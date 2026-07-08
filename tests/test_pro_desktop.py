@@ -181,8 +181,9 @@ def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
     monkeypatch.setattr("abcxauto.rocket._tool", _fake_tool)
     monkeypatch.setattr("abcxauto.rocket.grok", fake_grok)
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
-    monkeypatch.setattr("abcxauto.pro_desktop.GrokClient", lambda: object())
-    monkeypatch.setattr("abcxauto.pro_desktop.asyncio.sleep", paced_sleep)
+    # Worker lives in ProEngine — patch there, not the Flet shell module.
+    monkeypatch.setattr("abcxauto.pro_engine.GrokClient", lambda: object())
+    monkeypatch.setattr("abcxauto.pro_engine.asyncio.sleep", paced_sleep)
 
     before = dict(TWEAKS)
     try:

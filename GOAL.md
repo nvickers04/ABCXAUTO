@@ -14,6 +14,9 @@ Make `python -m abcxauto` open a usable Flet Pro cockpit (not stuck on "Workingâ
 - [x] Switch entrypoint to `ft.run` (ca2e3fc)
 - [x] Fix Flutter "Working..." hang: remove unbounded Column expand spacer; force window reveal; `assets_dir=None`
 - [x] Situational awareness wired via enriched `run_cycle` payload
+- [x] Pro shell restored over `ProEngine` (Start/Stop/Panic + log tools)
+- [x] Fix `python -m abcxauto` self-kill during pre-launch cleanup (`--ui-only`)
+- [x] Panic flatten routes STK vs OPT per-leg (`_flatten_one_position`)
 - [ ] User visual confirm of Start/Stop/Panic on live paper session
 
 ## Context

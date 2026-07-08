@@ -92,7 +92,10 @@ class ProEngine:
     async def grok_analyze_tweak(self, tw: dict) -> None:
         try:
             g = GrokClient()
-            txt = await grok(g, f"Analyze this portfolio tweak and suggest ONE follow-up:\n{json.dumps(tw)}\nJSON response.")
+            txt = await grok(
+                g,
+                f"Analyze this portfolio tweak and suggest ONE follow-up:\n{json.dumps(tw)}\nJSON response.",
+            )
             self.ui.put(("log", f"Grok analysis: {txt[:500]}"))
         except Exception as e:
             self.ui.put(("error", f"Analyze failed: {e}"))
@@ -104,14 +107,21 @@ class ProEngine:
         elif kind == "cycle":
             self._on_cycle(data)
         elif kind == "panic":
-            s.records.append({
-                "cycle": 0, "type": "panic", "ts": _now(),
-                "position_results": data.get("position_results", []),
-                "msg": json.dumps(data, default=str)[:2000],
-                "reasoning_chain": "\n".join(
-                    r.get("reasoning", "") for r in data.get("position_results", []) if r.get("reasoning")
-                ),
-            })
+            s.records.append(
+                {
+                    "cycle": 0,
+                    "type": "panic",
+                    "ts": _now(),
+                    "position_results": data.get("position_results", []),
+                    "before_ledger": data.get("before_ledger", []),
+                    "msg": json.dumps(data, default=str)[:2000],
+                    "reasoning_chain": "\n".join(
+                        r.get("reasoning", "")
+                        for r in data.get("position_results", [])
+                        if r.get("reasoning")
+                    ),
+                }
+            )
         elif kind in ("log", "error"):
             s.records.append({"cycle": 0, "type": "error", "msg": str(data), "ts": _now()})
 
@@ -132,10 +142,16 @@ class ProEngine:
         rec = {**d, "ts": _now(), "type": "cycle"}
         s.records.append(rec)
         if d.get("tweak") and d["tweak"] != "none":
-            s.tweaks.append({
-                "cycle": d["cycle"], "summary": d["tweak"], "obj": d.get("tweak_obj", {}),
-                "before": d.get("tweak_before") or {}, "after": dict(TWEAKS), "ts": _now(),
-            })
+            s.tweaks.append(
+                {
+                    "cycle": d["cycle"],
+                    "summary": d["tweak"],
+                    "obj": d.get("tweak_obj", {}),
+                    "before": d.get("tweak_before") or {},
+                    "after": dict(TWEAKS),
+                    "ts": _now(),
+                }
+            )
 
     async def _do_panic(self) -> None:
         try:
@@ -145,12 +161,14 @@ class ProEngine:
             # Capture before ledger for Logs display of before/after
             before_ledger = []
             try:
-                before_ledger = await conn.get_positions() if hasattr(conn, 'get_positions') else []
+                before_ledger = (
+                    await conn.get_positions() if hasattr(conn, "get_positions") else []
+                )
             except Exception:
                 pass
             res = await conn.flatten_all() if hasattr(conn, "flatten_all") else {"status": "logged"}
             res = dict(res)  # copy
-            res['before_ledger'] = before_ledger
+            res["before_ledger"] = before_ledger
             self.ui.put(("panic", res))
         except Exception as e:
             self.ui.put(("error", f"PANIC ERROR: {e}"))
@@ -171,6 +189,9 @@ class ProEngine:
         except Exception as e:
             self.ui.put(("log", f"INIT ERROR: {e}"))
             self.ui.put(("conn", False))
+            # Drop back to Safe so the Overview mode chip is honest.
+            self.state.running = False
+            self.state.status = "Safe"
             return
         hist, prev, n = [], 0.0, 0
         while gen == self._gen and not self.stop.is_set():
@@ -178,14 +199,21 @@ class ProEngine:
             try:
                 out = await run_cycle(n, self.conn, g, hist, prev)
                 prev = out["pnl"]
+                # Prefer the enriched run_cycle payload; fall back to hist record.
                 rec = hist[-1] if hist else {}
-                out["action_obj"] = rec.get("action", {})
-                out["rationale"] = (rec.get("action") or {}).get("rationale", "")
-                out["reasoning_chain"] = rec.get("reasoning_chain") or out["rationale"]
-                out["inventory"] = rec.get("inventory", "")
-                out["validation"] = rec.get("validation", "")
-                snap = rec.get("snapshot") or {}
-                out["positions"] = snap.get("positions") or []
+                out.setdefault("action_obj", rec.get("action", {}))
+                out.setdefault(
+                    "rationale", (rec.get("action") or {}).get("rationale", "")
+                )
+                out.setdefault(
+                    "reasoning_chain",
+                    rec.get("reasoning_chain") or out.get("rationale", ""),
+                )
+                out.setdefault("inventory", rec.get("inventory", ""))
+                out.setdefault("validation", rec.get("validation", ""))
+                if not out.get("positions"):
+                    snap = rec.get("snapshot") or {}
+                    out["positions"] = snap.get("positions") or []
                 self.ui.put(("cycle", out))
             except Exception as e:
                 self.ui.put(("error", str(e)))

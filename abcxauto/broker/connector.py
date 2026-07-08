@@ -797,78 +797,156 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
 
     # ========== EMERGENCY OPERATIONS ==========
 
-    async def flatten_all(self) -> dict:
-        """Cancel all open orders and close all positions with market orders.
+    async def _flatten_one_position(self, pos: dict) -> dict:
+        """Close one position leg independently. STK→MKT, OPT→close_option_position."""
+        symbol = pos.get("symbol", "")
+        qty = pos.get("quantity", pos.get("qty", 0))
+        sec = str(pos.get("sec_type") or pos.get("secType") or "STK").upper()
+        cid = pos.get("conId") or pos.get("con_id") or "none"
+        if qty == 0 or not symbol:
+            return {
+                "success": True,
+                "method": "noop",
+                "symbol": symbol,
+                "conId": cid,
+                "reasoning": f"Closing target = conId={cid} — zero qty or no symbol",
+            }
+        action = "SELL" if qty > 0 else "BUY"
+        close_qty = abs(int(qty))
+        if sec.startswith("OPT"):
+            expiration = pos.get("expiration") or pos.get("lastTradeDateOrContractMonth")
+            strike = pos.get("strike")
+            right = pos.get("right")
+            try:
+                order_result = await self.close_option_position(
+                    symbol,
+                    expiration=expiration,
+                    strike=float(strike) if strike is not None else None,
+                    right=str(right) if right is not None else None,
+                    quantity=close_qty,
+                    reason="panic_flatten",
+                )
+                ok = bool(order_result.get("success") or order_result.get("order_id"))
+                return {
+                    "success": ok,
+                    "method": "close_option_position",
+                    "symbol": symbol,
+                    "sec_type": "OPT",
+                    "conId": cid,
+                    "quantity": close_qty,
+                    "order_result": order_result,
+                    "reasoning": (
+                        f"Closing target = conId={cid} — independent close via "
+                        "close_option_position for OPT leg"
+                    ),
+                }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "method": "close_option_position",
+                    "symbol": symbol,
+                    "conId": cid,
+                    "error": str(e),
+                    "reasoning": f"Closing target = conId={cid} — OPT close failed: {e}",
+                }
+        try:
+            order_result = await self._place_order(
+                symbol=symbol,
+                action=action,
+                quantity=close_qty,
+                order_type="MKT",
+                tif="IOC",
+                order_name="EMERGENCY_FLATTEN_STK",
+            )
+            return {
+                "success": bool(order_result.get("success")),
+                "method": "stock_mkt",
+                "symbol": symbol,
+                "sec_type": "STK",
+                "conId": cid,
+                "quantity": close_qty,
+                "order_result": order_result,
+                "reasoning": (
+                    f"Closing target = conId={cid} — independent close via stock MKT for STK leg"
+                ),
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "method": "stock_mkt",
+                "symbol": symbol,
+                "conId": cid,
+                "error": str(e),
+                "reasoning": f"Closing target = conId={cid} — STK flatten failed: {e}",
+            }
 
-        Returns a summary dict with cancelled/closed counts.
+    async def flatten_all(self) -> dict:
+        """Cancel all open orders and close all positions per-leg (STK vs OPT).
+
+        Returns a summary dict with cancelled/closed counts and position_results.
         This is the broker-level nuclear option — caller decides when to invoke.
         """
         if not await self._ensure_connected():
-            return {'success': False, 'error': 'Not connected'}
+            return {"success": False, "error": "Not connected"}
 
-        result = {'orders_cancelled': 0, 'orders_total': 0,
-                  'positions_closed': 0, 'positions_total': 0,
-                  'errors': []}
+        result = {
+            "orders_cancelled": 0,
+            "orders_total": 0,
+            "positions_closed": 0,
+            "positions_total": 0,
+            "position_results": [],
+            "errors": [],
+        }
 
         # Step 1: Cancel ALL open orders
         try:
             open_orders = await self.get_open_orders()
-            result['orders_total'] = len(open_orders)
+            result["orders_total"] = len(open_orders)
             for order in open_orders:
                 try:
-                    oid = order.get('order_id')
+                    oid = order.get("order_id")
                     if oid:
                         await self.cancel_order(oid)
-                        result['orders_cancelled'] += 1
+                        result["orders_cancelled"] += 1
                 except Exception as e:
                     err_msg = f'cancel order {order.get("order_id")}: {e}'
                     logger.error(err_msg)
-                    result['errors'].append(err_msg)
+                    result["errors"].append(err_msg)
         except Exception as e:
-            err_msg = f'get_open_orders: {e}'
+            err_msg = f"get_open_orders: {e}"
             logger.error(err_msg)
-            result['errors'].append(err_msg)
+            result["errors"].append(err_msg)
 
         await _safe_sleep(1)  # Let cancellations process
 
-        # Step 2: Close ALL positions with MKT IOC orders
+        # Step 2: Close each position leg independently (STK vs OPT routing)
         try:
             positions = await self.get_positions()
-            result['positions_total'] = len(positions)
+            result["positions_total"] = len(positions)
             for pos in positions:
                 try:
-                    symbol = pos.get('symbol', '')
-                    qty = pos.get('quantity', 0)
-                    if qty == 0 or not symbol:
-                        continue
-                    action = 'SELL' if qty > 0 else 'BUY'
-                    close_qty = abs(qty)
-                    order_result = await self._place_order(
-                        symbol=symbol,
-                        action=action,
-                        quantity=close_qty,
-                        order_type='MKT',
-                        tif='IOC',
-                        order_name='EMERGENCY_FLATTEN',
-                    )
-                    if order_result.get('success'):
-                        result['positions_closed'] += 1
-                    else:
-                        err_msg = f'flatten {symbol}: {order_result}'
+                    pr = await self._flatten_one_position(pos)
+                    result["position_results"].append(pr)
+                    if pr.get("success") and pr.get("method") != "noop":
+                        result["positions_closed"] += 1
+                    elif not pr.get("success"):
+                        err_msg = f'flatten {pos.get("symbol", "?")}: {pr}'
                         logger.error(err_msg)
-                        result['errors'].append(err_msg)
+                        result["errors"].append(err_msg)
                 except Exception as e:
                     err_msg = f'flatten {pos.get("symbol", "?")}: {e}'
                     logger.error(err_msg)
-                    result['errors'].append(err_msg)
+                    result["errors"].append(err_msg)
         except Exception as e:
-            err_msg = f'get_positions: {e}'
+            err_msg = f"get_positions: {e}"
             logger.error(err_msg)
-            result['errors'].append(err_msg)
+            result["errors"].append(err_msg)
 
-        result['success'] = True
-        logger.critical(f"FLATTEN ALL: cancelled {result['orders_cancelled']}/{result['orders_total']} orders, "
-                        f"closed {result['positions_closed']}/{result['positions_total']} positions")
+        result["success"] = True
+        logger.critical(
+            f"FLATTEN ALL: cancelled {result['orders_cancelled']}/{result['orders_total']} orders, "
+            f"closed {result['positions_closed']}/{result['positions_total']} (per-leg)"
+        )
         return result
 
     async def flatten_limits(self) -> dict:
