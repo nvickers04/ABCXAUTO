@@ -46,6 +46,14 @@ Pro desktop (Flet situational-awareness cockpit):
 python -m abcxauto
 ```
 
+If an old Pro window keeps coming back, clean stale Flet/Python processes first:
+
+```powershell
+python -m abcxauto --cleanup --aggressive
+# optional deep clean of the Flet desktop client cache:
+python -m abcxauto --cleanup --aggressive --flet-cache
+```
+
 Legacy Tkinter cockpit:
 
 ```powershell

@@ -19,7 +19,7 @@ from abcxauto.config import get_config
 from abcxauto.llm import GrokClient
 from abcxauto.rocket import TWEAKS, apply_tweak, grok, run_cycle
 
-TITLE = "ABCXAUTO Pro"
+TITLE = "ABCXAUTO Pro v0.1.1"
 BG = "#0b0e14"
 CARD = "#151b26"
 CARD2 = "#1c2433"
@@ -994,6 +994,7 @@ def run_app() -> None:
         write_launch_probe(probe)
         print(f"ABCXAUTO title={TITLE} mainloop_ready=True status=Safe", flush=True)
         return
+    print(f"ABCXAUTO Pro entry={Path(__file__).resolve()} title={TITLE}", flush=True)
     # Flet >=0.80: ft.app is deprecated and can leave the desktop client on
     # the "Working…" splash; ft.run is the supported entrypoint.
     runner = getattr(ft, "run", None) or ft.app

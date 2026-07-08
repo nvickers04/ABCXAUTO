@@ -15,7 +15,7 @@ REQUIRED = (
     "AI Brain",
     "Equity Curve",
     "Open Positions",
-    TITLE,
+    "ABCXAUTO Pro",
 )
 
 
