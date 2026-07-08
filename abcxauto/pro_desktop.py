@@ -964,7 +964,10 @@ def run_app() -> None:
         write_launch_probe(probe)
         print(f"ABCXAUTO title={TITLE} mainloop_ready=True status=Safe", flush=True)
         return
-    ft.app(main)
+    # Flet >=0.80: ft.app is deprecated and can leave the desktop client on
+    # the "Working…" splash; ft.run is the supported entrypoint.
+    runner = getattr(ft, "run", None) or ft.app
+    runner(main)
 
 
 if __name__ == "__main__":
