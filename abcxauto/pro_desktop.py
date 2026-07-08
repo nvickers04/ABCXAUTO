@@ -158,6 +158,7 @@ class ProTerminal:
         p.padding = 0
         p.theme_mode = ft.ThemeMode.DARK
         try:
+            p.window.visible = True
             p.window.width = 1280
             p.window.height = 820
             p.window.min_width = 1000
@@ -193,6 +194,8 @@ class ProTerminal:
                 alignment=ft.MainAxisAlignment.START,
             ),
         )
+        # Avoid expand spacers inside unbounded Columns — that leaves the
+        # Flutter desktop client stuck on the "Working..." splash.
         side = ft.Container(
             width=200,
             bgcolor=CARD,
@@ -201,19 +204,30 @@ class ProTerminal:
                 [
                     ft.Text("NAVIGATION", size=10, color=MUTED, weight=ft.FontWeight.BOLD),
                     *[self._nav_btn(k, label, icon) for k, label, icon in NAV],
-                    ft.Container(expand=True),
+                    ft.Container(height=24),
                     ft.Text("Engine", size=10, color=MUTED),
                     self.lbl_status,
-                ]
+                ],
+                tight=True,
+                scroll=ft.ScrollMode.AUTO,
             ),
         )
         body = ft.Row(
             [side, ft.VerticalDivider(width=1, color=BORDER), self.content],
             expand=True,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
         )
-        p.add(ft.Column([top, ft.Divider(height=1, color=BORDER), body], expand=True, spacing=0))
+        root = ft.Column(
+            [top, ft.Divider(height=1, color=BORDER), body],
+            expand=True,
+            spacing=0,
+        )
+        p.controls.clear()
+        p.add(root)
         self._show_tab("overview")
+        p.update()
         p.run_task(self._poll_loop)
+        p.run_task(self._reveal_window)
 
     def _nav_btn(self, key: str, label: str, icon) -> ft.Container:
         c = ft.Container(
@@ -545,6 +559,22 @@ class ProTerminal:
                 self.ui.put(("error", str(e)))
             await asyncio.sleep(float(TWEAKS.get("cycle_sleep_s", 8)))
         self.ui.put(("status_safe", None))
+
+    async def _reveal_window(self) -> None:
+        """Force the desktop client past the Working… splash once controls exist."""
+        try:
+            await self.page.window.wait_until_ready_to_show()
+        except Exception:
+            pass
+        try:
+            self.page.window.visible = True
+            await self.page.window.to_front()
+        except Exception:
+            try:
+                self.page.window.visible = True
+            except Exception:
+                pass
+        self._safe_update()
 
     async def _poll_loop(self) -> None:
         while True:
@@ -967,7 +997,15 @@ def run_app() -> None:
     # Flet >=0.80: ft.app is deprecated and can leave the desktop client on
     # the "Working…" splash; ft.run is the supported entrypoint.
     runner = getattr(ft, "run", None) or ft.app
-    runner(main)
+    view = ft.AppView.FLET_APP
+    if os.environ.get("ABCXAUTO_PRO_WEB", "").strip() in ("1", "true", "yes"):
+        view = ft.AppView.WEB_BROWSER
+    kwargs: dict[str, Any] = {"assets_dir": None, "view": view}
+    try:
+        runner(main, **kwargs)
+    except TypeError:
+        # Older flet stubs may not accept these kwargs.
+        runner(main)
 
 
 if __name__ == "__main__":
