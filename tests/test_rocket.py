@@ -7,6 +7,7 @@ import pytest
 
 from abcxauto.executor import safe_execute
 from abcxauto.rocket import (
+    ALLOWED_ACTIONS,
     TWEAKS,
     apply_tweak,
     equity_of,
@@ -21,6 +22,9 @@ from abcxauto.rocket import (
 
 class FakeConnector:
     connected = True
+
+    async def connect(self):
+        return True
 
     async def get_positions(self):
         return [{"symbol": "AAPL", "quantity": 10, "sec_type": "STK", "unrealized_pnl": 5.0}]
@@ -72,9 +76,15 @@ async def test_run_cycle_hold_path(monkeypatch):
         assert out["strat"] == "hold"
         assert out["result"]["status"] == "hold"
         assert out["pnl"] == 5.0
+        assert out["positions"] == []
+        assert out["open_orders"] == []
+        assert "unprotected_symbols" in out["protection"]
+        assert out["action_obj"]["strategy"] == "hold"
+        assert out["rationale"] == "wait"
         out2 = await run_cycle(2, FakeConnector(), None, hist, out["pnl"])
         assert out2["tweak"] == "faster"
         assert TWEAKS.get("cycle_sleep_s") == 2
+        assert out2["portfolio"].startswith("0 positions")
     finally:
         TWEAKS.clear()
         TWEAKS.update(before)
@@ -85,6 +95,13 @@ def test_normalize_action_rejects_unknown():
     assert strat == "hold"
     assert forced["status"] == "hold"
     assert "coerced" in forced["note"]
+
+
+def test_normalize_action_rejects_trailing_stop_not_in_prompt():
+    assert "trailing_stop" not in ALLOWED_ACTIONS
+    strat, forced = normalize_action({"action": "trailing_stop", "strategy": "trailing_stop"})
+    assert strat == "hold"
+    assert forced is not None
 
 
 @pytest.mark.asyncio
@@ -102,22 +119,83 @@ async def test_run_cycle_coerces_invalid_strategy(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cycle_smoke_snap_and_safe_execute(monkeypatch, tmp_path):
+async def test_cycle_smoke_run_cycle_bracket_dispatch(monkeypatch, tmp_path):
+    """Shipped run_cycle path: snapshot + bracket action + safe_execute (not direct hold call)."""
     monkeypatch.setattr("abcxauto.rocket._tool", _fake_tool)
+    calls: list[dict] = []
+
+    async def record_safe_execute(action, conn):
+        calls.append(action)
+        return {"status": "executed", "strategy": action.get("strategy")}
+
+    async def bracket_grok(_g, prompt: str) -> str:
+        if "ONE tweak" in prompt:
+            return json.dumps({"type": "none", "summary": "none"})
+        return json.dumps({
+            "action": "bracket", "strategy": "bracket",
+            "params": {
+                "symbol": "SPY", "quantity": 1, "direction": "LONG",
+                "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
+            },
+            "rationale": "smoke",
+        })
+
+    monkeypatch.setattr("abcxauto.rocket.grok", bracket_grok)
+    monkeypatch.setattr("abcxauto.rocket.safe_execute", record_safe_execute)
     snap_out = await snap(FakeConnector())
-    hold = await safe_execute({"action": "hold"}, FakeConnector())
-    payload = {"snapshot_keys": list(snap_out.keys()), "hold": hold}
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    payload = {
+        "snapshot_keys": list(snap_out.keys()),
+        "strat": out["strat"],
+        "result": out["result"],
+        "safe_execute_calls": len(calls),
+        "dispatched_strategy": calls[0]["strategy"] if calls else None,
+    }
     text = json.dumps(payload, indent=2)
     (tmp_path / "cycle_smoke.json").write_text(text, encoding="utf-8")
     scratch = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-eafc232c6c32\implementer")
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "cycle_smoke.json").write_text(text, encoding="utf-8")
     assert "protection" in payload["snapshot_keys"]
-    assert hold["status"] == "hold"
+    assert out["strat"] == "bracket"
+    assert payload["safe_execute_calls"] == 1
 
 
 def test_parse_json_plain():
     assert parse_json('{"action":"hold"}')["action"] == "hold"
+
+
+def test_parse_json_bad_extract_defaults_hold():
+    assert parse_json("noise {not valid json} tail") == {"action": "hold"}
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_dispatches_bracket_to_safe_execute(monkeypatch):
+    monkeypatch.setattr("abcxauto.rocket._tool", _fake_tool)
+    calls: list[dict] = []
+
+    async def record_safe_execute(action, conn):
+        calls.append(action)
+        return {"status": "executed", "strategy": action.get("strategy")}
+
+    async def bracket_grok(_g, prompt: str) -> str:
+        if "ONE tweak" in prompt:
+            return json.dumps({"type": "none", "summary": "none"})
+        return json.dumps({
+            "action": "bracket", "strategy": "bracket",
+            "params": {
+                "symbol": "SPY", "quantity": 1, "direction": "LONG",
+                "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
+            },
+            "rationale": "test bracket dispatch",
+        })
+
+    monkeypatch.setattr("abcxauto.rocket.grok", bracket_grok)
+    monkeypatch.setattr("abcxauto.rocket.safe_execute", record_safe_execute)
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert out["strat"] == "bracket"
+    assert len(calls) == 1
+    assert calls[0]["strategy"] == "bracket"
 
 
 def test_apply_tweak_merges_config():

@@ -10,14 +10,15 @@ from xai_sdk.chat import system, user
 from abcxauto.executor import safe_execute
 from abcxauto.llm import GrokClient
 from abcxauto.monitor import build_protection_report
-from abcxauto.proposals import STRATEGIES
 from abcxauto.tools import run_readonly_tool
 
 VALID_ACTIONS = "hold|bracket|market_bracket|oca|modify_stop|modify_target|cancel_order|close_option"
+ALLOWED_ACTIONS = frozenset(VALID_ACTIONS.split("|"))
 RULES = (
     "ABCXAUTO v0.1. Output ONLY valid JSON. Cash-only until 5 winning paper cycles. "
     "Max 1% risk/trade. Entries MUST be bracket/market_bracket with stop+target. "
-    f"action/strategy MUST be one of: {VALID_ACTIONS}. Use hold if unsure."
+    f"action AND strategy MUST be exactly one of: {', '.join(sorted(ALLOWED_ACTIONS))}. "
+    "NEVER invent names (no cash_only_mode, hold_existing, protect_existing). Default hold."
 )
 TWEAKS: Dict[str, Any] = {}
 
@@ -27,7 +28,12 @@ def parse_json(text: str) -> dict:
         return json.loads(text)
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", text, re.S)
-        return json.loads(m.group()) if m else {"action": "hold"}
+        if not m:
+            return {"action": "hold"}
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            return {"action": "hold"}
 
 
 def pnl_of(acct: dict) -> float:
@@ -61,7 +67,7 @@ def normalize_action(act: dict) -> tuple[str, dict | None]:
     strat = (act.get("strategy") or act.get("action") or "hold").strip()
     if strat in ("hold", "none"):
         return "hold", None
-    if strat not in STRATEGIES:
+    if strat not in ALLOWED_ACTIONS:
         return "hold", {"status": "hold", "note": f"invalid strategy {strat!r} coerced to hold"}
     return strat, None
 
@@ -107,7 +113,7 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
     pnl, eq = pnl_of(acct), equity_of(acct)
     act = parse_json(await grok(
         g, f"Cycle {n}. Snapshot:\n{json.dumps(s, default=str)[:10000]}\n"
-        f'JSON: {{"action":"{VALID_ACTIONS}","strategy":"...","params":{{}},"rationale":"..."}}',
+        'JSON: {"action":"hold","strategy":"hold","params":{},"rationale":"..."}',
     ))
     strat, forced = normalize_action(act)
     res = forced if forced else ({"status": "hold"} if strat == "hold" else await safe_execute(act, c))
@@ -123,9 +129,18 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         twk = apply_tweak(tw)
         Path("improvements.log").open("a", encoding="utf-8").write(
             json.dumps({"cycle": n, "tweak": tw}, default=str) + "\n")
-    pos_n = len(s.get("positions") or [])
+    positions = s.get("positions") or []
+    orders = s.get("open_orders") or []
+    protection = s.get("protection") or {}
     return {
         "cycle": n, "pnl": pnl, "pnl_chg": pnl - prev, "equity": eq, "strat": strat,
         "result": res, "tweak": twk, "tweak_obj": tw, "risk": risk_label(s),
-        "portfolio": f"{pos_n} positions | {len(s.get('open_orders') or [])} orders",
+        "portfolio": f"{len(positions)} positions | {len(orders)} orders",
+        "positions": positions,
+        "open_orders": orders,
+        "protection": protection,
+        "unprotected": list(protection.get("unprotected_symbols") or []),
+        "action_obj": act,
+        "rationale": act.get("rationale") or "",
+        "taken_at": s.get("taken_at") or "",
     }

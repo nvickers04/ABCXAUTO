@@ -40,10 +40,16 @@ Start TWS (paper) with API enabled on port 7497.
 
 ## Run
 
-Autonomous agent (terminal):
+Pro desktop (Flet situational-awareness cockpit):
 
 ```powershell
 python -m abcxauto
+```
+
+Legacy Tkinter cockpit:
+
+```powershell
+python -m abcxauto --tk
 ```
 
 Monitoring dashboard (agent + live P&L/positions feed):
