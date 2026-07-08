@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from abcxauto.proposals import OrderProposal
+from abcxauto.proposals import OrderProposal, ProposalValidationError, validate_proposal
 
 logger = logging.getLogger(__name__)
 
@@ -75,3 +75,20 @@ async def execute_proposal(proposal: OrderProposal, connector: Any) -> Dict[str,
     result = await method(**kwargs)
     logger.info(f"Proposal #{proposal.id} result: {result}")
     return result
+
+
+async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
+    """Paper-trade via execute_proposal, or log proposal if broker is offline."""
+    strategy = action.get("strategy") or action.get("action", "hold")
+    if strategy in ("hold", "none"):
+        return {"status": "hold"}
+    if not getattr(connector, "connected", False):
+        return {"status": "logged", "strategy": strategy, "params": action.get("params")}
+    try:
+        proposal = validate_proposal(
+            strategy, action.get("params") or {}, action.get("rationale", "auto"),
+            action.get("max_loss"), action.get("max_gain"),
+        )
+    except ProposalValidationError as e:
+        return {"status": "rejected", "error": str(e)}
+    return await execute_proposal(proposal, connector)
