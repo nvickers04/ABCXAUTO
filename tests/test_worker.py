@@ -33,7 +33,13 @@ def _drain_cycles(ui: queue.Queue, n: int, timeout: float = 10.0) -> list[dict]:
 
 def test_worker_three_cycles_then_stop(monkeypatch):
     monkeypatch.setattr("abcxauto.desktop.get_config", lambda: type("C", (), {"xai_api_key": "k"})())
-    root = __import__("tkinter").Tk()
+    tk = __import__("tkinter")
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        import pytest
+
+        pytest.skip(f"Tk unavailable: {exc}")
     root.withdraw()
     app = RocketApp(root)
     run_calls: list[int] = []

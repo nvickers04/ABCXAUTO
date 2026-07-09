@@ -11,7 +11,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from abcxauto.order_lab import _fixtures, _px, run_order_lab, strategies_for_session
+from abcxauto.order_lab import (
+    _fixtures,
+    _px,
+    _validate_schema,
+    run_order_lab,
+    strategies_for_session,
+)
 from abcxauto.proposals import STRATEGIES
 from abcxauto.reality_pulse import build_reality_pulse
 
@@ -224,18 +230,21 @@ async def run_brutal_suite(
     fixtures = _fixtures(_px(pulse), positions)
     place_rows: list[dict] = []
 
+    # Index lab schema results; never assume pass when strategy was skipped by session filter
+    lab_by_name = {
+        r.get("strategy"): r for r in (lab.get("results") or []) if r.get("strategy")
+    }
+
     for name in names:
         if name not in STRATEGIES:
             continue
         params = _paper_params(name, fixtures)
-        # Schema must pass first
-        schema_ok = True
-        schema_detail = "ok"
-        for r in lab.get("results") or []:
-            if r.get("strategy") == name:
-                schema_ok = bool(r.get("pass"))
-                schema_detail = r.get("detail") or ""
-                break
+        # Always run real schema validation (even if order_lab omitted this strategy)
+        schema_row = lab_by_name.get(name)
+        if schema_row is None:
+            schema_row = _validate_schema(name, params)
+        schema_ok = bool(schema_row.get("pass"))
+        schema_detail = schema_row.get("detail") or ""
         if not schema_ok:
             place_rows.append(
                 {
@@ -247,12 +256,15 @@ async def run_brutal_suite(
                     "placed": False,
                     "cancelled": False,
                     "cancel_intent": True,
+                    "schema_validated": True,
                 }
             )
             continue
         row = await _place_validate_cancel(
             connector, name, params, force_dry=force_dry
         )
+        row["schema_validated"] = True
+        row["schema_detail"] = schema_detail
         place_rows.append(row)
 
     # Panic/flatten validation is always included

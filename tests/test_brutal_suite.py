@@ -130,3 +130,25 @@ def test_startup_source_marker():
     report = asyncio.run(run_brutal_suite(source="startup", force_dry=True))
     assert report["source"] == "startup"
     assert report["idle_prevented"] is True
+
+
+def test_closed_session_still_schema_validates_all_appended_strategies():
+    """Strategies not in session lab filter must not get free dry_run PASS."""
+    pulse = {
+        "session": {"status": "closed"},
+        "data_freshness": {"spy_last": 500},
+        "narrative": "closed",
+        "position_ledger": [],
+    }
+    report = asyncio.run(
+        run_brutal_suite(pulse=pulse, source="closed_test", force_dry=True)
+    )
+    # Every non-panic row must have been schema-validated
+    for r in report["results"]:
+        if r.get("strategy") == "panic_flatten_leg":
+            continue
+        assert r.get("schema_validated") is True or r.get("phase") == "schema"
+        # If dry_run pass, schema must have actually run (schema_detail or gateway)
+        if r.get("mode") == "dry_run" and r.get("pass"):
+            assert r.get("schema_validated") is True
+            assert r.get("gateway") or r.get("schema_detail") is not None
