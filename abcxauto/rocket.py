@@ -90,6 +90,9 @@ RULES = (
     "Every cycle runs BRUTAL order suite (place/validate/cancel or dry-run for ALL types) — never idle. "
     "Loop: Reality Pulse → brutal suite → fix/simplify → re-test → execute → auto-reconfig. "
     "No force_tweak. PnL + suite pass-rate drive reconfig. "
+    "DECISION SPACE: use list_decision_space to know every order type you can choose; "
+    "cancel_order_id cancels ONE working order by id; paper_exercise_order_types places "
+    "paper orders (fills marketable), then cancels each working order_id individually. "
     + AWARENESS_HEART
     + KAHNEMAN_HEART
     + ORDER_PROTOCOL

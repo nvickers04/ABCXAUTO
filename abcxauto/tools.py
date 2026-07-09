@@ -159,6 +159,49 @@ TOOL_DEFINITIONS = [
         parameters=_schema({}, []),
     ),
     tool(
+        name="list_decision_space",
+        description=(
+            "SITUATIONAL AWARENESS of DECISIONS: full catalog of order types/strategies "
+            "this agent can use on paper IBKR (market, limit, stop, stop-limit, trail, "
+            "bracket, OCA, multi-leg, modify/cancel). Call this to know what is possible "
+            "before proposing trades — awareness of price alone is incomplete without "
+            "knowing available decisions. Returns ibkr_order_type_enum + agent strategies "
+            "and how each fills/cancels."
+        ),
+        parameters=_schema({}, []),
+    ),
+    tool(
+        name="cancel_order_id",
+        description=(
+            "PAPER: Cancel ONE working order by exact order_id (from open_orders). "
+            "Use for individual cancels after paper exercises or when managing protection. "
+            "Never cancel by symbol alone."
+        ),
+        parameters=_schema(
+            {"order_id": {"type": "integer", "description": "IBKR order id to cancel"}},
+            ["order_id"],
+        ),
+    ),
+    tool(
+        name="paper_exercise_order_types",
+        description=(
+            "PAPER ONLY: place multiple order types (marketable ones fill; protective "
+            "stops/trails work then are cancelled). Then cancel EACH remaining working "
+            "order individually by order_id, and flatten residual stock if needed. "
+            "Use to prove IBKR path and refresh awareness of possible decisions."
+        ),
+        parameters=_schema(
+            {
+                "symbol": _SYMBOL,
+                "quantity": {
+                    "type": "integer",
+                    "description": "Share qty for tests (default 1)",
+                },
+            },
+            [],
+        ),
+    ),
+    tool(
         name="propose_order",
         description=(
             "Propose an order structure. ALL proposals auto-execute immediately under "
@@ -326,6 +369,28 @@ async def _executions(args: Dict[str, Any], connector: Any) -> Any:
     return await connector.get_recent_executions()
 
 
+async def _list_decision_space(args: Dict[str, Any], connector: Any) -> Any:
+    from abcxauto.decision_space import list_decision_space
+
+    return list_decision_space()
+
+
+async def _cancel_order_id(args: Dict[str, Any], connector: Any) -> Any:
+    from abcxauto.decision_space import cancel_order_id
+
+    return await cancel_order_id(connector, int(args["order_id"]))
+
+
+async def _paper_exercise_order_types(args: Dict[str, Any], connector: Any) -> Any:
+    from abcxauto.decision_space import paper_exercise_order_types
+
+    return await paper_exercise_order_types(
+        connector,
+        symbol=str(args.get("symbol") or "SPY"),
+        quantity=int(args.get("quantity") or 1),
+    )
+
+
 Handler = Callable[[Dict[str, Any], Any], Coroutine[Any, Any, Any]]
 
 READONLY_HANDLERS: Dict[str, Handler] = {
@@ -344,6 +409,9 @@ READONLY_HANDLERS: Dict[str, Handler] = {
     "open_orders": _open_orders,
     "protection_status": _protection_status,
     "executions": _executions,
+    "list_decision_space": _list_decision_space,
+    "cancel_order_id": _cancel_order_id,
+    "paper_exercise_order_types": _paper_exercise_order_types,
 }
 
 
