@@ -14,6 +14,7 @@ import flet as ft
 
 from abcxauto.config import get_config
 from abcxauto.pro_engine import ProEngine
+from abcxauto.reality_pulse import build_reality_pulse, pulse_clock_view
 from abcxauto.rocket import TWEAKS
 
 BG, CARD, CARD2, BORDER = "#0b0e14", "#151b26", "#1c2433", "#2a3548"
@@ -87,6 +88,23 @@ class ProTerminal:
             selectable=True,
         )
         self.lbl_ledger_snippet = ft.Text("—", color=MUTED, size=10, selectable=True)
+        # Market Clock (situational awareness heart on the chrome)
+        self.lbl_clock = ft.Text("—", size=14, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_session_badge = ft.Text("—", size=11, weight=ft.FontWeight.W_600, color=AMBER)
+        self.lbl_countdown = ft.Text("—", size=11, color=MUTED)
+        self.lbl_data_age = ft.Text("data n/a", size=10, color=MUTED)
+        self.lbl_pulse_narrative = ft.Text(
+            "Reality Pulse idle — START for live awareness.",
+            size=11,
+            color=MUTED,
+            selectable=True,
+        )
+        self.lbl_kahneman = ft.Text(
+            "Kahneman System 2 idle — START for deliberative traces.",
+            size=11,
+            color=MUTED,
+            selectable=True,
+        )
         self.brain_action = ft.Text("—", size=18, color=BLUE)
         self.brain_rationale = ft.Text(
             "Start autonomous mode to see Grok decisions.", color=MUTED, selectable=True
@@ -149,6 +167,38 @@ class ProTerminal:
                     ft.Text("PAPER", color=AMBER, size=13, weight=ft.FontWeight.W_600),
                     ft.Text("•", color=MUTED),
                     ft.Text(f"Grok {cfg.model}", color=BLUE, size=13, weight=ft.FontWeight.W_600),
+                    ft.Container(width=16),
+                    # Live Market Clock — awareness heart in chrome
+                    ft.Container(
+                        bgcolor=CARD2,
+                        border=ft.Border.all(1, BORDER),
+                        border_radius=10,
+                        padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                        content=ft.Column(
+                            [
+                                ft.Row(
+                                    [
+                                        self.lbl_clock,
+                                        ft.Container(
+                                            bgcolor="#1a2332",
+                                            border_radius=6,
+                                            padding=ft.Padding.symmetric(
+                                                horizontal=8, vertical=2
+                                            ),
+                                            content=self.lbl_session_badge,
+                                        ),
+                                    ],
+                                    spacing=8,
+                                ),
+                                ft.Row(
+                                    [self.lbl_countdown, self.lbl_data_age],
+                                    spacing=12,
+                                ),
+                            ],
+                            spacing=2,
+                            tight=True,
+                        ),
+                    ),
                     ft.Container(expand=True),
                     ft.Column(
                         [ft.Text("Equity", size=10, color=MUTED), self.lbl_equity],
@@ -205,6 +255,7 @@ class ProTerminal:
         self._sync_widgets()
         p.update()
         p.run_task(self._poll_loop)
+        p.run_task(self._clock_loop)
         p.run_task(self._reveal_window)
         if probe := os.environ.get("ABCXAUTO_UI_PROBE"):
             Path(probe).write_text(
@@ -295,6 +346,32 @@ class ProTerminal:
                     wrap=True,
                 ),
                 ft.Container(height=8),
+                ft.Container(
+                    bgcolor=CARD,
+                    border=ft.Border.all(1, BORDER),
+                    border_radius=12,
+                    padding=12,
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                "Reality Pulse",
+                                color=MUTED,
+                                size=11,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                            self.lbl_pulse_narrative,
+                            ft.Container(height=6),
+                            ft.Text(
+                                "Kahneman System 2",
+                                color=MUTED,
+                                size=11,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                            self.lbl_kahneman,
+                        ],
+                        spacing=4,
+                    ),
+                ),
                 ft.Row(
                     [
                         self._card("Cycles", self.lbl_cycles, "autonomous iterations"),
@@ -584,6 +661,38 @@ class ProTerminal:
             self._safe_update()
             await asyncio.sleep(0.12)
 
+    async def _clock_loop(self) -> None:
+        """Refresh Market Clock even when the rocket is idle."""
+        while True:
+            try:
+                pulse = self.engine.state.reality_pulse
+                if not pulse:
+                    pulse = build_reality_pulse(
+                        ibkr_connected=self.engine.state.connected,
+                        positions=self.engine.state.positions,
+                        account=None,
+                    )
+                self._apply_clock(pulse)
+                self._safe_update()
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+
+    def _apply_clock(self, pulse: dict) -> None:
+        view = pulse_clock_view(pulse)
+        self.lbl_clock.value = view.get("clock") or "—"
+        status = (view.get("session_status") or "closed").lower()
+        self.lbl_session_badge.value = view.get("session") or "—"
+        self.lbl_session_badge.color = (
+            GREEN
+            if status == "regular"
+            else (AMBER if status in ("premarket", "postmarket") else MUTED)
+        )
+        self.lbl_countdown.value = view.get("countdown") or "—"
+        self.lbl_data_age.value = f"data {view.get('data_age') or 'n/a'}"
+        if pulse.get("narrative"):
+            self.lbl_pulse_narrative.value = pulse["narrative"]
+
     def _sync_widgets(self) -> None:
         s = self.engine.state
         self.lbl_cycles.value = str(s.cycles)
@@ -612,6 +721,15 @@ class ProTerminal:
         )
         inv = getattr(s, "inventory", "") or ""
         self.lbl_ledger_snippet.value = inv[:2500] if inv else "Ledger empty"
+        pulse = getattr(s, "reality_pulse", None) or {}
+        if pulse:
+            self._apply_clock(pulse)
+        ktrace = getattr(s, "kahneman_trace", None) or ""
+        kobj = getattr(s, "kahneman", None) or {}
+        if ktrace:
+            self.lbl_kahneman.value = ktrace[:1200]
+        elif kobj:
+            self.lbl_kahneman.value = json.dumps(kobj, default=str)[:1200]
         rows = self._position_rows(s.positions)
         self.ov_pos_table.rows = rows
         self.pos_table.rows = rows
@@ -799,11 +917,67 @@ class ProTerminal:
         n, strat, chg = r.get("cycle", 0), r.get("strat", "hold"), r.get("pnl_chg", 0)
         has_tw = r.get("tweak") and r.get("tweak") != "none"
         inv = r.get("inventory") or ""
+        pulse = r.get("reality_pulse") or {}
+        narrative = (pulse.get("narrative") if isinstance(pulse, dict) else None) or ""
         body: list[ft.Control] = [
             ft.Text(
                 f"Snapshot → {len(r.get('positions') or [])} pos | equity ${r.get('equity', 0):,.0f}",
                 color=MUTED,
                 size=11,
+            ),
+            (
+                ft.Container(
+                    bgcolor="#121820",
+                    border_radius=8,
+                    padding=8,
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                "Reality Pulse",
+                                size=10,
+                                color=AMBER,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                            ft.Text(
+                                narrative or json.dumps(pulse, default=str)[:600],
+                                size=10,
+                                color=MUTED,
+                                selectable=True,
+                            ),
+                        ],
+                        spacing=2,
+                    ),
+                )
+                if pulse
+                else ft.Container()
+            ),
+            (
+                ft.Container(
+                    bgcolor="#141a12",
+                    border_radius=8,
+                    padding=8,
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                "Kahneman System 2",
+                                size=10,
+                                color=GREEN,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                            ft.Text(
+                                r.get("kahneman_trace")
+                                or json.dumps(r.get("kahneman") or {}, default=str)[:800]
+                                or "—",
+                                size=10,
+                                color=MUTED,
+                                selectable=True,
+                            ),
+                        ],
+                        spacing=2,
+                    ),
+                )
+                if (r.get("kahneman_trace") or r.get("kahneman"))
+                else ft.Container()
             ),
             (
                 ft.Text(

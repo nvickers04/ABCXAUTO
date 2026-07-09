@@ -1,66 +1,64 @@
 # GOAL — ABCXAUTO Pro Desktop v0.1  
-## Professional Self-Evolving IBKR Terminal with Hyper-Aware Position Management
+## Situational Awareness as the Literal Heart
 
 ### Objective
-Single-command Flet desktop app (`python -m abcxauto`) that feels like a premium broker terminal while running an autonomous Grok portfolio manager that **never confuses instruments** (conId is the single source of truth for every close/flatten).
+Premium one-command Flet terminal (`python -m abcxauto`) whose **core is a Reality Pulse** — a live situational-awareness snapshot injected at the start of every agent cycle. Automation flows from awareness; PnL is the truth signal.
 
-### Done when
-1. App launches premium dark UI (Overview / Positions Ledger / AI Brain / Logs & Evolution / Settings).
-2. Controls: **START AUTONOMOUS | PAUSE | PANIC FLATTEN | FORCE TWEAK | VALIDATE & EXECUTE**.
-3. Every cycle injects full LIVE POSITION LEDGER + ORDER PROTOCOL into the agent prompt.
-4. Logs & Evolution is filterable and auditable (ledger, reasoning with `Closing target = conId=…`, impact gate).
-5. Smart PANIC FLATTEN closes **per conId** (STK vs OPT independently).
-6. `python -m pytest -q` green.
+### Reality Pulse (mandatory every cycle)
+Built in `abcxauto/reality_pulse.py`, attached in `rocket.snap()` / `run_cycle()`:
+- Time (UTC + America/New_York), day of week, date
+- Session: Pre-market / Regular / Post-market / Closed + countdown
+- Tradable-now flags + liquidity
+- Data freshness (MDA SPY age, IBKR snapshot age, VIX if available)
+- Full position ledger (conId, secType, OPT fields, qty, PnL)
+- Account summary + awareness checklist
 
-### Architecture (module split — reuses ABCXAUTO)
+Agent system rules (`rocket.AWARENESS_HEART` + `ORDER_PROTOCOL`) force:
+1. Open rationale with `Current reality: …`
+2. Walk the checklist before any order
+3. Close only by exact **conId**
+
+### UI
+- **Market Clock** in top nav (clock, session badge, countdown, data age)
+- Overview Reality Pulse narrative strip
+- Logs & Evolution: each cycle card shows Reality Pulse + ledger + reasoning
+- START / PAUSE / PANIC / FORCE TWEAK / VALIDATE & EXECUTE
+
+### Architecture
 | Module | Role |
 |--------|------|
-| `abcxauto/__main__.py` | Zero-flag entry: `python -m abcxauto` |
-| `abcxauto/pro_desktop.py` | Flet Pro shell (premium UI) |
-| `abcxauto/pro_engine.py` | Background rocket worker, pause/panic/force/validate |
-| `abcxauto/rocket.py` | Snapshot → ledger → Grok → validate conId → execute → tweak |
-| `abcxauto/broker/connector.py` | IBKR + `_flatten_one_position` / `flatten_all` |
-| `abcxauto/executor.py` | conId-aware exit verification |
-| `abcxauto/proposals.py` | Strategy schemas (`market_order` exit-only + conId) |
+| `abcxauto/reality_pulse.py` | Heart — build pulse + clock view |
+| `abcxauto/rocket.py` | Pulse → Grok → validate → execute → tweak |
+| `abcxauto/pro_engine.py` | Background worker + state |
+| `abcxauto/pro_desktop.py` | Flet shell + Market Clock |
+| `abcxauto/broker/connector.py` | Per-conId panic flatten |
 
-### Run commands
+### Run (zero flags)
 ```powershell
 cd C:\Users\nvick\ABCXAUTO
-python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-# fill .env: XAI_API_KEY, MARKETDATA_TOKEN; start TWS paper API :7497
+# .env: XAI_API_KEY; TWS paper :7497
 python -m abcxauto
 ```
 
-Optional:
-```powershell
-python -m abcxauto --cleanup --aggressive   # kill stale Pro windows
-python -m abcxauto --tk                     # legacy Tk cockpit
-python -m pytest -q
-python scripts/pro_headless_acceptance.py
-```
-
 ### requirements.txt
-Already includes `flet>=0.85.0` plus ib_insync, xai-sdk, pydantic, fastapi, etc. No extra packages required for Pro.
+`flet>=0.85.0` already listed. No new packages.
 
-### 4-step test checklist (position awareness + order protocol)
-1. **Launch** — `python -m abcxauto` (no flags) → dark Flet UI, conId columns, START / PAUSE / PANIC / FORCE TWEAK / VALIDATE & EXECUTE.
-2. **START AUTONOMOUS** — ≥3 cycles; each cycle prompt/log contains `LIVE POSITION LEDGER` with `conId=…` rows; rationale names `Closing target = conId=…` before any close.
-3. **Logs & Evolution** — filters All/Trades/Closes/Improvements/Errors/Position Mismatches; expandable cards show inventory, reasoning, Validate Order Impact / Replay / Apply Again; summary strip shows close-success + mismatches.
-4. **Simulated PANIC on mixed SPY STK + OPT** — `tests/test_flatten_smoke.py` + connector `_flatten_one_position`: independent `position_results` per conId; stock MKT vs `close_option_position`; no cross-leg netting. UI panic writes before/after ledger into Logs.
+### 4-step checklist (awareness heart)
+1. **Launch** `python -m abcxauto` → Market Clock ticks; session badge + countdown visible.
+2. **START AUTONOMOUS** ≥3 cycles → Logs show **Reality Pulse** narrative + `LIVE POSITION LEDGER` with conIds; rationale starts from current reality.
+3. **Mixed book panic** (SPY STK + OPT) → PANIC or `pytest tests/test_flatten_smoke.py` → independent close per conId (never stock vs option swap).
+4. **Logs & Evolution** → expandable pulse + impact gate + close-success / mismatch chips; self-tweaks reference context vs PnL.
 
-Automated proofs:
 ```powershell
-python -m pytest tests/test_situational.py tests/test_flatten_smoke.py tests/test_pro_desktop.py tests/test_pro_engine.py -q
+python -m pytest tests/test_reality_pulse.py tests/test_situational.py tests/test_flatten_smoke.py tests/test_pro_desktop.py -q
 ```
 
 ### Progress
-- [x] Flet Pro shell over ProEngine + Working… hang fixes
-- [x] Full ORDER PROTOCOL embedded every cycle (`rocket.ORDER_PROTOCOL` / `RULES`)
-- [x] LIVE POSITION LEDGER (conId, secType, OPT fields, exchange, uPnL…)
-- [x] conId validation gate + simulate_close_impact + executor conId checks
-- [x] PANIC per-leg flatten (STK vs OPT)
-- [x] UI: Positions Ledger, PAUSE, FORCE TWEAK, VALIDATE & EXECUTE, proposal breakdown
-- [x] Logs: close-success rate + mismatch counter
-- [ ] User visual confirm on live paper with real mixed book
+- [x] Reality Pulse module + injection every cycle
+- [x] Awareness checklist in system rules
+- [x] Market Clock + Overview pulse strip
+- [x] Logs pulse cards
+- [x] conId order protocol + per-leg panic (prior)
+- [ ] Live paper visual confirm with real mixed book

@@ -18,7 +18,7 @@ REQUIRED = (
     "Logs & Evolution", "Apply Again", "Replay Cycle", "Grok Deep Analyze",
     "Export All", "Clear", "Pin Insight", "PANIC FLATTEN", "Raw JSON",
     "START AUTONOMOUS", "PAUSE", "FORCE TWEAK", "VALIDATE & EXECUTE",
-    "Positions Ledger",
+    "Positions Ledger", "Reality Pulse", "lbl_clock", "lbl_session_badge",
 )
 
 

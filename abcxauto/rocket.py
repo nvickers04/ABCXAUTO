@@ -12,8 +12,16 @@ from typing import Any, Dict, List
 from xai_sdk.chat import system, user
 
 from abcxauto.executor import safe_execute
+from abcxauto.kahneman import (
+    KAHNEMAN_HEART,
+    extract_kahneman,
+    format_kahneman_trace,
+    gate_incomplete_system2,
+    expected_json_shape_hint,
+)
 from abcxauto.llm import GrokClient
 from abcxauto.monitor import build_protection_report
+from abcxauto.reality_pulse import build_reality_pulse
 from abcxauto.tools import run_readonly_tool
 
 VALID_ACTIONS = (
@@ -55,6 +63,20 @@ Bad: "Close the bottom SPY position" (picks wrong contract).
 Good: "Target conId=270639 (SPY STK) currently +1. SELL 1. Separate conId=XXXXX (SPY OPT) remains untouched."
 """
 
+AWARENESS_HEART = """
+=== SITUATIONAL AWARENESS (THE HEART — MANDATORY EVERY CYCLE) ===
+You receive a REALITY PULSE JSON first. Before ANY action you MUST:
+1. Open rationale with the pulse "narrative" line (or rewrite "Current reality: …").
+2. Walk the awareness_checklist:
+   - Is this instrument tradable right now given session?
+   - Is data fresh enough (MDA / IBKR ages)?
+   - Does the action respect session liquidity?
+   - If closing: exact conId match against position_ledger (never symbol alone)?
+   - After close: target conId → zero, no other conIds touched?
+3. Prefer hold when session is closed/thin and data is stale unless risk demands protection.
+4. PnL is the final truth signal — self-tweaks must relate context to PnL outcomes.
+"""
+
 RULES = (
     "ABCXAUTO Pro v0.1.1. Output ONLY valid JSON. Cash-only until 5 winning paper cycles. "
     "Max 1% risk/trade. Entries MUST be bracket/market_bracket with stop+target. "
@@ -62,6 +84,8 @@ RULES = (
     "NEVER invent names (no cash_only_mode, hold_existing, protect_existing). Default hold. "
     "market_order is EXIT-ONLY and requires target_conId + closing of that exact conId. "
     "close_option is for OPT legs only with matching target_conId. "
+    + AWARENESS_HEART
+    + KAHNEMAN_HEART
     + ORDER_PROTOCOL
 )
 
@@ -264,6 +288,7 @@ async def _tool(c: Any, n: str, a: dict | None = None) -> Any:
 
 
 async def snap(c: Any) -> dict:
+    # VIX is best-effort; never block the pulse if the quote tool fails.
     acct, pos, orders, hours, spy = await asyncio.gather(
         _tool(c, "account_summary"),
         _tool(c, "positions"),
@@ -271,17 +296,38 @@ async def snap(c: Any) -> dict:
         _tool(c, "market_hours"),
         _tool(c, "quote", {"symbol": "SPY"}),
     )
+    vix: Any = {}
+    try:
+        vix = await _tool(c, "quote", {"symbol": "VIX"})
+    except Exception:
+        vix = {}
     pl, ol = (pos if isinstance(pos, list) else []), (
         orders if isinstance(orders, list) else []
     )
+    taken = datetime.now(timezone.utc).isoformat()
+    protection = build_protection_report(pl, ol)
+    connected = bool(getattr(c, "connected", True))
+    pulse = build_reality_pulse(
+        account=acct if isinstance(acct, dict) else {},
+        positions=pl,
+        open_orders=ol,
+        market_hours=hours if isinstance(hours, dict) else {},
+        spy_quote=spy if isinstance(spy, dict) else {},
+        vix_quote=vix if isinstance(vix, dict) else {},
+        protection=protection,
+        ibkr_connected=connected,
+        taken_at=taken,
+    )
     return {
-        "taken_at": datetime.now(timezone.utc).isoformat(),
+        "taken_at": taken,
         "account": acct,
         "positions": pl,
         "open_orders": ol,
         "market_hours": hours,
         "spy_quote": spy,
-        "protection": build_protection_report(pl, ol),
+        "vix_quote": vix,
+        "protection": protection,
+        "reality_pulse": pulse,
     }
 
 
@@ -363,32 +409,58 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         if "conId" not in p and "con_id" in p:
             p["conId"] = p["con_id"]
     inventory = format_position_inventory(positions)
+    pulse = s.get("reality_pulse") or {}
+    # Heart: Reality Pulse → Kahneman System 2 → order protocol → proposal.
     prompt = (
-        f"Cycle {n}.\n{inventory}\n{ORDER_PROTOCOL}\n"
-        f"Snapshot:\n{json.dumps(s, default=str)[:8000]}\n"
-        'JSON: {"action":"...","strategy":"...","params":{},"rationale":"...",'
-        '"target_conId":"...","reasoning_chain":"Closing target = conId=..."}'
+        f"Cycle {n}.\n"
+        f"REALITY PULSE (situational awareness heart):\n"
+        f"{json.dumps(pulse, default=str)[:6000]}\n\n"
+        f"{KAHNEMAN_HEART}\n"
+        f"{inventory}\n{ORDER_PROTOCOL}\n"
+        f"Raw snapshot (truncated):\n{json.dumps(s, default=str)[:3500]}\n"
+        f"{expected_json_shape_hint()}\n"
+        "Fill kahneman completely before any non-hold action. "
+        "Open rationale with pulse narrative + System 2 summary."
     )
     act = parse_json(await grok(g, prompt))
     strat, forced = normalize_action(act)
+    kahneman = extract_kahneman(act)
+    act["kahneman"] = kahneman
+    kahneman_trace = format_kahneman_trace(kahneman)
     validation = "n/a"
     reasoning_chain = (
         (act or {}).get("rationale")
         or (act or {}).get("reasoning_chain")
         or ""
     )
+    # Soft System 2 gate: incomplete deliberative scaffold → hold (no execute).
+    s2_ok, s2_msg = gate_incomplete_system2(strat, kahneman)
+    if not s2_ok and strat != "hold":
+        forced = {
+            "status": "hold",
+            "note": s2_msg,
+            "kahneman_incomplete": True,
+        }
+        strat = "hold"
+        validation = f"system2_gate: {s2_msg}"
     _prepare_close_params(act, positions)
     try:
         ok, vmsg = validate_action_against_inventory(act, positions)
-        validation = f"{'ok' if ok else 'rejected'}: {vmsg}"
+        if validation == "n/a" or validation.startswith("ok"):
+            validation = f"{'ok' if ok else 'rejected'}: {vmsg}"
+        elif not ok and strat != "hold":
+            validation = f"{validation}; rejected: {vmsg}"
         if not ok and strat != "hold":
             forced = {"status": "validated_hold", "reason": vmsg}
             strat = "hold"
+            if not str(validation).startswith("rejected"):
+                validation = f"rejected: {vmsg}"
     except Exception:
         pass
     impact = simulate_close_impact(act, positions)
     act["_live_positions"] = positions
     act["_impact"] = impact
+    act["_kahneman_trace"] = kahneman_trace
     res = (
         forced
         if forced
@@ -402,6 +474,9 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         "cycle": n,
         "pnl": pnl,
         "snapshot": s,
+        "reality_pulse": pulse,
+        "kahneman": kahneman,
+        "kahneman_trace": kahneman_trace,
         "action": act,
         "result": res,
         "inventory": inventory,
@@ -419,10 +494,10 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         tw = parse_json(
             await grok(
                 g,
-                f"Analyze last 2 cycles (watch for conId close mistakes):\n"
+                f"Analyze last 2 cycles (pulse + Kahneman bias signatures vs PnL + conId):\n"
                 f"{json.dumps(h[-2:], default=str)[:6000]}\n"
                 'ONE tweak JSON: {{"type":"config|none","config":{{}},'
-                '"summary":"one concrete tweak"}}',
+                '"summary":"one concrete tweak tied to pulse/Kahneman/PnL"}}',
             )
         )
         twk = apply_tweak(tw)
@@ -454,4 +529,7 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         "reasoning_chain": reasoning_chain,
         "tweak_before": tweak_before,
         "impact": impact,
+        "reality_pulse": pulse,
+        "kahneman": kahneman,
+        "kahneman_trace": kahneman_trace,
     }

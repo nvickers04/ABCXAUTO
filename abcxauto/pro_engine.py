@@ -49,6 +49,9 @@ class ViewState:
     last_action: dict = field(default_factory=dict)
     last_result: dict = field(default_factory=dict)
     last_impact: dict = field(default_factory=dict)
+    reality_pulse: dict = field(default_factory=dict)
+    kahneman: dict = field(default_factory=dict)
+    kahneman_trace: str = ""
     brain_strat: str = "—"
     brain_rationale: str = "Start autonomous mode to see Grok decisions."
     risk: str = "—"
@@ -251,6 +254,9 @@ class ProEngine:
         s.last_action = d.get("action_obj") or {}
         s.last_result = d.get("result") or {}
         s.last_impact = d.get("impact") or {}
+        s.reality_pulse = d.get("reality_pulse") or {}
+        s.kahneman = d.get("kahneman") or {}
+        s.kahneman_trace = d.get("kahneman_trace") or ""
         s.brain_strat = d.get("strat", "hold")
         s.brain_rationale = d.get("rationale") or "—"
         s.positions = d.get("positions") or []
@@ -343,6 +349,14 @@ class ProEngine:
                 out.setdefault("inventory", rec.get("inventory", ""))
                 out.setdefault("validation", rec.get("validation", ""))
                 out.setdefault("impact", rec.get("impact", {}))
+                out.setdefault(
+                    "reality_pulse",
+                    rec.get("reality_pulse")
+                    or (rec.get("snapshot") or {}).get("reality_pulse")
+                    or {},
+                )
+                out.setdefault("kahneman", rec.get("kahneman") or {})
+                out.setdefault("kahneman_trace", rec.get("kahneman_trace") or "")
                 if not out.get("positions"):
                     snap = rec.get("snapshot") or {}
                     out["positions"] = snap.get("positions") or []

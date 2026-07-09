@@ -53,10 +53,13 @@ async def _fake_tool(_c, name: str, _a=None):
 async def test_snap_with_fake_connector(monkeypatch):
     monkeypatch.setattr("abcxauto.rocket._tool", _fake_tool)
     out = await snap(FakeConnector())
-    assert set(out.keys()) == {
-        "taken_at", "account", "positions", "open_orders", "market_hours", "spy_quote", "protection",
-    }
+    assert {
+        "taken_at", "account", "positions", "open_orders", "market_hours",
+        "spy_quote", "protection", "reality_pulse", "vix_quote",
+    }.issubset(out.keys())
     assert out["account"]["netliquidation"] == 1000
+    assert "narrative" in out["reality_pulse"]
+    assert out["reality_pulse"]["session"]["status"] == "regular"
 
 
 @pytest.mark.asyncio
