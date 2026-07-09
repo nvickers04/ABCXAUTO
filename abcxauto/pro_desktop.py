@@ -43,7 +43,7 @@ FILTERS = [
     "Position Mismatches",
 ]
 # Canonical window title — keep TITLE + PRO_TITLE in sync for launch probes.
-TITLE = "ABCXAUTO Pro v0.1.1"
+TITLE = "ABCXAUTO Pro v0.2"
 PRO_TITLE = TITLE
 
 
@@ -99,6 +99,14 @@ class ProTerminal:
             color=MUTED,
             selectable=True,
         )
+        self.lbl_lab = ft.Text(
+            "Order lab idle — runs every cycle automatically.",
+            size=11,
+            color=MUTED,
+            selectable=True,
+        )
+        self.lbl_reconfig = ft.Text("—", size=11, color=AMBER, selectable=True)
+        self.lbl_simplify = ft.Text("—", size=11, color=MUTED, selectable=True)
         self.lbl_kahneman = ft.Text(
             "Kahneman System 2 idle — START for deliberative traces.",
             size=11,
@@ -339,7 +347,6 @@ class ProTerminal:
                         self._btn("▶  START AUTONOMOUS", GREEN, self._start),
                         self._btn("❚❚  PAUSE", AMBER, self._pause),
                         self._btn("⚠  PANIC FLATTEN", RED, self._panic),
-                        self._btn("⚡  FORCE TWEAK", BLUE, self._force_tweak),
                         self._btn("✓  VALIDATE & EXECUTE", BLUE, self._validate_execute),
                     ],
                     spacing=10,
@@ -368,6 +375,28 @@ class ProTerminal:
                                 weight=ft.FontWeight.W_600,
                             ),
                             self.lbl_kahneman,
+                            ft.Divider(color=BORDER, height=1),
+                            ft.Text(
+                                "Order Lab (auto every cycle)",
+                                color=MUTED,
+                                size=11,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                            self.lbl_lab,
+                            ft.Text(
+                                "Auto-reconfig (PnL/lab — no manual force-tweak)",
+                                color=MUTED,
+                                size=11,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                            self.lbl_reconfig,
+                            ft.Text(
+                                "Simplify ×2 (lean pass)",
+                                color=MUTED,
+                                size=11,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                            self.lbl_simplify,
                         ],
                         spacing=4,
                     ),
@@ -604,13 +633,6 @@ class ProTerminal:
         self._sync_widgets()
         self._safe_update()
 
-    def _force_tweak(self, _=None) -> None:
-        msg = self.engine.force_tweak()
-        self.page.overlay.append(
-            ft.SnackBar(ft.Text(f"FORCE TWEAK: {msg}"), bgcolor=BLUE, open=True)
-        )
-        self._safe_update()
-
     def _validate_execute(self, _=None) -> None:
         impact = self.engine.validate_last_impact()
         if not impact.get("ok"):
@@ -730,6 +752,21 @@ class ProTerminal:
             self.lbl_kahneman.value = ktrace[:1200]
         elif kobj:
             self.lbl_kahneman.value = json.dumps(kobj, default=str)[:1200]
+        lab = getattr(s, "order_lab", None) or {}
+        if lab or getattr(s, "lab_summary", None):
+            self.lbl_lab.value = (
+                getattr(s, "lab_summary", None)
+                or f"lab pass_rate={lab.get('pass_rate')}"
+            )[:900]
+            self.lbl_lab.color = (
+                GREEN if float(lab.get("pass_rate") or 0) >= 0.9 else AMBER
+            )
+        reconf = getattr(s, "reconfig", None) or {}
+        if reconf:
+            self.lbl_reconfig.value = str(reconf.get("summary") or "—")[:500]
+        simp = getattr(s, "simplify", None) or {}
+        if simp:
+            self.lbl_simplify.value = str(simp.get("summary") or "—")[:500]
         rows = self._position_rows(s.positions)
         self.ov_pos_table.rows = rows
         self.pos_table.rows = rows
@@ -803,6 +840,11 @@ class ProTerminal:
             self._stat_chip("Best cycle", f"${best:+.2f}", GREEN),
             self._stat_chip("Close success", close_rate, GREEN if attempts else MUTED),
             self._stat_chip("Mismatches", str(mismatches), RED if mismatches else GREEN),
+            self._stat_chip(
+                "Lab rate",
+                f"{float(getattr(s, 'lab_pass_rate', 0) or 0):.0%}",
+                GREEN if float(getattr(s, "lab_pass_rate", 0) or 0) >= 0.9 else AMBER,
+            ),
             self._stat_chip("Cycles", str(s.cycles), TEXT),
         ]
 
@@ -949,6 +991,45 @@ class ProTerminal:
                     ),
                 )
                 if pulse
+                else ft.Container()
+            ),
+            (
+                ft.Container(
+                    bgcolor="#101820",
+                    border_radius=8,
+                    padding=8,
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                "Order Lab + Auto-reconfig",
+                                size=10,
+                                color=BLUE,
+                                weight=ft.FontWeight.BOLD,
+                            ),
+                            ft.Text(
+                                (r.get("lab_summary") or "")[:800]
+                                or json.dumps(r.get("order_lab") or {}, default=str)[:600],
+                                size=10,
+                                color=MUTED,
+                                selectable=True,
+                            ),
+                            ft.Text(
+                                f"reconfig: {(r.get('reconfig') or {}).get('summary', '—')}",
+                                size=10,
+                                color=AMBER,
+                                selectable=True,
+                            ),
+                            ft.Text(
+                                f"simplify: {(r.get('simplify') or {}).get('summary', '—')}",
+                                size=10,
+                                color=MUTED,
+                                selectable=True,
+                            ),
+                        ],
+                        spacing=2,
+                    ),
+                )
+                if r.get("order_lab") or r.get("lab_summary")
                 else ft.Container()
             ),
             (

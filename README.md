@@ -48,8 +48,9 @@ Pro desktop (Flet professional terminal — **one command, zero flags**):
 python -m abcxauto
 ```
 
-Controls: **START AUTONOMOUS · PAUSE · PANIC FLATTEN · FORCE TWEAK · VALIDATE & EXECUTE**.  
-Every cycle injects a conId LIVE POSITION LEDGER + strict entry/exit protocol so stock and option legs never get confused. See `GOAL.md` for the 4-step checklist.
+Controls: **START AUTONOMOUS · PAUSE · PANIC FLATTEN · VALIDATE & EXECUTE**  
+(no manual force-tweak — lab + PnL auto-reconfig + two simplification passes each cycle).  
+See `GOAL.md` for the v0.2 checklist.
 
 If an old Pro window keeps coming back, clean stale Flet/Python processes first:
 

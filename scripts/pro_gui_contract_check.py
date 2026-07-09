@@ -10,8 +10,9 @@ REQUIRED = (
     "Overview", "Positions Ledger", "AI Brain", "Logs & Evolution", "Settings",
     "Apply Again", "Replay Cycle", "Grok Deep Analyze", "Export All", "Clear",
     "Pin Insight", "PANIC FLATTEN", "Raw JSON", "START AUTONOMOUS",
-    "PAUSE", "FORCE TWEAK", "VALIDATE & EXECUTE",
-    "Reality Pulse",
+    "PAUSE", "VALIDATE & EXECUTE",
+    "Reality Pulse", "Order Lab", "Simplify",
+    "Kahneman System 2",
 )
 
 

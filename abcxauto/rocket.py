@@ -21,7 +21,13 @@ from abcxauto.kahneman import (
 )
 from abcxauto.llm import GrokClient
 from abcxauto.monitor import build_protection_report
+from abcxauto.order_lab import (
+    auto_reconfig_from_lab,
+    format_lab_summary,
+    run_order_lab,
+)
 from abcxauto.reality_pulse import build_reality_pulse
+from abcxauto.simplify import run_two_simplification_passes
 from abcxauto.tools import run_readonly_tool
 
 VALID_ACTIONS = (
@@ -78,12 +84,14 @@ You receive a REALITY PULSE JSON first. Before ANY action you MUST:
 """
 
 RULES = (
-    "ABCXAUTO Pro v0.1.1. Output ONLY valid JSON. Cash-only until 5 winning paper cycles. "
-    "Max 1% risk/trade. Entries MUST be bracket/market_bracket with stop+target. "
+    "ABCXAUTO Pro v0.2. Output ONLY valid JSON. Cash-only until 5 winning paper cycles. "
+    "Max 1% risk/trade (or TWEAKS max_risk_pct). Entries MUST be bracket/market_bracket with stop+target. "
     f"action AND strategy MUST be exactly one of: {', '.join(sorted(ALLOWED_ACTIONS))}. "
     "NEVER invent names (no cash_only_mode, hold_existing, protect_existing). Default hold. "
     "market_order is EXIT-ONLY and requires target_conId + closing of that exact conId. "
     "close_option is for OPT legs only with matching target_conId. "
+    "A background ORDER LAB validates all order types every cycle; prefer strategies that pass the lab. "
+    "Self-reconfigure is automatic from lab pass-rate + PnL — do not invent force_tweak. "
     + AWARENESS_HEART
     + KAHNEMAN_HEART
     + ORDER_PROTOCOL
@@ -446,21 +454,57 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
     _prepare_close_params(act, positions)
     try:
         ok, vmsg = validate_action_against_inventory(act, positions)
-        if validation == "n/a" or validation.startswith("ok"):
+        # Never clobber an earlier system2_gate / rejection message.
+        if validation == "n/a":
             validation = f"{'ok' if ok else 'rejected'}: {vmsg}"
         elif not ok and strat != "hold":
             validation = f"{validation}; rejected: {vmsg}"
-        if not ok and strat != "hold":
             forced = {"status": "validated_hold", "reason": vmsg}
             strat = "hold"
-            if not str(validation).startswith("rejected"):
-                validation = f"rejected: {vmsg}"
+        elif not ok and strat == "hold" and not validation.startswith("system2"):
+            validation = f"rejected: {vmsg}"
     except Exception:
         pass
     impact = simulate_close_impact(act, positions)
     act["_live_positions"] = positions
     act["_impact"] = impact
     act["_kahneman_trace"] = kahneman_trace
+
+    # Heavy order lab (all types) + gate if prefer_bracket_only and non-bracket entry
+    lab = run_order_lab(
+        pulse=pulse, positions=positions, proposal=act, history=h
+    )
+    lab_summary = format_lab_summary(lab)
+    if TWEAKS.get("prefer_bracket_only") and strat not in (
+        "hold",
+        "bracket",
+        "market_bracket",
+        "close_option",
+        "market_order",
+        "modify_stop",
+        "modify_target",
+        "cancel_order",
+        "oca",
+    ):
+        forced = {
+            "status": "hold",
+            "note": "lab reconfig prefer_bracket_only — non-preferred strategy held",
+        }
+        strat = "hold"
+        validation = f"{validation}; lab_gate: prefer_bracket_only"
+
+    # Hold new risk if lab pass rate collapsed
+    if float(lab.get("pass_rate") or 1) < float(TWEAKS.get("lab_min_pass_rate", 0.5)) and strat in (
+        "bracket",
+        "market_bracket",
+    ):
+        forced = {
+            "status": "hold",
+            "note": f"lab pass_rate {lab.get('pass_rate')} below min — new entries paused",
+        }
+        strat = "hold"
+        validation = f"{validation}; lab_gate: low_pass_rate"
+
     res = (
         forced
         if forced
@@ -470,13 +514,26 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
             else await safe_execute(act, c)
         )
     )
+    # Constant auto-reconfig from lab + PnL (no manual force-tweak)
+    reconfig = auto_reconfig_from_lab(lab, h)
+    # TWO simplification passes (lean runtime; audited, no blind source deletion)
+    simplify = run_two_simplification_passes(lab)
+    twk = reconfig.get("summary") or "none"
+    tw = {**reconfig, "simplify": simplify.get("summary")}
+    tweak_before = reconfig.get("config_before") or {}
+
     rec = {
         "cycle": n,
         "pnl": pnl,
+        "pnl_chg": pnl - prev,
         "snapshot": s,
         "reality_pulse": pulse,
         "kahneman": kahneman,
         "kahneman_trace": kahneman_trace,
+        "order_lab": lab,
+        "lab_summary": lab_summary,
+        "reconfig": reconfig,
+        "simplify": simplify,
         "action": act,
         "result": res,
         "inventory": inventory,
@@ -488,22 +545,29 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
     Path("rocket.log").open("a", encoding="utf-8").write(
         json.dumps(rec, default=str) + "\n"
     )
-    twk, tw = "none", {}
-    tweak_before = dict(TWEAKS)
-    if len(h) >= 2:
-        tw = parse_json(
-            await grok(
-                g,
-                f"Analyze last 2 cycles (pulse + Kahneman bias signatures vs PnL + conId):\n"
-                f"{json.dumps(h[-2:], default=str)[:6000]}\n"
-                'ONE tweak JSON: {{"type":"config|none","config":{{}},'
-                '"summary":"one concrete tweak tied to pulse/Kahneman/PnL"}}',
+    Path("improvements.log").open("a", encoding="utf-8").write(
+        json.dumps({"cycle": n, "reconfig": reconfig, "lab_pass_rate": lab.get("pass_rate")}, default=str)
+        + "\n"
+    )
+    # Optional Grok reflection only when lab failed or PnL negative (audit, not force-tweak UI)
+    if len(h) >= 2 and (lab.get("failed", 0) > 0 or (pnl - prev) < 0):
+        try:
+            tw_g = parse_json(
+                await grok(
+                    g,
+                    f"Lab+Kahneman+PnL reflection (auto, not manual):\n"
+                    f"{lab_summary}\n"
+                    f"{json.dumps(h[-2:], default=str)[:5000]}\n"
+                    'ONE tweak JSON: {{"type":"config|none","config":{{}},'
+                    '"summary":"pnl/lab driven tweak"}}',
+                )
             )
-        )
-        twk = apply_tweak(tw)
-        Path("improvements.log").open("a", encoding="utf-8").write(
-            json.dumps({"cycle": n, "tweak": tw}, default=str) + "\n"
-        )
+            if tw_g.get("type") == "config" and tw_g.get("config"):
+                apply_tweak(tw_g)
+                tw = {**reconfig, "grok_reflection": tw_g}
+                twk = f"{twk}; grok:{tw_g.get('summary', '')}"
+        except Exception:
+            pass
     orders = s.get("open_orders") or []
     protection = s.get("protection") or {}
     return {
@@ -532,4 +596,8 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         "reality_pulse": pulse,
         "kahneman": kahneman,
         "kahneman_trace": kahneman_trace,
+        "order_lab": lab,
+        "lab_summary": lab_summary,
+        "reconfig": reconfig,
+        "simplify": simplify,
     }

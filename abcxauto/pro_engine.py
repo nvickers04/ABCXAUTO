@@ -52,6 +52,12 @@ class ViewState:
     reality_pulse: dict = field(default_factory=dict)
     kahneman: dict = field(default_factory=dict)
     kahneman_trace: str = ""
+    order_lab: dict = field(default_factory=dict)
+    lab_summary: str = ""
+    reconfig: dict = field(default_factory=dict)
+    simplify: dict = field(default_factory=dict)
+    lab_pass_rate: float = 0.0
+    simplify_count: int = 0
     brain_strat: str = "—"
     brain_rationale: str = "Start autonomous mode to see Grok decisions."
     risk: str = "—"
@@ -116,27 +122,6 @@ class ProEngine:
     def panic(self) -> None:
         self.stop_engine()
         threading.Thread(target=lambda: asyncio.run(self._do_panic()), daemon=True).start()
-
-    def force_tweak(self, tw: dict | None = None) -> str:
-        """Apply a manual self-improvement tweak (default: faster cycle)."""
-        payload = tw or {
-            "type": "config",
-            "config": {"cycle_sleep_s": 3},
-            "summary": "FORCE TWEAK: cycle_sleep_s=3",
-        }
-        msg = apply_tweak(payload)
-        self.state.tweaks.append(
-            {
-                "cycle": self.state.cycles,
-                "summary": msg,
-                "obj": payload,
-                "before": {},
-                "after": dict(TWEAKS),
-                "ts": _now(),
-            }
-        )
-        self.ui.put(("log", f"FORCE TWEAK applied: {msg}"))
-        return msg
 
     def drain_apply(self) -> ViewState:
         while not self.ui.empty():
@@ -257,6 +242,12 @@ class ProEngine:
         s.reality_pulse = d.get("reality_pulse") or {}
         s.kahneman = d.get("kahneman") or {}
         s.kahneman_trace = d.get("kahneman_trace") or ""
+        s.order_lab = d.get("order_lab") or {}
+        s.lab_summary = d.get("lab_summary") or ""
+        s.reconfig = d.get("reconfig") or {}
+        s.simplify = d.get("simplify") or {}
+        s.lab_pass_rate = float((s.order_lab or {}).get("pass_rate") or 0)
+        s.simplify_count = int((s.simplify or {}).get("simplification_count") or 0)
         s.brain_strat = d.get("strat", "hold")
         s.brain_rationale = d.get("rationale") or "—"
         s.positions = d.get("positions") or []

@@ -85,8 +85,10 @@ async def test_run_cycle_hold_path(monkeypatch):
         assert out["action_obj"]["strategy"] == "hold"
         assert out["rationale"] == "wait"
         out2 = await run_cycle(2, FakeConnector(), None, hist, out["pnl"])
-        assert out2["tweak"] == "faster"
-        assert TWEAKS.get("cycle_sleep_s") == 2
+        # v0.2: auto-reconfig from order lab (no manual force-tweak summary)
+        assert "auto-reconfig" in str(out2["tweak"])
+        assert out2.get("order_lab") and out2["order_lab"].get("pass_rate") is not None
+        assert out2.get("simplify") and "round1" in out2["simplify"]
         assert out2["portfolio"].startswith("0 positions")
     finally:
         TWEAKS.clear()
@@ -140,7 +142,15 @@ async def test_cycle_smoke_run_cycle_bracket_dispatch(monkeypatch, tmp_path):
                 "symbol": "SPY", "quantity": 1, "direction": "LONG",
                 "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
             },
-            "rationale": "smoke",
+            "rationale": "Current reality: RTH; System 2 ok. smoke",
+            "kahneman": {
+                "system1_scan": "SPY liquid RTH",
+                "system2_base_rate": "equity long brackets ~55% base rate",
+                "debias": {"overconfidence": "p_win=0.5"},
+                "pre_mortem": "gap through stop",
+                "alternatives": ["hold"],
+                "bias_audit": ["availability"],
+            },
         })
 
     monkeypatch.setattr("abcxauto.rocket.grok", bracket_grok)
@@ -191,6 +201,13 @@ async def test_run_cycle_dispatches_bracket_to_safe_execute(monkeypatch):
                 "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
             },
             "rationale": "test bracket dispatch",
+            "kahneman": {
+                "system1_scan": "entry setup",
+                "system2_base_rate": "RTH liquid ETF base rate",
+                "pre_mortem": "false breakout",
+                "alternatives": ["hold"],
+                "bias_audit": ["anchoring"],
+            },
         })
 
     monkeypatch.setattr("abcxauto.rocket.grok", bracket_grok)
@@ -199,6 +216,7 @@ async def test_run_cycle_dispatches_bracket_to_safe_execute(monkeypatch):
     assert out["strat"] == "bracket"
     assert len(calls) == 1
     assert calls[0]["strategy"] == "bracket"
+    assert out.get("kahneman", {}).get("complete") is True
 
 
 def test_apply_tweak_merges_config():
