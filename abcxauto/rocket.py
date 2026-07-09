@@ -84,14 +84,14 @@ You receive a REALITY PULSE JSON first. Before ANY action you MUST:
 """
 
 RULES = (
-    "ABCXAUTO Pro v0.2. Output ONLY valid JSON. Cash-only until 5 winning paper cycles. "
+    "ABCXAUTO Pro v0.3. Output ONLY valid JSON. Cash-only until 5 winning paper cycles. "
     "Max 1% risk/trade (or TWEAKS max_risk_pct). Entries MUST be bracket/market_bracket with stop+target. "
     f"action AND strategy MUST be exactly one of: {', '.join(sorted(ALLOWED_ACTIONS))}. "
     "NEVER invent names (no cash_only_mode, hold_existing, protect_existing). Default hold. "
     "market_order is EXIT-ONLY and requires target_conId + closing of that exact conId. "
     "close_option is for OPT legs only with matching target_conId. "
-    "A background ORDER LAB validates all order types every cycle; prefer strategies that pass the lab. "
-    "Self-reconfigure is automatic from lab pass-rate + PnL — do not invent force_tweak. "
+    "Loop every cycle: Reality Pulse → order lab → fix/simplify → re-test lab → execute → auto-reconfig. "
+    "No force_tweak. PnL + lab pass-rate drive reconfig. "
     + AWARENESS_HEART
     + KAHNEMAN_HEART
     + ORDER_PROTOCOL
@@ -470,11 +470,37 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
     act["_impact"] = impact
     act["_kahneman_trace"] = kahneman_trace
 
-    # Heavy order lab (all types) + gate if prefer_bracket_only and non-bracket entry
+    # v0.3 loop: Test → Fix/simplify → Re-test → Execute → Reconfigure
     lab = run_order_lab(
         pulse=pulse, positions=positions, proposal=act, history=h
     )
     lab_summary = format_lab_summary(lab)
+    # Fix round (audited lean passes — not runtime source wipe)
+    simplify = run_two_simplification_passes(lab)
+    # Immediate re-test after fix
+    lab_retest = run_order_lab(
+        pulse=pulse, positions=positions, proposal=act, history=h
+    )
+    retest = {
+        "after_fix": True,
+        "pre_pass_rate": lab.get("pass_rate"),
+        "post_pass_rate": lab_retest.get("pass_rate"),
+        "pre_failed": lab.get("failed"),
+        "post_failed": lab_retest.get("failed"),
+        "improved": float(lab_retest.get("pass_rate") or 0)
+        >= float(lab.get("pass_rate") or 0),
+        "summary": (
+            f"re-test after fix: {lab.get('pass_rate')} → {lab_retest.get('pass_rate')} "
+            f"(failed {lab.get('failed')} → {lab_retest.get('failed')})"
+        ),
+        "lab": lab_retest,
+    }
+    lab_summary = (
+        f"{lab_summary}\n{retest['summary']}\n"
+        f"simplify: {simplify.get('summary')}"
+    )
+    # Gates use post-fix lab
+    rate = float(lab_retest.get("pass_rate") or 1)
     if TWEAKS.get("prefer_bracket_only") and strat not in (
         "hold",
         "bracket",
@@ -493,17 +519,16 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         strat = "hold"
         validation = f"{validation}; lab_gate: prefer_bracket_only"
 
-    # Hold new risk if lab pass rate collapsed
-    if float(lab.get("pass_rate") or 1) < float(TWEAKS.get("lab_min_pass_rate", 0.5)) and strat in (
+    if rate < float(TWEAKS.get("lab_min_pass_rate", 0.5)) and strat in (
         "bracket",
         "market_bracket",
     ):
         forced = {
             "status": "hold",
-            "note": f"lab pass_rate {lab.get('pass_rate')} below min — new entries paused",
+            "note": f"re-test lab pass_rate {rate} below min — new entries paused",
         }
         strat = "hold"
-        validation = f"{validation}; lab_gate: low_pass_rate"
+        validation = f"{validation}; lab_gate: low_pass_rate_after_retest"
 
     res = (
         forced
@@ -514,12 +539,14 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
             else await safe_execute(act, c)
         )
     )
-    # Constant auto-reconfig from lab + PnL (no manual force-tweak)
-    reconfig = auto_reconfig_from_lab(lab, h)
-    # TWO simplification passes (lean runtime; audited, no blind source deletion)
-    simplify = run_two_simplification_passes(lab)
+    # Reconfigure from post-fix lab + PnL (no manual force-tweak)
+    reconfig = auto_reconfig_from_lab(lab_retest, h)
     twk = reconfig.get("summary") or "none"
-    tw = {**reconfig, "simplify": simplify.get("summary")}
+    tw = {
+        **reconfig,
+        "simplify": simplify.get("summary"),
+        "retest": retest.get("summary"),
+    }
     tweak_before = reconfig.get("config_before") or {}
 
     rec = {
@@ -531,6 +558,8 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         "kahneman": kahneman,
         "kahneman_trace": kahneman_trace,
         "order_lab": lab,
+        "lab_retest": lab_retest,
+        "retest": retest,
         "lab_summary": lab_summary,
         "reconfig": reconfig,
         "simplify": simplify,
@@ -546,16 +575,23 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         json.dumps(rec, default=str) + "\n"
     )
     Path("improvements.log").open("a", encoding="utf-8").write(
-        json.dumps({"cycle": n, "reconfig": reconfig, "lab_pass_rate": lab.get("pass_rate")}, default=str)
+        json.dumps(
+            {
+                "cycle": n,
+                "reconfig": reconfig,
+                "retest": retest.get("summary"),
+                "lab_pass_rate": lab_retest.get("pass_rate"),
+            },
+            default=str,
+        )
         + "\n"
     )
-    # Optional Grok reflection only when lab failed or PnL negative (audit, not force-tweak UI)
-    if len(h) >= 2 and (lab.get("failed", 0) > 0 or (pnl - prev) < 0):
+    if len(h) >= 2 and (lab_retest.get("failed", 0) > 0 or (pnl - prev) < 0):
         try:
             tw_g = parse_json(
                 await grok(
                     g,
-                    f"Lab+Kahneman+PnL reflection (auto, not manual):\n"
+                    f"Lab+retest+PnL reflection (auto):\n"
                     f"{lab_summary}\n"
                     f"{json.dumps(h[-2:], default=str)[:5000]}\n"
                     'ONE tweak JSON: {{"type":"config|none","config":{{}},'
@@ -564,7 +600,7 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
             )
             if tw_g.get("type") == "config" and tw_g.get("config"):
                 apply_tweak(tw_g)
-                tw = {**reconfig, "grok_reflection": tw_g}
+                tw = {**tw, "grok_reflection": tw_g}
                 twk = f"{twk}; grok:{tw_g.get('summary', '')}"
         except Exception:
             pass
@@ -596,8 +632,10 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         "reality_pulse": pulse,
         "kahneman": kahneman,
         "kahneman_trace": kahneman_trace,
-        "order_lab": lab,
+        "order_lab": lab_retest,
+        "order_lab_pre": lab,
         "lab_summary": lab_summary,
+        "retest": retest,
         "reconfig": reconfig,
         "simplify": simplify,
     }

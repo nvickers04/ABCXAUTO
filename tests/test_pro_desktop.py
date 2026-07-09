@@ -18,8 +18,8 @@ REQUIRED = (
     "Logs & Evolution", "Apply Again", "Replay Cycle", "Grok Deep Analyze",
     "Export All", "Clear", "Pin Insight", "PANIC FLATTEN", "Raw JSON",
     "START AUTONOMOUS", "PAUSE", "VALIDATE & EXECUTE",
-    "Positions Ledger", "Reality Pulse", "Order Lab", "lbl_clock", "lbl_session_badge",
-    "Kahneman System 2", "lbl_kahneman", "Simplify",
+    "Positions", "Reality Pulse", "Order Lab", "lbl_clock", "lbl_session_badge",
+    "Simplify", "re-test",
 )
 
 

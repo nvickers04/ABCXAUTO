@@ -56,6 +56,7 @@ class ViewState:
     lab_summary: str = ""
     reconfig: dict = field(default_factory=dict)
     simplify: dict = field(default_factory=dict)
+    retest: dict = field(default_factory=dict)
     lab_pass_rate: float = 0.0
     simplify_count: int = 0
     brain_strat: str = "—"
@@ -246,6 +247,7 @@ class ProEngine:
         s.lab_summary = d.get("lab_summary") or ""
         s.reconfig = d.get("reconfig") or {}
         s.simplify = d.get("simplify") or {}
+        s.retest = d.get("retest") or {}
         s.lab_pass_rate = float((s.order_lab or {}).get("pass_rate") or 0)
         s.simplify_count = int((s.simplify or {}).get("simplification_count") or 0)
         s.brain_strat = d.get("strat", "hold")

@@ -89,6 +89,8 @@ async def test_run_cycle_hold_path(monkeypatch):
         assert "auto-reconfig" in str(out2["tweak"])
         assert out2.get("order_lab") and out2["order_lab"].get("pass_rate") is not None
         assert out2.get("simplify") and "round1" in out2["simplify"]
+        assert out2.get("retest") and out2["retest"].get("after_fix") is True
+        assert "re-test after fix" in str(out2["retest"].get("summary", ""))
         assert out2["portfolio"].startswith("0 positions")
     finally:
         TWEAKS.clear()

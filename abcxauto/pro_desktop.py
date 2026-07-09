@@ -28,10 +28,8 @@ TEXT, MUTED, GREEN, RED, BLUE, AMBER = (
 )
 NAV = [
     ("overview", "Overview", ft.Icons.DASHBOARD_OUTLINED),
-    ("positions", "Positions Ledger", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED),
-    ("brain", "AI Brain", ft.Icons.PSYCHOLOGY_OUTLINED),
+    ("positions", "Positions", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED),
     ("logs", "Logs & Evolution", ft.Icons.TIMELINE_OUTLINED),
-    ("settings", "Settings", ft.Icons.SETTINGS_OUTLINED),
 ]
 FILTERS = [
     "All",
@@ -43,7 +41,7 @@ FILTERS = [
     "Position Mismatches",
 ]
 # Canonical window title — keep TITLE + PRO_TITLE in sync for launch probes.
-TITLE = "ABCXAUTO Pro v0.2"
+TITLE = "ABCXAUTO Pro v0.3"
 PRO_TITLE = TITLE
 
 
@@ -300,11 +298,9 @@ class ProTerminal:
         builders = {
             "overview": self._page_overview,
             "positions": self._page_positions,
-            "brain": self._page_brain,
             "logs": self._page_logs,
-            "settings": self._page_settings,
         }
-        self.content.content = builders[key]()
+        self.content.content = builders.get(key, self._page_overview)()
         self._safe_update()
 
     def _safe_update(self) -> None:
@@ -765,8 +761,11 @@ class ProTerminal:
         if reconf:
             self.lbl_reconfig.value = str(reconf.get("summary") or "—")[:500]
         simp = getattr(s, "simplify", None) or {}
-        if simp:
-            self.lbl_simplify.value = str(simp.get("summary") or "—")[:500]
+        retest = getattr(s, "retest", None) or {}
+        if simp or retest:
+            self.lbl_simplify.value = (
+                f"{simp.get('summary') or '—'} | {retest.get('summary') or ''}"
+            )[:600]
         rows = self._position_rows(s.positions)
         self.ov_pos_table.rows = rows
         self.pos_table.rows = rows
@@ -1025,6 +1024,12 @@ class ProTerminal:
                                 color=MUTED,
                                 selectable=True,
                             ),
+                            ft.Text(
+                                f"re-test: {(r.get('retest') or {}).get('summary', '—')}",
+                                size=10,
+                                color=GREEN,
+                                selectable=True,
+                            ),
                         ],
                         spacing=2,
                     ),
@@ -1217,7 +1222,7 @@ class ProTerminal:
         if tw := rec.get("tweak_obj"):
             self._apply_tweak(tw)
         self._sync_widgets()
-        self._show_tab("brain")
+        self._show_tab("overview")
 
     def _validate_impact(self, rec: dict) -> None:
         """Simulate order impact using live ledger (AC4) — conId-level gate."""
