@@ -1,4 +1,4 @@
-"""Pro engine — START/stop/panic, rocket loop, view state (stdlib only, no Flet)."""
+"""Pro engine — START/pause/panic, rocket loop, view state (stdlib only, no Flet)."""
 
 from __future__ import annotations
 
@@ -13,8 +13,17 @@ from typing import Any
 
 from abcxauto.broker.connector import get_ibkr_connector
 from abcxauto.config import get_config
+from abcxauto.executor import safe_execute
 from abcxauto.llm import GrokClient
-from abcxauto.rocket import TWEAKS, apply_tweak, grok, run_cycle
+from abcxauto.rocket import (
+    TWEAKS,
+    apply_tweak,
+    format_position_inventory,
+    grok,
+    run_cycle,
+    simulate_close_impact,
+    validate_action_against_inventory,
+)
 
 
 def _now() -> str:
@@ -29,23 +38,32 @@ class ViewState:
     pnl_chg: float = 0.0
     equity_hist: list[float] = field(default_factory=list)
     positions: list[dict] = field(default_factory=list)
+    open_orders: list[dict] = field(default_factory=list)
+    inventory: str = ""
     records: list[dict] = field(default_factory=list)
     tweaks: list[dict] = field(default_factory=list)
     connected: bool = False
     running: bool = False
+    paused: bool = False
     status: str = "Safe"
     last_action: dict = field(default_factory=dict)
+    last_result: dict = field(default_factory=dict)
+    last_impact: dict = field(default_factory=dict)
     brain_strat: str = "—"
     brain_rationale: str = "Start autonomous mode to see Grok decisions."
     risk: str = "—"
+    close_attempts: int = 0
+    close_ok: int = 0
+    mismatches: int = 0
 
 
 class ProEngine:
-    """Autonomous rocket loop + thread-safe UI queue. Wired to START button via ProTerminal."""
+    """Autonomous rocket loop + thread-safe UI queue. Wired to START via ProTerminal."""
 
     def __init__(self) -> None:
         self.ui: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.stop = threading.Event()
+        self.pause = threading.Event()  # set = paused
         self._gen = 0
         self.worker: threading.Thread | None = None
         self.conn: Any = None
@@ -55,26 +73,67 @@ class ProEngine:
         if not get_config().xai_api_key:
             return "XAI_API_KEY missing"
         if self.worker and self.worker.is_alive():
+            # Resume if paused
+            if self.pause.is_set():
+                self.pause.clear()
+                self.state.paused = False
+                self.state.running = True
+                self.state.status = "Running"
+                return None
             return None
         self._gen += 1
         gen = self._gen
         self.stop.clear()
+        self.pause.clear()
         self.state.running = True
+        self.state.paused = False
         self.state.status = "Running"
         self.worker = threading.Thread(target=lambda: self._worker(gen), daemon=True)
         self.worker.start()
         return None
 
+    def pause_engine(self) -> None:
+        """Pause cycles without tearing down the worker / connection."""
+        if not self.worker or not self.worker.is_alive():
+            return
+        self.pause.set()
+        self.state.paused = True
+        self.state.running = False
+        self.state.status = "Paused"
+
     def stop_engine(self) -> None:
         self.stop.set()
+        self.pause.clear()
         self._gen += 1
         self.state.running = False
+        self.state.paused = False
         self.state.status = "Safe"
         self.worker = None
 
     def panic(self) -> None:
         self.stop_engine()
         threading.Thread(target=lambda: asyncio.run(self._do_panic()), daemon=True).start()
+
+    def force_tweak(self, tw: dict | None = None) -> str:
+        """Apply a manual self-improvement tweak (default: faster cycle)."""
+        payload = tw or {
+            "type": "config",
+            "config": {"cycle_sleep_s": 3},
+            "summary": "FORCE TWEAK: cycle_sleep_s=3",
+        }
+        msg = apply_tweak(payload)
+        self.state.tweaks.append(
+            {
+                "cycle": self.state.cycles,
+                "summary": msg,
+                "obj": payload,
+                "before": {},
+                "after": dict(TWEAKS),
+                "ts": _now(),
+            }
+        )
+        self.ui.put(("log", f"FORCE TWEAK applied: {msg}"))
+        return msg
 
     def drain_apply(self) -> ViewState:
         while not self.ui.empty():
@@ -85,16 +144,65 @@ class ProEngine:
     def clear_logs(self) -> None:
         self.state.records.clear()
         self.state.tweaks.clear()
+        self.state.close_attempts = 0
+        self.state.close_ok = 0
+        self.state.mismatches = 0
 
     def apply_tweak_manual(self, tw: dict) -> str:
         return apply_tweak(tw)
+
+    def validate_last_impact(self) -> dict:
+        """Simulate last proposal against live ledger (no broker call)."""
+        act = self.state.last_action or {}
+        impact = simulate_close_impact(act, self.state.positions)
+        self.state.last_impact = impact
+        self.ui.put(
+            (
+                "log",
+                f"Validate Order Impact: {impact.get('gate')} "
+                f"untouched={impact.get('untouched_conIds')}",
+            )
+        )
+        return impact
+
+    def execute_last_proposal(self) -> None:
+        """Manual override: validate then safe_execute last Grok proposal."""
+        threading.Thread(
+            target=lambda: asyncio.run(self._do_manual_execute()), daemon=True
+        ).start()
+
+    async def _do_manual_execute(self) -> None:
+        act = dict(self.state.last_action or {})
+        if not act:
+            self.ui.put(("error", "No proposal to execute"))
+            return
+        ok, msg = validate_action_against_inventory(act, self.state.positions)
+        if not ok:
+            self.state.mismatches += 1
+            self.ui.put(("error", f"Validate & Execute blocked: {msg}"))
+            return
+        try:
+            conn = self.conn or get_ibkr_connector()
+            if not getattr(conn, "connected", False):
+                await conn.connect()
+            res = await safe_execute(act, conn)
+            self.state.last_result = res
+            self.ui.put(
+                (
+                    "log",
+                    f"Validate & Execute result: {json.dumps(res, default=str)[:500]}",
+                )
+            )
+        except Exception as e:
+            self.ui.put(("error", f"Validate & Execute failed: {e}"))
 
     async def grok_analyze_tweak(self, tw: dict) -> None:
         try:
             g = GrokClient()
             txt = await grok(
                 g,
-                f"Analyze this portfolio tweak and suggest ONE follow-up:\n{json.dumps(tw)}\nJSON response.",
+                f"Analyze this portfolio tweak and suggest ONE follow-up:\n"
+                f"{json.dumps(tw)}\nJSON response.",
             )
             self.ui.put(("log", f"Grok analysis: {txt[:500]}"))
         except Exception as e:
@@ -120,10 +228,15 @@ class ProEngine:
                         for r in data.get("position_results", [])
                         if r.get("reasoning")
                     ),
+                    "inventory": format_position_inventory(
+                        data.get("before_ledger") or []
+                    ),
                 }
             )
         elif kind in ("log", "error"):
-            s.records.append({"cycle": 0, "type": "error", "msg": str(data), "ts": _now()})
+            s.records.append(
+                {"cycle": 0, "type": "error", "msg": str(data), "ts": _now()}
+            )
 
     def _on_cycle(self, d: dict) -> None:
         s = self.state
@@ -136,9 +249,23 @@ class ProEngine:
             s.equity_hist = s.equity_hist[-40:]
         s.risk = d.get("risk", "—")
         s.last_action = d.get("action_obj") or {}
+        s.last_result = d.get("result") or {}
+        s.last_impact = d.get("impact") or {}
         s.brain_strat = d.get("strat", "hold")
         s.brain_rationale = d.get("rationale") or "—"
         s.positions = d.get("positions") or []
+        s.open_orders = d.get("open_orders") or []
+        s.inventory = d.get("inventory") or format_position_inventory(s.positions)
+        # Close / mismatch stats for Logs summary strip
+        strat = str(d.get("strat") or "").lower()
+        val = str(d.get("validation") or "")
+        if any(k in strat for k in ("close", "market_order", "flatten")) or "close" in val:
+            s.close_attempts += 1
+            res = d.get("result") or {}
+            if res.get("success") or res.get("status") in ("executed", "filled", "Submitted"):
+                s.close_ok += 1
+        if "rejected" in val.lower() or "mismatch" in val.lower():
+            s.mismatches += 1
         rec = {**d, "ts": _now(), "type": "cycle"}
         s.records.append(rec)
         if d.get("tweak") and d["tweak"] != "none":
@@ -158,7 +285,6 @@ class ProEngine:
             conn = self.conn or get_ibkr_connector()
             if not getattr(conn, "connected", False):
                 await conn.connect()
-            # Capture before ledger for Logs display of before/after
             before_ledger = []
             try:
                 before_ledger = (
@@ -166,8 +292,12 @@ class ProEngine:
                 )
             except Exception:
                 pass
-            res = await conn.flatten_all() if hasattr(conn, "flatten_all") else {"status": "logged"}
-            res = dict(res)  # copy
+            res = (
+                await conn.flatten_all()
+                if hasattr(conn, "flatten_all")
+                else {"status": "logged"}
+            )
+            res = dict(res)
             res["before_ledger"] = before_ledger
             self.ui.put(("panic", res))
         except Exception as e:
@@ -189,17 +319,18 @@ class ProEngine:
         except Exception as e:
             self.ui.put(("log", f"INIT ERROR: {e}"))
             self.ui.put(("conn", False))
-            # Drop back to Safe so the Overview mode chip is honest.
             self.state.running = False
             self.state.status = "Safe"
             return
         hist, prev, n = [], 0.0, 0
         while gen == self._gen and not self.stop.is_set():
+            if self.pause.is_set():
+                await asyncio.sleep(0.25)
+                continue
             n += 1
             try:
                 out = await run_cycle(n, self.conn, g, hist, prev)
                 prev = out["pnl"]
-                # Prefer the enriched run_cycle payload; fall back to hist record.
                 rec = hist[-1] if hist else {}
                 out.setdefault("action_obj", rec.get("action", {}))
                 out.setdefault(
@@ -211,6 +342,7 @@ class ProEngine:
                 )
                 out.setdefault("inventory", rec.get("inventory", ""))
                 out.setdefault("validation", rec.get("validation", ""))
+                out.setdefault("impact", rec.get("impact", {}))
                 if not out.get("positions"):
                     snap = rec.get("snapshot") or {}
                     out["positions"] = snap.get("positions") or []

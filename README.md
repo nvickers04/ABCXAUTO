@@ -42,11 +42,14 @@ Start TWS (paper) with API enabled on port 7497.
 
 ## Run
 
-Pro desktop (Flet situational-awareness cockpit):
+Pro desktop (Flet professional terminal — **one command, zero flags**):
 
 ```powershell
 python -m abcxauto
 ```
+
+Controls: **START AUTONOMOUS · PAUSE · PANIC FLATTEN · FORCE TWEAK · VALIDATE & EXECUTE**.  
+Every cycle injects a conId LIVE POSITION LEDGER + strict entry/exit protocol so stock and option legs never get confused. See `GOAL.md` for the 4-step checklist.
 
 If an old Pro window keeps coming back, clean stale Flet/Python processes first:
 

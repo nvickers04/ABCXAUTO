@@ -27,7 +27,7 @@ TEXT, MUTED, GREEN, RED, BLUE, AMBER = (
 )
 NAV = [
     ("overview", "Overview", ft.Icons.DASHBOARD_OUTLINED),
-    ("positions", "Positions", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED),
+    ("positions", "Positions Ledger", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED),
     ("brain", "AI Brain", ft.Icons.PSYCHOLOGY_OUTLINED),
     ("logs", "Logs & Evolution", ft.Icons.TIMELINE_OUTLINED),
     ("settings", "Settings", ft.Icons.SETTINGS_OUTLINED),
@@ -67,24 +67,26 @@ class ProTerminal:
         self.lbl_cycles = ft.Text("0", size=28, weight=ft.FontWeight.BOLD, color=TEXT)
         self.lbl_risk = ft.Text("—", color=MUTED)
         self.sparkline = ft.Container(height=220, expand=True)
+        _pos_cols = ("conId", "Symbol", "Type", "Qty", "uPnL", "Details")
         self.ov_pos_table = ft.DataTable(
-            columns=[
-                ft.DataColumn(ft.Text(c, color=MUTED))
-                for c in ("conId", "Symbol", "Qty", "PnL", "Type")
-            ],
+            columns=[ft.DataColumn(ft.Text(c, color=MUTED)) for c in _pos_cols],
             rows=[],
             heading_row_color=CARD2,
             border=ft.Border.all(1, BORDER),
         )
         self.pos_table = ft.DataTable(
-            columns=[
-                ft.DataColumn(ft.Text(c, color=MUTED))
-                for c in ("conId", "Symbol", "Qty", "PnL", "Type")
-            ],
+            columns=[ft.DataColumn(ft.Text(c, color=MUTED)) for c in _pos_cols],
             rows=[],
             heading_row_color=CARD2,
             border=ft.Border.all(1, BORDER),
         )
+        self.lbl_proposal = ft.Text(
+            "No proposal yet — START AUTONOMOUS or wait for a cycle.",
+            color=MUTED,
+            size=12,
+            selectable=True,
+        )
+        self.lbl_ledger_snippet = ft.Text("—", color=MUTED, size=10, selectable=True)
         self.brain_action = ft.Text("—", size=18, color=BLUE)
         self.brain_rationale = ft.Text(
             "Start autonomous mode to see Grok decisions.", color=MUTED, selectable=True
@@ -146,7 +148,7 @@ class ProTerminal:
                     ft.Text("•", color=MUTED),
                     ft.Text("PAPER", color=AMBER, size=13, weight=ft.FontWeight.W_600),
                     ft.Text("•", color=MUTED),
-                    ft.Text(f"Grok {cfg.model}", color=BLUE, size=13),
+                    ft.Text(f"Grok {cfg.model}", color=BLUE, size=13, weight=ft.FontWeight.W_600),
                     ft.Container(expand=True),
                     ft.Column(
                         [ft.Text("Equity", size=10, color=MUTED), self.lbl_equity],
@@ -284,10 +286,13 @@ class ProTerminal:
                 ft.Row(
                     [
                         self._btn("▶  START AUTONOMOUS", GREEN, self._start),
-                        self._btn("■  STOP", RED, self._stop),
+                        self._btn("❚❚  PAUSE", AMBER, self._pause),
                         self._btn("⚠  PANIC FLATTEN", RED, self._panic),
+                        self._btn("⚡  FORCE TWEAK", BLUE, self._force_tweak),
+                        self._btn("✓  VALIDATE & EXECUTE", BLUE, self._validate_execute),
                     ],
-                    spacing=12,
+                    spacing=10,
+                    wrap=True,
                 ),
                 ft.Container(height=8),
                 ft.Row(
@@ -322,7 +327,11 @@ class ProTerminal:
                             expand=1,
                             content=ft.Column(
                                 [
-                                    ft.Text("Positions", color=MUTED, size=12),
+                                    ft.Text(
+                                        "Live Positions (conId)",
+                                        color=MUTED,
+                                        size=12,
+                                    ),
                                     ft.Column(
                                         [self.ov_pos_table],
                                         scroll=ft.ScrollMode.AUTO,
@@ -336,22 +345,55 @@ class ProTerminal:
                     spacing=12,
                     expand=True,
                 ),
+                ft.Container(
+                    bgcolor=CARD,
+                    border=ft.Border.all(1, BORDER),
+                    border_radius=12,
+                    padding=14,
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                "Proposed order breakdown",
+                                color=MUTED,
+                                size=12,
+                                weight=ft.FontWeight.W_600,
+                            ),
+                            self.lbl_proposal,
+                        ],
+                        spacing=6,
+                    ),
+                ),
             ],
             spacing=12,
             expand=True,
+            scroll=ft.ScrollMode.AUTO,
         )
 
     def _page_positions(self) -> ft.Column:
         return ft.Column(
             [
-                ft.Text("Open Positions", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
+                ft.Text(
+                    "Positions Ledger",
+                    size=20,
+                    weight=ft.FontWeight.BOLD,
+                    color=TEXT,
+                ),
+                ft.Text(
+                    "conId is the single source of truth — STK and OPT for the same symbol "
+                    "are distinct legs.",
+                    color=MUTED,
+                    size=12,
+                ),
                 ft.Container(
                     bgcolor=CARD,
                     border=ft.Border.all(1, BORDER),
                     border_radius=12,
                     padding=12,
                     expand=True,
-                    content=ft.Column([self.pos_table], scroll=ft.ScrollMode.AUTO),
+                    content=ft.Column(
+                        [self.pos_table, ft.Divider(color=BORDER), self.lbl_ledger_snippet],
+                        scroll=ft.ScrollMode.AUTO,
+                    ),
                 ),
             ],
             expand=True,
@@ -470,6 +512,11 @@ class ProTerminal:
         self._sync_widgets()
         self._safe_update()
 
+    def _pause(self, _=None) -> None:
+        self.engine.pause_engine()
+        self._sync_widgets()
+        self._safe_update()
+
     def _stop(self, _=None) -> None:
         self.engine.stop_engine()
         self._sync_widgets()
@@ -477,6 +524,37 @@ class ProTerminal:
 
     def _panic(self, _=None) -> None:
         self.engine.panic()
+        self._sync_widgets()
+        self._safe_update()
+
+    def _force_tweak(self, _=None) -> None:
+        msg = self.engine.force_tweak()
+        self.page.overlay.append(
+            ft.SnackBar(ft.Text(f"FORCE TWEAK: {msg}"), bgcolor=BLUE, open=True)
+        )
+        self._safe_update()
+
+    def _validate_execute(self, _=None) -> None:
+        impact = self.engine.validate_last_impact()
+        if not impact.get("ok"):
+            self.page.overlay.append(
+                ft.SnackBar(
+                    ft.Text(f"Blocked: {impact.get('message')}"),
+                    bgcolor=RED,
+                    open=True,
+                )
+            )
+            self._sync_widgets()
+            self._safe_update()
+            return
+        self.engine.execute_last_proposal()
+        self.page.overlay.append(
+            ft.SnackBar(
+                ft.Text(impact.get("gate") or "Executing validated proposal…"),
+                bgcolor=GREEN,
+                open=True,
+            )
+        )
         self._sync_widgets()
         self._safe_update()
 
@@ -514,13 +592,26 @@ class ProTerminal:
         self.lbl_pnl.color = GREEN if s.pnl_chg >= 0 else RED
         self.lbl_risk.value = s.risk
         self.lbl_status.value = s.status
-        self.lbl_status.color = GREEN if s.running else MUTED
+        mode_color = (
+            GREEN if s.running else (AMBER if getattr(s, "paused", False) else MUTED)
+        )
+        self.lbl_status.color = mode_color
         self.lbl_mode.value = s.status
-        self.lbl_mode.color = GREEN if s.running else MUTED
+        self.lbl_mode.color = mode_color
         self.dot_conn.bgcolor = GREEN if s.connected else RED
         self.brain_action.value = s.brain_strat
         self.brain_rationale.value = s.brain_rationale
         self.brain_json.value = json.dumps(s.last_action, indent=2)
+        act = s.last_action or {}
+        impact = getattr(s, "last_impact", None) or act.get("_impact") or {}
+        self.lbl_proposal.value = (
+            f"strategy={s.brain_strat}  target_conId={act.get('target_conId') or '—'}\n"
+            f"params={json.dumps(act.get('params') or {}, default=str)[:280]}\n"
+            f"result={json.dumps(s.last_result or {}, default=str)[:200]}\n"
+            f"impact={impact.get('gate') or '—'}"
+        )
+        inv = getattr(s, "inventory", "") or ""
+        self.lbl_ledger_snippet.value = inv[:2500] if inv else "Ledger empty"
         rows = self._position_rows(s.positions)
         self.ov_pos_table.rows = rows
         self.pos_table.rows = rows
@@ -530,53 +621,70 @@ class ProTerminal:
         if not positions:
             return [
                 ft.DataRow(
-                    cells=[ft.DataCell(ft.Text("No positions", color=MUTED))] * 5
+                    cells=[ft.DataCell(ft.Text("No positions", color=MUTED))] * 6
                 )
             ]
-        return [
-            ft.DataRow(
-                cells=[
-                    ft.DataCell(
-                        ft.Text(
-                            str(p.get("conId") or p.get("con_id") or "?"),
-                            color=AMBER,
-                            selectable=True,
-                        )
-                    ),
-                    ft.DataCell(ft.Text(str(p.get("symbol", "?")), color=TEXT)),
-                    ft.DataCell(
-                        ft.Text(str(p.get("quantity", p.get("qty", 0))), color=TEXT)
-                    ),
-                    ft.DataCell(
-                        ft.Text(
-                            f"{float(p.get('unrealized_pnl') or 0):+.2f}", color=GREEN
-                        )
-                    ),
-                    ft.DataCell(
-                        ft.Text(
-                            str(p.get("sec_type", p.get("secType", "STK"))), color=MUTED
-                        )
-                    ),
-                ]
+        rows = []
+        for p in positions[:50]:
+            sec = str(p.get("sec_type") or p.get("secType") or "STK").upper()
+            pnl = float(
+                p.get("unrealized_pnl")
+                or p.get("unrealizedPNL")
+                or 0
             )
-            for p in positions[:50]
-        ]
+            pnl_color = GREEN if pnl >= 0 else RED
+            qty = p.get("quantity", p.get("qty", 0))
+            try:
+                qty_s = f"{float(qty):+g}"
+            except (TypeError, ValueError):
+                qty_s = str(qty)
+            details = ""
+            if sec.startswith("OPT"):
+                exp = p.get("expiration") or p.get("lastTradeDateOrContractMonth") or ""
+                details = f"{exp} {p.get('strike', '')}{p.get('right', '')}"
+            else:
+                details = str(p.get("exchange") or "SMART")
+            rows.append(
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(
+                            ft.Text(
+                                str(p.get("conId") or p.get("con_id") or "?"),
+                                color=AMBER,
+                                selectable=True,
+                                weight=ft.FontWeight.W_600,
+                            )
+                        ),
+                        ft.DataCell(ft.Text(str(p.get("symbol", "?")), color=TEXT)),
+                        ft.DataCell(
+                            ft.Text(
+                                sec,
+                                color=BLUE if sec.startswith("OPT") else MUTED,
+                            )
+                        ),
+                        ft.DataCell(ft.Text(qty_s, color=TEXT)),
+                        ft.DataCell(ft.Text(f"{pnl:+.2f}", color=pnl_color)),
+                        ft.DataCell(ft.Text(details, color=MUTED, size=11)),
+                    ]
+                )
+            )
+        return rows
 
     def _rebuild_log_stats(self) -> None:
         s = self.engine.state
         uplifts = [r.get("pnl_chg", 0) for r in s.records if r.get("type") == "cycle"]
         avg = sum(uplifts) / len(uplifts) if uplifts else 0
         best = max(uplifts, default=0)
-        trend = (
-            f"{100 * sum(1 for u in uplifts if u > 0) // len(uplifts)}% up"
-            if uplifts
-            else "—"
-        )
+        attempts = getattr(s, "close_attempts", 0) or 0
+        ok = getattr(s, "close_ok", 0) or 0
+        close_rate = f"{(100 * ok // attempts) if attempts else 0}% ({ok}/{attempts})"
+        mismatches = getattr(s, "mismatches", 0) or 0
         self.log_stats.controls = [
             self._stat_chip("Improvements", str(len(s.tweaks)), AMBER),
             self._stat_chip("Avg ΔPnL", f"${avg:+.2f}", BLUE),
             self._stat_chip("Best cycle", f"${best:+.2f}", GREEN),
-            self._stat_chip("Trend", trend, BLUE),
+            self._stat_chip("Close success", close_rate, GREEN if attempts else MUTED),
+            self._stat_chip("Mismatches", str(mismatches), RED if mismatches else GREEN),
             self._stat_chip("Cycles", str(s.cycles), TEXT),
         ]
 
@@ -857,17 +965,21 @@ class ProTerminal:
         self._show_tab("brain")
 
     def _validate_impact(self, rec: dict) -> None:
-        """Simulate order impact using live ledger (AC4)."""
+        """Simulate order impact using live ledger (AC4) — conId-level gate."""
+        from abcxauto.rocket import simulate_close_impact
+
         s = self.engine.state
-        target = (rec.get("action_obj") or rec.get("action", {})).get("target_conId") or "?"
-        s.brain_rationale = (
-            f"Validate Impact: conId={target} position will go to exactly zero. "
-            "No other conIds touched. (simulated)"
-        )
+        act = rec.get("action_obj") or rec.get("action") or {}
+        impact = simulate_close_impact(act, s.positions or rec.get("positions") or [])
+        s.last_impact = impact
+        s.brain_rationale = impact.get("gate") or "—"
+        s.brain_strat = f"validate:{act.get('strategy') or act.get('action') or '?'}"
         self._sync_widgets()
         self.page.overlay.append(
             ft.SnackBar(
-                ft.Text("Impact validated against current ledger"), bgcolor=BLUE, open=True
+                ft.Text(impact.get("gate") or "validated"),
+                bgcolor=GREEN if impact.get("ok") else RED,
+                open=True,
             )
         )
         self._safe_update()

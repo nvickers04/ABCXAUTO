@@ -61,3 +61,28 @@ def test_validate_accepts_stock_sell_for_stk_only():
         [MIXED[0]],
     )
     assert ok
+
+
+def test_simulate_close_impact_zeros_only_target_conid():
+    from abcxauto.rocket import simulate_close_impact
+
+    impact = simulate_close_impact(
+        {
+            "strategy": "market_order",
+            "params": {"symbol": "SPY", "action": "SELL", "quantity": 100},
+            "target_conId": "1",
+        },
+        MIXED,
+    )
+    assert impact["ok"]
+    assert str(impact["would_zero"][0]["conId"]) == "1"
+    assert "99" in [str(x) for x in impact["untouched_conIds"]]
+    assert "exactly zero" in impact["gate"]
+
+
+def test_order_protocol_embedded_in_rules():
+    from abcxauto.rocket import ORDER_PROTOCOL, RULES
+
+    assert "NEVER close by symbol" in ORDER_PROTOCOL or "Never close by symbol" in ORDER_PROTOCOL
+    assert "conId" in RULES
+    assert "LIVE POSITION LEDGER" in ORDER_PROTOCOL

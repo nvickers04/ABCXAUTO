@@ -16,11 +16,18 @@ _EXIT_ONLY_STRATEGIES = frozenset({"limit_order", "market_order", "stop_order", 
 
 
 async def _verify_closes_position(proposal: OrderProposal, connector: Any) -> Optional[Dict[str, Any]]:
-    """Return an error dict if the exit-only order would not reduce an existing position."""
+    """Return an error dict if the exit-only order would not reduce an existing position.
+
+    Prefer exact conId match (protocol single source of truth). Fall back to symbol+STK
+    only when conId is absent — never close an OPT leg with a stock market order.
+    """
     params = proposal.params
     symbol = getattr(params, "symbol", "").upper()
     action = getattr(params, "action", "")
-    quantity = int(getattr(params, "quantity", 0))
+    quantity = int(getattr(params, "quantity", 0) or 0)
+    target_con = getattr(params, "conId", None) or getattr(params, "con_id", None)
+    if target_con is not None:
+        target_con = str(target_con).strip()
 
     try:
         positions = await connector.get_positions()
@@ -29,17 +36,48 @@ async def _verify_closes_position(proposal: OrderProposal, connector: Any) -> Op
 
     held = 0
     has_option_position = False
+    matched_sec = None
     for p in positions or []:
+        sec = str(p.get("sec_type") or p.get("secType") or "STK").upper()
+        p_con = str(p.get("conId") or p.get("con_id") or "")
+        if target_con:
+            if p_con != target_con:
+                continue
+            matched_sec = sec
+            try:
+                held = int(float(p.get("quantity", 0) or 0))
+            except (TypeError, ValueError):
+                held = 0
+            break
         if str(p.get("symbol", "")).upper() != symbol:
             continue
-        if p.get("sec_type", "STK") == "STK":
-            held = int(p.get("quantity", 0))
-        elif p.get("sec_type") == "OPT":
+        if sec.startswith("STK"):
+            try:
+                held = int(float(p.get("quantity", 0) or 0))
+            except (TypeError, ValueError):
+                held = 0
+            matched_sec = "STK"
+        elif sec.startswith("OPT"):
             has_option_position = True
 
-    if action == "SELL" and held >= quantity:
+    if target_con and matched_sec is None:
+        return {
+            "error": (
+                f"Exit-order check failed: target_conId={target_con} not in live ledger. "
+                "Never close by symbol alone."
+            )
+        }
+    if target_con and matched_sec and not str(matched_sec).startswith("STK"):
+        return {
+            "error": (
+                f"Exit-order check failed: conId={target_con} is {matched_sec}, not STK. "
+                "Use close_option for option legs."
+            )
+        }
+
+    if action == "SELL" and held >= quantity > 0:
         return None
-    if action == "BUY" and held <= -quantity:
+    if action == "BUY" and held <= -quantity and quantity > 0:
         return None
 
     hint = (
@@ -48,9 +86,10 @@ async def _verify_closes_position(proposal: OrderProposal, connector: Any) -> Op
         if has_option_position
         else " New positions require a bracket/market_bracket with stop loss and take profit."
     )
+    cid_bit = f" conId={target_con}" if target_con else ""
     return {
         "error": (
-            f"Exit-order check failed: {action} {quantity} {symbol} does not reduce an "
+            f"Exit-order check failed: {action} {quantity} {symbol}{cid_bit} does not reduce an "
             f"existing STOCK position (current stock position: {held}).{hint}"
         )
     }

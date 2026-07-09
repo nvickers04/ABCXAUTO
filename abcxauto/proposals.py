@@ -54,6 +54,8 @@ class MarketOrderParams(BaseModel):
     symbol: str
     action: Literal["BUY", "SELL"]
     quantity: int = Field(gt=0)
+    # Protocol: conId is the single source of truth for closes (excluded from gateway kwargs).
+    conId: int | str | None = Field(default=None, exclude=True)
     closing_position: bool = Field(default=False, exclude=True)
 
     @model_validator(mode="after")

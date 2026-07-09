@@ -17,6 +17,8 @@ SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-80c4246a04fb\implem
 REQUIRED = (
     "Logs & Evolution", "Apply Again", "Replay Cycle", "Grok Deep Analyze",
     "Export All", "Clear", "Pin Insight", "PANIC FLATTEN", "Raw JSON",
+    "START AUTONOMOUS", "PAUSE", "FORCE TWEAK", "VALIDATE & EXECUTE",
+    "Positions Ledger",
 )
 
 
