@@ -17,6 +17,21 @@ def test_desktop_start_poll_three_cycles(headless_app, monkeypatch):
                 {"type": "config", "config": {"cycle_sleep_s": 0.01}, "summary": "faster cycles"}
             )
         grok_n[0] += 1
+        k2 = {
+            "system1_scan": "SPY long setup",
+            "system2_base_rate": "defined-risk bracket base case",
+            "debias": {
+                "anchoring": "ignore prior print",
+                "availability": "use pulse ledger",
+                "overconfidence": "p_win 0.45",
+                "representativeness": "regular session",
+                "loss_aversion": "stop set",
+                "prospect_theory": "asymmetric exits",
+            },
+            "pre_mortem": "fill then reverse without protection",
+            "alternatives": ["hold", "market_bracket"],
+            "bias_audit": ["anchoring"],
+        }
         if grok_n[0] == 1:
             return json.dumps({
                 "action": "bracket", "strategy": "bracket",
@@ -24,9 +39,14 @@ def test_desktop_start_poll_three_cycles(headless_app, monkeypatch):
                     "symbol": "SPY", "quantity": 1, "direction": "LONG",
                     "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
                 },
-                "rationale": "integration bracket",
+                "rationale": "Current reality: integration bracket after System 2",
+                "kahneman": k2,
             })
-        return json.dumps({"action": "hold", "strategy": "hold"})
+        return json.dumps({
+            "action": "hold", "strategy": "hold",
+            "rationale": "Current reality: hold",
+            "kahneman": k2,
+        })
 
     _real_sleep = asyncio.sleep
 
