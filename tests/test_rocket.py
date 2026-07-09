@@ -91,6 +91,8 @@ async def test_run_cycle_hold_path(monkeypatch):
         assert out2.get("simplify") and "round1" in out2["simplify"]
         assert out2.get("retest") and out2["retest"].get("after_fix") is True
         assert "re-test after fix" in str(out2["retest"].get("summary", ""))
+        assert out2.get("brutal_suite") and out2["brutal_suite"].get("idle_prevented")
+        assert (out2["brutal_suite"].get("strategies_tested") or 0) >= 10
         assert out2["portfolio"].startswith("0 positions")
     finally:
         TWEAKS.clear()

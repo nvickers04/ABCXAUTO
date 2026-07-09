@@ -57,6 +57,8 @@ class ViewState:
     reconfig: dict = field(default_factory=dict)
     simplify: dict = field(default_factory=dict)
     retest: dict = field(default_factory=dict)
+    brutal_suite: dict = field(default_factory=dict)
+    brutal_summary: str = ""
     lab_pass_rate: float = 0.0
     simplify_count: int = 0
     brain_strat: str = "—"
@@ -101,6 +103,50 @@ class ProEngine:
         self.worker = threading.Thread(target=lambda: self._worker(gen), daemon=True)
         self.worker.start()
         return None
+
+    def run_startup_suite(self) -> None:
+        """Force brutal order suite on startup so the bot never idles."""
+        threading.Thread(target=lambda: asyncio.run(self._startup_suite()), daemon=True).start()
+
+    async def _startup_suite(self) -> None:
+        from abcxauto.brutal_suite import format_brutal_summary, run_brutal_suite
+        from abcxauto.reality_pulse import build_reality_pulse
+
+        try:
+            conn = self.conn
+            if conn is None:
+                try:
+                    conn = get_ibkr_connector()
+                    if not getattr(conn, "connected", False):
+                        await conn.connect()
+                except Exception:
+                    conn = None
+            pulse = build_reality_pulse(
+                ibkr_connected=bool(getattr(conn, "connected", False)) if conn else False,
+                positions=self.state.positions,
+            )
+            report = await run_brutal_suite(
+                connector=conn, pulse=pulse, positions=self.state.positions, source="startup"
+            )
+            self.state.brutal_suite = report
+            self.state.brutal_summary = format_brutal_summary(report)
+            self.state.order_lab = {
+                "pass_rate": report.get("pass_rate"),
+                "passed": report.get("passed"),
+                "failed": report.get("failed"),
+                "results": report.get("results") or [],
+            }
+            self.state.lab_pass_rate = float(report.get("pass_rate") or 0)
+            self.state.lab_summary = self.state.brutal_summary
+            self.ui.put(
+                (
+                    "log",
+                    f"STARTUP BRUTAL SUITE: {report.get('summary')} idle_prevented=True",
+                )
+            )
+            self.ui.put(("brutal", report))
+        except Exception as e:
+            self.ui.put(("error", f"STARTUP SUITE ERROR: {e}"))
 
     def pause_engine(self) -> None:
         """Pause cycles without tearing down the worker / connection."""
@@ -203,6 +249,26 @@ class ProEngine:
             s.connected = bool(data)
         elif kind == "cycle":
             self._on_cycle(data)
+        elif kind == "brutal":
+            s.brutal_suite = data or {}
+            s.brutal_summary = str((data or {}).get("summary") or "")
+            s.lab_pass_rate = float((data or {}).get("pass_rate") or 0)
+            s.order_lab = {
+                "pass_rate": (data or {}).get("pass_rate"),
+                "passed": (data or {}).get("passed"),
+                "failed": (data or {}).get("failed"),
+                "results": (data or {}).get("results") or [],
+            }
+            s.records.append(
+                {
+                    "cycle": 0,
+                    "type": "brutal_suite",
+                    "ts": _now(),
+                    "brutal_suite": data,
+                    "lab_summary": s.brutal_summary,
+                    "msg": s.brutal_summary,
+                }
+            )
         elif kind == "panic":
             s.records.append(
                 {
@@ -248,6 +314,10 @@ class ProEngine:
         s.reconfig = d.get("reconfig") or {}
         s.simplify = d.get("simplify") or {}
         s.retest = d.get("retest") or {}
+        s.brutal_suite = d.get("brutal_suite") or s.brutal_suite
+        s.brutal_summary = str(
+            (d.get("lab_summary") or (s.brutal_suite or {}).get("summary") or "")
+        )
         s.lab_pass_rate = float((s.order_lab or {}).get("pass_rate") or 0)
         s.simplify_count = int((s.simplify or {}).get("simplification_count") or 0)
         s.brain_strat = d.get("strat", "hold")

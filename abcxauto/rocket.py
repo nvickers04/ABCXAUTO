@@ -19,13 +19,10 @@ from abcxauto.kahneman import (
     gate_incomplete_system2,
     expected_json_shape_hint,
 )
+from abcxauto.brutal_suite import format_brutal_summary, run_brutal_suite
 from abcxauto.llm import GrokClient
 from abcxauto.monitor import build_protection_report
-from abcxauto.order_lab import (
-    auto_reconfig_from_lab,
-    format_lab_summary,
-    run_order_lab,
-)
+from abcxauto.order_lab import auto_reconfig_from_lab
 from abcxauto.reality_pulse import build_reality_pulse
 from abcxauto.simplify import run_two_simplification_passes
 from abcxauto.tools import run_readonly_tool
@@ -84,14 +81,15 @@ You receive a REALITY PULSE JSON first. Before ANY action you MUST:
 """
 
 RULES = (
-    "ABCXAUTO Pro v0.3. Output ONLY valid JSON. Cash-only until 5 winning paper cycles. "
+    "ABCXAUTO Pro v0.4 PAPER ONLY. Output ONLY valid JSON. Cash-only until 5 winning paper cycles. "
     "Max 1% risk/trade (or TWEAKS max_risk_pct). Entries MUST be bracket/market_bracket with stop+target. "
     f"action AND strategy MUST be exactly one of: {', '.join(sorted(ALLOWED_ACTIONS))}. "
     "NEVER invent names (no cash_only_mode, hold_existing, protect_existing). Default hold. "
     "market_order is EXIT-ONLY and requires target_conId + closing of that exact conId. "
     "close_option is for OPT legs only with matching target_conId. "
-    "Loop every cycle: Reality Pulse → order lab → fix/simplify → re-test lab → execute → auto-reconfig. "
-    "No force_tweak. PnL + lab pass-rate drive reconfig. "
+    "Every cycle runs BRUTAL order suite (place/validate/cancel or dry-run for ALL types) — never idle. "
+    "Loop: Reality Pulse → brutal suite → fix/simplify → re-test → execute → auto-reconfig. "
+    "No force_tweak. PnL + suite pass-rate drive reconfig. "
     + AWARENESS_HEART
     + KAHNEMAN_HEART
     + ORDER_PROTOCOL
@@ -470,17 +468,41 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
     act["_impact"] = impact
     act["_kahneman_trace"] = kahneman_trace
 
-    # v0.3 loop: Test → Fix/simplify → Re-test → Execute → Reconfigure
-    lab = run_order_lab(
-        pulse=pulse, positions=positions, proposal=act, history=h
+    # v0.4: Brutal suite (never idle) → Fix → Re-test → Execute → Reconfigure
+    brutal = await run_brutal_suite(
+        connector=c,
+        pulse=pulse,
+        positions=positions,
+        history=h,
+        source="cycle",
     )
-    lab_summary = format_lab_summary(lab)
-    # Fix round (audited lean passes — not runtime source wipe)
+    lab = {
+        "pass_rate": brutal.get("pass_rate"),
+        "passed": brutal.get("passed"),
+        "failed": brutal.get("failed"),
+        "strategies_tested": brutal.get("strategies_tested"),
+        "results": brutal.get("results") or [],
+        "summary": brutal.get("summary"),
+    }
+    lab_summary = format_brutal_summary(brutal)
+    # Fix round (audited lean passes)
     simplify = run_two_simplification_passes(lab)
-    # Immediate re-test after fix
-    lab_retest = run_order_lab(
-        pulse=pulse, positions=positions, proposal=act, history=h
+    # Immediate re-test after fix (brutal again)
+    brutal_retest = await run_brutal_suite(
+        connector=c,
+        pulse=pulse,
+        positions=positions,
+        history=h,
+        source="cycle_retest",
     )
+    lab_retest = {
+        "pass_rate": brutal_retest.get("pass_rate"),
+        "passed": brutal_retest.get("passed"),
+        "failed": brutal_retest.get("failed"),
+        "strategies_tested": brutal_retest.get("strategies_tested"),
+        "results": brutal_retest.get("results") or [],
+        "summary": brutal_retest.get("summary"),
+    }
     retest = {
         "after_fix": True,
         "pre_pass_rate": lab.get("pass_rate"),
@@ -494,6 +516,7 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
             f"(failed {lab.get('failed')} → {lab_retest.get('failed')})"
         ),
         "lab": lab_retest,
+        "brutal": brutal_retest,
     }
     lab_summary = (
         f"{lab_summary}\n{retest['summary']}\n"
@@ -558,6 +581,7 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         "kahneman": kahneman,
         "kahneman_trace": kahneman_trace,
         "order_lab": lab,
+        "brutal_suite": brutal,
         "lab_retest": lab_retest,
         "retest": retest,
         "lab_summary": lab_summary,
@@ -634,6 +658,8 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         "kahneman_trace": kahneman_trace,
         "order_lab": lab_retest,
         "order_lab_pre": lab,
+        "brutal_suite": brutal_retest,
+        "brutal_suite_pre": brutal,
         "lab_summary": lab_summary,
         "retest": retest,
         "reconfig": reconfig,

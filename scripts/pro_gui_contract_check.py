@@ -7,11 +7,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PRO = REPO / "abcxauto" / "pro_desktop.py"
 REQUIRED = (
-    "Overview", "Positions", "Logs & Evolution",
+    "Overview", "Positions", "Test Suite Results", "Logs & Evolution",
     "Apply Again", "Replay Cycle", "Grok Deep Analyze", "Export All", "Clear",
     "Pin Insight", "PANIC FLATTEN", "Raw JSON", "START AUTONOMOUS",
     "PAUSE", "VALIDATE & EXECUTE",
-    "Reality Pulse", "Order Lab", "Simplify", "re-test",
+    "Reality Pulse", "Simplify", "re-test", "Brutal",
 )
 
 

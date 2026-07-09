@@ -18,8 +18,8 @@ REQUIRED = (
     "Logs & Evolution", "Apply Again", "Replay Cycle", "Grok Deep Analyze",
     "Export All", "Clear", "Pin Insight", "PANIC FLATTEN", "Raw JSON",
     "START AUTONOMOUS", "PAUSE", "VALIDATE & EXECUTE",
-    "Positions", "Reality Pulse", "Order Lab", "lbl_clock", "lbl_session_badge",
-    "Simplify", "re-test",
+    "Positions", "Test Suite Results", "Reality Pulse", "lbl_clock", "lbl_session_badge",
+    "Simplify", "re-test", "Brutal", "suite_table",
 )
 
 

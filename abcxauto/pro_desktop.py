@@ -29,6 +29,7 @@ TEXT, MUTED, GREEN, RED, BLUE, AMBER = (
 NAV = [
     ("overview", "Overview", ft.Icons.DASHBOARD_OUTLINED),
     ("positions", "Positions", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED),
+    ("tests", "Test Suite Results", ft.Icons.SCIENCE_OUTLINED),
     ("logs", "Logs & Evolution", ft.Icons.TIMELINE_OUTLINED),
 ]
 FILTERS = [
@@ -41,7 +42,7 @@ FILTERS = [
     "Position Mismatches",
 ]
 # Canonical window title — keep TITLE + PRO_TITLE in sync for launch probes.
-TITLE = "ABCXAUTO Pro v0.3"
+TITLE = "ABCXAUTO Pro v0.4"
 PRO_TITLE = TITLE
 
 
@@ -105,6 +106,21 @@ class ProTerminal:
         )
         self.lbl_reconfig = ft.Text("—", size=11, color=AMBER, selectable=True)
         self.lbl_simplify = ft.Text("—", size=11, color=MUTED, selectable=True)
+        self.lbl_brutal = ft.Text(
+            "Brutal suite idle — runs on startup and every cycle.",
+            size=11,
+            color=MUTED,
+            selectable=True,
+        )
+        self.suite_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text(c, color=MUTED))
+                for c in ("Strategy", "Pass", "Mode", "Detail")
+            ],
+            rows=[],
+            heading_row_color=CARD2,
+            border=ft.Border.all(1, BORDER),
+        )
         self.lbl_kahneman = ft.Text(
             "Kahneman System 2 idle — START for deliberative traces.",
             size=11,
@@ -260,6 +276,8 @@ class ProTerminal:
         self._show_tab("overview")
         self._sync_widgets()
         p.update()
+        # Force brutal suite immediately so bot never idles on open
+        self.engine.run_startup_suite()
         p.run_task(self._poll_loop)
         p.run_task(self._clock_loop)
         p.run_task(self._reveal_window)
@@ -298,6 +316,7 @@ class ProTerminal:
         builders = {
             "overview": self._page_overview,
             "positions": self._page_positions,
+            "tests": self._page_tests,
             "logs": self._page_logs,
         }
         self.content.content = builders.get(key, self._page_overview)()
@@ -471,11 +490,42 @@ class ProTerminal:
             scroll=ft.ScrollMode.AUTO,
         )
 
+    def _page_tests(self) -> ft.Column:
+        return ft.Column(
+            [
+                ft.Text(
+                    "Test Suite Results — ALL IBKR order types",
+                    size=20,
+                    weight=ft.FontWeight.BOLD,
+                    color=TEXT,
+                ),
+                ft.Text(
+                    "Brutal paper suite: place → validate → cancel (or dry-run). "
+                    "Runs on startup and every cycle — never idle.",
+                    color=MUTED,
+                    size=12,
+                ),
+                self.lbl_brutal,
+                ft.Container(
+                    bgcolor=CARD,
+                    border=ft.Border.all(1, BORDER),
+                    border_radius=12,
+                    padding=12,
+                    expand=True,
+                    content=ft.Column(
+                        [self.suite_table], scroll=ft.ScrollMode.AUTO, expand=True
+                    ),
+                ),
+            ],
+            expand=True,
+            spacing=10,
+        )
+
     def _page_positions(self) -> ft.Column:
         return ft.Column(
             [
                 ft.Text(
-                    "Positions Ledger",
+                    "Positions",
                     size=20,
                     weight=ft.FontWeight.BOLD,
                     color=TEXT,
@@ -766,10 +816,67 @@ class ProTerminal:
             self.lbl_simplify.value = (
                 f"{simp.get('summary') or '—'} | {retest.get('summary') or ''}"
             )[:600]
+        brutal = getattr(s, "brutal_suite", None) or {}
+        if brutal or getattr(s, "brutal_summary", None):
+            self.lbl_brutal.value = (
+                getattr(s, "brutal_summary", None)
+                or brutal.get("summary")
+                or "—"
+            )[:900]
+            self.lbl_brutal.color = (
+                GREEN if float(brutal.get("pass_rate") or 0) >= 0.9 else AMBER
+            )
+            self._refresh_suite_table(brutal.get("results") or [])
         rows = self._position_rows(s.positions)
         self.ov_pos_table.rows = rows
         self.pos_table.rows = rows
         self.sparkline.content = _equity_chart_control(s.equity_hist)
+
+    def _refresh_suite_table(self, results: list) -> None:
+        rows = []
+        for r in (results or [])[:80]:
+            ok = bool(r.get("pass"))
+            rows.append(
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(
+                            ft.Text(str(r.get("strategy", "?")), color=TEXT, size=11)
+                        ),
+                        ft.DataCell(
+                            ft.Text(
+                                "PASS" if ok else "FAIL",
+                                color=GREEN if ok else RED,
+                                weight=ft.FontWeight.BOLD,
+                            )
+                        ),
+                        ft.DataCell(
+                            ft.Text(
+                                str(r.get("mode") or r.get("phase") or "—"),
+                                color=MUTED,
+                                size=11,
+                            )
+                        ),
+                        ft.DataCell(
+                            ft.Text(
+                                str(r.get("detail") or "")[:80],
+                                color=MUTED,
+                                size=10,
+                                selectable=True,
+                            )
+                        ),
+                    ]
+                )
+            )
+        if not rows:
+            rows = [
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text("Waiting for suite…", color=MUTED))
+                    ]
+                    + [ft.DataCell(ft.Text(""))] * 3
+                )
+            ]
+        self.suite_table.rows = rows
 
     def _position_rows(self, positions: list[dict]) -> list[ft.DataRow]:
         if not positions:
