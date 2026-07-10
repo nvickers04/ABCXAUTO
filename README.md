@@ -1,4 +1,6 @@
-# ABCXAUTO — Autonomous Grok Agent for IBKR Trading
+# Asset Balancing Control X Auto (ABCX Auto)
+
+**Autonomous Grok-powered agent for IBKR trading and portfolio management.**
 
 Forked from ABCX. Grok researches with read-only tools (quotes, candles, option
 chains, greeks, news, positions) and **auto-executes** order proposals — brackets,
