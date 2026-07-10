@@ -1,19 +1,4 @@
-"""
-IBKR Options Mixin - Options Chains and Spreads
-
-This module provides all options-related functionality as a mixin class:
-- Options chain queries
-- Vertical spreads (bull/bear call/put spreads)
-- Iron condors and iron butterflies
-- Straddles and strangles
-- Butterfly spreads
-- Calendar spreads
-- Covered calls and cash-secured puts
-- Protective puts and collars
-- Ratio spreads and jade lizards
-
-This mixin is imported by IBKRConnector in connector.py.
-"""
+"""IBKR options chains and multi-leg spread mixin."""
 
 import asyncio
 import logging

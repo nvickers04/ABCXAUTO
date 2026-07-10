@@ -4,10 +4,10 @@ import ast
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from abcxauto.pro_desktop import TITLE, ProTerminal, write_launch_probe
 from abcxauto.rocket import TWEAKS
+from abcxauto.ui import TITLE, ProTerminal, write_launch_probe
 
-PRO_SRC = Path(__file__).resolve().parents[1] / "abcxauto" / "pro_desktop.py"
+UI_ROOT = Path(__file__).resolve().parents[1] / "abcxauto" / "ui"
 REQUIRED = (
     "START AUTONOMOUS",
     "STOP",
@@ -19,8 +19,15 @@ REQUIRED = (
 )
 
 
+def _ui_sources() -> str:
+    return "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted(UI_ROOT.glob("*.py"))
+    )
+
+
 def test_pro_desktop_imports_flet():
-    tree = ast.parse(PRO_SRC.read_text(encoding="utf-8"))
+    tree = ast.parse((UI_ROOT / "terminal.py").read_text(encoding="utf-8"))
     imports = {
         alias.name.split(".")[0]
         for node in ast.walk(tree)
@@ -36,13 +43,13 @@ def test_pro_desktop_imports_flet():
 
 
 def test_pro_desktop_contract_labels():
-    text = PRO_SRC.read_text(encoding="utf-8")
+    text = _ui_sources()
     for label in REQUIRED:
         assert label in text
 
 
 def test_pro_desktop_uses_run_cycle():
-    text = PRO_SRC.read_text(encoding="utf-8")
+    text = _ui_sources()
     assert "run_cycle" in text
     assert "positions" in text
     assert "protection" in text
@@ -57,10 +64,8 @@ def test_write_launch_probe(tmp_path):
     assert "mainloop_ready=True" in text
 
 
-def test_on_cycle_updates_situational_awareness(monkeypatch):
-    monkeypatch.setattr("abcxauto.pro_desktop.get_config", lambda: type("C", (), {
-        "xai_api_key": "k", "model": "test", "ibkr_host": "127.0.0.1", "ibkr_port": 7497,
-    })())
+def test_on_cycle_updates_situational_awareness(monkeypatch, sample_config):
+    monkeypatch.setattr("abcxauto.ui.terminal.get_config", lambda: sample_config)
     page = MagicMock()
     page.overlay = []
     term = ProTerminal(page)

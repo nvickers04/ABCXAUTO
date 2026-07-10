@@ -1,12 +1,10 @@
-"""ABCXAUTO Pro Desktop v0.1 — Flet professional self-evolving portfolio terminal."""
+"""ABCXAUTO Pro terminal — Flet situational-awareness cockpit."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import queue
-import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,39 +16,24 @@ from abcxauto.broker.connector import get_ibkr_connector
 from abcxauto.config import get_config
 from abcxauto.llm import GrokClient
 from abcxauto.rocket import TWEAKS, apply_tweak, grok, run_cycle
-
-TITLE = "ABCXAUTO Pro v0.1.1"
-BG = "#0b0e14"
-CARD = "#151b26"
-CARD2 = "#1c2433"
-BORDER = "#2a3548"
-TEXT = "#e8edf4"
-MUTED = "#8b9bb4"
-GREEN = "#00d47e"
-RED = "#ff4d6d"
-BLUE = "#4dabf7"
-AMBER = "#ffc857"
-NAV = [
-    ("overview", "Overview", ft.Icons.DASHBOARD_OUTLINED),
-    ("positions", "Positions", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED),
-    ("brain", "AI Brain", ft.Icons.PSYCHOLOGY_OUTLINED),
-    ("logs", "Logs & Evolution", ft.Icons.TIMELINE_OUTLINED),
-    ("settings", "Settings", ft.Icons.SETTINGS_OUTLINED),
-]
-FILTERS = ["All", "Trades", "Decisions", "Improvements", "Errors"]
-
-
-def _pad(h: int = 0, v: int = 0) -> ft.padding.Padding:
-    return ft.padding.Padding.symmetric(horizontal=h, vertical=v)
-
-
-def _margin(**kwargs: int) -> ft.margin.Margin:
-    return ft.margin.Margin.only(**kwargs)
-
-
-def _border(color: str, width: float = 1) -> ft.border.Border:
-    return ft.border.Border.all(width, color)
-
+from abcxauto.ui.theme import (
+    AMBER,
+    BG,
+    BLUE,
+    BORDER,
+    CARD,
+    CARD2,
+    FILTERS,
+    GREEN,
+    MUTED,
+    NAV,
+    RED,
+    TEXT,
+    TITLE,
+    border as _border,
+    margin as _margin,
+    pad as _pad,
+)
 
 class ProTerminal:
     def __init__(self, page: ft.Page):
@@ -466,7 +449,7 @@ class ProTerminal:
                                 selectable=True,
                             ),
                             ft.Text(
-                                "Fallback Tk cockpit: python -m abcxauto --tk",
+                                "Web escape hatch: ABCXAUTO_PRO_WEB=1 python -m abcxauto",
                                 size=11,
                                 color=MUTED,
                             ),
@@ -973,41 +956,6 @@ class ProTerminal:
             pass
 
 
+
 def _now() -> str:
     return datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-
-
-def main(page: ft.Page) -> None:
-    ProTerminal(page).build()
-
-
-def write_launch_probe(path: str | Path) -> None:
-    Path(path).write_text(
-        f"title={TITLE}\nexpected={TITLE}\nstatus=Safe\nmainloop_ready=True\n",
-        encoding="utf-8",
-    )
-
-
-def run_app() -> None:
-    probe = os.environ.get("ABCXAUTO_LAUNCH_PROBE")
-    if probe:
-        write_launch_probe(probe)
-        print(f"ABCXAUTO title={TITLE} mainloop_ready=True status=Safe", flush=True)
-        return
-    print(f"ABCXAUTO Pro entry={Path(__file__).resolve()} title={TITLE}", flush=True)
-    # Flet >=0.80: ft.app is deprecated and can leave the desktop client on
-    # the "Working…" splash; ft.run is the supported entrypoint.
-    runner = getattr(ft, "run", None) or ft.app
-    view = ft.AppView.FLET_APP
-    if os.environ.get("ABCXAUTO_PRO_WEB", "").strip() in ("1", "true", "yes"):
-        view = ft.AppView.WEB_BROWSER
-    kwargs: dict[str, Any] = {"assets_dir": None, "view": view}
-    try:
-        runner(main, **kwargs)
-    except TypeError:
-        # Older flet stubs may not accept these kwargs.
-        runner(main)
-
-
-if __name__ == "__main__":
-    run_app()
