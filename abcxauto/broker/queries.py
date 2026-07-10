@@ -1,15 +1,4 @@
-"""
-IBKR Queries Mixin - Account and Position Queries
-
-This module provides all query-related functionality as a mixin class:
-- Account summary and buying power queries
-- Position queries with P/L data
-- Open order queries
-- Order cancellation
-- Execution history and P/L calculation
-
-This mixin is imported by IBKRConnector in connector.py.
-"""
+"""IBKR account, position, order, and execution query mixin."""
 
 import logging
 import asyncio

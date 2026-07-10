@@ -1,16 +1,4 @@
-"""
-IBKR Orders Mixin - Order Placement and Management
-
-This module provides all order-related functionality as a mixin class:
-- Basic order types (limit, market, stop, stop-limit)
-- Bracket orders with OCA protection
-- Trailing stops
-- Advanced order types (adaptive, midprice, relative, VWAP, TWAP, etc.)
-- Order modification and cancellation
-- Order state tracking
-
-This mixin is imported by IBKRConnector in connector.py.
-"""
+"""IBKR order placement and management mixin (basic, bracket, trail, advanced)."""
 
 import logging
 import asyncio

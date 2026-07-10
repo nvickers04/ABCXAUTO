@@ -1,10 +1,8 @@
-"""Kill stale ABCXAUTO / Flet desktop processes and clear project Python caches.
+"""Kill stale ABCXAUTO / Flet processes and clear project Python caches.
 
 Usage:
-  python scripts/cleanup_pro.py
-  python scripts/cleanup_pro.py --aggressive      # also empty-cmdline python orphans
-  python scripts/cleanup_pro.py --flet-cache      # wipe ~/.flet/client
   python -m abcxauto --cleanup
+  python -m abcxauto --cleanup --aggressive --flet-cache
 """
 
 from __future__ import annotations
@@ -49,7 +47,7 @@ Get-CimInstance Win32_Process | Where-Object {{
 }} | ForEach-Object {{
   $cmd = $_.CommandLine
   $isFlet = $_.Name -eq 'flet.exe'
-  $isPro = $cmd -and ($cmd -match 'abcxauto|pro_desktop|pro_launch|_pro_|-m abcxauto')
+  $isPro = $cmd -and ($cmd -match 'abcxauto|pro_launch|_pro_|-m abcxauto')
   $isOrphanPy = ($aggressive -eq 'true') -and ($_.Name -match '^pythonw?\\.exe$') -and (-not $cmd)
   if ($isFlet -or $isPro -or $isOrphanPy) {{ Kill-Pid $_.ProcessId "$($_.Name)" }}
 }}
@@ -112,12 +110,11 @@ def main() -> int:
     clear_pycache()
     if args.flet_cache:
         clear_flet_cache()
-    sys.path.insert(0, str(REPO))
-    import abcxauto.pro_desktop as pro
+    from abcxauto import ui as pro_ui
 
-    print(f"pro_desktop={pro.__file__}")
-    print(f"title={pro.TITLE}")
-    print(f"has_reveal={hasattr(pro.ProTerminal, '_reveal_window')}")
+    print(f"ui={pro_ui.__file__}")
+    print(f"title={pro_ui.TITLE}")
+    print(f"has_reveal={hasattr(pro_ui.ProTerminal, '_reveal_window')}")
     return 0
 
 

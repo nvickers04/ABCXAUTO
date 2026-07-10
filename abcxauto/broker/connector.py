@@ -1,18 +1,4 @@
-"""
-IBKR Core Connector - Connection Management and Base Class
-
-This module provides the core IBKRConnector class with:
-- Singleton pattern for connection management
-- Thread-safe connection/disconnection
-- Event handler registration
-- Real-time market data streaming
-- Base infrastructure for order and query operations
-
-The IBKRConnector class imports mixins from:
-- orders.py: Order placement and management
-- options.py: Options chains and spreads
-- queries.py: Account and position queries
-"""
+"""IBKR core connector — connection lifecycle, singleton, mixin composition."""
 
 import asyncio
 import logging
@@ -1137,47 +1123,6 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         return False
 
 
-# ========== FACTORY FUNCTION ==========
-
 def get_ibkr_connector() -> IBKRConnector:
     """Get singleton IBKR connector instance."""
     return IBKRConnector()
-
-
-# ========== TEST FUNCTION ==========
-
-async def test_connection():
-    """Manual smoke: connect, read account/positions, delayed SPY quote."""
-    logging.basicConfig(level=logging.INFO)
-    connector = get_ibkr_connector()
-
-    connected = await connector.connect()
-    if not connected:
-        logger.error("Connect failed — ensure TWS/Gateway is running with API enabled")
-        return
-
-    logger.info(f"Connected (account={connector.account_id})")
-
-    summary = await connector.get_account_summary()
-    if "error" not in summary:
-        logger.info(
-            f"Account: net_liq={summary.get('netliquidation', 0)} "
-            f"cash={summary.get('totalcashvalue', 0)}"
-        )
-
-    positions = await connector.get_positions()
-    logger.info(f"Positions: {len(positions)}")
-
-    ticker = await connector.subscribe_market_data("SPY", delayed=True)
-    if ticker:
-        await _safe_sleep(3)
-        price = connector.get_realtime_price(ticker)
-        logger.info(f"SPY quote: last={price.get('last')} bid={price.get('bid')} ask={price.get('ask')}")
-        await connector.unsubscribe_market_data("SPY")
-
-    await connector.disconnect()
-    logger.info("Test complete")
-
-
-if __name__ == "__main__":
-    asyncio.run(test_connection())
