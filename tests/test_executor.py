@@ -7,24 +7,68 @@ from abcxauto.proposals import STRATEGIES, validate_proposal
 
 from tests.test_proposals import RATIONALE, VALID_PAYLOADS
 
-_GATEWAY_PREFIXES = ("place_", "modify_", "cancel_", "close_")
+_GATEWAY_PREFIXES = ("place_", "modify_", "cancel_", "close_", "buy_", "sell_", "roll_")
+
+
+@pytest.fixture(autouse=True)
+def _disable_risk_gates(monkeypatch):
+    """Dispatch tests isolate gateway mapping; risk gates covered in test_risk_gates."""
+    from abcxauto.config import Config, get_config
+
+    base = get_config()
+    monkeypatch.setattr(
+        "abcxauto.executor.get_config",
+        lambda: Config(**{**base.__dict__, "risk_gates_enabled": False}),
+    )
+    # Proposal validation still runs for payload construction — relax Sprint-2
+    # defined-risk / R:R so every strategy in VALID_PAYLOADS remains constructible.
+    monkeypatch.setattr(
+        "abcxauto.proposals.get_config",
+        lambda: Config(**{**base.__dict__, "defined_risk_only": False, "min_reward_risk": 0}),
+    )
 
 
 class FakeGateway:
     """Records every gateway call; returns a canned success dict.
 
-    Holds 10 AAPL long so exit-only orders (SELL <= 10 AAPL) pass the
-    executor's position check.
+    Holds stock for exit-only / trailing / covered-call checks, plus a SPY OPT
+    for close_option. Exposes get_open_orders for cancel_order guards.
     """
 
-    def __init__(self, positions=None):
+    def __init__(self, positions=None, account=None, open_orders=None):
         self.calls = []
         self.positions = positions if positions is not None else [
             {"symbol": "AAPL", "quantity": 10, "sec_type": "STK"},
+            {"symbol": "NVDA", "quantity": 10, "sec_type": "STK"},
+            {"symbol": "TSLA", "quantity": 10, "sec_type": "STK"},
+            {"symbol": "SPY", "quantity": 100, "sec_type": "STK"},
+            {
+                "symbol": "SPY", "quantity": 1, "sec_type": "OPT",
+                "strike": 745.0, "right": "C", "expiration": "20260709",
+                "market_value": 150.0,
+            },
+        ]
+        self.account = account if account is not None else {
+            "netliquidation": 100_000.0,
+            "dailypnl": 0.0,
+        }
+        self.open_orders = open_orders if open_orders is not None else [
+            # Redundant stop so cancel_order VALID_PAYLOAD (order_id=103) is not
+            # the sole protector when AAPL is held — last-stop tests override this.
+            {
+                "order_id": 103, "symbol": "AAPL", "sec_type": "STK",
+                "action": "SELL", "quantity": 10, "order_type": "LMT",
+            },
         ]
 
     async def get_positions(self):
         return self.positions
+
+    async def get_account_summary(self):
+        return self.account
+
+    async def get_open_orders(self):
+        return self.open_orders
 
     def __getattr__(self, name):
         if not name.startswith(_GATEWAY_PREFIXES):
@@ -56,7 +100,7 @@ async def test_dispatch_maps_strategy_to_gateway_method(strategy):
             assert key not in kwargs
             continue
         expected = value.upper() if key == "symbol" else value
-        if key == "ratio":
+        if key == "ratio" and isinstance(value, (list, tuple)):
             expected = tuple(value)
         assert kwargs[key] == expected, f"{strategy}: {key}"
 
@@ -64,7 +108,9 @@ async def test_dispatch_maps_strategy_to_gateway_method(strategy):
 @pytest.mark.asyncio
 async def test_none_params_are_omitted():
     proposal = validate_proposal(
-        "vertical_spread", VALID_PAYLOADS["vertical_spread"], RATIONALE
+        "close_option",
+        {**VALID_PAYLOADS["close_option"], "limit_price": None},
+        RATIONALE,
     )
     gateway = FakeGateway()
     await execute_proposal(proposal, gateway)
@@ -77,6 +123,12 @@ async def test_gateway_error_propagates():
     class ExplodingGateway:
         async def get_positions(self):
             return [{"symbol": "AAPL", "quantity": 10, "sec_type": "STK"}]
+
+        async def get_account_summary(self):
+            return {"netliquidation": 100_000.0, "dailypnl": 0.0}
+
+        async def get_open_orders(self):
+            return []
 
         async def place_market_order(self, **kwargs):
             raise RuntimeError("connection lost")
@@ -144,12 +196,214 @@ class TestExitOnlyVerification:
         assert "close_option" in result["error"]
         assert gateway.calls == []
 
+
+class TestCloseOptionVerification:
+    """close_option must match a live OPT position before dispatch."""
+
     @pytest.mark.asyncio
-    async def test_close_option_dispatches_without_position_check(self):
+    async def test_close_option_without_position_blocked(self):
         gateway = FakeGateway(positions=[])
+        proposal = validate_proposal("close_option", VALID_PAYLOADS["close_option"], RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert "error" in result
+        assert "close_option" in result["error"].lower() or "no matching" in result["error"].lower()
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_close_option_with_matching_position_dispatches(self):
+        gateway = FakeGateway(positions=[
+            {
+                "symbol": "SPY", "quantity": 2, "sec_type": "OPT",
+                "strike": 745.0, "right": "C", "expiration": "20260709",
+            },
+        ])
         proposal = validate_proposal("close_option", VALID_PAYLOADS["close_option"], RATIONALE)
         result = await execute_proposal(proposal, gateway)
         assert result["success"] is True
         method, kwargs = gateway.calls[0]
         assert method == "close_option_position"
         assert kwargs == {"symbol": "SPY", "expiration": "20260709", "strike": 745.0, "right": "C"}
+
+    @pytest.mark.asyncio
+    async def test_close_option_partial_allowed(self):
+        gateway = FakeGateway(positions=[
+            {
+                "symbol": "SPY", "quantity": 3, "sec_type": "OPT",
+                "strike": 745.0, "right": "C", "expiration": "20260709",
+            },
+        ])
+        proposal = validate_proposal(
+            "close_option",
+            {
+                "symbol": "SPY", "expiration": "20260709", "strike": 745.0,
+                "right": "C", "quantity": 1,
+            },
+            RATIONALE,
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_close_option_oversized_blocked(self):
+        gateway = FakeGateway(positions=[
+            {
+                "symbol": "SPY", "quantity": 1, "sec_type": "OPT",
+                "strike": 745.0, "right": "C", "expiration": "20260709",
+            },
+        ])
+        proposal = validate_proposal(
+            "close_option",
+            {
+                "symbol": "SPY", "expiration": "20260709", "strike": 745.0,
+                "right": "C", "quantity": 5,
+            },
+            RATIONALE,
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert "error" in result
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_close_option_short_cover_allowed(self):
+        gateway = FakeGateway(positions=[
+            {
+                "symbol": "SPY", "quantity": -2, "sec_type": "OPT",
+                "strike": 745.0, "right": "C", "expiration": "20260709",
+            },
+        ])
+        proposal = validate_proposal(
+            "close_option",
+            {
+                "symbol": "SPY", "expiration": "20260709", "strike": 745.0,
+                "right": "C", "quantity": 1,
+            },
+            RATIONALE,
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+
+
+class TestCancelOrderLastStopGuard:
+    """Reject cancelling the only working stop on an open stock position."""
+
+    @pytest.mark.asyncio
+    async def test_last_stop_cancel_rejected(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "AAPL", "quantity": 10, "sec_type": "STK"}],
+            open_orders=[
+                {
+                    "order_id": 103, "symbol": "AAPL", "sec_type": "STK",
+                    "action": "SELL", "quantity": 10, "order_type": "STP",
+                },
+            ],
+        )
+        proposal = validate_proposal("cancel_order", {"order_id": 103}, RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert "error" in result
+        assert "only working stop" in result["error"].lower() or "replacement" in result["error"].lower()
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_redundant_stop_cancel_allowed(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "AAPL", "quantity": 10, "sec_type": "STK"}],
+            open_orders=[
+                {
+                    "order_id": 103, "symbol": "AAPL", "sec_type": "STK",
+                    "action": "SELL", "quantity": 10, "order_type": "STP",
+                },
+                {
+                    "order_id": 104, "symbol": "AAPL", "sec_type": "STK",
+                    "action": "SELL", "quantity": 10, "order_type": "TRAIL",
+                },
+            ],
+        )
+        proposal = validate_proposal("cancel_order", {"order_id": 103}, RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_non_stop_cancel_allowed(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "AAPL", "quantity": 10, "sec_type": "STK"}],
+            open_orders=[
+                {
+                    "order_id": 103, "symbol": "AAPL", "sec_type": "STK",
+                    "action": "SELL", "quantity": 10, "order_type": "LMT",
+                },
+                {
+                    "order_id": 200, "symbol": "AAPL", "sec_type": "STK",
+                    "action": "SELL", "quantity": 10, "order_type": "STP",
+                },
+            ],
+        )
+        proposal = validate_proposal("cancel_order", {"order_id": 103}, RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_stop_on_flat_symbol_allowed(self):
+        gateway = FakeGateway(
+            positions=[],  # flat
+            open_orders=[
+                {
+                    "order_id": 103, "symbol": "AAPL", "sec_type": "STK",
+                    "action": "SELL", "quantity": 10, "order_type": "STP",
+                },
+            ],
+        )
+        proposal = validate_proposal("cancel_order", {"order_id": 103}, RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_fail_closed_when_orders_unreadable(self):
+        class BrokenOrders(FakeGateway):
+            async def get_open_orders(self):
+                raise RuntimeError("tws down")
+
+        gateway = BrokenOrders(
+            positions=[{"symbol": "AAPL", "quantity": 10, "sec_type": "STK"}],
+        )
+        proposal = validate_proposal("cancel_order", {"order_id": 103}, RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert "error" in result
+        assert "fail-closed" in result["error"].lower()
+        assert gateway.calls == []
+
+
+class TestProtectionRequiresPosition:
+    """oca needs a live open position."""
+
+    @pytest.mark.asyncio
+    async def test_oca_without_position_blocked(self):
+        gateway = FakeGateway(positions=[])
+        proposal = validate_proposal("oca", VALID_PAYLOADS["oca"], RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert "error" in result
+        assert "protection order rejected" in result["error"].lower()
+        assert "NVDA" in result["error"]
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_oca_with_position_dispatches(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "NVDA", "quantity": 10, "sec_type": "STK"}]
+        )
+        proposal = validate_proposal("oca", VALID_PAYLOADS["oca"], RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        assert gateway.calls[0][0] == "place_oca"
+
+    @pytest.mark.asyncio
+    async def test_modify_cancel_unaffected(self):
+        """modify_* / cancel_order stay unrestricted by the protection check."""
+        gateway = FakeGateway(positions=[])
+        for strategy in ("modify_stop", "modify_target"):
+            proposal = validate_proposal(strategy, VALID_PAYLOADS[strategy], RATIONALE)
+            result = await execute_proposal(proposal, gateway)
+            assert result["success"] is True, strategy
+        # cancel of non-stop / flat symbol still ok
+        proposal = validate_proposal("cancel_order", {"order_id": 103}, RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True

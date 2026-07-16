@@ -1,9 +1,10 @@
-"""ABCXAUTO Pro Desktop v0.1 — launch: python -m abcxauto
+"""ABCXAUTO Pro Desktop — launch: python -m abcxauto
 
-Use ``python -m abcxauto --tk`` for the legacy Tkinter cockpit.
+Default: Pro UI (``pro_desktop.run_app``).
 Use ``python -m abcxauto --cleanup`` to kill stale Flet/Python Pro processes
 and clear project ``__pycache__``.
 Use ``python -m abcxauto --cleanup --aggressive --flet-cache`` for a deep clean.
+Use ``python -m abcxauto --headless`` to print how to run autonomy (Pro START).
 """
 
 from __future__ import annotations
@@ -47,17 +48,19 @@ def main() -> None:
                 kill_only="--kill-only" in sys.argv,
             )
         )
-    if "--tk" in sys.argv:
-        from abcxauto.desktop import run_app
-    else:
-        # Headless launch probes must not kill processes or spend time on pycache.
-        if not os.environ.get("ABCXAUTO_LAUNCH_PROBE"):
-            # Clear stale Flet / titled Pro windows only — never match this
-            # brand-new ``python -m abcxauto`` process.
-            _cleanup(aggressive=False, flet_cache=False, ui_only=True)
-        from abcxauto.pro_desktop import run_app
+    if "--headless" in sys.argv:
+        print(
+            "Use Pro START AUTONOMOUS (agent_loop is the cycle engine).",
+            flush=True,
+        )
+        raise SystemExit(0)
+    # Clear stale Flet / titled Pro windows only — never match this
+    # brand-new ``python -m abcxauto`` process.
+    if not os.environ.get("ABCXAUTO_LAUNCH_PROBE"):
+        _cleanup(aggressive=False, flet_cache=False, ui_only=True)
+    from abcxauto.pro_desktop import run_app
 
-        print(f"launching Pro from {Path(run_app.__code__.co_filename)}", flush=True)
+    print(f"launching Pro from {Path(run_app.__code__.co_filename)}", flush=True)
     run_app()
 
 

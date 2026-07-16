@@ -823,6 +823,65 @@ class IBKROptionsMixin:
             logger.error(f"Close option failed for {symbol}: {e}")
             return {'error': str(e), 'symbol': symbol}
 
+
+    async def roll_option(
+        self,
+        symbol: str,
+        quantity: int,
+        conId: int = None,
+        expiration: str = None,
+        strike: float = None,
+        right: str = None,
+        new_strike: float = None,
+        new_dte: int = None,
+        new_expiration: str = None,
+        roll_type: str = "ROLL_OUT",
+        limit_price: float = None,
+    ) -> Dict[str, Any]:
+        """JSON-friendly roll: resolve option contract from conId or symbol legs."""
+        if not await self._ensure_connected():
+            return {"error": "Not connected"}
+
+        contract = None
+        target_con = int(conId) if conId is not None else None
+        for pos in self.ib.positions():
+            c = pos.contract
+            if c.secType != "OPT":
+                continue
+            if str(c.symbol).upper() != str(symbol).upper():
+                continue
+            if target_con is not None:
+                if int(c.conId) == target_con:
+                    contract = c
+                    break
+                continue
+            if expiration and c.lastTradeDateOrContractMonth != expiration:
+                continue
+            if strike is not None and abs(float(c.strike) - float(strike)) > 0.01:
+                continue
+            if right and str(c.right).upper()[0] != str(right).upper()[0]:
+                continue
+            contract = c
+            break
+
+        if contract is None:
+            return {
+                "error": (
+                    f"No option position found for roll "
+                    f"{symbol} conId={conId} {expiration} {strike}{right}"
+                )
+            }
+        return await self.roll_option_position(
+            symbol=symbol,
+            current_contract=contract,
+            quantity=quantity,
+            new_strike=new_strike,
+            new_dte=new_dte,
+            new_expiration=new_expiration,
+            roll_type=roll_type,
+            limit_price=limit_price,
+        )
+
     async def roll_option_position(
         self,
         symbol: str,
@@ -830,6 +889,7 @@ class IBKROptionsMixin:
         quantity: int,
         new_strike: float = None,
         new_dte: int = None,
+        new_expiration: str = None,
         roll_type: str = 'ROLL_OUT',
         limit_price: float = None
     ) -> Dict[str, Any]:
@@ -869,7 +929,9 @@ class IBKROptionsMixin:
                 new_strike = current_contract.strike
 
             # Determine new expiration
-            if new_dte:
+            if new_expiration:
+                pass  # use caller-provided YYYYMMDD
+            elif new_dte:
                 # Find expiration closest to target DTE
                 chain = await self.get_option_chain(symbol, new_dte - 7, new_dte + 14)
                 if 'error' in chain:

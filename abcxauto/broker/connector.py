@@ -5,13 +5,10 @@ This module provides the core IBKRConnector class with:
 - Singleton pattern for connection management
 - Thread-safe connection/disconnection
 - Event handler registration
-- Real-time market data streaming
-- Base infrastructure for order and query operations
+- Account/position query methods (merged from queries mixin)
+- Base infrastructure for order operations
 
-The IBKRConnector class imports mixins from:
-- orders.py: Order placement and management
-- options.py: Options chains and spreads
-- queries.py: Account and position queries
+The IBKRConnector class imports the orders mixin from orders.py.
 """
 
 import asyncio
@@ -23,18 +20,19 @@ from enum import Enum
 from typing import Dict, List, Optional, Any, Callable
 from datetime import datetime, timezone
 from threading import Lock
-from concurrent.futures import ThreadPoolExecutor
 
 from ib_insync import IB, Order, Trade, Fill
-from ib_insync.contract import Stock, Option
 
 from abcxauto.broker.connection import (
     DisconnectCause,
+    TradingModePortError,
+    assert_connect_allowed,
     classify_error_code,
     reconnect_backoff_seconds,
+    resolve_ibkr_endpoint,
+    safe_sleep as _safe_sleep,
 )
-from abcxauto.broker.util import is_live_trading, resolve_ibkr_endpoint, safe_sleep as _safe_sleep
-from abcxauto.broker.order_types import IBKROrderType
+from abcxauto.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -142,10 +140,245 @@ class BracketGroup:
         }
 
 
+class IBKRQueriesMixin:
+    """Slim account/position/order query methods (merged from queries.py)."""
+
+    async def refresh_positions(self) -> None:
+        """Force refresh position data from TWS."""
+        if not self._connected:
+            return
+        try:
+            async with self.async_lock:
+                await self.ib.reqPositionsAsync()
+                logger.debug("Position data refreshed from TWS")
+        except Exception as e:
+            logger.warning(f"Position refresh failed: {e}")
+
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        """Get current positions with P/L data (refreshes from TWS first)."""
+        if not await self._ensure_connected():
+            return []
+
+        try:
+            await self.refresh_positions()
+            await _safe_sleep(0.3)
+
+            portfolio_items = self.ib.portfolio()
+            if not portfolio_items:
+                await _safe_sleep(0.5)
+                portfolio_items = self.ib.portfolio()
+
+            positions = []
+            for item in portfolio_items:
+                if item.position == 0:
+                    continue
+
+                contract = item.contract
+                sec_type = contract.secType or 'STK'
+                pos_data = {
+                    'symbol': contract.symbol,
+                    'quantity': item.position,
+                    'avg_cost': item.averageCost,
+                    'market_value': item.marketValue,
+                    'unrealized_pnl': item.unrealizedPNL,
+                    'realized_pnl': item.realizedPNL,
+                    'market_price': item.marketPrice,
+                    'sec_type': sec_type,
+                    'con_id': contract.conId,
+                    'conId': contract.conId,
+                }
+                if sec_type == 'OPT':
+                    pos_data.update({
+                        'strike': contract.strike,
+                        'expiration': contract.lastTradeDateOrContractMonth,
+                        'right': contract.right,
+                        'multiplier': int(contract.multiplier or 100),
+                        'local_symbol': contract.localSymbol,
+                    })
+                positions.append(pos_data)
+            return positions
+        except Exception as e:
+            logger.error(f"Failed to get positions: {e}")
+            return []
+
+    async def get_account_summary(self) -> Dict[str, Any]:
+        """Get account summary."""
+        if not await self._ensure_connected():
+            return {'error': 'Not connected'}
+
+        try:
+            async with self.async_lock:
+                account_values = self.ib.accountValues()
+                result = {'account_id': self.account_id}
+                target_tags = {
+                    'NetLiquidation',
+                    'TotalCashValue',
+                    'AvailableFunds',
+                    'DailyPnL',
+                    'UnrealizedPnL',
+                    'RealizedPnL',
+                }
+                for av in account_values:
+                    if av.tag in target_tags and av.currency == 'USD':
+                        result[av.tag.lower()] = float(av.value)
+                return result
+        except Exception as e:
+            logger.error(f"Failed to get account summary: {e}")
+            return {'error': str(e)}
+
+    async def cancel_order(self, order_id: int) -> Dict[str, Any]:
+        """Cancel an open order."""
+        if not await self._ensure_connected():
+            return {'error': 'Not connected'}
+
+        try:
+            for trade in self.ib.openTrades():
+                if trade.order.orderId == order_id:
+                    if hasattr(self, "_cancel_order_with_tracking"):
+                        self._cancel_order_with_tracking(trade.order, source="cancel_order")
+                    else:
+                        self.ib.cancelOrder(trade.order)
+                    return {'success': True, 'order_id': order_id}
+            return {'error': f'Order {order_id} not found'}
+        except Exception as e:
+            logger.error(f"Failed to cancel order {order_id}: {e}")
+            return {'error': str(e)}
+
+    async def get_open_orders(self) -> List[Dict[str, Any]]:
+        """Get all open orders including from other client sessions."""
+        if not await self._ensure_connected():
+            return []
+
+        ACTIVE_STATUSES = {'PreSubmitted', 'Submitted', 'PendingSubmit'}
+        try:
+            await self.ib.reqAllOpenOrdersAsync()
+            await _safe_sleep(0.3)
+
+            orders = []
+            for t in self.ib.openTrades():
+                status = t.orderStatus.status
+                if status not in ACTIVE_STATUSES:
+                    continue
+
+                lmt_price = t.order.lmtPrice
+                if lmt_price > 1e300:
+                    lmt_price = None
+
+                trail_pct = getattr(t.order, 'trailingPercent', None)
+                aux = t.order.auxPrice
+                if t.order.orderType == 'TRAIL' and trail_pct:
+                    aux = None
+
+                order_data = {
+                    'order_id': t.order.orderId,
+                    'symbol': t.contract.symbol,
+                    'sec_type': t.contract.secType or 'STK',
+                    'action': t.order.action,
+                    'quantity': t.order.totalQuantity,
+                    'order_type': t.order.orderType,
+                    'aux_price': aux,
+                    'lmt_price': lmt_price,
+                    'status': status,
+                    'con_id': t.contract.conId,
+                    'conId': t.contract.conId,
+                }
+                if trail_pct:
+                    order_data['trail_percent'] = trail_pct
+                orders.append(order_data)
+            return orders
+        except Exception as e:
+            logger.error(f"Failed to get open orders: {e}")
+            return []
+
+    async def get_fills(self) -> List[Dict[str, Any]]:
+        """Get session fills as plain dicts for the trade journal."""
+        if not await self._ensure_connected():
+            return []
+
+        try:
+            fills = self.ib.fills()
+            out: List[Dict[str, Any]] = []
+            for fill in fills:
+                execution = fill.execution
+                contract = fill.contract
+                commission_report = getattr(fill, "commissionReport", None)
+
+                exec_time = getattr(execution, "time", None)
+                if exec_time is None:
+                    ts = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%S.%f"
+                    )[:-3] + "Z"
+                elif getattr(exec_time, "tzinfo", None) is None:
+                    ts = exec_time.replace(tzinfo=timezone.utc).isoformat().replace(
+                        "+00:00", "Z"
+                    )
+                else:
+                    ts = exec_time.astimezone(timezone.utc).isoformat().replace(
+                        "+00:00", "Z"
+                    )
+
+                commission = None
+                realized_pnl = None
+                if commission_report is not None:
+                    raw_comm = getattr(commission_report, "commission", None)
+                    if raw_comm is not None:
+                        try:
+                            commission = float(raw_comm)
+                        except (TypeError, ValueError):
+                            commission = None
+                    raw_pnl = getattr(commission_report, "realizedPNL", None)
+                    if raw_pnl is not None:
+                        try:
+                            realized_pnl = float(raw_pnl)
+                        except (TypeError, ValueError):
+                            realized_pnl = None
+
+                out.append({
+                    "ts": ts,
+                    "exec_id": getattr(execution, "execId", None),
+                    "order_id": getattr(execution, "orderId", None),
+                    "symbol": getattr(contract, "symbol", None),
+                    "sec_type": getattr(contract, "secType", None) or "STK",
+                    "side": getattr(execution, "side", None),
+                    "quantity": getattr(execution, "shares", None),
+                    "price": getattr(execution, "price", None),
+                    "commission": commission,
+                    "realized_pnl": realized_pnl,
+                })
+            return out
+        except Exception as e:
+            logger.error(f"Failed to get fills: {e}")
+            return []
+
+    async def get_recent_executions(self) -> List[Dict[str, Any]]:
+        """Get recent execution fills from IBKR."""
+        if not await self._ensure_connected():
+            return []
+
+        try:
+            fills = self.ib.fills()
+            executions = []
+            for fill in fills:
+                executions.append({
+                    'symbol': fill.contract.symbol,
+                    'side': fill.execution.side,
+                    'shares': fill.execution.shares,
+                    'price': fill.execution.price,
+                    'avg_price': fill.execution.avgPrice,
+                    'time': fill.execution.time.isoformat() if fill.execution.time else None,
+                    'order_id': fill.execution.orderId,
+                    'exec_id': fill.execution.execId,
+                    'commission': fill.commissionReport.commission if fill.commissionReport else 0,
+                })
+            return executions
+        except Exception as e:
+            logger.error(f"Failed to get executions: {e}")
+            return []
+
+
 # Import mixins after defining base classes to avoid circular imports
 from abcxauto.broker.orders import IBKROrdersMixin
 from abcxauto.broker.options import IBKROptionsMixin
-from abcxauto.broker.queries import IBKRQueriesMixin
 
 
 class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
@@ -154,9 +387,12 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
     Thread-safe singleton pattern.
 
     Inherits from:
-    - IBKROrdersMixin: Order placement and management methods
-    - IBKROptionsMixin: Options chains and spreads methods
+    - IBKROrdersMixin: Stock order placement and management
+    - IBKROptionsMixin: Multi-leg / single-option strategies
     - IBKRQueriesMixin: Account and position query methods
+
+    MRO: Orders before Options so close_option_position uses the orders
+    implementation (JSON-friendly symbol/expiry/strike close).
     """
 
     _instance: Optional['IBKRConnector'] = None
@@ -184,35 +420,38 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
 
         # Resolve endpoint from environment
         self.host, self.port, self.mode = resolve_ibkr_endpoint()
-        # Fixed client ID from env var (default 1) — MUST be consistent across restarts
-        # so the agent can cancel orders from prior sessions
-        self.client_id = int(os.environ.get('IBKR_CLIENT_ID', '1'))
+        # Fixed client ID from config (IBKR_CLIENT_ID, default 42) — MUST be
+        # consistent across restarts so the agent can cancel prior-session orders.
+        self.client_id = int(get_config().ibkr_client_id)
 
         # Connection state
         self.ib = IB()
         self._connected = False
         self.account_id: Optional[str] = None
+        self.account_name: Optional[str] = None
         self.net_liquidation: float = 0.0
         self.cash_value: float = 0.0  # TotalCashValue - actual cash
         self.available_funds: float = 0.0  # AvailableFunds (INCLUDES MARGIN — do NOT use for order sizing, use cash_value instead)
         self.day_trades_remaining: int = 3  # PDT tracking - updated on connect
 
-        # Thread pool for blocking operations
-        self._executor = ThreadPoolExecutor(max_workers=4)
-
-        # Active streaming subscriptions: symbol -> ticker
+        # Active streaming subscriptions: symbol -> ticker (legacy; no public subscribe API)
         self._tickers: Dict[str, Any] = {}
 
         # Background heartbeat task
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._reconnect_task: Optional[asyncio.Task] = None
 
-        # Connection lifecycle (TWS restart, reconnect, resubscribe)
+        # Connection lifecycle (TWS restart, reconnect)
         self._disconnect_cause: str = DisconnectCause.UNKNOWN.value
         self._reconnect_requested: bool = False
         self._pending_resubscribe: set[str] = set()
         self._last_heartbeat_ok: Optional[float] = None
         self._heartbeat_failures: int = 0
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._handlers_on_ib: Optional[IB] = None
+        self._disconnect_since: Optional[float] = None
+        self._disconnect_halt_fired: bool = False
+        self._reconnect_attempt: int = 0
 
         # Execution tracking - stores ALL fills with actual prices
         # Key: symbol, Value: list of execution records
@@ -240,11 +479,16 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         logger.info(f"IBKRConnector initialized ({self.mode} mode, {self.host}:{self.port})")
 
     def _register_handlers(self):
-        """Register event handlers on the current IB instance."""
+        """Register event handlers on the current IB instance (idempotent)."""
+        if self._handlers_on_ib is self.ib:
+            return
+        if self._handlers_on_ib is not None:
+            self._unregister_handlers()
         self.ib.disconnectedEvent += self._disconnect_handler
         self.ib.execDetailsEvent += self._execution_handler
         self.ib.orderStatusEvent += self._order_status_handler
         self.ib.errorEvent += self._error_handler
+        self._handlers_on_ib = self.ib
 
     def is_connected(self) -> bool:
         """Check if connected to IBKR TWS/Gateway."""
@@ -306,22 +550,24 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
 
     def _unregister_handlers(self):
         """Safely remove event handlers from the current IB instance."""
+        target = self._handlers_on_ib or self.ib
         try:
-            self.ib.disconnectedEvent -= self._disconnect_handler
+            target.disconnectedEvent -= self._disconnect_handler
         except Exception:
             pass
         try:
-            self.ib.execDetailsEvent -= self._execution_handler
+            target.execDetailsEvent -= self._execution_handler
         except Exception:
             pass
         try:
-            self.ib.orderStatusEvent -= self._order_status_handler
+            target.orderStatusEvent -= self._order_status_handler
         except Exception:
             pass
         try:
-            self.ib.errorEvent -= self._error_handler
+            target.errorEvent -= self._error_handler
         except Exception:
             pass
+        self._handlers_on_ib = None
 
     # ── Noisy IBKR error codes to suppress (log at DEBUG instead of WARNING) ──
     _SUPPRESSED_ERROR_CODES = {
@@ -377,77 +623,192 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         self._tickers.clear()
         self._connected = False
         cause = self._disconnect_cause
+        if cause == DisconnectCause.USER_DISCONNECT.value:
+            logger.info(
+                f"IBKR disconnected (user-requested, client_id={self.client_id}, "
+                f"{self.host}:{self.port})"
+            )
+            return
         if cause == DisconnectCause.UNKNOWN.value:
             cause = DisconnectCause.TWS_RESTART.value
             self._disconnect_cause = cause
+        if self._disconnect_since is None:
+            self._disconnect_since = time.monotonic()
+            self._disconnect_halt_fired = False
+            self._reconnect_attempt = 0
         logger.warning(
             f"IBKR disconnected (cause={cause}, client_id={self.client_id}, "
             f"{self.host}:{self.port}, resubscribe_pending={len(self._pending_resubscribe)})"
         )
+        self._schedule_reconnect(cause)
+
+    def _resolve_loop(self) -> Optional[asyncio.AbstractEventLoop]:
+        """Prefer the running loop; fall back to the loop captured at connect."""
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            return loop
+        return None
 
     def _schedule_reconnect(self, reason: str) -> None:
-        """Kick off reconnect on the running loop (deduped)."""
+        """Kick off reconnect on the connector loop without blocking callers."""
+        if self._disconnect_cause == DisconnectCause.USER_DISCONNECT.value:
+            return
         self._reconnect_requested = True
         if self._disconnect_cause == DisconnectCause.UNKNOWN.value:
             self._disconnect_cause = reason
+        if self._disconnect_since is None:
+            self._disconnect_since = time.monotonic()
+            self._disconnect_halt_fired = False
+            self._reconnect_attempt = 0
+
+        loop = self._resolve_loop()
+        if loop is None:
+            logger.warning("Cannot schedule IBKR reconnect — no event loop available")
+            return
+
+        def _start() -> None:
+            if self._reconnect_task and not self._reconnect_task.done():
+                return
+            self._reconnect_task = loop.create_task(
+                self._reconnect_after_disconnect(reason)
+            )
+
         try:
-            loop = asyncio.get_running_loop()
+            running = asyncio.get_running_loop()
         except RuntimeError:
+            running = None
+        if running is loop:
+            _start()
+        else:
+            loop.call_soon_threadsafe(_start)
+
+    def _maybe_halt_on_prolonged_disconnect(self) -> None:
+        """Latch risk gate if still disconnected past configured threshold."""
+        if self._disconnect_halt_fired or self._disconnect_since is None:
             return
-        if self._reconnect_task and not self._reconnect_task.done():
+        try:
+            threshold = float(get_config().disconnect_halt_s)
+        except Exception:
+            threshold = 120.0
+        if threshold <= 0:
             return
-        self._reconnect_task = loop.create_task(self._reconnect_after_disconnect(reason))
+        elapsed = time.monotonic() - self._disconnect_since
+        if elapsed < threshold:
+            return
+        self._disconnect_halt_fired = True
+        reason = f"broker disconnected >{int(threshold)}s"
+        logger.critical(
+            f"IBKR still disconnected after {elapsed:.0f}s "
+            f"(threshold={threshold:.0f}s) — risk gate HALT: {reason}"
+        )
+        try:
+            from abcxauto.risk_gates import get_risk_gate
+
+            get_risk_gate().halt(reason, kind="disconnect")
+        except Exception as e:
+            logger.critical(f"Failed to halt risk gate after disconnect: {e}")
 
     async def _reconnect_after_disconnect(self, reason: str) -> None:
-        """Single-flight reconnect used after TWS restart or heartbeat failure."""
+        """Background reconnect with exponential backoff; may halt after threshold."""
         try:
-            if self.connected:
-                self._reconnect_requested = False
-                return
-            backoff = reconnect_backoff_seconds(self._heartbeat_failures)
-            if backoff > 0 and self._heartbeat_failures > 0:
+            while True:
+                if self._disconnect_cause == DisconnectCause.USER_DISCONNECT.value:
+                    return
+                if self.connected:
+                    self._reconnect_requested = False
+                    return
+
+                self._maybe_halt_on_prolonged_disconnect()
+
+                backoff = reconnect_backoff_seconds(self._reconnect_attempt)
                 logger.info(
                     f"Reconnect backoff {backoff:.1f}s "
-                    f"(failures={self._heartbeat_failures}, reason={reason})"
+                    f"(attempt={self._reconnect_attempt}, reason={reason})"
                 )
                 await _safe_sleep(backoff)
-            logger.info(f"Reconnect attempt (reason={reason}, client_id={self.client_id})")
-            ok = await self.connect()
-            if ok:
-                logger.info(f"Reconnected (reason={reason})")
-                await self._after_connect_restore()
-            else:
+
+                if self._disconnect_cause == DisconnectCause.USER_DISCONNECT.value:
+                    return
+                if self.connected:
+                    self._reconnect_requested = False
+                    return
+
+                self._maybe_halt_on_prolonged_disconnect()
+                logger.info(
+                    f"Reconnect attempt (reason={reason}, client_id={self.client_id}, "
+                    f"attempt={self._reconnect_attempt})"
+                )
+                try:
+                    ok = await self.connect()
+                except TradingModePortError as e:
+                    logger.critical(f"Reconnect blocked by mode/port guard: {e}")
+                    self._maybe_halt_on_prolonged_disconnect()
+                    return
+                except Exception as e:
+                    ok = False
+                    self._heartbeat_failures += 1
+                    logger.error(f"Reconnect error (reason={reason}): {e}")
+
+                if ok:
+                    try:
+                        from abcxauto.risk_gates import get_risk_gate
+
+                        gate = get_risk_gate()
+                        if gate.is_halted:
+                            logger.warning(
+                                f"IBKR reconnected successfully (reason={reason}, "
+                                f"client_id={self.client_id}), but risk-gate halt "
+                                f"remains (kind={gate.halt_kind!r}: {gate.halt_reason}). "
+                                "Manual resume() required before new entries."
+                            )
+                        else:
+                            logger.info(
+                                f"IBKR reconnected successfully (reason={reason}, "
+                                f"client_id={self.client_id})."
+                            )
+                    except Exception:
+                        logger.info(
+                            f"IBKR reconnected successfully (reason={reason}, "
+                            f"client_id={self.client_id}). "
+                            "Any risk-gate halt remains until human/monitor resume."
+                        )
+                    await self._after_connect_restore()
+                    return
+
+                self._reconnect_attempt += 1
                 self._heartbeat_failures += 1
-                logger.error(f"Reconnect failed (reason={reason}, failures={self._heartbeat_failures})")
+                logger.error(
+                    f"Reconnect failed (reason={reason}, "
+                    f"attempt={self._reconnect_attempt})"
+                )
         except asyncio.CancelledError:
             raise
-        except Exception as e:
-            self._heartbeat_failures += 1
-            logger.error(f"Reconnect error (reason={reason}): {e}")
         finally:
             self._reconnect_task = None
 
     async def _after_connect_restore(self) -> None:
-        """Resubscribe market data after TWS/Gateway reconnect."""
+        """Resubscribe market data after TWS/Gateway reconnect.
+
+        Does not clear a risk-gate halt — human/monitor must resume.
+        """
         self._disconnect_cause = DisconnectCause.UNKNOWN.value
         self._reconnect_requested = False
         self._heartbeat_failures = 0
+        self._reconnect_attempt = 0
+        self._disconnect_since = None
+        # Leave _disconnect_halt_fired as-is so we do not re-halt on a later blip
+        # in the same outage window; a fresh disconnect resets it in _on_disconnect.
         self._last_heartbeat_ok = time.time()
 
-        symbols = sorted(self._pending_resubscribe)
-        if not symbols:
-            return
-
-        logger.info(f"Resubscribing market data for {len(symbols)} symbol(s)")
-        for sym in symbols:
-            if sym not in self._tickers:
-                try:
-                    await self.subscribe_market_data(sym)
-                except Exception as e:
-                    logger.debug(f"Ticker restore failed for {sym}: {e}")
-
+        # Streaming subscribe API removed; nothing to restore.
+        n = len(self._pending_resubscribe)
         self._pending_resubscribe.clear()
-        logger.info(f"Resubscribe complete ({len(symbols)} symbol(s))")
+        if n:
+            logger.info(f"Cleared {n} pending market-data resubscribe symbol(s)")
 
     def _on_execution(self, trade: Trade, fill: Fill) -> None:
         """
@@ -535,8 +896,10 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         self._connected = value
 
     def __del__(self):
-        if hasattr(self, '_executor'):
-            self._executor.shutdown(wait=False)
+        try:
+            self._stop_heartbeat()
+        except Exception:
+            pass
 
     # ========== CONNECTION ==========
 
@@ -547,12 +910,28 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         stale or competing session on the base id does not block connect. Default span is
         controlled by ``IBKR_CONNECT_MAX_ATTEMPTS`` (1–50, default 12). After success,
         ``self.client_id`` is set to the working id for this process.
+
+        Refuses to attempt a socket connect when TRADING_MODE / port / live-confirm
+        are inconsistent (:class:`TradingModePortError`).
         """
         if max_retries is None:
             max_retries = max(1, min(50, int(os.environ.get("IBKR_CONNECT_MAX_ATTEMPTS", "12"))))
 
+        # Refresh endpoint from config each connect (env may have changed in tests)
+        self.host, self.port, self.mode = resolve_ibkr_endpoint()
+        try:
+            assert_connect_allowed()
+        except TradingModePortError as e:
+            logger.error(f"IBKR connect refused: {e}")
+            raise
+
         if self.connected:
             return True
+
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
 
         async with self.async_lock:
             # Double-check after acquiring lock
@@ -588,6 +967,9 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
                     if self.ib.isConnected():
                         self._connected = True
                         self.client_id = current_client_id  # Store the working client ID
+                        self._disconnect_since = None
+                        if self._disconnect_cause != DisconnectCause.USER_DISCONNECT.value:
+                            self._disconnect_cause = DisconnectCause.UNKNOWN.value
 
                         # Purge stale order tracking from prior session (prevents 10147)
                         with self._order_state_lock:
@@ -608,10 +990,12 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
                         accounts = self.ib.managedAccounts()
                         if accounts:
                             self.account_id = accounts[0]
+                            self.account_name = None
                             logger.info(f"Connected to IBKR account: {self.account_id}")
 
                             # Fetch account values
                             await self._update_account_values()
+                            self._refresh_account_identity()
 
                         self._last_heartbeat_ok = time.time()
                         self._heartbeat_failures = 0
@@ -627,6 +1011,8 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
                     else:
                         logger.warning(f"Connection timeout on attempt {attempt + 1}")
 
+                except TradingModePortError:
+                    raise
                 except Exception as e:
                     logger.warning(f"Connection attempt {attempt + 1} failed: {e}")
 
@@ -636,13 +1022,45 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
             logger.error(f"Failed to connect after {max_retries} attempts")
             return False
 
+
+    def _refresh_account_identity(self) -> None:
+        """Best-effort account display name from IBKR accountValues tags."""
+        try:
+            values = self.ib.accountValues(self.account_id) if self.account_id else self.ib.accountValues()
+        except Exception:
+            values = []
+        tags = {}
+        for av in values or []:
+            tag = str(getattr(av, "tag", "") or "")
+            val = str(getattr(av, "value", "") or "").strip()
+            if tag and val:
+                tags[tag] = val
+        # Prefer human labels when present; fall back to account type + id.
+        for key in ("AccountTitle", "AccountOrGroup", "AccountCode"):
+            if tags.get(key):
+                self.account_name = tags[key]
+                break
+        if not self.account_name:
+            atype = tags.get("AccountType") or ""
+            if atype and self.account_id:
+                self.account_name = f"{atype} {self.account_id}"
+            elif self.account_id:
+                self.account_name = f"IBKR {self.account_id}"
+
     async def disconnect(self):
         """Disconnect from IBKR."""
+        self._disconnect_cause = DisconnectCause.USER_DISCONNECT.value
+        self._reconnect_requested = False
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._reconnect_task = None
+        self._disconnect_since = None
+
         if self.connected:
-            self._disconnect_cause = DisconnectCause.USER_DISCONNECT.value
-            self._reconnect_requested = False
-            if self._reconnect_task and not self._reconnect_task.done():
-                self._reconnect_task.cancel()
             # Stop heartbeat
             self._stop_heartbeat()
 
@@ -657,14 +1075,6 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
             self.ib.disconnect()
             self.connected = False
             logger.info("Disconnected from IBKR")
-
-        # Shutdown thread pool executor to prevent thread leaks
-        if hasattr(self, '_executor') and self._executor:
-            try:
-                self._executor.shutdown(wait=False)
-                logger.debug("ThreadPoolExecutor shutdown complete")
-            except Exception as e:
-                logger.warning(f"Error shutting down executor: {e}")
 
     async def _update_account_values(self):
         """Fetch and update account values (available funds, net liquidation, PDT status)."""
@@ -700,14 +1110,6 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
                 logger.info(f"Account values (subscribed) - Available: ${self.available_funds:,.2f}, Cash: ${self.cash_value:,.2f}, Net Liq: ${self.net_liquidation:,.2f}")
         except Exception as e:
             logger.warning(f"Failed to fetch account values: {e}")
-
-    async def _run_in_executor(self, func, *args, timeout: float = 30.0):
-        """Run blocking function in thread pool."""
-        loop = asyncio.get_running_loop()
-        return await asyncio.wait_for(
-            loop.run_in_executor(self._executor, func, *args),
-            timeout=timeout
-        )
 
     async def _ensure_connected(self) -> bool:
         """Ensure we're connected, attempt reconnect if not."""
@@ -949,153 +1351,6 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         )
         return result
 
-    async def flatten_limits(self) -> dict:
-        """Cancel open orders and close all positions with LIMIT orders at mid.
-
-        This is a non-emergency flatten. Uses only limit orders (no markets).
-        Returns a summary dict with cancelled/closed counts and any errors.
-        """
-        if not await self._ensure_connected():
-            return {'success': False, 'error': 'Not connected'}
-
-        result = {
-            'orders_cancelled': 0,
-            'orders_total': 0,
-            'positions_closed': 0,
-            'positions_total': 0,
-            'errors': [],
-        }
-
-        # Step 1: Cancel ALL open orders to prevent overfills/over-shorts
-        try:
-            open_orders = await self.get_open_orders()
-            result['orders_total'] = len(open_orders)
-            for order in open_orders:
-                try:
-                    oid = order.get('order_id')
-                    if oid:
-                        await self.cancel_order(oid)
-                        result['orders_cancelled'] += 1
-                except Exception as e:
-                    err_msg = f'cancel order {order.get("order_id")}: {e}'
-                    logger.error(err_msg)
-                    result['errors'].append(err_msg)
-        except Exception as e:
-            err_msg = f'get_open_orders: {e}'
-            logger.error(err_msg)
-            result['errors'].append(err_msg)
-
-        await _safe_sleep(2)  # Let cancellations + any final fills settle
-
-        # Step 2: Re-read positions AFTER cancellations (flip-guard)
-        # Positions may have changed if fills arrived during cancel phase
-        try:
-            positions = await self.get_positions()
-            result['positions_total'] = len(positions)
-            for pos in positions:
-                try:
-                    symbol = pos.get('symbol', '')
-                    qty = pos.get('quantity', 0)
-                    sec_type = pos.get('sec_type', 'STK')
-                    if qty == 0 or not symbol:
-                        continue
-
-                    if sec_type == 'OPT':
-                        expiration = pos.get('expiration')
-                        strike = pos.get('strike')
-                        right = pos.get('right')
-                        if not all([expiration, strike, right]):
-                            result['errors'].append(f'option details missing for {symbol}')
-                            continue
-
-                        contract = Option(symbol, expiration, float(strike), right, 'SMART')
-                        await self.ib.qualifyContractsAsync(contract)
-
-                        # Get option bid/ask from MDA
-                        bid, ask, mid = 0, 0, 0
-                        try:
-                            from abcxauto.marketdata.client import get_marketdata_client
-                            _occ = f"{symbol}{expiration[2:]}{right}{int(float(strike)*1000):08d}"
-                            _oq = await get_marketdata_client().get_option_quote(_occ)
-                            if _oq:
-                                bid = _oq.get('bid') or 0
-                                ask = _oq.get('ask') or 0
-                                mid = _oq.get('mid') or 0
-                        except Exception as _mkt_err:
-                            logger.debug(f"MDA option quote failed for {symbol}: {_mkt_err}")
-
-                        if mid and mid > 0:
-                            limit_price = round(mid, 2)
-                        elif bid > 0 and ask > 0:
-                            limit_price = round((bid + ask) / 2, 2)
-                        elif pos.get('market_price') and pos['market_price'] > 0:
-                            limit_price = round(pos['market_price'], 2)
-                            logger.warning(f"Using position market_price {limit_price} for option {symbol} (no MDA quote)")
-                        else:
-                            result['errors'].append(f'no midpoint for option {symbol} {strike}{right} {expiration}')
-                            continue
-
-                        order_result = await self.close_option_position(
-                            symbol,
-                            expiration=expiration,
-                            strike=float(strike),
-                            right=str(right),
-                            quantity=abs(int(qty)),
-                            limit_price=limit_price,
-                            reason='flatten_limits',
-                        )
-                    else:
-                        # Use MarketData.app for live quotes (no IBKR subscription needed)
-                        from abcxauto.marketdata.client import get_marketdata_client
-                        mda = get_marketdata_client()
-                        quote = await mda.get_quote(symbol)
-                        mid = quote.get('mid') if quote else None
-                        bid = quote.get('bid') if quote else None
-                        ask = quote.get('ask') if quote else None
-
-                        if mid and mid > 0:
-                            limit_price = round(mid, 4) if mid < 1 else round(mid, 2)
-                        elif bid and ask and bid > 0 and ask > 0:
-                            m = (bid + ask) / 2
-                            limit_price = round(m, 4) if m < 1 else round(m, 2)
-                        elif pos.get('market_price') and pos['market_price'] > 0:
-                            limit_price = round(pos['market_price'], 4) if pos['market_price'] < 1 else round(pos['market_price'], 2)
-                            logger.warning(f"Using position market_price {limit_price} for {symbol} (MDA unavailable)")
-                        else:
-                            result['errors'].append(f'no price data for {symbol}')
-                            continue
-
-                        action = 'SELL' if qty > 0 else 'BUY'
-                        order_result = await self.place_limit_order(
-                            symbol, action, abs(int(qty)), float(limit_price)
-                        )
-
-                    if order_result.get('success'):
-                        result['positions_closed'] += 1
-                    else:
-                        err_msg = f'flatten {symbol}: {order_result}'
-                        logger.error(err_msg)
-                        result['errors'].append(err_msg)
-                except Exception as e:
-                    err_msg = f'flatten {pos.get("symbol", "?")}: {e}'
-                    logger.error(err_msg)
-                    result['errors'].append(err_msg)
-        except Exception as e:
-            err_msg = f'get_positions: {e}'
-            logger.error(err_msg)
-            result['errors'].append(err_msg)
-
-        result['success'] = len(result['errors']) == 0
-        logger.warning(
-            "FLATTEN LIMITS: cancelled %s/%s orders, closed %s/%s positions, errors=%s",
-            result['orders_cancelled'],
-            result['orders_total'],
-            result['positions_closed'],
-            result['positions_total'],
-            len(result['errors']),
-        )
-        return result
-
     # ========== HEARTBEAT ==========
 
     def _heartbeat_interval_s(self) -> float:
@@ -1152,110 +1407,9 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         except asyncio.CancelledError:
             pass
 
-    # ========== REAL-TIME STREAMING ==========
-
-    async def subscribe_market_data(self, symbol: str, delayed: bool = False) -> Optional[Any]:
-        """
-        Subscribe to real-time market data.
-
-        Args:
-            symbol: Stock symbol
-            delayed: Ignored — always forces LIVE (type 1). Paper accounts get it free.
-
-        Returns:
-            Ticker object for accessing bid/ask/last, or None on error
-        """
-        if not await self._ensure_connected():
-            return None
-
-        if symbol in self._tickers:
-            return self._tickers[symbol]
-
-        try:
-            # ALWAYS force live — paper accounts have free real-time data
-            self.ib.reqMarketDataType(1)
-
-            contract = Stock(symbol, 'SMART', 'USD')
-            await self.ib.qualifyContractsAsync(contract)
-
-            ticker = self.ib.reqMktData(contract, '', False, False)
-            self._tickers[symbol] = ticker
-
-            logger.info(f"Subscribed to streaming data for {symbol}")
-            return ticker
-
-        except Exception as e:
-            logger.error(f"Failed to subscribe to {symbol}: {e}")
-            return None
-
-    def get_realtime_price(self, ticker) -> Dict[str, Any]:
-        """Get current price data from a subscribed ticker."""
-        if ticker is None:
-            return {'error': 'No ticker'}
-
-        return {
-            'bid': ticker.bid if ticker.bid > 0 else None,
-            'ask': ticker.ask if ticker.ask > 0 else None,
-            'last': ticker.last if ticker.last > 0 else None,
-            'volume': ticker.volume if ticker.volume >= 0 else 0,
-            'high': ticker.high if ticker.high > 0 else None,
-            'low': ticker.low if ticker.low > 0 else None,
-        }
-
-    async def unsubscribe_market_data(self, symbol: str) -> bool:
-        """Unsubscribe from market data."""
-        if symbol in self._tickers:
-            try:
-                self.ib.cancelMktData(self._tickers[symbol].contract)
-                del self._tickers[symbol]
-                logger.info(f"Unsubscribed from {symbol}")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to unsubscribe from {symbol}: {e}")
-        return False
-
 
 # ========== FACTORY FUNCTION ==========
 
 def get_ibkr_connector() -> IBKRConnector:
     """Get singleton IBKR connector instance."""
     return IBKRConnector()
-
-
-# ========== TEST FUNCTION ==========
-
-async def test_connection():
-    """Manual smoke: connect, read account/positions, delayed SPY quote."""
-    logging.basicConfig(level=logging.INFO)
-    connector = get_ibkr_connector()
-
-    connected = await connector.connect()
-    if not connected:
-        logger.error("Connect failed — ensure TWS/Gateway is running with API enabled")
-        return
-
-    logger.info(f"Connected (account={connector.account_id})")
-
-    summary = await connector.get_account_summary()
-    if "error" not in summary:
-        logger.info(
-            f"Account: net_liq={summary.get('netliquidation', 0)} "
-            f"cash={summary.get('totalcashvalue', 0)}"
-        )
-
-    positions = await connector.get_positions()
-    logger.info(f"Positions: {len(positions)}")
-
-    ticker = await connector.subscribe_market_data("SPY", delayed=True)
-    if ticker:
-        await _safe_sleep(3)
-        price = connector.get_realtime_price(ticker)
-        logger.info(f"SPY quote: last={price.get('last')} bid={price.get('bid')} ask={price.get('ask')}")
-        await connector.unsubscribe_market_data("SPY")
-
-    await connector.disconnect()
-    logger.info("Test complete")
-
-
-if __name__ == "__main__":
-    asyncio.run(test_connection())

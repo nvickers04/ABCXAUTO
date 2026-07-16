@@ -1,6 +1,6 @@
 """Reality Pulse — situational awareness heart of ABCXAUTO Pro.
 
-Built fresh every rocket cycle from IBKR + market hours + quote freshness.
+Built fresh every Pro cycle from IBKR + market hours + quote freshness.
 Injected at the start of every Grok reasoning turn.
 """
 
@@ -33,13 +33,34 @@ def _fmt_countdown(seconds: int | None) -> str:
 
 
 def _parse_ts(value: Any) -> datetime | None:
+    """Parse MDA/IBKR timestamps.
+
+    MarketData.app returns ``updated`` as a Unix epoch (seconds). ISO strings
+    and datetime objects are also accepted.
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        # MDA uses seconds; treat values that look like ms as milliseconds.
+        n = float(value)
+        if n > 1e12:
+            n /= 1000.0
+        try:
+            return datetime.fromtimestamp(n, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    # Numeric string → Unix epoch (MDA often serializes updated as int/str).
     try:
-        text = str(value).replace("Z", "+00:00")
-        dt = datetime.fromisoformat(text)
+        return _parse_ts(float(text))
+    except (TypeError, ValueError):
+        pass
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return None
@@ -116,19 +137,16 @@ def _tradable_now(session: str) -> dict:
     s = (session or "closed").lower()
     equity_rth = s == "regular"
     equity_ext = s in ("premarket", "postmarket")
-    options = equity_rth  # conservative: RTH only for equity options
-    futures = s in ("regular", "premarket", "postmarket", "closed")  # overnight often open
     if equity_rth:
         liq = "full"
     elif equity_ext:
         liq = "thin"
     else:
         liq = "closed"
-        futures = True  # overnight futures narrative
     return {
         "equity_rth": equity_rth,
         "equity_extended": equity_ext,
-        "options": options,
+        "options": equity_rth,  # conservative: RTH only for equity options
         "futures_overnight": not equity_rth,
         "liquidity_flag": liq,
         "notes": (
@@ -191,9 +209,6 @@ def _account_summary(acct: dict | None) -> dict:
     for k in keys:
         if acct.get(k) is not None:
             out[k.lower()] = acct.get(k)
-    # Normalize common names
-    if "netliquidation" not in out and "NetLiquidation" in acct:
-        out["netliquidation"] = acct["NetLiquidation"]
     return out or dict(acct)
 
 
@@ -333,17 +348,21 @@ def pulse_clock_view(pulse: dict | None) -> dict:
     t = pulse.get("time") or {}
     s = pulse.get("session") or {}
     f = pulse.get("data_freshness") or {}
-    age = f.get("mda_spy_quote_age_s")
+    mda_age = f.get("mda_spy_quote_age_s")
+    ibkr_age = f.get("ibkr_snapshot_age_s")
+    to = s.get("countdown_to")
+    human = s.get("countdown_human")
     return {
         "clock": t.get("local_clock") or "—",
         "day": t.get("day_of_week") or "—",
         "session": s.get("label") or "—",
         "session_status": s.get("status") or "closed",
         "countdown": (
-            f"{s.get('countdown_to', '')} {s.get('countdown_human', '')}".strip()
-            if s.get("countdown_human")
-            else "—"
+            f"{to} {human}".strip() if human else "—"
         ),
-        "data_age": f"{age:.0f}s" if age is not None else "n/a",
+        "countdown_to": to,
+        "countdown_human": human or "—",
+        "data_age": f"{mda_age:.0f}s" if mda_age is not None else "n/a",
+        "ibkr_refresh": f"{ibkr_age:.0f}s" if ibkr_age is not None else "n/a",
         "narrative": pulse.get("narrative") or "—",
     }

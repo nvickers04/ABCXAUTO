@@ -4,9 +4,8 @@ IBKR Orders Mixin - Order Placement and Management
 This module provides all order-related functionality as a mixin class:
 - Basic order types (limit, market, stop, stop-limit)
 - Bracket orders with OCA protection
-- Trailing stops
-- Advanced order types (adaptive, midprice, relative, VWAP, TWAP, etc.)
-- Order modification and cancellation
+- Option position close
+- Stop/target modification
 - Order state tracking
 
 This mixin is imported by IBKRConnector in connector.py.
@@ -17,10 +16,10 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple
 
-from ib_insync import Order, TagValue
+from ib_insync import Order, Contract, TagValue
 from ib_insync.contract import Stock
 
-from abcxauto.broker.util import safe_sleep as _safe_sleep
+from abcxauto.broker.connection import safe_sleep as _safe_sleep
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +253,11 @@ class IBKROrdersMixin:
         contract = await self._prepare_contract(symbol)
         if contract is None:
             return {'error': 'Not connected'}
+
+        # Track fill state for the outer except (naked-position emergency flatten).
+        filled_qty = None
+        actual_fill_price = None
+        exit_action = None
 
         try:
 
@@ -493,7 +497,49 @@ class IBKROrdersMixin:
 
         except Exception as e:
             logger.error(f"Bracket order failed for {symbol}: {e}", exc_info=True)
-            return {'error': str(e), 'symbol': symbol}
+            # If entry already filled but protection never confirmed, flatten — do not
+            # leave a naked position (mirrors the stop-placement failure path above).
+            if filled_qty and exit_action and contract is not None:
+                logger.critical(
+                    f"POSITION AT RISK: Entry filled for {symbol} but bracket failed "
+                    f"before protection confirmed ({e}). Placing emergency market exit."
+                )
+                emergency_info: Dict[str, Any] = {"attempted": True}
+                try:
+                    emergency_order = Order()
+                    emergency_order.action = exit_action
+                    emergency_order.totalQuantity = int(filled_qty)
+                    emergency_order.orderType = "MKT"
+                    emergency_order.tif = "GTC"
+                    emergency_order.transmit = True
+                    emergency_trade = self.ib.placeOrder(contract, emergency_order)
+                    await _safe_sleep(2.0)
+                    emergency_info.update({
+                        "order_id": emergency_trade.order.orderId,
+                        "status": emergency_trade.orderStatus.status,
+                    })
+                    logger.critical(
+                        f"Emergency market exit placed for {symbol}: "
+                        f"order_id={emergency_trade.order.orderId}, "
+                        f"status={emergency_trade.orderStatus.status}"
+                    )
+                except Exception as emerg_err:
+                    emergency_info["error"] = str(emerg_err)
+                    logger.critical(f"EMERGENCY EXIT ALSO FAILED for {symbol}: {emerg_err}")
+                return {
+                    "success": False,
+                    "filled": True,
+                    "entry_price": actual_fill_price,
+                    "quantity": int(filled_qty),
+                    "error": str(e),
+                    "symbol": symbol,
+                    "emergency_exit": emergency_info,
+                    "warning": (
+                        "Entry filled but bracket exception before protection — "
+                        "emergency market exit attempted. Verify position manually!"
+                    ),
+                }
+            return {"error": str(e), "symbol": symbol}
 
     # ========== MARKET BRACKET (market entry + OCA protection) ==========
 
@@ -517,19 +563,32 @@ class IBKROrdersMixin:
         if entry.get('error') or not entry.get('success'):
             return entry
         if not entry.get('filled'):
-            # Market order not confirmed filled — cancel and report
-            order_id = entry.get('order_id')
-            if order_id:
-                try:
-                    await self.cancel_order(order_id)
-                except Exception:
-                    pass
-            return {
-                'success': False,
-                'filled': False,
-                'reason': f"Market entry not filled within timeout ({entry.get('fill_status')})",
-                'symbol': symbol,
-            }
+            # Last chance: position may already exist even if wait reported miss.
+            reconciled = await self._reconcile_market_fill(
+                symbol=symbol,
+                action=entry_action,
+                quantity=quantity,
+                order_id=entry.get('order_id'),
+            )
+            if reconciled.get('filled'):
+                entry.update(reconciled)
+                logger.warning(
+                    "market_bracket: fill wait missed but position/fill reconciled for %s",
+                    symbol,
+                )
+            else:
+                order_id = entry.get('order_id')
+                if order_id:
+                    try:
+                        await self.cancel_order(order_id)
+                    except Exception:
+                        pass
+                return {
+                    'success': False,
+                    'filled': False,
+                    'reason': f"Market entry not filled within timeout ({entry.get('fill_status')})",
+                    'symbol': symbol,
+                }
 
         filled_qty = int(entry.get('filled_quantity') or quantity)
         fill_price = entry.get('avg_fill_price')
@@ -638,22 +697,27 @@ class IBKROrdersMixin:
             await _safe_sleep(0.1)
 
             if target_trade.orderStatus.status in ('ApiCancelled', 'Cancelled', 'Error'):
-                # Target failed - MUST cancel stop to avoid orphaned order
+                # Target failed — KEEP the working stop so the position is not naked.
                 logger.error(f"Target order failed for {symbol}: {target_trade.orderStatus.status}")
-                logger.warning(f"Cancelling orphaned stop order {stop_id} for {symbol}")
-                try:
-                    if hasattr(self, "_cancel_order_with_tracking"):
-                        self._cancel_order_with_tracking(stop_order, source="oca_target_failed")
-                    else:
-                        self.ib.cancelOrder(stop_order)
-                except Exception as cancel_err:
-                    logger.error(f"Failed to cancel orphaned stop {stop_id}: {cancel_err}")
-
+                logger.warning(
+                    f"PARTIAL OCA: {symbol} has a working STOP (id={stop_id} @ {stop_price}) "
+                    f"but NO TARGET. Position is protected on the downside only — "
+                    f"propose modify_target / oca to add take-profit."
+                )
                 return {
-                    'success': False,
-                    'error': f"Target order failed: {target_trade.orderStatus.status}, stop cancelled",
+                    'success': True,
+                    'partial': True,
+                    'warning': (
+                        f"Target order failed ({target_trade.orderStatus.status}); "
+                        f"stop kept working (id={stop_id})"
+                    ),
+                    'oca_group': oca_group,
+                    'stop_order_id': stop_id,
+                    'target_order_id': None,
                     'symbol': symbol,
-                    'cancelled_stop_id': stop_id
+                    'quantity': quantity,
+                    'direction': direction,
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
                 }
 
             logger.info(f"OCA orders placed for {symbol}: stop=${stop_price:.2f} (id={stop_id}), target=${target_price:.2f} (id={target_id})")
@@ -675,34 +739,6 @@ class IBKROrdersMixin:
 
     # Alias for backward compatibility
     place_oca_orders = place_oca
-
-    # ========== TRAILING STOP ==========
-
-    async def place_trailing_stop(
-        self, symbol: str, quantity: int, direction: str,
-        trail_amount: float = None, trail_percent: float = None
-    ) -> Dict[str, Any]:
-        """Place trailing stop order with fixed amount or percentage."""
-        from abcxauto.broker.order_types import IBKROrderType
-
-        if trail_amount is None and trail_percent is None:
-            return {'error': 'Must provide trail_amount or trail_percent'}
-
-        action = 'SELL' if direction == 'LONG' else 'BUY'
-        order_attrs = {}
-        if trail_percent:
-            # Normalize: if < 1, assume decimal (0.08 = 8%); otherwise already a %
-            pct = trail_percent * 100 if trail_percent < 1 else trail_percent
-            pct = max(0.1, min(pct, 99.0))  # IBKR requires (0, 100)
-            order_attrs['trailingPercent'] = pct
-
-        return await self._place_order(
-            symbol, action, quantity, IBKROrderType.TRAIL.value, tif='GTC',
-            aux_price=trail_amount if not trail_percent else 0,
-            order_name='Trailing stop',
-            extra_result={'direction': direction, 'trail_amount': trail_amount, 'trail_percent': trail_percent},
-            **order_attrs
-        )
 
     # ========== SIMPLE STOP ORDER ==========
 
@@ -773,7 +809,12 @@ class IBKROrdersMixin:
         self, symbol: str, action: str, quantity: int,
         wait_for_fill: bool = True, timeout: float = 10.0
     ) -> Dict[str, Any]:
-        """Place a market order with optional fill waiting."""
+        """Place a market order with optional fill waiting.
+
+        Fast paper fills often leave ``openTrades()`` empty immediately — we also
+        look up the Trade in ``ib.trades()`` / fills so brackets do not abort
+        after a real fill and leave a naked position.
+        """
         result = await self._place_order(
             symbol, action, quantity, 'MKT',
             order_name='MARKET',
@@ -783,23 +824,139 @@ class IBKROrdersMixin:
 
         if wait_for_fill:
             order_id = result.get('order_id')
-            trade = None
-            if order_id:
-                for t in self.ib.openTrades():
-                    if t.order.orderId == order_id:
-                        trade = t
-                        break
-            if trade:
+            trade = self._find_trade_by_order_id(order_id) if order_id else None
+            if trade is not None:
                 fill_result = await self._wait_for_fill(trade, timeout=timeout)
                 result.update({
-                    'filled': fill_result['filled'], 'fill_status': fill_result['status'],
+                    'filled': fill_result['filled'],
+                    'fill_status': fill_result['status'],
                     'avg_fill_price': fill_result['avg_fill_price'],
-                    'filled_quantity': fill_result['filled_quantity']
+                    'filled_quantity': fill_result['filled_quantity'],
                 })
                 if fill_result['filled']:
-                    logger.info(f"Market order FILLED: {action} {fill_result['filled_quantity']} {symbol} @ ${fill_result['avg_fill_price']:.2f}")
+                    logger.info(
+                        f"Market order FILLED: {action} {fill_result['filled_quantity']} "
+                        f"{symbol} @ ${fill_result['avg_fill_price']:.2f}"
+                    )
+                else:
+                    # Wait timed out / cancelled — still check fills & positions.
+                    reconciled = await self._reconcile_market_fill(
+                        symbol=symbol,
+                        action=action,
+                        quantity=quantity,
+                        order_id=order_id,
+                    )
+                    if reconciled.get('filled'):
+                        result.update(reconciled)
+                        logger.warning(
+                            f"Market order fill-wait missed but reconciled for {symbol}"
+                        )
+            else:
+                # Trade already gone from open book — reconcile via fills / positions.
+                reconciled = await self._reconcile_market_fill(
+                    symbol=symbol,
+                    action=action,
+                    quantity=quantity,
+                    order_id=order_id,
+                )
+                result.update(reconciled)
+                if reconciled.get('filled'):
+                    logger.info(
+                        f"Market order FILLED (reconciled): {action} "
+                        f"{reconciled.get('filled_quantity')} {symbol} "
+                        f"@ ${reconciled.get('avg_fill_price')}"
+                    )
+                else:
+                    logger.warning(
+                        f"Market order {order_id} for {symbol}: trade not found in "
+                        f"openTrades/trades and reconcile did not confirm fill"
+                    )
 
         return result
+
+    def _find_trade_by_order_id(self, order_id: int):
+        """Find a Trade in open or completed trades by order id."""
+        if order_id is None:
+            return None
+        try:
+            for t in self.ib.openTrades():
+                if t.order.orderId == order_id:
+                    return t
+        except Exception:
+            pass
+        try:
+            for t in self.ib.trades():
+                if t.order.orderId == order_id:
+                    return t
+        except Exception:
+            pass
+        return None
+
+    async def _reconcile_market_fill(
+        self,
+        *,
+        symbol: str,
+        action: str,
+        quantity: int,
+        order_id: int | None,
+    ) -> Dict[str, Any]:
+        """Confirm a market fill when the Trade left openTrades too fast."""
+        sym = str(symbol or "").upper()
+        # Prefer execution report for this order id.
+        try:
+            for t in self.ib.trades():
+                if order_id is not None and t.order.orderId != order_id:
+                    continue
+                status = getattr(t.orderStatus, "status", "") or ""
+                filled_qty = int(getattr(t.orderStatus, "filled", 0) or 0)
+                avg = getattr(t.orderStatus, "avgFillPrice", None)
+                if status == "Filled" or filled_qty > 0:
+                    return {
+                        "filled": True,
+                        "fill_status": status or "Filled",
+                        "avg_fill_price": float(avg) if avg else None,
+                        "filled_quantity": filled_qty or int(quantity),
+                        "reconciled": True,
+                    }
+        except Exception as exc:
+            logger.debug("reconcile via trades failed: %s", exc)
+
+        # Fall back: position in the expected direction appeared.
+        try:
+            positions = await self.get_positions()
+        except Exception:
+            positions = []
+        want_sign = 1 if str(action).upper() == "BUY" else -1
+        for p in positions or []:
+            if str(p.get("symbol") or "").upper() != sym:
+                continue
+            try:
+                qty = float(p.get("quantity") or p.get("position") or 0)
+            except (TypeError, ValueError):
+                continue
+            if qty == 0:
+                continue
+            if (qty > 0 and want_sign > 0) or (qty < 0 and want_sign < 0):
+                avg = p.get("avg_cost") or p.get("avgCost") or p.get("market_price")
+                try:
+                    avg_f = float(avg) if avg is not None else None
+                except (TypeError, ValueError):
+                    avg_f = None
+                return {
+                    "filled": True,
+                    "fill_status": "ReconciledFromPosition",
+                    "avg_fill_price": avg_f,
+                    "filled_quantity": int(abs(qty)) if abs(qty) >= 1 else int(quantity),
+                    "reconciled": True,
+                    "conId": p.get("conId") or p.get("con_id"),
+                }
+        return {
+            "filled": False,
+            "fill_status": "NotFound",
+            "avg_fill_price": None,
+            "filled_quantity": 0,
+            "reconciled": False,
+        }
 
     # ========== MODIFY ORDER ==========
 
@@ -846,62 +1003,6 @@ class IBKROrdersMixin:
             logger.error(f"Failed to modify order {order_id}: {e}")
             return {'error': str(e)}
 
-    async def modify_order(
-        self,
-        order_id: int,
-        limit_price: float = None,
-        stop_price: float = None,
-        quantity: int = None
-    ) -> Dict[str, Any]:
-        """
-        Edit a working order in place: limit price, stop/aux price, and/or quantity.
-
-        Cannot change symbol, action, or order type — cancel and replace for that.
-        """
-        if not await self._ensure_connected():
-            return {'error': 'Not connected'}
-
-        if limit_price is None and stop_price is None and quantity is None:
-            return {'error': 'Provide at least one of limit_price, stop_price, quantity'}
-
-        try:
-            for trade in self.ib.openTrades():
-                if trade.order.orderId == order_id:
-                    changes = {}
-                    if limit_price is not None:
-                        trade.order.lmtPrice = limit_price
-                        changes['limit_price'] = limit_price
-                    if stop_price is not None:
-                        trade.order.auxPrice = stop_price
-                        changes['stop_price'] = stop_price
-                    if quantity is not None:
-                        trade.order.totalQuantity = quantity
-                        changes['quantity'] = quantity
-
-                    self.ib.placeOrder(trade.contract, trade.order)
-
-                    rejection = await self._check_order_rejection(
-                        trade, 'Modify order', trade.contract.symbol
-                    )
-                    if rejection:
-                        return rejection
-
-                    logger.info(f"Modified order {order_id}: {changes}")
-                    return {
-                        'success': True,
-                        'order_id': order_id,
-                        'symbol': trade.contract.symbol,
-                        'order_type': trade.order.orderType,
-                        'changes': changes,
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    }
-
-            return {'error': f'Order {order_id} not found among working orders'}
-
-        except Exception as e:
-            logger.error(f"Failed to modify order {order_id}: {e}")
-            return {'error': str(e)}
-
     async def modify_target_price(
         self,
         order_id: int,
@@ -936,7 +1037,36 @@ class IBKROrdersMixin:
             logger.error(f"Failed to modify order {order_id}: {e}")
             return {'error': str(e)}
 
-    # ========== ADVANCED ORDER TYPES ==========
+    # ========== ADVANCED / AUCTION / ALGO ORDER TYPES (ABC parity) ==========
+
+    async def place_trailing_stop(
+        self, symbol: str, quantity: int, direction: str,
+        trail_amount: float = None, trail_percent: float = None
+    ) -> Dict[str, Any]:
+        """Place trailing stop order with fixed amount or percentage."""
+        from abcxauto.broker.order_types import IBKROrderType
+
+        if trail_amount is None and trail_percent is None:
+            return {'error': 'Must provide trail_amount or trail_percent'}
+
+        action = 'SELL' if direction == 'LONG' else 'BUY'
+        order_attrs: Dict[str, Any] = {}
+        if trail_percent:
+            pct = trail_percent * 100 if trail_percent < 1 else trail_percent
+            pct = max(0.1, min(pct, 99.0))
+            order_attrs['trailingPercent'] = pct
+
+        return await self._place_order(
+            symbol, action, quantity, IBKROrderType.TRAIL.value, tif='GTC',
+            aux_price=trail_amount if not trail_percent else 0,
+            order_name='Trailing stop',
+            extra_result={
+                'direction': direction,
+                'trail_amount': trail_amount,
+                'trail_percent': trail_percent,
+            },
+            **order_attrs,
+        )
 
     async def place_trailing_stop_limit(
         self, symbol: str, quantity: int, direction: str,
@@ -947,14 +1077,12 @@ class IBKROrdersMixin:
             return {'error': 'Must provide trail_amount or trail_percent'}
 
         action = 'SELL' if direction == 'LONG' else 'BUY'
-        order_attrs = {'lmtPriceOffset': limit_offset}
+        order_attrs: Dict[str, Any] = {'lmtPriceOffset': limit_offset}
         if trail_percent:
-            # Normalize: if < 1, assume decimal (0.08 = 8%); otherwise already a %
             pct = trail_percent * 100 if trail_percent < 1 else trail_percent
-            pct = max(0.1, min(pct, 99.0))  # IBKR requires (0, 100)
+            pct = max(0.1, min(pct, 99.0))
             order_attrs['trailingPercent'] = pct
 
-        # TWS rejects TRAIL LIMIT without trailStopPrice ("Please enter a stop price").
         contract = await self._prepare_contract(symbol)
         if contract is None:
             return {'error': 'Not connected'}
@@ -982,7 +1110,7 @@ class IBKROrdersMixin:
         if "trailStopPrice" not in order_attrs:
             return {
                 "error": "Could not determine trailStopPrice (no quote). "
-                "Try again with live market data for the symbol.",
+                         "Try again with live market data for the symbol.",
                 "symbol": symbol,
             }
 
@@ -990,90 +1118,94 @@ class IBKROrdersMixin:
             symbol, action, quantity, 'TRAIL LIMIT', tif='GTC',
             aux_price=trail_amount if not trail_percent else None,
             order_name='Trailing stop limit',
-            extra_result={'direction': direction, 'trail_amount': trail_amount,
-                         'trail_percent': trail_percent, 'limit_offset': limit_offset},
-            **order_attrs
+            extra_result={
+                'direction': direction, 'trail_amount': trail_amount,
+                'trail_percent': trail_percent, 'limit_offset': limit_offset,
+            },
+            **order_attrs,
         )
 
     async def place_market_on_close(self, symbol: str, action: str, quantity: int) -> Dict[str, Any]:
-        """Place Market-on-Close (MOC) order. Executes at closing auction."""
+        """Place Market-on-Close (MOC) order."""
         return await self._place_order(symbol, action, quantity, 'MOC', order_name='MOC')
 
     async def place_limit_on_close(
         self, symbol: str, action: str, quantity: int, limit_price: float
     ) -> Dict[str, Any]:
-        """Place Limit-on-Close (LOC) order. Executes at close if price acceptable."""
-        return await self._place_order(symbol, action, quantity, 'LOC', limit_price=limit_price, order_name='LOC')
+        """Place Limit-on-Close (LOC) order."""
+        return await self._place_order(
+            symbol, action, quantity, 'LOC', limit_price=limit_price, order_name='LOC'
+        )
 
     async def place_market_on_open(self, symbol: str, action: str, quantity: int) -> Dict[str, Any]:
-        """Place Market-on-Open (MOO) order. Executes at opening auction."""
+        """Place Market-on-Open (MOO) — MKT + tif=OPG."""
         return await self._place_order(symbol, action, quantity, 'MKT', tif='OPG', order_name='MOO')
 
     async def place_limit_on_open(
         self, symbol: str, action: str, quantity: int, limit_price: float
     ) -> Dict[str, Any]:
-        """Place Limit-on-Open (LOO) order. Participates in opening auction with price limit."""
-        return await self._place_order(symbol, action, quantity, 'LMT', tif='OPG', limit_price=limit_price, order_name='LOO')
+        """Place Limit-on-Open (LOO) — LMT + tif=OPG."""
+        return await self._place_order(
+            symbol, action, quantity, 'LMT', tif='OPG',
+            limit_price=limit_price, order_name='LOO',
+        )
 
     async def place_adaptive(
         self, symbol: str, action: str, quantity: int,
         order_type: str = 'MKT', limit_price: float = None, priority: str = 'Normal'
     ) -> Dict[str, Any]:
-        """Place IBKR Adaptive algo order for better execution. Priority: Patient/Normal/Urgent."""
+        """Place IBKR Adaptive algo. Priority: Patient/Normal/Urgent."""
         if order_type == 'LMT' and limit_price is None:
             return {'error': 'Limit price required for LMT adaptive orders'}
-
         return await self._place_order(
             symbol, action, quantity, order_type, limit_price=limit_price,
             order_name=f'Adaptive {order_type}',
             extra_result={'priority': priority},
-            algoStrategy='Adaptive', algoParams=[TagValue('adaptivePriority', priority)]
+            algoStrategy='Adaptive',
+            algoParams=[TagValue('adaptivePriority', priority)],
         )
 
-    # Alias for backward compatibility
     place_adaptive_order = place_adaptive
 
     async def place_midprice(
         self, symbol: str, action: str, quantity: int, price_cap: float = None
     ) -> Dict[str, Any]:
-        """Place Midprice order. Pegs to bid/ask midpoint for better fills."""
+        """Place Midprice order pegged to bid/ask midpoint."""
         return await self._place_order(
             symbol, action, quantity, 'MIDPRICE',
             limit_price=price_cap, order_name='Midprice',
-            extra_result={'price_cap': price_cap} if price_cap else None
+            extra_result={'price_cap': price_cap} if price_cap else None,
         )
 
-    # Alias for backward compatibility
     place_midprice_order = place_midprice
 
     async def place_relative(
         self, symbol: str, action: str, quantity: int,
         offset: float = 0.01, limit_price: float = None
     ) -> Dict[str, Any]:
-        """Place Relative order. Pegs to bid/ask with offset, auto-adjusts."""
+        """Place Relative (REL) order pegged to bid/ask with offset."""
         return await self._place_order(
             symbol, action, quantity, 'REL', aux_price=offset, limit_price=limit_price,
-            order_name='Relative', extra_result={'offset': offset}
+            order_name='Relative', extra_result={'offset': offset},
         )
 
-    # Alias for backward compatibility
     place_relative_order = place_relative
 
     async def place_limit_order_gtd(
         self, symbol: str, action: str, quantity: int,
         limit_price: float, good_till_date: str
     ) -> Dict[str, Any]:
-        """Place Good-Till-Date limit order. Format: 'YYYYMMDD HH:MM:SS'."""
+        """Place Good-Till-Date limit. Format: 'YYYYMMDD HH:MM:SS'."""
         return await self._place_order(
             symbol, action, quantity, 'LMT', tif='GTD', limit_price=limit_price,
             extra_result={'tif': 'GTD', 'good_till_date': good_till_date},
-            goodTillDate=good_till_date
+            goodTillDate=good_till_date,
         )
 
     async def place_fill_or_kill(
         self, symbol: str, action: str, quantity: int, limit_price: float
     ) -> Dict[str, Any]:
-        """Place Fill-or-Kill (FOK) order. Must fill entirely or cancels."""
+        """Place Fill-or-Kill (FOK) order."""
         return await self._place_order_with_fill(
             symbol, action, quantity, 'FOK', 'FOK', limit_price, timeout=2.0, order_name='FOK'
         )
@@ -1081,7 +1213,7 @@ class IBKROrdersMixin:
     async def place_immediate_or_cancel(
         self, symbol: str, action: str, quantity: int, limit_price: float
     ) -> Dict[str, Any]:
-        """Place Immediate-or-Cancel (IOC) order. Fills what it can, cancels rest."""
+        """Place Immediate-or-Cancel (IOC) order."""
         return await self._place_order_with_fill(
             symbol, action, quantity, 'IOC', 'IOC', limit_price, timeout=2.0, order_name='IOC'
         )
@@ -1090,54 +1222,170 @@ class IBKROrdersMixin:
         self, symbol: str, action: str, quantity: int,
         start_time: str = None, end_time: str = None, max_pct_volume: float = 25.0
     ) -> Dict[str, Any]:
-        """Place VWAP algo order. Executes over time to achieve volume-weighted average."""
-        algo_params = [TagValue('maxPctVol', str(max_pct_volume / 100)), TagValue('noTakeLiq', '0')]
+        """Place VWAP algo order."""
+        algo_params = [
+            TagValue('maxPctVol', str(max_pct_volume / 100)),
+            TagValue('noTakeLiq', '0'),
+        ]
         if start_time:
             algo_params.append(TagValue('startTime', start_time))
         if end_time:
             algo_params.append(TagValue('endTime', end_time))
-
         return await self._place_order(
             symbol, action, quantity, 'MKT', order_name='VWAP',
-            extra_result={'max_pct_volume': max_pct_volume, 'start_time': start_time, 'end_time': end_time},
-            algoStrategy='Vwap', algoParams=algo_params
+            extra_result={
+                'max_pct_volume': max_pct_volume,
+                'start_time': start_time,
+                'end_time': end_time,
+            },
+            algoStrategy='Vwap', algoParams=algo_params,
         )
 
-    # Alias for backward compatibility
     place_vwap_order = place_vwap
 
     async def place_twap(
         self, symbol: str, action: str, quantity: int,
         start_time: str = None, end_time: str = None
     ) -> Dict[str, Any]:
-        """Place TWAP algo order. Spreads execution evenly over time."""
+        """Place TWAP algo order."""
         algo_params = [TagValue('allowPastEndTime', '1')]
         if start_time:
             algo_params.append(TagValue('startTime', start_time))
         if end_time:
             algo_params.append(TagValue('endTime', end_time))
-
         return await self._place_order(
             symbol, action, quantity, 'MKT', order_name='TWAP',
             extra_result={'start_time': start_time, 'end_time': end_time},
-            algoStrategy='Twap', algoParams=algo_params
+            algoStrategy='Twap', algoParams=algo_params,
         )
 
-    # Alias for backward compatibility
     place_twap_order = place_twap
 
     async def place_iceberg_order(
         self, symbol: str, action: str, total_quantity: int,
         display_size: int, limit_price: float
     ) -> Dict[str, Any]:
-        """Place Iceberg order. Shows only display_size, hides rest."""
+        """Place Iceberg order (displaySize hides rest of qty)."""
         return await self._place_order(
             symbol, action, total_quantity, 'LMT', limit_price=limit_price,
             order_name='Iceberg',
             extra_result={'total_quantity': total_quantity, 'display_size': display_size},
-            displaySize=display_size
+            displaySize=display_size,
         )
 
     async def place_snap_to_midpoint(self, symbol: str, action: str, quantity: int) -> Dict[str, Any]:
-        """Place Snap-to-Midpoint order. Sets limit to midpoint at submission."""
+        """Place Snap-to-Midpoint order."""
         return await self._place_order(symbol, action, quantity, 'SNAP MID', order_name='Snap-to-Mid')
+
+    # ========== OPTION POSITION CLOSE ==========
+
+    async def close_option_position(
+        self,
+        symbol: str,
+        expiration: str = None,
+        strike: float = None,
+        right: str = None,
+        contract: Contract = None,
+        quantity: int = None,
+        limit_price: float = None,
+        reason: str = ''
+    ) -> Dict[str, Any]:
+        """Close an existing option position (moved from options mixin)."""
+        if not await self._ensure_connected():
+            return {'error': 'Not connected'}
+
+        try:
+            if contract is None:
+                positions = self.ib.positions()
+                for pos in positions:
+                    c = pos.contract
+                    if c.symbol == symbol and c.secType == 'OPT':
+                        if expiration and c.lastTradeDateOrContractMonth != expiration:
+                            continue
+                        if strike and abs(c.strike - strike) > 0.01:
+                            continue
+                        if right and c.right != right:
+                            continue
+                        contract = c
+                        if quantity is None:
+                            quantity = abs(int(pos.position))
+                        break
+
+            if contract is None:
+                return {'error': f'No option position found for {symbol} {right} {strike} {expiration}'}
+
+            if not contract.exchange:
+                contract.exchange = 'SMART'
+
+            positions = self.ib.positions()
+            current_qty = 0
+            for pos in positions:
+                if pos.contract.conId == contract.conId:
+                    current_qty = int(pos.position)
+                    break
+
+            action = 'SELL' if current_qty > 0 else 'BUY'
+            close_qty = quantity or abs(current_qty)
+
+            if limit_price is None:
+                try:
+                    from abcxauto.marketdata.client import get_marketdata_client
+
+                    exp = contract.lastTradeDateOrContractMonth  # YYYYMMDD
+                    occ = (
+                        f"{contract.symbol}{exp[2:]}"
+                        f"{contract.right.upper()[0]}"
+                        f"{int(round(contract.strike * 1000)):08d}"
+                    )
+                    q = await get_marketdata_client().get_option_quote(occ)
+                    if q:
+                        bid, ask = q.get('bid'), q.get('ask')
+                        limit_price = q.get('mid') or q.get('last') or (
+                            (bid + ask) / 2 if bid and ask else None
+                        )
+                        if limit_price:
+                            limit_price = round(float(limit_price), 2)
+                            logger.info(f"External mid for close {occ}: {limit_price}")
+                except Exception as e:
+                    logger.debug(f"External price fallback failed for {symbol}: {e}")
+                if not limit_price:
+                    limit_price = None  # MKT fallback only as last resort
+
+            order = Order()
+            order.action = action
+            order.totalQuantity = close_qty
+            order.orderType = 'LMT' if limit_price else 'MKT'
+            if limit_price:
+                order.lmtPrice = limit_price
+            order.tif = 'DAY'
+            order.transmit = True
+
+            trade = self.ib.placeOrder(contract, order)
+
+            logger.info(f"Close option: {action} {close_qty} {symbol} "
+                       f"{contract.strike}{contract.right} {contract.lastTradeDateOrContractMonth} "
+                       f"{'LMT@' + str(limit_price) if limit_price else 'MKT'} [{reason}]")
+
+            rejection = await self._check_order_rejection(
+                trade, f'Close {symbol} {contract.strike}{contract.right}', symbol
+            )
+            if rejection:
+                return rejection
+
+            return {
+                'success': True,
+                'order_id': trade.order.orderId,
+                'symbol': symbol,
+                'action': action,
+                'quantity': close_qty,
+                'strike': contract.strike,
+                'right': contract.right,
+                'expiration': contract.lastTradeDateOrContractMonth,
+                'reason': reason,
+                'status': trade.orderStatus.status,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+
+        except Exception as e:
+            logger.error(f"Close option failed for {symbol}: {e}")
+            return {'error': str(e), 'symbol': symbol}

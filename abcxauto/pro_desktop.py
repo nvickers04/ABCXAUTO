@@ -1,49 +1,70 @@
-"""ABCXAUTO Pro Desktop v0.1 — Flet shell over ProEngine."""
+"""ABCXAUTO Pro Desktop — slim Flet cockpit over ProEngine."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
+import logging
 import os
-import threading
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import flet as ft
 
-from abcxauto.config import get_config
+from abcxauto.config import (
+    RISK_POSTURES,
+    apply_risk_posture,
+    get_config,
+    risk_config_snapshot,
+    risk_envelope_snapshot,
+    setup_file_logging,
+    update_risk_config,
+)
+from abcxauto.broker.connection import LIVE_CONFIRM_PHRASE
+from abcxauto.memory import get_journal
 from abcxauto.pro_engine import ProEngine
 from abcxauto.reality_pulse import build_reality_pulse, pulse_clock_view
-from abcxauto.rocket import TWEAKS
 
-BG, CARD, CARD2, BORDER = "#0b0e14", "#151b26", "#1c2433", "#2a3548"
-TEXT, MUTED, GREEN, RED, BLUE, AMBER = (
-    "#e8edf4",
-    "#8b9bb4",
-    "#00d47e",
-    "#ff4d6d",
-    "#4dabf7",
-    "#ffc857",
-)
+logger = logging.getLogger(__name__)
+
+# X Lights Out palette — look only; nav/controls are product labels
+BG = "#000000"
+SURFACE = "#16181c"
+HOVER = "#181818"
+BORDER = "#2f3336"
+TEXT = "#e7e9ea"
+MUTED = "#71767b"
+GREEN = "#00ba7c"
+RED = "#f4212e"
+LIKE = "#f91880"
+BLUE = "#1d9bf0"
+AMBER = "#ffd400"
+WHITE = "#ffffff"
+CARD, CARD2 = BG, SURFACE
+
+ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+LOGO_SRC = "abcxauto_logo.png"
+
+# key, label, outlined icon, filled icon
 NAV = [
-    ("overview", "Overview", ft.Icons.DASHBOARD_OUTLINED),
-    ("positions", "Positions", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED),
-    ("tests", "Test Suite Results", ft.Icons.SCIENCE_OUTLINED),
-    ("logs", "Logs & Evolution", ft.Icons.TIMELINE_OUTLINED),
+    ("overview", "Dashboard", ft.Icons.DASHBOARD_OUTLINED, ft.Icons.DASHBOARD),
+    ("positions", "Positions", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED, ft.Icons.ACCOUNT_BALANCE_WALLET),
+    ("risk", "Risk", ft.Icons.SHIELD_OUTLINED, ft.Icons.SHIELD),
+    ("scorecard", "Scorecard", ft.Icons.BAR_CHART_OUTLINED, ft.Icons.BAR_CHART),
+    ("suite", "Test Suite", ft.Icons.SCIENCE_OUTLINED, ft.Icons.SCIENCE),
 ]
-FILTERS = [
-    "All",
-    "Trades",
-    "Closes",
-    "Decisions",
-    "Improvements",
-    "Errors",
-    "Position Mismatches",
-]
-# Canonical window title — keep TITLE + PRO_TITLE in sync for launch probes.
+_SCORECARD_REFRESH_S = 3.0
 TITLE = "ABCXAUTO Pro v0.4"
 PRO_TITLE = TITLE
+
+# Dashboard sub-tabs (center column only)
+DASH_TABS = (
+    ("book", "Book"),
+    ("agent", "Agent"),
+    ("log", "Log"),
+)
 
 
 class ProTerminal:
@@ -51,119 +72,212 @@ class ProTerminal:
         self.page = page
         self.engine = ProEngine()
         self.tab = "overview"
-        self.filter = "All"
-        self.raw_json = False
-        self.pin_insight = ""
-        self.lbl_mode = ft.Text("Safe", size=20, color=MUTED)
+        self.lbl_mode = ft.Text("Safe", size=22, weight=ft.FontWeight.BOLD, color=TEXT)
         self._build_refs()
-        self._load_pin_insight()
         self._sync_widgets()
 
     def _build_refs(self) -> None:
-        self.lbl_equity = ft.Text("$0", size=22, weight=ft.FontWeight.BOLD, color=TEXT)
-        self.lbl_pnl = ft.Text("$+0.00", size=16, weight=ft.FontWeight.W_600, color=GREEN)
+        self.lbl_equity = ft.Text("$0", size=28, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_pnl = ft.Text("$+0.00", size=14, weight=ft.FontWeight.W_600, color=GREEN)
+        self.lbl_ret_1w = ft.Text("—", size=14, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_ret_3m = ft.Text("—", size=14, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_ret_1y = ft.Text("—", size=14, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_ret_source = ft.Text("IBKR NAV — building history…", size=10, color=MUTED)
+        self._ret_cache: dict | None = None
+        self._ret_last_fetch = 0.0
+        self.news_list = ft.Column(spacing=0, tight=True)
+        self._news_last_fetch = 0.0
+        self._news_cache: list[dict] = []
         self.dot_conn = ft.Container(width=10, height=10, border_radius=5, bgcolor=RED)
-        self.lbl_status = ft.Text("Safe", color=MUTED, size=12)
+        self.dot_xai = ft.Container(width=10, height=10, border_radius=5, bgcolor=RED)
+        self.dot_mda = ft.Container(width=10, height=10, border_radius=5, bgcolor=RED)
+        self.lbl_ibkr_status = ft.Text("Disconnected", size=12, color=MUTED)
+        self.lbl_xai_status = ft.Text("Missing key", size=12, color=MUTED)
+        self.lbl_mda_status = ft.Text("Not configured", size=12, color=MUTED)
+        self.lbl_status = ft.Text("Safe", color=TEXT, size=13, weight=ft.FontWeight.W_600)
         self.lbl_cycles = ft.Text("0", size=28, weight=ft.FontWeight.BOLD, color=TEXT)
-        self.lbl_risk = ft.Text("—", color=MUTED)
-        self.sparkline = ft.Container(height=220, expand=True)
-        _pos_cols = ("conId", "Symbol", "Type", "Qty", "uPnL", "Details")
-        self.ov_pos_table = ft.DataTable(
-            columns=[ft.DataColumn(ft.Text(c, color=MUTED)) for c in _pos_cols],
-            rows=[],
-            heading_row_color=CARD2,
-            border=ft.Border.all(1, BORDER),
-        )
+        self.lbl_risk = ft.Text("—", size=16, weight=ft.FontWeight.W_600, color=TEXT)
+        self.lbl_book_netliq = ft.Text("$0", size=18, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_book_pnl = ft.Text("$+0.00", size=18, weight=ft.FontWeight.W_600, color=GREEN)
+        self.lbl_book_unprotected = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=GREEN)
+        self.lbl_book_decision = ft.Text("—", size=18, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_book_halt = ft.Text("clear", size=18, weight=ft.FontWeight.BOLD, color=GREEN)
+        cols = ("conId", "Symbol", "Type", "Qty", "uPnL", "Details")
         self.pos_table = ft.DataTable(
-            columns=[ft.DataColumn(ft.Text(c, color=MUTED)) for c in _pos_cols],
+            columns=[ft.DataColumn(ft.Text(c, color=MUTED, size=13)) for c in cols],
             rows=[],
-            heading_row_color=CARD2,
+            heading_row_color=BG,
             border=ft.Border.all(1, BORDER),
+            data_row_min_height=44,
+        )
+        self.lbl_pos_summary = ft.Text("No open positions", color=TEXT, size=14, selectable=True)
+        self.lbl_working_orders = ft.Text(
+            "No working orders", color=MUTED, size=12, selectable=True
+        )
+        self.lbl_recent_fills = ft.Text(
+            "No fills this session", color=MUTED, size=12, selectable=True
         )
         self.lbl_proposal = ft.Text(
-            "No proposal yet — START AUTONOMOUS or wait for a cycle.",
+            "No proposal yet — Start agent or wait for a cycle.",
+            color=TEXT, size=13, selectable=True,
+        )
+        self.lbl_ledger_snippet = ft.Text("—", color=MUTED, size=11, selectable=True)
+        self.lbl_cycle_log = ft.Text(
+            "No activity yet — Connect IBKR, then Start agent",
             color=MUTED,
             size=12,
             selectable=True,
         )
-        self.lbl_ledger_snippet = ft.Text("—", color=MUTED, size=10, selectable=True)
-        # Market Clock (situational awareness heart on the chrome)
         self.lbl_clock = ft.Text("—", size=14, weight=ft.FontWeight.BOLD, color=TEXT)
         self.lbl_session_badge = ft.Text("—", size=11, weight=ft.FontWeight.W_600, color=AMBER)
-        self.lbl_countdown = ft.Text("—", size=11, color=MUTED)
-        self.lbl_data_age = ft.Text("data n/a", size=10, color=MUTED)
+        self.lbl_countdown_title = ft.Text("Close time", size=11, color=MUTED)
+        self.lbl_countdown = ft.Text("—", size=11, color=TEXT)
+        self.lbl_data_age = ft.Text("n/a", size=11, color=TEXT)
+        self.lbl_mandate_health = ft.Text(
+            "green — protected", size=11, weight=ft.FontWeight.W_600, color=GREEN
+        )
         self.lbl_pulse_narrative = ft.Text(
-            "Reality Pulse idle — START for live awareness.",
-            size=11,
+            "Reality Pulse idle — Start for live awareness.", size=13, color=TEXT, selectable=True
+        )
+        self.lbl_order_suite = ft.Text(
+            "Order suite idle — open Test Suite to re-test types.", size=12, color=MUTED, selectable=True
+        )
+        self.lbl_risk_halt = ft.Text("Halt: clear", size=14, weight=ft.FontWeight.W_600, color=GREEN)
+        self.lbl_risk_status = ft.Text(
+            "Set posture — wide envelope; agent sizes per trade (set_risk).",
+            size=12,
             color=MUTED,
             selectable=True,
         )
-        self.lbl_lab = ft.Text(
-            "Order lab idle — runs every cycle automatically.",
-            size=11,
-            color=MUTED,
-            selectable=True,
+        self.lbl_risk_envelope = ft.Text("", size=12, color=MUTED, selectable=True)
+        self.risk_dd_posture = ft.Dropdown(
+            label="Risk posture",
+            value="balanced",
+            options=[
+                ft.dropdown.Option("defensive", "Defensive"),
+                ft.dropdown.Option("balanced", "Balanced"),
+                ft.dropdown.Option("aggressive", "Aggressive"),
+            ],
+            width=280,
+            text_size=13,
+            color=TEXT,
+            label_style=ft.TextStyle(color=MUTED, size=12),
+            bgcolor=SURFACE,
+            border_color=BORDER,
+            focused_border_color=BLUE,
         )
-        self.lbl_reconfig = ft.Text("—", size=11, color=AMBER, selectable=True)
-        self.lbl_simplify = ft.Text("—", size=11, color=MUTED, selectable=True)
-        self.lbl_brutal = ft.Text(
-            "Brutal suite idle — runs on startup and every cycle.",
-            size=11,
-            color=MUTED,
-            selectable=True,
+        self.risk_sw_gates = ft.Switch(value=True, active_color=BLUE)
+        self.risk_sw_auto_panic = ft.Switch(value=True, active_color=BLUE)
+        self.risk_sw_defined = ft.Switch(value=False, active_color=BLUE)
+        self.risk_sw_cash = ft.Switch(value=False, active_color=BLUE)
+        self.risk_tf: dict[str, ft.TextField] = {}
+        for key, hint in (
+            ("max_risk_per_trade_pct", "Max risk per trade % (agent)"),
+            ("daily_loss_limit_pct", "Daily loss % NetLiq"),
+            ("max_position_pct", "Max position % NetLiq"),
+            ("max_open_positions", "Max open positions"),
+            ("max_daily_trades", "Max daily trades"),
+            ("min_reward_risk", "Min reward:risk"),
+            ("max_peak_drawdown_pct", "Max peak drawdown %"),
+            ("max_option_premium_pct", "Max option premium %"),
+        ):
+            self.risk_tf[key] = ft.TextField(
+                label=hint,
+                value="0",
+                dense=True,
+                text_size=13,
+                color=TEXT,
+                label_style=ft.TextStyle(color=MUTED, size=12),
+                bgcolor=SURFACE,
+                border_color=BORDER,
+                focused_border_color=BLUE,
+                cursor_color=TEXT,
+                width=280,
+                read_only=True,
+            )
+        self.suite_status: dict[str, ft.Text] = {}
+        self.suite_filter = "all"  # all | stock | manage | options
+        self.lbl_suite_chip = ft.Text("Suite: idle", size=12, color=MUTED)
+        self._scorecard_last_refresh = 0.0
+        self.lbl_sc_day = ft.Text("Today", size=12, color=MUTED)
+        self.lbl_sc_proposals = ft.Text("0", size=22, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_sc_allowed = ft.Text("0", size=22, weight=ft.FontWeight.BOLD, color=GREEN)
+        self.lbl_sc_rejected = ft.Text("0", size=22, weight=ft.FontWeight.BOLD, color=RED)
+        self.lbl_sc_dispatch_ok = ft.Text("0", size=22, weight=ft.FontWeight.BOLD, color=GREEN)
+        self.lbl_sc_dispatch_failed = ft.Text("0", size=22, weight=ft.FontWeight.BOLD, color=RED)
+        self.lbl_sc_halts = ft.Text("0", size=22, weight=ft.FontWeight.BOLD, color=MUTED)
+        self.lbl_sc_hold_trade = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_sc_netliq = ft.Text("—", size=28, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_sc_equity_empty = ft.Text(
+            "No data yet — journal populates as the agent trades", color=MUTED, size=12
         )
-        self.suite_table = ft.DataTable(
+        self.sc_equity_spark = ft.Container(height=56, expand=True)
+        self.lbl_sc_agent_ret = ft.Text("—", size=14, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.sc_dispatch_table = ft.DataTable(
             columns=[
-                ft.DataColumn(ft.Text(c, color=MUTED))
-                for c in ("Strategy", "Pass", "Mode", "Detail")
+                ft.DataColumn(ft.Text(c, color=MUTED, size=13))
+                for c in ("Time", "Status", "Result")
             ],
             rows=[],
-            heading_row_color=CARD2,
+            heading_row_color=BG,
             border=ft.Border.all(1, BORDER),
+            data_row_min_height=44,
         )
-        self.lbl_kahneman = ft.Text(
-            "Kahneman System 2 idle — START for deliberative traces.",
-            size=11,
-            color=MUTED,
-            selectable=True,
-        )
-        self.brain_action = ft.Text("—", size=18, color=BLUE)
+        self.brain_action = ft.Text("—", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
         self.brain_rationale = ft.Text(
-            "Start autonomous mode to see Grok decisions.", color=MUTED, selectable=True
+            "Start autonomous mode to see Grok decisions.", color=MUTED, size=13, selectable=True
         )
-        self.brain_json = ft.Text("", selectable=True, size=11, color=AMBER)
-        self.log_search = ft.TextField(
-            hint_text="Search cycles, actions, tweaks…",
-            border_color=BORDER,
-            bgcolor=CARD,
-            color=TEXT,
-            expand=True,
-            on_change=self._on_search,
-        )
-        self.log_filter = ft.Dropdown(
-            value="All",
-            options=[ft.dropdown.Option(f) for f in FILTERS],
-            width=160,
-            border_color=BORDER,
-            bgcolor=CARD,
-            color=TEXT,
-            on_select=lambda e: self._set_filter(getattr(e.control, "value", None) or "All"),
-        )
-        self.log_stats = ft.Row(spacing=12)
-        self.log_timeline = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, expand=True)
-        self.pin_insight_field = ft.TextField(
-            multiline=True,
-            min_lines=3,
-            max_lines=6,
-            hint_text="Pin Insight — jot ideas for next iteration…",
-            border_color=BORDER,
-            bgcolor=CARD,
-            color=TEXT,
-            expand=True,
-            on_blur=self._save_pin_insight,
-        )
-        self.content = ft.Container(expand=True, padding=20)
+        self.content = ft.Container(expand=True, padding=0)
         self.sidebar_btns: dict[str, ft.Container] = {}
+        self.sidebar_icons: dict[str, ft.Icon] = {}
+        self.sidebar_labels: dict[str, ft.Text] = {}
+        self.sidebar_icon_pair: dict[str, tuple] = {}
+        self.lbl_center_title = ft.Text("Dashboard", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.dash_tab = "book"
+        self.dash_tab_labels: dict[str, ft.Text] = {}
+        self.dash_tab_bars: dict[str, ft.Container] = {}
+        self.dash_tabs_row = ft.Container(visible=True)
+        self.btn_run = self._btn("Start agent", WHITE, self._toggle_run)
+        self.btn_run.tooltip = (
+            "Start the Grok agent loop (connects IBKR if needed; requires XAI_API_KEY)"
+        )
+        self.btn_run.width = 228
+        self.btn_connect = self._btn(
+            "Connect IBKR", TEXT, self._toggle_connect, outlined=True
+        )
+        self.btn_connect.tooltip = "Connect to TWS/Gateway only — no agent cycles"
+        self.btn_connect.width = 228
+        self.btn_flatten = self._btn(
+            "Close All Positions", TEXT, self._panic, outlined=True
+        )
+        self.btn_flatten.tooltip = "Close every open position on the connected account"
+        self.btn_flatten.width = 228
+        self.lbl_account_name = ft.Text(
+            "IBKR", size=14, weight=ft.FontWeight.BOLD, color=TEXT
+        )
+        self.lbl_account_id = ft.Text("Not connected", size=13, color=MUTED)
+        self.lbl_account_mode = ft.Text("Paper", size=12, weight=ft.FontWeight.W_600, color=GREEN)
+        self.btn_account_mode = ft.Container(
+            content=self.lbl_account_mode,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            border=ft.Border.all(1, BORDER),
+            border_radius=999,
+            ink=True,
+            tooltip="Switch Paper / Live",
+            on_click=self._toggle_trading_mode,
+        )
+        self.tf_live_confirm = ft.TextField(
+            label="Type live confirm phrase",
+            password=True,
+            can_reveal_password=True,
+            dense=True,
+            color=TEXT,
+            bgcolor=SURFACE,
+            border_color=BORDER,
+            focused_border_color=BLUE,
+            width=320,
+        )
+        self.lbl_account_model = ft.Text("Grok —", size=12, color=MUTED)
 
     def build(self) -> None:
         p, cfg = self.page, get_config()
@@ -179,94 +293,25 @@ class ProTerminal:
             p.window.min_height = 700
         except Exception:
             pass
-        top = ft.Container(
-            bgcolor=CARD,
-            padding=ft.Padding.symmetric(horizontal=20, vertical=12),
-            content=ft.Row(
-                [
-                    ft.Text("ABCXAUTO", weight=ft.FontWeight.BOLD, size=18, color=TEXT),
-                    ft.Text("•", color=MUTED),
-                    ft.Text("PAPER", color=AMBER, size=13, weight=ft.FontWeight.W_600),
-                    ft.Text("•", color=MUTED),
-                    ft.Text(f"Grok {cfg.model}", color=BLUE, size=13, weight=ft.FontWeight.W_600),
-                    ft.Container(width=16),
-                    # Live Market Clock — awareness heart in chrome
-                    ft.Container(
-                        bgcolor=CARD2,
-                        border=ft.Border.all(1, BORDER),
-                        border_radius=10,
-                        padding=ft.Padding.symmetric(horizontal=12, vertical=6),
-                        content=ft.Column(
-                            [
-                                ft.Row(
-                                    [
-                                        self.lbl_clock,
-                                        ft.Container(
-                                            bgcolor="#1a2332",
-                                            border_radius=6,
-                                            padding=ft.Padding.symmetric(
-                                                horizontal=8, vertical=2
-                                            ),
-                                            content=self.lbl_session_badge,
-                                        ),
-                                    ],
-                                    spacing=8,
-                                ),
-                                ft.Row(
-                                    [self.lbl_countdown, self.lbl_data_age],
-                                    spacing=12,
-                                ),
-                            ],
-                            spacing=2,
-                            tight=True,
-                        ),
-                    ),
-                    ft.Container(expand=True),
-                    ft.Column(
-                        [ft.Text("Equity", size=10, color=MUTED), self.lbl_equity],
-                        spacing=0,
-                        horizontal_alignment=ft.CrossAxisAlignment.END,
-                    ),
-                    ft.Container(width=20),
-                    ft.Column(
-                        [ft.Text("PnL", size=10, color=MUTED), self.lbl_pnl],
-                        spacing=0,
-                        horizontal_alignment=ft.CrossAxisAlignment.END,
-                    ),
-                    ft.Container(width=20),
-                    ft.Row(
-                        [self.dot_conn, ft.Text("IBKR", size=12, color=MUTED)], spacing=6
-                    ),
-                ]
-            ),
-        )
-        # Avoid expand spacers inside unbounded Columns — they leave the
-        # Flutter desktop client stuck on the "Working..." splash.
-        side = ft.Container(
-            width=200,
-            bgcolor=CARD,
-            padding=12,
-            content=ft.Column(
-                [
-                    ft.Text("NAVIGATION", size=10, color=MUTED, weight=ft.FontWeight.BOLD),
-                    *[self._nav_btn(k, label, icon) for k, label, icon in NAV],
-                    ft.Container(height=24),
-                    ft.Text("Engine", size=10, color=MUTED),
-                    self.lbl_status,
-                ],
-                tight=True,
-                scroll=ft.ScrollMode.AUTO,
-            ),
-        )
-        body = ft.Row(
-            [side, ft.VerticalDivider(width=1, color=BORDER), self.content],
-            expand=True,
+        self.lbl_account_model.value = f"Grok {getattr(cfg, 'model', '—')}"
+        left = self._left_rail(cfg)
+        center = self._center_column()
+        right = self._right_rail()
+        shell = ft.Row(
+            [left, center, right],
+            spacing=0,
+            tight=True,
             vertical_alignment=ft.CrossAxisAlignment.STRETCH,
         )
-        root = ft.Column(
-            [top, ft.Divider(height=1, color=BORDER), body],
+        root = ft.Row(
+            [
+                ft.Container(expand=True),
+                shell,
+                ft.Container(expand=True),
+            ],
             expand=True,
             spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
         )
         try:
             p.controls.clear()
@@ -276,33 +321,322 @@ class ProTerminal:
         self._show_tab("overview")
         self._sync_widgets()
         p.update()
-        # Force brutal suite immediately so bot never idles on open
-        self.engine.run_startup_suite()
         p.run_task(self._poll_loop)
         p.run_task(self._clock_loop)
         p.run_task(self._reveal_window)
         if probe := os.environ.get("ABCXAUTO_UI_PROBE"):
             Path(probe).write_text(
-                json.dumps(
-                    {
-                        "title": p.title,
-                        "tab": self.tab,
-                        "ui_built": True,
-                        "engine": "ProEngine",
-                    },
-                    indent=2,
-                ),
+                json.dumps({"title": p.title, "tab": self.tab, "ui_built": True,
+                            "engine": "ProEngine"}, indent=2),
                 encoding="utf-8",
             )
 
-    def _nav_btn(self, key: str, label: str, icon) -> ft.Container:
-        c = ft.Container(
+    def _avatar(self, letter: str = "A", size: int = 40) -> ft.Container:
+        return ft.Container(
+            width=size,
+            height=size,
+            border_radius=size // 2,
+            bgcolor=SURFACE,
+            alignment=ft.Alignment.CENTER,
+            content=ft.Text(letter, size=size // 2, weight=ft.FontWeight.BOLD, color=TEXT),
+        )
+
+    def _left_rail(self, cfg) -> ft.Container:
+        nav_items = [self._nav_btn(k, label, outlined, filled)
+                     for k, label, outlined, filled in NAV]
+        self._apply_suite_nav_visibility()
+        logo = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=12, vertical=12),
             content=ft.Row(
-                [ft.Icon(icon, size=18, color=MUTED), ft.Text(label, size=13, color=TEXT)],
+                [
+                    ft.Image(
+                        src=LOGO_SRC,
+                        width=40,
+                        height=40,
+                        fit=ft.BoxFit.CONTAIN,
+                        error_content=ft.Text("A", size=22, weight=ft.FontWeight.BOLD, color=BLUE),
+                    ),
+                    ft.Text("ABCXAUTO", size=18, weight=ft.FontWeight.BOLD, color=TEXT),
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+        self._sync_ibkr_account_label()
+        self.account_bar = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+            border_radius=999,
+            content=ft.Row(
+                [
+                    self._avatar("I", 40),
+                    ft.Column(
+                        [
+                            self.lbl_account_name,
+                            self.lbl_account_id,
+                            self.btn_account_mode,
+                        ],
+                        spacing=4,
+                        tight=True,
+                        expand=True,
+                    ),
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+        rail_body = ft.Column(
+            [
+                logo,
+                *nav_items,
+                ft.Container(height=16),
+                self.btn_connect,
+                ft.Container(height=8),
+                self.btn_run,
+                ft.Container(height=8),
+                self.btn_flatten,
+                ft.Container(expand=True),
+                self.account_bar,
+            ],
+            spacing=2,
+            expand=True,
+        )
+        # No Stack overlay on the rail — accounts popup uses page.overlay so
+        # Connect/Start stay clickable.
+        return ft.Container(
+            width=260,
+            bgcolor=BG,
+            padding=ft.Padding.only(left=8, right=12, top=4, bottom=12),
+            content=rail_body,
+        )
+
+    def _rail_outline_btn(self, text: str, color: str, on_click) -> ft.Container:
+        return ft.Container(
+            content=ft.Text(
+                text,
+                size=14,
+                weight=ft.FontWeight.BOLD,
+                color=color,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            bgcolor=BG,
+            border=ft.Border.all(1, BORDER if color == TEXT else color),
+            border_radius=999,
+            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+            alignment=ft.Alignment.CENTER,
+            ink=True,
+            on_click=on_click,
+        )
+
+    def _center_column(self) -> ft.Container:
+        def _dash_tab(key: str, label: str) -> ft.Container:
+            on = key == self.dash_tab
+            txt = ft.Text(
+                label,
+                size=15,
+                weight=ft.FontWeight.BOLD if on else ft.FontWeight.W_500,
+                color=TEXT if on else MUTED,
+            )
+            bar = ft.Container(
+                height=4,
+                width=max(28, len(label) * 7),
+                bgcolor=BLUE if on else BG,
+                border_radius=999,
+            )
+            self.dash_tab_labels[key] = txt
+            self.dash_tab_bars[key] = bar
+            return ft.Container(
+                expand=True,
+                ink=True,
+                on_click=lambda e, k=key: self._set_dash_tab(k),
+                content=ft.Column(
+                    [
+                        ft.Container(
+                            padding=ft.Padding.symmetric(vertical=12),
+                            alignment=ft.Alignment.CENTER,
+                            content=txt,
+                        ),
+                        ft.Container(alignment=ft.Alignment.CENTER, content=bar),
+                    ],
+                    spacing=0,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            )
+
+        self.dash_tabs_row = ft.Container(
+            border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+            content=ft.Row(
+                [_dash_tab(k, label) for k, label in DASH_TABS],
+                spacing=0,
+            ),
+        )
+        header = ft.Container(
+            bgcolor=BG,
+            padding=ft.Padding.only(left=16, right=16, top=14, bottom=0),
+            content=ft.Column(
+                [self.lbl_center_title, self.dash_tabs_row],
+                spacing=8,
+            ),
+        )
+        return ft.Container(
+            width=600,
+            bgcolor=BG,
+            border=ft.Border(
+                left=ft.BorderSide(1, BORDER),
+                right=ft.BorderSide(1, BORDER),
+            ),
+            content=ft.Column(
+                [header, self.content],
+                spacing=0,
+                expand=True,
+            ),
+        )
+
+    def _right_rail(self) -> ft.Container:
+        def _ret_col(label: str, value: ft.Text, *, visible: bool = True) -> ft.Column:
+            return ft.Column(
+                [ft.Text(label, size=11, color=MUTED), value],
+                spacing=2,
+                tight=True,
+                visible=visible,
+            )
+
+        self.col_ret_1w = _ret_col("1W", self.lbl_ret_1w, visible=False)
+        self.col_ret_3m = _ret_col("3M", self.lbl_ret_3m, visible=False)
+        self.col_ret_1y = _ret_col("1Y", self.lbl_ret_1y, visible=False)
+
+        account_card = self._happen_card(
+            "Account",
+            ft.Column(
+                [
+                    ft.Text("Total value", size=12, color=MUTED),
+                    self.lbl_equity,
+                    ft.Row(
+                        [
+                            _ret_col("Today", self.lbl_pnl),
+                            self.col_ret_1w,
+                            self.col_ret_3m,
+                            self.col_ret_1y,
+                        ],
+                        spacing=16,
+                        wrap=True,
+                    ),
+                    self.lbl_ret_source,
+                    ft.Container(height=4),
+                    ft.Row(
+                        [
+                            self.lbl_clock,
+                            ft.Container(
+                                bgcolor=BG,
+                                border_radius=999,
+                                padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+                                content=self.lbl_session_badge,
+                            ),
+                        ],
+                        spacing=8,
+                        wrap=True,
+                    ),
+                    ft.Row(
+                        [
+                            self.dot_conn,
+                            ft.Text("IBKR", size=12, color=TEXT, weight=ft.FontWeight.W_600),
+                            self.lbl_ibkr_status,
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Row(
+                        [
+                            self.dot_xai,
+                            ft.Text("xAI", size=12, color=TEXT, weight=ft.FontWeight.W_600),
+                            self.lbl_xai_status,
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Row(
+                        [
+                            self.dot_mda,
+                            ft.Text("MDA", size=12, color=TEXT, weight=ft.FontWeight.W_600),
+                            self.lbl_mda_status,
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Row(
+                        [self.lbl_countdown_title, self.lbl_countdown],
+                        spacing=8,
+                    ),
+                    ft.Row(
+                        [
+                            ft.Text("IBKR refresh", size=11, color=MUTED),
+                            self.lbl_data_age,
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Row(
+                        [
+                            ft.Text("Risk posture", size=11, color=MUTED),
+                            self.lbl_mandate_health,
+                        ],
+                        spacing=8,
+                    ),
+                ],
+                spacing=6,
+                tight=True,
+            ),
+        )
+        news_card = self._happen_card(
+            "What's happening",
+            ft.Column(
+                [
+                    ft.Text(
+                        "Headlines for your book and the broader market.",
+                        size=11,
+                        color=MUTED,
+                    ),
+                    self.news_list,
+                ],
+                spacing=8,
+                tight=True,
+            ),
+        )
+        return ft.Container(
+            width=320,
+            bgcolor=BG,
+            padding=ft.Padding.only(left=16, right=8, top=8, bottom=12),
+            content=ft.Column(
+                [
+                    account_card,
+                    ft.Container(height=12),
+                    news_card,
+                ],
+                spacing=0,
+                scroll=ft.ScrollMode.AUTO,
+                expand=True,
+            ),
+        )
+
+    def _happen_card(self, title: str, body: ft.Control) -> ft.Container:
+        return ft.Container(
+            bgcolor=SURFACE,
+            border_radius=16,
+            padding=16,
+            content=ft.Column(
+                [
+                    ft.Text(title, size=15, weight=ft.FontWeight.BOLD, color=TEXT),
+                    body,
+                ],
                 spacing=10,
             ),
-            padding=10,
-            border_radius=8,
+        )
+
+    def _nav_btn(self, key: str, label: str, outlined, filled) -> ft.Container:
+        ic = ft.Icon(outlined, size=26, color=TEXT)
+        lab = ft.Text(label, size=20, color=TEXT, weight=ft.FontWeight.W_400)
+        self.sidebar_icons[key] = ic
+        self.sidebar_labels[key] = lab
+        self.sidebar_icon_pair[key] = (outlined, filled)
+        c = ft.Container(
+            content=ft.Row([ic, lab], spacing=20),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=12),
+            border_radius=999,
             ink=True,
             on_click=lambda e, k=key: self._show_tab(k),
         )
@@ -310,16 +644,65 @@ class ProTerminal:
         return c
 
     def _show_tab(self, key: str) -> None:
+        if key == "suite" and not get_config().is_paper:
+            self.page.overlay.append(
+                ft.SnackBar(
+                    ft.Text("Test Suite is paper-only"), bgcolor=AMBER, open=True
+                )
+            )
+            key = "overview"
         self.tab = key
         for k, btn in self.sidebar_btns.items():
-            btn.bgcolor = CARD2 if k == key else None
+            active = k == key
+            btn.bgcolor = HOVER if active else None
+            pair = self.sidebar_icon_pair.get(k)
+            if k in self.sidebar_icons and pair:
+                outlined, filled = pair
+                self.sidebar_icons[k].icon = filled if active else outlined
+                self.sidebar_icons[k].color = TEXT
+            if k in self.sidebar_labels:
+                self.sidebar_labels[k].weight = (
+                    ft.FontWeight.BOLD if active else ft.FontWeight.W_400
+                )
+                self.sidebar_labels[k].color = TEXT
+        titles = {
+            "overview": "Dashboard",
+            "positions": "Positions",
+            "risk": "Risk",
+            "scorecard": "Scorecard",
+            "suite": "Test Suite",
+        }
+        self.lbl_center_title.value = titles.get(key, "Dashboard")
+        self.dash_tabs_row.visible = key == "overview"
         builders = {
             "overview": self._page_overview,
             "positions": self._page_positions,
-            "tests": self._page_tests,
-            "logs": self._page_logs,
+            "risk": self._page_risk,
+            "scorecard": self._page_scorecard,
+            "suite": self._page_suite,
         }
         self.content.content = builders.get(key, self._page_overview)()
+        if key == "risk":
+            self._load_risk_form()
+        if key == "scorecard":
+            self._refresh_scorecard(force=True)
+        if key == "suite":
+            self._refresh_suite_statuses()
+        self._safe_update()
+
+    def _set_dash_tab(self, key: str) -> None:
+        self.dash_tab = key
+        for k, label in DASH_TABS:
+            on = k == key
+            if k in self.dash_tab_labels:
+                self.dash_tab_labels[k].weight = (
+                    ft.FontWeight.BOLD if on else ft.FontWeight.W_500
+                )
+                self.dash_tab_labels[k].color = TEXT if on else MUTED
+            if k in self.dash_tab_bars:
+                self.dash_tab_bars[k].bgcolor = BLUE if on else BG
+        if self.tab == "overview":
+            self.content.content = self._page_overview()
         self._safe_update()
 
     def _safe_update(self) -> None:
@@ -328,334 +711,1027 @@ class ProTerminal:
         except Exception:
             pass
 
-    def _card(self, title: str, value: ft.Control, sub: str = "") -> ft.Container:
+    def _section(self, title: str, *body: ft.Control) -> ft.Container:
+        """Clean center panel — hairline separator, no social-post chrome."""
         return ft.Container(
-            bgcolor=CARD,
-            border=ft.Border.all(1, BORDER),
-            border_radius=12,
-            padding=16,
-            expand=True,
+            padding=ft.Padding.symmetric(horizontal=16, vertical=14),
+            border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
             content=ft.Column(
                 [
-                    ft.Text(title, size=11, color=MUTED, weight=ft.FontWeight.W_600),
-                    value,
-                    ft.Text(sub, size=10, color=MUTED) if sub else ft.Container(),
+                    ft.Text(title, size=15, weight=ft.FontWeight.BOLD, color=TEXT),
+                    *body,
                 ],
-                spacing=4,
+                spacing=8,
+                tight=True,
             ),
         )
 
-    def _btn(self, text: str, color: str, on_click) -> ft.Button:
+    def _section_header(self, title: str, on_refresh) -> ft.Row:
+        """Title row with a circular refresh control."""
+        return ft.Row(
+            [
+                ft.Text(title, size=15, weight=ft.FontWeight.BOLD, color=TEXT, expand=True),
+                ft.Container(
+                    width=32,
+                    height=32,
+                    border_radius=16,
+                    border=ft.Border.all(1, BORDER),
+                    bgcolor=SURFACE,
+                    alignment=ft.Alignment.CENTER,
+                    ink=True,
+                    tooltip="Refresh",
+                    on_click=on_refresh,
+                    content=ft.Icon(ft.Icons.REFRESH, size=16, color=TEXT),
+                ),
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _section_refresh(self, title: str, on_refresh, *body: ft.Control) -> ft.Container:
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=16, vertical=14),
+            border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+            content=ft.Column(
+                [self._section_header(title, on_refresh), *body],
+                spacing=8,
+                tight=True,
+            ),
+        )
+
+    def _log_entry(self, title: str, *body: ft.Control, letter: str = "C") -> ft.Container:
+        """Post-style row reserved for logging / activity feed."""
+        return self._post(title, "@log", *body, letter=letter)
+
+    def _post(
+        self,
+        name: str,
+        handle: str,
+        *body: ft.Control,
+        letter: str = "A",
+    ) -> ft.Container:
+        """Post-style log row — avatar + title + body, hairline separator."""
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+            border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+            content=ft.Row(
+                [
+                    self._avatar(letter, 40),
+                    ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Text(name, size=15, weight=ft.FontWeight.BOLD, color=TEXT),
+                                    ft.Text(handle, size=15, color=MUTED),
+                                ],
+                                spacing=6,
+                            ),
+                            *body,
+                        ],
+                        spacing=4,
+                        expand=True,
+                        tight=True,
+                    ),
+                ],
+                spacing=12,
+                vertical_alignment=ft.CrossAxisAlignment.START,
+            ),
+        )
+
+    def _stat_line(self, label: str, value: ft.Control) -> ft.Row:
+        return ft.Row(
+            [
+                ft.Text(label, size=13, color=MUTED),
+                value,
+            ],
+            spacing=8,
+            wrap=True,
+        )
+
+    def _card(self, title: str, value: ft.Control) -> ft.Container:
+        """Compact metric chip used inside timeline posts / scorecard."""
+        return ft.Container(
+            bgcolor=BG,
+            border=ft.Border.all(1, BORDER),
+            border_radius=8,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            content=ft.Column(
+                [
+                    ft.Text(title, size=12, color=MUTED, weight=ft.FontWeight.W_500),
+                    value,
+                ],
+                spacing=2,
+                tight=True,
+            ),
+        )
+
+    def _panel(self, title: str, *controls: ft.Control) -> ft.Container:
+        return self._section(title, *controls)
+
+    def _btn(self, text: str, color: str, on_click, *, outlined: bool = False) -> ft.Button:
+        if outlined:
+            return ft.Button(
+                text,
+                bgcolor=BG,
+                color=TEXT,
+                style=ft.ButtonStyle(
+                    shape=ft.RoundedRectangleBorder(radius=999),
+                    side=ft.BorderSide(1, BORDER),
+                    padding=ft.Padding.symmetric(horizontal=18, vertical=12),
+                ),
+                on_click=on_click,
+            )
+        fg = "#ffffff" if color in (BLUE, RED, GREEN, LIKE) else "#0f1419"
+        if color in (AMBER, WHITE):
+            fg = "#0f1419"
         return ft.Button(
             text,
             bgcolor=color,
-            color="#fff",
-            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+            color=fg,
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=999),
+                padding=ft.Padding.symmetric(horizontal=18, vertical=12),
+            ),
             on_click=on_click,
         )
 
     def _page_overview(self) -> ft.Column:
+        panels = {
+            "book": self._dash_book,
+            "agent": self._dash_agent,
+            "log": self._dash_log,
+        }
+        body = panels.get(self.dash_tab, self._dash_book)()
+        return ft.Column([body], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
+
+    def _dash_book(self) -> ft.Column:
         return ft.Column(
             [
-                ft.Row(
-                    [
-                        self._btn("▶  START AUTONOMOUS", GREEN, self._start),
-                        self._btn("❚❚  PAUSE", AMBER, self._pause),
-                        self._btn("⚠  PANIC FLATTEN", RED, self._panic),
-                        self._btn("✓  VALIDATE & EXECUTE", BLUE, self._validate_execute),
-                    ],
-                    spacing=10,
-                    wrap=True,
-                ),
-                ft.Container(height=8),
-                ft.Container(
-                    bgcolor=CARD,
-                    border=ft.Border.all(1, BORDER),
-                    border_radius=12,
-                    padding=12,
-                    content=ft.Column(
-                        [
-                            ft.Text(
-                                "Reality Pulse",
-                                color=MUTED,
-                                size=11,
-                                weight=ft.FontWeight.W_600,
-                            ),
-                            self.lbl_pulse_narrative,
-                            ft.Container(height=6),
-                            ft.Text(
-                                "Kahneman System 2",
-                                color=MUTED,
-                                size=11,
-                                weight=ft.FontWeight.W_600,
-                            ),
-                            self.lbl_kahneman,
-                            ft.Divider(color=BORDER, height=1),
-                            ft.Text(
-                                "Order Lab (auto every cycle)",
-                                color=MUTED,
-                                size=11,
-                                weight=ft.FontWeight.W_600,
-                            ),
-                            self.lbl_lab,
-                            ft.Text(
-                                "Auto-reconfig (PnL/lab — no manual force-tweak)",
-                                color=MUTED,
-                                size=11,
-                                weight=ft.FontWeight.W_600,
-                            ),
-                            self.lbl_reconfig,
-                            ft.Text(
-                                "Simplify ×2 (lean pass)",
-                                color=MUTED,
-                                size=11,
-                                weight=ft.FontWeight.W_600,
-                            ),
-                            self.lbl_simplify,
-                        ],
-                        spacing=4,
+                self._section_refresh(
+                    "Book",
+                    self._refresh_book_tab,
+                    ft.Text(
+                        "Live IBKR order blotter — working (unfilled) and session fills. "
+                        "Positions live on the Positions page.",
+                        size=12,
+                        color=MUTED,
                     ),
                 ),
-                ft.Row(
-                    [
-                        self._card("Cycles", self.lbl_cycles, "autonomous iterations"),
-                        self._card("Risk", self.lbl_risk, "protection compliance"),
-                        self._card("Mode", self.lbl_mode, "engine state"),
-                    ],
-                    spacing=12,
+                self._section("Working", self.lbl_working_orders),
+                self._section("Fills", self.lbl_recent_fills),
+            ],
+            spacing=0,
+        )
+
+    def _dash_agent(self) -> ft.Column:
+        mode_stats = ft.Column(
+            [
+                self._stat_line("Mode", self.lbl_mode),
+                self._stat_line("Cycles", self.lbl_cycles),
+                self._stat_line("Risk", self.lbl_risk),
+            ],
+            spacing=4,
+            tight=True,
+        )
+        return ft.Column(
+            [
+                self._section_refresh(
+                    "Agent",
+                    self._refresh_agent_tab,
+                    ft.Text(
+                        "Live decision panel — what the agent is doing now.",
+                        size=12,
+                        color=MUTED,
+                    ),
+                    mode_stats,
                 ),
-                ft.Row(
-                    [
-                        ft.Container(
-                            bgcolor=CARD,
-                            border=ft.Border.all(1, BORDER),
-                            border_radius=12,
-                            padding=16,
-                            expand=2,
-                            content=ft.Column(
-                                [
-                                    ft.Text("Equity Curve", color=MUTED, size=12),
-                                    self.sparkline,
-                                ],
-                                expand=True,
-                            ),
-                        ),
-                        ft.Container(
-                            bgcolor=CARD,
-                            border=ft.Border.all(1, BORDER),
-                            border_radius=12,
-                            padding=12,
-                            expand=1,
-                            content=ft.Column(
-                                [
-                                    ft.Text(
-                                        "Live Positions (conId)",
-                                        color=MUTED,
-                                        size=12,
-                                    ),
-                                    ft.Column(
-                                        [self.ov_pos_table],
-                                        scroll=ft.ScrollMode.AUTO,
-                                        expand=True,
-                                    ),
-                                ],
-                                expand=True,
-                            ),
-                        ),
-                    ],
-                    spacing=12,
-                    expand=True,
+                self._section(
+                    "Last action",
+                    self.brain_action,
+                    self.brain_rationale,
+                    self.lbl_proposal,
                 ),
+                self._section("Reality Pulse", self.lbl_pulse_narrative),
+            ],
+            spacing=0,
+        )
+
+    def _dash_log(self) -> ft.Column:
+        return ft.Column(
+            [
+                self._section_refresh(
+                    "Activity",
+                    self._refresh_log_tab,
+                    ft.Text(
+                        "Chronological feed — connect/start, each cycle outcome, errors. "
+                        "Not the live decision panel (see Agent).",
+                        size=12,
+                        color=MUTED,
+                    ),
+                    self.lbl_cycle_log,
+                ),
+            ],
+            spacing=0,
+        )
+
+    def _refresh_book_tab(self, _=None) -> None:
+        err = self.engine.request_snapshot()
+        if err:
+            self._toast(err, color=AMBER)
+        else:
+            self._toast("Refreshing orders & fills…", color=BLUE)
+        self._sync_widgets()
+        self._safe_update()
+
+    def _refresh_agent_tab(self, _=None) -> None:
+        try:
+            pulse = self.engine.state.reality_pulse or build_reality_pulse(
+                ibkr_connected=self.engine.state.connected,
+                positions=self.engine.state.positions,
+                account=None,
+            )
+            self._apply_clock(pulse)
+        except Exception:
+            pass
+        err = self.engine.request_snapshot()
+        if err:
+            self._toast("Agent view refreshed (broker snapshot unavailable)", color=AMBER)
+        else:
+            self._toast("Refreshing agent view…", color=BLUE)
+        self._sync_widgets()
+        self._safe_update()
+
+    def _refresh_log_tab(self, _=None) -> None:
+        self.engine.drain_apply()
+        self._sync_widgets()
+        self._toast("Activity log refreshed", color=BLUE)
+        self._safe_update()
+
+    def _page_risk(self) -> ft.Column:
+        def _sw_row(label: str, sw: ft.Switch) -> ft.Row:
+            return ft.Row(
+                [ft.Text(label, size=13, color=TEXT, expand=True), sw],
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            )
+
+        posture_block = ft.Column(
+            [
+                self.risk_dd_posture,
+                ft.Text(
+                    "One operator knob. Seeds capital gates and a wide envelope; "
+                    "Grok sizes risk per trade and may set_risk inside the box.",
+                    size=12,
+                    color=MUTED,
+                ),
+            ],
+            spacing=8,
+            tight=True,
+        )
+        knobs = ft.Column(
+            [
+                _sw_row("Pre-trade gates (halt latch)", self.risk_sw_gates),
+                _sw_row("Auto-panic on daily-loss breach", self.risk_sw_auto_panic),
+                _sw_row("Defined-risk options only", self.risk_sw_defined),
+                _sw_row("Cash-only sizing (block SHORT stock)", self.risk_sw_cash),
+                ft.Container(height=8),
+                ft.Text("Current gates (agent-tuned; read-only)", size=12, color=MUTED),
+                *self.risk_tf.values(),
+            ],
+            spacing=10,
+            tight=True,
+        )
+        actions = ft.Row(
+            [
+                self._btn("Apply posture", BLUE, self._apply_risk),
+                self._btn("Resume", GREEN, self._resume_halt, outlined=True),
+                self._btn("Halt entries", RED, self._manual_halt, outlined=True),
+            ],
+            spacing=10,
+            wrap=True,
+        )
+        return ft.Column(
+            [
                 ft.Container(
-                    bgcolor=CARD,
-                    border=ft.Border.all(1, BORDER),
-                    border_radius=12,
-                    padding=14,
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                    border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
                     content=ft.Column(
                         [
+                            ft.Text("Risk", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
                             ft.Text(
-                                "Proposed order breakdown",
+                                "Operator sets posture. Agent sizes per trade inside the envelope. "
+                                "Exits always bypass halt.",
                                 color=MUTED,
-                                size=12,
-                                weight=ft.FontWeight.W_600,
+                                size=14,
                             ),
-                            self.lbl_proposal,
                         ],
                         spacing=6,
                     ),
                 ),
-            ],
-            spacing=12,
-            expand=True,
-            scroll=ft.ScrollMode.AUTO,
-        )
-
-    def _page_tests(self) -> ft.Column:
-        return ft.Column(
-            [
-                ft.Text(
-                    "Test Suite Results — ALL IBKR order types",
-                    size=20,
-                    weight=ft.FontWeight.BOLD,
-                    color=TEXT,
-                ),
-                ft.Text(
-                    "Brutal paper suite: place → validate → cancel (or dry-run). "
-                    "Runs on startup and every cycle — never idle.",
-                    color=MUTED,
-                    size=12,
-                ),
-                self.lbl_brutal,
                 ft.Container(
-                    bgcolor=CARD,
-                    border=ft.Border.all(1, BORDER),
-                    border_radius=12,
-                    padding=12,
+                    padding=16,
                     expand=True,
                     content=ft.Column(
-                        [self.suite_table], scroll=ft.ScrollMode.AUTO, expand=True
+                        [
+                            self.lbl_risk_halt,
+                            self.lbl_risk_status,
+                            self.lbl_risk_envelope,
+                            ft.Container(height=8),
+                            self._section("Posture", posture_block),
+                            ft.Container(height=8),
+                            self._section("Limits", knobs),
+                            ft.Container(height=8),
+                            actions,
+                        ],
+                        scroll=ft.ScrollMode.AUTO,
+                        spacing=8,
                     ),
                 ),
             ],
             expand=True,
-            spacing=10,
+            spacing=0,
         )
+
+    def _load_risk_form(self) -> None:
+        snap = risk_config_snapshot()
+        posture = str(snap.get("risk_posture") or "").strip().lower()
+        if posture in RISK_POSTURES:
+            self.risk_dd_posture.value = posture
+        elif not self.risk_dd_posture.value:
+            self.risk_dd_posture.value = "balanced"
+        self.risk_sw_gates.value = bool(snap.get("risk_gates_enabled", True))
+        self.risk_sw_auto_panic.value = bool(snap.get("auto_panic_on_breach", False))
+        self.risk_sw_defined.value = bool(snap.get("defined_risk_only", False))
+        self.risk_sw_cash.value = bool(snap.get("cash_only", False))
+        for key, tf in self.risk_tf.items():
+            val = snap.get(key, 0)
+            if isinstance(val, float) and val == int(val):
+                tf.value = str(int(val))
+            else:
+                tf.value = str(val)
+        self._sync_risk_envelope_label()
+        self._sync_risk_halt_label()
+
+    def _sync_risk_envelope_label(self) -> None:
+        try:
+            env = risk_envelope_snapshot()
+            eff = env.get("effective_risk_posture") or "(none)"
+            posture = env.get("risk_posture") or "(none)"
+            clamp = " · live-clamped to balanced" if env.get("live_clamped") else ""
+            self.lbl_risk_status.value = (
+                f"Posture {posture} (effective {eff}){clamp} — "
+                "wide envelope; agent sizes per trade."
+            )
+            self.lbl_risk_status.color = MUTED
+            cur = env.get("current") or {}
+            box = env.get("envelope") or {}
+            if box:
+                rt = box.get("max_risk_per_trade_pct") or {}
+                self.lbl_risk_envelope.value = (
+                    f"Envelope: risk/trade {cur.get('max_risk_per_trade_pct')} "
+                    f"[{rt.get('floor')}-{rt.get('ceil')}]; "
+                    f"daily {cur.get('daily_loss_limit_pct')}; "
+                    f"pos {cur.get('max_position_pct')}"
+                )
+            else:
+                self.lbl_risk_envelope.value = (
+                    "Envelope: apply a posture to enable agent set_risk."
+                )
+        except Exception:
+            self.lbl_risk_envelope.value = ""
+
+    def _sync_risk_halt_label(self) -> None:
+        try:
+            from abcxauto.risk_gates import get_risk_gate
+            gate = get_risk_gate()
+            if gate.is_halted:
+                reason = (gate.halt_reason or "halted")[:120]
+                self.lbl_risk_halt.value = f"Halt: {reason}"
+                self.lbl_risk_halt.color = RED
+            else:
+                self.lbl_risk_halt.value = "Halt: clear"
+                self.lbl_risk_halt.color = GREEN
+        except Exception:
+            self.lbl_risk_halt.value = "Halt: n/a"
+            self.lbl_risk_halt.color = MUTED
+
+    def _apply_risk(self, _=None) -> None:
+        try:
+            posture = str(self.risk_dd_posture.value or "balanced").strip().lower()
+            apply_risk_posture(posture)
+            update_risk_config(
+                risk_gates_enabled=bool(self.risk_sw_gates.value),
+                auto_panic_on_breach=bool(self.risk_sw_auto_panic.value),
+                defined_risk_only=bool(self.risk_sw_defined.value),
+                cash_only=bool(self.risk_sw_cash.value),
+            )
+            self._load_risk_form()
+            self.lbl_risk_status.value = (
+                f"Posture {posture} applied — persists; agent sizes per trade."
+            )
+            self.lbl_risk_status.color = GREEN
+            self.page.overlay.append(
+                ft.SnackBar(ft.Text(f"Risk posture: {posture}"), bgcolor=BLUE, open=True)
+            )
+        except Exception as e:
+            self.lbl_risk_status.value = f"Apply failed: {e}"
+            self.lbl_risk_status.color = RED
+            try:
+                self.page.overlay.append(
+                    ft.SnackBar(ft.Text(f"Risk apply failed: {e}"), bgcolor=RED, open=True)
+                )
+            except Exception:
+                pass
+        self._safe_update()
+
+    def _resume_halt(self, _=None) -> None:
+        try:
+            from abcxauto.risk_gates import get_risk_gate
+            get_risk_gate().resume()
+            self.lbl_risk_status.value = "Trading resumed (halt cleared)."
+            self.lbl_risk_status.color = GREEN
+        except Exception as e:
+            self.lbl_risk_status.value = f"Resume failed: {e}"
+            self.lbl_risk_status.color = RED
+        self._sync_risk_halt_label()
+        self._safe_update()
+
+    def _manual_halt(self, _=None) -> None:
+        try:
+            from abcxauto.risk_gates import get_risk_gate
+            get_risk_gate().halt("manual halt from Risk tab", kind="halt")
+            self.lbl_risk_status.value = "New entries halted."
+            self.lbl_risk_status.color = AMBER
+        except Exception as e:
+            self.lbl_risk_status.value = f"Halt failed: {e}"
+            self.lbl_risk_status.color = RED
+        self._sync_risk_halt_label()
+        self._safe_update()
 
     def _page_positions(self) -> ft.Column:
         return ft.Column(
             [
-                ft.Text(
-                    "Positions",
-                    size=20,
-                    weight=ft.FontWeight.BOLD,
-                    color=TEXT,
-                ),
-                ft.Text(
-                    "conId is the single source of truth — STK and OPT for the same symbol "
-                    "are distinct legs.",
-                    color=MUTED,
-                    size=12,
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                    border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+                    content=ft.Column(
+                        [
+                            ft.Text("Positions", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
+                            ft.Text(
+                                "conId is the single source of truth — STK and OPT for the same "
+                                "symbol are distinct legs.",
+                                color=MUTED,
+                                size=14,
+                            ),
+                        ],
+                        spacing=6,
+                    ),
                 ),
                 ft.Container(
-                    bgcolor=CARD,
-                    border=ft.Border.all(1, BORDER),
-                    border_radius=12,
                     padding=12,
                     expand=True,
                     content=ft.Column(
-                        [self.pos_table, ft.Divider(color=BORDER), self.lbl_ledger_snippet],
+                        [
+                            self.pos_table,
+                            ft.Divider(color=BORDER, height=1),
+                            self.lbl_ledger_snippet,
+                        ],
                         scroll=ft.ScrollMode.AUTO,
                     ),
                 ),
             ],
             expand=True,
+            spacing=0,
         )
 
-    def _page_brain(self) -> ft.Column:
+    def _page_scorecard(self) -> ft.Column:
+        today = ft.Row(
+            [
+                self._card("Proposals", self.lbl_sc_proposals),
+                self._card("Allowed", self.lbl_sc_allowed),
+                self._card("Rejected", self.lbl_sc_rejected),
+                self._card("Dispatched OK", self.lbl_sc_dispatch_ok),
+                self._card("Failed", self.lbl_sc_dispatch_failed),
+                self._card("Halts", self.lbl_sc_halts),
+                self._card("Hold vs trade", self.lbl_sc_hold_trade),
+            ],
+            spacing=8,
+            wrap=True,
+        )
         return ft.Column(
             [
-                ft.Text(
-                    "AI Brain — Latest Grok Decision",
-                    size=20,
-                    weight=ft.FontWeight.BOLD,
-                    color=TEXT,
-                ),
                 ft.Container(
-                    bgcolor=CARD,
-                    border=ft.Border.all(1, BORDER),
-                    border_radius=12,
-                    padding=20,
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                    border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
                     content=ft.Column(
                         [
-                            ft.Text("Strategy", color=MUTED, size=11),
-                            self.brain_action,
-                            ft.Divider(color=BORDER),
-                            ft.Text("Rationale", color=MUTED, size=11),
-                            self.brain_rationale,
-                            ft.Divider(color=BORDER),
-                            ft.Text("Raw JSON", color=MUTED, size=11),
-                            self.brain_json,
+                            ft.Text("Scorecard", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
+                            ft.Text(
+                                "Forward-test journal — daily gates, equity, and recent dispatches.",
+                                color=MUTED,
+                                size=14,
+                            ),
+                            self.lbl_sc_day,
                         ],
-                        spacing=8,
+                        spacing=6,
                     ),
                 ),
-            ],
-            expand=True,
-        )
-
-    def _page_logs(self) -> ft.Column:
-        self._rebuild_log_stats()
-        return ft.Column(
-            [
-                ft.Text("Logs & Evolution", size=22, weight=ft.FontWeight.BOLD, color=TEXT),
-                self.log_stats,
-                ft.Row(
-                    [
-                        self.log_search,
-                        self.log_filter,
-                        ft.Switch(
-                            label="Raw JSON",
-                            value=self.raw_json,
-                            active_color=BLUE,
-                            on_change=lambda e: self._toggle_raw(e.control.value),
-                        ),
-                        ft.TextButton("Export All", on_click=self._export_all),
-                        ft.TextButton("Clear", on_click=self._clear_logs),
-                    ]
+                self._section("Today", today),
+                self._section(
+                    "Equity",
+                    ft.Row(
+                        [
+                            ft.Column(
+                                [ft.Text("NetLiq", size=13, color=MUTED), self.lbl_sc_netliq],
+                                spacing=4,
+                            ),
+                            ft.Column(
+                                [
+                                    ft.Text("Agent return", size=13, color=MUTED),
+                                    self.lbl_sc_agent_ret,
+                                ],
+                                spacing=4,
+                            ),
+                        ],
+                        spacing=24,
+                    ),
+                    self.lbl_sc_equity_empty,
+                    self.sc_equity_spark,
                 ),
                 ft.Container(
-                    bgcolor=CARD,
-                    border=ft.Border.all(1, BORDER),
-                    border_radius=12,
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=8),
+                    content=ft.Text(
+                        "Recent activity", color=MUTED, size=13, weight=ft.FontWeight.W_600
+                    ),
+                ),
+                ft.Container(
                     padding=12,
                     expand=True,
-                    content=self.log_timeline,
-                ),
-                ft.Text("Pin Insight", color=MUTED, size=11),
-                self.pin_insight_field,
-            ],
-            spacing=10,
-            expand=True,
-        )
-
-    def _page_settings(self) -> ft.Column:
-        cfg = get_config()
-        return ft.Column(
-            [
-                ft.Text("Settings", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
-                ft.Container(
-                    bgcolor=CARD,
-                    border=ft.Border.all(1, BORDER),
-                    border_radius=12,
-                    padding=20,
                     content=ft.Column(
-                        [
-                            ft.Text(
-                                f"XAI API Key: {'✓ set' if cfg.xai_api_key else '✗ missing'}",
-                                color=TEXT,
-                            ),
-                            ft.Text(f"IBKR: {cfg.ibkr_host}:{cfg.ibkr_port}", color=MUTED),
-                            ft.Text(
-                                f"Cycle sleep: {TWEAKS.get('cycle_sleep_s', 8)}s", color=MUTED
-                            ),
-                            ft.Text(
-                                f"Tweaks: {json.dumps(TWEAKS) or '{}'}",
-                                size=11,
-                                color=AMBER,
-                                selectable=True,
-                            ),
-                            ft.Text(
-                                "Fallback Tk cockpit: python -m abcxauto --tk",
-                                size=11,
-                                color=MUTED,
-                            ),
-                        ],
-                        spacing=8,
+                        [self.sc_dispatch_table], scroll=ft.ScrollMode.AUTO, expand=True
                     ),
                 ),
             ],
             expand=True,
+            spacing=0,
+            scroll=ft.ScrollMode.AUTO,
         )
+
+
+    def _sync_ibkr_account_label(self) -> None:
+        s = self.engine.state
+        cfg = get_config()
+        paper = bool(cfg.is_paper)
+        aid = str(getattr(s, "ibkr_account_id", "") or "")
+        aname = str(getattr(s, "ibkr_account_name", "") or "")
+        self.lbl_account_mode.value = "Paper" if paper else "Live"
+        self.lbl_account_mode.color = GREEN if paper else RED
+        self.btn_account_mode.border = ft.Border.all(1, GREEN if paper else RED)
+        if s.connected and aid:
+            self.lbl_account_name.value = aname or f"IBKR {aid}"
+            self.lbl_account_id.value = aid
+        elif s.connected:
+            self.lbl_account_name.value = aname or "IBKR"
+            self.lbl_account_id.value = "Account id pending…"
+        else:
+            self.lbl_account_name.value = "IBKR"
+            self.lbl_account_id.value = "Not connected"
+
+    def _toggle_trading_mode(self, _=None) -> None:
+        """Flip Paper ↔ Live from the account chip (live requires confirm phrase)."""
+        if get_config().is_paper:
+            self._open_live_confirm_dialog()
+        else:
+            try:
+                self.engine.switch_trading_mode("paper")
+                self._after_mode_change()
+            except Exception as e:
+                self.page.overlay.append(
+                    ft.SnackBar(ft.Text(str(e)), bgcolor=RED, open=True)
+                )
+                self._safe_update()
+
+    def _open_live_confirm_dialog(self) -> None:
+        self.tf_live_confirm.value = ""
+
+        def _cancel(_=None) -> None:
+            dlg.open = False
+            self._safe_update()
+
+        def _confirm(_=None) -> None:
+            phrase = str(self.tf_live_confirm.value or "").strip()
+            try:
+                self.engine.switch_trading_mode("live", live_confirm=phrase)
+                dlg.open = False
+                self._after_mode_change()
+            except Exception as e:
+                self.page.overlay.append(
+                    ft.SnackBar(ft.Text(str(e)), bgcolor=RED, open=True)
+                )
+                self._safe_update()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            bgcolor=SURFACE,
+            title=ft.Text("Switch to Live?", color=TEXT),
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "Real-money mode. Type the exact confirm phrase:",
+                        size=13,
+                        color=MUTED,
+                    ),
+                    ft.Text(LIVE_CONFIRM_PHRASE, size=12, color=TEXT, selectable=True),
+                    self.tf_live_confirm,
+                ],
+                tight=True,
+                spacing=12,
+                width=360,
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=_cancel),
+                ft.TextButton("Switch to Live", on_click=_confirm),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            shape=ft.RoundedRectangleBorder(radius=16),
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self._safe_update()
+
+    def _after_mode_change(self) -> None:
+        self._sync_ibkr_account_label()
+        self._apply_suite_nav_visibility()
+        self.page.overlay.append(
+            ft.SnackBar(
+                ft.Text(f"Mode → {self.lbl_account_mode.value}"),
+                bgcolor=BLUE,
+                open=True,
+            )
+        )
+        self._safe_update()
+
+    def _apply_suite_nav_visibility(self) -> None:
+        paper = bool(get_config().is_paper)
+        btn = self.sidebar_btns.get("suite")
+        if btn is not None:
+            btn.visible = paper
+        if not paper and self.tab == "suite":
+            self._show_tab("overview")
+
+    def _page_suite(self) -> ft.Column:
+
+
+
+        from abcxauto.order_suite import SUITE_STRATEGIES
+        from abcxauto.strategy_params import OPTION_STRATEGIES
+
+        manage_keys = {
+            "oca", "modify_stop", "modify_target", "cancel_order",
+            "trailing_stop", "trailing_stop_limit", "roll_option",
+        }
+        stockish, options, manage = [], [], []
+        for name in SUITE_STRATEGIES:
+            if name in OPTION_STRATEGIES and name != "roll_option":
+                options.append(name)
+            elif name in manage_keys:
+                manage.append(name)
+            else:
+                stockish.append(name)
+
+        filt = self.suite_filter
+        groups = [
+            ("stock", "Stock / auction / algo", stockish),
+            ("manage", "Manage / protect", manage),
+            ("options", "Options", options),
+        ]
+        if filt != "all":
+            groups = [g for g in groups if g[0] == filt]
+
+        def _filter_chip(key: str, label: str) -> ft.Container:
+            on = self.suite_filter == key
+            return ft.Container(
+                content=ft.Text(
+                    label,
+                    size=12,
+                    weight=ft.FontWeight.BOLD if on else ft.FontWeight.W_500,
+                    color=TEXT if on else MUTED,
+                ),
+                bgcolor=HOVER if on else BG,
+                border=ft.Border.all(1, BLUE if on else BORDER),
+                border_radius=999,
+                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                ink=True,
+                on_click=lambda e, k=key: self._set_suite_filter(k),
+            )
+
+        def _rows(names: list[str]) -> list[ft.Control]:
+            out: list[ft.Control] = []
+            for name in names:
+                status = self.suite_status.get(name)
+                if status is None:
+                    status = ft.Text("—", size=12, color=MUTED, selectable=True)
+                    self.suite_status[name] = status
+                out.append(
+                    ft.Container(
+                        padding=ft.Padding.symmetric(horizontal=16, vertical=10),
+                        border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+                        content=ft.Row(
+                            [
+                                ft.Column(
+                                    [
+                                        ft.Text(
+                                            name, size=14,
+                                            weight=ft.FontWeight.W_600, color=TEXT,
+                                        ),
+                                        status,
+                                    ],
+                                    spacing=2,
+                                    expand=True,
+                                    tight=True,
+                                ),
+                                ft.TextButton(
+                                    "Test",
+                                    style=ft.ButtonStyle(color=BLUE),
+                                    on_click=lambda e, n=name: self._test_strategy(n),
+                                ),
+                            ],
+                            spacing=12,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                    )
+                )
+            return out
+
+        def _group(title: str, names: list[str]) -> list[ft.Control]:
+            if not names:
+                return []
+            return [
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=10),
+                    content=ft.Text(
+                        title, size=13, weight=ft.FontWeight.BOLD, color=MUTED
+                    ),
+                ),
+                *_rows(names),
+            ]
+
+        header = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+            border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "Starts the engine if needed, then place→cancel each type on paper IBKR. Paper mode only.",
+                        color=MUTED,
+                        size=13,
+                    ),
+                    ft.Row(
+                        [
+                            _filter_chip("all", "All"),
+                            _filter_chip("stock", "Stock"),
+                            _filter_chip("manage", "Manage"),
+                            _filter_chip("options", "Options"),
+                        ],
+                        spacing=8,
+                        wrap=True,
+                    ),
+                    ft.Row(
+                        [self._btn("Re-test all", BLUE, self._retest_suite)],
+                        spacing=8,
+                    ),
+                    self.lbl_order_suite,
+                ],
+                spacing=10,
+            ),
+        )
+        body: list[ft.Control] = [header]
+        for _, title, names in groups:
+            body.extend(_group(title, names))
+        return ft.Column(
+            body,
+            spacing=0,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
+        )
+
+    def _set_suite_filter(self, key: str) -> None:
+        self.suite_filter = key
+        if self.tab == "suite":
+            self.content.content = self._page_suite()
+        self._safe_update()
+
+    def _refresh_suite_statuses(self) -> None:
+        suite = getattr(self.engine.state, "order_suite", None) or {}
+        by_name = {
+            str(r.get("strategy")): r
+            for r in (suite.get("results") or [])
+            if r.get("strategy")
+        }
+        for name, lbl in self.suite_status.items():
+            row = by_name.get(name)
+            if not row:
+                continue
+            ok = bool(row.get("pass"))
+            detail = str(row.get("detail") or row.get("mode") or "")[:80]
+            lbl.value = f"{'PASS' if ok else 'FAIL'} — {detail}"
+            lbl.color = GREEN if ok else RED
+
+    def _test_strategy(self, strategy: str) -> None:
+        if not get_config().is_paper:
+            self.page.overlay.append(
+                ft.SnackBar(ft.Text("Test Suite is paper-only"), bgcolor=AMBER, open=True)
+            )
+            self._safe_update()
+            return
+        status = self.suite_status.get(strategy)
+        if status is None:
+            status = ft.Text("—", size=12, color=MUTED, selectable=True)
+            self.suite_status[strategy] = status
+        status.value = "Starting paper IBKR…"
+        status.color = AMBER
+        self._safe_update()
+        try:
+            row = self.engine.run_strategy_test(strategy)
+        except Exception as e:
+            row = {"pass": False, "detail": str(e)[:200], "mode": "broker_fail"}
+        detail = str(row.get("detail") or row.get("mode") or "")[:80]
+        if row.get("mode") == "paper_pending":
+            status.value = f"Running on paper… {detail}"
+            status.color = BLUE
+            self.page.overlay.append(
+                ft.SnackBar(
+                    ft.Text(f"{strategy}: running on paper…"),
+                    bgcolor=BLUE,
+                    open=True,
+                )
+            )
+        else:
+            ok = bool(row.get("pass"))
+            status.value = f"{'PASS' if ok else 'FAIL'} — {detail}"
+            status.color = GREEN if ok else RED
+            self.page.overlay.append(
+                ft.SnackBar(
+                    ft.Text(f"{strategy}: {'PASS' if ok else 'FAIL'}"),
+                    bgcolor=GREEN if ok else RED,
+                    open=True,
+                )
+            )
+        self._sync_widgets()
+        self._safe_update()
+
+    def _toast(self, msg: str, *, color: str = BLUE) -> None:
+        self.page.overlay.append(ft.SnackBar(ft.Text(msg), bgcolor=color, open=True))
+
+    def _toggle_run(self, _=None) -> None:
+        s = self.engine.state
+        if s.running and not getattr(s, "paused", False) and getattr(s, "autonomous", False):
+            self.engine.pause_engine()
+            self._toast("Agent stopped — IBKR stays connected", color=AMBER)
+        else:
+            err = self.engine.start()
+            if err:
+                self._toast(err, color=RED)
+            else:
+                self._toast("Starting agent (Grok cycles)…", color=BLUE)
+        self._sync_widgets()
+        self._safe_update()
+
+    def _toggle_connect(self, _=None) -> None:
+        logger.info("Connect IBKR clicked")
+        s = self.engine.state
+        linked = bool(s.connected) or (
+            self.engine.worker is not None and self.engine.worker.is_alive()
+        )
+        if linked:
+            self._open_disconnect_confirm_dialog()
+            return
+        err = self.engine.connect_broker()
+        if err:
+            self._toast(err, color=RED)
+        else:
+            self._toast("Connecting to IBKR (TWS/Gateway)…", color=BLUE)
+        self._sync_widgets()
+        self._safe_update()
+
+    def _open_disconnect_confirm_dialog(self) -> None:
+        s = self.engine.state
+        agent_on = bool(s.running) and getattr(s, "autonomous", False)
+        warn = (
+            "This stops the agent and tears down the IBKR link. "
+            "Open orders and positions are left as-is at the broker."
+            if agent_on
+            else (
+                "This tears down the IBKR link. "
+                "Open orders and positions are left as-is at the broker."
+            )
+        )
+
+        def _cancel(_=None) -> None:
+            dlg.open = False
+            self._safe_update()
+
+        def _confirm(_=None) -> None:
+            dlg.open = False
+            if getattr(s, "autonomous", False) and s.running:
+                self.engine.pause_engine()
+            self.engine.stop_engine()
+            self._toast("Disconnected from IBKR", color=AMBER)
+            self._sync_widgets()
+            self._safe_update()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            bgcolor=SURFACE,
+            title=ft.Text("Disconnect IBKR?", color=TEXT),
+            content=ft.Text(warn, size=13, color=MUTED),
+            actions=[
+                ft.TextButton("Cancel", on_click=_cancel),
+                ft.TextButton(
+                    "Disconnect",
+                    on_click=_confirm,
+                    style=ft.ButtonStyle(color=RED),
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            shape=ft.RoundedRectangleBorder(radius=16),
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self._safe_update()
+
+    def _refresh_connect_btn(self) -> None:
+        s = self.engine.state
+        linked = bool(s.connected) or (
+            self.engine.worker is not None and self.engine.worker.is_alive()
+        )
+        if linked:
+            self.btn_connect.content = "Disconnect IBKR"
+            self.btn_connect.color = RED
+            self.btn_connect.style = ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=999),
+                side=ft.BorderSide(1, RED),
+                padding=ft.Padding.symmetric(horizontal=18, vertical=12),
+            )
+        else:
+            self.btn_connect.content = "Connect IBKR"
+            self.btn_connect.color = TEXT
+            self.btn_connect.style = ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=999),
+                side=ft.BorderSide(1, BORDER),
+                padding=ft.Padding.symmetric(horizontal=18, vertical=12),
+            )
+
+    def _refresh_run_btn(self) -> None:
+        s = self.engine.state
+        running = bool(s.running) and getattr(s, "autonomous", False) and not getattr(s, "paused", False)
+        if running:
+            self.btn_run.content = "Stop agent"
+            self.btn_run.bgcolor = SURFACE
+            self.btn_run.color = TEXT
+            self.btn_run.style = ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=999),
+                side=ft.BorderSide(1, BORDER),
+                padding=ft.Padding.symmetric(horizontal=18, vertical=12),
+            )
+        else:
+            self.btn_run.content = "Start agent"
+            self.btn_run.bgcolor = WHITE
+            self.btn_run.color = "#0f1419"
+            self.btn_run.style = ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=999),
+                padding=ft.Padding.symmetric(horizontal=18, vertical=12),
+            )
+
+    def _refresh_service_status(self) -> None:
+        try:
+            from abcxauto.connections import connection_status
+            st = connection_status(self.engine.conn)
+        except Exception:
+            st = {}
+        s = self.engine.state
+        ibkr_ok = bool(s.connected)
+        xai_ok = bool(st.get("xai_configured"))
+        mda_ok = bool(st.get("mda_configured"))
+        mode = str(st.get("trading_mode") or get_config().trading_mode or "paper")
+        if s.status == "Connecting" and not ibkr_ok:
+            self.dot_conn.bgcolor = AMBER
+            self.lbl_ibkr_status.value = "Connecting…"
+            self.lbl_ibkr_status.color = AMBER
+        else:
+            self.dot_conn.bgcolor = GREEN if ibkr_ok else RED
+            self.lbl_ibkr_status.value = f"Connected ({mode})" if ibkr_ok else "Disconnected"
+            self.lbl_ibkr_status.color = GREEN if ibkr_ok else MUTED
+        self.dot_xai.bgcolor = GREEN if xai_ok else RED
+        self.lbl_xai_status.value = "Ready" if xai_ok else "Missing key"
+        self.lbl_xai_status.color = GREEN if xai_ok else MUTED
+        self.dot_mda.bgcolor = GREEN if mda_ok else RED
+        self.lbl_mda_status.value = "Ready" if mda_ok else "Not configured"
+        self.lbl_mda_status.color = GREEN if mda_ok else MUTED
+        # Surface one-shot connect/start failures from the worker.
+        err = getattr(s, "last_error", None)
+        if err:
+            s.last_error = None
+            self._toast(str(err), color=RED)
 
     def _start(self, _=None) -> None:
         err = self.engine.start()
@@ -679,32 +1755,21 @@ class ProTerminal:
         self._sync_widgets()
         self._safe_update()
 
-    def _validate_execute(self, _=None) -> None:
-        impact = self.engine.validate_last_impact()
-        if not impact.get("ok"):
+    def _retest_suite(self, _=None) -> None:
+        """Manual re-test: paper brokerage place→cancel when connected."""
+        if not get_config().is_paper:
             self.page.overlay.append(
-                ft.SnackBar(
-                    ft.Text(f"Blocked: {impact.get('message')}"),
-                    bgcolor=RED,
-                    open=True,
-                )
+                ft.SnackBar(ft.Text("Test Suite is paper-only"), bgcolor=AMBER, open=True)
             )
-            self._sync_widgets()
             self._safe_update()
             return
-        self.engine.execute_last_proposal()
+        self.engine.run_manual_suite()
         self.page.overlay.append(
-            ft.SnackBar(
-                ft.Text(impact.get("gate") or "Executing validated proposal…"),
-                bgcolor=GREEN,
-                open=True,
-            )
+            ft.SnackBar(ft.Text("Starting paper suite (place→cancel)…"), bgcolor=BLUE, open=True)
         )
-        self._sync_widgets()
         self._safe_update()
 
     async def _reveal_window(self) -> None:
-        """Force the desktop client past the Working… splash once controls exist."""
         try:
             await self.page.window.wait_until_ready_to_show()
         except Exception:
@@ -721,26 +1786,25 @@ class ProTerminal:
 
     async def _poll_loop(self) -> None:
         while True:
-            prev_cycles = self.engine.state.cycles
             self.engine.drain_apply()
             self._sync_widgets()
-            if self.engine.state.cycles != prev_cycles and self.tab == "logs":
-                self._refresh_timeline()
+            if self.tab == "scorecard":
+                self._refresh_scorecard(force=False)
             self._safe_update()
             await asyncio.sleep(0.12)
 
     async def _clock_loop(self) -> None:
-        """Refresh Market Clock even when the rocket is idle."""
         while True:
             try:
-                pulse = self.engine.state.reality_pulse
-                if not pulse:
-                    pulse = build_reality_pulse(
-                        ibkr_connected=self.engine.state.connected,
-                        positions=self.engine.state.positions,
-                        account=None,
-                    )
+                pulse = self.engine.state.reality_pulse or build_reality_pulse(
+                    ibkr_connected=self.engine.state.connected,
+                    positions=self.engine.state.positions,
+                    account=None,
+                )
                 self._apply_clock(pulse)
+                self._refresh_account_performance()
+                await self._refresh_returns()
+                await self._refresh_news()
                 self._safe_update()
             except Exception:
                 pass
@@ -752,735 +1816,499 @@ class ProTerminal:
         status = (view.get("session_status") or "closed").lower()
         self.lbl_session_badge.value = view.get("session") or "—"
         self.lbl_session_badge.color = (
-            GREEN
-            if status == "regular"
+            GREEN if status == "regular"
             else (AMBER if status in ("premarket", "postmarket") else MUTED)
         )
-        self.lbl_countdown.value = view.get("countdown") or "—"
-        self.lbl_data_age.value = f"data {view.get('data_age') or 'n/a'}"
+        self.lbl_countdown_title.value = (
+            "Open time" if view.get("countdown_to") == "open" else "Close time"
+        )
+        self.lbl_countdown.value = view.get("countdown_human") or "—"
+        self.lbl_data_age.value = view.get("ibkr_refresh") or "n/a"
         if pulse.get("narrative"):
             self.lbl_pulse_narrative.value = pulse["narrative"]
 
-    def _sync_widgets(self) -> None:
-        s = self.engine.state
-        self.lbl_cycles.value = str(s.cycles)
-        self.lbl_equity.value = f"${s.equity:,.0f}"
-        self.lbl_pnl.value = f"${s.pnl_chg:+.2f}"
-        self.lbl_pnl.color = GREEN if s.pnl_chg >= 0 else RED
-        self.lbl_risk.value = s.risk
-        self.lbl_status.value = s.status
-        mode_color = (
-            GREEN if s.running else (AMBER if getattr(s, "paused", False) else MUTED)
-        )
-        self.lbl_status.color = mode_color
-        self.lbl_mode.value = s.status
-        self.lbl_mode.color = mode_color
-        self.dot_conn.bgcolor = GREEN if s.connected else RED
-        self.brain_action.value = s.brain_strat
-        self.brain_rationale.value = s.brain_rationale
-        self.brain_json.value = json.dumps(s.last_action, indent=2)
-        act = s.last_action or {}
-        impact = getattr(s, "last_impact", None) or act.get("_impact") or {}
-        self.lbl_proposal.value = (
-            f"strategy={s.brain_strat}  target_conId={act.get('target_conId') or '—'}\n"
-            f"params={json.dumps(act.get('params') or {}, default=str)[:280]}\n"
-            f"result={json.dumps(s.last_result or {}, default=str)[:200]}\n"
-            f"impact={impact.get('gate') or '—'}"
-        )
-        inv = getattr(s, "inventory", "") or ""
-        self.lbl_ledger_snippet.value = inv[:2500] if inv else "Ledger empty"
-        pulse = getattr(s, "reality_pulse", None) or {}
-        if pulse:
-            self._apply_clock(pulse)
-        ktrace = getattr(s, "kahneman_trace", None) or ""
-        kobj = getattr(s, "kahneman", None) or {}
-        if ktrace:
-            self.lbl_kahneman.value = ktrace[:1200]
-        elif kobj:
-            self.lbl_kahneman.value = json.dumps(kobj, default=str)[:1200]
-        lab = getattr(s, "order_lab", None) or {}
-        if lab or getattr(s, "lab_summary", None):
-            self.lbl_lab.value = (
-                getattr(s, "lab_summary", None)
-                or f"lab pass_rate={lab.get('pass_rate')}"
-            )[:900]
-            self.lbl_lab.color = (
-                GREEN if float(lab.get("pass_rate") or 0) >= 0.9 else AMBER
-            )
-        reconf = getattr(s, "reconfig", None) or {}
-        if reconf:
-            self.lbl_reconfig.value = str(reconf.get("summary") or "—")[:500]
-        simp = getattr(s, "simplify", None) or {}
-        retest = getattr(s, "retest", None) or {}
-        if simp or retest:
-            self.lbl_simplify.value = (
-                f"{simp.get('summary') or '—'} | {retest.get('summary') or ''}"
-            )[:600]
-        brutal = getattr(s, "brutal_suite", None) or {}
-        if brutal or getattr(s, "brutal_summary", None):
-            self.lbl_brutal.value = (
-                getattr(s, "brutal_summary", None)
-                or brutal.get("summary")
-                or "—"
-            )[:900]
-            self.lbl_brutal.color = (
-                GREEN if float(brutal.get("pass_rate") or 0) >= 0.9 else AMBER
-            )
-            self._refresh_suite_table(brutal.get("results") or [])
-        rows = self._position_rows(s.positions)
-        self.ov_pos_table.rows = rows
-        self.pos_table.rows = rows
-        self.sparkline.content = _equity_chart_control(s.equity_hist)
+    def _format_return_pct(self, value) -> tuple[str, str]:
+        """Return (label, color) for a fractional return."""
+        if value is None:
+            return "—", MUTED
+        try:
+            pct = float(value) * 100.0
+        except (TypeError, ValueError):
+            return "—", MUTED
+        color = GREEN if pct >= 0 else RED
+        return f"{pct:+.2f}%", color
 
-    def _refresh_suite_table(self, results: list) -> None:
-        rows = []
-        for r in (results or [])[:80]:
-            ok = bool(r.get("pass"))
+    def _render_news_list(self, items: list[dict], *, fallback: str = "") -> None:
+        rows: list[ft.Control] = []
+        for it in (items or [])[:10]:
+            hl = str(it.get("headline") or "").strip()
+            if not hl:
+                continue
+            sym = str(it.get("symbol") or "").upper()
+            src = str(it.get("source") or "")
+            if src.startswith("http"):
+                # keep host only for compactness
+                try:
+                    from urllib.parse import urlparse
+                    host = urlparse(src).netloc or src
+                except Exception:
+                    host = src
+            else:
+                host = src
+            meta = " · ".join(x for x in (sym, host) if x)
             rows.append(
-                ft.DataRow(
-                    cells=[
-                        ft.DataCell(
-                            ft.Text(str(r.get("strategy", "?")), color=TEXT, size=11)
-                        ),
-                        ft.DataCell(
-                            ft.Text(
-                                "PASS" if ok else "FAIL",
-                                color=GREEN if ok else RED,
-                                weight=ft.FontWeight.BOLD,
-                            )
-                        ),
-                        ft.DataCell(
-                            ft.Text(
-                                str(r.get("mode") or r.get("phase") or "—"),
-                                color=MUTED,
-                                size=11,
-                            )
-                        ),
-                        ft.DataCell(
-                            ft.Text(
-                                str(r.get("detail") or "")[:80],
-                                color=MUTED,
-                                size=10,
-                                selectable=True,
-                            )
-                        ),
-                    ]
+                ft.Container(
+                    padding=ft.Padding.symmetric(vertical=8),
+                    border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+                    content=ft.Column(
+                        [
+                            ft.Text(hl, size=13, color=TEXT, weight=ft.FontWeight.W_500),
+                            ft.Text(meta or "news", size=11, color=MUTED),
+                        ],
+                        spacing=2,
+                        tight=True,
+                    ),
                 )
             )
         if not rows:
+            text = fallback or "No headlines yet."
             rows = [
-                ft.DataRow(
-                    cells=[
-                        ft.DataCell(ft.Text("Waiting for suite…", color=MUTED))
-                    ]
-                    + [ft.DataCell(ft.Text(""))] * 3
+                ft.Container(
+                    padding=ft.Padding.symmetric(vertical=8),
+                    content=ft.Text(text, size=13, color=MUTED, selectable=True),
                 )
             ]
-        self.suite_table.rows = rows
+        self.news_list.controls = rows
 
-    def _position_rows(self, positions: list[dict]) -> list[ft.DataRow]:
-        if not positions:
-            return [
-                ft.DataRow(
-                    cells=[ft.DataCell(ft.Text("No positions", color=MUTED))] * 6
-                )
-            ]
-        rows = []
-        for p in positions[:50]:
-            sec = str(p.get("sec_type") or p.get("secType") or "STK").upper()
-            pnl = float(
-                p.get("unrealized_pnl")
-                or p.get("unrealizedPNL")
-                or 0
+    def _refresh_account_performance(self) -> None:
+        """IBKR live equity/daily; horizon returns come from journal NAV history."""
+        s = self.engine.state
+        self.lbl_equity.value = f"${float(s.equity or 0):,.0f}"
+        self.lbl_pnl.value = f"${float(s.pnl or 0):+,.2f}"
+        self.lbl_pnl.color = GREEN if float(s.pnl or 0) >= 0 else RED
+        if not getattr(self, "_ret_cache", None):
+            self.lbl_ret_source.value = "IBKR NAV — building history…"
+            self.lbl_ret_source.color = MUTED
+
+    def _nav_disclaimer(self, perf: dict) -> str:
+        """Short tracking-since / updated line for the Account card."""
+        src = str((perf or {}).get("source") or "none")
+        if src != "ibkr_nav":
+            return "IBKR NAV — building history…"
+        start = (perf or {}).get("history_start")
+        days = (perf or {}).get("history_days")
+        as_of = (perf or {}).get("as_of")
+        start_bit = "—"
+        if start:
+            try:
+                dt = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+                start_bit = dt.strftime("%Y-%m-%d")
+            except ValueError:
+                start_bit = str(start)[:10]
+        days_bit = f" ({int(days)}d)" if days is not None else ""
+        updated_bit = ""
+        if as_of:
+            try:
+                dt = datetime.fromisoformat(str(as_of).replace("Z", "+00:00"))
+                updated_bit = f" · updated {dt.strftime('%H:%MZ')}"
+            except ValueError:
+                updated_bit = f" · updated {str(as_of)[:16]}"
+        return f"IBKR NAV since {start_bit}{days_bit}{updated_bit}"
+
+    def _apply_return_perf(self, perf: dict) -> None:
+        self.lbl_ret_source.value = self._nav_disclaimer(perf)
+        self.lbl_ret_source.color = MUTED
+        for lbl_attr, col_attr, key in (
+            ("lbl_ret_1w", "col_ret_1w", "ret_1w"),
+            ("lbl_ret_3m", "col_ret_3m", "ret_3m"),
+            ("lbl_ret_1y", "col_ret_1y", "ret_1y"),
+        ):
+            raw = (perf or {}).get(key)
+            label, color = self._format_return_pct(raw)
+            getattr(self, lbl_attr).value = label
+            getattr(self, lbl_attr).color = color
+            col = getattr(self, col_attr, None)
+            if col is not None:
+                col.visible = raw is not None
+
+    async def _refresh_returns(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and getattr(self, "_ret_last_fetch", 0) and (now - self._ret_last_fetch) < 120.0:
+            return
+        self._ret_last_fetch = now
+        try:
+            from abcxauto.account_returns import compute_account_returns
+            perf = compute_account_returns(
+                equity=self.engine.state.equity,
+                daily_pnl=self.engine.state.pnl,
             )
-            pnl_color = GREEN if pnl >= 0 else RED
+            self._ret_cache = perf
+            self._apply_return_perf(perf)
+        except Exception:
+            self.lbl_ret_source.value = "IBKR NAV — error"
+            self.lbl_ret_source.color = MUTED
+
+
+    async def _refresh_news(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - self._news_last_fetch) < 60.0:
+            return
+        self._news_last_fetch = now
+        try:
+            from abcxauto.news_feed import fetch_agent_news
+            unique = await fetch_agent_news(
+                self.engine.state.positions, force=force, per_symbol=5
+            )
+        except Exception:
+            unique = []
+        self._news_cache = unique
+        self._render_news_list(unique)
+
+    def _sync_widgets(self) -> None:
+        s = self.engine.state
+        self._sync_ibkr_account_label()
+        self._apply_suite_nav_visibility()
+        self.lbl_cycles.value = str(s.cycles)
+        self.lbl_equity.value = f"${s.equity:,.0f}"
+        self.lbl_pnl.value = f"${s.pnl:+.2f}"
+        self.lbl_pnl.color = GREEN if s.pnl >= 0 else RED
+        self._refresh_account_performance()
+        self.lbl_risk.value = s.risk
+        mode_color = GREEN if s.running else (AMBER if getattr(s, "paused", False) else MUTED)
+        self.lbl_status.value = self.lbl_mode.value = s.status
+        self.lbl_status.color = self.lbl_mode.color = mode_color
+        self._refresh_run_btn()
+        self._refresh_connect_btn()
+        self._refresh_service_status()
+        self.brain_action.value = s.brain_strat
+        self.brain_rationale.value = s.brain_rationale
+        act = s.last_action or {}
+        strat = s.brain_strat or act.get("strategy") or act.get("action") or "—"
+        result = s.last_result or {}
+        bit = f"  ·  {json.dumps(result, default=str)[:120]}" if result else ""
+        self.lbl_proposal.value = f"{strat}  ·  conId={act.get('target_conId') or '—'}{bit}"
+        inv = getattr(s, "inventory", "") or ""
+        self.lbl_ledger_snippet.value = inv[:2500] if inv else "Ledger empty"
+        port = getattr(s, "portfolio", None) or {}
+        netliq = float(port.get("net_liquidation") if port.get("net_liquidation") is not None
+                       else s.equity or 0)
+        daily = float(port.get("daily_pnl") if port.get("daily_pnl") is not None else s.pnl or 0)
+        unprotected_n = int(
+            port.get("unprotected_count") if port.get("unprotected_count") is not None
+            else getattr(s, "unprotected_count", 0) or 0
+        )
+        decision = str(port.get("last_decision") or getattr(s, "last_decision", None) or "—")
+        halted = bool(port.get("halted") if "halted" in port else getattr(s, "halted", False))
+        self.lbl_book_netliq.value = f"${netliq:,.0f}"
+        self.lbl_book_pnl.value = f"${daily:+.2f}"
+        self.lbl_book_pnl.color = GREEN if daily >= 0 else RED
+        self.lbl_book_unprotected.value = str(unprotected_n)
+        self.lbl_book_unprotected.color = RED if unprotected_n else GREEN
+        self.lbl_book_decision.value = decision
+        self.lbl_book_decision.color = AMBER if decision == "hold" else TEXT
+        self.lbl_book_halt.value = "HALTED" if halted else "clear"
+        self.lbl_book_halt.color = RED if halted else GREEN
+        health = getattr(s, "mandate_health", "green") or "green"
+        health_label = getattr(s, "mandate_health_label", "") or ""
+        self.lbl_mandate_health.value = (
+            f"{health} — {health_label}" if health_label else str(health)
+        )
+        self.lbl_mandate_health.color = (
+            RED if health == "red" else (AMBER if health == "amber" else GREEN)
+        )
+        if pulse := (getattr(s, "reality_pulse", None) or {}):
+            self._apply_clock(pulse)
+        suite = getattr(s, "order_suite", None) or {}
+        if suite or getattr(s, "order_suite_summary", None):
+            summary = (
+                getattr(s, "order_suite_summary", None) or suite.get("summary") or "—"
+            )[:900]
+            self.lbl_order_suite.value = summary
+            rate = float(suite.get("pass_rate") or 0)
+            self.lbl_order_suite.color = GREEN if rate >= 0.9 else AMBER
+            passed = suite.get("passed")
+            failed = suite.get("failed")
+            mode = suite.get("mode") or "dry_run"
+            if passed is not None:
+                self.lbl_suite_chip.value = (
+                    f"Suite: {passed} pass / {failed or 0} fail ({mode})"
+                )
+                self.lbl_suite_chip.color = GREEN if rate >= 0.9 else AMBER
+            if self.tab == "suite":
+                self._refresh_suite_statuses()
+        else:
+            self.lbl_suite_chip.value = "Suite: idle"
+            self.lbl_suite_chip.color = MUTED
+        self.pos_table.rows = self._position_rows(s.positions)
+        self.lbl_pos_summary.value = self._positions_summary(s.positions)
+        self.lbl_working_orders.value = self._format_working_orders(
+            getattr(s, "open_orders", None) or []
+        )
+        self.lbl_working_orders.color = TEXT if (s.open_orders or []) else MUTED
+        self.lbl_recent_fills.value = self._format_recent_fills(
+            getattr(s, "recent_fills", None) or []
+        )
+        self.lbl_recent_fills.color = TEXT if (getattr(s, "recent_fills", None) or []) else MUTED
+        self.lbl_cycle_log.value = self._cycle_log_text(s.records)
+        if self.tab == "risk":
+            self._sync_risk_halt_label()
+
+    def _cycle_log_text(self, records: list[dict]) -> str:
+        lines: list[str] = []
+        for r in reversed(list(records or [])[-30:]):
+            kind = str(r.get("type") or "cycle").lower()
+            ts = str(r.get("ts") or "")
+            if kind in ("error", "err"):
+                lines.append(f"{ts}  ERR  {r.get('msg', 'error')}")
+            elif kind == "panic":
+                lines.append(f"{ts}  FLATTEN  Close All Positions")
+            elif kind in ("connect", "start", "pause", "disconnect", "log"):
+                tag = kind.upper()
+                lines.append(f"{ts}  {tag}  {r.get('msg') or '—'}")
+            elif kind == "order_suite":
+                lines.append(f"{ts}  SUITE  {r.get('msg') or r.get('lab_summary') or '—'}")
+            else:
+                strat = r.get("strat") or (r.get("action_obj") or {}).get("strategy") or "—"
+                res = r.get("result") or {}
+                status = str(res.get("status") or res.get("ok") or "ok")
+                rationale = str(r.get("rationale") or "").replace("\n", " ").strip()
+                if len(rationale) > 72:
+                    rationale = rationale[:69] + "…"
+                bit = f"  — {rationale}" if rationale else ""
+                lines.append(
+                    f"{ts}  #{r.get('cycle', '?')}  {strat}  {status}{bit}"
+                )
+        return "\n".join(lines) if lines else (
+            "No activity yet — Connect IBKR, then Start agent"
+        )
+
+    def _format_working_orders(self, orders: list[dict]) -> str:
+        if not orders:
+            return "No working orders"
+        lines = []
+        for o in (orders or [])[:25]:
+            sym = o.get("symbol") or "?"
+            side = o.get("action") or o.get("side") or "?"
+            qty = o.get("quantity") or o.get("qty") or "?"
+            status = o.get("status") or "?"
+            oid = o.get("order_id") or o.get("orderId") or "—"
+            otype = o.get("order_type") or o.get("orderType") or ""
+            px = o.get("lmt_price") or o.get("aux_price")
+            px_s = f" @ {px}" if px not in (None, "", 0) else ""
+            lines.append(f"{sym}  {side} {qty}  {otype}{px_s}  {status}  id={oid}")
+        return "\n".join(lines)
+
+    def _format_recent_fills(self, fills: list[dict]) -> str:
+        if not fills:
+            return "No fills this session"
+        lines = []
+        for f in list(fills or [])[-20:][::-1]:
+            sym = f.get("symbol") or "?"
+            side = f.get("side") or "?"
+            qty = f.get("quantity") or f.get("shares") or "?"
+            px = f.get("price")
+            try:
+                px_s = f"{float(px):.2f}" if px is not None else "—"
+            except (TypeError, ValueError):
+                px_s = str(px or "—")
+            ts = str(f.get("ts") or "")[:19].replace("T", " ")
+            lines.append(f"{ts}  {sym}  {side} {qty} @ {px_s}")
+        return "\n".join(lines)
+
+    def _refresh_scorecard(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and (now - self._scorecard_last_refresh) < _SCORECARD_REFRESH_S:
+            return
+        self._scorecard_last_refresh = now
+        try:
+            journal = get_journal()
+            summary = journal.daily_summary()
+            curve = journal.equity_curve(limit=120)
+            dispatches = journal.recent_dispatches(limit=15)
+            hold_n, trade_n = self._hold_trade_counts(journal)
+        except Exception:
+            summary = {
+                "day": "—", "proposals": 0, "allowed": 0, "rejected": 0,
+                "dispatch_ok": 0, "dispatch_failed": 0, "halts": 0,
+            }
+            curve, dispatches = [], []
+            hold_n = int(getattr(self.engine.state, "hold_count", 0) or 0)
+            trade_n = int(getattr(self.engine.state, "trade_count", 0) or 0)
+
+        self.lbl_sc_day.value = f"Day {summary.get('day') or '—'} (UTC)"
+        self.lbl_sc_proposals.value = str(int(summary.get("proposals") or 0))
+        self.lbl_sc_allowed.value = str(int(summary.get("allowed") or 0))
+        self.lbl_sc_rejected.value = str(int(summary.get("rejected") or 0))
+        self.lbl_sc_dispatch_ok.value = str(int(summary.get("dispatch_ok") or 0))
+        self.lbl_sc_dispatch_failed.value = str(int(summary.get("dispatch_failed") or 0))
+        halts = int(summary.get("halts") or 0)
+        self.lbl_sc_halts.value = str(halts)
+        self.lbl_sc_halts.color = AMBER if halts > 0 else MUTED
+        if hold_n + trade_n:
+            self.lbl_sc_hold_trade.value = f"{hold_n}/{trade_n}"
+            self.lbl_sc_hold_trade.color = TEXT
+        else:
+            self.lbl_sc_hold_trade.value = "—"
+            self.lbl_sc_hold_trade.color = MUTED
+
+        curve_pts = [float(v) for _, v in curve if v is not None]
+        if curve_pts:
+            self.lbl_sc_netliq.value = f"${curve_pts[-1]:,.0f}"
+            self.lbl_sc_netliq.color = (
+                GREEN if len(curve_pts) < 2 or curve_pts[-1] >= curve_pts[0] else RED
+            )
+            self.lbl_sc_equity_empty.visible = False
+            self.sc_equity_spark.content = _equity_spark_control(curve_pts)
+            self.sc_equity_spark.visible = True
+            if len(curve_pts) >= 2 and curve_pts[0]:
+                ret = (curve_pts[-1] / curve_pts[0] - 1) * 100
+                self.lbl_sc_agent_ret.value = f"{ret:+.2f}%"
+                self.lbl_sc_agent_ret.color = GREEN if ret >= 0 else RED
+            else:
+                self.lbl_sc_agent_ret.value = "—"
+                self.lbl_sc_agent_ret.color = MUTED
+        else:
+            self.lbl_sc_netliq.value = "—"
+            self.lbl_sc_netliq.color = MUTED
+            self.lbl_sc_equity_empty.visible = True
+            self.lbl_sc_equity_empty.value = (
+                "No data yet — journal populates as the agent trades"
+            )
+            self.sc_equity_spark.content = _equity_spark_control([])
+            self.sc_equity_spark.visible = True
+            self.lbl_sc_agent_ret.value = "—"
+            self.lbl_sc_agent_ret.color = MUTED
+        self._refresh_dispatch_table(dispatches)
+
+    def _hold_trade_counts(self, journal: Any) -> tuple[int, int]:
+        recent = None
+        for meth in ("recent_decisions", "recent_proposals"):
+            if hasattr(journal, meth):
+                try:
+                    recent = getattr(journal, meth)(limit=50) or None
+                except Exception:
+                    recent = None
+                if recent:
+                    break
+        if not recent:
+            return (
+                int(getattr(self.engine.state, "hold_count", 0) or 0),
+                int(getattr(self.engine.state, "trade_count", 0) or 0),
+            )
+        hold_n = trade_n = 0
+        for item in recent:
+            strat = str(
+                (item or {}).get("strategy")
+                or (item or {}).get("action")
+                or (item or {}).get("decision")
+                or ""
+            ).lower()
+            if strat in ("hold", "skipped", "blocked", "set_risk", "none", ""):
+                hold_n += 1
+            else:
+                trade_n += 1
+        return hold_n, trade_n
+
+    def _refresh_dispatch_table(self, dispatches: list) -> None:
+        rows: list[ft.DataRow] = []
+        for d in (dispatches or [])[:15]:
+            ok = bool(d.get("ok"))
+            ts = str(d.get("ts") or "—")
+            if len(ts) > 19:
+                ts = ts[:19].replace("T", " ")
+            result = d.get("result")
+            if result is None:
+                summary = str(d.get("result_json") or "")[:80] or "—"
+            elif isinstance(result, dict):
+                summary = json.dumps(result, default=str)[:80]
+            else:
+                summary = str(result)[:80]
+            rows.append(ft.DataRow(cells=[
+                ft.DataCell(ft.Text(ts, color=MUTED, size=11)),
+                ft.DataCell(ft.Text(
+                    "OK" if ok else "FAILED", color=GREEN if ok else RED,
+                    weight=ft.FontWeight.BOLD, size=11,
+                )),
+                ft.DataCell(ft.Text(summary, color=MUTED, size=10, selectable=True)),
+            ]))
+        if not rows:
+            rows = [ft.DataRow(cells=[
+                ft.DataCell(ft.Text(
+                    "No data yet — journal populates as the agent trades", color=MUTED
+                )),
+                ft.DataCell(ft.Text("")),
+                ft.DataCell(ft.Text("")),
+            ])]
+        self.sc_dispatch_table.rows = rows
+
+    def _positions_summary(self, positions: list[dict]) -> str:
+        if not positions:
+            return "No open positions"
+        bits = []
+        for p in positions[:8]:
+            sym = p.get("symbol") or "?"
+            sec = str(p.get("sec_type") or p.get("secType") or "STK").upper()
             qty = p.get("quantity", p.get("qty", 0))
             try:
                 qty_s = f"{float(qty):+g}"
             except (TypeError, ValueError):
                 qty_s = str(qty)
-            details = ""
+            pnl = float(p.get("unrealized_pnl") or p.get("unrealizedPNL") or 0)
+            bits.append(f"{sym} {sec} {qty_s}  uPnL {pnl:+.2f}")
+        line = "  ·  ".join(bits)
+        extra = len(positions) - 8
+        if extra > 0:
+            line = f"{line}  ·  +{extra} more"
+        return f"{len(positions)} open  ·  {line}"
+
+    def _position_rows(self, positions: list[dict]) -> list[ft.DataRow]:
+        if not positions:
+            return [ft.DataRow(cells=[ft.DataCell(ft.Text("No positions", color=MUTED))] * 6)]
+        rows = []
+        for p in positions[:50]:
+            sec = str(p.get("sec_type") or p.get("secType") or "STK").upper()
+            pnl = float(p.get("unrealized_pnl") or p.get("unrealizedPNL") or 0)
+            qty = p.get("quantity", p.get("qty", 0))
+            try:
+                qty_s = f"{float(qty):+g}"
+            except (TypeError, ValueError):
+                qty_s = str(qty)
             if sec.startswith("OPT"):
                 exp = p.get("expiration") or p.get("lastTradeDateOrContractMonth") or ""
                 details = f"{exp} {p.get('strike', '')}{p.get('right', '')}"
             else:
                 details = str(p.get("exchange") or "SMART")
-            rows.append(
-                ft.DataRow(
-                    cells=[
-                        ft.DataCell(
-                            ft.Text(
-                                str(p.get("conId") or p.get("con_id") or "?"),
-                                color=AMBER,
-                                selectable=True,
-                                weight=ft.FontWeight.W_600,
-                            )
-                        ),
-                        ft.DataCell(ft.Text(str(p.get("symbol", "?")), color=TEXT)),
-                        ft.DataCell(
-                            ft.Text(
-                                sec,
-                                color=BLUE if sec.startswith("OPT") else MUTED,
-                            )
-                        ),
-                        ft.DataCell(ft.Text(qty_s, color=TEXT)),
-                        ft.DataCell(ft.Text(f"{pnl:+.2f}", color=pnl_color)),
-                        ft.DataCell(ft.Text(details, color=MUTED, size=11)),
-                    ]
-                )
-            )
+            rows.append(ft.DataRow(cells=[
+                ft.DataCell(ft.Text(
+                    str(p.get("conId") or p.get("con_id") or "?"),
+                    color=AMBER, selectable=True, weight=ft.FontWeight.W_600,
+                )),
+                ft.DataCell(ft.Text(str(p.get("symbol", "?")), color=TEXT)),
+                ft.DataCell(ft.Text(sec, color=BLUE if sec.startswith("OPT") else MUTED)),
+                ft.DataCell(ft.Text(qty_s, color=TEXT)),
+                ft.DataCell(ft.Text(f"{pnl:+.2f}", color=GREEN if pnl >= 0 else RED)),
+                ft.DataCell(ft.Text(details, color=MUTED, size=11)),
+            ]))
         return rows
 
-    def _rebuild_log_stats(self) -> None:
-        s = self.engine.state
-        uplifts = [r.get("pnl_chg", 0) for r in s.records if r.get("type") == "cycle"]
-        avg = sum(uplifts) / len(uplifts) if uplifts else 0
-        best = max(uplifts, default=0)
-        attempts = getattr(s, "close_attempts", 0) or 0
-        ok = getattr(s, "close_ok", 0) or 0
-        close_rate = f"{(100 * ok // attempts) if attempts else 0}% ({ok}/{attempts})"
-        mismatches = getattr(s, "mismatches", 0) or 0
-        self.log_stats.controls = [
-            self._stat_chip("Improvements", str(len(s.tweaks)), AMBER),
-            self._stat_chip("Avg ΔPnL", f"${avg:+.2f}", BLUE),
-            self._stat_chip("Best cycle", f"${best:+.2f}", GREEN),
-            self._stat_chip("Close success", close_rate, GREEN if attempts else MUTED),
-            self._stat_chip("Mismatches", str(mismatches), RED if mismatches else GREEN),
-            self._stat_chip(
-                "Lab rate",
-                f"{float(getattr(s, 'lab_pass_rate', 0) or 0):.0%}",
-                GREEN if float(getattr(s, "lab_pass_rate", 0) or 0) >= 0.9 else AMBER,
-            ),
-            self._stat_chip("Cycles", str(s.cycles), TEXT),
-        ]
 
-    def _stat_chip(self, label: str, val: str, color: str) -> ft.Container:
-        return ft.Container(
-            bgcolor=CARD2,
-            border_radius=8,
-            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
-            content=ft.Column(
-                [
-                    ft.Text(label, size=10, color=MUTED),
-                    ft.Text(val, size=16, color=color, weight=ft.FontWeight.BOLD),
-                ],
-                spacing=2,
-            ),
-        )
-
-    def _filtered_records(self) -> list[dict]:
-        q = (self.log_search.value or "").lower()
-        out = []
-        for r in self.engine.state.records:
-            if r.get("type") == "error" and self.filter not in ("All", "Errors"):
-                continue
-            if r.get("type") == "cycle":
-                if self.filter == "Trades" and r.get("strat") in ("hold", None):
-                    continue
-                if self.filter == "Closes" and "close" not in str(
-                    r.get("action", {})
-                ).lower() and "flatten" not in str(r.get("action", {})).lower():
-                    continue
-                if self.filter == "Decisions" and not r.get("action_obj"):
-                    continue
-                if self.filter == "Improvements" and (
-                    not r.get("tweak") or r.get("tweak") == "none"
-                ):
-                    continue
-                if self.filter == "Errors":
-                    continue
-                if self.filter == "Position Mismatches":
-                    if (
-                        "mismatch" not in str(r).lower()
-                        and "conid" not in str(r.get("validation", "")).lower()
-                    ):
-                        continue
-            if q and q not in json.dumps(r, default=str).lower():
-                continue
-            out.append(r)
-        return list(reversed(out))
-
-    def _refresh_timeline(self) -> None:
-        self._rebuild_log_stats()
-        self.log_timeline.controls = []
-        for r in self._filtered_records():
-            if r.get("type") == "error":
-                self.log_timeline.controls.append(self._err_card(r))
-            elif r.get("type") == "panic":
-                self.log_timeline.controls.append(self._panic_card(r))
-            else:
-                self.log_timeline.controls.append(self._cycle_card(r))
-        if not self.log_timeline.controls:
-            self.log_timeline.controls.append(
-                ft.Text("No cycles yet — click START AUTONOMOUS", color=MUTED)
-            )
-
-    def _err_card(self, r: dict) -> ft.Container:
-        return ft.Container(
-            bgcolor="#2a1520",
-            border=ft.Border.all(1, RED),
-            border_radius=10,
-            padding=12,
-            content=ft.Text(r.get("msg", "error"), color=RED, selectable=True),
-        )
-
-    def _panic_card(self, r: dict) -> ft.Container:
-        body = [ft.Text("PANIC FLATTEN — per-position closes", color=RED, weight=ft.FontWeight.BOLD)]
-        before = r.get("before_ledger") or []
-        if before:
-            body.append(ft.Text("Before ledger:", color=MUTED, size=10))
-            for p in before[:5]:
-                cid = p.get("conId") or p.get("con_id") or "?"
-                body.append(
-                    ft.Text(
-                        f"  conId={cid} {p.get('symbol')} {p.get('sec_type', 'STK')} pos={p.get('quantity')}",
-                        size=9,
-                        color=MUTED,
-                        selectable=True,
-                    )
-                )
-        for pr in r.get("position_results") or []:
-            cid = pr.get("conId") or pr.get("con_id") or "?"
-            body.append(
-                ft.Text(
-                    f"conId={cid} via {pr.get('method', '?')} → {'OK' if pr.get('success') else 'FAIL'}",
-                    color=GREEN if pr.get("success") else RED,
-                    size=11,
-                    selectable=True,
-                )
-            )
-            if pr.get("reasoning"):
-                body.append(
-                    ft.Text(pr["reasoning"], color=MUTED, size=10, selectable=True)
-                )
-        return ft.Container(
-            bgcolor="#2a1018",
-            border=ft.Border.all(1, RED),
-            border_radius=10,
-            padding=12,
-            content=ft.Column(body, spacing=4),
-        )
-
-    def _cycle_card(self, r: dict) -> ft.Container:
-        n, strat, chg = r.get("cycle", 0), r.get("strat", "hold"), r.get("pnl_chg", 0)
-        has_tw = r.get("tweak") and r.get("tweak") != "none"
-        inv = r.get("inventory") or ""
-        pulse = r.get("reality_pulse") or {}
-        narrative = (pulse.get("narrative") if isinstance(pulse, dict) else None) or ""
-        body: list[ft.Control] = [
-            ft.Text(
-                f"Snapshot → {len(r.get('positions') or [])} pos | equity ${r.get('equity', 0):,.0f}",
-                color=MUTED,
-                size=11,
-            ),
-            (
-                ft.Container(
-                    bgcolor="#121820",
-                    border_radius=8,
-                    padding=8,
-                    content=ft.Column(
-                        [
-                            ft.Text(
-                                "Reality Pulse",
-                                size=10,
-                                color=AMBER,
-                                weight=ft.FontWeight.BOLD,
-                            ),
-                            ft.Text(
-                                narrative or json.dumps(pulse, default=str)[:600],
-                                size=10,
-                                color=MUTED,
-                                selectable=True,
-                            ),
-                        ],
-                        spacing=2,
-                    ),
-                )
-                if pulse
-                else ft.Container()
-            ),
-            (
-                ft.Container(
-                    bgcolor="#101820",
-                    border_radius=8,
-                    padding=8,
-                    content=ft.Column(
-                        [
-                            ft.Text(
-                                "Order Lab + Auto-reconfig",
-                                size=10,
-                                color=BLUE,
-                                weight=ft.FontWeight.BOLD,
-                            ),
-                            ft.Text(
-                                (r.get("lab_summary") or "")[:800]
-                                or json.dumps(r.get("order_lab") or {}, default=str)[:600],
-                                size=10,
-                                color=MUTED,
-                                selectable=True,
-                            ),
-                            ft.Text(
-                                f"reconfig: {(r.get('reconfig') or {}).get('summary', '—')}",
-                                size=10,
-                                color=AMBER,
-                                selectable=True,
-                            ),
-                            ft.Text(
-                                f"simplify: {(r.get('simplify') or {}).get('summary', '—')}",
-                                size=10,
-                                color=MUTED,
-                                selectable=True,
-                            ),
-                            ft.Text(
-                                f"re-test: {(r.get('retest') or {}).get('summary', '—')}",
-                                size=10,
-                                color=GREEN,
-                                selectable=True,
-                            ),
-                        ],
-                        spacing=2,
-                    ),
-                )
-                if r.get("order_lab") or r.get("lab_summary")
-                else ft.Container()
-            ),
-            (
-                ft.Container(
-                    bgcolor="#141a12",
-                    border_radius=8,
-                    padding=8,
-                    content=ft.Column(
-                        [
-                            ft.Text(
-                                "Kahneman System 2",
-                                size=10,
-                                color=GREEN,
-                                weight=ft.FontWeight.BOLD,
-                            ),
-                            ft.Text(
-                                r.get("kahneman_trace")
-                                or json.dumps(r.get("kahneman") or {}, default=str)[:800]
-                                or "—",
-                                size=10,
-                                color=MUTED,
-                                selectable=True,
-                            ),
-                        ],
-                        spacing=2,
-                    ),
-                )
-                if (r.get("kahneman_trace") or r.get("kahneman"))
-                else ft.Container()
-            ),
-            (
-                ft.Text(
-                    f"Inventory (before/after snapshot):\n{inv or '—'}",
-                    color=MUTED,
-                    size=9,
-                    selectable=True,
-                )
-                if inv
-                else ft.Container()
-            ),
-            ft.Text(
-                f"Reasoning: {r.get('reasoning_chain') or r.get('rationale') or '—'}",
-                color=TEXT,
-                size=12,
-                selectable=True,
-            ),
-            ft.Text(
-                f"Validation: {r.get('validation') or '—'}",
-                color=AMBER,
-                size=10,
-                selectable=True,
-            ),
-            ft.Text(
-                f"Action: {strat} → {json.dumps(r.get('result', {}), default=str)[:200]}",
-                color=BLUE,
-                size=11,
-                selectable=True,
-            ),
-            ft.Text(f"PnL Δ ${chg:+.2f}", color=GREEN if chg >= 0 else RED, size=12),
-            ft.TextButton(
-                "Validate Order Impact", on_click=lambda e, rec=r: self._validate_impact(rec)
-            ),
-        ]
-        if has_tw:
-            tw_obj, before = r.get("tweak_obj") or {}, r.get("tweak_before") or {}
-            body.insert(
-                0,
-                ft.Container(
-                    bgcolor="#2a2510",
-                    border_radius=8,
-                    padding=10,
-                    margin=ft.Margin.only(bottom=8),
-                    content=ft.Column(
-                        [
-                            ft.Text(
-                                f"✦ Self-tweak: {r.get('tweak')}",
-                                color=AMBER,
-                                weight=ft.FontWeight.BOLD,
-                            ),
-                            ft.Row(
-                                [
-                                    ft.Column(
-                                        [
-                                            ft.Text("Before", size=10, color=MUTED),
-                                            ft.Text(
-                                                _diff_text(
-                                                    before, tw_obj.get("config") or {}, "before"
-                                                ),
-                                                size=11,
-                                                color=RED,
-                                                selectable=True,
-                                            ),
-                                        ],
-                                        expand=True,
-                                    ),
-                                    ft.Column(
-                                        [
-                                            ft.Text("After", size=10, color=MUTED),
-                                            ft.Text(
-                                                _diff_text(
-                                                    before, tw_obj.get("config") or {}, "after"
-                                                ),
-                                                size=11,
-                                                color=GREEN,
-                                                selectable=True,
-                                            ),
-                                        ],
-                                        expand=True,
-                                    ),
-                                ]
-                            ),
-                            ft.Row(
-                                [
-                                    ft.TextButton(
-                                        "Apply Again",
-                                        on_click=lambda e, o=tw_obj: self._apply_tweak(o),
-                                    ),
-                                    ft.TextButton(
-                                        "Grok Deep Analyze",
-                                        on_click=lambda e, o=tw_obj: self._analyze_tweak(o),
-                                    ),
-                                    ft.TextButton(
-                                        "Copy JSON",
-                                        on_click=lambda e, o=tw_obj: self._copy(
-                                            json.dumps(o, indent=2)
-                                        ),
-                                    ),
-                                    ft.TextButton(
-                                        "Replay Cycle",
-                                        on_click=lambda e, rec=r: self._replay(rec),
-                                    ),
-                                    ft.TextButton(
-                                        "Validate Order Impact",
-                                        on_click=lambda e, rec=r: self._validate_impact(rec),
-                                    ),
-                                ]
-                            ),
-                        ],
-                        spacing=4,
-                    ),
-                ),
-            )
-        if self.raw_json:
-            body.append(
-                ft.Text(
-                    json.dumps(r, indent=2, default=str)[:3000],
-                    size=10,
-                    color=AMBER,
-                    selectable=True,
-                )
-            )
-        return ft.Container(
-            bgcolor=CARD2 if has_tw else CARD,
-            border=ft.Border.all(1, AMBER if has_tw else BORDER),
-            border_radius=10,
-            padding=0,
-            content=ft.ExpansionTile(
-                title=ft.Text(
-                    f"Cycle {n}  •  {strat}  •  Δ${chg:+.2f}",
-                    color=AMBER if has_tw else TEXT,
-                    weight=ft.FontWeight.W_600,
-                ),
-                subtitle=ft.Text(r.get("ts", ""), size=10, color=MUTED),
-                controls=[ft.Container(padding=12, content=ft.Column(body, spacing=6))],
-            ),
-        )
-
-    def _apply_tweak(self, tw: dict) -> None:
-        msg = self.engine.apply_tweak_manual(tw)
-        self.page.overlay.append(
-            ft.SnackBar(ft.Text(f"Applied: {msg}"), bgcolor=GREEN, open=True)
-        )
-        self._safe_update()
-
-    def _analyze_tweak(self, tw: dict) -> None:
-        threading.Thread(
-            target=lambda: asyncio.run(self.engine.grok_analyze_tweak(tw)), daemon=True
-        ).start()
-
-    def _replay(self, rec: dict) -> None:
-        s = self.engine.state
-        s.brain_strat = rec.get("strat", "—")
-        s.brain_rationale = rec.get("rationale", "—")
-        s.last_action = rec.get("action_obj") or {}
-        if tw := rec.get("tweak_obj"):
-            self._apply_tweak(tw)
-        self._sync_widgets()
-        self._show_tab("overview")
-
-    def _validate_impact(self, rec: dict) -> None:
-        """Simulate order impact using live ledger (AC4) — conId-level gate."""
-        from abcxauto.rocket import simulate_close_impact
-
-        s = self.engine.state
-        act = rec.get("action_obj") or rec.get("action") or {}
-        impact = simulate_close_impact(act, s.positions or rec.get("positions") or [])
-        s.last_impact = impact
-        s.brain_rationale = impact.get("gate") or "—"
-        s.brain_strat = f"validate:{act.get('strategy') or act.get('action') or '?'}"
-        self._sync_widgets()
-        self.page.overlay.append(
-            ft.SnackBar(
-                ft.Text(impact.get("gate") or "validated"),
-                bgcolor=GREEN if impact.get("ok") else RED,
-                open=True,
-            )
-        )
-        self._safe_update()
-
-    def _copy(self, text: str) -> None:
-        try:
-            if hasattr(self.page, "set_clipboard"):
-                self.page.set_clipboard(text)
-            elif hasattr(self.page, "clipboard"):
-                self.page.clipboard.set(text)
-            self.page.overlay.append(ft.SnackBar(ft.Text("Copied"), bgcolor=BLUE, open=True))
-        except Exception as e:
-            self.page.overlay.append(
-                ft.SnackBar(ft.Text(f"Copy failed: {e}"), bgcolor=RED, open=True)
-            )
-        self._safe_update()
-
-    def _set_filter(self, val: str) -> None:
-        self.filter = val or "All"
-        self._refresh_timeline()
-        self._safe_update()
-
-    def _on_search(self, _=None) -> None:
-        self._refresh_timeline()
-        self._safe_update()
-
-    def _toggle_raw(self, val: bool) -> None:
-        self.raw_json = val
-        self._refresh_timeline()
-        self._safe_update()
-
-    def _save_pin_insight(self, _=None) -> None:
-        self.pin_insight = self.pin_insight_field.value or ""
-        try:
-            Path("pin_insight.txt").write_text(self.pin_insight, encoding="utf-8")
-        except OSError:
-            pass
-
-    def _load_pin_insight(self) -> None:
-        try:
-            self.pin_insight = Path("pin_insight.txt").read_text(encoding="utf-8")
-            self.pin_insight_field.value = self.pin_insight
-        except OSError:
-            pass
-
-    def _export_all(self, _=None) -> None:
-        s = self.engine.state
-        payload = json.dumps(
-            {"records": s.records, "tweaks": s.tweaks, "pin_insight": self.pin_insight},
-            indent=2,
-            default=str,
-        )
-        try:
-            Path("logs_export.json").write_text(payload, encoding="utf-8")
-        except OSError:
-            pass
-        self._copy(payload)
-
-    def _clear_logs(self, _=None) -> None:
-        self.engine.clear_logs()
-        self._refresh_timeline()
-        self._safe_update()
-
-
-def _equity_chart_control(vals: list[float]) -> ft.Control:
-    w, h = 640, 200
+def _equity_spark_control(vals: list[float]) -> ft.Control:
+    """Compact NetLiq spark: last value + unicode bars (no SVG / SPY overlay)."""
     if not vals:
-        svg = (
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
-            f'<rect width="{w}" height="{h}" fill="#0f131a" rx="8"/>'
-            f'<text x="{w // 2}" y="{h // 2}" fill="#8b9bb4" font-size="12" '
-            f'text-anchor="middle">Awaiting equity data — click START</text></svg>'
-        )
-        return ft.Image(
-            src=f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}",
-            height=h,
-            fit=ft.BoxFit.CONTAIN,
-        )
-    lo, hi = min(vals), max(vals)
-    pad = max((hi - lo) * 0.1, 500) if len(vals) > 1 else 500
-    lo, hi = lo - pad, hi + pad
-    span, color = hi - lo or 1, GREEN if vals[-1] >= vals[0] else RED
+        return ft.Text("Awaiting equity data — click Start", color=MUTED, size=12)
+    color = GREEN if len(vals) < 2 or vals[-1] >= vals[0] else RED
     if len(vals) == 1:
-        x, y = w // 2, h - 30 - (vals[0] - lo) / span * (h - 50)
-        svg = (
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
-            f'<rect width="{w}" height="{h}" fill="#0f131a" rx="8"/>'
-            f'<circle cx="{x}" cy="{y:.1f}" r="5" fill="{color}"/>'
-            f'<text x="44" y="18" fill="#8b9bb4" font-size="11">${vals[0]:,.0f}</text></svg>'
-        )
-        return ft.Image(
-            src=f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}",
-            height=h,
-            fit=ft.BoxFit.CONTAIN,
-        )
-    xs = [40 + i * (w - 60) / (len(vals) - 1) for i in range(len(vals))]
-    ys = [h - 30 - (v - lo) / span * (h - 50) for v in vals]
-    pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
-    area = (
-        f"M{xs[0]:.1f},{h - 30} L"
-        + " L".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
-        + f" L{xs[-1]:.1f},{h - 30} Z"
-    )
-    svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}">'
-        f'<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'
-        f'<stop offset="0%" stop-color="{color}" stop-opacity="0.35"/>'
-        f'<stop offset="100%" stop-color="{color}" stop-opacity="0"/>'
-        f"</linearGradient></defs>"
-        f'<rect width="{w}" height="{h}" fill="#0f131a" rx="8"/>'
-        f'<path d="{area}" fill="url(#g)"/>'
-        f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2.5"/>'
-        + "".join(
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}"/>'
-            for x, y in zip(xs, ys)
-        )
-        + f'<text x="44" y="18" fill="#8b9bb4" font-size="11">${vals[-1]:,.0f}</text></svg>'
-    )
-    return ft.Image(
-        src=f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}",
-        height=h,
-        fit=ft.BoxFit.CONTAIN,
-    )
-
-
-def _diff_text(before: dict, cfg: dict, side: str) -> str:
-    after = {**before, **cfg}
-    lines = []
-    for k in sorted(set(before) | set(cfg)):
-        if side == "before":
-            lines.append(f"{k}: {before.get(k, '—')}")
-        else:
-            lines.append(f"{k}: {after.get(k, '—')}{'  ←' if k in cfg else ''}")
-    return "\n".join(lines) or "(empty)"
+        return ft.Text(f"${vals[0]:,.0f}", color=color, size=14, weight=ft.FontWeight.BOLD)
+    lo, hi = min(vals), max(vals)
+    span = hi - lo or 1.0
+    blocks = "▁▂▃▄▅▆▇█"
+    spark = "".join(blocks[min(7, int((v - lo) / span * 7))] for v in vals[-48:])
+    ret = (vals[-1] / vals[0] - 1) * 100 if vals[0] else 0.0
+    return ft.Column([
+        ft.Text(f"${vals[-1]:,.0f}  ({ret:+.2f}%)", color=color, size=14,
+                weight=ft.FontWeight.BOLD),
+        ft.Text(spark, color=color, size=16),
+    ], spacing=2)
 
 
 def main(page: ft.Page) -> None:
@@ -1495,19 +2323,18 @@ def write_launch_probe(path: str | Path) -> None:
 
 
 def run_app() -> None:
+    setup_file_logging()
     probe = os.environ.get("ABCXAUTO_LAUNCH_PROBE")
     if probe:
         write_launch_probe(probe)
         print(f"ABCXAUTO title={TITLE} mainloop_ready=True status=Safe", flush=True)
         return
     print(f"ABCXAUTO Pro entry={Path(__file__).resolve()} title={TITLE}", flush=True)
-    # Flet >=0.80: ft.app is deprecated and can leave the desktop client on
-    # the "Working…" splash; ft.run is the supported entrypoint.
     runner = getattr(ft, "run", None) or ft.app
     view = ft.AppView.FLET_APP
     if os.environ.get("ABCXAUTO_PRO_WEB", "").strip() in ("1", "true", "yes"):
         view = ft.AppView.WEB_BROWSER
-    kwargs: dict[str, Any] = {"assets_dir": None, "view": view}
+    kwargs: dict[str, Any] = {"assets_dir": str(ASSETS_DIR), "view": view}
     try:
         runner(main, **kwargs)
     except TypeError:

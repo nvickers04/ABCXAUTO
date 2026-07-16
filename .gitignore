@@ -1,9 +1,11 @@
-﻿.env
+﻿risk_settings.json
+.env
 __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
 venv/
 logs/
-rocket.log
-improvements.log
+journal.db
+journal.db-wal
+journal.db-shm

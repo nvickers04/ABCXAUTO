@@ -1,108 +1,114 @@
-# Asset Balancing Control X Auto (ABCX Auto)
+# Asset Balancing Control X Auto (ABCXAUTO)
 
-**Autonomous Grok-powered agent for IBKR trading and portfolio management.**
+**Autonomous Grok-powered agentic portfolio for IBKR (paper-first).**
 
-Forked from ABCX. Grok researches with read-only tools (quotes, candles, option
-chains, greeks, news, positions) and **auto-executes** order proposals — brackets,
-OCA pairs, trailing stops, verticals, iron condors, collars, multi-leg. No human
-confirmation step.
+Grok 4.5 **owns** a paper IBKR portfolio under hard risk rules. Protect first;
+hold is valid when the book is protected. See `SPEC.md` for doctrine.
 
-## Risk policy
+## 1. Connections
 
-- **Every stock position must carry a stop loss and a take profit.** New entries
-  must be `bracket` (limit entry) or `market_bracket` (market entry) — both place
-  an OCA stop + target pair sized to the actual fill. Bare limit/market/stop
-  orders are rejected at validation unless they close an existing position
-  (`closing_position=true`), and the executor re-verifies that against live
-  positions before dispatch.
-- **Grok manages all orders autonomously.** Entries, exits, and order-management
-  actions (`modify_order`, `modify_stop`, `modify_target`, `cancel_order`, `oca`,
-  trailing stops) all auto-execute. If Grok cancels a protective stop, the monitor
-  flags the position as unprotected within its next poll and nudges Grok to replace
-  protection immediately.
-- **Background P&L monitor.** A monitor loop snapshots positions, account P&L,
-  open orders, and a protection audit every `ABCXAUTO_MONITOR_POLL_S` (30s). During
-  market hours it asks Grok to review the portfolio every
-  `ABCXAUTO_MONITOR_REVIEW_S` (5 min); if any position is ever unprotected it nudges
-  Grok immediately to propose protection.
-- **Opportunity scans.** Every `ABCXAUTO_SCAN_INTERVAL_S` (15 min) during market
-  hours, Grok scans for new trades — conservative by default.
-
-## Setup
+| Need | How |
+|------|-----|
+| TWS paper | API on port **7497** (or Gateway 4002) |
+| xAI | `XAI_API_KEY` in `.env` |
+| MarketData.app | optional `MARKETDATA_TOKEN` for quotes/chains/news |
 
 ```powershell
 cd C:\Users\nvick\ABCXAUTO
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.template .env   # then fill in XAI_API_KEY and MARKETDATA_TOKEN
+copy .env.template .env   # fill XAI_API_KEY; optional MARKETDATA_TOKEN
 ```
 
-Start TWS (paper) with API enabled on port 7497.
+## 2. Agent order surface
 
-## Run
+The agent sees **ORDER EXAMPLES** (`abcxauto.order_examples`) and can send each
+allowlisted type through the shell (`send` → executor → broker). Entries require
+stop + target; bare stock orders are exit-only.
 
-Pro desktop (Flet professional terminal — **one command, zero flags**):
+## 3. Portfolio ownership
+
+- Owns the book: entries, exits, modify/cancel, hold when protected.
+- **Tools only** — no symbol allowlist; capital/daily-loss gates default off (opt-in via env).
+- Halt latch still blocks new entries on Panic / broker disconnect.
+- Hold is valid when protected; unprotected STK must be fixed first.
+
+## 4. Run
 
 ```powershell
 python -m abcxauto
 ```
 
-Controls: **START AUTONOMOUS · PAUSE · PANIC FLATTEN · VALIDATE & EXECUTE**  
-(no manual force-tweak — lab + PnL auto-reconfig + two simplification passes each cycle).  
-See `GOAL.md` for the v0.2 checklist.
-
-If an old Pro window keeps coming back, clean stale Flet/Python processes first:
+Launches **Pro** (Flet). Press **Start**.  
+Controls: Connect IBKR · Start agent · Close All Positions.
 
 ```powershell
-python -m abcxauto --cleanup --aggressive
-# optional deep clean of the Flet desktop client cache:
-python -m abcxauto --cleanup --aggressive --flet-cache
+python -m abcxauto --cleanup --aggressive   # stale Flet/Python cleanup
+python -m abcxauto --headless               # exits 0; autonomy via Pro START
 ```
 
-Legacy Tkinter cockpit:
+## 5. Supported orders
 
-```powershell
-python -m abcxauto --tk
-```
+Matches `ORDER_EXAMPLES` / sendable types:
 
-Monitoring dashboard (agent + live P&L/positions feed):
-
-```powershell
-python -m abcxauto.web
-# open http://127.0.0.1:8000
-```
+| Type | Role |
+|------|------|
+| `hold` | No-op when protected |
+| `bracket` / `market_bracket` | Entry with stop + target |
+| `oca` | Attach stop + target to an open position |
+| `modify_stop` / `modify_target` | Adjust working protection |
+| `cancel_order` | Cancel by order id |
+| `market_order` / `limit_order` / `stop_order` / `stop_limit` | Exit only (`closing_position`) |
+| `close_option` | Close an option position |
 
 ## Configuration
 
-Set your trading objective via `ABCXAUTO_TRADING_MANDATE` in `.env`, or use the
-default conservative mandate. Other knobs:
-
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ABCXAUTO_SCAN_ENABLED` | `true` | Periodic opportunity scans |
-| `ABCXAUTO_SCAN_INTERVAL_S` | `900` | Scan interval (seconds) |
+| `ABCXAUTO_CYCLE_SLEEP_S` | `120` | Idle sleep between autonomous cycles |
+| `ABCXAUTO_GROK_MIN_INTERVAL_S` | `120` | Min seconds between Grok calls when flat/protected |
 | `ABCXAUTO_MONITOR_POLL_S` | `30` | Snapshot refresh |
 | `ABCXAUTO_MONITOR_REVIEW_S` | `300` | Grok portfolio review interval |
+| `ABCXAUTO_MODEL` | `grok-4.5` | xAI model |
+| `ABCXAUTO_RISK_GATES_ENABLED` | `true` | Pre-trade path (halt latch); capital rules opt-in |
+| `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `0` | Daily loss circuit breaker (% NetLiq; 0=off) |
+| `ABCXAUTO_MAX_POSITION_PCT` | `0` | Max entry notional (% NetLiq; 0=off) |
+| `ABCXAUTO_MAX_OPEN_POSITIONS` | `0` | Max simultaneous positions (0=off) |
+| `ABCXAUTO_MAX_DAILY_TRADES` | `0` | Max entries per day (0=off) |
+| `ABCXAUTO_AUTO_PANIC_ON_BREACH` | `false` | Auto halt + flatten on daily-loss breach |
+| `ABCXAUTO_JOURNAL_ENABLED` | `true` | SQLite trade journal |
+| `ABCXAUTO_JOURNAL_PATH` | `journal.db` | Journal path |
+| `ABCXAUTO_RISK_SETTINGS_PATH` | `risk_settings.json` | Persisted Risk-tab knobs (gitignored) |
+| `ABCXAUTO_RISK_POSTURE` | _(empty)_ | `defensive` / `balanced` / `aggressive` (or set in Risk tab) |
+
+Pro **Risk** tab: one operator knob — **risk posture**. Apply seeds capital gates and a wide envelope (persists to `risk_settings.json`). The agent sizes risk **per trade** and may `set_risk` inside that envelope; it cannot change posture. Cycles also get an ideas-only **opportunity scan** (MDA) in the prompt — never auto-trades.
 
 ## Architecture
 
+Thin product shell over broker / risk / executor. Target ~3.5–5k LOC.
+
 ```
 abcxauto/
-  __main__.py      autonomous agent entry (python -m abcxauto)
-  web.py           monitoring dashboard (python -m abcxauto.web)
-  static/          read-only dashboard client
-  agent.py         conversation loop, tool dispatch, auto-execution
-  monitor.py       background P&L/protection monitor + Grok review injections
-  llm.py           xAI AsyncClient wrapper
-  tools.py         read-only tool schemas + handlers for Grok
-  proposals.py     OrderProposal schemas, validation, ticket rendering
-  executor.py      validated proposal -> IBKR gateway method
-  config.py        flat env config
-  broker/          IBKR layer (ib_insync)
-  marketdata/      MarketData.app client + provider + market hours
+  __main__.py        Pro UI default; --cleanup; --headless → Pro START message
+  order_examples.py  ORDER EXAMPLES catalog (agent contract)
+  connections.py     IBKR + optional MDA façade
+  send.py            dispatch façade → executor
+  book.py            portfolio / book state façade
+  risk.py            risk-gate façade
+  agent_loop.py      autonomous cycle engine (snap → Grok JSON → send)
+  cycle.py           thin shim re-exporting agent_loop for Pro/tests
+  proposals.py       OrderProposal schemas + validation
+  risk_gates.py      hard pre-trade gates + halt latch
+  executor.py        validate → gate → IBKR dispatch
+  monitor.py         P&L / protection / auto-panic
+  llm.py             xAI client
+  tools.py           read-only tools (snap helpers; legacy agent path)
+  memory/            SQLite journal
+  config.py          flat env config
+  broker/            IBKR layer
+  marketdata/        MarketData.app + market hours
+  pro_desktop.py     Flet Pro cockpit (thin operator UI)
 ```
 
-Salvaged from ABCX: the IBKR execution layer, MarketData.app client, and xAI SDK
-integration. The human chat portal, confirm/cancel flow, and operator REPL were
-deliberately removed.
+Priority: **risk > execution > monitoring > thin UI**.

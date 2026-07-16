@@ -1,55 +1,84 @@
-"""Shared desktop test helpers — mainloop-driven poll, stable Tk teardown."""
+"""Shared test helpers."""
 
-import time
 from pathlib import Path
 
 import pytest
 
 SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-eafc232c6c32\implementer")
 
+# Static safety defaults from cycle.TWEAKS — restore after tests that clear TWEAKS.
+STATIC_TWEAKS = {
+    "max_risk_pct": 0.5,
+}
+
 
 class _Cfg:
     xai_api_key = "test-key"
+    cycle_sleep_s = 0.05
+    grok_min_interval_s = 0.0
+    signal_only = False
+    monitor_enabled = False
 
 
-def mainloop_until(app, predicate, timeout: float = 8.0) -> bool:
-    """Wait for predicate using tk mainloop so after(100, _poll) drives updates."""
-    box = {"ok": False}
-    deadline = time.time() + timeout
+@pytest.fixture(autouse=True)
+def _isolated_journal(tmp_path):
+    """Keep the trade journal out of the real journal.db during tests."""
+    from abcxauto.memory import reset_journal
 
-    def tick():
-        if predicate():
-            box["ok"] = True
-            app.shutdown_ui()
-            app.root.quit()
-        elif time.time() >= deadline:
-            app.shutdown_ui()
-            app.root.quit()
-        else:
-            app.root.after(25, tick)
-
-    app.root.after(25, tick)
-    app.root.mainloop()
-    return box["ok"]
+    reset_journal(path=str(tmp_path / "journal.db"))
+    yield
+    reset_journal(path=str(tmp_path / "journal.db"))
 
 
-@pytest.fixture
-def headless_app(monkeypatch):
-    monkeypatch.setattr("abcxauto.desktop.get_config", lambda: _Cfg())
-    tk = __import__("tkinter")
-    try:
-        root = tk.Tk()
-    except tk.TclError as exc:
-        pytest.skip(f"Tk unavailable: {exc}")
-    root.withdraw()
-    from abcxauto.desktop import RocketApp
+@pytest.fixture(autouse=True)
+def _clear_risk_overrides(tmp_path, monkeypatch):
+    """Risk overrides must not leak; use a temp settings file per test."""
+    from abcxauto.config import (
+        clear_risk_settings,
+        clear_runtime_overrides,
+        get_config,
+        load_risk_settings,
+    )
 
-    app = RocketApp(root)
-    yield app
-    app.shutdown_ui()
-    app._invalidate_worker()
-    try:
-        root.update_idletasks()
-        root.destroy()
-    except tk.TclError:
-        pass
+    path = tmp_path / "risk_settings.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    clear_runtime_overrides()
+    get_config.cache_clear()
+    yield
+    clear_risk_settings(path=path)
+    clear_runtime_overrides()
+    get_config.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _restore_tweaks():
+    """Ensure static safety TWEAKS survive tests that clear the dict."""
+    from abcxauto.cycle import TWEAKS
+
+    before = dict(TWEAKS)
+    yield
+    TWEAKS.clear()
+    TWEAKS.update(STATIC_TWEAKS)
+    TWEAKS.update({k: v for k, v in before.items() if k in STATIC_TWEAKS or k in TWEAKS})
+    # Prefer known static defaults after every test
+    for k, v in STATIC_TWEAKS.items():
+        TWEAKS[k] = v
+
+
+@pytest.fixture(autouse=True)
+def _stub_opportunity_scan(monkeypatch):
+    """Avoid live MDA candle fan-out during unit tests."""
+
+    async def _empty(*_a, **_k):
+        return []
+
+    monkeypatch.setattr(
+        "abcxauto.opportunity_scan.scan_opportunities",
+        _empty,
+    )
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.scan_opportunities",
+        _empty,
+    )

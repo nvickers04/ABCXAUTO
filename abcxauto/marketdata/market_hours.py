@@ -6,7 +6,7 @@ Integrates with IBKR API to get actual contract trading hours including premarke
 
 import asyncio
 import logging
-from datetime import datetime, time, timezone, timedelta
+from datetime import datetime, time, timezone
 from typing import Dict, Any, Optional
 from enum import Enum
 
@@ -168,24 +168,6 @@ class MarketHoursProvider:
             logger.warning(f"Error checking trading day: {e}")
             return dt.weekday() < 5  # Fallback
 
-    def is_market_open(self, include_extended: bool = False, dt: Optional[datetime] = None) -> bool:
-        """
-        Check if market is currently open.
-        
-        Args:
-            include_extended: If True, includes premarket and postmarket hours
-            dt: Datetime to check (defaults to now)
-            
-        Returns:
-            True if market is open
-        """
-        session = self.get_current_session(dt)
-
-        if include_extended:
-            return session in [MarketSession.PREMARKET, MarketSession.REGULAR, MarketSession.POSTMARKET]
-        else:
-            return session == MarketSession.REGULAR
-
     def get_session_info(self, dt: Optional[datetime] = None) -> Dict[str, Any]:
         """
         Get comprehensive session information.
@@ -261,44 +243,8 @@ class MarketHoursProvider:
             logger.warning(f"Error getting next market open: {e}")
             return None
 
-    def get_trading_hours_info(self) -> Dict[str, Any]:
-        """
-        Get static trading hours information.
-        
-        Returns:
-            Dict with trading hours configuration
-        """
-        return {
-            'exchange': self.exchange,
-            'timezone': 'America/New_York',
-            'sessions': {
-                'premarket': {
-                    'start': self.premarket_start.strftime('%H:%M'),
-                    'end': self.regular_open.strftime('%H:%M'),
-                    'description': 'Extended hours - premarket trading'
-                },
-                'regular': {
-                    'start': self.regular_open.strftime('%H:%M'),
-                    'end': self.regular_close.strftime('%H:%M'),
-                    'description': 'Regular trading hours'
-                },
-                'postmarket': {
-                    'start': self.regular_close.strftime('%H:%M'),
-                    'end': self.postmarket_end.strftime('%H:%M'),
-                    'description': 'Extended hours - after-hours trading'
-                }
-            }
-        }
-
-
 # Global instance
 _market_hours_provider: Optional[MarketHoursProvider] = None
-
-
-def install_market_hours_provider(provider: MarketHoursProvider | None) -> None:
-    """Pin a market-hours provider (``None`` clears singleton)."""
-    global _market_hours_provider
-    _market_hours_provider = provider
 
 
 def get_market_hours_provider(exchange: str = 'NYSE') -> MarketHoursProvider:

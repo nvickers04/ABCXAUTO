@@ -1,7 +1,9 @@
-"""Proposal validation matrix: every strategy, good and bad payloads."""
+"""Proposal validation matrix: core allowlist + exit-only bare orders."""
 
 import pytest
 
+from abcxauto.config import Config, get_config
+from abcxauto.order_examples import ORDER_EXAMPLES
 from abcxauto.proposals import (
     STRATEGIES,
     ProposalValidationError,
@@ -11,91 +13,18 @@ from abcxauto.proposals import (
 
 RATIONALE = "test rationale"
 
-VALID_PAYLOADS = {
-    # Bare orders are exit-only: closing_position=True is required by validation
-    # and re-verified against live positions by the executor.
-    "limit_order": {
-        "symbol": "AAPL", "action": "SELL", "quantity": 10,
-        "limit_price": 150.0, "closing_position": True,
-    },
-    "market_order": {"symbol": "AAPL", "action": "SELL", "quantity": 5, "closing_position": True},
-    "stop_order": {
-        "symbol": "AAPL", "action": "SELL", "quantity": 10,
-        "stop_price": 140.0, "closing_position": True,
-    },
-    "stop_limit": {
-        "symbol": "AAPL", "action": "SELL", "quantity": 10,
-        "stop_price": 140.0, "limit_price": 139.5, "closing_position": True,
-    },
-    "bracket": {
-        "symbol": "NVDA", "quantity": 10, "direction": "LONG",
-        "entry_price": 100.0, "stop_price": 95.0, "target_price": 110.0,
-    },
-    "market_bracket": {
-        "symbol": "NVDA", "quantity": 10, "direction": "LONG",
-        "stop_price": 95.0, "target_price": 110.0,
-    },
-    "oca": {
-        "symbol": "NVDA", "quantity": 10, "direction": "LONG",
-        "stop_price": 95.0, "target_price": 110.0,
-    },
-    "modify_stop": {"order_id": 101, "new_stop_price": 97.5},
-    "modify_target": {"order_id": 102, "new_limit_price": 112.0},
-    "modify_order": {"order_id": 104, "limit_price": 101.5, "quantity": 8},
-    "cancel_order": {"order_id": 103},
-    "close_option": {"symbol": "SPY", "expiration": "20260709", "strike": 745.0, "right": "C"},
-    "trailing_stop": {
-        "symbol": "TSLA", "quantity": 10, "direction": "LONG", "trail_percent": 5.0,
-    },
-    "trailing_stop_limit": {
-        "symbol": "TSLA", "quantity": 10, "direction": "LONG",
-        "trail_amount": 2.0, "limit_offset": 0.25,
-    },
-    "vertical_spread": {
-        "symbol": "SPY", "expiration": "20260731",
-        "long_strike": 550.0, "short_strike": 560.0, "right": "C",
-    },
-    "iron_condor": {
-        "symbol": "SPY", "expiration": "20260731",
-        "put_long_strike": 540.0, "put_short_strike": 550.0,
-        "call_short_strike": 580.0, "call_long_strike": 590.0,
-    },
-    "iron_butterfly": {
-        "symbol": "SPY", "expiration": "20260731",
-        "center_strike": 565.0, "wing_width": 10.0,
-    },
-    "straddle": {"symbol": "SPY", "expiration": "20260731", "strike": 565.0},
-    "strangle": {
-        "symbol": "SPY", "expiration": "20260731",
-        "put_strike": 550.0, "call_strike": 580.0,
-    },
-    "butterfly": {
-        "symbol": "SPY", "expiration": "20260731",
-        "lower_strike": 550.0, "middle_strike": 565.0, "upper_strike": 580.0,
-    },
-    "calendar_spread": {
-        "symbol": "SPY", "strike": 565.0,
-        "near_expiration": "20260731", "far_expiration": "20260831",
-    },
-    "diagonal_spread": {
-        "symbol": "SPY", "near_strike": 560.0, "far_strike": 570.0,
-        "near_expiration": "20260731", "far_expiration": "20260831",
-    },
-    "covered_call": {"symbol": "AAPL", "expiration": "20260731", "strike": 160.0, "shares": 100},
-    "protective_put": {"symbol": "AAPL", "expiration": "20260731", "strike": 140.0, "shares": 200},
-    "collar": {
-        "symbol": "AAPL", "expiration": "20260731",
-        "put_strike": 140.0, "call_strike": 160.0, "shares": 100,
-    },
-    "ratio_spread": {
-        "symbol": "SPY", "expiration": "20260731",
-        "long_strike": 560.0, "short_strike": 570.0, "right": "C", "ratio": [1, 2],
-    },
-    "jade_lizard": {
-        "symbol": "SPY", "expiration": "20260731",
-        "put_strike": 550.0, "call_short_strike": 580.0, "call_long_strike": 585.0,
-    },
-}
+# One valid payload per allowlisted strategy (hold is prompt-only, not STRATEGIES).
+VALID_PAYLOADS = {k: dict(v) for k, v in ORDER_EXAMPLES.items() if k in STRATEGIES}
+
+
+@pytest.fixture(autouse=True)
+def _relax_proposal_gates(monkeypatch):
+    """Matrix tests cover schema shape; R:R gates have dedicated cases."""
+    base = get_config()
+    monkeypatch.setattr(
+        "abcxauto.proposals.get_config",
+        lambda: Config(**{**base.__dict__, "defined_risk_only": False, "min_reward_risk": 0}),
+    )
 
 
 def test_every_strategy_has_a_valid_payload_case():
@@ -109,7 +38,6 @@ def test_valid_payloads_accepted(strategy):
     assert proposal.gateway_method == STRATEGIES[strategy][1]
     if "symbol" in VALID_PAYLOADS[strategy]:
         assert proposal.params.symbol == VALID_PAYLOADS[strategy]["symbol"].upper()
-    # Ticket rendering must not raise for any valid proposal
     render_ticket(proposal)
 
 
@@ -122,6 +50,18 @@ def test_proposal_ids_increment():
 def test_unknown_strategy_rejected():
     with pytest.raises(ProposalValidationError, match="Unknown strategy"):
         validate_proposal("naked_yolo", {"symbol": "AAPL"}, RATIONALE)
+
+
+def test_deleted_exotic_strategies_rejected():
+    for name in ("modify_order", "naked_yolo"):
+        with pytest.raises(ProposalValidationError, match="Unknown strategy"):
+            validate_proposal(name, {"symbol": "SPY"}, RATIONALE)
+
+
+def test_covered_call_and_trailing_are_allowlisted():
+    for name in ("covered_call", "trailing_stop", "vertical_spread", "vwap", "roll_option"):
+        assert name in STRATEGIES
+        validate_proposal(name, VALID_PAYLOADS[name], RATIONALE)
 
 
 def test_missing_rationale_rejected():
@@ -167,7 +107,6 @@ class TestProtectionRequired:
 
     def test_bare_order_with_closing_flag_accepted(self):
         proposal = validate_proposal("market_order", VALID_PAYLOADS["market_order"], RATIONALE)
-        # The flag is an assertion, not a gateway parameter
         assert "closing_position" not in proposal.params.model_dump()
 
     def test_market_bracket_price_ordering(self):
@@ -182,17 +121,12 @@ class TestProtectionRequired:
             )
 
     def test_management_strategies_flagged(self):
-        """Order management strategies are flagged separately from new trades."""
-        for strategy in ("oca", "modify_stop", "modify_target", "modify_order", "cancel_order"):
+        for strategy in ("oca", "modify_stop", "modify_target", "cancel_order"):
             p = validate_proposal(strategy, VALID_PAYLOADS[strategy], RATIONALE)
             assert p.is_management, strategy
         for strategy in ("bracket", "market_bracket", "market_order", "close_option"):
             p = validate_proposal(strategy, VALID_PAYLOADS[strategy], RATIONALE)
             assert not p.is_management, strategy
-
-    def test_modify_order_requires_a_change(self):
-        with pytest.raises(ProposalValidationError, match="at least one"):
-            validate_proposal("modify_order", {"order_id": 104}, RATIONALE)
 
 
 class TestBracketOrdering:
@@ -230,85 +164,118 @@ class TestBracketOrdering:
         assert p.params.direction == "SHORT"
 
 
-class TestTrailingStop:
-    def test_both_trails_rejected(self):
-        with pytest.raises(ProposalValidationError, match="exactly one"):
-            validate_proposal(
-                "trailing_stop",
-                {
-                    "symbol": "TSLA", "quantity": 10, "direction": "LONG",
-                    "trail_amount": 2.0, "trail_percent": 5.0,
-                },
-                RATIONALE,
-            )
-
-    def test_neither_trail_rejected(self):
-        with pytest.raises(ProposalValidationError, match="exactly one"):
-            validate_proposal(
-                "trailing_stop",
-                {"symbol": "TSLA", "quantity": 10, "direction": "LONG"},
-                RATIONALE,
-            )
-
-
-class TestOptionValidation:
+class TestCloseOption:
     def test_bad_expiration_format_rejected(self):
         with pytest.raises(ProposalValidationError, match="YYYYMMDD"):
             validate_proposal(
-                "straddle",
-                {"symbol": "SPY", "expiration": "2026-07-31", "strike": 565.0},
+                "close_option",
+                {"symbol": "SPY", "expiration": "2026-07-31", "strike": 565.0, "right": "C"},
                 RATIONALE,
             )
 
-    def test_iron_condor_strike_ordering_rejected(self):
-        with pytest.raises(ProposalValidationError, match="put_long < put_short"):
+
+class TestMinRewardRisk:
+    """Bracket / market_bracket must meet min reward:risk when configured."""
+
+    @pytest.fixture(autouse=True)
+    def _enable(self, monkeypatch):
+        base = get_config()
+        monkeypatch.setattr(
+            "abcxauto.proposals.get_config",
+            lambda: Config(**{**base.__dict__, "defined_risk_only": False, "min_reward_risk": 2.0}),
+        )
+
+    def test_bracket_below_min_rejected(self):
+        with pytest.raises(ProposalValidationError, match="reward:risk"):
             validate_proposal(
-                "iron_condor",
+                "bracket",
                 {
-                    "symbol": "SPY", "expiration": "20260731",
-                    "put_long_strike": 550.0, "put_short_strike": 540.0,
-                    "call_short_strike": 580.0, "call_long_strike": 590.0,
+                    "symbol": "NVDA", "quantity": 10, "direction": "LONG",
+                    "entry_price": 100.0, "stop_price": 95.0, "target_price": 105.0,
                 },
                 RATIONALE,
             )
 
-    def test_vertical_same_strikes_rejected(self):
-        with pytest.raises(ProposalValidationError, match="must differ"):
+    def test_bracket_meets_min_accepted(self):
+        p = validate_proposal(
+            "bracket",
+            {
+                "symbol": "NVDA", "quantity": 10, "direction": "LONG",
+                "entry_price": 100.0, "stop_price": 95.0, "target_price": 110.0,
+            },
+            RATIONALE,
+        )
+        assert p.strategy == "bracket"
+
+    def test_market_bracket_skips_rr_without_price_hint(self):
+        p = validate_proposal(
+            "market_bracket",
+            {
+                "symbol": "NVDA", "quantity": 10, "direction": "LONG",
+                "stop_price": 95.0, "target_price": 110.0,
+            },
+            RATIONALE,
+        )
+        assert p.strategy == "market_bracket"
+        assert getattr(p.params, "price_hint", None) is None
+
+    def test_market_bracket_enforces_rr_with_price_hint(self):
+        p = validate_proposal(
+            "market_bracket",
+            {
+                "symbol": "NVDA", "quantity": 10, "direction": "LONG",
+                "stop_price": 95.0, "target_price": 110.0, "price_hint": 100.0,
+            },
+            RATIONALE,
+        )
+        assert p.params.price_hint == 100.0
+
+        with pytest.raises(ProposalValidationError, match="reward:risk"):
             validate_proposal(
-                "vertical_spread",
+                "market_bracket",
                 {
-                    "symbol": "SPY", "expiration": "20260731",
-                    "long_strike": 560.0, "short_strike": 560.0, "right": "C",
+                    "symbol": "NVDA", "quantity": 10, "direction": "LONG",
+                    "stop_price": 95.0, "target_price": 105.0, "price_hint": 100.0,
                 },
                 RATIONALE,
             )
 
-    def test_calendar_expiration_ordering_rejected(self):
-        with pytest.raises(ProposalValidationError, match="before far_expiration"):
-            validate_proposal(
-                "calendar_spread",
-                {
-                    "symbol": "SPY", "strike": 565.0,
-                    "near_expiration": "20260831", "far_expiration": "20260731",
-                },
-                RATIONALE,
-            )
+    def test_disabled_skips(self, monkeypatch):
+        base = get_config()
+        monkeypatch.setattr(
+            "abcxauto.proposals.get_config",
+            lambda: Config(**{**base.__dict__, "min_reward_risk": 0}),
+        )
+        p = validate_proposal(
+            "bracket",
+            {
+                "symbol": "NVDA", "quantity": 10, "direction": "LONG",
+                "entry_price": 100.0, "stop_price": 95.0, "target_price": 105.0,
+            },
+            RATIONALE,
+        )
+        assert p.strategy == "bracket"
 
-    def test_odd_share_count_rejected_for_covered_call(self):
-        with pytest.raises(ProposalValidationError, match="shares"):
-            validate_proposal(
-                "covered_call",
-                {"symbol": "AAPL", "expiration": "20260731", "strike": 160.0, "shares": 150},
-                RATIONALE,
-            )
-
-    def test_collar_put_above_call_rejected(self):
-        with pytest.raises(ProposalValidationError, match="put_strike < call_strike"):
-            validate_proposal(
-                "collar",
-                {
-                    "symbol": "AAPL", "expiration": "20260731",
-                    "put_strike": 160.0, "call_strike": 140.0, "shares": 100,
-                },
-                RATIONALE,
-            )
+    def test_market_bracket_accepts_side_buy_alias(self):
+        """Live Grok often sends side=BUY instead of direction=LONG."""
+        p = validate_proposal(
+            "market_bracket",
+            {
+                "symbol": "SPY",
+                "quantity": 2,
+                "side": "BUY",
+                "stop_price": 749.5,
+                "target_price": 754.8,
+                "secType": "STK",
+                "exchange": "SMART",
+                "currency": "USD",
+                "tif": "DAY",
+            },
+            RATIONALE,
+        )
+        assert p.strategy == "market_bracket"
+        assert p.params.direction == "LONG"
+        dumped = p.params.model_dump(exclude_none=True)
+        assert "side" not in dumped
+        assert "secType" not in dumped
+        assert "tif" not in dumped

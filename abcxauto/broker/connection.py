@@ -1,13 +1,17 @@
-"""IBKR TWS/Gateway connection lifecycle — error codes and reconnect hints.
+"""IBKR TWS/Gateway connection lifecycle — error codes, port/mode guards, reconnect hints.
 
 Used by :mod:`abcxauto.broker.connector` for classifying disconnects (especially TWS
-midnight restarts) and structured logging.
+midnight restarts), paper/live safety checks, and structured logging.
 """
 
 from __future__ import annotations
 
+import asyncio
+import time as _time
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple
+
+from abcxauto.config import get_config
 
 # IB API connectivity messages (see IB TWS API Reference → Error Codes)
 ERROR_CONNECTIVITY_LOST = 1100  # IB ↔ TWS lost; TWS may still be up
@@ -21,6 +25,10 @@ TWS_RESTORED_CODES: frozenset[int] = frozenset(
 )
 FARM_OK_CODES: frozenset[int] = frozenset({2104, 2106, 2158})
 
+PAPER_PORTS: frozenset[int] = frozenset({7497, 4002})
+LIVE_PORTS: frozenset[int] = frozenset({7496, 4001})
+LIVE_CONFIRM_PHRASE = "I_UNDERSTAND_LIVE_TRADING_RISK"
+
 
 class DisconnectCause(str, Enum):
     """Why the API session dropped (best-effort attribution)."""
@@ -30,6 +38,54 @@ class DisconnectCause(str, Enum):
     USER_DISCONNECT = "user_disconnect"
     HEARTBEAT_FAILED = "heartbeat_failed"
     CONNECT_FAILED = "connect_failed"
+
+
+class TradingModePortError(ValueError):
+    """TRADING_MODE / IBKR_PORT / live-confirm inconsistency — refuse connect."""
+
+
+def validate_trading_mode_port(
+    mode: str,
+    port: int,
+    live_confirm: str = "",
+) -> None:
+    """Raise :class:`TradingModePortError` if mode/port/confirm are inconsistent.
+
+    Paper may only use 7497/4002; live only 7496/4001. Live additionally requires
+    ``live_confirm == I_UNDERSTAND_LIVE_TRADING_RISK``.
+    """
+    normalized = (mode or "paper").strip().lower()
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError) as e:
+        raise TradingModePortError(f"Invalid IBKR_PORT={port!r}") from e
+
+    if normalized == "paper":
+        if port_i not in PAPER_PORTS:
+            raise TradingModePortError(
+                f"TRADING_MODE=paper requires IBKR_PORT in {sorted(PAPER_PORTS)} "
+                f"(got {port_i}). Live ports are 7496/4001 — set TRADING_MODE=live "
+                f"and ABCXAUTO_LIVE_CONFIRM only if you intend real-money trading."
+            )
+        return
+
+    if normalized == "live":
+        if port_i not in LIVE_PORTS:
+            raise TradingModePortError(
+                f"TRADING_MODE=live requires IBKR_PORT in {sorted(LIVE_PORTS)} "
+                f"(got {port_i}). Paper ports are 7497/4002."
+            )
+        if (live_confirm or "").strip() != LIVE_CONFIRM_PHRASE:
+            raise TradingModePortError(
+                "TRADING_MODE=live refused: set ABCXAUTO_LIVE_CONFIRM to the exact "
+                f"phrase {LIVE_CONFIRM_PHRASE!r} before connecting to a live port. "
+                "This is real money — do not set it casually."
+            )
+        return
+
+    raise TradingModePortError(
+        f"Unknown TRADING_MODE={mode!r}; expected 'paper' or 'live'"
+    )
 
 
 def classify_error_code(error_code: int) -> Optional[str]:
@@ -50,7 +106,62 @@ def classify_error_code(error_code: int) -> Optional[str]:
     return None
 
 
-def reconnect_backoff_seconds(failure_count: int, *, base: float = 5.0, cap: float = 60.0) -> float:
-    """Exponential backoff between reconnect attempts (seconds)."""
+def reconnect_backoff_seconds(
+    failure_count: int, *, base: float = 2.0, cap: float = 60.0
+) -> float:
+    """Exponential backoff between reconnect attempts (seconds).
+
+    ``failure_count`` 0 → ``base``, then doubles each step up to ``cap``.
+    """
     n = max(0, int(failure_count))
-    return min(cap, base * (2**min(n, 4)))
+    return min(cap, base * (2 ** min(n, 5)))
+
+
+# ---------- endpoint helpers (absorbed from util.py) ----------
+
+
+async def safe_sleep(seconds: float) -> None:
+    """asyncio.sleep wrapper — falls back to time.sleep on Python 3.13 deque bug."""
+    try:
+        await asyncio.sleep(seconds)
+    except IndexError:
+        _time.sleep(seconds)
+
+
+def get_ibkr_host() -> str:
+    return get_config().ibkr_host
+
+
+def get_ibkr_port() -> int:
+    return get_config().ibkr_port
+
+
+def is_paper_trading() -> bool:
+    return get_ibkr_port() not in LIVE_PORTS
+
+
+def is_live_trading() -> bool:
+    return get_ibkr_port() in LIVE_PORTS
+
+
+def resolve_ibkr_endpoint(mode: str | None = None) -> Tuple[str, int, str]:
+    """Return (host, port, mode_string) from config.
+
+    ``mode`` is ignored (kept for API compat). Mode comes from ``TRADING_MODE``.
+    Call :func:`validate_trading_mode_port` before connecting.
+    """
+    del mode
+    cfg = get_config()
+    mode_str = (cfg.trading_mode or "paper").strip().lower() or "paper"
+    return cfg.ibkr_host, cfg.ibkr_port, mode_str
+
+
+def assert_connect_allowed() -> None:
+    """Raise if TRADING_MODE / port / live-confirm are inconsistent."""
+    cfg = get_config()
+    validate_trading_mode_port(cfg.trading_mode, cfg.ibkr_port, cfg.live_confirm)
+
+
+def format_ibkr_endpoint() -> str:
+    host, port, mode_str = resolve_ibkr_endpoint()
+    return f"{host}:{port} ({mode_str})"

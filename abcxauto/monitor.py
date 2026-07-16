@@ -14,14 +14,70 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from abcxauto.broker.order_types import is_stop_order
 from abcxauto.config import get_config
 from abcxauto.marketdata.market_hours import get_session_info
+from abcxauto.memory import get_journal
+from abcxauto.risk_gates import get_risk_gate
 
 logger = logging.getLogger(__name__)
+
+
+def _account_float(account: Dict[str, Any], *keys: str) -> Optional[float]:
+    for key in keys:
+        if key in account and account[key] is not None:
+            try:
+                return float(account[key])
+            except (TypeError, ValueError):
+                continue
+        lower = key.lower()
+        if lower in account and account[lower] is not None:
+            try:
+                return float(account[lower])
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _days_to_expiry(expiration: Any) -> Optional[int]:
+    """Parse YYYYMMDD (or YYYY-MM-DD) expiration into days-to-expiry, or None."""
+    if expiration is None:
+        return None
+    raw = str(expiration).replace("-", "").strip()[:8]
+    if len(raw) != 8 or not raw.isdigit():
+        return None
+    try:
+        exp = date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+    except ValueError:
+        return None
+    return (exp - date.today()).days
+
+
+def _con_id(obj: Dict[str, Any]) -> Optional[str]:
+    """Normalize conId/con_id to a comparable string, or None if absent/empty."""
+    raw = obj.get("conId")
+    if raw is None:
+        raw = obj.get("con_id")
+    if raw is None or raw == "":
+        return None
+    return str(raw)
+
+
+def _order_matches_position(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
+    """Prefer conId match when both sides expose it; else symbol + secType."""
+    pos_con = _con_id(position)
+    ord_con = _con_id(order)
+    if pos_con is not None and ord_con is not None:
+        return pos_con == ord_con
+    pos_sec = position.get("sec_type", "STK")
+    ord_sec = order.get("sec_type", "STK")
+    return (
+        order.get("symbol") == position.get("symbol", "")
+        and ord_sec == pos_sec
+    )
 
 
 def build_protection_report(
@@ -31,8 +87,12 @@ def build_protection_report(
     """Match each position with its working stop/target orders.
 
     Stock positions without a working stop order are flagged unprotected.
-    Option positions are listed for review but not stop-audited (multi-leg
-    structures carry defined risk in the structure itself).
+    Matching prefers conId when both the position and order expose one;
+    otherwise falls back to symbol + secType (avoids option-leg / stale
+    same-symbol stops masquerading as stock protection).
+    Option positions get a light advisory audit (market value, DTE, short flag)
+    but are not stop-audited — multi-leg structures carry defined risk in the
+    structure itself. Short option legs are flagged for Grok review only.
     """
     report = []
     unprotected = []
@@ -59,7 +119,7 @@ def build_protection_report(
         if sec_type == "STK":
             same_side_exits = [
                 o for o in (orders or [])
-                if o.get("symbol") == symbol
+                if _order_matches_position(p, o)
                 and o.get("sec_type", "STK") == "STK"
                 and o.get("action") == exit_action
             ]
@@ -78,7 +138,30 @@ def build_protection_report(
             if not stops:
                 unprotected.append(symbol)
         else:
-            entry["note"] = "option position - protection audit not applied"
+            # Light option audit — advisory only (does not block or auto-panic).
+            expiration = (
+                p.get("expiration")
+                or p.get("lastTradeDateOrContractMonth")
+                or p.get("expiry")
+            )
+            dte = _days_to_expiry(expiration)
+            if dte is not None:
+                entry["days_to_expiry"] = dte
+            if expiration is not None:
+                entry["expiration"] = expiration
+            if p.get("strike") is not None:
+                entry["strike"] = p.get("strike")
+            if p.get("right") is not None:
+                entry["right"] = p.get("right")
+            try:
+                qty_n = float(qty)
+            except (TypeError, ValueError):
+                qty_n = 0.0
+            if qty_n < 0:
+                entry["note"] = "short option — review risk"
+                entry["flag"] = "short option — review risk"
+            else:
+                entry["note"] = "option position — light audit (no stop matching)"
 
         report.append(entry)
 
@@ -142,9 +225,16 @@ class PortfolioMonitor:
         if not snapshot:
             return
 
+        await self._maybe_auto_panic(snapshot)
+
         now = time.monotonic()
         unprotected = snapshot["protection"]["unprotected_symbols"]
         has_positions = bool(snapshot["protection"]["positions"])
+
+        # Stub / non-agent sessions (ProEngine) skip Grok review entirely;
+        # auto-panic, snapshots, fills, and equity tracking still run above.
+        if not self._supports_agent_review():
+            return
 
         # Unprotected positions are urgent: nudge Grok at most every 2 minutes,
         # regardless of the normal review interval.
@@ -163,6 +253,61 @@ class PortfolioMonitor:
 
         self._last_review_ts = now
         await self._ask_grok_review(snapshot, urgent=False)
+
+    def _supports_agent_review(self) -> bool:
+        """True when session can accept Grok review injections (web AgentSession)."""
+        flag = getattr(self.session, "supports_agent_review", None)
+        if flag is not None:
+            return bool(flag)
+        # Default True for AgentSession / test fakes without the flag.
+        return True
+
+    async def _maybe_auto_panic(self, snapshot: Dict[str, Any]) -> None:
+        """On daily-loss breach: halt once, flatten_all, inject a clear message.
+
+        The risk-gate halt latch guards against repeated flatten on every poll.
+        """
+        cfg = self.cfg
+        if not cfg.auto_panic_on_breach or cfg.daily_loss_limit_pct <= 0:
+            return
+
+        gate = get_risk_gate()
+        if gate.is_halted:
+            return
+
+        account = snapshot.get("account") or {}
+        net_liq = _account_float(account, "netliquidation", "NetLiquidation")
+        daily_pnl = _account_float(account, "dailypnl", "DailyPnL")
+        if net_liq is None or net_liq <= 0 or daily_pnl is None:
+            return
+
+        limit = -(cfg.daily_loss_limit_pct / 100.0) * net_liq
+        if daily_pnl > limit:
+            return
+
+        reason = (
+            f"AUTO-PANIC: daily PnL {daily_pnl:.2f} breached "
+            f"{cfg.daily_loss_limit_pct}% of NL ({limit:.2f} on {net_liq:.2f})"
+        )
+        logger.critical(reason)
+        gate.halt(reason, kind="auto_panic")
+
+        flatten_result: Any = {"skipped": True}
+        try:
+            if hasattr(self.connector, "flatten_all"):
+                flatten_result = await self.connector.flatten_all()
+        except Exception as e:
+            logger.error(f"AUTO-PANIC flatten_all failed: {e}")
+            flatten_result = {"error": str(e)}
+
+        message = (
+            f"[monitor] {reason}. Trading halted; flatten_all invoked "
+            f"({flatten_result}). New entries blocked until resume or next day."
+        )
+        try:
+            await self.session.inject(message, source="monitor")
+        except Exception as e:
+            logger.warning(f"AUTO-PANIC inject failed: {e}")
 
     def _market_active(self) -> bool:
         try:
@@ -193,12 +338,31 @@ class PortfolioMonitor:
         account = await self.connector.get_account_summary()
         protection = build_protection_report(positions, orders)
 
+        # Feed peak-equity tracker for the self-clearing drawdown gate.
+        net_liq = _account_float(account or {}, "netliquidation", "NetLiquidation")
+        if net_liq is not None and net_liq > 0:
+            get_risk_gate().update_equity(net_liq)
+
+        journal = get_journal()
+        journal.record_snapshot(account or {}, positions, orders)
+
+        fills: list = []
+        # Cheap idempotent fill ingest (hasattr so fakes without get_fills stay green).
+        if hasattr(self.connector, "get_fills"):
+            try:
+                fills = await self.connector.get_fills() or []
+                journal.record_fills(fills)
+            except Exception as e:
+                logger.warning(f"Monitor fill ingest failed: {e}")
+                fills = []
+
         snapshot = {
             "connected": True,
             "taken_at": datetime.now(timezone.utc).isoformat(),
             "account": account,
             "positions": positions,
             "open_orders": orders,
+            "fills": list(fills)[-20:],
             "protection": protection,
         }
         self.latest = snapshot

@@ -176,7 +176,10 @@ class IBKRQueriesMixin:
                 # Use accountValues() which is already populated from connection
                 account_values = self.ib.accountValues()
 
-                result = {'account_id': self.account_id}
+                result = {
+                    'account_id': self.account_id,
+                    'account_name': getattr(self, 'account_name', None),
+                }
                 target_tags = {
                     'NetLiquidation',
                     'TotalCashValue',

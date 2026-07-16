@@ -3,23 +3,50 @@
 import ast
 import asyncio
 import json
-import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from abcxauto.pro_desktop import ProTerminal, FILTERS, NAV, _equity_chart_control
-from abcxauto.rocket import TWEAKS, run_cycle
+from abcxauto.pro_desktop import (
+    AMBER,
+    ProTerminal,
+    NAV,
+    _equity_spark_control,
+)
+from abcxauto.cycle import TWEAKS, run_cycle
 
 PRO_SRC = Path(__file__).resolve().parents[1] / "abcxauto" / "pro_desktop.py"
 SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-80c4246a04fb\implementer")
 REQUIRED = (
-    "Logs & Evolution", "Apply Again", "Replay Cycle", "Grok Deep Analyze",
-    "Export All", "Clear", "Pin Insight", "PANIC FLATTEN", "Raw JSON",
-    "START AUTONOMOUS", "PAUSE", "VALIDATE & EXECUTE",
-    "Positions", "Test Suite Results", "Reality Pulse", "lbl_clock", "lbl_session_badge",
-    "Simplify", "re-test", "Brutal", "suite_table",
+    "Close All Positions",
+    "Connect IBKR",
+    "Disconnect IBKR",
+    "Start agent",
+    "Stop agent",
+    "Start",
+    "Stop",
+    "Re-test",
+    "Dashboard",
+    "Test Suite",
+    "Positions",
+    "Scorecard",
+    "Reality Pulse",
+    "lbl_clock",
+    "lbl_session_badge",
+    "lbl_ibkr_status",
+    "lbl_xai_status",
+    "lbl_mda_status",
+    "_toggle_connect",
+    "_open_disconnect_confirm_dialog",
+    "re-test",
+    "Order suite",
+    "Activity",
+    "Working",
+    "Fills",
+    "_refresh_book_tab",
+    "What's happening",
+    "ABCXAUTO",
 )
 
 
@@ -42,29 +69,182 @@ def test_pro_gui_contract_labels():
     assert "_position_rows" in text
 
 
-def test_overview_dashboard_includes_positions_table():
+def test_overview_dashboard_agent_status():
     text = PRO_SRC.read_text(encoding="utf-8")
     idx = text.index("def _page_overview")
     end = text.index("def _page_positions", idx)
     block = text[idx:end]
-    # positions table widget is built in overview (ov_pos_table); _position_rows called in sync
-    assert "ov_pos_table" in text or "Positions" in block
-    assert "Equity Curve" in block
+    assert "Last action" in block
+    assert "Book" in block
+    assert "Working" in block
+    assert "Fills" in block
+    assert "order blotter" in block.lower() or "Working" in block
+    assert "Activity" in block
+    assert "Reality Pulse" in block
+    assert "_dash_book" in block
+    assert "_dash_agent" in block
+    assert "_dash_log" in block
+    assert "_refresh_book_tab" in block
+    assert "_refresh_agent_tab" in block
+    assert "_refresh_log_tab" in block
+    assert "_dash_pulse" not in block
+    assert '("pulse", "Pulse")' not in text
+    assert "_set_dash_tab" in text
+    assert "DASH_TABS" in text
+    # Portfolio NetLiq strip is not the Book tab primary content anymore
+    assert 'self._stat_line("NetLiq"' not in block
+    assert "VALIDATE & EXECUTE" not in block
+    assert "ov_pos_table" not in block
+    assert "Equity Curve" not in block
+    assert "Start" in text
+    assert "Stop" in text or "Pause" in text
+    assert "Close All Positions" in text
+    assert "Re-test all" in text
+    assert "Dashboard" in text
+    assert "Test Suite" in text
+    assert "_page_risk" in text
+    assert '("risk", "Risk"' in text or "\"risk\", \"Risk\"" in text
+    assert "_sync_ibkr_account_label" in text
+    assert "_toggle_trading_mode" in text
+    assert "lbl_account_id" in text
+    assert "btn_account_mode" in text
+    assert "_toggle_accounts_popup" not in text
+    assert "@paper" not in text
+    assert "_toggle_run" in text
+    assert "_page_suite" in text
+    assert "_left_rail" in text
+    assert "_right_rail" in text
+    assert "Following" not in text
+    assert "Search ABCXAUTO" not in text
+    assert "START AUTONOMOUS" not in text
+    assert "PANIC FLATTEN" not in text
+    assert "Mandate:" in text or "lbl_mandate_health" in text
 
 
-def test_equity_chart_placeholder_single_and_multi():
+def test_book_strip_and_mandate_sync(headless_pro):
+    """Book + mandate health reflect ViewState portfolio fields."""
+    from abcxauto.pro_engine import compute_mandate_health
+
+    s = headless_pro.engine.state
+    s.equity = 100_000.0
+    s.pnl = -50.0
+    s.unprotected_count = 0
+    s.halted = False
+    s.last_decision = "trade"
+    s.mandate_health, s.mandate_health_label = compute_mandate_health(
+        unprotected_count=0,
+        halted=False,
+        equity=100_000.0,
+        daily_pnl=-50.0,
+        gate_blocks=0,
+    )
+    s.portfolio = {
+        "net_liquidation": 100_000.0,
+        "daily_pnl": -50.0,
+        "unprotected_count": 0,
+        "last_decision": "trade",
+        "halted": False,
+    }
+    headless_pro._sync_widgets()
+    assert headless_pro.lbl_book_netliq.value == "$100,000"
+    assert "-50.00" in (headless_pro.lbl_book_pnl.value or "")
+    assert headless_pro.lbl_book_unprotected.value == "0"
+    assert headless_pro.lbl_book_decision.value == "trade"
+    assert headless_pro.lbl_book_halt.value == "clear"
+    assert "green" in (headless_pro.lbl_mandate_health.value or "").lower()
+
+    s.unprotected_count = 2
+    s.halted = True
+    s.last_decision = "hold"
+    s.mandate_health, s.mandate_health_label = compute_mandate_health(
+        unprotected_count=2,
+        halted=True,
+        equity=100_000.0,
+        daily_pnl=-50.0,
+    )
+    s.portfolio = {
+        "net_liquidation": 99_000.0,
+        "daily_pnl": -1200.0,
+        "unprotected_count": 2,
+        "last_decision": "hold",
+        "halted": True,
+    }
+    headless_pro._sync_widgets()
+    assert headless_pro.lbl_book_unprotected.value == "2"
+    assert headless_pro.lbl_book_decision.value == "hold"
+    assert headless_pro.lbl_book_halt.value == "HALTED"
+    assert "red" in (headless_pro.lbl_mandate_health.value or "").lower()
+
+
+def test_scorecard_hold_vs_trade_label(headless_pro, tmp_path, monkeypatch):
+    """Scorecard shows hold/trade ratio from journal proposals."""
+    from abcxauto.memory import reset_journal
+
+    db = tmp_path / "hold_trade_scorecard.db"
+    j = reset_journal(path=str(db), enabled=True)
+    monkeypatch.setattr("abcxauto.pro_desktop.get_journal", lambda: j)
+    j.record_proposal(
+        source="test",
+        strategy="hold",
+        symbol="SPY",
+        direction="LONG",
+        quantity=0,
+        validation_ok=True,
+    )
+    j.record_proposal(
+        source="test",
+        strategy="market_bracket",
+        symbol="SPY",
+        direction="LONG",
+        quantity=1,
+        validation_ok=True,
+    )
+    j.record_proposal(
+        source="test",
+        strategy="oca",
+        symbol="QQQ",
+        direction="LONG",
+        quantity=1,
+        validation_ok=True,
+    )
+    headless_pro._page_scorecard()
+    headless_pro._refresh_scorecard(force=True)
+    assert headless_pro.lbl_sc_hold_trade.value == "1/2"
+
+
+def test_no_validate_execute_chrome():
+    text = PRO_SRC.read_text(encoding="utf-8")
+    assert "VALIDATE & EXECUTE" not in text
+    assert "Validate Order Impact" not in text
+    assert "_validate_execute" not in text
+    assert "_validate_impact" not in text
+    assert "Improvements" not in text
+
+
+def test_equity_spark_placeholder_single_and_multi():
     import flet as ft
-    ph = _equity_chart_control([])
-    one = _equity_chart_control([100000.0])
-    multi = _equity_chart_control([100000, 100500, 101200])
-    assert isinstance(ph, ft.Image)
-    assert isinstance(one, ft.Image)
-    assert isinstance(multi, ft.Image)
-    assert ph.src != one.src and one.src != multi.src
+
+    ph = _equity_spark_control([])
+    one = _equity_spark_control([100000.0])
+    multi = _equity_spark_control([100000, 100500, 101200])
+    assert isinstance(ph, ft.Text)
+    assert isinstance(one, ft.Text)
+    assert isinstance(multi, ft.Column)
+    assert "Awaiting" in (ph.value or "")
+    assert "100,000" in (one.value or "")
+    assert multi.controls and "101,200" in (multi.controls[0].value or "")
 
 
 class _Cfg:
     xai_api_key = "test-key"
+    model = "grok-4.5"
+    trading_mode = "paper"
+    ibkr_port = 7497
+    suite_paper_place = True
+
+    @property
+    def is_paper(self) -> bool:
+        return True
 
 
 class _Page:
@@ -76,6 +256,7 @@ class _Page:
     def __init__(self):
         self.window = type("W", (), {"width": 1280, "height": 820, "min_width": 1000, "min_height": 700})()
         self.snack_bar = None
+        self.overlay = []
 
     def add(self, *_):
         pass
@@ -103,6 +284,112 @@ def test_tab_switch_builds_fresh_pos_tables(headless_pro):
     assert ov is not None and pos is not None
 
 
+def test_scorecard_page_empty_journal(headless_pro, tmp_path, monkeypatch):
+    """Scorecard constructs and shows empty-state copy when journal has no rows."""
+    from abcxauto.memory import reset_journal
+
+    db = tmp_path / "empty_scorecard.db"
+    reset_journal(path=str(db), enabled=True)
+    monkeypatch.setattr("abcxauto.pro_desktop.get_journal", lambda: reset_journal(path=str(db), enabled=True))
+
+    page = headless_pro._page_scorecard()
+    assert page is not None
+    headless_pro._refresh_scorecard(force=True)
+
+    assert headless_pro.lbl_sc_proposals.value == "0"
+    assert headless_pro.lbl_sc_allowed.value == "0"
+    assert headless_pro.lbl_sc_rejected.value == "0"
+    assert headless_pro.lbl_sc_dispatch_ok.value == "0"
+    assert headless_pro.lbl_sc_dispatch_failed.value == "0"
+    assert headless_pro.lbl_sc_halts.value == "0"
+    assert headless_pro.lbl_sc_netliq.value == "—"
+    assert headless_pro.lbl_sc_hold_trade.value == "—"
+    empty_msg = "No data yet — journal populates as the agent trades"
+    assert empty_msg in (headless_pro.lbl_sc_equity_empty.value or "")
+    first_cell = headless_pro.sc_dispatch_table.rows[0].cells[0].content
+    assert empty_msg in (getattr(first_cell, "value", "") or "")
+    assert ("scorecard", "Scorecard") in [n[:2] for n in NAV]
+    assert ("risk", "Risk") in [n[:2] for n in NAV]
+
+
+def test_scorecard_page_with_journal_data(headless_pro, tmp_path, monkeypatch):
+    """Scorecard counters and NetLiq reflect a populated temp journal."""
+    from abcxauto.memory import reset_journal
+
+    db = tmp_path / "filled_scorecard.db"
+    j = reset_journal(path=str(db), enabled=True)
+    monkeypatch.setattr("abcxauto.pro_desktop.get_journal", lambda: j)
+
+    pid = j.record_proposal(
+        source="test",
+        strategy="bracket",
+        symbol="SPY",
+        direction="LONG",
+        quantity=1,
+        validation_ok=True,
+    )
+    j.record_gate_decision(pid, True, "ok")
+    j.record_gate_decision(pid, False, "risk")
+    j.record_dispatch(pid, True, {"status": "filled", "order_id": 1})
+    j.record_dispatch(pid, False, {"status": "rejected", "reason": "timeout"})
+    j.record_halt("daily loss", kind="halt")
+    j.record_snapshot(account={"NetLiquidation": 100000.0})
+    j.record_snapshot(account={"NetLiquidation": 100250.0})
+
+    page = headless_pro._page_scorecard()
+    assert page is not None
+    headless_pro._refresh_scorecard(force=True)
+
+    assert headless_pro.lbl_sc_proposals.value == "1"
+    assert headless_pro.lbl_sc_allowed.value == "1"
+    assert headless_pro.lbl_sc_rejected.value == "1"
+    assert headless_pro.lbl_sc_dispatch_ok.value == "1"
+    assert headless_pro.lbl_sc_dispatch_failed.value == "1"
+    assert headless_pro.lbl_sc_halts.value == "1"
+    assert headless_pro.lbl_sc_halts.color == AMBER
+    assert headless_pro.lbl_sc_netliq.value == "$100,250"
+    assert headless_pro.lbl_sc_equity_empty.visible is False
+    assert headless_pro.lbl_sc_agent_ret.value == "+0.25%"
+    assert len(headless_pro.sc_dispatch_table.rows or []) >= 2
+    statuses = []
+    for row in headless_pro.sc_dispatch_table.rows:
+        cell = row.cells[1]
+        statuses.append(getattr(cell.content, "value", None))
+    assert "OK" in statuses and "FAILED" in statuses
+    spark = headless_pro.sc_equity_spark.content
+    assert spark is not None
+    assert getattr(spark, "controls", None) or getattr(spark, "value", None)
+
+
+def test_scorecard_nav_and_show_tab(headless_pro, tmp_path, monkeypatch):
+    from abcxauto.memory import reset_journal
+
+    db = tmp_path / "nav_scorecard.db"
+    j = reset_journal(path=str(db), enabled=True)
+    monkeypatch.setattr("abcxauto.pro_desktop.get_journal", lambda: j)
+    headless_pro.sidebar_btns = {
+        k: type("B", (), {"bgcolor": None})() for k, _, _, _ in NAV
+    }
+    headless_pro.sidebar_icon_pair = {k: (o, f) for k, _, o, f in NAV}
+    headless_pro.sidebar_icons = {}
+    headless_pro.sidebar_labels = {}
+    headless_pro.lbl_center_title = type("T", (), {"value": ""})()
+    headless_pro.content = type("C", (), {"content": None})()
+    headless_pro.dash_tabs_row = type("D", (), {"visible": True})()
+    headless_pro._show_tab("scorecard")
+    assert headless_pro.tab == "scorecard"
+    assert headless_pro.lbl_center_title.value == "Scorecard"
+    assert headless_pro.dash_tabs_row.visible is False
+    assert headless_pro.content.content is not None
+    headless_pro._show_tab("suite")
+    assert headless_pro.tab == "suite"
+    assert headless_pro.lbl_center_title.value == "Test Suite"
+    headless_pro._show_tab("overview")
+    assert headless_pro.dash_tabs_row.visible is True
+    headless_pro._set_dash_tab("log")
+    assert headless_pro.dash_tab == "log"
+
+
 @pytest.mark.asyncio
 async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
     calls = {"grok": 0}
@@ -113,9 +400,25 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
         if "ONE tweak" in prompt:
             return json.dumps({"type": "config", "config": {"cycle_sleep_s": 0.01}, "summary": "faster"})
         return json.dumps({
-            "action": "hold", "strategy": "hold",
-            "rationale": "inventory reviewed → target none → hold",
+            "action": "oca",
+            "strategy": "oca",
+            "params": {
+                "symbol": "SPY",
+                "quantity": 10,
+                "direction": "LONG",
+                "stop_price": 490.0,
+                "target_price": 520.0,
+                "conId": 1,
+            },
+            "rationale": "inventory reviewed → protect SPY conId=1",
             "reasoning_chain": "SPY STK listed",
+            "kahneman": {
+                "system1_scan": "unprotected",
+                "system2_base_rate": "protect",
+                "pre_mortem": "gap",
+                "alternatives": ["modify_stop"],
+                "bias_audit": ["loss_aversion"],
+            },
         })
 
     async def _fake_tool(_c, name, _a=None):
@@ -136,8 +439,24 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
         async def get_positions(self):
             return [{"symbol": "SPY", "quantity": 10, "sec_type": "STK"}]
 
-    monkeypatch.setattr("abcxauto.rocket._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.rocket.grok", fake_grok)
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
+    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+
+    async def _noop_send(action, conn):
+        return {"status": "executed", "strategy": action.get("strategy")}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
+    # Unprotected STK → protection Grok every cycle.
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: SimpleNamespace(
+            signal_only=False,
+            grok_min_interval_s=0,
+            trading_mandate="",
+        ),
+    )
     hist, prev = [], 0.0
     before = dict(TWEAKS)
     try:
@@ -145,6 +464,7 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
             out = await run_cycle(n, _Conn(), object(), hist, prev)
             prev = out["pnl"]
             assert out.get("inventory")
+        # Unprotected SPY STK → protection Grok every cycle
         assert calls["grok"] >= 3
     finally:
         TWEAKS.clear()
@@ -152,14 +472,34 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
 
 
 def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
-    """Shipped _start() — same handler as START AUTONOMOUS button."""
+    """Shipped _start() — same handler as Start path / toggle."""
     grok_n = [0]
 
     async def fake_grok(_g, prompt: str) -> str:
         if "ONE tweak" in prompt:
             return json.dumps({"type": "config", "config": {"cycle_sleep_s": 0.01}, "summary": "faster"})
         grok_n[0] += 1
-        return json.dumps({"action": "hold", "strategy": "hold", "reasoning_chain": "hold"})
+        return json.dumps({
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {
+                "symbol": "SPY",
+                "quantity": 1,
+                "direction": "LONG",
+                "stop_price": 490.0,
+                "target_price": 520.0,
+                "price_hint": 500.0,
+            },
+            "rationale": "active cycle",
+            "reasoning_chain": "active",
+            "kahneman": {
+                "system1_scan": "scan",
+                "system2_base_rate": "base",
+                "pre_mortem": "gap",
+                "alternatives": ["market_bracket"],
+                "bias_audit": ["anchoring"],
+            },
+        })
 
     class _Conn:
         connected = True
@@ -181,12 +521,23 @@ def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
     async def paced_sleep(_t):
         await _real_sleep(0.06)
 
-    monkeypatch.setattr("abcxauto.rocket._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.rocket.grok", fake_grok)
+    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
+    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
     # Worker lives in ProEngine — patch there, not the Flet shell module.
     monkeypatch.setattr("abcxauto.pro_engine.GrokClient", lambda: object())
     monkeypatch.setattr("abcxauto.pro_engine.asyncio.sleep", paced_sleep)
+
+    class _FastCfg:
+        xai_api_key = "test-key"
+        cycle_sleep_s = 0.05
+        grok_min_interval_s = 0.0
+        signal_only = False
+        monitor_enabled = False
+        trading_mandate = ""
+
+    monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _FastCfg())
+    monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _FastCfg())
 
     before = dict(TWEAKS)
     try:

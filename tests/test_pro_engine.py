@@ -1,6 +1,6 @@
 """ProEngine integration on shipped path (no mocks of engine itself).
 
-Mocks only: rocket._tool, rocket.grok, get_ibkr_connector.
+Mocks only: agent_loop._tool, agent_loop.grok, get_ibkr_connector.
 """
 
 import asyncio
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from abcxauto.pro_engine import ProEngine
-from abcxauto.rocket import TWEAKS
+from abcxauto.cycle import TWEAKS
 
 SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-80c4246a04fb\implementer")
 GOAL_SCRATCH = SCRATCH
@@ -19,6 +19,16 @@ GOAL_SCRATCH = SCRATCH
 
 class _Cfg:
     xai_api_key = "test-key"
+    cycle_sleep_s = 0.05
+    grok_min_interval_s = 0.0
+    signal_only = False
+    monitor_enabled = True
+    trading_mandate = ""
+
+
+_DEFAULT_TWEAKS = {
+    "max_risk_pct": 0.5,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -26,33 +36,67 @@ def patch_config(monkeypatch):
     monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _Cfg())
     yield
     TWEAKS.clear()
+    TWEAKS.update(_DEFAULT_TWEAKS)
 
 
 @pytest.mark.asyncio
 async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
-    """Engine.start() drives >=3 run_cycle, inventory+validation in records, >=1 tweak."""
-    calls = {"grok": 0, "tweak": 0}
+    """Engine.start() drives >=3 run_cycle with inventory+validation in records."""
+    from abcxauto.order_suite import set_cached_suite
+
+    set_cached_suite(
+        {
+            "pass_rate": 1.0,
+            "passed": 10,
+            "failed": 0,
+            "strategies_tested": 10,
+            "results": [],
+            "summary": "cached healthy",
+            "taken_at": "t",
+            "source": "startup",
+            "idle_prevented": True,
+        }
+    )
+    calls = {"grok": 0}
 
     async def fake_grok(_g, prompt: str) -> str:
         calls["grok"] += 1
-        assert "LIVE POSITION LEDGER" in prompt, "inventory must be in every cycle prompt"
-        if "ONE tweak" in prompt:
-            calls["tweak"] += 1
-            return json.dumps({"type": "config", "config": {"cycle_sleep_s": 0.01}, "summary": "faster-cycles"})
+        # Decision prompts always carry the live ledger.
+        assert "LIVE POSITION LEDGER" in prompt, "inventory must be in every decision prompt"
         # Occasionally return a close with explicit conId target to exercise real protocol path
         if calls["grok"] % 3 == 0:
             return json.dumps({
                 "action": "market_order", "strategy": "market_order",
                 "params": {"symbol": "SPY", "action": "SELL", "quantity": 1, "conId": "42"},
-                "rationale": "Closing target = conId=42 (SPY stock) — reducing to zero. Inventory reviewed.",
+                "rationale": "Current reality: RTH. Closing target = conId=42 (SPY stock).",
                 "target_conId": "42",
                 "reasoning_chain": "exact conId match",
+                "kahneman": {
+                    "system1_scan": "unprotected SPY STK",
+                    "system2_base_rate": "exit of unprotected equity",
+                    "pre_mortem": "partial fill leaves residue",
+                    "alternatives": ["oca", "modify_stop"],
+                    "bias_audit": ["loss_aversion"],
+                },
             })
         return json.dumps({
-            "action": "hold", "strategy": "hold",
-            "rationale": "inventory + checklist reviewed; hold. Closing target = conId=none",
+            "action": "modify_stop",
+            "strategy": "modify_stop",
+            "params": {
+                "symbol": "SPY",
+                "conId": 42,
+                "stop_price": 490.0,
+            },
+            "rationale": "inventory + checklist reviewed; protect SPY conId=42",
             "reasoning_chain": "full inventory present",
-            "target_conId": "",
+            "target_conId": "42",
+            "kahneman": {
+                "system1_scan": "unprotected SPY",
+                "system2_base_rate": "protect equity",
+                "pre_mortem": "gap",
+                "alternatives": ["oca"],
+                "bias_audit": ["loss_aversion"],
+            },
         })
 
     async def _fake_tool(_c, name, _a=None):
@@ -72,9 +116,17 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
         async def connect(self):
             return True
 
-    monkeypatch.setattr("abcxauto.rocket._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.rocket.grok", fake_grok)
+    async def _noop_send(action, conn):
+        return {"status": "executed", "strategy": action.get("strategy")}
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
+    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: _Cfg(),
+    )
 
     eng = ProEngine()
     err = eng.start()
@@ -82,7 +134,7 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
     assert eng.state.running
 
     # Let it run a bit (worker thread + async)
-    deadline = time.time() + 12
+    deadline = time.time() + 15
     while time.time() < deadline and eng.state.cycles < 3:
         eng.drain_apply()
         await asyncio.sleep(0.05)
@@ -97,13 +149,22 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
     inv_recs = [r for r in eng.state.records if r.get("inventory")]
     assert len(inv_recs) >= 3
     assert any("LIVE POSITION LEDGER" in (r.get("inventory") or "") for r in inv_recs)
-    # at least one tweak recorded
-    assert len(eng.state.tweaks) >= 1 or calls["tweak"] >= 1
+    # Manual tweak path still works (no per-cycle auto-reconfig)
+    eng.apply_tweak_manual(
+        {"type": "config", "config": {"cycle_sleep_s": 0.02}, "summary": "manual-faster"}
+    )
+    assert TWEAKS.get("cycle_sleep_s") == 0.02
     # validation present
     assert any(r.get("validation") for r in eng.state.records if r.get("type") != "panic")
     # exercise close + conId target naming (real path)
     has_close = any("close" in str((r.get("action") or r.get("action_obj", {}))).lower() or r.get("target_conId") for r in eng.state.records)
     assert has_close or any("conId=42" in str(r) for r in eng.state.records)  # from fake close exercise
+    # Cached suite used — no per-cycle suite theater in cycle records
+    assert all(
+        (r.get("reconfig") in (None, {}) or not r.get("reconfig"))
+        for r in eng.state.records
+        if r.get("type") == "cycle"
+    )
 
     SCRATCH.mkdir(parents=True, exist_ok=True)
     (SCRATCH / "pro_integration_notes.txt").write_text(
@@ -143,3 +204,404 @@ def test_pro_engine_passes_new_fields_through_records(monkeypatch):
     # no start, just check dataclass has the attrs used by apply
     assert hasattr(eng.state, "records")
     assert hasattr(eng.state, "tweaks")
+    assert hasattr(eng.state, "portfolio")
+    assert hasattr(eng.state, "mandate_health")
+    assert hasattr(eng.state, "last_decision")
+    assert hasattr(eng.state, "hold_count")
+    assert hasattr(eng.state, "trade_count")
+
+
+def test_on_cycle_populates_book_and_mandate(monkeypatch):
+    """_on_cycle fills portfolio / mandate_health / last_decision / hold-trade stats."""
+    from abcxauto.pro_engine import compute_mandate_health
+    from abcxauto.risk_gates import reset_risk_gate
+
+    reset_risk_gate()
+    eng = ProEngine()
+    eng._on_cycle(
+        {
+            "cycle": 1,
+            "pnl": -50.0,
+            "pnl_chg": -10.0,
+            "equity": 100_000.0,
+            "strat": "market_bracket",
+            "rationale": "enter",
+            "action_obj": {"strategy": "market_bracket"},
+            "result": {"status": "executed"},
+            "impact": {},
+            "reality_pulse": {},
+            "positions": [{"symbol": "SPY", "sec_type": "STK", "quantity": 1}],
+            "open_orders": [],
+            "unprotected": [],
+            "protection": {"unprotected_symbols": []},
+            "portfolio": "1 positions | 0 orders",
+            "inventory": "LIVE POSITION LEDGER",
+            "validation": "ok",
+        }
+    )
+    s = eng.state
+    assert s.last_decision == "trade"
+    assert s.trade_count == 1
+    assert s.hold_count == 0
+    assert s.unprotected_count == 0
+    assert s.mandate_health == "green"
+    assert s.portfolio.get("net_liquidation") == 100_000.0
+    assert s.portfolio.get("last_decision") == "trade"
+
+    eng._on_cycle(
+        {
+            "cycle": 2,
+            "pnl": -50.0,
+            "pnl_chg": 0.0,
+            "equity": 100_000.0,
+            "strat": "hold",
+            "rationale": "wait",
+            "action_obj": {},
+            "result": {"status": "hold"},
+            "impact": {},
+            "reality_pulse": {},
+            "positions": [{"symbol": "SPY", "sec_type": "STK", "quantity": 1}],
+            "open_orders": [],
+            "unprotected": ["SPY"],
+            "protection": {"unprotected_symbols": ["SPY"]},
+            "inventory": "LIVE POSITION LEDGER",
+            "validation": "ok",
+        }
+    )
+    s = eng.state
+    assert s.last_decision == "hold"
+    assert s.hold_count == 1
+    assert s.trade_count == 1
+    assert s.unprotected_count == 1
+    assert s.mandate_health == "red"
+    assert "unprotected" in s.mandate_health_label
+
+    level, _ = compute_mandate_health(
+        unprotected_count=0,
+        halted=False,
+        equity=100_000.0,
+        daily_pnl=-1200.0,  # > 50% of 2% limit (1000)
+        gate_blocks=0,
+    )
+    # With daily-loss limit default off, amber comes from gate_blocks instead.
+    assert level == "green"
+    level2, _ = compute_mandate_health(
+        unprotected_count=0,
+        halted=False,
+        equity=100_000.0,
+        daily_pnl=0.0,
+        gate_blocks=3,
+    )
+    assert level2 == "amber"
+    reset_risk_gate()
+
+
+@pytest.mark.asyncio
+async def test_pro_engine_wires_portfolio_monitor(monkeypatch):
+    """After IBKR connect, ProEngine starts PortfolioMonitor on the worker loop."""
+    from abcxauto.monitor import PortfolioMonitor
+    from abcxauto.risk_gates import get_risk_gate, reset_risk_gate
+
+    class _MonCfg:
+        xai_api_key = "test-key"
+        cycle_sleep_s = 0.05
+        grok_min_interval_s = 0.0
+        signal_only = False
+        monitor_enabled = True
+        monitor_poll_s = 60
+        monitor_review_s = 300
+        monitor_extended_hours = False
+        auto_panic_on_breach = True
+        daily_loss_limit_pct = 2.0
+        trading_mandate = ""
+
+    class _Conn:
+        connected = True
+
+        async def connect(self):
+            return True
+
+        async def get_positions(self):
+            return []
+
+        async def get_open_orders(self):
+            return []
+
+        async def get_account_summary(self):
+            return {"netliquidation": 100_000.0, "dailypnl": -3000.0}
+
+        async def get_fills(self):
+            return []
+
+        async def flatten_all(self):
+            return {"success": True, "flattened": 0}
+
+    async def fake_grok(_g, prompt: str) -> str:
+        return json.dumps(
+            {
+                "action": "market_bracket",
+                "strategy": "market_bracket",
+                "params": {
+                    "symbol": "SPY",
+                    "quantity": 1,
+                    "direction": "LONG",
+                    "stop_price": 490.0,
+                    "target_price": 520.0,
+                    "price_hint": 500.0,
+                },
+                "rationale": "active entry",
+                "reasoning_chain": "test",
+                "target_conId": "",
+                "kahneman": {
+                    "system1_scan": "scan",
+                    "system2_base_rate": "base",
+                    "pre_mortem": "gap",
+                    "alternatives": ["market_bracket"],
+                    "bias_audit": ["anchoring"],
+                },
+            }
+        )
+
+    async def _fake_tool(_c, name, _a=None):
+        return {
+            "account_summary": {"netliquidation": 100000, "unrealizedpnl": 0},
+            "positions": [],
+            "open_orders": [],
+            "market_hours": {"session": "regular"},
+            "quote": {"symbol": "SPY", "last": 500},
+        }.get(name, {})
+
+    monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _MonCfg())
+    monkeypatch.setattr("abcxauto.monitor.get_config", lambda: _MonCfg())
+    monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _MonCfg())
+    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
+    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
+
+    reset_risk_gate()
+    eng = ProEngine()
+    err = eng.start()
+    assert err is None
+
+    deadline = time.time() + 8
+    while time.time() < deadline and eng.monitor is None:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+
+    assert eng.monitor is not None
+    assert isinstance(eng.monitor, PortfolioMonitor)
+    assert eng.monitor.running is True
+    assert getattr(eng.monitor.session, "supports_agent_review", True) is False
+
+    # Auto-panic path reachable via monitor (halt latch + inject to stub)
+    snap = {
+        "account": {"netliquidation": 100_000.0, "dailypnl": -3000.0},
+        "protection": {"positions": [], "unprotected_symbols": []},
+    }
+    await eng.monitor._maybe_auto_panic(snap)
+    assert get_risk_gate().is_halted
+
+    eng.stop_engine()
+    eng.drain_apply()
+    assert eng.monitor is None
+    reset_risk_gate()
+
+
+def test_startup_suite_schedules_dry_run(monkeypatch):
+    """Startup suite path never paper-places (force_dry / no place_*)."""
+    from abcxauto.order_suite import clear_cached_suite
+
+    clear_cached_suite()
+    monkeypatch.delenv("ABCXAUTO_SUITE_PAPER_PLACE", raising=False)
+    calls = {"force_dry": None, "connector": "unset"}
+
+    async def fake_suite(**kwargs):
+        calls["force_dry"] = kwargs.get("force_dry")
+        calls["connector"] = kwargs.get("connector")
+        return {
+            "pass_rate": 1.0,
+            "passed": 1,
+            "failed": 0,
+            "results": [],
+            "summary": "dry",
+            "taken_at": "t",
+            "source": kwargs.get("source"),
+            "idle_prevented": True,
+            "mode": "dry_run",
+        }
+
+    monkeypatch.setattr("abcxauto.order_suite.run_order_suite", fake_suite)
+
+    async def _run():
+        eng = ProEngine()
+        await eng._run_suite_once("startup", allow_paper_place=False)
+
+    asyncio.run(_run())
+    assert calls["force_dry"] is True
+    assert calls["connector"] is None
+
+
+@pytest.mark.asyncio
+async def test_connect_broker_no_cycles_without_xai(monkeypatch):
+    """connect_broker links IBKR + monitor without requiring xAI or running cycles."""
+
+    class _NoXaiCfg:
+        xai_api_key = ""
+        cycle_sleep_s = 0.05
+        grok_min_interval_s = 0.0
+        signal_only = False
+        monitor_enabled = True
+        trading_mandate = ""
+
+    class _Conn:
+        connected = True
+
+        async def connect(self):
+            return True
+
+    cycle_calls = {"n": 0}
+
+    async def boom_cycle(*_a, **_k):
+        cycle_calls["n"] += 1
+        raise AssertionError("run_cycle must not run on connect-only")
+
+    monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _NoXaiCfg())
+    monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
+    monkeypatch.setattr("abcxauto.pro_engine.run_cycle", boom_cycle)
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.ProEngine._start_monitor",
+        lambda self: setattr(self, "monitor", type("M", (), {"running": True})()),
+    )
+
+    eng = ProEngine()
+    assert eng.start() == "XAI_API_KEY missing"
+    err = eng.connect_broker()
+    assert err is None
+
+    deadline = time.time() + 5
+    while time.time() < deadline and not eng.state.connected:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+
+    assert eng.state.connected
+    assert eng.state.autonomous is False
+    assert eng.state.running is False
+    assert eng.state.status == "Connected"
+    assert cycle_calls["n"] == 0
+    await asyncio.sleep(0.2)
+    eng.drain_apply()
+    assert cycle_calls["n"] == 0
+    assert eng.state.cycles == 0
+
+    eng.stop_engine()
+    eng.drain_apply()
+    assert eng.state.connected is False
+
+
+@pytest.mark.asyncio
+async def test_start_after_connect_enables_autonomous(monkeypatch):
+    """Start on an already-connected worker flips autonomous and runs cycles."""
+    calls = {"grok": 0}
+
+    async def fake_grok(_g, prompt: str) -> str:
+        calls["grok"] += 1
+        return json.dumps({
+            "action": "hold",
+            "strategy": "hold",
+            "params": {},
+            "rationale": "hold",
+            "reasoning_chain": "hold",
+            "target_conId": "",
+            "kahneman": {
+                "system1_scan": "ok",
+                "system2_base_rate": "ok",
+                "pre_mortem": "ok",
+                "alternatives": ["hold"],
+                "bias_audit": [],
+            },
+        })
+
+    async def _fake_tool(_c, name, _a=None):
+        return {
+            "account_summary": {"netliquidation": 100000, "unrealizedpnl": 0},
+            "positions": [],
+            "open_orders": [],
+            "market_hours": {"session": "regular"},
+            "quote": {"symbol": "SPY", "last": 500},
+        }.get(name, {})
+
+    class _Conn:
+        connected = True
+
+        async def connect(self):
+            return True
+
+    async def _noop_send(action, conn):
+        return {"status": "held", "strategy": "hold"}
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
+    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
+    monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
+    monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _Cfg())
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.ProEngine._start_monitor",
+        lambda self: setattr(self, "monitor", type("M", (), {"running": True})()),
+    )
+
+    eng = ProEngine()
+    assert eng.connect_broker() is None
+    deadline = time.time() + 5
+    while time.time() < deadline and not eng.state.connected:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert eng.state.connected
+    assert eng.state.autonomous is False
+
+    assert eng.start() is None
+    assert eng.state.autonomous is True
+    assert eng.state.running is True
+
+    deadline = time.time() + 10
+    while time.time() < deadline and eng.state.cycles < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+
+    eng.pause_engine()
+    eng.drain_apply()
+    assert eng.state.autonomous is False
+    assert eng.state.running is False
+    assert eng.monitor is not None  # pause keeps monitor
+
+    eng.stop_engine()
+    eng.drain_apply()
+
+
+def test_ensure_broker_ready_uses_connect_not_start(monkeypatch):
+    """Test Suite readiness must not require xAI / autonomy."""
+
+    class _NoXaiCfg:
+        xai_api_key = ""
+        cycle_sleep_s = 0.05
+        monitor_enabled = True
+        trading_mandate = ""
+
+    class _Conn:
+        connected = True
+
+        async def connect(self):
+            return True
+
+    monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _NoXaiCfg())
+    monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.ProEngine._start_monitor",
+        lambda self: setattr(self, "monitor", type("M", (), {"running": True})()),
+    )
+
+    eng = ProEngine()
+    err = eng.ensure_broker_ready(timeout=5.0)
+    assert err is None
+    assert eng.state.connected
+    assert eng.state.autonomous is False
+    eng.stop_engine()

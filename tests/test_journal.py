@@ -1,0 +1,619 @@
+"""TradeJournal: schema, round-trips, disabled no-ops, summaries, thread smoke."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+from abcxauto.memory import TradeJournal, get_journal, reset_journal
+
+
+@pytest.fixture
+def journal(tmp_path, monkeypatch):
+    """Fresh TradeJournal on a temp DB; reset module singleton after."""
+    db = tmp_path / "journal.db"
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(db))
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_ENABLED", "true")
+    j = TradeJournal(path=str(db), enabled=True)
+    yield j
+    reset_journal(path=str(db), enabled=True)
+
+
+def test_schema_creation(journal, tmp_path):
+    db = tmp_path / "journal.db"
+    assert db.exists()
+    conn = sqlite3.connect(str(db))
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert {
+        "proposals",
+        "gate_decisions",
+        "dispatches",
+        "halts",
+        "snapshots",
+        "fills",
+        "decisions",
+        "working_thesis",
+    } <= tables
+
+
+def test_record_proposal_round_trip(journal, tmp_path):
+    pid = journal.record_proposal(
+        source="brain",
+        strategy="bracket",
+        symbol="NVDA",
+        direction="LONG",
+        quantity=10,
+        params={"entry_price": 100.0, "stop_price": 95.0},
+        validation_ok=True,
+        validation_reason="ok",
+    )
+    assert isinstance(pid, int) and pid > 0
+
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        row = conn.execute("SELECT * FROM proposals WHERE id = ?", (pid,)).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row[2] == "brain"  # source
+    assert row[3] == "bracket"
+    assert row[4] == "NVDA"
+    assert row[5] == "LONG"
+    assert row[6] == 10.0
+    assert json.loads(row[7])["entry_price"] == 100.0
+    assert row[8] == 1
+    assert row[9] == "ok"
+
+
+def test_record_gate_decision_round_trip(journal, tmp_path):
+    pid = journal.record_proposal(strategy="bracket", symbol="AAPL", validation_ok=True)
+    journal.record_gate_decision(pid, True, "ok")
+    journal.record_gate_decision(pid, False, "daily loss")
+
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        rows = conn.execute(
+            "SELECT allowed, reason FROM gate_decisions WHERE proposal_id = ? ORDER BY id",
+            (pid,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [(1, "ok"), (0, "daily loss")]
+
+
+def test_record_dispatch_round_trip(journal, tmp_path):
+    pid = journal.record_proposal(strategy="market_order", symbol="SPY")
+    journal.record_dispatch(pid, True, {"order_id": 42, "status": "Submitted"})
+    journal.record_dispatch(None, False, {"error": "timeout"})
+
+    recent = journal.recent_dispatches(limit=10)
+    assert len(recent) == 2
+    # Newest first
+    assert recent[0]["ok"] == 0
+    assert recent[0]["result"]["error"] == "timeout"
+    assert recent[1]["ok"] == 1
+    assert recent[1]["proposal_id"] == pid
+    assert recent[1]["result"]["order_id"] == 42
+
+
+def test_record_halt_round_trip(journal, tmp_path):
+    journal.record_halt("daily loss breach", "auto_panic")
+    journal.record_halt("manual", "halt")
+    journal.record_halt("cleared", "resume")
+
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        rows = conn.execute(
+            "SELECT reason, kind FROM halts ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [
+        ("daily loss breach", "auto_panic"),
+        ("manual", "halt"),
+        ("cleared", "resume"),
+    ]
+
+
+def test_record_snapshot_case_insensitive_account(journal, tmp_path):
+    journal.record_snapshot(
+        account={
+            "NetLiquidation": 105_000.5,
+            "DailyPnL": -250.0,
+            "TotalCashValue": 40_000.0,
+        },
+        positions=[{"symbol": "NVDA", "qty": 10}],
+        open_orders=[{"orderId": 1}],
+    )
+    journal.record_snapshot(
+        account={
+            "netliquidation": 106_000.0,
+            "dailypnl": 100.0,
+            "totalcashvalue": 41_000.0,
+        },
+        positions=[],
+        open_orders=[],
+    )
+
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        rows = conn.execute(
+            "SELECT net_liquidation, daily_pnl, total_cash, positions_json FROM snapshots ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows[0][0] == 105_000.5
+    assert rows[0][1] == -250.0
+    assert rows[0][2] == 40_000.0
+    assert json.loads(rows[0][3])[0]["symbol"] == "NVDA"
+    assert rows[1][0] == 106_000.0
+
+
+def test_disabled_is_noop(tmp_path, monkeypatch):
+    db = tmp_path / "disabled.db"
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_ENABLED", "false")
+    j = TradeJournal(path=str(db), enabled=False)
+    assert j.record_proposal(strategy="bracket", symbol="X") is None
+    j.record_gate_decision(1, True, "ok")
+    j.record_dispatch(1, True, {"ok": True})
+    j.record_halt("x", "halt")
+    j.record_snapshot({"NetLiquidation": 1.0}, [], [])
+    assert j.record_decision(cycle=1, action="hold", strategy="hold") is None
+    j.set_working_thesis("x")
+    assert j.record_fills([{"exec_id": "e1", "order_id": 1}]) == 0
+    assert not db.exists()
+
+
+def test_daily_summary_counts(journal):
+    day = "2026-07-09"
+    ts = f"{day}T12:00:00.000Z"
+    other = "2026-07-08T12:00:00.000Z"
+
+    p1 = journal.record_proposal(strategy="bracket", symbol="A", ts=ts)
+    journal.record_proposal(strategy="bracket", symbol="B", ts=ts)
+    journal.record_proposal(strategy="bracket", symbol="C", ts=other)
+
+    journal.record_gate_decision(p1, True, "ok", ts=ts)
+    journal.record_gate_decision(p1, False, "size", ts=ts)
+    journal.record_gate_decision(p1, True, "ok", ts=other)
+
+    journal.record_dispatch(p1, True, {"id": 1}, ts=ts)
+    journal.record_dispatch(p1, False, {"err": "x"}, ts=ts)
+    journal.record_dispatch(p1, True, {"id": 2}, ts=other)
+
+    journal.record_halt("panic", "auto_panic", ts=ts)
+    journal.record_halt("resume", "resume", ts=other)
+
+    summary = journal.daily_summary(day)
+    assert summary["day"] == day
+    assert summary["proposals"] == 2
+    assert summary["allowed"] == 1
+    assert summary["rejected"] == 1
+    assert summary["validation_failed"] == 0
+    assert summary["dispatch_ok"] == 1
+    assert summary["dispatch_failed"] == 1
+    assert summary["halts"] == 1
+
+
+def test_recent_proposals_includes_validation_failures(journal):
+    journal.record_proposal(
+        strategy="market_bracket",
+        symbol="SPY",
+        params={"side": "BUY", "quantity": 2},
+        validation_ok=False,
+        validation_reason="direction required",
+        ts="2026-07-09T18:00:00.000Z",
+    )
+    journal.record_proposal(
+        strategy="market_bracket",
+        symbol="QQQ",
+        validation_ok=True,
+        ts="2026-07-09T18:01:00.000Z",
+    )
+    rows = journal.recent_proposals(limit=5)
+    assert len(rows) >= 2
+    assert rows[0]["symbol"] == "QQQ"
+    assert rows[1]["validation_ok"] is False
+    assert "direction" in (rows[1].get("validation_reason") or "")
+    summary = journal.daily_summary("2026-07-09")
+    assert summary["validation_failed"] == 1
+
+
+def test_equity_curve_ordering(journal):
+    for i, nliq in enumerate([100.0, 110.0, 105.0, 120.0]):
+        journal.record_snapshot(
+            account={"netliquidation": nliq},
+            positions=[],
+            open_orders=[],
+            ts=f"2026-07-09T0{i}:00:00.000Z",
+        )
+    curve = journal.equity_curve(limit=3)
+    assert len(curve) == 3
+    assert [v for _, v in curve] == [110.0, 105.0, 120.0]
+    assert curve[0][0] < curve[1][0] < curve[2][0]
+
+
+def test_account_performance_horizons(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    import sqlite3
+
+    from abcxauto.memory.journal import TradeJournal
+
+    db = tmp_path / "perf.db"
+    j = TradeJournal(path=str(db), enabled=True)
+    j.record_snapshot(account={"NetLiquidation": 1.0})  # ensure schema
+    now = datetime.now(timezone.utc)
+    con = sqlite3.connect(str(db))
+    con.execute("DELETE FROM snapshots")
+    for days, nl in ((400, 90_000.0), (100, 95_000.0), (10, 98_000.0), (0, 100_000.0)):
+        con.execute(
+            "INSERT INTO snapshots(ts, net_liquidation, daily_pnl) VALUES (?,?,?)",
+            ((now - timedelta(days=days)).isoformat(), nl, 12.5 if days == 0 else 0.0),
+        )
+    con.commit()
+    con.close()
+    perf = j.account_performance()
+    assert perf["source"] == "ibkr_nav"
+    assert perf["net_liquidation"] == 100_000.0
+    assert abs(perf["ret_1w"] - (100_000 / 98_000 - 1)) < 1e-9
+    assert abs(perf["ret_3m"] - (100_000 / 95_000 - 1)) < 1e-9
+    assert abs(perf["ret_1y"] - (100_000 / 90_000 - 1)) < 1e-9
+    assert perf["history_start"] is not None
+    assert perf["history_days"] is not None
+    assert perf["history_days"] >= 399
+    assert perf["as_of"] is not None
+
+
+def test_account_performance_short_history_hides_long_horizons(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    import sqlite3
+
+    from abcxauto.memory.journal import TradeJournal
+
+    db = tmp_path / "short.db"
+    j = TradeJournal(path=str(db), enabled=True)
+    j.record_snapshot(account={"NetLiquidation": 1.0})
+    now = datetime.now(timezone.utc)
+    con = sqlite3.connect(str(db))
+    con.execute("DELETE FROM snapshots")
+    for days, nl in ((10, 98_000.0), (0, 100_000.0)):
+        con.execute(
+            "INSERT INTO snapshots(ts, net_liquidation, daily_pnl) VALUES (?,?,?)",
+            ((now - timedelta(days=days)).isoformat(), nl, 0.0),
+        )
+    con.commit()
+    con.close()
+    perf = j.account_performance()
+    assert perf["source"] == "ibkr_nav"
+    assert abs(perf["ret_1w"] - (100_000 / 98_000 - 1)) < 1e-9
+    assert perf["ret_3m"] is None
+    assert perf["ret_1y"] is None
+    assert perf["history_days"] is not None
+    assert perf["history_days"] < 90
+
+
+def test_thread_safety_smoke(journal):
+    errors: list = []
+
+    def writer(n: int) -> None:
+        try:
+            for i in range(20):
+                pid = journal.record_proposal(
+                    strategy="bracket",
+                    symbol=f"T{n}",
+                    quantity=i,
+                    params={"n": n, "i": i},
+                    validation_ok=True,
+                )
+                journal.record_gate_decision(pid, True, "ok")
+                journal.record_dispatch(pid, True, {"n": n, "i": i})
+                if i % 5 == 0:
+                    journal.record_halt(f"t{n}-{i}", "halt")
+                    journal.record_snapshot(
+                        {"NetLiquidation": 1000.0 + n + i},
+                        [],
+                        [],
+                    )
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(writer, range(4)))
+
+    assert errors == []
+    summary = journal.daily_summary()
+    assert summary["proposals"] == 80
+    assert summary["allowed"] == 80
+    assert summary["dispatch_ok"] == 80
+
+
+def test_record_methods_swallow_errors(tmp_path):
+    # Point at a path that cannot be a SQLite DB (existing directory).
+    bad = tmp_path / "not_a_file"
+    bad.mkdir()
+    j = TradeJournal(path=str(bad), enabled=True)
+    assert j.record_proposal(strategy="x", symbol="Y") is None
+    j.record_gate_decision(1, False, "nope")
+    j.record_dispatch(1, False, {"x": 1})
+    j.record_halt("x", "halt")
+    j.record_snapshot({"NetLiquidation": 1}, [], [])
+    assert j.record_fills([{"exec_id": "e1"}]) == 0
+    assert j.recent_dispatches() == []
+    assert j.recent_decisions() == []
+    assert j.get_working_thesis() == ""
+    assert j.equity_curve() == []
+    assert j.strategy_performance() == []
+    summary = j.daily_summary("2026-07-09")
+    assert summary["proposals"] == 0
+
+
+def test_record_fills_round_trip_and_dedup(journal, tmp_path):
+    fill = {
+        "ts": "2026-07-09T14:00:00.000Z",
+        "exec_id": "exec-001",
+        "order_id": 101,
+        "symbol": "NVDA",
+        "sec_type": "STK",
+        "side": "BOT",
+        "quantity": 10.0,
+        "price": 120.5,
+        "commission": 1.25,
+        "realized_pnl": 0.0,
+    }
+    assert journal.record_fills([fill]) == 1
+    assert journal.record_fills([fill]) == 0  # UNIQUE exec_id
+    assert journal.record_fills([
+        {**fill, "exec_id": "exec-002", "side": "SLD", "realized_pnl": 42.0},
+        fill,
+    ]) == 1
+
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        rows = conn.execute(
+            "SELECT exec_id, order_id, symbol, side, quantity, price, commission, realized_pnl "
+            "FROM fills ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 2
+    assert rows[0][0] == "exec-001"
+    assert rows[0][1] == 101
+    assert rows[0][2] == "NVDA"
+    assert rows[1][0] == "exec-002"
+    assert rows[1][7] == 42.0
+
+
+def test_strategy_performance_attribution(journal):
+    day = "2026-07-09"
+    ts = f"{day}T12:00:00.000Z"
+
+    pid_bracket = journal.record_proposal(
+        strategy="bracket", symbol="AAPL", validation_ok=True, ts=ts
+    )
+    journal.record_dispatch(
+        pid_bracket,
+        True,
+        {
+            "success": True,
+            "bracket_order_id": 501,
+            "stop_order_id": 502,
+            "target_order_id": 503,
+        },
+        ts=ts,
+    )
+
+    pid_mkt = journal.record_proposal(
+        strategy="market_order", symbol="SPY", validation_ok=True, ts=ts
+    )
+    journal.record_dispatch(
+        pid_mkt,
+        True,
+        {"success": True, "order_id": 601, "status": "Submitted"},
+        ts=ts,
+    )
+
+    # Options-style list of ids
+    pid_opt = journal.record_proposal(
+        strategy="vertical", symbol="QQQ", validation_ok=True, ts=ts
+    )
+    journal.record_dispatch(
+        pid_opt,
+        True,
+        {"success": True, "order_ids": [701, 702]},
+        ts=ts,
+    )
+
+    journal.record_fills(
+        [
+            {
+                "ts": f"{day}T13:00:00.000Z",
+                "exec_id": "e-bracket-entry",
+                "order_id": 501,
+                "symbol": "AAPL",
+                "sec_type": "STK",
+                "side": "BOT",
+                "quantity": 10,
+                "price": 100.0,
+                "commission": 1.0,
+                "realized_pnl": 0.0,
+            },
+            {
+                "ts": f"{day}T14:00:00.000Z",
+                "exec_id": "e-bracket-stop",
+                "order_id": 502,
+                "symbol": "AAPL",
+                "sec_type": "STK",
+                "side": "SLD",
+                "quantity": 10,
+                "price": 95.0,
+                "commission": 1.0,
+                "realized_pnl": -50.0,
+            },
+            {
+                "ts": f"{day}T13:30:00.000Z",
+                "exec_id": "e-mkt",
+                "order_id": 601,
+                "symbol": "SPY",
+                "sec_type": "STK",
+                "side": "SLD",
+                "quantity": 5,
+                "price": 500.0,
+                "commission": 0.5,
+                "realized_pnl": 12.5,
+            },
+            {
+                "ts": f"{day}T15:00:00.000Z",
+                "exec_id": "e-opt",
+                "order_id": 701,
+                "symbol": "QQQ",
+                "sec_type": "OPT",
+                "side": "BOT",
+                "quantity": 1,
+                "price": 2.0,
+                "commission": 0.65,
+                "realized_pnl": None,
+            },
+            {
+                "ts": f"{day}T16:00:00.000Z",
+                "exec_id": "e-orphan",
+                "order_id": 9999,
+                "symbol": "TSLA",
+                "sec_type": "STK",
+                "side": "BOT",
+                "quantity": 1,
+                "price": 200.0,
+                "commission": 0.35,
+                "realized_pnl": 0.0,
+            },
+            # Outside since_day window
+            {
+                "ts": "2026-07-08T12:00:00.000Z",
+                "exec_id": "e-old",
+                "order_id": 601,
+                "symbol": "SPY",
+                "sec_type": "STK",
+                "side": "BOT",
+                "quantity": 5,
+                "price": 490.0,
+                "commission": 0.5,
+                "realized_pnl": 0.0,
+            },
+        ]
+    )
+
+    by_strategy = {r["strategy"]: r for r in journal.strategy_performance(since_day=day)}
+    assert set(by_strategy) == {"bracket", "market_order", "vertical", "(unattributed)"}
+
+    bracket = by_strategy["bracket"]
+    assert bracket["n_fills"] == 2
+    assert bracket["realized_pnl_sum"] == -50.0
+    assert bracket["commissions_sum"] == 2.0
+    assert bracket["first_fill_ts"] == f"{day}T13:00:00.000Z"
+    assert bracket["last_fill_ts"] == f"{day}T14:00:00.000Z"
+
+    mkt = by_strategy["market_order"]
+    assert mkt["n_fills"] == 1
+    assert mkt["realized_pnl_sum"] == 12.5
+    assert mkt["commissions_sum"] == 0.5
+
+    vertical = by_strategy["vertical"]
+    assert vertical["n_fills"] == 1
+    assert vertical["realized_pnl_sum"] == 0.0
+    assert vertical["commissions_sum"] == 0.65
+
+    unattr = by_strategy["(unattributed)"]
+    assert unattr["n_fills"] == 1
+    assert unattr["commissions_sum"] == 0.35
+
+    # Without since_day, the older market_order fill is included.
+    all_rows = {r["strategy"]: r for r in journal.strategy_performance()}
+    assert all_rows["market_order"]["n_fills"] == 2
+
+
+def test_json_default_str_for_non_serializable(journal, tmp_path):
+    class Weird:
+        def __str__(self) -> str:
+            return "weird-obj"
+
+    pid = journal.record_proposal(
+        strategy="bracket",
+        symbol="Z",
+        params={"obj": Weird()},
+        validation_ok=True,
+    )
+    assert pid is not None
+    journal.record_dispatch(pid, True, {"obj": Weird()})
+
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        params_json = conn.execute(
+            "SELECT params_json FROM proposals WHERE id = ?", (pid,)
+        ).fetchone()[0]
+        result_json = conn.execute(
+            "SELECT result_json FROM dispatches WHERE proposal_id = ?", (pid,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert "weird-obj" in params_json
+    assert "weird-obj" in result_json
+
+
+def test_get_journal_singleton(tmp_path, monkeypatch):
+    db = tmp_path / "singleton.db"
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(db))
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_ENABLED", "true")
+    # Force re-init of singleton
+    import abcxauto.memory.journal as journal_mod
+
+    with journal_mod._journal_lock:
+        journal_mod._journal = None
+
+    a = get_journal()
+    b = get_journal()
+    assert a is b
+    assert a.path == str(db)
+    reset_journal(path=str(db), enabled=True)
+
+
+def test_record_decision_and_recent(journal):
+    did = journal.record_decision(
+        cycle=3,
+        action="hold",
+        strategy="hold",
+        rationale="wait for setup",
+        portfolio_snapshot={"net_liq": 1000},
+        outcome={"status": "hold"},
+    )
+    assert isinstance(did, int) and did > 0
+    journal.record_decision(
+        cycle=4,
+        action="bracket",
+        strategy="bracket",
+        rationale="enter SPY",
+        outcome={"status": "executed"},
+    )
+    rows = journal.recent_decisions(limit=5)
+    assert len(rows) >= 2
+    assert rows[0]["strategy"] == "bracket"
+    assert rows[0]["outcome"]["status"] == "executed"
+    assert rows[1]["strategy"] == "hold"
+    assert rows[1]["portfolio_snapshot"]["net_liq"] == 1000
+
+
+def test_working_thesis_round_trip(journal):
+    assert journal.get_working_thesis() == ""
+    journal.set_working_thesis("SPY mean-reversion while VIX calm")
+    assert "mean-reversion" in journal.get_working_thesis()
+    journal.set_working_thesis("updated thesis on QQQ")
+    assert journal.get_working_thesis() == "updated thesis on QQQ"

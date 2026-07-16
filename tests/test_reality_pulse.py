@@ -1,7 +1,7 @@
 """Reality Pulse — situational awareness heart."""
 
 from abcxauto.reality_pulse import build_narrative, build_reality_pulse, pulse_clock_view
-from abcxauto.rocket import AWARENESS_HEART, RULES
+from abcxauto.cycle import AWARENESS_HEART, RULES
 
 
 MIXED = [
@@ -65,6 +65,27 @@ def test_pulse_clock_view_compact():
     assert view["narrative"]
 
 
+def test_mda_unix_updated_yields_age_not_na():
+    """MDA quotes use Unix ``updated`` — must not show age n/a."""
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime.now(timezone.utc)
+    updated = int((now - timedelta(seconds=12)).timestamp())
+    pulse = build_reality_pulse(
+        spy_quote={"last": 500.0, "updated": updated, "source": "marketdata_hybrid"},
+        market_hours={"session": "regular", "is_trading_day": True},
+    )
+    age = pulse["data_freshness"]["mda_spy_quote_age_s"]
+    assert age is not None
+    assert 0 <= age < 60
+    assert pulse["data_freshness"]["sources"]["mda_spy"] == "fresh"
+    view = pulse_clock_view(pulse)
+    assert view["data_age"] != "n/a"
+    assert view["data_age"].endswith("s")
+    assert "MDA age n/a" not in pulse["narrative"]
+    assert "MDA data" in pulse["narrative"]
+
+
 def test_narrative_lists_mixed_instruments_separately():
     pulse = build_reality_pulse(positions=MIXED, market_hours={"session": "regular"})
     n = build_narrative(pulse)
@@ -73,6 +94,7 @@ def test_narrative_lists_mixed_instruments_separately():
 
 
 def test_awareness_heart_in_system_rules():
-    assert "REALITY PULSE" in AWARENESS_HEART or "Reality" in AWARENESS_HEART or "awareness" in AWARENESS_HEART.lower()
-    assert "awareness_checklist" in AWARENESS_HEART or "checklist" in AWARENESS_HEART.lower()
-    assert AWARENESS_HEART in RULES or "SITUATIONAL AWARENESS" in RULES
+    assert "AWARENESS" in AWARENESS_HEART or "awareness" in AWARENESS_HEART.lower()
+    assert "conId" in AWARENESS_HEART or "Hold forbidden" in AWARENESS_HEART
+    assert AWARENESS_HEART in RULES or "AWARENESS" in RULES
+    assert "HOLD" in RULES.upper() or "Hold forbidden" in RULES

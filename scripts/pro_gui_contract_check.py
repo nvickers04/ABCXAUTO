@@ -1,4 +1,4 @@
-"""Static Flet Pro Desktop contract check."""
+"""Static Flet Pro Desktop contract check — stdout + exit code only."""
 
 import ast
 import sys
@@ -7,11 +7,47 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PRO = REPO / "abcxauto" / "pro_desktop.py"
 REQUIRED = (
-    "Overview", "Positions", "Test Suite Results", "Logs & Evolution",
-    "Apply Again", "Replay Cycle", "Grok Deep Analyze", "Export All", "Clear",
-    "Pin Insight", "PANIC FLATTEN", "Raw JSON", "START AUTONOMOUS",
-    "PAUSE", "VALIDATE & EXECUTE",
-    "Reality Pulse", "Simplify", "re-test", "Brutal",
+    "Dashboard",
+    "Positions",
+    "Risk",
+    "Scorecard",
+    "Test Suite",
+    "Close All Positions",
+    "Connect IBKR",
+    "Disconnect IBKR",
+    "Start agent",
+    "Stop agent",
+    "Start",
+    "Stop",
+    "Re-test",
+    "re-test",
+    "Reality Pulse",
+    "Order suite",
+    "Activity",
+    "Working",
+    "Fills",
+    "_refresh_book_tab",
+    "_refresh_agent_tab",
+    "_refresh_log_tab",
+    "What's happening",
+    "ABCXAUTO",
+    "DASH_TABS",
+    "suite_filter",
+    "roll_option",
+    "Total value",
+    "lbl_ret_1w",
+    "lbl_ibkr_status",
+    "lbl_xai_status",
+    "lbl_mda_status",
+    "_toggle_connect",
+    "_open_disconnect_confirm_dialog",
+    "_page_risk",
+    "update_risk_config",
+    "lbl_account_id",
+    "lbl_account_mode",
+    "_sync_ibkr_account_label",
+    "_toggle_trading_mode",
+    "paper-only",
 )
 
 
@@ -26,16 +62,17 @@ def main() -> int:
     }
     lines, ok = [], True
     if "flet" not in imports:
-        lines.append("FAIL: flet import missing"); ok = False
+        lines.append("FAIL: flet import missing")
+        ok = False
     else:
         lines.append("PASS: flet import present")
     for label in REQUIRED:
         if label not in text:
-            lines.append(f"FAIL: {label!r} missing"); ok = False
+            lines.append(f"FAIL: {label!r} missing")
+            ok = False
         else:
             lines.append(f"PASS: {label!r}")
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("pro_gui_contract.txt")
-    out.write_text("\n".join(lines) + f"\nRESULT={'PASS' if ok else 'FAIL'}\n", encoding="utf-8")
+    lines.append(f"RESULT={'PASS' if ok else 'FAIL'}")
     print("\n".join(lines))
     return 0 if ok else 1
 

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import itertools
 import re
-from typing import Any, Dict, Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from rich.table import Table
+
+from abcxauto.config import get_config
 
 _EXPIRATION_RE = re.compile(r"^\d{8}$")
 
@@ -22,10 +24,6 @@ def _check_expiration(value: str, label: str = "expiration") -> str:
     return value
 
 
-# ---------------------------------------------------------------------------
-# Stock strategies
-# ---------------------------------------------------------------------------
-
 _PROTECTION_REQUIRED_MSG = (
     "every new position requires a stop loss and take profit. Use 'bracket' "
     "(limit entry) or 'market_bracket' (market entry) instead. Set "
@@ -33,14 +31,34 @@ _PROTECTION_REQUIRED_MSG = (
 )
 
 
+def _coerce_direction_aliases(data: Any) -> Any:
+    """Map Grok's side/action BUY|SELL onto direction LONG|SHORT before validation."""
+    if not isinstance(data, dict):
+        return data
+    out = dict(data)
+    direction = out.get("direction")
+    if direction in (None, ""):
+        side = str(out.get("side") or out.get("action") or "").strip().upper()
+        if side == "BUY":
+            out["direction"] = "LONG"
+        elif side == "SELL":
+            out["direction"] = "SHORT"
+    # Drop order-ticket aliases that are not schema fields (Grok often echoes them).
+    for k in ("side", "secType", "sec_type", "exchange", "currency", "tif", "TIF"):
+        out.pop(k, None)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Exit-only bare stock orders (closing_position required)
+# ---------------------------------------------------------------------------
+
 class LimitOrderParams(BaseModel):
     symbol: str
     action: Literal["BUY", "SELL"]
     quantity: int = Field(gt=0)
     limit_price: float = Field(gt=0)
     tif: Literal["DAY", "GTC"] = "DAY"
-    # Exit-only assertion; excluded from the gateway call. Executor re-verifies
-    # against live positions before dispatch.
     closing_position: bool = Field(default=False, exclude=True)
 
     @model_validator(mode="after")
@@ -54,7 +72,6 @@ class MarketOrderParams(BaseModel):
     symbol: str
     action: Literal["BUY", "SELL"]
     quantity: int = Field(gt=0)
-    # Protocol: conId is the single source of truth for closes (excluded from gateway kwargs).
     conId: int | str | None = Field(default=None, exclude=True)
     closing_position: bool = Field(default=False, exclude=True)
 
@@ -95,6 +112,10 @@ class StopLimitParams(BaseModel):
         return self
 
 
+# ---------------------------------------------------------------------------
+# Entries + management (cycle allowlist)
+# ---------------------------------------------------------------------------
+
 class BracketParams(BaseModel):
     symbol: str
     quantity: int = Field(gt=0)
@@ -103,6 +124,11 @@ class BracketParams(BaseModel):
     stop_price: float = Field(gt=0)
     target_price: float = Field(gt=0)
     time_bucket: Literal["intraday", "short_swing", "swing"] = "short_swing"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: Any) -> Any:
+        return _coerce_direction_aliases(data)
 
     @model_validator(mode="after")
     def _price_ordering(self) -> "BracketParams":
@@ -122,13 +148,24 @@ class BracketParams(BaseModel):
 
 
 class MarketBracketParams(BaseModel):
-    """Market entry, then OCA stop + target sized to the actual fill."""
+    """Market entry, then OCA stop + target sized to the actual fill.
+
+    ``price_hint`` is optional sizing/R:R context (excluded from the gateway
+    call). When absent, risk gates use a conservative stop/target bound and
+    min_reward_risk is skipped (cannot be computed honestly without an entry).
+    """
 
     symbol: str
     quantity: int = Field(gt=0)
     direction: Literal["LONG", "SHORT"]
     stop_price: float = Field(gt=0)
     target_price: float = Field(gt=0)
+    price_hint: Optional[float] = Field(default=None, gt=0, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: Any) -> Any:
+        return _coerce_direction_aliases(data)
 
     @model_validator(mode="after")
     def _price_ordering(self) -> "MarketBracketParams":
@@ -147,6 +184,11 @@ class OcaParams(BaseModel):
     direction: Literal["LONG", "SHORT"]
     stop_price: float = Field(gt=0)
     target_price: float = Field(gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: Any) -> Any:
+        return _coerce_direction_aliases(data)
 
     @model_validator(mode="after")
     def _price_ordering(self) -> "OcaParams":
@@ -177,24 +219,6 @@ class CancelOrderParams(BaseModel):
     order_id: int = Field(gt=0)
 
 
-class ModifyOrderParams(BaseModel):
-    """Edit a working order in place: price(s) and/or quantity.
-
-    Cannot change symbol, action, or order type — cancel and re-propose for that.
-    """
-
-    order_id: int = Field(gt=0)
-    limit_price: Optional[float] = Field(default=None, gt=0)
-    stop_price: Optional[float] = Field(default=None, gt=0)
-    quantity: Optional[int] = Field(default=None, gt=0)
-
-    @model_validator(mode="after")
-    def _at_least_one_change(self) -> "ModifyOrderParams":
-        if self.limit_price is None and self.stop_price is None and self.quantity is None:
-            raise ValueError("Provide at least one of limit_price, stop_price, quantity")
-        return self
-
-
 class CloseOptionParams(BaseModel):
     """Close an existing option position (sell-to-close if long, buy-to-close if short)."""
 
@@ -202,248 +226,12 @@ class CloseOptionParams(BaseModel):
     expiration: str
     strike: float = Field(gt=0)
     right: Literal["C", "P"]
-    quantity: Optional[int] = Field(default=None, gt=0)  # None = close full position
-    limit_price: Optional[float] = Field(default=None, gt=0)  # None = mid-based limit
+    quantity: Optional[int] = Field(default=None, gt=0)
+    limit_price: Optional[float] = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _validate(self) -> "CloseOptionParams":
         _check_expiration(self.expiration)
-        return self
-
-
-class TrailingStopParams(BaseModel):
-    symbol: str
-    quantity: int = Field(gt=0)
-    direction: Literal["LONG", "SHORT"]
-    trail_amount: Optional[float] = Field(default=None, gt=0)
-    trail_percent: Optional[float] = Field(default=None, gt=0, le=50)
-
-    @model_validator(mode="after")
-    def _exactly_one_trail(self) -> "TrailingStopParams":
-        if (self.trail_amount is None) == (self.trail_percent is None):
-            raise ValueError("Provide exactly one of trail_amount or trail_percent")
-        return self
-
-
-class TrailingStopLimitParams(TrailingStopParams):
-    limit_offset: float = Field(default=0.1, ge=0)
-
-
-# ---------------------------------------------------------------------------
-# Option strategies
-# ---------------------------------------------------------------------------
-
-class VerticalSpreadParams(BaseModel):
-    symbol: str
-    expiration: str
-    long_strike: float = Field(gt=0)
-    short_strike: float = Field(gt=0)
-    right: Literal["C", "P"]
-    quantity: int = Field(default=1, gt=0)
-    limit_price: Optional[float] = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "VerticalSpreadParams":
-        _check_expiration(self.expiration)
-        if self.long_strike == self.short_strike:
-            raise ValueError("long_strike and short_strike must differ")
-        return self
-
-
-class IronCondorParams(BaseModel):
-    symbol: str
-    expiration: str
-    put_long_strike: float = Field(gt=0)
-    put_short_strike: float = Field(gt=0)
-    call_short_strike: float = Field(gt=0)
-    call_long_strike: float = Field(gt=0)
-    quantity: int = Field(default=1, gt=0)
-    limit_price: Optional[float] = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "IronCondorParams":
-        _check_expiration(self.expiration)
-        strikes = (
-            self.put_long_strike,
-            self.put_short_strike,
-            self.call_short_strike,
-            self.call_long_strike,
-        )
-        if not all(a < b for a, b in itertools.pairwise(strikes)):
-            raise ValueError(
-                "Iron condor requires put_long < put_short < call_short < call_long, "
-                f"got {strikes}"
-            )
-        return self
-
-
-class IronButterflyParams(BaseModel):
-    symbol: str
-    expiration: str
-    center_strike: float = Field(gt=0)
-    wing_width: float = Field(gt=0)
-    quantity: int = Field(default=1, gt=0)
-    limit_price: Optional[float] = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "IronButterflyParams":
-        _check_expiration(self.expiration)
-        return self
-
-
-class StraddleParams(BaseModel):
-    symbol: str
-    expiration: str
-    strike: float = Field(gt=0)
-    quantity: int = Field(default=1, gt=0)
-    action: Literal["BUY", "SELL"] = "BUY"
-    limit_price: Optional[float] = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "StraddleParams":
-        _check_expiration(self.expiration)
-        return self
-
-
-class StrangleParams(BaseModel):
-    symbol: str
-    expiration: str
-    put_strike: float = Field(gt=0)
-    call_strike: float = Field(gt=0)
-    quantity: int = Field(default=1, gt=0)
-    action: Literal["BUY", "SELL"] = "BUY"
-    limit_price: Optional[float] = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "StrangleParams":
-        _check_expiration(self.expiration)
-        if self.put_strike >= self.call_strike:
-            raise ValueError("Strangle requires put_strike < call_strike")
-        return self
-
-
-class ButterflyParams(BaseModel):
-    symbol: str
-    expiration: str
-    lower_strike: float = Field(gt=0)
-    middle_strike: float = Field(gt=0)
-    upper_strike: float = Field(gt=0)
-    right: Literal["C", "P"] = "C"
-    quantity: int = Field(default=1, gt=0)
-    limit_price: Optional[float] = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "ButterflyParams":
-        _check_expiration(self.expiration)
-        if not (self.lower_strike < self.middle_strike < self.upper_strike):
-            raise ValueError("Butterfly requires lower < middle < upper strikes")
-        return self
-
-
-class CalendarSpreadParams(BaseModel):
-    symbol: str
-    strike: float = Field(gt=0)
-    near_expiration: str
-    far_expiration: str
-    right: Literal["C", "P"] = "C"
-    quantity: int = Field(default=1, gt=0)
-    limit_price: Optional[float] = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "CalendarSpreadParams":
-        _check_expiration(self.near_expiration, "near_expiration")
-        _check_expiration(self.far_expiration, "far_expiration")
-        if self.near_expiration >= self.far_expiration:
-            raise ValueError("Calendar requires near_expiration before far_expiration")
-        return self
-
-
-class DiagonalSpreadParams(BaseModel):
-    symbol: str
-    near_strike: float = Field(gt=0)
-    far_strike: float = Field(gt=0)
-    near_expiration: str
-    far_expiration: str
-    right: Literal["C", "P"] = "C"
-    quantity: int = Field(default=1, gt=0)
-    limit_price: Optional[float] = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "DiagonalSpreadParams":
-        _check_expiration(self.near_expiration, "near_expiration")
-        _check_expiration(self.far_expiration, "far_expiration")
-        if self.near_expiration >= self.far_expiration:
-            raise ValueError("Diagonal requires near_expiration before far_expiration")
-        return self
-
-
-class CoveredCallParams(BaseModel):
-    symbol: str
-    expiration: str
-    strike: float = Field(gt=0)
-    shares: int = Field(default=100, gt=0, multiple_of=100)
-
-    @model_validator(mode="after")
-    def _validate(self) -> "CoveredCallParams":
-        _check_expiration(self.expiration)
-        return self
-
-
-class ProtectivePutParams(CoveredCallParams):
-    pass
-
-
-class CollarParams(BaseModel):
-    symbol: str
-    expiration: str
-    put_strike: float = Field(gt=0)
-    call_strike: float = Field(gt=0)
-    shares: int = Field(default=100, gt=0, multiple_of=100)
-
-    @model_validator(mode="after")
-    def _validate(self) -> "CollarParams":
-        _check_expiration(self.expiration)
-        if self.put_strike >= self.call_strike:
-            raise ValueError("Collar requires put_strike < call_strike")
-        return self
-
-
-class RatioSpreadParams(BaseModel):
-    symbol: str
-    expiration: str
-    long_strike: float = Field(gt=0)
-    short_strike: float = Field(gt=0)
-    right: Literal["C", "P"] = "C"
-    ratio: tuple[int, int] = (1, 2)
-    quantity: int = Field(default=1, gt=0)
-    limit_price: Optional[float] = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "RatioSpreadParams":
-        _check_expiration(self.expiration)
-        if self.long_strike == self.short_strike:
-            raise ValueError("long_strike and short_strike must differ")
-        if self.ratio[0] <= 0 or self.ratio[1] <= self.ratio[0]:
-            raise ValueError("ratio must be (long, short) with short > long > 0")
-        return self
-
-
-class JadeLizardParams(BaseModel):
-    symbol: str
-    expiration: str
-    put_strike: float = Field(gt=0)
-    call_short_strike: float = Field(gt=0)
-    call_long_strike: float = Field(gt=0)
-    quantity: int = Field(default=1, gt=0)
-    limit_price: Optional[float] = None
-
-    @model_validator(mode="after")
-    def _validate(self) -> "JadeLizardParams":
-        _check_expiration(self.expiration)
-        if self.put_strike >= self.call_short_strike:
-            raise ValueError("Jade lizard requires put_strike < call_short_strike")
-        if self.call_short_strike >= self.call_long_strike:
-            raise ValueError("Jade lizard requires call_short_strike < call_long_strike")
         return self
 
 
@@ -461,38 +249,27 @@ STRATEGIES: Dict[str, tuple[type[BaseModel], str]] = {
     "oca": (OcaParams, "place_oca"),
     "modify_stop": (ModifyStopParams, "modify_stop_price"),
     "modify_target": (ModifyTargetParams, "modify_target_price"),
-    "modify_order": (ModifyOrderParams, "modify_order"),
     "cancel_order": (CancelOrderParams, "cancel_order"),
     "close_option": (CloseOptionParams, "close_option_position"),
-    "trailing_stop": (TrailingStopParams, "place_trailing_stop"),
-    "trailing_stop_limit": (TrailingStopLimitParams, "place_trailing_stop_limit"),
-    "vertical_spread": (VerticalSpreadParams, "place_vertical_spread"),
-    "iron_condor": (IronCondorParams, "place_iron_condor"),
-    "iron_butterfly": (IronButterflyParams, "place_iron_butterfly"),
-    "straddle": (StraddleParams, "place_straddle"),
-    "strangle": (StrangleParams, "place_strangle"),
-    "butterfly": (ButterflyParams, "place_butterfly"),
-    "calendar_spread": (CalendarSpreadParams, "place_calendar_spread"),
-    "diagonal_spread": (DiagonalSpreadParams, "place_diagonal_spread"),
-    "covered_call": (CoveredCallParams, "place_covered_call"),
-    "protective_put": (ProtectivePutParams, "place_protective_put"),
-    "collar": (CollarParams, "place_collar"),
-    "ratio_spread": (RatioSpreadParams, "place_ratio_spread"),
-    "jade_lizard": (JadeLizardParams, "place_jade_lizard"),
 }
 
-# Order-management strategies: they edit/cancel already-sent orders or add
-# protection to existing exposure — they never open a new position or exit
-# one. In ABCXAUTO all strategies (including management) auto-execute.
+from abcxauto.strategy_params import (  # noqa: E402
+    EXIT_ONLY_EXTRA,
+    EXTRA_MANAGEMENT,
+    EXTRA_STRATEGIES,
+    OPTION_STRATEGIES,
+)
+
+STRATEGIES.update(EXTRA_STRATEGIES)
+
+# Order-management strategies: edit/cancel working orders or add protection —
+# they never open a new position. All strategies auto-execute.
 MANAGEMENT_STRATEGIES = frozenset({
     "oca",
     "modify_stop",
     "modify_target",
-    "modify_order",
     "cancel_order",
-    "trailing_stop",
-    "trailing_stop_limit",
-})
+}) | EXTRA_MANAGEMENT
 
 
 class OrderProposal(BaseModel):
@@ -519,6 +296,45 @@ _id_counter = itertools.count(1)
 
 class ProposalValidationError(Exception):
     """Raised when a propose_order payload fails validation (fed back to Grok)."""
+
+
+def _check_min_reward_risk(strategy: str, parsed: BaseModel) -> None:
+    """Enforce min reward:risk on bracket / market_bracket when configured.
+
+    For market_bracket: skip when ``price_hint`` is absent (R:R cannot be
+    computed honestly without an entry). Never use the stop/target midpoint.
+    """
+    if strategy not in ("bracket", "market_bracket"):
+        return
+
+    min_rr = float(get_config().min_reward_risk or 0)
+    if min_rr <= 0:
+        return
+
+    stop = float(parsed.stop_price)
+    target = float(parsed.target_price)
+    if strategy == "bracket":
+        entry = float(parsed.entry_price)
+    else:
+        hint = getattr(parsed, "price_hint", None)
+        if hint is None:
+            return
+        entry = float(hint)
+
+    risk = abs(entry - stop)
+    reward = abs(target - entry)
+    if risk <= 0:
+        raise ProposalValidationError(
+            f"{strategy} reward:risk undefined — |entry-stop| is zero "
+            f"(entry={entry}, stop={stop})"
+        )
+    ratio = reward / risk
+    if ratio < min_rr:
+        raise ProposalValidationError(
+            f"{strategy} reward:risk {ratio:.3f} is below minimum {min_rr} "
+            f"(|target-entry|={reward:.4f} / |entry-stop|={risk:.4f}). "
+            f"Widen the target or tighten the stop."
+        )
 
 
 def validate_proposal(
@@ -550,6 +366,7 @@ def validate_proposal(
         raise ProposalValidationError(f"Invalid {strategy} params — {problems}") from e
     if hasattr(parsed, "symbol"):
         parsed.symbol = parsed.symbol.upper()
+    _check_min_reward_risk(strategy, parsed)
     return OrderProposal(
         id=next(_id_counter),
         strategy=strategy,
