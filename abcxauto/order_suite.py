@@ -46,6 +46,12 @@ def set_cached_suite(report: dict[str, Any] | None) -> dict[str, Any]:
     }
     _LATEST_SUITE["failed_strategies"] = failed
     _LATEST_SUITE["results"] = report.get("results") or []
+    try:
+        from abcxauto.structure_grade import save_structure_vocab
+
+        save_structure_vocab(report)
+    except Exception:
+        pass
     return dict(_LATEST_SUITE)
 
 
@@ -79,14 +85,21 @@ def _fixtures(px: float, positions: list | None = None) -> dict[str, dict]:
     entry = {"symbol": "SPY", "quantity": 1, "direction": "LONG"}
     exp, exp_far = "20260718", "20260815"
     fixtures: dict[str, dict] = {
-        "bracket": {**entry, "entry_price": px, "stop_price": stop, "target_price": tgt},
-        "market_bracket": {**entry, "stop_price": stop, "target_price": tgt},
+        "bracket": {
+            **entry, "entry_price": px, "stop_price": stop, "target_price": tgt,
+            "price_hint": px,
+        },
+        "market_bracket": {
+            **entry, "stop_price": stop, "target_price": tgt, "price_hint": px,
+        },
         "market_order": dict(exit_),
         "limit_order": {**exit_, "limit_price": px},
         "stop_order": {**exit_, "stop_price": stop},
         "stop_limit": {**exit_, "stop_price": stop, "limit_price": round(stop * 0.999, 2)},
-        "oca": {"symbol": "SPY", "quantity": qty, "direction": "LONG",
-                "stop_price": stop, "target_price": tgt},
+        "oca": {
+            "symbol": "SPY", "quantity": qty, "direction": "LONG",
+            "stop_price": stop, "target_price": tgt, "price_hint": px,
+        },
         "modify_stop": {"order_id": 1, "new_stop_price": stop},
         "modify_target": {"order_id": 2, "new_limit_price": tgt},
         "cancel_order": {"order_id": 4},
@@ -184,7 +197,14 @@ def _validate_schema(strategy: str, params: dict) -> dict:
     base = {"strategy": strategy, "placed": False, "cancelled": False,
             "cancel_intent": True, "schema_validated": True}
     try:
-        prop = validate_proposal(strategy, params, f"suite dry-run {strategy}")
+        hint = params.get("price_hint") or params.get("entry_price")
+        prop = validate_proposal(
+            strategy,
+            params,
+            f"suite dry-run {strategy}",
+            quote_last=float(hint) if hint is not None else None,
+            posture="balanced",
+        )
         return {
             **base, "pass": True, "mode": "dry_run", "phase": "schema_dry_run",
             "gateway": prop.gateway_method,

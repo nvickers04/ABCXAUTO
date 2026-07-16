@@ -197,6 +197,23 @@ class ViewState:
     brain_rationale: str = (
         "Start autonomous — Grok decides every RTH cycle; risk gates constrain."
     )
+    opportunities: list[dict] = field(default_factory=list)
+    news_items: list[dict] = field(default_factory=list)
+    market_read: str = ""
+    risk_posture: str = ""
+    last_params: dict = field(default_factory=dict)
+    world_state: dict = field(default_factory=dict)
+    judgment: dict = field(default_factory=dict)
+    stance: str = ""
+    thesis: str = ""
+    dismissed: str = ""
+    intent: dict = field(default_factory=dict)
+    stage_error: str = ""
+    trade_plan: dict | None = None
+    regime: dict = field(default_factory=dict)
+    portfolio_risk: dict = field(default_factory=dict)
+    structure_grade: str = ""
+    structure_lessons: list = field(default_factory=list)
     risk: str = "—"
     close_attempts: int = 0
     close_ok: int = 0
@@ -550,17 +567,32 @@ class ProEngine:
         """Pause agent cycles without tearing down IBKR / monitor."""
         if not self.worker or not self.worker.is_alive():
             return
+        was_auto = bool(self.state.autonomous)
         self.pause.set()
         self.state.autonomous = False
         self.state.paused = True
         self.state.running = False
         self.state.status = "Connected" if self.state.connected else "Paused"
         self._note("PAUSE", "Agent paused — IBKR still connected")
+        if was_auto:
+            try:
+                from abcxauto.agent_loop import run_session_review_on_stop
+
+                run_session_review_on_stop(
+                    {
+                        "thesis": self.state.thesis,
+                        "what_worked": self.state.market_read,
+                        "next_change": f"last={self.state.brain_strat}",
+                    }
+                )
+            except Exception:
+                pass
 
     def stop_engine(self) -> None:
         was_linked = bool(self.state.connected) or (
             self.worker is not None and self.worker.is_alive()
         )
+        was_auto = bool(self.state.autonomous or self.state.running)
         self.stop.set()
         self.pause.clear()
         self._gen += 1
@@ -575,6 +607,19 @@ class ProEngine:
         self.worker = None
         self._worker_loop = None
         self.conn = None
+        if was_auto:
+            try:
+                from abcxauto.agent_loop import run_session_review_on_stop
+
+                run_session_review_on_stop(
+                    {
+                        "thesis": self.state.thesis,
+                        "what_worked": self.state.market_read,
+                        "next_change": f"last={self.state.brain_strat}",
+                    }
+                )
+            except Exception:
+                pass
         if was_linked:
             self._note("DISCONNECT", "Disconnected from IBKR")
 
@@ -794,6 +839,29 @@ class ProEngine:
         s.lab_pass_rate = float((s.order_lab or {}).get("pass_rate") or 0)
         s.brain_strat = d.get("strat", "hold")
         s.brain_rationale = d.get("rationale") or "—"
+        s.market_read = str(d.get("market_read") or "").strip()
+        s.opportunities = list(d.get("opportunities") or [])
+        s.news_items = list(d.get("news_items") or [])
+        s.risk_posture = str(d.get("risk_posture") or "")
+        s.last_params = dict(d.get("params") or (d.get("action_obj") or {}).get("params") or {})
+        s.world_state = dict(d.get("world_state") or {})
+        s.judgment = dict(d.get("judgment") or {})
+        s.stance = str(d.get("stance") or s.judgment.get("stance") or "")
+        s.thesis = str(d.get("thesis") or s.judgment.get("thesis") or "")
+        s.dismissed = str(d.get("dismissed") or s.judgment.get("dismissed") or "")
+        s.intent = dict(d.get("intent") or s.judgment.get("intent") or {})
+        s.stage_error = str(d.get("stage_error") or "")
+        s.trade_plan = d.get("trade_plan")
+        s.regime = dict(d.get("regime") or (s.world_state or {}).get("regime") or {})
+        s.portfolio_risk = dict(
+            d.get("portfolio_risk") or (s.world_state or {}).get("portfolio_risk") or {}
+        )
+        s.structure_grade = str(d.get("structure_grade") or "")
+        s.structure_lessons = list(
+            d.get("structure_lessons")
+            or (s.world_state or {}).get("structure_lessons")
+            or []
+        )
         s.positions = d.get("positions") or []
         s.open_orders = d.get("open_orders") or []
         s.inventory = d.get("inventory") or format_position_inventory(s.positions)

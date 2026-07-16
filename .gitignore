@@ -1,4 +1,11 @@
 ﻿risk_settings.json
+active_trade_plan.json
+last_closed_trade_plan.json
+idle_streak_state.json
+session_prep.json
+session_review.json
+structure_events.jsonl
+structure_vocab.json
 .env
 __pycache__/
 *.pyc

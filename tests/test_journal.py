@@ -44,6 +44,7 @@ def test_schema_creation(journal, tmp_path):
         "fills",
         "decisions",
         "working_thesis",
+        "judgments",
     } <= tables
 
 

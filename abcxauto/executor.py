@@ -455,13 +455,23 @@ async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
         }
     if not getattr(connector, "connected", False):
         return {"status": "logged", "strategy": strategy, "params": action.get("params")}
+    params = action.get("params") or {}
+    quote_last = action.get("_quote_last")
+    if quote_last is None:
+        quote_last = params.get("price_hint")
+    posture = action.get("_posture")
     try:
         proposal = validate_proposal(
-            strategy, action.get("params") or {}, action.get("rationale", "auto"),
-            action.get("max_loss"), action.get("max_gain"),
+            strategy,
+            params,
+            action.get("rationale", "auto"),
+            action.get("max_loss"),
+            action.get("max_gain"),
+            quote_last=float(quote_last) if quote_last is not None else None,
+            posture=str(posture) if posture else None,
         )
     except ProposalValidationError as e:
-        params = action.get("params") or {}
+        err = str(e)
         get_journal().record_proposal(
             source="cycle",
             strategy=strategy,
@@ -472,7 +482,43 @@ async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
             quantity=params.get("quantity"),
             params=params,
             validation_ok=False,
-            validation_reason=str(e),
+            validation_reason=err,
         )
-        return {"status": "rejected", "error": str(e), "learn": str(e)}
+        try:
+            from abcxauto.structure_grade import (
+                GEOMETRY_REJECTED,
+                append_structure_event,
+            )
+
+            code = err.split(":", 1)[0].strip() if ":" in err else GEOMETRY_REJECTED
+            append_structure_event(
+                {
+                    "strategy": strategy,
+                    "symbol": str(params.get("symbol") or "").upper(),
+                    "direction": str(params.get("direction") or ""),
+                    "quote": quote_last,
+                    "params": {
+                        k: params.get(k)
+                        for k in (
+                            "stop_price",
+                            "target_price",
+                            "entry_price",
+                            "quantity",
+                            "price_hint",
+                        )
+                        if k in params
+                    },
+                    "outcome": GEOMETRY_REJECTED,
+                    "reason_code": code,
+                    "message": err[:300],
+                }
+            )
+        except Exception:
+            pass
+        return {
+            "status": "rejected",
+            "error": err,
+            "learn": err,
+            "reason_code": err.split(":", 1)[0].strip() if ":" in err else "rejected",
+        }
     return await execute_proposal(proposal, connector, source="cycle")

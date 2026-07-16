@@ -581,8 +581,18 @@ def clear_risk_settings(*, path: Path | None = None) -> None:
         logger.exception("Failed to remove risk settings %s", settings_path)
 
 
-def risk_config_snapshot() -> dict[str, Any]:
-    """Current effective risk knobs for the Risk tab."""
+def risk_settings_path() -> Path:
+    """Absolute path of the persisted risk settings file."""
+    return _risk_settings_path().resolve()
+
+
+def risk_config_snapshot(*, reload: bool = False) -> dict[str, Any]:
+    """Current effective risk knobs for the Risk tab.
+
+    Pass ``reload=True`` to re-read ``risk_settings.json`` from disk (Pro UI).
+    """
+    if reload:
+        load_risk_settings()
     cfg = get_config()
     return {k: getattr(cfg, k) for k in sorted(RISK_CONFIG_KEYS)}
 

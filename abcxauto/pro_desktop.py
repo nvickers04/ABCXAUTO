@@ -17,8 +17,10 @@ from abcxauto.config import (
     RISK_POSTURES,
     apply_risk_posture,
     get_config,
+    load_risk_settings,
     risk_config_snapshot,
     risk_envelope_snapshot,
+    risk_settings_path,
     setup_file_logging,
     update_risk_config,
 )
@@ -121,6 +123,42 @@ class ProTerminal:
             "No proposal yet — Start agent or wait for a cycle.",
             color=TEXT, size=13, selectable=True,
         )
+        self.lbl_agent_posture = ft.Text("Posture: —", size=12, color=MUTED, selectable=True)
+        self.lbl_agent_world = ft.Text(
+            "World: — (built each cycle from book / news / opportunities)",
+            size=12,
+            color=MUTED,
+            selectable=True,
+        )
+        self.lbl_agent_judgment = ft.Text(
+            "Judgment: — (stance / thesis / dismissed after Judge)",
+            size=13,
+            color=MUTED,
+            selectable=True,
+        )
+        self.lbl_agent_read = ft.Text(
+            "Focus: — (appears after the next Judge cycle)",
+            size=13,
+            color=MUTED,
+            selectable=True,
+        )
+        self.lbl_agent_news = ft.Text(
+            "News (World): (none yet)",
+            size=12,
+            color=MUTED,
+            selectable=True,
+        )
+        self.lbl_agent_opps = ft.Text(
+            "Opportunities (World): (none yet)",
+            size=12,
+            color=MUTED,
+            selectable=True,
+        )
+        self.lbl_agent_params = ft.Text("Params: —", size=12, color=MUTED, selectable=True)
+        self.lbl_agent_structure = ft.Text(
+            "Structure grade: —", size=12, color=MUTED, selectable=True
+        )
+        self.lbl_agent_plan = ft.Text("Trade plan: —", size=12, color=MUTED, selectable=True)
         self.lbl_ledger_snippet = ft.Text("—", color=MUTED, size=11, selectable=True)
         self.lbl_cycle_log = ft.Text(
             "No activity yet — Connect IBKR, then Start agent",
@@ -193,8 +231,14 @@ class ProTerminal:
                 focused_border_color=BLUE,
                 cursor_color=TEXT,
                 width=280,
-                read_only=True,
+                read_only=False,
             )
+        # Hydrate from risk_settings.json immediately (not only when Risk tab opens).
+        try:
+            load_risk_settings()
+            self._load_risk_form()
+        except Exception:
+            logger.exception("initial risk form load failed")
         self.suite_status: dict[str, ft.Text] = {}
         self.suite_filter = "all"  # all | stock | manage | options
         self.lbl_suite_chip = ft.Text("Suite: idle", size=12, color=MUTED)
@@ -681,6 +725,12 @@ class ProTerminal:
             "scorecard": self._page_scorecard,
             "suite": self._page_suite,
         }
+        if key == "risk":
+            try:
+                load_risk_settings()
+                self._load_risk_form()
+            except Exception:
+                logger.exception("risk form reload before nav failed")
         self.content.content = builders.get(key, self._page_overview)()
         if key == "risk":
             self._load_risk_form()
@@ -899,17 +949,32 @@ class ProTerminal:
                     "Agent",
                     self._refresh_agent_tab,
                     ft.Text(
-                        "Live decision panel — what the agent is doing now.",
+                        "Perceive -> Judge -> Act: World (code) -> Judgment -> Action.",
                         size=12,
                         color=MUTED,
                     ),
                     mode_stats,
                 ),
                 self._section(
-                    "Last action",
+                    "World",
+                    self.lbl_agent_world,
+                    self.lbl_agent_posture,
+                    self.lbl_agent_news,
+                    self.lbl_agent_opps,
+                    self.lbl_agent_plan,
+                ),
+                self._section(
+                    "Judgment",
+                    self.lbl_agent_judgment,
+                    self.lbl_agent_read,
+                ),
+                self._section(
+                    "Action",
                     self.brain_action,
                     self.brain_rationale,
                     self.lbl_proposal,
+                    self.lbl_agent_params,
+                    self.lbl_agent_structure,
                 ),
                 self._section("Reality Pulse", self.lbl_pulse_narrative),
             ],
@@ -923,8 +988,8 @@ class ProTerminal:
                     "Activity",
                     self._refresh_log_tab,
                     ft.Text(
-                        "Chronological feed — connect/start, each cycle outcome, errors. "
-                        "Not the live decision panel (see Agent).",
+                        "Chronological feed — each cycle with strategy, status, top idea, "
+                        "and why (rationale). Connect/start/errors included.",
                         size=12,
                         color=MUTED,
                     ),
@@ -978,10 +1043,14 @@ class ProTerminal:
             [
                 self.risk_dd_posture,
                 ft.Text(
-                    "One operator knob. Seeds capital gates and a wide envelope; "
-                    "Grok sizes risk per trade and may set_risk inside the box.",
+                    "Sets the envelope width and reseeds default capital knobs. "
+                    "Does not save your manual gate edits — use Save risk for that.",
                     size=12,
                     color=MUTED,
+                ),
+                ft.Row(
+                    [self._btn("Apply posture", BLUE, self._apply_posture)],
+                    spacing=10,
                 ),
             ],
             spacing=8,
@@ -994,15 +1063,24 @@ class ProTerminal:
                 _sw_row("Defined-risk options only", self.risk_sw_defined),
                 _sw_row("Cash-only sizing (block SHORT stock)", self.risk_sw_cash),
                 ft.Container(height=8),
-                ft.Text("Current gates (agent-tuned; read-only)", size=12, color=MUTED),
+                ft.Text(
+                    "Gate values (clamped to current posture envelope). "
+                    "Save risk does not change posture.",
+                    size=12,
+                    color=MUTED,
+                ),
                 *self.risk_tf.values(),
+                ft.Container(height=4),
+                ft.Row(
+                    [self._btn("Save risk", BLUE, self._save_risk_gates)],
+                    spacing=10,
+                ),
             ],
             spacing=10,
             tight=True,
         )
-        actions = ft.Row(
+        halt_actions = ft.Row(
             [
-                self._btn("Apply posture", BLUE, self._apply_risk),
                 self._btn("Resume", GREEN, self._resume_halt, outlined=True),
                 self._btn("Halt entries", RED, self._manual_halt, outlined=True),
             ],
@@ -1018,7 +1096,7 @@ class ProTerminal:
                         [
                             ft.Text("Risk", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
                             ft.Text(
-                                "Operator sets posture. Agent sizes per trade inside the envelope. "
+                                "Posture = envelope. Risk gates = capital limits. Apply them separately. "
                                 "Exits always bypass halt.",
                                 color=MUTED,
                                 size=14,
@@ -1038,9 +1116,9 @@ class ProTerminal:
                             ft.Container(height=8),
                             self._section("Posture", posture_block),
                             ft.Container(height=8),
-                            self._section("Limits", knobs),
+                            self._section("Risk gates", knobs),
                             ft.Container(height=8),
-                            actions,
+                            self._section("Halt", halt_actions),
                         ],
                         scroll=ft.ScrollMode.AUTO,
                         spacing=8,
@@ -1052,12 +1130,17 @@ class ProTerminal:
         )
 
     def _load_risk_form(self) -> None:
-        snap = risk_config_snapshot()
+        snap = risk_config_snapshot(reload=True)
         posture = str(snap.get("risk_posture") or "").strip().lower()
-        if posture in RISK_POSTURES:
-            self.risk_dd_posture.value = posture
-        elif not self.risk_dd_posture.value:
-            self.risk_dd_posture.value = "balanced"
+        if posture not in RISK_POSTURES:
+            posture = "balanced"
+        self.risk_dd_posture.value = posture
+        # Re-bind options so Flet picks up the value after restart.
+        self.risk_dd_posture.options = [
+            ft.dropdown.Option("defensive", "Defensive"),
+            ft.dropdown.Option("balanced", "Balanced"),
+            ft.dropdown.Option("aggressive", "Aggressive"),
+        ]
         self.risk_sw_gates.value = bool(snap.get("risk_gates_enabled", True))
         self.risk_sw_auto_panic.value = bool(snap.get("auto_panic_on_breach", False))
         self.risk_sw_defined.value = bool(snap.get("defined_risk_only", False))
@@ -1077,9 +1160,10 @@ class ProTerminal:
             eff = env.get("effective_risk_posture") or "(none)"
             posture = env.get("risk_posture") or "(none)"
             clamp = " · live-clamped to balanced" if env.get("live_clamped") else ""
+            path = risk_settings_path()
             self.lbl_risk_status.value = (
                 f"Posture {posture} (effective {eff}){clamp} — "
-                "wide envelope; agent sizes per trade."
+                f"loaded from {path.name}"
             )
             self.lbl_risk_status.color = MUTED
             cur = env.get("current") or {}
@@ -1087,14 +1171,14 @@ class ProTerminal:
             if box:
                 rt = box.get("max_risk_per_trade_pct") or {}
                 self.lbl_risk_envelope.value = (
-                    f"Envelope: risk/trade {cur.get('max_risk_per_trade_pct')} "
+                    f"{path} · risk/trade {cur.get('max_risk_per_trade_pct')} "
                     f"[{rt.get('floor')}-{rt.get('ceil')}]; "
                     f"daily {cur.get('daily_loss_limit_pct')}; "
                     f"pos {cur.get('max_position_pct')}"
                 )
             else:
                 self.lbl_risk_envelope.value = (
-                    "Envelope: apply a posture to enable agent set_risk."
+                    f"{path} · apply a posture to enable agent set_risk."
                 )
         except Exception:
             self.lbl_risk_envelope.value = ""
@@ -1114,34 +1198,79 @@ class ProTerminal:
             self.lbl_risk_halt.value = "Halt: n/a"
             self.lbl_risk_halt.color = MUTED
 
-    def _apply_risk(self, _=None) -> None:
+    def _apply_posture(self, _=None) -> None:
+        """Operator posture only — reseeds capital knobs + envelope; ignores gate form edits."""
         try:
             posture = str(self.risk_dd_posture.value or "balanced").strip().lower()
             apply_risk_posture(posture)
-            update_risk_config(
-                risk_gates_enabled=bool(self.risk_sw_gates.value),
-                auto_panic_on_breach=bool(self.risk_sw_auto_panic.value),
-                defined_risk_only=bool(self.risk_sw_defined.value),
-                cash_only=bool(self.risk_sw_cash.value),
-            )
+            path = risk_settings_path()
             self._load_risk_form()
             self.lbl_risk_status.value = (
-                f"Posture {posture} applied — persists; agent sizes per trade."
+                f"Posture {posture} applied (gates reseeded) → {path}"
             )
             self.lbl_risk_status.color = GREEN
             self.page.overlay.append(
-                ft.SnackBar(ft.Text(f"Risk posture: {posture}"), bgcolor=BLUE, open=True)
+                ft.SnackBar(
+                    ft.Text(f"Posture {posture} saved"),
+                    bgcolor=BLUE,
+                    open=True,
+                )
             )
         except Exception as e:
-            self.lbl_risk_status.value = f"Apply failed: {e}"
+            self.lbl_risk_status.value = f"Posture apply failed: {e}"
             self.lbl_risk_status.color = RED
             try:
                 self.page.overlay.append(
-                    ft.SnackBar(ft.Text(f"Risk apply failed: {e}"), bgcolor=RED, open=True)
+                    ft.SnackBar(ft.Text(f"Posture apply failed: {e}"), bgcolor=RED, open=True)
                 )
             except Exception:
                 pass
         self._safe_update()
+
+    def _save_risk_gates(self, _=None) -> None:
+        """Save toggles + gate fields only — does not change or reseed posture."""
+        try:
+            cfg = get_config()
+            if not (cfg.risk_posture or "").strip():
+                raise ValueError("Apply a posture first so gates have an envelope")
+            payload: dict[str, Any] = {
+                "risk_gates_enabled": bool(self.risk_sw_gates.value),
+                "auto_panic_on_breach": bool(self.risk_sw_auto_panic.value),
+                "defined_risk_only": bool(self.risk_sw_defined.value),
+                "cash_only": bool(self.risk_sw_cash.value),
+            }
+            int_keys = {"max_open_positions", "max_daily_trades"}
+            for key, tf in self.risk_tf.items():
+                raw = str(tf.value or "").strip()
+                if raw == "":
+                    continue
+                payload[key] = int(float(raw)) if key in int_keys else float(raw)
+            update_risk_config(**payload)
+            path = risk_settings_path()
+            self._load_risk_form()
+            self.lbl_risk_status.value = f"Risk gates saved → {path}"
+            self.lbl_risk_status.color = GREEN
+            self.page.overlay.append(
+                ft.SnackBar(
+                    ft.Text(f"Risk gates saved to {path.name}"),
+                    bgcolor=BLUE,
+                    open=True,
+                )
+            )
+        except Exception as e:
+            self.lbl_risk_status.value = f"Save risk failed: {e}"
+            self.lbl_risk_status.color = RED
+            try:
+                self.page.overlay.append(
+                    ft.SnackBar(ft.Text(f"Save risk failed: {e}"), bgcolor=RED, open=True)
+                )
+            except Exception:
+                pass
+        self._safe_update()
+
+    # Back-compat alias if anything still wires the old handler.
+    def _apply_risk(self, _=None) -> None:
+        self._apply_posture(_)
 
     def _resume_halt(self, _=None) -> None:
         try:
@@ -1981,12 +2110,142 @@ class ProTerminal:
         self._refresh_connect_btn()
         self._refresh_service_status()
         self.brain_action.value = s.brain_strat
-        self.brain_rationale.value = s.brain_rationale
+        stance = str(getattr(s, "stance", "") or "").strip()
+        thesis = str(getattr(s, "thesis", "") or "").strip()
+        dismissed = str(getattr(s, "dismissed", "") or "").strip()
+        intent = getattr(s, "intent", None) or {}
+        stage_err = str(getattr(s, "stage_error", "") or "").strip()
+        if stance or thesis:
+            jlines = [f"Stance: {stance or '—'}"]
+            if thesis:
+                jlines.append(f"Thesis: {thesis}")
+            if dismissed:
+                jlines.append(f"Dismissed: {dismissed}")
+            if intent:
+                jlines.append(f"Intent: {json.dumps(intent, default=str)[:180]}")
+            if stage_err:
+                jlines.append(f"Stage error: {stage_err}")
+            self.lbl_agent_judgment.value = "\n".join(jlines)
+            self.lbl_agent_judgment.color = TEXT
+        else:
+            self.lbl_agent_judgment.value = (
+                "Judgment: — (stance / thesis after next Judge cycle)"
+            )
+            self.lbl_agent_judgment.color = MUTED
+        market_read = str(getattr(s, "market_read", "") or "").strip()
+        if market_read:
+            self.lbl_agent_read.value = f"Focus:\n{market_read}"
+            self.lbl_agent_read.color = TEXT
+        else:
+            self.lbl_agent_read.value = "Focus: —"
+            self.lbl_agent_read.color = MUTED
+        rationale = str(s.brain_rationale or "").strip()
+        if rationale and rationale != "—":
+            self.brain_rationale.value = f"Why this action:\n{rationale}"
+            self.brain_rationale.color = TEXT
+        else:
+            self.brain_rationale.value = "Why this action: —"
+            self.brain_rationale.color = MUTED
         act = s.last_action or {}
         strat = s.brain_strat or act.get("strategy") or act.get("action") or "—"
         result = s.last_result or {}
-        bit = f"  ·  {json.dumps(result, default=str)[:120]}" if result else ""
+        bit = f"  ·  {json.dumps(result, default=str)[:160]}" if result else ""
         self.lbl_proposal.value = f"{strat}  ·  conId={act.get('target_conId') or '—'}{bit}"
+        params = getattr(s, "last_params", None) or act.get("params") or {}
+        if params:
+            self.lbl_agent_params.value = (
+                "Params: " + json.dumps(params, default=str)[:220]
+            )
+            self.lbl_agent_params.color = TEXT
+        else:
+            self.lbl_agent_params.value = "Params: —"
+            self.lbl_agent_params.color = MUTED
+        grade = str(getattr(s, "structure_grade", "") or "").strip()
+        lessons = getattr(s, "structure_lessons", None) or []
+        if grade or lessons:
+            gline = f"Structure grade: {grade or '—'}"
+            if lessons:
+                last = lessons[0]
+                gline += (
+                    f"\nLast lesson: {last.get('outcome') or last.get('reason_code')} "
+                    f"{last.get('symbol') or ''} "
+                    f"{str(last.get('message') or '')[:100]}"
+                )
+            self.lbl_agent_structure.value = gline
+            bad = grade not in ("", "ok", "hold", "set_risk", "—")
+            self.lbl_agent_structure.color = RED if bad and "geometry" in grade else TEXT
+        else:
+            self.lbl_agent_structure.value = "Structure grade: — (shell grades Grok's geometry)"
+            self.lbl_agent_structure.color = MUTED
+        posture = str(getattr(s, "risk_posture", "") or "").strip()
+        if not posture:
+            try:
+                posture = str(get_config().risk_posture or "").strip()
+            except Exception:
+                posture = ""
+        posture = posture or "—"
+        self.lbl_agent_posture.value = f"Posture: {posture}"
+        self.lbl_agent_posture.color = TEXT if posture != "—" else MUTED
+        regime = getattr(s, "regime", None) or {}
+        port_risk = getattr(s, "portfolio_risk", None) or {}
+        world_bits = []
+        if regime:
+            world_bits.append(
+                f"Regime: {regime.get('trend_bias')}/{regime.get('vol_proxy')} "
+                f"phase={regime.get('session_phase')}"
+            )
+        if port_risk:
+            world_bits.append(
+                f"Book: n={port_risk.get('n_positions')} "
+                f"top={port_risk.get('top_symbol')} "
+                f"{port_risk.get('top_concentration_pct')}%"
+            )
+        idle_n = (getattr(s, "world_state", None) or {}).get("idle_streak")
+        if idle_n is not None:
+            world_bits.append(f"Idle streak: {idle_n}")
+        self.lbl_agent_world.value = (
+            "\n".join(world_bits) if world_bits else "World: (awaiting cycle)"
+        )
+        self.lbl_agent_world.color = TEXT if world_bits else MUTED
+        plan = getattr(s, "trade_plan", None)
+        if plan:
+            self.lbl_agent_plan.value = (
+                f"Trade plan: {plan.get('symbol')} {plan.get('direction')} "
+                f"stop={plan.get('stop_price')} tgt={plan.get('target_price')} "
+                f"cycles={plan.get('cycles_open')}/{plan.get('max_hold_cycles')}"
+            )
+            self.lbl_agent_plan.color = TEXT
+        else:
+            self.lbl_agent_plan.value = "Trade plan: (none open)"
+            self.lbl_agent_plan.color = MUTED
+        news = getattr(s, "news_items", None) or []
+        if news:
+            nlines = []
+            for it in news[:10]:
+                sym = str(it.get("symbol") or "?").upper()
+                hl = str(it.get("headline") or "").strip()
+                if hl:
+                    nlines.append(f"• [{sym}] {hl}")
+            self.lbl_agent_news.value = "News (World):\n" + "\n".join(nlines)
+            self.lbl_agent_news.color = TEXT
+        else:
+            self.lbl_agent_news.value = "News (World): (none this cycle)"
+            self.lbl_agent_news.color = MUTED
+        opps = getattr(s, "opportunities", None) or []
+        if opps:
+            bits = []
+            for i, idea in enumerate(opps[:5], 1):
+                bits.append(
+                    f"{i}. {idea.get('symbol')} {idea.get('bias')} "
+                    f"score={idea.get('score')} — {idea.get('note')}"
+                )
+            self.lbl_agent_opps.value = "Opportunities (World):\n" + "\n".join(bits)
+            self.lbl_agent_opps.color = TEXT
+        else:
+            self.lbl_agent_opps.value = (
+                "Opportunities (World): (none — check MDA candles / Start agent)"
+            )
+            self.lbl_agent_opps.color = MUTED
         inv = getattr(s, "inventory", "") or ""
         self.lbl_ledger_snippet.value = inv[:2500] if inv else "Ledger empty"
         port = getattr(s, "portfolio", None) or {}
@@ -2055,7 +2314,7 @@ class ProTerminal:
 
     def _cycle_log_text(self, records: list[dict]) -> str:
         lines: list[str] = []
-        for r in reversed(list(records or [])[-30:]):
+        for r in reversed(list(records or [])[-40:]):
             kind = str(r.get("type") or "cycle").lower()
             ts = str(r.get("ts") or "")
             if kind in ("error", "err"):
@@ -2071,13 +2330,68 @@ class ProTerminal:
                 strat = r.get("strat") or (r.get("action_obj") or {}).get("strategy") or "—"
                 res = r.get("result") or {}
                 status = str(res.get("status") or res.get("ok") or "ok")
+                posture = str(r.get("risk_posture") or "").strip()
+                stance = str(r.get("stance") or (r.get("judgment") or {}).get("stance") or "")
+                opps = r.get("opportunities") or []
+                top = ""
+                if opps:
+                    o0 = opps[0]
+                    top = (
+                        f"  top={o0.get('symbol')} {o0.get('bias')} "
+                        f"({o0.get('score')})"
+                    )
+                elif posture:
+                    top = "  top=(none)"
+                params = r.get("params") or (r.get("action_obj") or {}).get("params") or {}
+                param_bit = ""
+                if strat not in ("hold", "skipped", "blocked", "—") and params:
+                    sym = params.get("symbol") or ""
+                    qty = params.get("quantity") or ""
+                    direction = params.get("direction") or params.get("action") or ""
+                    param_bit = f"  {sym} {direction} x{qty}".rstrip()
+                focus = str(r.get("market_read") or "").replace("\n", " ").strip()
                 rationale = str(r.get("rationale") or "").replace("\n", " ").strip()
-                if len(rationale) > 72:
-                    rationale = rationale[:69] + "…"
-                bit = f"  — {rationale}" if rationale else ""
+                thesis = str(r.get("thesis") or "").replace("\n", " ").strip()
+                dismissed = str(r.get("dismissed") or "").replace("\n", " ").strip()
+                if len(focus) > 160:
+                    focus = focus[:157] + "…"
+                if len(rationale) > 140:
+                    rationale = rationale[:137] + "…"
+                if len(thesis) > 140:
+                    thesis = thesis[:137] + "…"
+                news = r.get("news_items") or []
+                news_bit = ""
+                if news:
+                    n0 = news[0]
+                    news_bit = (
+                        f"  news=[{n0.get('symbol')}] "
+                        f"{str(n0.get('headline') or '')[:48]}"
+                    )
+                    if len(news) > 1:
+                        news_bit += f" (+{len(news) - 1})"
+                post_bit = f"  [{posture}]" if posture else ""
+                stance_bit = f"  stance={stance}" if stance else ""
                 lines.append(
-                    f"{ts}  #{r.get('cycle', '?')}  {strat}  {status}{bit}"
+                    f"{ts}  #{r.get('cycle', '?')}  JUDGE{stance_bit}{post_bit}{top}{news_bit}"
                 )
+                if thesis:
+                    lines.append(f"         thesis: {thesis}")
+                if focus:
+                    lines.append(f"         focus: {focus}")
+                if dismissed:
+                    dbit = dismissed[:140] + ("…" if len(dismissed) > 140 else "")
+                    lines.append(f"         dismissed: {dbit}")
+                lines.append(
+                    f"{ts}  #{r.get('cycle', '?')}  ACT  {strat}  {status}{param_bit}"
+                )
+                if rationale:
+                    lines.append(f"         why: {rationale}")
+                sgrade = str(r.get("structure_grade") or "").strip()
+                if sgrade and sgrade not in ("ok", "hold", "set_risk"):
+                    lines.append(f"         structure: {sgrade}")
+                stage_err = str(r.get("stage_error") or "").strip()
+                if stage_err:
+                    lines.append(f"         block: {stage_err[:160]}")
         return "\n".join(lines) if lines else (
             "No activity yet — Connect IBKR, then Start agent"
         )

@@ -82,7 +82,7 @@ Matches `ORDER_EXAMPLES` / sendable types:
 | `ABCXAUTO_RISK_SETTINGS_PATH` | `risk_settings.json` | Persisted Risk-tab knobs (gitignored) |
 | `ABCXAUTO_RISK_POSTURE` | _(empty)_ | `defensive` / `balanced` / `aggressive` (or set in Risk tab) |
 
-Pro **Risk** tab: one operator knob — **risk posture**. Apply seeds capital gates and a wide envelope (persists to `risk_settings.json`). The agent sizes risk **per trade** and may `set_risk` inside that envelope; it cannot change posture. Cycles also get an ideas-only **opportunity scan** (MDA) in the prompt — never auto-trades.
+Pro **Risk** tab: **Apply posture** (envelope + seed knobs) and **Save risk** (gates/toggles only) are separate. Persists to `risk_settings.json`. The agent sizes risk **per trade** and may `set_risk` inside the envelope; it cannot change posture. Cycles also get an ideas-only **opportunity scan** (MDA) — never auto-trades.
 
 ## Architecture
 

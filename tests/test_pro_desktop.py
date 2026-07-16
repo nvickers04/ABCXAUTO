@@ -74,7 +74,9 @@ def test_overview_dashboard_agent_status():
     idx = text.index("def _page_overview")
     end = text.index("def _page_positions", idx)
     block = text[idx:end]
-    assert "Last action" in block
+    assert "Judgment" in block or "Decision" in block or "Last action" in block
+    assert "World" in block or "Consumed this cycle" in block or "market_read" in text
+    assert "Action" in block or "brain_action" in text
     assert "Book" in block
     assert "Working" in block
     assert "Fills" in block
@@ -394,9 +396,26 @@ def test_scorecard_nav_and_show_tab(headless_pro, tmp_path, monkeypatch):
 async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
     calls = {"grok": 0}
 
-    async def fake_grok(_g, prompt: str) -> str:
+    async def fake_grok(_g, prompt: str, *, stage: str = "act") -> str:
         calls["grok"] += 1
-        assert "LIVE POSITION LEDGER" in prompt
+        if stage == "judge" or "JUDGE STAGE" in prompt:
+            assert "WORLDSTATE" in prompt or "unprotected" in prompt.lower()
+            return json.dumps({
+                "stance": "protect",
+                "thesis": "Protect naked SPY",
+                "focus": "unprotected STK",
+                "dismissed": "",
+                "intent": {
+                    "kind": "protect",
+                    "symbol": "SPY",
+                    "direction": "LONG",
+                    "urgency": "high",
+                },
+                "risk_budget_pct": 1.0,
+                "regime_fit": True,
+                "setup_grade": "A",
+            })
+        assert "LIVE POSITION LEDGER" in prompt or "ORDER EXAMPLES" in prompt
         if "ONE tweak" in prompt:
             return json.dumps({"type": "config", "config": {"cycle_sleep_s": 0.01}, "summary": "faster"})
         return json.dumps({
@@ -410,15 +429,8 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
                 "target_price": 520.0,
                 "conId": 1,
             },
-            "rationale": "inventory reviewed → protect SPY conId=1",
+            "rationale": "inventory reviewed -> protect SPY conId=1",
             "reasoning_chain": "SPY STK listed",
-            "kahneman": {
-                "system1_scan": "unprotected",
-                "system2_base_rate": "protect",
-                "pre_mortem": "gap",
-                "alternatives": ["modify_stop"],
-                "bias_audit": ["loss_aversion"],
-            },
         })
 
     async def _fake_tool(_c, name, _a=None):

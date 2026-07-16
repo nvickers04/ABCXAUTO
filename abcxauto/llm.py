@@ -25,6 +25,9 @@ closing_position; close_option. Never invent prices or order types.
 Size each entry so stop risk fits max_risk_per_trade_pct. You may not change
 risk_posture. Act via exact ORDER EXAMPLE structures. Options expirations use
 YYYYMMDD from live chain data. Journal memory is part of your context — use it.
+
+Every cycle: fill market_read (what news, opportunities, and book facts you
+weighed) and rationale (why this action follows from that read). Be concrete.
 """
 
 

@@ -157,9 +157,11 @@ class TestBracketOrdering:
             "bracket",
             {
                 "symbol": "NVDA", "quantity": 10, "direction": "SHORT",
-                "entry_price": 100.0, "stop_price": 105.0, "target_price": 90.0,
+                "entry_price": 100.0, "stop_price": 103.0, "target_price": 94.0,
+                "price_hint": 100.0,
             },
             RATIONALE,
+            quote_last=100.0,
         )
         assert p.params.direction == "SHORT"
 
@@ -202,19 +204,23 @@ class TestMinRewardRisk:
             {
                 "symbol": "NVDA", "quantity": 10, "direction": "LONG",
                 "entry_price": 100.0, "stop_price": 95.0, "target_price": 110.0,
+                "price_hint": 100.0,
             },
             RATIONALE,
+            quote_last=100.0,
         )
         assert p.strategy == "bracket"
 
     def test_market_bracket_skips_rr_without_price_hint(self):
+        # quote_last satisfies geometry; absent price_hint still skips R:R
         p = validate_proposal(
             "market_bracket",
             {
                 "symbol": "NVDA", "quantity": 10, "direction": "LONG",
-                "stop_price": 95.0, "target_price": 110.0,
+                "stop_price": 97.0, "target_price": 106.0,
             },
             RATIONALE,
+            quote_last=100.0,
         )
         assert p.strategy == "market_bracket"
         assert getattr(p.params, "price_hint", None) is None
@@ -227,6 +233,7 @@ class TestMinRewardRisk:
                 "stop_price": 95.0, "target_price": 110.0, "price_hint": 100.0,
             },
             RATIONALE,
+            quote_last=100.0,
         )
         assert p.params.price_hint == 100.0
 
@@ -238,6 +245,7 @@ class TestMinRewardRisk:
                     "stop_price": 95.0, "target_price": 105.0, "price_hint": 100.0,
                 },
                 RATIONALE,
+                quote_last=100.0,
             )
 
     def test_disabled_skips(self, monkeypatch):
@@ -251,8 +259,10 @@ class TestMinRewardRisk:
             {
                 "symbol": "NVDA", "quantity": 10, "direction": "LONG",
                 "entry_price": 100.0, "stop_price": 95.0, "target_price": 105.0,
+                "price_hint": 100.0,
             },
             RATIONALE,
+            quote_last=100.0,
         )
         assert p.strategy == "bracket"
 
@@ -265,13 +275,15 @@ class TestMinRewardRisk:
                 "quantity": 2,
                 "side": "BUY",
                 "stop_price": 749.5,
-                "target_price": 754.8,
+                "target_price": 760.0,
+                "price_hint": 752.0,
                 "secType": "STK",
                 "exchange": "SMART",
                 "currency": "USD",
                 "tif": "DAY",
             },
             RATIONALE,
+            quote_last=752.0,
         )
         assert p.strategy == "market_bracket"
         assert p.params.direction == "LONG"

@@ -15,6 +15,7 @@ from abcxauto.agent_loop import (  # noqa: F401
     VALID_ACTIONS,
     _tool,
     apply_tweak,
+    check_intent_coherence,
     equity_of,
     expected_json_shape_hint,
     extract_kahneman,
@@ -26,9 +27,11 @@ from abcxauto.agent_loop import (  # noqa: F401
     pnl_of,
     risk_label,
     run_cycle,
+    run_session_review_on_stop,
     simulate_close_impact,
     snap,
     validate_action_against_inventory,
+    validate_judgment,
 )
 from abcxauto.executor import safe_execute  # noqa: F401
 
@@ -40,6 +43,7 @@ __all__ = [
     "TWEAKS",
     "VALID_ACTIONS",
     "apply_tweak",
+    "check_intent_coherence",
     "equity_of",
     "expected_json_shape_hint",
     "extract_kahneman",
@@ -51,8 +55,10 @@ __all__ = [
     "pnl_of",
     "risk_label",
     "run_cycle",
+    "run_session_review_on_stop",
     "safe_execute",
     "simulate_close_impact",
     "snap",
     "validate_action_against_inventory",
+    "validate_judgment",
 ]

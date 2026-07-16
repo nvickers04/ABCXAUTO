@@ -145,7 +145,9 @@ async def scan_opportunities(
             return []
         for sym in symbols:
             try:
-                candles = await client.get_stock_candles(sym, days_back=120)
+                candles = await client.get_stock_candles(
+                    sym, resolution="D", countback=120
+                )
             except Exception:
                 logger.exception("opportunity_scan candles failed for %s", sym)
                 candles = []

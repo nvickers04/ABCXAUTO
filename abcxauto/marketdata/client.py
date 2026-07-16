@@ -630,9 +630,14 @@ class MarketDataClient:
         *,
         resolution: str = "D",
         days_back: int = 400,
+        countback: int | None = None,
     ) -> list[dict]:
-        """Daily (or other) OHLCV candles via MDA /stocks/candles/{symbol}/.
+        """Daily (or other) OHLCV candles via MDA.
 
+        Correct path: ``/stocks/candles/{resolution}/{symbol}/``
+        (resolution is a path segment, not a query param).
+
+        Prefer ``countback`` when set; otherwise ``from``/``to`` from ``days_back``.
         Returns list of dicts with t/o/h/l/c/v, oldest-first. Empty on failure.
         """
         if not self.is_configured or self._is_credits_exhausted():
@@ -640,16 +645,18 @@ class MarketDataClient:
         sym = (symbol or "").strip().upper()
         if not sym:
             return []
+        res = (resolution or "D").strip() or "D"
         to_dt = datetime.now(timezone.utc)
-        from_dt = to_dt - timedelta(days=max(2, int(days_back)))
+        params: Dict[str, Any] = {"to": to_dt.strftime("%Y-%m-%d")}
+        if countback is not None and int(countback) > 0:
+            params["countback"] = int(countback)
+        else:
+            from_dt = to_dt - timedelta(days=max(2, int(days_back)))
+            params["from"] = from_dt.strftime("%Y-%m-%d")
         try:
             resp = await self._get_with_retries(
-                f"/stocks/candles/{sym}/",
-                params={
-                    "resolution": resolution,
-                    "from": from_dt.strftime("%Y-%m-%d"),
-                    "to": to_dt.strftime("%Y-%m-%d"),
-                },
+                f"/stocks/candles/{res}/{sym}/",
+                params=params,
                 label=f"candles {sym}",
             )
             if resp is None or resp.status_code >= 400:

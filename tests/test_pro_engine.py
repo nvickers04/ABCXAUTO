@@ -24,6 +24,8 @@ class _Cfg:
     signal_only = False
     monitor_enabled = True
     trading_mandate = ""
+    trading_mode = "paper"
+    risk_posture = "balanced"
 
 
 _DEFAULT_TWEAKS = {
@@ -59,25 +61,36 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
     )
     calls = {"grok": 0}
 
-    async def fake_grok(_g, prompt: str) -> str:
+    async def fake_grok(_g, prompt: str, *, stage: str = "act") -> str:
         calls["grok"] += 1
-        # Decision prompts always carry the live ledger.
-        assert "LIVE POSITION LEDGER" in prompt, "inventory must be in every decision prompt"
+        if stage == "judge" or "JUDGE STAGE" in prompt:
+            assert "WORLDSTATE" in prompt or "unprotected" in prompt.lower()
+            return json.dumps({
+                "stance": "protect",
+                "thesis": "Protect SPY",
+                "focus": "unprotected STK",
+                "dismissed": "",
+                "intent": {
+                    "kind": "protect",
+                    "symbol": "SPY",
+                    "direction": "LONG",
+                    "urgency": "high",
+                },
+                "risk_budget_pct": 1.0,
+                "regime_fit": True,
+                "setup_grade": "A",
+            })
+        # Act prompts carry the live ledger / order examples.
+        assert "LIVE POSITION LEDGER" in prompt or "ORDER EXAMPLES" in prompt
+        calls["act"] = calls.get("act", 0) + 1
         # Occasionally return a close with explicit conId target to exercise real protocol path
-        if calls["grok"] % 3 == 0:
+        if calls["act"] % 3 == 0:
             return json.dumps({
                 "action": "market_order", "strategy": "market_order",
                 "params": {"symbol": "SPY", "action": "SELL", "quantity": 1, "conId": "42"},
                 "rationale": "Current reality: RTH. Closing target = conId=42 (SPY stock).",
                 "target_conId": "42",
                 "reasoning_chain": "exact conId match",
-                "kahneman": {
-                    "system1_scan": "unprotected SPY STK",
-                    "system2_base_rate": "exit of unprotected equity",
-                    "pre_mortem": "partial fill leaves residue",
-                    "alternatives": ["oca", "modify_stop"],
-                    "bias_audit": ["loss_aversion"],
-                },
             })
         return json.dumps({
             "action": "modify_stop",
@@ -90,13 +103,6 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
             "rationale": "inventory + checklist reviewed; protect SPY conId=42",
             "reasoning_chain": "full inventory present",
             "target_conId": "42",
-            "kahneman": {
-                "system1_scan": "unprotected SPY",
-                "system2_base_rate": "protect equity",
-                "pre_mortem": "gap",
-                "alternatives": ["oca"],
-                "bias_audit": ["loss_aversion"],
-            },
         })
 
     async def _fake_tool(_c, name, _a=None):
@@ -119,12 +125,24 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
     async def _noop_send(action, conn):
         return {"status": "executed", "strategy": action.get("strategy")}
 
+    async def _no_opps(*_a, **_k):
+        return []
+
+    async def _no_news(*_a, **_k):
+        return []
+
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
+    monkeypatch.setattr("abcxauto.agent_loop.scan_opportunities", _no_opps)
+    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _no_news)
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
+        lambda: _Cfg(),
+    )
+    monkeypatch.setattr(
+        "abcxauto.world_state.get_config",
         lambda: _Cfg(),
     )
 
@@ -133,8 +151,8 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
     assert err is None, f"start err: {err}"
     assert eng.state.running
 
-    # Let it run a bit (worker thread + async)
-    deadline = time.time() + 15
+    # Let it run a bit (worker thread + async); PJA = 2 Grok calls/cycle
+    deadline = time.time() + 20
     while time.time() < deadline and eng.state.cycles < 3:
         eng.drain_apply()
         await asyncio.sleep(0.05)

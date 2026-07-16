@@ -1,4 +1,4 @@
-"""Lean autonomous agent loop - snap -> Grok -> normalize -> send_action -> journal.
+"""Perceive → Judge → Act autonomous loop.
 
 ``abcxauto.cycle`` re-exports this API for test/UI compatibility.
 """
@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from xai_sdk.chat import system, user
 
@@ -20,17 +20,34 @@ from abcxauto.connections import connection_status
 from abcxauto.llm import GrokClient
 from abcxauto.memory import get_journal
 from abcxauto.monitor import build_protection_report
-from abcxauto.opportunity_scan import format_opportunities, scan_opportunities
+from abcxauto.opportunity_scan import scan_opportunities
 from abcxauto.order_examples import format_order_examples
 from abcxauto.reality_pulse import build_reality_pulse
 from abcxauto.send import send_action
+from abcxauto.session_cadence import maybe_auto_review_from_cycle
 from abcxauto.tools import run_readonly_tool
+from abcxauto.trade_plan import (
+    bump_plan_cycle,
+    close_trade_plan,
+    plan_from_hunt_action,
+    save_trade_plan,
+)
+from abcxauto.world_state import (
+    STANCES,
+    WorldState,
+    build_world_state,
+    idle_streak_threshold,
+    load_idle_streak,
+    update_idle_streak_after_judgment,
+)
 
 logger = logging.getLogger(__name__)
 
 VALID_ACTIONS = (
-    "hold|set_risk|bracket|market_bracket|market_order|oca|"
-    "modify_stop|modify_target|cancel_order|close_option"
+    "hold|set_risk|bracket|market_bracket|market_order|limit_order|"
+    "stop_order|stop_limit|oca|modify_stop|modify_target|cancel_order|"
+    "close_option|trailing_stop|trailing_stop_limit|"
+    "market_on_close|limit_on_close|market_on_open|limit_on_open"
 )
 ALLOWED_ACTIONS = frozenset(VALID_ACTIONS.split("|"))
 BLOCKED_STRAT = "blocked"
@@ -49,13 +66,27 @@ PROTECT_HOLD_RULES = (
     "set_risk adjusts capital knobs (not risk_posture)."
 )
 TWEAKS: Dict[str, Any] = {"max_risk_pct": 0.5}
-# Soft hold-streak nudge state (process-local).
-_HOLD_STREAK = {"count": 0, "flat": True}
 _HIST_KEYS = (
     "cycle", "pnl", "pnl_chg", "reality_pulse", "kahneman", "kahneman_trace",
     "order_lab", "order_suite", "retest", "lab_summary", "result", "inventory",
     "validation", "reasoning_chain", "impact",
 )
+
+STANCE_ACTIONS: dict[str, frozenset[str]] = {
+    "protect": frozenset({
+        "oca", "modify_stop", "modify_target", "cancel_order",
+        "market_order", "limit_order", "stop_order", "stop_limit",
+        "close_option", "trailing_stop", "trailing_stop_limit",
+    }),
+    "manage": frozenset({
+        "modify_stop", "modify_target", "cancel_order", "hold",
+        "oca", "market_order", "limit_order", "stop_order", "stop_limit",
+        "close_option", "trailing_stop", "trailing_stop_limit",
+        "market_on_close", "limit_on_close",
+    }),
+    "hunt": frozenset({"bracket", "market_bracket", "set_risk"}),
+    "idle": frozenset({"hold"}),
+}
 
 
 def _build_rules() -> str:
@@ -87,10 +118,11 @@ def format_kahneman_trace(_k: dict | None = None) -> str:
 
 def expected_json_shape_hint() -> str:
     return (
-        'JSON: {"action":"...","strategy":"...","params":{},"rationale":"...",'
-        '"target_conId":"..."} - hold when protected/flat; hold FORBIDDEN when '
-        "unprotected STK. bracket/market_bracket/oca use direction LONG|SHORT. "
-        "set_risk params are capital knobs inside the posture envelope."
+        'ACT JSON: {"action":"...","strategy":"...","params":{},'
+        '"rationale":"why this action fulfills Judgment intent",'
+        '"target_conId":"..."} — must satisfy Judgment.intent; '
+        "hold when stance=idle; hold FORBIDDEN when unprotected STK. "
+        "bracket/market_bracket/oca use direction LONG|SHORT."
     )
 
 
@@ -100,11 +132,11 @@ def parse_json(text: str) -> dict:
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", text, re.S)
         if not m:
-            return {"action": "market_bracket", "strategy": "market_bracket", "params": {}}
+            return {}
         try:
             return json.loads(m.group())
         except json.JSONDecodeError:
-            return {"action": "market_bracket", "strategy": "market_bracket", "params": {}}
+            return {}
 
 
 def pnl_of(acct: dict) -> float:
@@ -260,57 +292,40 @@ async def snap(c: Any) -> dict:
     return base
 
 
-def _journal_snippet(s: dict | None = None) -> str:
-    try:
-        journal = get_journal()
-        thesis = journal.get_working_thesis() or ""
-        decisions = journal.recent_decisions(limit=3)
-    except Exception as exc:
-        logger.warning("agent_loop: journal unavailable: %s", exc)
-        return "JOURNAL MEMORY: unavailable."
-    positions = (s or {}).get("positions") or []
-    orders = (s or {}).get("open_orders") or []
-    acct = (s or {}).get("account") or {}
-    unprotected = list(((s or {}).get("protection") or {}).get("unprotected_symbols") or [])
-    live = {
-        "net_liquidation": acct.get("netliquidation") or acct.get("NetLiquidation"),
-        "n_positions": len(positions), "n_open_orders": len(orders),
-        "unprotected_symbols": unprotected,
-        "positions": [
-            {"conId": p.get("conId") or p.get("con_id"), "symbol": p.get("symbol"),
-             "sec": p.get("secType") or p.get("sec_type"),
-             "qty": p.get("quantity") or p.get("position")}
-            for p in positions[:8]
-        ],
-    }
-    slim = [
-        {"action": d.get("action"), "strategy": d.get("strategy"),
-         "rationale": (d.get("rationale") or "")[:80]}
-        for d in decisions[:3]
-    ]
-    reality = "REALITY CHECK: ok."
-    if unprotected:
-        reality = (
-            "REALITY CHECK: UNPROTECTED - protect or exit by conId. Hold FORBIDDEN. "
-            + ", ".join(str(x) for x in unprotected)
-        )
-    elif positions and not orders and any(
-        str(p.get("secType") or p.get("sec_type") or "STK").upper().startswith("STK")
-        and abs(float(p.get("quantity") or p.get("position") or 0)) > 0
-        for p in positions
-    ):
-        reality = "REALITY CHECK: naked STK (zero orders) - protect immediately."
+def _judge_system() -> str:
+    mandate = (get_config().trading_mandate or "")[:600]
     return (
-        f"LIVE BOOK:\n{json.dumps(live, default=str)[:1400]}\n\n{reality}\n\n"
-        f"JOURNAL MEMORY:\nworking_thesis={(thesis or '-')[:200]}\n"
-        f"recent_decisions={json.dumps(slim, default=str)[:500]}"
+        "ABCXAUTO Judge. Output ONLY valid JSON. No action orders.\n"
+        f"MANDATE:\n{mandate}\n"
+        "You perceive WORLDSTATE (code truth). Set stance + thesis + intent for Act.\n"
+        "stances: protect | manage | hunt | idle\n"
+        "If unprotected STK → stance=protect. If open trade_plan → prefer manage.\n"
+        "idle while flat + opportunities + balanced/aggressive REQUIRES dismissed "
+        "citing opportunity #1 symbol and why rejected.\n"
+        "Affirm, revise, or close working_thesis.\n"
+        'JSON: {"stance":"...","thesis":"1-3 sentences","focus":"what mattered",'
+        '"dismissed":"why top ideas rejected (required for idle when ideas present)",'
+        '"intent":{"kind":"protect|manage|hunt|idle","symbol":null,'
+        '"direction":null,"urgency":"low|med|high"},'
+        '"risk_budget_pct":0.5,"regime_fit":true,"setup_grade":"A|B|C"}'
     )
 
 
-async def grok(g: GrokClient, p: str) -> str:
+def _act_system() -> str:
+    return (
+        _build_rules()
+        + "\nYou are ACT. Fulfill Judgment.intent with ONE allowlisted action.\n"
+        "Do not contradict stance. idle → hold only. hunt → bracket/market_bracket "
+        "or set_risk. protect → oca/modify_*/exit by conId.\n"
+        + expected_json_shape_hint()
+    )
+
+
+async def grok(g: GrokClient, p: str, *, stage: str = "act") -> str:
+    sys_msg = _judge_system() if stage == "judge" else _act_system()
     chat = g.client.chat.create(
         model=g.model,
-        messages=[system(_build_rules() + "\nTWEAKS=" + json.dumps(TWEAKS)), user(p)],
+        messages=[system(sys_msg + "\nTWEAKS=" + json.dumps(TWEAKS)), user(p)],
         temperature=g.temperature,
         max_tokens=min(2048, g.max_tokens),
     )
@@ -364,94 +379,229 @@ def _prepare_close_params(act: dict, positions: list) -> None:
         act["params"].setdefault("action", "SELL" if signed > 0 else "BUY")
 
 
-def _risk_prompt_block() -> str:
-    try:
-        snap = risk_envelope_snapshot()
-    except Exception:
-        return (
-            "RISK POSTURE: (unavailable)\n\n"
-        )
-    if not snap.get("effective_risk_posture"):
-        return (
-            "RISK POSTURE: (none — operator has not set risk_posture; "
-            "set_risk blocked until then)\n\n"
-        )
-    cur = snap.get("current") or {}
-    env = snap.get("envelope") or {}
-    lines = [
-        f"RISK POSTURE: {snap.get('risk_posture')} "
-        f"(effective={snap.get('effective_risk_posture')})",
-        f"BIAS: {snap.get('prompt_bias') or ''}",
-        "CURRENT GATES: "
-        + ", ".join(f"{k}={cur.get(k)}" for k in sorted(cur)),
-        "ENVELOPE (you may set_risk within): "
-        + ", ".join(
-            f"{k}=[{(env.get(k) or {}).get('floor')}-{(env.get(k) or {}).get('ceil')}]"
-            for k in sorted(env)
-        ),
-        "Size each trade inside max_risk_per_trade_pct. "
-        "You may not change risk_posture.",
-        "",
-    ]
-    return "\n".join(lines) + "\n"
+def _top_opp_symbol(world: WorldState) -> str:
+    if not world.opportunities:
+        return ""
+    return str(world.opportunities[0].get("symbol") or "").upper()
 
 
-def _build_prompt(n: int, s: dict, needs_prot: bool, c: Any = None) -> str:
-    book = s.get("portfolio_state") or build_book_from_snap(s)
-    s["portfolio_state"] = book
+def validate_judgment(judgment: dict, world: WorldState) -> tuple[bool, str, dict]:
+    """Fail closed. Returns (ok, reason, maybe_patched_judgment)."""
+    j = dict(judgment or {})
+    stance = str(j.get("stance") or "").strip().lower()
+    if stance not in STANCES:
+        return False, f"invalid or missing stance {stance!r}", j
+    thesis = str(j.get("thesis") or "").strip()
+    focus = str(j.get("focus") or "").strip()
+    if not thesis or not focus:
+        return False, "judgment requires thesis and focus", j
+    intent = j.get("intent")
+    if not isinstance(intent, dict):
+        return False, "judgment.intent must be an object", j
+    kind = str(intent.get("kind") or "").strip().lower()
+    if not kind:
+        return False, "judgment.intent.kind required", j
+    j["stance"] = stance
+    j["thesis"] = thesis
+    j["focus"] = focus
+    j["dismissed"] = str(j.get("dismissed") or "").strip()
+    j["setup_grade"] = str(j.get("setup_grade") or "B").upper()[:1] or "B"
+    if j["setup_grade"] not in ("A", "B", "C"):
+        j["setup_grade"] = "B"
     try:
-        conn = connection_status(c)
-    except Exception:
-        conn = {
-            "ibkr_connected": bool(getattr(c, "connected", False)),
-            "mda_configured": False, "trading_mode": "paper",
-        }
-    cfg = get_config()
-    mandate = (getattr(cfg, "trading_mandate", None) or "")[:400]
-    ideas = s.get("opportunities") or []
-    flat = not (s.get("positions") or [])
-    posture = resolve_effective_posture(
-        getattr(cfg, "risk_posture", "") or "",
-        getattr(cfg, "trading_mode", "paper") or "paper",
-    )
-    if needs_prot:
-        focus = (
-            "PROTECTION ONLY: unprotected STK - oca / modify_stop / market_order by conId. "
-            "HOLD FORBIDDEN. No new entries."
+        j["risk_budget_pct"] = float(j.get("risk_budget_pct") or 0)
+    except (TypeError, ValueError):
+        j["risk_budget_pct"] = 0.0
+
+    if world.needs_protection:
+        if stance in ("idle", "hunt"):
+            return False, "unprotected STK — stance must be protect (idle/hunt forbidden)", j
+        j["stance"] = "protect"
+        stance = "protect"
+
+    if world.trade_plan and stance == "hunt":
+        return False, "open ActiveTradePlan — manage/protect before hunt", j
+
+    posture = (world.effective_posture or world.risk_posture or "").lower()
+    ideas = world.opportunities
+    top = _top_opp_symbol(world)
+
+    if (
+        stance == "idle"
+        and world.flat
+        and world.session_status == "regular"
+        and ideas
+        and posture in ("balanced", "aggressive")
+    ):
+        dismissed = j.get("dismissed") or ""
+        if not dismissed:
+            return False, "idle requires dismissed against opportunity #1", j
+        if top and top not in dismissed.upper():
+            return False, f"idle dismissed must cite opportunity #1 ({top})", j
+
+    thresh = idle_streak_threshold(posture)
+    if (
+        stance == "idle"
+        and world.flat
+        and ideas
+        and int(world.idle_streak or 0) >= thresh
+        and top
+        and top == str(world.idle_top_symbol or "").upper()
+    ):
+        prev = str(load_idle_streak().get("last_dismiss") or "").strip()
+        cur = str(j.get("dismissed") or "").strip()
+        if prev and cur and cur == prev:
+            return False, "idle streak escalate — new dismiss reason or hunt", j
+
+    if stance == "hunt":
+        grade = j["setup_grade"]
+        if posture == "defensive" and grade != "A":
+            return False, "defensive posture requires setup_grade A to hunt", j
+        if posture == "balanced" and grade == "C":
+            return False, "balanced posture blocks setup_grade C hunts", j
+        rf = j.get("regime_fit")
+        if posture == "defensive" and rf in (False, "no", "false", "counter", 0, "0"):
+            return False, "counter-regime hunt blocked under defensive", j
+        sym = str(intent.get("symbol") or "").upper()
+        if sym:
+            from abcxauto.world_state import hunt_cooldown_remaining
+
+            cool = hunt_cooldown_remaining(world.recent_decisions, sym)
+            if cool > 0:
+                return False, f"hunt cooldown on {sym} ({cool} cycles left)", j
+            struct_cool = getattr(world, "structure_cooldown", None) or {}
+            if sym in struct_cool and j.get("setup_grade") != "A":
+                return (
+                    False,
+                    f"structure cooldown on {sym} ({struct_cool[sym]}) — "
+                    "need setup_grade A or hunt elsewhere",
+                    j,
+                )
+
+    # Thesis continuity: repeating no-edge without addressing open thesis / top opp
+    open_thesis = (world.working_thesis or "").strip()
+    if stance == "idle" and open_thesis and ideas and top:
+        blob = f"{thesis} {focus} {j.get('dismissed') or ''}".upper()
+        if top not in blob and "THESIS" not in blob and len(open_thesis) > 20:
+            # soft: require some engagement
+            if "REVISE" not in blob and "CLOSE" not in blob and "AFFIRM" not in blob:
+                if top not in blob:
+                    return False, "idle must engage open thesis or top opportunity", j
+
+    return True, "ok", j
+
+
+def check_intent_coherence(
+    judgment: dict, strat: str, act: dict
+) -> tuple[bool, str]:
+    stance = str(judgment.get("stance") or "").lower()
+    intent = judgment.get("intent") if isinstance(judgment.get("intent"), dict) else {}
+    allowed = STANCE_ACTIONS.get(stance, frozenset())
+    if strat not in allowed:
+        return False, f"act {strat!r} contradicts stance {stance!r}"
+    if stance == "hunt" and strat in ("bracket", "market_bracket"):
+        want_sym = str(intent.get("symbol") or "").upper()
+        got_sym = str(((act.get("params") or {}).get("symbol") or "")).upper()
+        if want_sym and got_sym and want_sym != got_sym:
+            return False, f"intent symbol {want_sym} != act {got_sym}"
+        want_dir = str(intent.get("direction") or "").upper()
+        got_dir = str(((act.get("params") or {}).get("direction") or "")).upper()
+        if want_dir and got_dir and want_dir != got_dir:
+            return False, f"intent direction {want_dir} != act {got_dir}"
+    return True, "ok"
+
+
+def check_risk_budget(
+    judgment: dict, act: dict, net_liq: float, gates: dict | None = None
+) -> tuple[bool, str]:
+    strat = str(act.get("strategy") or act.get("action") or "").lower()
+    if strat not in ("bracket", "market_bracket"):
+        return True, "n/a"
+    params = act.get("params") or {}
+    try:
+        qty = float(params.get("quantity") or 0)
+        entry = float(params.get("entry_price") or 0)
+        stop = float(params.get("stop_price") or 0)
+    except (TypeError, ValueError):
+        return True, "n/a"
+    if qty <= 0 or entry <= 0 or stop <= 0 or net_liq <= 0:
+        return True, "n/a"
+    risk_dollars = abs(entry - stop) * qty
+    risk_pct = 100.0 * risk_dollars / float(net_liq)
+    try:
+        budget = float(judgment.get("risk_budget_pct") or 0)
+    except (TypeError, ValueError):
+        budget = 0.0
+    gate_max = None
+    if gates:
+        try:
+            gate_max = float(gates.get("max_risk_per_trade_pct") or 0)
+        except (TypeError, ValueError):
+            gate_max = None
+    cap = budget if budget > 0 else (gate_max or 0)
+    if cap > 0 and risk_pct > cap * 1.05:
+        return False, f"size risk {risk_pct:.2f}% > budget {cap:.2f}%"
+    return True, "ok"
+
+
+def _build_judge_prompt(world: WorldState) -> str:
+    pressure = ""
+    posture = (world.effective_posture or "").lower()
+    top = _top_opp_symbol(world)
+    if world.needs_protection:
+        pressure = "PRESSURE: unprotected — stance MUST be protect."
+    elif world.trade_plan:
+        pressure = "PRESSURE: open ActiveTradePlan — prefer manage until closed."
+    elif (
+        world.flat
+        and world.session_status == "regular"
+        and world.opportunities
+        and posture in ("balanced", "aggressive")
+    ):
+        pressure = (
+            f"PRESSURE: flat + ideas under {posture}. idle REQUIRES dismissed "
+            f"citing #{1} {top}. Or stance=hunt with setup_grade."
         )
-    elif posture in ("balanced", "aggressive") and flat and ideas:
-        focus = (
-            f"ACTIVE TRADING ({posture}). Top ideas attached — "
-            "hold requires a one-line reason vs #1, or take a small bracket / set_risk. "
-            "Size per trade inside max_risk_per_trade_pct."
+    thresh = idle_streak_threshold(posture)
+    if world.idle_streak >= thresh and world.opportunities:
+        pressure += (
+            f" IDLE STREAK={world.idle_streak}: cannot re-idle with same dismiss; "
+            "new reason or hunt."
         )
-    else:
-        focus = (
-            "ACTIVE TRADING - hold allowed when protected/flat. One allowlisted action. "
-            "Size entries inside max_risk_per_trade_pct; set_risk within envelope."
-        )
-    if s.get("hold_streak_nudge"):
-        focus += (
-            " HOLD STREAK: Justify hold vs opportunity #1 or take a small bracket / set_risk."
-        )
-    pulse = s.get("reality_pulse") or {}
-    pulse_bit = ""
-    if pulse.get("narrative"):
-        pulse_bit = f"REALITY PULSE:\n{str(pulse.get('narrative'))[:500]}\n\n"
-    news_bit = str(s.get("news_prompt") or "").strip()
-    if news_bit:
-        news_bit = news_bit + "\n\n"
-    opp_bit = format_opportunities(ideas) + "\n\n"
     return (
-        f"Cycle {n}.\nMANDATE:\n{mandate}\n\n"
-        f"CONNECTION: {json.dumps(conn, default=str)}\n\n"
-        f"PORTFOLIO STATE:\n{json.dumps(book, default=str)[:1800]}\n\n"
-        f"{_risk_prompt_block()}"
-        f"{pulse_bit}{news_bit}{opp_bit}"
+        f"=== JUDGE STAGE ===\nCycle {world.cycle}.\n{pressure}\n\n"
+        f"{world.prompt_block()}\n\n"
+        f"Open working_thesis: {(world.working_thesis or '-')[:300]}\n"
+        "Affirm, revise, or close it in thesis.\n"
+        "Output judgment JSON only."
+    )
+
+
+def _build_act_prompt(world: WorldState, judgment: dict) -> str:
+    from abcxauto.structure_grade import format_structure_lessons_for_prompt
+
+    lessons = format_structure_lessons_for_prompt(
+        getattr(world, "structure_lessons", None)
+    )
+    vocab = getattr(world, "structure_vocab", None) or {}
+    vocab_bit = ""
+    if vocab:
+        vocab_bit = (
+            f"SUITE TRAINER: pass_rate={vocab.get('pass_rate')} "
+            f"failed={vocab.get('failed')}\n"
+        )
+    return (
+        f"=== ACT STAGE ===\nCycle {world.cycle}.\n"
+        f"JUDGMENT:\n{json.dumps(judgment, default=str)[:2000]}\n\n"
+        f"{world.prompt_block(limit=2800)}\n\n"
+        f"{lessons}\n{vocab_bit}"
+        "You OWN structure: pick order type + stop/target/qty. "
+        "Shell grades geometry vs live quote — wrong-side stops are rejected.\n"
         f"{format_order_examples()}\n\n"
-        f"{_journal_snippet(s)}\n\n"
-        f"{format_position_inventory(s.get('positions') or [])}\n"
-        f"{expected_json_shape_hint()}\n{focus}"
+        f"{format_position_inventory(world.positions)}\n"
+        f"{expected_json_shape_hint()}\n"
+        "Emit ONE action that fulfills intent. Include price_hint when hunting "
+        "(live last). No contradictions."
     )
 
 
@@ -459,8 +609,24 @@ def _result_dict(
     *, n: int, s: dict, act: dict, strat: str, result: dict,
     pnl: float, eq: float, prev: float, inventory: str, validation: str,
     kahneman: dict, impact: dict | None = None,
+    judgment: dict | None = None,
+    world: dict | None = None,
+    stage_error: str = "",
 ) -> dict:
     positions = s.get("positions") or []
+    cfg = get_config()
+    ideas = list(s.get("opportunities") or [])
+    news_items = list(s.get("news_items") or [])
+    j = judgment or {}
+    market_read = str(
+        j.get("focus")
+        or (act or {}).get("market_read")
+        or (act or {}).get("read")
+        or ""
+    ).strip()
+    rationale = str(
+        (act or {}).get("rationale") or j.get("thesis") or ""
+    ).strip()
     return {
         "cycle": n, "pnl": pnl, "pnl_chg": pnl - prev, "equity": eq,
         "strat": strat, "result": result, "tweak": "none", "tweak_obj": {},
@@ -470,59 +636,101 @@ def _result_dict(
         "positions": positions, "open_orders": s.get("open_orders") or [],
         "protection": s.get("protection") or {},
         "unprotected": list((s.get("protection") or {}).get("unprotected_symbols") or []),
-        "action_obj": act, "rationale": act.get("rationale") or "",
+        "action_obj": act, "rationale": rationale,
+        "market_read": market_read,
         "taken_at": s.get("taken_at") or "", "inventory": inventory,
         "validation": validation,
-        "reasoning_chain": act.get("rationale") or act.get("reasoning_chain") or "",
+        "reasoning_chain": market_read or rationale or (act or {}).get("reasoning_chain") or "",
         "tweak_before": {}, "impact": impact or {},
         "reality_pulse": s.get("reality_pulse") or {},
         "kahneman": kahneman, "kahneman_trace": format_kahneman_trace(kahneman),
         "order_lab": {}, "order_suite": {}, "lab_summary": "",
         "retest": {}, "reconfig": {},
+        "opportunities": ideas[:5],
+        "news_items": [
+            {
+                "symbol": it.get("symbol"),
+                "headline": str(it.get("headline") or "")[:160],
+            }
+            for it in news_items[:12]
+            if it.get("headline")
+        ],
+        "risk_posture": getattr(cfg, "risk_posture", "") or "",
+        "params": (act.get("params") or {}) if isinstance(act, dict) else {},
+        "judgment": j,
+        "world_state": world or {},
+        "stance": j.get("stance") or "",
+        "thesis": j.get("thesis") or "",
+        "dismissed": j.get("dismissed") or "",
+        "intent": j.get("intent") or {},
+        "stage_error": stage_error,
+        "trade_plan": (world or {}).get("trade_plan"),
+        "regime": (world or {}).get("regime") or {},
+        "portfolio_risk": (world or {}).get("portfolio_risk") or {},
+        "structure_grade": (act or {}).get("_structure_grade") or "",
+        "structure_lessons": (world or {}).get("structure_lessons") or [],
     }
 
 
-def _journal_decision(out: dict, act: dict, s: dict) -> None:
+def _journal_stages(
+    out: dict, act: dict, s: dict, judgment: dict | None
+) -> None:
     try:
         journal = get_journal()
         strat = out.get("strat")
         result = out.get("result") or {}
+        j = judgment or {}
+        if j:
+            journal.record_judgment(
+                cycle=out.get("cycle"),
+                stance=str(j.get("stance") or ""),
+                thesis=str(j.get("thesis") or ""),
+                focus=str(j.get("focus") or ""),
+                dismissed=str(j.get("dismissed") or ""),
+                intent=j.get("intent") or {},
+                judgment=j,
+            )
+            stance = str(j.get("stance") or "").lower()
+            if stance and stance != "idle":
+                thesis = str(j.get("thesis") or "").strip()
+                if thesis:
+                    journal.set_working_thesis(thesis)
         journal.record_decision(
-            cycle=out.get("cycle"), action=act.get("action") or strat, strategy=strat,
+            cycle=out.get("cycle"),
+            action=act.get("action") or strat,
+            strategy=strat,
             rationale=out.get("rationale") or act.get("rationale") or "",
-            portfolio_snapshot=s.get("portfolio_state"), outcome=result,
+            portfolio_snapshot=s.get("portfolio_state"),
+            outcome={
+                **(result if isinstance(result, dict) else {"raw": result}),
+                "stance": j.get("stance"),
+                "judgment": j,
+            },
         )
-        if (
-            strat not in (BLOCKED_STRAT, "skipped", "hold", "set_risk")
-            and isinstance(result, dict)
-            and str(result.get("status") or "").lower()
-            not in ("blocked", "rejected", "error", "failed", "held")
-        ):
-            thesis = (
-                act.get("rationale") or out.get("rationale") or act.get("reasoning_chain") or ""
-            ).strip()
-            if thesis:
-                journal.set_working_thesis(thesis)
     except Exception as exc:
-        logger.warning("agent_loop: journal decision record failed: %s", exc)
+        logger.warning("agent_loop: journal stages failed: %s", exc)
 
 
-def _update_hold_streak(strat: str, flat: bool, ideas: list) -> bool:
-    """Track consecutive holds while flat; return whether to nudge next/this cycle."""
-    if flat and strat == "hold":
-        _HOLD_STREAK["count"] = int(_HOLD_STREAK.get("count") or 0) + 1
-    else:
-        _HOLD_STREAK["count"] = 0
-    _HOLD_STREAK["flat"] = flat
-    return bool(
-        flat
-        and ideas
-        and int(_HOLD_STREAK.get("count") or 0) >= 3
-    )
+def _maybe_eod_review(world: WorldState, judgment: dict | None, strat: str) -> None:
+    try:
+        phase = str((world.regime or {}).get("session_phase") or "")
+        if phase != "close":
+            return
+        maybe_auto_review_from_cycle(
+            {
+                "end_of_day": True,
+                "thesis": (judgment or {}).get("thesis") or world.working_thesis,
+                "what_worked": (judgment or {}).get("focus") or "",
+                "mistake": (judgment or {}).get("dismissed") or "",
+                "next_change": f"last_act={strat}",
+            }
+        )
+    except Exception:
+        logger.exception("eod review failed")
 
 
 async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -> dict:
-    """One autonomous cycle: snap -> Grok -> normalize -> send_action -> journal."""
+    """Perceive (code) → Judge (Grok) → Act (Grok) → gates/send → journal."""
     s = await snap(c)
     positions = s.get("positions") or []
     for p in positions:
@@ -533,9 +741,8 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
     pnl, eq = pnl_of(acct), equity_of(acct)
     inventory = format_position_inventory(positions)
     session = str((pulse.get("session") or {}).get("status") or "").lower()
-    flat = not positions
-
     needs_prot = bool((s.get("protection") or {}).get("unprotected_symbols"))
+
     if session != "regular" and not needs_prot:
         act = {
             "action": "skipped", "strategy": "skipped",
@@ -547,7 +754,7 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
             pnl=pnl, eq=eq, prev=prev, inventory=inventory,
             validation="skipped_grok: session_closed", kahneman=extract_kahneman(act),
         )
-        _journal_decision(out, act, s)
+        _journal_stages(out, act, s, None)
         h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
         return out
 
@@ -566,12 +773,89 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         logger.exception("opportunity scan failed")
         ideas = []
     s["opportunities"] = ideas
-    # Nudge when already on a hold streak entering this cycle.
-    s["hold_streak_nudge"] = bool(
-        flat and ideas and int(_HOLD_STREAK.get("count") or 0) >= 3
-    )
 
-    act = parse_json(await grok(g, _build_prompt(n, s, needs_prot, c)))
+    # Trade plan lifecycle: bump / close if flat
+    try:
+        if not positions:
+            from abcxauto.trade_plan import load_trade_plan
+            if load_trade_plan():
+                close_trade_plan("flat_book")
+        else:
+            bump_plan_cycle()
+    except Exception:
+        logger.exception("trade plan bump failed")
+
+    world = build_world_state(
+        cycle=n, snap=s, opportunities=ideas, news_items=s.get("news_items") or [],
+    )
+    world_dict = world.to_dict()
+
+    # --- JUDGE ---
+    try:
+        raw_j = await grok(g, _build_judge_prompt(world), stage="judge")
+        judgment = parse_json(raw_j)
+    except Exception as exc:
+        logger.exception("judge failed")
+        judgment = {}
+        stage_err = f"judge_error: {exc}"
+        act = {"action": BLOCKED_STRAT, "strategy": BLOCKED_STRAT, "rationale": stage_err}
+        out = _result_dict(
+            n=n, s=s, act=act, strat=BLOCKED_STRAT,
+            result={"status": "blocked", "note": stage_err},
+            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
+            validation=stage_err, kahneman=extract_kahneman(act),
+            judgment={}, world=world_dict, stage_error=stage_err,
+        )
+        _journal_stages(out, act, s, None)
+        h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
+        return out
+
+    ok_j, jreason, judgment = validate_judgment(judgment, world)
+    if not ok_j:
+        act = {
+            "action": BLOCKED_STRAT, "strategy": BLOCKED_STRAT,
+            "rationale": f"judgment_rejected: {jreason}",
+        }
+        out = _result_dict(
+            n=n, s=s, act=act, strat=BLOCKED_STRAT,
+            result={"status": "blocked", "note": f"judgment_rejected: {jreason}"},
+            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
+            validation=f"judgment_rejected: {jreason}",
+            kahneman=extract_kahneman(act),
+            judgment=judgment, world=world_dict, stage_error=jreason,
+        )
+        _journal_stages(out, act, s, judgment)
+        h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
+        return out
+
+    update_idle_streak_after_judgment(judgment, world)
+
+    # Optional: skip Act when idle + valid dismissed (still one Act call for hold
+    # audit trail — plan says add skip later; keep two-call path).
+
+    # --- ACT ---
+    try:
+        raw_a = await grok(g, _build_act_prompt(world, judgment), stage="act")
+        act = parse_json(raw_a)
+        if not act:
+            act = {"action": "hold", "strategy": "hold", "rationale": "empty_act"}
+    except Exception as exc:
+        logger.exception("act failed")
+        act = {
+            "action": BLOCKED_STRAT, "strategy": BLOCKED_STRAT,
+            "rationale": f"act_error: {exc}",
+        }
+        out = _result_dict(
+            n=n, s=s, act=act, strat=BLOCKED_STRAT,
+            result={"status": "blocked", "note": f"act_error: {exc}"},
+            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
+            validation=f"act_error: {exc}", kahneman=extract_kahneman(act),
+            judgment=judgment, world=world_dict, stage_error=str(exc),
+        )
+        _journal_stages(out, act, s, judgment)
+        h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
+        return out
+
     strat, forced = normalize_action(act)
     if strat == "hold" and needs_prot:
         strat = BLOCKED_STRAT
@@ -580,6 +864,41 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
             "note": "hold_forbidden - unprotected STK needs protection",
         }
         act["strategy"] = act["action"] = BLOCKED_STRAT
+
+    # Intent coherence
+    if forced is None and strat != BLOCKED_STRAT:
+        ok_i, ireason = check_intent_coherence(judgment, strat, act)
+        if not ok_i:
+            strat = BLOCKED_STRAT
+            forced = {"status": "blocked", "note": f"intent_mismatch: {ireason}"}
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            act["rationale"] = f"intent_mismatch: {ireason}"
+
+    # Risk budget vs size
+    if forced is None and strat != BLOCKED_STRAT:
+        ok_b, breason = check_risk_budget(
+            judgment, act, world.net_liquidation, world.gates
+        )
+        if not ok_b:
+            strat = BLOCKED_STRAT
+            forced = {"status": "blocked", "note": f"risk_budget: {breason}"}
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+
+    # Hold-streak: block serial hold after escalate threshold with same top opp
+    posture = (world.effective_posture or "").lower()
+    thresh = idle_streak_threshold(posture)
+    if (
+        forced is None
+        and strat == "hold"
+        and judgment.get("stance") == "idle"
+        and world.flat
+        and ideas
+        and int(world.idle_streak or 0) >= thresh
+    ):
+        # streak already includes prior idles; this cycle's judgment was accepted
+        # with new dismiss — allow hold. If streak high and we somehow got here
+        # without new dismiss, validate_judgment already blocked.
+        pass
 
     validation = "n/a"
     _prepare_close_params(act, positions)
@@ -593,26 +912,264 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
 
     impact = simulate_close_impact(act, positions)
     act["_live_positions"], act["_impact"] = positions, impact
+
+    quote_last = await _quote_for_action(act, s, c)
+    if quote_last is not None:
+        act["_quote_last"] = quote_last
+        params = act.setdefault("params", {})
+        if isinstance(params, dict) and params.get("price_hint") is None:
+            params["price_hint"] = quote_last
+    act["_posture"] = world.effective_posture or world.risk_posture
+    chosen_strat = strat
+
+    if forced is None and strat in ("market_bracket", "oca", "bracket"):
+        from abcxauto.structure_grade import (
+            GEOMETRY_REJECTED,
+            append_structure_event,
+            check_live_geometry,
+        )
+
+        ok_g, code, gmsg = check_live_geometry(
+            strat,
+            act.get("params") or {},
+            quote_last=quote_last,
+            posture=str(act["_posture"] or "balanced"),
+        )
+        act["_structure_grade"] = code
+        if not ok_g:
+            forced = {
+                "status": "rejected",
+                "error": f"{code}: {gmsg}",
+                "reason_code": code,
+                "learn": gmsg,
+            }
+            strat = BLOCKED_STRAT
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            append_structure_event(
+                {
+                    "strategy": chosen_strat,
+                    "symbol": str((act.get("params") or {}).get("symbol") or "").upper(),
+                    "direction": str((act.get("params") or {}).get("direction") or ""),
+                    "quote": quote_last,
+                    "params": {
+                        k: (act.get("params") or {}).get(k)
+                        for k in (
+                            "stop_price", "target_price", "entry_price", "quantity",
+                        )
+                    },
+                    "outcome": GEOMETRY_REJECTED,
+                    "reason_code": code,
+                    "message": gmsg[:300],
+                }
+            )
+
     if forced is not None:
         result = forced
     elif strat == BLOCKED_STRAT:
         result = {"status": "blocked"}
     elif strat == "hold":
         result = {"status": "hold", "strategy": "hold"}
+        act["_structure_grade"] = "hold"
     elif strat == "set_risk":
         result = await send_action(act, c)
+        act["_structure_grade"] = "set_risk"
     elif strat in ALLOWED_ACTIONS:
         result = await send_action(act, c)
+        rc = str((result or {}).get("reason_code") or "")
+        st = str((result or {}).get("status") or "").lower()
+        if rc:
+            act["_structure_grade"] = rc
+        elif st in ("rejected", "blocked", "error", "failed"):
+            act["_structure_grade"] = st
+        else:
+            act["_structure_grade"] = act.get("_structure_grade") or "ok"
     else:
         result = {"status": "blocked"}
 
-    _update_hold_streak(strat, flat, ideas)
+    await _post_act_structure_and_plan(
+        act=act,
+        strat=chosen_strat if strat == BLOCKED_STRAT else strat,
+        result=result or {},
+        judgment=judgment,
+        snap=s,
+        quote_last=quote_last,
+        connector=c,
+    )
+
+    _maybe_eod_review(world, judgment, strat)
 
     out = _result_dict(
         n=n, s=s, act=act, strat=strat, result=result,
         pnl=pnl, eq=eq, prev=prev, inventory=inventory,
         validation=validation, kahneman=extract_kahneman(act), impact=impact,
+        judgment=judgment, world=world_dict,
     )
-    _journal_decision(out, act, s)
+    _journal_stages(out, act, s, judgment)
     h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
     return out
+
+
+async def _quote_for_action(act: dict, snap: dict, connector: Any = None) -> float | None:
+    """Best live last for the action symbol (never invents stop/target)."""
+    params = act.get("params") or {}
+    hint = params.get("price_hint")
+    if hint is not None:
+        try:
+            v = float(hint)
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    if params.get("entry_price") is not None:
+        try:
+            v = float(params["entry_price"])
+            if v > 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    sym = str(params.get("symbol") or "").upper()
+    spy = snap.get("spy_quote") or {}
+    if sym in ("", "SPY"):
+        for k in ("last", "price", "close", "c"):
+            if spy.get(k) is not None:
+                try:
+                    return float(spy[k])
+                except (TypeError, ValueError):
+                    pass
+    for idea in snap.get("opportunities") or []:
+        if str(idea.get("symbol") or "").upper() != sym:
+            continue
+        for k in ("last", "price", "close"):
+            if idea.get(k) is not None:
+                try:
+                    return float(idea[k])
+                except (TypeError, ValueError):
+                    pass
+    if sym and connector is not None:
+        try:
+            q = await _tool(connector, "quote", {"symbol": sym})
+            if isinstance(q, dict):
+                for k in ("last", "price", "close", "c"):
+                    if q.get(k) is not None:
+                        return float(q[k])
+        except Exception:
+            logger.debug("quote fetch for %s failed", sym, exc_info=True)
+    return None
+
+
+async def _post_act_structure_and_plan(
+    *,
+    act: dict,
+    strat: str,
+    result: dict,
+    judgment: dict,
+    snap: dict,
+    quote_last: float | None,
+    connector: Any,
+) -> None:
+    """Record structure lessons, open/close trade plan, detect scrapes."""
+    from abcxauto.structure_grade import (
+        SCRAPE_SUSPECT,
+        STRUCTURE_OK,
+        append_structure_event,
+        detect_scrape_from_fills,
+    )
+
+    status = str((result or {}).get("status") or "").lower()
+    params = act.get("params") or {}
+    symbol = str(params.get("symbol") or result.get("symbol") or "").upper()
+    ok_dispatch = status not in (
+        "blocked", "rejected", "error", "failed", "held", "hold", "",
+    ) and strat not in (BLOCKED_STRAT, "hold", "skipped", "set_risk")
+
+    try:
+        if ok_dispatch and strat in ("bracket", "market_bracket"):
+            plan = plan_from_hunt_action(act, str(judgment.get("thesis") or ""))
+            if plan:
+                try:
+                    fill_px = result.get("entry_price") or result.get("avg_fill_price")
+                    if fill_px is not None:
+                        plan.entry_price = float(fill_px)
+                except (TypeError, ValueError):
+                    pass
+                save_trade_plan(plan)
+            append_structure_event(
+                {
+                    "strategy": strat,
+                    "symbol": symbol,
+                    "direction": str(params.get("direction") or ""),
+                    "quote": quote_last or result.get("entry_price"),
+                    "params": {
+                        k: params.get(k)
+                        for k in (
+                            "stop_price", "target_price", "entry_price", "quantity",
+                        )
+                    },
+                    "outcome": STRUCTURE_OK,
+                    "reason_code": STRUCTURE_OK,
+                    "message": "dispatched",
+                }
+            )
+        elif strat in (
+            "market_order", "close_option", "limit_order", "stop_order",
+        ) and ok_dispatch:
+            close_trade_plan("exit_act")
+
+        # Scrape detection from recent fills (BOT+SLD within seconds)
+        if symbol and ok_dispatch and strat in ("bracket", "market_bracket"):
+            fills: list = []
+            try:
+                if connector is not None and hasattr(connector, "get_recent_executions"):
+                    fills = await connector.get_recent_executions() or []
+            except Exception:
+                fills = []
+            if not fills:
+                # journal fills as fallback
+                try:
+                    import sqlite3
+                    from abcxauto.memory.journal import get_journal
+
+                    jpath = get_journal().path
+                    conn = sqlite3.connect(jpath)
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        "SELECT ts,symbol,side,quantity,price FROM fills "
+                        "ORDER BY id DESC LIMIT 20"
+                    ).fetchall()
+                    conn.close()
+                    fills = [dict(r) for r in rows]
+                except Exception:
+                    fills = []
+            if detect_scrape_from_fills(fills, symbol=symbol):
+                append_structure_event(
+                    {
+                        "strategy": strat,
+                        "symbol": symbol,
+                        "direction": str(params.get("direction") or ""),
+                        "quote": quote_last,
+                        "outcome": SCRAPE_SUSPECT,
+                        "reason_code": SCRAPE_SUSPECT,
+                        "message": "round-trip fill within scrape window",
+                    }
+                )
+                close_trade_plan("scrape_suspect")
+                # flat book after scrape
+                if not (snap.get("positions") or []):
+                    close_trade_plan("flat_after_scrape")
+    except Exception:
+        logger.exception("post_act structure/plan failed")
+
+
+def run_session_review_on_stop(summary: Optional[dict] = None) -> dict | None:
+    """Operator stop / pause → write session review for next Judge."""
+    try:
+        return maybe_auto_review_from_cycle(
+            {
+                "force": True,
+                **(summary or {}),
+                "notes": "operator stop",
+            }
+        )
+    except Exception:
+        logger.exception("session review on stop failed")
+        return None

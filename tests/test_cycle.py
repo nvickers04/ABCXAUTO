@@ -70,15 +70,67 @@ def _cfg(**overrides):
         marketdata_token="",
         trading_mandate="RELY ON YOUR INTELLIGENCE. Trade actively with brackets.",
         trading_mode="paper",
+        risk_posture="balanced",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
 
 
+def _judgment_for_act(act: dict, **extra) -> dict:
+    """Build a coherent Judge payload for a given Act dict."""
+    strat = str(act.get("strategy") or act.get("action") or "hold").lower()
+    params = act.get("params") or {}
+    if strat in ("bracket", "market_bracket"):
+        stance, kind = "hunt", "hunt"
+    elif strat in ("oca", "modify_stop", "modify_target", "market_order", "close_option"):
+        stance, kind = "protect", "protect"
+    elif strat in ("set_risk",):
+        stance, kind = "hunt", "hunt"
+    elif strat == "hold":
+        stance, kind = "idle", "idle"
+    else:
+        stance, kind = "manage", "manage"
+    j = {
+        "stance": stance,
+        "thesis": str(act.get("rationale") or "test thesis"),
+        "focus": "test focus",
+        "dismissed": "",
+        "intent": {
+            "kind": kind,
+            "symbol": params.get("symbol"),
+            "direction": params.get("direction"),
+            "urgency": "med",
+        },
+        "risk_budget_pct": 2.0,
+        "regime_fit": True,
+        "setup_grade": "A",
+    }
+    j.update(extra)
+    return j
+
+
+def _pja_grok(act: dict, judgment: dict | None = None, prompts: list | None = None):
+    """Return async grok stub that answers Judge then Act."""
+    j = judgment if judgment is not None else _judgment_for_act(act)
+
+    async def fake(_g, prompt: str, *, stage: str = "act") -> str:
+        if prompts is not None:
+            prompts.append(prompt)
+        if stage == "judge" or "JUDGE STAGE" in prompt:
+            return json.dumps(j)
+        return json.dumps(act)
+
+    return fake
+
+
 @pytest.fixture(autouse=True)
-def _reset_cadence(monkeypatch):
+def _reset_cadence(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
+        lambda: _cfg(signal_only=False, grok_min_interval_s=0),
+    )
+    monkeypatch.setattr(
+        "abcxauto.world_state.get_config",
         lambda: _cfg(signal_only=False, grok_min_interval_s=0),
     )
     # Avoid real MDA/connector in connection_status during prompts.
@@ -90,6 +142,25 @@ def _reset_cadence(monkeypatch):
             "trading_mode": "paper",
         },
     )
+    monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
+    monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "review.json"))
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "journal.db"))
+    from abcxauto.memory import reset_journal
+    from abcxauto.world_state import reset_idle_streak
+
+    reset_journal(path=str(tmp_path / "journal.db"), enabled=True)
+    reset_idle_streak()
+
+    async def _no_opps(*_a, **_k):
+        return []
+
+    async def _no_news(*_a, **_k):
+        return []
+
+    monkeypatch.setattr("abcxauto.agent_loop.scan_opportunities", _no_opps)
+    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _no_news)
     yield
 
 
@@ -112,18 +183,17 @@ async def test_run_cycle_hold_when_flat(monkeypatch):
     before = dict(TWEAKS)
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     send_calls: list[dict] = []
-
-    async def fake_grok(_g, prompt: str) -> str:
-        assert "PORTFOLIO STATE:" in prompt
-        assert "hold allowed" in prompt.lower()
-        assert "ORDER EXAMPLES" in prompt
-        return json.dumps({"action": "hold", "strategy": "hold", "rationale": "wait"})
+    prompts: list[str] = []
+    act = {"action": "hold", "strategy": "hold", "rationale": "wait"}
 
     async def record_send(action, conn):
         send_calls.append(action)
         return {"status": "executed"}
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok",
+        _pja_grok(act, prompts=prompts),
+    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     try:
         hist = []
@@ -134,6 +204,8 @@ async def test_run_cycle_hold_when_flat(monkeypatch):
         assert out["pnl"] == 5.0
         assert out["positions"] == []
         assert "unprotected_symbols" in out["protection"]
+        assert any("JUDGE STAGE" in p for p in prompts)
+        assert any("ORDER EXAMPLES" in p for p in prompts)
         out2 = await run_cycle(2, FakeConnector(), None, hist, out["pnl"])
         assert out2["tweak"] == "none"
         assert out2.get("order_lab") == {}
@@ -152,31 +224,32 @@ async def test_run_cycle_rth_always_calls_grok(monkeypatch):
         lambda: _cfg(signal_only=True, grok_min_interval_s=300),
     )
     grok_calls: list[str] = []
-
-    async def tracking_grok(_g, prompt: str) -> str:
-        grok_calls.append(prompt)
-        return json.dumps({
-            "action": "market_bracket",
-            "strategy": "market_bracket",
-            "params": {
-                "symbol": "SPY",
-                "quantity": 1,
-                "direction": "LONG",
-                "stop_price": 490.0,
-                "target_price": 520.0,
-                "price_hint": 500.0,
-            },
-            "rationale": "active entry",
-        })
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {
+            "symbol": "SPY",
+            "quantity": 1,
+            "direction": "LONG",
+            "stop_price": 490.0,
+            "target_price": 520.0,
+            "price_hint": 500.0,
+            "entry_price": 500.0,
+        },
+        "rationale": "active entry",
+    }
 
     async def _ok_send(a, c):
         return {"status": "executed", "strategy": a.get("strategy")}
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", tracking_grok)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok",
+        _pja_grok(act, prompts=grok_calls),
+    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _ok_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert len(grok_calls) >= 1
-    assert "PORTFOLIO STATE:" in grok_calls[0]
+    assert len(grok_calls) >= 2
+    assert any("WORLDSTATE" in p or "JUDGE STAGE" in p for p in grok_calls)
     assert out["strat"] in ("market_bracket", "blocked", "hold")
 
 
@@ -207,23 +280,26 @@ async def test_run_cycle_protection_blocks_hold(monkeypatch):
         lambda: _cfg(signal_only=False, grok_min_interval_s=0),
     )
     grok_calls: list[str] = []
+    act = {
+        "action": "hold",
+        "strategy": "hold",
+        "rationale": "protection review hold",
+    }
+    judgment = _judgment_for_act(
+        {"strategy": "oca", "params": {"symbol": "SPY"}},
+        stance="protect",
+        thesis="Must protect SPY",
+        focus="unprotected SPY",
+    )
 
-    async def tracking_grok(_g, prompt: str) -> str:
-        grok_calls.append(prompt)
-        return json.dumps({
-            "action": "hold",
-            "strategy": "hold",
-            "rationale": "protection review hold",
-        })
-
-    monkeypatch.setattr("abcxauto.agent_loop.grok", tracking_grok)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok",
+        _pja_grok(act, judgment=judgment, prompts=grok_calls),
+    )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert len(grok_calls) == 1
-    assert "PROTECTION ONLY" in grok_calls[0]
-    assert "HOLD FORBIDDEN" in grok_calls[0]
-    assert "LIVE BOOK" in grok_calls[0]
-    assert "JOURNAL MEMORY" in grok_calls[0]
-    assert "PORTFOLIO STATE:" in grok_calls[0]
+    assert len(grok_calls) == 2
+    assert any("protect" in p.lower() for p in grok_calls)
+    assert any("WORLDSTATE" in p for p in grok_calls)
     assert out["strat"] == "blocked"
     assert "hold_forbidden" in str(out["result"].get("note") or "")
 
@@ -243,32 +319,33 @@ async def test_run_cycle_agent_decides_with_journal_memory(monkeypatch):
         calls.append(action)
         return {"status": "executed", "strategy": action.get("strategy")}
 
-    async def tracking_grok(_g, prompt: str) -> str:
-        grok_calls.append(prompt)
-        return json.dumps({
-            "action": "market_bracket",
-            "strategy": "market_bracket",
-            "params": {
-                "symbol": "SPY",
-                "quantity": 1,
-                "direction": "LONG",
-                "stop_price": 490.0,
-                "target_price": 520.0,
-                "price_hint": 500.0,
-            },
-            "rationale": "intelligent entry",
-        })
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {
+            "symbol": "SPY",
+            "quantity": 1,
+            "direction": "LONG",
+            "stop_price": 490.0,
+            "target_price": 520.0,
+            "price_hint": 500.0,
+            "entry_price": 500.0,
+        },
+        "rationale": "intelligent entry",
+    }
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", tracking_grok)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok",
+        _pja_grok(act, prompts=grok_calls),
+    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert len(grok_calls) == 1
-    assert "LIVE BOOK" in grok_calls[0]
-    assert "JOURNAL MEMORY" in grok_calls[0]
-    assert "ORDER EXAMPLES" in grok_calls[0]
-    assert "RELY ON YOUR INTELLIGENCE" in grok_calls[0] or "hold allowed" in grok_calls[0].lower()
-    assert "PORTFOLIO STATE:" in grok_calls[0]
-    assert "MARKET HINTS" not in grok_calls[0]
+    assert len(grok_calls) == 2
+    joined = "\n".join(grok_calls)
+    assert "WORLDSTATE" in joined
+    assert "ORDER EXAMPLES" in joined
+    assert "working_thesis" in joined.lower() or "JUDGE STAGE" in joined
+    assert "MARKET HINTS" not in joined
     assert out["strat"] == "market_bracket"
     assert len(calls) == 1
 
@@ -305,33 +382,33 @@ async def test_run_cycle_prompt_flags_naked_stk(monkeypatch):
         lambda: _cfg(signal_only=False, grok_min_interval_s=0),
     )
     prompts: list[str] = []
-
-    async def tracking_grok(_g, prompt: str) -> str:
-        prompts.append(prompt)
-        return json.dumps({
-            "action": "oca",
-            "strategy": "oca",
-            "params": {
-                "symbol": "SPY",
-                "quantity": 3,
-                "direction": "LONG",
-                "stop_price": 749.0,
-                "target_price": 755.0,
-            },
-            "rationale": "protect naked SPY",
-        })
+    act = {
+        "action": "oca",
+        "strategy": "oca",
+        "params": {
+            "symbol": "SPY",
+            "quantity": 3,
+            "direction": "LONG",
+            "stop_price": 749.0,
+            "target_price": 755.0,
+        },
+        "rationale": "protect naked SPY",
+    }
 
     async def _noop_send(action, conn):
         return {"status": "executed", "strategy": action.get("strategy")}
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", tracking_grok)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok",
+        _pja_grok(act, prompts=prompts),
+    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert prompts
-    assert "LIVE BOOK" in prompts[0]
-    assert "REALITY CHECK" in prompts[0]
-    assert "UNPROTECTED" in prompts[0] or "naked" in prompts[0].lower()
-    assert "PROTECTION ONLY" in prompts[0]
+    joined = "\n".join(prompts)
+    assert "WORLDSTATE" in joined
+    assert "needs_protection" in joined or "unprotected" in joined.lower()
+    assert "PRESSURE: unprotected" in joined or "stance MUST be protect" in joined
     assert out["strat"] == "oca"
 
 
@@ -359,26 +436,25 @@ async def test_run_cycle_market_closed_skips_grok(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_cycle_does_not_write_jsonl(monkeypatch, tmp_path):
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-
-    async def fake_grok(_g, _p: str) -> str:
-        return json.dumps({
-            "action": "market_bracket",
-            "strategy": "market_bracket",
-            "params": {
-                "symbol": "SPY",
-                "quantity": 1,
-                "direction": "LONG",
-                "stop_price": 490.0,
-                "target_price": 520.0,
-                "price_hint": 500.0,
-            },
-            "rationale": "active",
-        })
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {
+            "symbol": "SPY",
+            "quantity": 1,
+            "direction": "LONG",
+            "stop_price": 490.0,
+            "target_price": 520.0,
+            "price_hint": 500.0,
+            "entry_price": 500.0,
+        },
+        "rationale": "active",
+    }
 
     async def _noop_send(action, conn):
         return {"status": "executed"}
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr("abcxauto.agent_loop.grok", _pja_grok(act))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     monkeypatch.chdir(tmp_path)
     await run_cycle(1, FakeConnector(), None, [], 0.0)
@@ -413,20 +489,23 @@ def test_normalize_action_accepts_hold_and_noop():
 
 def test_normalize_action_hold_in_allowlist():
     assert "hold" in ALLOWED_ACTIONS
-    assert "trailing_stop" not in ALLOWED_ACTIONS
+    assert "trailing_stop" in ALLOWED_ACTIONS  # structure vocab for manage/protect
     strat, forced = normalize_action({"action": "trailing_stop", "strategy": "trailing_stop"})
-    assert strat == "blocked"
-    assert forced is not None
+    assert strat == "trailing_stop"
+    assert forced is None
 
 
 @pytest.mark.asyncio
 async def test_run_cycle_blocks_invalid_strategy(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
+    # Valid idle judgment, then invalid act strategy → blocked at normalize.
+    act = {"action": "hold_existing", "strategy": "hold_existing"}
+    judgment = _judgment_for_act({"strategy": "hold"})
 
-    async def bad_grok(_g, _p: str) -> str:
-        return json.dumps({"action": "hold_existing", "strategy": "hold_existing"})
-
-    monkeypatch.setattr("abcxauto.agent_loop.grok", bad_grok)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok",
+        _pja_grok(act, judgment=judgment),
+    )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "blocked"
     assert out["result"]["status"] == "blocked"
@@ -442,22 +521,21 @@ async def test_run_cycle_allows_trade_without_kahneman(monkeypatch):
         calls.append(action)
         return {"status": "executed"}
 
-    async def bare_bracket(_g, _p: str) -> str:
-        return json.dumps({
-            "action": "bracket",
-            "strategy": "bracket",
-            "params": {
-                "symbol": "SPY",
-                "quantity": 1,
-                "direction": "LONG",
-                "entry_price": 500.0,
-                "stop_price": 490.0,
-                "target_price": 510.0,
-            },
-            "rationale": "no system2",
-        })
+    act = {
+        "action": "bracket",
+        "strategy": "bracket",
+        "params": {
+            "symbol": "SPY",
+            "quantity": 1,
+            "direction": "LONG",
+            "entry_price": 500.0,
+            "stop_price": 490.0,
+            "target_price": 510.0,
+        },
+        "rationale": "no system2",
+    }
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", bare_bracket)
+    monkeypatch.setattr("abcxauto.agent_loop.grok", _pja_grok(act))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "bracket"
@@ -475,17 +553,16 @@ async def test_cycle_smoke_run_cycle_bracket_dispatch(monkeypatch, tmp_path):
         calls.append(action)
         return {"status": "executed", "strategy": action.get("strategy")}
 
-    async def bracket_grok(_g, prompt: str) -> str:
-        return json.dumps({
-            "action": "bracket", "strategy": "bracket",
-            "params": {
-                "symbol": "SPY", "quantity": 1, "direction": "LONG",
-                "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
-            },
-            "rationale": "Current reality: RTH; smoke",
-        })
+    act = {
+        "action": "bracket", "strategy": "bracket",
+        "params": {
+            "symbol": "SPY", "quantity": 1, "direction": "LONG",
+            "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
+        },
+        "rationale": "Current reality: RTH; smoke",
+    }
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", bracket_grok)
+    monkeypatch.setattr("abcxauto.agent_loop.grok", _pja_grok(act))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     snap_out = await snap(FakeConnector())
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
@@ -513,22 +590,21 @@ async def test_no_suite_gate_on_autonomous_path(monkeypatch):
         calls.append(action)
         return {"status": "executed"}
 
-    async def bracket_grok(_g, _p: str) -> str:
-        return json.dumps({
-            "action": "bracket",
-            "strategy": "bracket",
-            "params": {
-                "symbol": "SPY",
-                "quantity": 1,
-                "direction": "LONG",
-                "entry_price": 500.0,
-                "stop_price": 490.0,
-                "target_price": 510.0,
-            },
-            "rationale": "try entry",
-        })
+    act = {
+        "action": "bracket",
+        "strategy": "bracket",
+        "params": {
+            "symbol": "SPY",
+            "quantity": 1,
+            "direction": "LONG",
+            "entry_price": 500.0,
+            "stop_price": 490.0,
+            "target_price": 510.0,
+        },
+        "rationale": "try entry",
+    }
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", bracket_grok)
+    monkeypatch.setattr("abcxauto.agent_loop.grok", _pja_grok(act))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "bracket"
@@ -546,21 +622,29 @@ async def test_no_prefer_bracket_only_playbook(monkeypatch):
         "abcxauto.agent_loop.ALLOWED_ACTIONS",
         frozenset(ALLOWED_ACTIONS | {"trailing_stop"}),
     )
+    from abcxauto.agent_loop import STANCE_ACTIONS
+
+    patched = dict(STANCE_ACTIONS)
+    patched["manage"] = frozenset(patched["manage"] | {"trailing_stop"})
+    monkeypatch.setattr("abcxauto.agent_loop.STANCE_ACTIONS", patched)
     calls: list[dict] = []
 
     async def record_send(action, conn):
         calls.append(action)
         return {"status": "executed"}
 
-    async def trail_grok(_g, _p: str) -> str:
-        return json.dumps({
-            "action": "trailing_stop",
-            "strategy": "trailing_stop",
-            "params": {"symbol": "SPY", "quantity": 1, "direction": "LONG", "trail_percent": 1.0},
-            "rationale": "trail",
-        })
+    act = {
+        "action": "trailing_stop",
+        "strategy": "trailing_stop",
+        "params": {"symbol": "SPY", "quantity": 1, "direction": "LONG", "trail_percent": 1.0},
+        "rationale": "trail",
+    }
+    judgment = _judgment_for_act(act, stance="manage")
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", trail_grok)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok",
+        _pja_grok(act, judgment=judgment),
+    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert "prefer_bracket_only" not in (out.get("validation") or "")
@@ -577,17 +661,16 @@ async def test_run_cycle_dispatches_bracket_to_send_action(monkeypatch):
         calls.append(action)
         return {"status": "executed", "strategy": action.get("strategy")}
 
-    async def bracket_grok(_g, prompt: str) -> str:
-        return json.dumps({
-            "action": "bracket", "strategy": "bracket",
-            "params": {
-                "symbol": "SPY", "quantity": 1, "direction": "LONG",
-                "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
-            },
-            "rationale": "test bracket dispatch",
-        })
+    act = {
+        "action": "bracket", "strategy": "bracket",
+        "params": {
+            "symbol": "SPY", "quantity": 1, "direction": "LONG",
+            "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
+        },
+        "rationale": "test bracket dispatch",
+    }
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", bracket_grok)
+    monkeypatch.setattr("abcxauto.agent_loop.grok", _pja_grok(act))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "bracket"

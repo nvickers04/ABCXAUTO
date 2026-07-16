@@ -99,6 +99,18 @@ CREATE TABLE IF NOT EXISTS working_thesis (
     ts TEXT NOT NULL,
     text TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS judgments (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    cycle INTEGER,
+    stance TEXT,
+    thesis TEXT,
+    focus TEXT,
+    dismissed TEXT,
+    intent_json TEXT,
+    judgment_json TEXT
+);
 """
 
 
@@ -536,9 +548,92 @@ class TradeJournal:
         except Exception:
             logger.exception("journal.set_working_thesis failed")
 
+    def record_judgment(
+        self,
+        *,
+        cycle: Any = None,
+        stance: str = "",
+        thesis: str = "",
+        focus: str = "",
+        dismissed: str = "",
+        intent: Any = None,
+        judgment: Any = None,
+        ts: Optional[str] = None,
+    ) -> Optional[int]:
+        """Persist a Judge-stage record for cross-cycle thesis continuity."""
+        if not self.enabled:
+            return None
+        try:
+            self._ensure_schema()
+            cycle_int: Optional[int] = None
+            if cycle is not None:
+                try:
+                    cycle_int = int(cycle)
+                except (TypeError, ValueError):
+                    cycle_int = None
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO judgments (
+                        ts, cycle, stance, thesis, focus, dismissed,
+                        intent_json, judgment_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ts or _utc_now_iso(),
+                        cycle_int,
+                        stance or None,
+                        (thesis or None),
+                        (focus or None),
+                        (dismissed or None),
+                        _json_dumps(intent) if intent is not None else None,
+                        _json_dumps(judgment) if judgment is not None else None,
+                    ),
+                )
+                conn.commit()
+                return int(cur.lastrowid)
+        except Exception:
+            logger.exception("journal.record_judgment failed")
+            return None
+
     # ------------------------------------------------------------------
     # Readers (never raise into the caller)
     # ------------------------------------------------------------------
+
+    def recent_judgments(self, limit: int = 8) -> List[dict]:
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, ts, cycle, stance, thesis, focus, dismissed,
+                           intent_json, judgment_json
+                    FROM judgments
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            out: List[dict] = []
+            for row in rows:
+                item = dict(row)
+                for key, dest in (
+                    ("intent_json", "intent"),
+                    ("judgment_json", "judgment"),
+                ):
+                    raw = item.pop(key, None)
+                    if raw:
+                        try:
+                            item[dest] = json.loads(raw)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            item[dest] = raw
+                    else:
+                        item[dest] = None
+                out.append(item)
+            return out
+        except Exception:
+            logger.exception("journal.recent_judgments failed")
+            return []
 
     def recent_decisions(self, limit: int = 8) -> List[dict]:
         try:

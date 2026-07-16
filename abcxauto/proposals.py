@@ -184,6 +184,7 @@ class OcaParams(BaseModel):
     direction: Literal["LONG", "SHORT"]
     stop_price: float = Field(gt=0)
     target_price: float = Field(gt=0)
+    price_hint: Optional[float] = Field(default=None, gt=0, exclude=True)
 
     @model_validator(mode="before")
     @classmethod
@@ -343,10 +344,15 @@ def validate_proposal(
     rationale: str,
     max_loss: Optional[str] = None,
     max_gain: Optional[str] = None,
+    *,
+    quote_last: Optional[float] = None,
+    posture: Optional[str] = None,
 ) -> OrderProposal:
     """Validate a raw propose_order payload into an OrderProposal.
 
     Raises ProposalValidationError with a Grok-readable message on failure.
+    Live-quote geometry is checked for bracket / market_bracket / oca — Grok's
+    prices are never rewritten, only accepted or rejected with a reason code.
     """
     entry = STRATEGIES.get(strategy)
     if entry is None:
@@ -367,6 +373,30 @@ def validate_proposal(
     if hasattr(parsed, "symbol"):
         parsed.symbol = parsed.symbol.upper()
     _check_min_reward_risk(strategy, parsed)
+
+    if strategy in ("market_bracket", "oca", "bracket"):
+        from abcxauto.config import resolve_effective_posture
+        from abcxauto.structure_grade import check_live_geometry
+
+        cfg = get_config()
+        eff = posture or resolve_effective_posture(
+            getattr(cfg, "risk_posture", "") or "",
+            getattr(cfg, "trading_mode", "paper") or "paper",
+        )
+        raw_params = (
+            parsed.model_dump()
+            if hasattr(parsed, "model_dump")
+            else dict(params)
+        )
+        # Prefer explicit price_hint on the model when present
+        hint = getattr(parsed, "price_hint", None)
+        q = quote_last if quote_last is not None else hint
+        ok_g, code, msg = check_live_geometry(
+            strategy, raw_params, quote_last=q, posture=eff or "balanced",
+        )
+        if not ok_g:
+            raise ProposalValidationError(f"{code}: {msg}")
+
     return OrderProposal(
         id=next(_id_counter),
         strategy=strategy,
