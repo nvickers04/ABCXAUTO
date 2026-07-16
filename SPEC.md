@@ -9,16 +9,19 @@ execution loop) into this repo.
 
 **Reality posture**: this is an **agentic portfolio** with a thin product shell
 (`order_examples` → `connections` / `book` / `send` / `risk` → broker + gates),
-not a playbook or scanner brain. The agent **owns** a paper IBKR book under hard
-risk rules and can send every type in ORDER EXAMPLES. Protect first; act when edge
-or risk requires. **Hold is valid** when the book is protected and within mandate;
-hold is **forbidden only while unprotected STK** exists (code enforces). Risk gates,
-brackets, and sizing are the floor so a wrong call cannot blow up the book; they may
-block a bad proposal but they are not a strategy. Intelligence + journal memory drive
-judgment. Paper (TWS 7497) until forward P&L shows the book survives and compounds.
-Target footprint **~3.5–5k LOC**. Every feature must answer: *does this help the agent
-own the book under constraints without raising blow-up risk or burning idle API?*
-If not, it doesn't ship.
+not a scanner brain. The agent **owns** a paper IBKR book under hard risk rules
+and can send every type in ORDER EXAMPLES. Protect first. **Hold is valid** when
+the book is protected; hold is **forbidden only while unprotected STK** exists
+(code enforces). Risk gates, brackets, and sizing are the floor — not a strategy.
+
+**Objectivity**: shell text is Fact, Gate, or labeled Heuristic
+(`heuristic ≠ recommendation`). Trading taste belongs only in an optional
+**Operator Card** (`ABCXAUTO_OPERATOR_CARD` / `operator_card.txt`) or in Grok’s
+judgment — never hard-coded narrative in prompts. Intelligence + journal memory
+drive judgment. Paper (TWS 7497) until forward P&L shows the book survives.
+Target footprint **~3.5–5k LOC**. Every feature must answer: *does this help the
+agent own the book under constraints without raising blow-up risk or burning idle
+API?* If not, it doesn't ship.
 
 ---
 

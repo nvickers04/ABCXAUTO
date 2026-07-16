@@ -408,7 +408,11 @@ async def test_run_cycle_prompt_flags_naked_stk(monkeypatch):
     joined = "\n".join(prompts)
     assert "WORLDSTATE" in joined
     assert "needs_protection" in joined or "unprotected" in joined.lower()
-    assert "PRESSURE: unprotected" in joined or "stance MUST be protect" in joined
+    assert (
+        "GATE: unprotected" in joined
+        or "PRESSURE: unprotected" in joined
+        or "stance MUST be protect" in joined
+    )
     assert out["strat"] == "oca"
 
 

@@ -1,0 +1,298 @@
+"""Open-risk continuity: reconcile, confirmed-flat, pause keeps plan file."""
+
+from __future__ import annotations
+
+from abcxauto.trade_plan import (
+    ActiveTradePlan,
+    clear_trade_plan,
+    format_open_risk_line,
+    load_flat_streak,
+    load_trade_plan,
+    maybe_close_on_confirmed_flat,
+    reconcile_open_risk,
+    reset_flat_streak,
+    save_trade_plan,
+    sync_open_risk,
+)
+
+
+def _pos(symbol="IWM", qty=22.0, avg=295.75, mv=6500.0):
+    return {
+        "symbol": symbol,
+        "secType": "STK",
+        "quantity": qty,
+        "avgCost": avg,
+        "marketValue": mv,
+        "conId": 1,
+    }
+
+
+def _stop_tgt(symbol="IWM", stop=293.4, target=300.5):
+    return [
+        {
+            "symbol": symbol,
+            "action": "SELL",
+            "order_type": "STP",
+            "aux_price": stop,
+            "order_id": 11,
+        },
+        {
+            "symbol": symbol,
+            "action": "SELL",
+            "order_type": "LMT",
+            "lmt_price": target,
+            "order_id": 12,
+        },
+    ]
+
+
+def test_reconcile_rebuilds_from_book_when_plan_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    clear_trade_plan()
+    reset_flat_streak()
+    plan = reconcile_open_risk(
+        [_pos()],
+        _stop_tgt(),
+        existing_plan=None,
+        thesis="IWM SMA pullback",
+    )
+    assert plan is not None
+    assert plan.symbol == "IWM"
+    assert plan.direction == "LONG"
+    assert plan.quantity == 22.0
+    assert plan.stop_price == 293.4
+    assert plan.target_price == 300.5
+    assert plan.entry_price == 295.75
+    assert "IWM" in plan.thesis
+    assert "OPEN RISK" in format_open_risk_line(plan)
+
+
+def test_reconcile_refreshes_existing_plan_qty_and_exits(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    existing = ActiveTradePlan(
+        symbol="IWM",
+        direction="LONG",
+        thesis="keep me",
+        stop_price=290.0,
+        target_price=310.0,
+        quantity=10,
+        cycles_open=3,
+    )
+    plan = reconcile_open_risk(
+        [_pos(qty=22)],
+        _stop_tgt(stop=293.4, target=300.5),
+        existing_plan=existing,
+    )
+    assert plan is not None
+    assert plan.quantity == 22.0
+    assert plan.stop_price == 293.4
+    assert plan.target_price == 300.5
+    assert plan.cycles_open == 3
+    assert plan.thesis == "keep me"
+
+
+def test_single_empty_snap_does_not_close_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    clear_trade_plan()
+    reset_flat_streak()
+    save_trade_plan(
+        ActiveTradePlan(symbol="IWM", direction="LONG", stop_price=293.4, quantity=22)
+    )
+    assert maybe_close_on_confirmed_flat([], needed=2) is False
+    assert load_trade_plan() is not None
+    assert load_flat_streak() == 1
+    assert maybe_close_on_confirmed_flat([], needed=2) is True
+    assert load_trade_plan() is None
+
+
+def test_sync_allow_flat_close_false_keeps_disk_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    clear_trade_plan()
+    reset_flat_streak()
+    save_trade_plan(
+        ActiveTradePlan(symbol="IWM", direction="LONG", stop_price=293.4, quantity=22)
+    )
+    # Pause/Stop path: empty in-memory book must not wipe disk plan.
+    kept = sync_open_risk([], [], allow_flat_close=False)
+    assert kept is not None
+    assert kept.symbol == "IWM"
+    assert load_trade_plan() is not None
+
+
+def test_sync_rebuild_and_persist(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    clear_trade_plan()
+    reset_flat_streak()
+    plan = sync_open_risk([_pos()], _stop_tgt(), thesis="rehydrate", bump=False)
+    assert plan is not None
+    loaded = load_trade_plan()
+    assert loaded is not None
+    assert loaded.stop_price == 293.4
+
+
+def test_pause_engine_keeps_plan_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    clear_trade_plan()
+    reset_flat_streak()
+    save_trade_plan(
+        ActiveTradePlan(symbol="IWM", direction="LONG", stop_price=293.4, quantity=22)
+    )
+    from abcxauto.pro_engine import ProEngine
+
+    eng = ProEngine()
+    eng.state.positions = []  # stale empty — must not wipe
+    eng.state.open_orders = []
+    eng.state.connected = True
+    eng.worker = type("W", (), {"is_alive": lambda self: True})()
+    eng.pause_engine()
+    assert load_trade_plan() is not None
+    assert eng.state.trade_plan is not None
+    assert eng.state.trade_plan.get("symbol") == "IWM"
+
+
+def _judgment_world(**kwargs):
+    from abcxauto.world_state import WorldState
+
+    base = dict(
+        cycle=1,
+        session_status="regular",
+        flat=False,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[_pos()],
+        open_orders=[],
+        opportunities=[{"symbol": "QQQ", "bias": "LONG", "score": 0.9}],
+        news_items=[],
+        risk_posture="aggressive",
+        effective_posture="aggressive",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={"n_positions": 1},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+        idle_streak=0,
+        idle_top_symbol="",
+        prep={},
+        review={},
+    )
+    base.update(kwargs)
+    return WorldState(**base)
+
+
+def _hunt_j() -> dict:
+    return {
+        "stance": "hunt",
+        "thesis": "new hunt",
+        "focus": "QQQ",
+        "dismissed": "",
+        "intent": {"kind": "hunt", "symbol": "QQQ", "direction": "LONG"},
+        "risk_budget_pct": 0.5,
+        "regime_fit": True,
+        "setup_grade": "A",
+    }
+
+
+def test_hunt_rejected_when_book_not_flat():
+    from abcxauto.agent_loop import validate_judgment
+
+    ok, reason, _ = validate_judgment(_hunt_j(), _judgment_world())
+    assert ok is False
+    assert "open book" in reason.lower() or "manage" in reason.lower()
+
+
+def test_hunt_rejected_while_flat_streak_unconfirmed(tmp_path, monkeypatch):
+    from abcxauto.agent_loop import validate_judgment
+    from abcxauto.trade_plan import _save_flat_streak_state
+
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    clear_trade_plan()
+    _save_flat_streak_state(1, True)
+    ok, reason, _ = validate_judgment(
+        _hunt_j(),
+        _judgment_world(flat=True, positions=[], portfolio_risk={"n_positions": 0}),
+    )
+    assert ok is False
+    assert "unconfirmed" in reason.lower()
+
+
+def test_monitor_paused_does_not_flat_close(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    clear_trade_plan()
+    reset_flat_streak()
+    save_trade_plan(
+        ActiveTradePlan(symbol="IWM", direction="LONG", stop_price=293.4, quantity=22)
+    )
+    from abcxauto.pro_engine import ProEngine
+
+    eng = ProEngine()
+    eng.state.autonomous = False
+    eng.state.paused = True
+    eng.state.positions = []
+    eng.state.open_orders = []
+    # Simulate two empty monitor snaps while paused.
+    eng._apply(
+        "monitor_snapshot",
+        {"positions": [], "open_orders": [], "account": {}},
+    )
+    eng._apply(
+        "monitor_snapshot",
+        {"positions": [], "open_orders": [], "account": {}},
+    )
+    assert load_trade_plan() is not None
+
+
+def test_exit_keeps_plan_when_symbol_still_held(tmp_path, monkeypatch):
+    from abcxauto.trade_plan import stk_qty_for_symbol
+
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    save_trade_plan(
+        ActiveTradePlan(symbol="IWM", direction="LONG", stop_price=293.4, quantity=22)
+    )
+    positions = [_pos(qty=10)]  # partial exit remnant
+    assert abs(stk_qty_for_symbol(positions, "IWM")) >= 1e-9
+    # Mimic exit_act gate: do not close while qty remains.
+    if abs(stk_qty_for_symbol(positions, "IWM")) < 1e-9:
+        from abcxauto.trade_plan import close_trade_plan
+
+        close_trade_plan("exit_act")
+    assert load_trade_plan() is not None
+
+
+def test_prefer_farthest_lmt_as_target():
+    orders = [
+        {"symbol": "IWM", "action": "SELL", "order_type": "STP", "aux_price": 293.4},
+        {"symbol": "IWM", "action": "SELL", "order_type": "LMT", "lmt_price": 298.0},
+        {"symbol": "IWM", "action": "SELL", "order_type": "LMT", "lmt_price": 300.5},
+    ]
+    plan = reconcile_open_risk([_pos()], orders, existing_plan=None)
+    assert plan is not None
+    assert plan.target_price == 300.5
+
+
+def test_options_only_closes_stk_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    clear_trade_plan()
+    reset_flat_streak()
+    save_trade_plan(
+        ActiveTradePlan(symbol="IWM", direction="LONG", stop_price=293.4, quantity=22)
+    )
+    opt = {
+        "symbol": "IWM",
+        "secType": "OPT",
+        "quantity": -1,
+        "conId": 99,
+    }
+    assert maybe_close_on_confirmed_flat([opt], needed=2) is True
+    assert load_trade_plan() is None

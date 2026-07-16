@@ -65,7 +65,6 @@ PRO_TITLE = TITLE
 DASH_TABS = (
     ("book", "Book"),
     ("agent", "Agent"),
-    ("log", "Log"),
 )
 
 
@@ -123,6 +122,13 @@ class ProTerminal:
             "No proposal yet — Start agent or wait for a cycle.",
             color=TEXT, size=13, selectable=True,
         )
+        self.lbl_agent_now = ft.Text(
+            "Waiting for first cycle…",
+            size=18,
+            weight=ft.FontWeight.BOLD,
+            color=MUTED,
+            selectable=True,
+        )
         self.lbl_agent_posture = ft.Text("Posture: —", size=12, color=MUTED, selectable=True)
         self.lbl_agent_world = ft.Text(
             "World: — (built each cycle from book / news / opportunities)",
@@ -149,7 +155,7 @@ class ProTerminal:
             selectable=True,
         )
         self.lbl_agent_opps = ft.Text(
-            "Opportunities (World): (none yet)",
+            "Features (heuristic): (none yet)",
             size=12,
             color=MUTED,
             selectable=True,
@@ -741,6 +747,9 @@ class ProTerminal:
         self._safe_update()
 
     def _set_dash_tab(self, key: str) -> None:
+        # Log folded into Agent — keep old key working for callers/tests.
+        if key == "log":
+            key = "agent"
         self.dash_tab = key
         for k, label in DASH_TABS:
             on = k == key
@@ -909,7 +918,7 @@ class ProTerminal:
         panels = {
             "book": self._dash_book,
             "agent": self._dash_agent,
-            "log": self._dash_log,
+            "log": self._dash_agent,  # Log folded into Agent
         }
         body = panels.get(self.dash_tab, self._dash_book)()
         return ft.Column([body], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
@@ -934,6 +943,7 @@ class ProTerminal:
         )
 
     def _dash_agent(self) -> ft.Column:
+        """Combined Now + Activity — one place for latest PJA state and the feed."""
         mode_stats = ft.Column(
             [
                 self._stat_line("Mode", self.lbl_mode),
@@ -949,19 +959,23 @@ class ProTerminal:
                     "Agent",
                     self._refresh_agent_tab,
                     ft.Text(
-                        "Perceive -> Judge -> Act: World (code) -> Judgment -> Action.",
+                        "Perceive -> Judge -> Act — latest cycle on top, full Activity below.",
                         size=12,
                         color=MUTED,
                     ),
                     mode_stats,
                 ),
                 self._section(
+                    "Now",
+                    self.lbl_agent_now,
+                    self.lbl_agent_structure,
+                    self.lbl_agent_plan,
+                ),
+                self._section(
                     "World",
                     self.lbl_agent_world,
                     self.lbl_agent_posture,
-                    self.lbl_agent_news,
                     self.lbl_agent_opps,
-                    self.lbl_agent_plan,
                 ),
                 self._section(
                     "Judgment",
@@ -974,22 +988,11 @@ class ProTerminal:
                     self.brain_rationale,
                     self.lbl_proposal,
                     self.lbl_agent_params,
-                    self.lbl_agent_structure,
                 ),
-                self._section("Reality Pulse", self.lbl_pulse_narrative),
-            ],
-            spacing=0,
-        )
-
-    def _dash_log(self) -> ft.Column:
-        return ft.Column(
-            [
-                self._section_refresh(
+                self._section(
                     "Activity",
-                    self._refresh_log_tab,
                     ft.Text(
-                        "Chronological feed — each cycle with strategy, status, top idea, "
-                        "and why (rationale). Connect/start/errors included.",
+                        "Newest cycles first — JUDGE / ACT, blocks, fills, connect/errors.",
                         size=12,
                         color=MUTED,
                     ),
@@ -998,6 +1001,10 @@ class ProTerminal:
             ],
             spacing=0,
         )
+
+    def _dash_log(self) -> ft.Column:
+        """Compat shim — Log tab merged into Agent."""
+        return self._dash_agent()
 
     def _refresh_book_tab(self, _=None) -> None:
         err = self.engine.request_snapshot()
@@ -1018,19 +1025,22 @@ class ProTerminal:
             self._apply_clock(pulse)
         except Exception:
             pass
+        self.engine.drain_apply()
         err = self.engine.request_snapshot()
+        try:
+            self.engine._apply_open_risk(note=False)
+        except Exception:
+            pass
         if err:
             self._toast("Agent view refreshed (broker snapshot unavailable)", color=AMBER)
         else:
-            self._toast("Refreshing agent view…", color=BLUE)
+            self._toast("Refreshing agent…", color=BLUE)
         self._sync_widgets()
         self._safe_update()
 
     def _refresh_log_tab(self, _=None) -> None:
-        self.engine.drain_apply()
-        self._sync_widgets()
-        self._toast("Activity log refreshed", color=BLUE)
-        self._safe_update()
+        """Compat — same as agent refresh after Log merge."""
+        self._refresh_agent_tab(_)
 
     def _page_risk(self) -> ft.Column:
         def _sw_row(label: str, sw: ft.Switch) -> ft.Row:
@@ -2109,7 +2119,6 @@ class ProTerminal:
         self._refresh_run_btn()
         self._refresh_connect_btn()
         self._refresh_service_status()
-        self.brain_action.value = s.brain_strat
         stance = str(getattr(s, "stance", "") or "").strip()
         thesis = str(getattr(s, "thesis", "") or "").strip()
         dismissed = str(getattr(s, "dismissed", "") or "").strip()
@@ -2122,7 +2131,13 @@ class ProTerminal:
             if dismissed:
                 jlines.append(f"Dismissed: {dismissed}")
             if intent:
-                jlines.append(f"Intent: {json.dumps(intent, default=str)[:180]}")
+                kind = intent.get("kind") or ""
+                isym = intent.get("symbol") or ""
+                idir = intent.get("direction") or ""
+                if kind or isym:
+                    jlines.append(f"Intent: {kind} {isym} {idir}".strip())
+                else:
+                    jlines.append(f"Intent: {json.dumps(intent, default=str)[:180]}")
             if stage_err:
                 jlines.append(f"Stage error: {stage_err}")
             self.lbl_agent_judgment.value = "\n".join(jlines)
@@ -2134,27 +2149,48 @@ class ProTerminal:
             self.lbl_agent_judgment.color = MUTED
         market_read = str(getattr(s, "market_read", "") or "").strip()
         if market_read:
-            self.lbl_agent_read.value = f"Focus:\n{market_read}"
+            focus_short = market_read if len(market_read) <= 220 else market_read[:217] + "…"
+            self.lbl_agent_read.value = f"Focus: {focus_short}"
             self.lbl_agent_read.color = TEXT
         else:
             self.lbl_agent_read.value = "Focus: —"
             self.lbl_agent_read.color = MUTED
         rationale = str(s.brain_rationale or "").strip()
         if rationale and rationale != "—":
-            self.brain_rationale.value = f"Why this action:\n{rationale}"
+            why = rationale if len(rationale) <= 240 else rationale[:237] + "…"
+            self.brain_rationale.value = f"Why: {why}"
             self.brain_rationale.color = TEXT
         else:
-            self.brain_rationale.value = "Why this action: —"
+            self.brain_rationale.value = "Why: —"
             self.brain_rationale.color = MUTED
         act = s.last_action or {}
         strat = s.brain_strat or act.get("strategy") or act.get("action") or "—"
         result = s.last_result or {}
-        bit = f"  ·  {json.dumps(result, default=str)[:160]}" if result else ""
-        self.lbl_proposal.value = f"{strat}  ·  conId={act.get('target_conId') or '—'}{bit}"
+        status = self._format_result_status(result)
         params = getattr(s, "last_params", None) or act.get("params") or {}
+        self.brain_action.value = f"{strat}  ·  {status}"
+        blocked = status.lower().startswith(("blocked", "rejected", "fail", "error"))
+        filled = "fill" in status.lower() or result.get("filled") is True
+        self.brain_action.color = RED if blocked else (GREEN if filled else TEXT)
+        bit = f"  ·  {json.dumps(result, default=str)[:140]}" if result else ""
+        self.lbl_proposal.value = f"{strat}  ·  conId={act.get('target_conId') or '—'}{bit}"
         if params:
+            # Prefer operator-readable prices over raw JSON dump.
+            sym = params.get("symbol") or intent.get("symbol") or ""
+            direction = params.get("direction") or params.get("action") or ""
+            qty = params.get("quantity") or ""
+            stop = params.get("stop_price")
+            tgt = params.get("target_price")
+            entry = params.get("entry_price") or result.get("entry_price")
+            parts = [p for p in (str(sym), str(direction), f"x{qty}" if qty != "" else "") if p]
+            if stop is not None:
+                parts.append(f"stop={stop}")
+            if tgt is not None:
+                parts.append(f"tgt={tgt}")
+            if entry is not None:
+                parts.append(f"entry={entry}")
             self.lbl_agent_params.value = (
-                "Params: " + json.dumps(params, default=str)[:220]
+                "Params: " + (" ".join(parts) if parts else json.dumps(params, default=str)[:220])
             )
             self.lbl_agent_params.color = TEXT
         else:
@@ -2173,10 +2209,28 @@ class ProTerminal:
                 )
             self.lbl_agent_structure.value = gline
             bad = grade not in ("", "ok", "hold", "set_risk", "—")
-            self.lbl_agent_structure.color = RED if bad and "geometry" in grade else TEXT
+            geom = "geometry" in grade or "scrape" in grade
+            self.lbl_agent_structure.color = RED if bad and geom else (AMBER if bad else TEXT)
         else:
             self.lbl_agent_structure.value = "Structure grade: — (shell grades Grok's geometry)"
             self.lbl_agent_structure.color = MUTED
+        # One-line "Now" headline — what to look at without reading the feed.
+        intent_sym = str(intent.get("symbol") or params.get("symbol") or "").upper()
+        intent_dir = str(intent.get("direction") or params.get("direction") or "")
+        intent_bit = f" {intent_sym} {intent_dir}".rstrip() if (intent_sym or intent_dir) else ""
+        stance_bit = (stance or "—").upper()
+        if int(getattr(s, "cycles", 0) or 0) <= 0 and not stance and strat in ("—", "", None):
+            self.lbl_agent_now.value = "Waiting for first cycle…"
+            self.lbl_agent_now.color = MUTED
+        else:
+            now = f"c{s.cycles}  {stance_bit}{intent_bit}  →  {strat}  ·  {status}"
+            if grade and grade not in ("ok", "hold", "set_risk", ""):
+                now += f"  [{grade}]"
+            self.lbl_agent_now.value = now
+            self.lbl_agent_now.color = (
+                RED if blocked or (grade and "geometry" in grade)
+                else (GREEN if filled else TEXT)
+            )
         posture = str(getattr(s, "risk_posture", "") or "").strip()
         if not posture:
             try:
@@ -2190,9 +2244,10 @@ class ProTerminal:
         port_risk = getattr(s, "portfolio_risk", None) or {}
         world_bits = []
         if regime:
+            mix = regime.get("feature_mix_bias") or regime.get("trend_bias")
             world_bits.append(
-                f"Regime: {regime.get('trend_bias')}/{regime.get('vol_proxy')} "
-                f"phase={regime.get('session_phase')}"
+                f"Feature mix (heuristic): {mix}/{regime.get('vol_proxy')} "
+                f"phase={regime.get('session_phase')} — not regime truth"
             )
         if port_risk:
             world_bits.append(
@@ -2208,16 +2263,51 @@ class ProTerminal:
         )
         self.lbl_agent_world.color = TEXT if world_bits else MUTED
         plan = getattr(s, "trade_plan", None)
+        if not plan:
+            try:
+                from abcxauto.trade_plan import load_trade_plan
+
+                loaded = load_trade_plan()
+                if loaded:
+                    plan = loaded.to_dict()
+                    s.trade_plan = plan
+            except Exception:
+                plan = None
         if plan:
-            self.lbl_agent_plan.value = (
-                f"Trade plan: {plan.get('symbol')} {plan.get('direction')} "
-                f"stop={plan.get('stop_price')} tgt={plan.get('target_price')} "
-                f"cycles={plan.get('cycles_open')}/{plan.get('max_hold_cycles')}"
+            try:
+                from abcxauto.trade_plan import ActiveTradePlan, format_open_risk_line
+
+                line = format_open_risk_line(ActiveTradePlan.from_dict(plan))
+            except Exception:
+                line = (
+                    f"OPEN RISK  {plan.get('symbol')} {plan.get('direction')} "
+                    f"x{plan.get('quantity')} stop={plan.get('stop_price')} "
+                    f"tgt={plan.get('target_price')}"
+                )
+            self.lbl_agent_plan.value = line
+            paused = bool(getattr(s, "paused", False)) or not bool(
+                getattr(s, "autonomous", False) or getattr(s, "running", False)
             )
-            self.lbl_agent_plan.color = TEXT
+            self.lbl_agent_plan.color = AMBER if paused and s.connected else TEXT
+            # Prefer open-risk headline when agent is stopped/paused with risk.
+            if paused or int(getattr(s, "cycles", 0) or 0) <= 0:
+                self.lbl_agent_now.value = line
+                self.lbl_agent_now.color = AMBER if paused else TEXT
         else:
-            self.lbl_agent_plan.value = "Trade plan: (none open)"
+            self.lbl_agent_plan.value = "Open risk: (flat / no plan)"
             self.lbl_agent_plan.color = MUTED
+        try:
+            from abcxauto.memory import get_journal
+
+            div = get_journal().strategy_diversity(limit=40)
+            if div.get("n_distinct"):
+                strats = ", ".join(div.get("strategies") or [])[:80]
+                self.lbl_agent_plan.value = (
+                    f"{self.lbl_agent_plan.value}\n"
+                    f"Strategy mix (observe): {div['n_distinct']} types — {strats}"
+                )
+        except Exception:
+            pass
         news = getattr(s, "news_items", None) or []
         if news:
             nlines = []
@@ -2235,15 +2325,16 @@ class ProTerminal:
         if opps:
             bits = []
             for i, idea in enumerate(opps[:5], 1):
+                rule = idea.get("rule_id") or idea.get("note") or ""
                 bits.append(
                     f"{i}. {idea.get('symbol')} {idea.get('bias')} "
-                    f"score={idea.get('score')} — {idea.get('note')}"
+                    f"heuristic_rank={idea.get('score')} rule={rule}"
                 )
-            self.lbl_agent_opps.value = "Opportunities (World):\n" + "\n".join(bits)
+            self.lbl_agent_opps.value = "Features (heuristic):\n" + "\n".join(bits)
             self.lbl_agent_opps.color = TEXT
         else:
             self.lbl_agent_opps.value = (
-                "Opportunities (World): (none — check MDA candles / Start agent)"
+                "Features (heuristic): (none — check MDA candles / Start agent)"
             )
             self.lbl_agent_opps.color = MUTED
         inv = getattr(s, "inventory", "") or ""
@@ -2312,16 +2403,39 @@ class ProTerminal:
         if self.tab == "risk":
             self._sync_risk_halt_label()
 
+    @staticmethod
+    def _format_result_status(res: object) -> str:
+        """Short operator-facing ACT outcome from a cycle result dict."""
+        if not isinstance(res, dict) or not res:
+            return "—"
+        if res.get("success") is True:
+            if res.get("filled") is True:
+                ep = res.get("entry_price")
+                return f"filled @{ep}" if ep not in (None, "") else "filled"
+            return "ok"
+        status = str(res.get("status") or "").strip()
+        note = str(
+            res.get("note") or res.get("reason_code") or res.get("error") or ""
+        ).strip()
+        if status and note and note.lower() not in status.lower():
+            combo = f"{status}: {note}"
+            return combo if len(combo) <= 120 else combo[:117] + "…"
+        return status or note or ("fail" if res.get("success") is False else "ok")
+
     def _cycle_log_text(self, records: list[dict]) -> str:
         lines: list[str] = []
         for r in reversed(list(records or [])[-40:]):
             kind = str(r.get("type") or "cycle").lower()
-            ts = str(r.get("ts") or "")
+            ts = str(r.get("ts") or "")[-8:]  # HH:MM:SS when ISO
+            if "T" in str(r.get("ts") or ""):
+                ts = str(r.get("ts") or "").split("T", 1)[-1][:8]
             if kind in ("error", "err"):
                 lines.append(f"{ts}  ERR  {r.get('msg', 'error')}")
             elif kind == "panic":
                 lines.append(f"{ts}  FLATTEN  Close All Positions")
-            elif kind in ("connect", "start", "pause", "disconnect", "log"):
+            elif kind in (
+                "connect", "start", "pause", "disconnect", "log", "open_risk",
+            ):
                 tag = kind.upper()
                 lines.append(f"{ts}  {tag}  {r.get('msg') or '—'}")
             elif kind == "order_suite":
@@ -2329,7 +2443,7 @@ class ProTerminal:
             else:
                 strat = r.get("strat") or (r.get("action_obj") or {}).get("strategy") or "—"
                 res = r.get("result") or {}
-                status = str(res.get("status") or res.get("ok") or "ok")
+                status = self._format_result_status(res)
                 posture = str(r.get("risk_posture") or "").strip()
                 stance = str(r.get("stance") or (r.get("judgment") or {}).get("stance") or "")
                 opps = r.get("opportunities") or []
@@ -2348,39 +2462,23 @@ class ProTerminal:
                     sym = params.get("symbol") or ""
                     qty = params.get("quantity") or ""
                     direction = params.get("direction") or params.get("action") or ""
+                    stop = params.get("stop_price")
                     param_bit = f"  {sym} {direction} x{qty}".rstrip()
+                    if stop is not None:
+                        param_bit += f" stop={stop}"
                 focus = str(r.get("market_read") or "").replace("\n", " ").strip()
                 rationale = str(r.get("rationale") or "").replace("\n", " ").strip()
-                thesis = str(r.get("thesis") or "").replace("\n", " ").strip()
-                dismissed = str(r.get("dismissed") or "").replace("\n", " ").strip()
-                if len(focus) > 160:
-                    focus = focus[:157] + "…"
-                if len(rationale) > 140:
-                    rationale = rationale[:137] + "…"
-                if len(thesis) > 140:
-                    thesis = thesis[:137] + "…"
-                news = r.get("news_items") or []
-                news_bit = ""
-                if news:
-                    n0 = news[0]
-                    news_bit = (
-                        f"  news=[{n0.get('symbol')}] "
-                        f"{str(n0.get('headline') or '')[:48]}"
-                    )
-                    if len(news) > 1:
-                        news_bit += f" (+{len(news) - 1})"
+                if len(focus) > 120:
+                    focus = focus[:117] + "…"
+                if len(rationale) > 120:
+                    rationale = rationale[:117] + "…"
                 post_bit = f"  [{posture}]" if posture else ""
-                stance_bit = f"  stance={stance}" if stance else ""
+                stance_bit = f"  {stance}" if stance else ""
                 lines.append(
-                    f"{ts}  #{r.get('cycle', '?')}  JUDGE{stance_bit}{post_bit}{top}{news_bit}"
+                    f"{ts}  #{r.get('cycle', '?')}  JUDGE{stance_bit}{post_bit}{top}"
                 )
-                if thesis:
-                    lines.append(f"         thesis: {thesis}")
                 if focus:
                     lines.append(f"         focus: {focus}")
-                if dismissed:
-                    dbit = dismissed[:140] + ("…" if len(dismissed) > 140 else "")
-                    lines.append(f"         dismissed: {dbit}")
                 lines.append(
                     f"{ts}  #{r.get('cycle', '?')}  ACT  {strat}  {status}{param_bit}"
                 )
@@ -2390,8 +2488,8 @@ class ProTerminal:
                 if sgrade and sgrade not in ("ok", "hold", "set_risk"):
                     lines.append(f"         structure: {sgrade}")
                 stage_err = str(r.get("stage_error") or "").strip()
-                if stage_err:
-                    lines.append(f"         block: {stage_err[:160]}")
+                if stage_err and stage_err not in status:
+                    lines.append(f"         block: {stage_err[:140]}")
         return "\n".join(lines) if lines else (
             "No activity yet — Connect IBKR, then Start agent"
         )

@@ -82,3 +82,17 @@ def _stub_opportunity_scan(monkeypatch):
         "abcxauto.agent_loop.scan_opportunities",
         _empty,
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_open_risk_and_structure_files(tmp_path, monkeypatch):
+    """Keep trade plan / structure lessons out of the live workspace files."""
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "active_trade_plan.json"))
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat_book_streak.json"))
+    monkeypatch.setenv(
+        "ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "structure_events.jsonl")
+    )
+    monkeypatch.setenv(
+        "ABCXAUTO_STRUCTURE_VOCAB_PATH", str(tmp_path / "structure_vocab.json")
+    )
+    monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle_streak.json"))

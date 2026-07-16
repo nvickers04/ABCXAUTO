@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from abcxauto.config import get_config, resolve_effective_posture, risk_envelope_snapshot
-from abcxauto.opportunity_scan import format_opportunities
+from abcxauto.opportunity_scan import format_market_features
 from abcxauto.session_cadence import load_prep, load_review, maybe_auto_prep_from_world
 from abcxauto.structure_grade import (
     format_structure_lessons_for_prompt,
@@ -79,7 +79,7 @@ def _session_phase(session_status: str, current_et: str | None = None) -> str:
 
 
 def _regime_from_opps(opportunities: list[dict], pulse: dict) -> dict[str, Any]:
-    """Cheap regime strip from ranked ideas + session."""
+    """Feature-mix strip from heuristic biases + session (not regime truth)."""
     session = (pulse.get("session") or {}) if isinstance(pulse, dict) else {}
     status = str(session.get("status") or "").lower()
     phase = _session_phase(status, session.get("current_time_et"))
@@ -98,11 +98,14 @@ def _regime_from_opps(opportunities: list[dict], pulse: dict) -> dict[str, Any]:
     return {
         "session_status": status or "unknown",
         "session_phase": phase,
-        "trend_bias": trend,
+        "trend_bias": trend,  # internal key; prompts label as feature_mix_bias
+        "feature_mix_bias": trend,
         "vol_proxy": vol,
         "top_longs": longs,
         "top_shorts": shorts,
-        "avg_opp_score": round(avg_score, 3),
+        "avg_heuristic_rank": round(avg_score, 3),
+        "avg_opp_score": round(avg_score, 3),  # compat
+        "source": "heuristic_feature_mix",
     }
 
 
@@ -226,10 +229,22 @@ class WorldState:
 
     def prompt_block(self, *, limit: int = 4500) -> str:
         """Compact WORLD block for Judge/Act prompts."""
+        reg = dict(self.regime or {})
+        # Prompt-facing: heuristic mix, not market-regime truth.
+        regime_prompt = {
+            "session_status": reg.get("session_status"),
+            "session_phase": reg.get("session_phase"),
+            "feature_mix_bias": reg.get("feature_mix_bias") or reg.get("trend_bias"),
+            "vol_proxy": reg.get("vol_proxy"),
+            "top_longs": reg.get("top_longs"),
+            "top_shorts": reg.get("top_shorts"),
+            "avg_heuristic_rank": reg.get("avg_heuristic_rank") or reg.get("avg_opp_score"),
+            "note": "heuristic from feature biases — not regime truth",
+        }
         body = {
             "cycle": self.cycle,
             "session": self.session_status,
-            "regime": self.regime,
+            "regime": regime_prompt,
             "flat": self.flat,
             "needs_protection": self.needs_protection,
             "unprotected": self.unprotected,
@@ -246,7 +261,7 @@ class WorldState:
             "review_lesson": self.review.get("next_change") or self.review.get("mistake"),
             "structure_cooldown": self.structure_cooldown,
             "suite_failed": (self.structure_vocab or {}).get("failed"),
-            "opportunities": self.opportunities[:5],
+            "market_features": self.opportunities[:5],
             "news": [
                 f"[{n.get('symbol')}] {n.get('headline')}"
                 for n in self.news_items[:8]
@@ -263,9 +278,9 @@ class WorldState:
             ],
         }
         text = "WORLDSTATE (code truth — cite these facts):\n" + json.dumps(body, default=str)
-        opp = format_opportunities(self.opportunities)
+        feats = format_market_features(self.opportunities)
         lessons = format_structure_lessons_for_prompt(self.structure_lessons)
-        out = text[:limit] + "\n\n" + opp + "\n\n" + lessons
+        out = text[:limit] + "\n\n" + feats + "\n\n" + lessons
         return out[: limit + 1200]
 
 

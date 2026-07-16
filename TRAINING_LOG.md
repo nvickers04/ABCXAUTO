@@ -77,47 +77,69 @@ Journal live:
 
 Cycle path: snap → Grok JSON → normalize → `send` → executor → journal; monitor snapshots/fills in parallel.
 
-## Phase 5 — Forward-test protocol — IN PROGRESS (multi-week)
+## Phase 5 — Forward-test (PRIMARY) — IN PROGRESS
 
-Run this on paper until evidence graduates you:
+Full protocol: plan `abcxauto_training_roadmap` Phase 5A–5E. Phases 0–4 done; stay here.
 
-### Daily (RTH)
+### 5A — Experiment card (lock; edit only on weekly review)
 
-1. Connect IBKR → Start agent.  
-2. Leave capital knobs documented (today defaults mostly **0** = off).  
-3. End of day Scorecard + Activity review (3 bullets):
-   - Survive? (unprotected STK incidents)  
-   - Mistake? (bad cancel / surprise halt)  
-   - Next? (one change max)  
+| Field | Value |
+|-------|--------|
+| Window | 2026-07-16 → ________ (aim ≥10 RTH days) |
+| Posture | ________ (e.g. aggressive) |
+| Knobs snapshot | risk_settings / .env noted: ________ |
+| Success | scrape rate ↓; 0 unprotected left open; coherent PJA |
+| Kill if | naked STK overnight; unexplained halt; same stop recycled |
 
-### Weekly
+### 5B — Daily debrief template (copy per session)
 
-- Sample 10 Activity cycles: was hold valid? protection first?  
-- Journal: hold vs trade, gate blocks, max drawdown  
-- Change **one** knob or constraint per week only  
+**Date:** ________ · **Cycles:** ________ · **Posture:** ________
 
-### Graduation (before any live thought)
+1. Survive:  
+2. Structure (scrapes / geometry_* / ok hunts):  
+3. Judgment (idle dismiss? symbol switch on cooldown?):  
+4. Book (flat / plan / fills make sense?):  
+5. Next (one note for weekly bucket — no mid-day code):  
 
-- [ ] No unprotected STK left open across sessions  
-- [ ] Every halt/flatten is explainable  
-- [ ] Journal shows survival under fixed knobs for agreed window  
-- [ ] Then consider tighter aggression — not before  
+### 5C — KPIs (glance daily, tally weekly)
 
-## Phase 6 — Live readiness — BLOCKED until Phase 5
+| KPI | This week | Notes |
+|-----|-----------|--------|
+| Unprotected left open | | target 0 |
+| Scrapes / entries | | falling |
+| Geometry rejects | | teaching, then declining |
+| Distinct hunt symbols | | ≥2 if #1 cooling |
+| Gate blocks (explainable?) | | |
+| Max DD / day PnL | | |
 
-Do not switch to live until Phase 5 boxes are checked.
+### 5D — Weekly review notes
 
-Checklist when ready:
+**Week of:** ________  
+10-cycle sample: ________  
+One change for next week: ________  
+Why: ________  
+
+### 5E — Graduation (all required before Phase 6)
+
+- [ ] Window complete under locked card  
+- [ ] Zero unprotected left open  
+- [ ] Halts/flattens explainable  
+- [ ] Scrapes improved or under target; cooldown visible after scrape  
+- [ ] Can narrate 3 random cycles World → Judgment → Action  
+- [ ] Written decision: continue paper / tighten / kill edge  
+
+## Phase 6 — Live readiness — BLOCKED until 5E
 
 - [ ] Capital limits **on** (not zeros)  
 - [ ] Auto-panic policy explicit  
 - [ ] Live confirm phrase / mode switch understood  
 - [ ] Tiny size first days  
 
-## Suggested cadence (rest of month)
+## Suggested cadence (Phase 5–heavy)
 
-| Week | Focus |
-|------|--------|
-| This week | Hands-on Phase 1 drills + Start agent ≥5 cycles/day |
-| Next | Test Suite paper place→cancel; Risk knobs experiment (one) |
-| Weeks 3–4 | Phase 5 protocol locked; first weekly edge review |
+| Window | Focus |
+|--------|--------|
+| Today | Fill 5A card; one full 5B session |
+| This week | Daily 5B + 5C; no new features |
+| Week 2 | First 5D; ≤1 knob change |
+| Weeks 3–4 | Push toward 5E decision |

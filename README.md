@@ -3,7 +3,9 @@
 **Autonomous Grok-powered agentic portfolio for IBKR (paper-first).**
 
 Grok 4.5 **owns** a paper IBKR portfolio under hard risk rules. Protect first;
-hold is valid when the book is protected. See `SPEC.md` for doctrine.
+hold is valid when the book is protected. The shell stays **objective** (facts,
+gates, labeled heuristics). Optional human beliefs go only in `operator_card.txt`
+or `ABCXAUTO_OPERATOR_CARD`. See `SPEC.md` for doctrine.
 
 ## 1. Connections
 
@@ -21,18 +23,30 @@ pip install -r requirements.txt
 copy .env.template .env   # fill XAI_API_KEY; optional MARKETDATA_TOKEN
 ```
 
-## 2. Agent order surface
+## 2. How the agent thinks
 
-The agent sees **ORDER EXAMPLES** (`abcxauto.order_examples`) and can send each
-allowlisted type through the shell (`send` → executor → broker). Entries require
-stop + target; bare stock orders are exit-only.
+Each cycle is **Perceive → Judge → Act**:
 
-## 3. Portfolio ownership
+| Stage | Owner | Role |
+|-------|--------|------|
+| Perceive | Code | Book, orders, MARKET FEATURES (heuristic≠recommendation), news, open risk |
+| Judge | Grok | Stance `protect` / `manage` / `hunt` / `idle` + thesis + intent |
+| Act | Grok | One allowlisted action; Grok owns structure (stops/targets/overlays) |
+| Grade | Code | Geometry / share-lot / risk gates — accept or reject with reason codes |
 
-- Owns the book: entries, exits, modify/cancel, hold when protected.
-- **Tools only** — no symbol allowlist; capital/daily-loss gates default off (opt-in via env).
-- Halt latch still blocks new entries on Panic / broker disconnect.
-- Hold is valid when protected; unprotected STK must be fixed first.
+Stop agent = pause decisions only. Positions stay at IBKR. Open risk is
+reconciled from the broker book across Stop/Start (`active_trade_plan.json`).
+
+## 3. Operator surfaces
+
+- **Pro Dashboard → Book | Agent** — Agent combines Now (open risk + latest PJA) and Activity.
+- **Risk tab** — posture envelopes; Save risk vs Apply posture are separate.
+- **Test Suite** — paper place/cancel gym for order mechanics (not live curriculum trading).
+- **Operator Card** (optional) — your beliefs only; empty by default:
+
+```text
+# operator_card.txt  (gitignored)  or  ABCXAUTO_OPERATOR_CARD=...
+```
 
 ## 4. Run
 
@@ -40,8 +54,7 @@ stop + target; bare stock orders are exit-only.
 python -m abcxauto
 ```
 
-Launches **Pro** (Flet). Press **Start**.  
-Controls: Connect IBKR · Start agent · Close All Positions.
+Launches **Pro** (Flet). Connect IBKR · Start agent · Close All Positions.
 
 ```powershell
 python -m abcxauto --cleanup --aggressive   # stale Flet/Python cleanup
@@ -50,17 +63,21 @@ python -m abcxauto --headless               # exits 0; autonomy via Pro START
 
 ## 5. Supported orders
 
-Matches `ORDER_EXAMPLES` / sendable types:
+Matches `ORDER_EXAMPLES` / sendable types. Manage stance can also use overlays
+(`covered_call`, `collar`, `protective_put`) when long ≥100 shares — see
+TRADE PLAYBOOK (preconditions + shell rejects only).
 
 | Type | Role |
 |------|------|
 | `hold` | No-op when protected |
 | `bracket` / `market_bracket` | Entry with stop + target |
 | `oca` | Attach stop + target to an open position |
-| `modify_stop` / `modify_target` | Adjust working protection |
+| `modify_stop` / `modify_target` / `trailing_stop` | Adjust protection |
 | `cancel_order` | Cancel by order id |
 | `market_order` / `limit_order` / `stop_order` / `stop_limit` | Exit only (`closing_position`) |
 | `close_option` | Close an option position |
+| `covered_call` / `collar` / `protective_put` | Manage overlays (share-lot gated) |
+| `set_risk` | Retune capital knobs inside posture envelope (no broker send) |
 
 ## Configuration
 
@@ -69,46 +86,48 @@ Matches `ORDER_EXAMPLES` / sendable types:
 | `ABCXAUTO_CYCLE_SLEEP_S` | `120` | Idle sleep between autonomous cycles |
 | `ABCXAUTO_GROK_MIN_INTERVAL_S` | `120` | Min seconds between Grok calls when flat/protected |
 | `ABCXAUTO_MONITOR_POLL_S` | `30` | Snapshot refresh |
-| `ABCXAUTO_MONITOR_REVIEW_S` | `300` | Grok portfolio review interval |
 | `ABCXAUTO_MODEL` | `grok-4.5` | xAI model |
-| `ABCXAUTO_RISK_GATES_ENABLED` | `true` | Pre-trade path (halt latch); capital rules opt-in |
-| `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `0` | Daily loss circuit breaker (% NetLiq; 0=off) |
-| `ABCXAUTO_MAX_POSITION_PCT` | `0` | Max entry notional (% NetLiq; 0=off) |
-| `ABCXAUTO_MAX_OPEN_POSITIONS` | `0` | Max simultaneous positions (0=off) |
-| `ABCXAUTO_MAX_DAILY_TRADES` | `0` | Max entries per day (0=off) |
-| `ABCXAUTO_AUTO_PANIC_ON_BREACH` | `false` | Auto halt + flatten on daily-loss breach |
-| `ABCXAUTO_JOURNAL_ENABLED` | `true` | SQLite trade journal |
-| `ABCXAUTO_JOURNAL_PATH` | `journal.db` | Journal path |
+| `ABCXAUTO_RISK_POSTURE` | _(empty)_ | `defensive` / `balanced` / `aggressive` |
+| `ABCXAUTO_OPERATOR_CARD` | _(empty)_ | Human beliefs injected into Judge/Act |
+| `ABCXAUTO_OPERATOR_CARD_PATH` | `operator_card.txt` | File fallback for Operator Card |
+| `ABCXAUTO_JOURNAL_PATH` | `journal.db` | SQLite journal |
 | `ABCXAUTO_RISK_SETTINGS_PATH` | `risk_settings.json` | Persisted Risk-tab knobs (gitignored) |
-| `ABCXAUTO_RISK_POSTURE` | _(empty)_ | `defensive` / `balanced` / `aggressive` (or set in Risk tab) |
 
-Pro **Risk** tab: **Apply posture** (envelope + seed knobs) and **Save risk** (gates/toggles only) are separate. Persists to `risk_settings.json`. The agent sizes risk **per trade** and may `set_risk` inside the envelope; it cannot change posture. Cycles also get an ideas-only **opportunity scan** (MDA) — never auto-trades.
+Capital / daily-loss gates default off until you Apply posture or set env knobs.
+See `.env.template` for the full list.
 
 ## Architecture
 
-Thin product shell over broker / risk / executor. Target ~3.5–5k LOC.
+Thin product shell. Priority: **risk > execution > monitoring > thin UI**.
 
 ```
 abcxauto/
-  __main__.py        Pro UI default; --cleanup; --headless → Pro START message
-  order_examples.py  ORDER EXAMPLES catalog (agent contract)
-  connections.py     IBKR + optional MDA façade
-  send.py            dispatch façade → executor
-  book.py            portfolio / book state façade
-  risk.py            risk-gate façade
-  agent_loop.py      autonomous cycle engine (snap → Grok JSON → send)
-  cycle.py           thin shim re-exporting agent_loop for Pro/tests
-  proposals.py       OrderProposal schemas + validation
-  risk_gates.py      hard pre-trade gates + halt latch
-  executor.py        validate → gate → IBKR dispatch
-  monitor.py         P&L / protection / auto-panic
-  llm.py             xAI client
-  tools.py           read-only tools (snap helpers; legacy agent path)
-  memory/            SQLite journal
-  config.py          flat env config
-  broker/            IBKR layer
-  marketdata/        MarketData.app + market hours
-  pro_desktop.py     Flet Pro cockpit (thin operator UI)
+  agent_loop.py         Perceive → Judge → Act
+  world_state.py        Code truth for prompts
+  opportunity_scan.py   MARKET FEATURES (heuristic ranking)
+  trade_playbook.py     Preconditions + shell rejects (no style dogma)
+  trade_plan.py         Open-risk continuity across Stop/Start
+  objective_language.py Banned taste phrases + taxonomy helpers
+  structure_grade.py    Geometry / scrape lessons
+  order_examples.py     How to send (param shapes)
+  risk_gates.py         Hard pre-trade gates + halt latch
+  executor.py / send.py Validate → gate → IBKR
+  pro_desktop.py        Flet Pro cockpit
+  config.py             Env + Operator Card + posture envelopes
+  memory/               SQLite journal
+  broker/               IBKR layer
 ```
 
-Priority: **risk > execution > monitoring > thin UI**.
+## Objectivity rule
+
+| Bucket | Where it lives |
+|--------|----------------|
+| Fact / Gate | Code + prompts |
+| Heuristic | Labeled `heuristic ≠ recommendation` |
+| Taste | Operator Card or Grok — **not** hard-coded shell prose |
+
+## Tests
+
+```powershell
+$env:PYTHONPATH='.'; python -m pytest tests/ -q
+```

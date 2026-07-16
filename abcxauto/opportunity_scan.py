@@ -1,7 +1,7 @@
-"""Ideas-only opportunity strip for the agent cycle prompt.
+"""Market-feature strip for the agent cycle prompt (heuristic ≠ recommendation).
 
 Ranks a small liquid universe from MDA candles/quotes. Never places orders —
-Grok still chooses hold vs bracket.
+Grok still chooses hold vs action. Internal field name remains ``opportunities``.
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ def _sma(values: list[float], n: int) -> float | None:
 
 
 def score_symbol(candles: list[dict], symbol: str) -> dict[str, Any] | None:
-    """SMA pullback / short momentum score. Returns None if insufficient data."""
+    """Heuristic rank from SMA/momentum rules. Returns None if insufficient data."""
     closes = _closes(candles)
     if len(closes) < 30:
         return None
@@ -63,55 +63,91 @@ def score_symbol(candles: list[dict], symbol: str) -> dict[str, Any] | None:
         return None
     ret5 = (last / closes[-6] - 1.0) if len(closes) >= 6 else 0.0
     dist20 = (last - sma20) / sma20
-    # Prefer mild pullback toward rising SMA (SPEC paper lane vibe).
     score = 0.0
     bias = "LONG"
-    note = ""
+    rule_id = "neutral_weak_rule"
     if sma50 and sma20 >= sma50 and -0.04 <= dist20 <= 0.01 and ret5 > -0.03:
         score = 0.55 + max(0.0, 0.04 + dist20) * 5.0 + max(0.0, ret5) * 2.0
         bias = "LONG"
-        note = "SMA pullback / uptrend support"
+        rule_id = "sma20_pullback_rule"
     elif dist20 > 0.03 and ret5 > 0.01:
         score = 0.35 + min(0.25, ret5 * 3.0)
         bias = "LONG"
-        note = "short momentum continuation"
+        rule_id = "momentum_continuation_rule"
     elif sma50 and sma20 < sma50 and dist20 > 0.02:
         score = 0.30 + min(0.2, dist20)
         bias = "SHORT"
-        note = "below SMA50; fade extension"
+        rule_id = "sma50_extension_short_rule"
     else:
         score = 0.15 + max(0.0, -abs(dist20)) * 0.5
         bias = "LONG" if dist20 >= 0 else "SHORT"
-        note = "neutral / weak setup"
-    # Prefer liquid index names slightly.
+        rule_id = "neutral_weak_rule"
+    # Liquidity bump for index names (heuristic weight, not advice).
     if symbol in ("SPY", "QQQ"):
         score += 0.08
-    stop_hint = 0.008 if bias == "LONG" else 0.008
-    target_hint = 0.016 if bias == "LONG" else 0.016
+    stop_hint = 0.008
+    target_hint = 0.016
     return {
         "symbol": symbol,
         "score": round(min(1.0, score), 3),
         "bias": bias,
-        "note": note,
+        "rule_id": rule_id,
+        "note": rule_id,  # compat for older readers
         "last": round(last, 4),
         "sma20": round(sma20, 4),
+        "dist20": round(dist20, 5),
+        "ret5": round(ret5, 5),
         "stop_hint_pct": stop_hint,
         "target_hint_pct": target_hint,
     }
 
 
-def format_opportunities(ideas: list[dict[str, Any]], *, limit: int = 5) -> str:
+def format_market_features(ideas: list[dict[str, Any]], *, limit: int = 5) -> str:
+    """Prompt block: labeled heuristics, not trade recommendations."""
     if not ideas:
-        return "OPPORTUNITIES: (none — MDA thin or no setups)"
-    lines = ["OPPORTUNITIES (ideas only — you choose hold or bracket):"]
+        return (
+            "MARKET FEATURES (heuristic ranking — not trade recommendations; "
+            "Grok decides): (none — MDA thin or no rule matches)"
+        )
+    lines = [
+        "MARKET FEATURES (heuristic ranking — not trade recommendations; Grok decides).",
+        "Rebuild stop/target from LIVE quote each hunt; never reuse a prior stop price.",
+        "heuristic_rank is a sort key only — not edge or a directive to trade.",
+    ]
     for i, idea in enumerate(ideas[:limit], 1):
+        try:
+            last = float(idea.get("last") or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        try:
+            sp = float(idea.get("stop_hint_pct") or 0.008)
+            tp = float(idea.get("target_hint_pct") or 0.016)
+        except (TypeError, ValueError):
+            sp, tp = 0.008, 0.016
+        bias = str(idea.get("bias") or "LONG").upper()
+        rule = str(idea.get("rule_id") or idea.get("note") or "rule")
+        abs_bit = ""
+        if last > 0:
+            if bias == "SHORT":
+                stop_px, tgt_px = last * (1 + sp), last * (1 - tp)
+            else:
+                stop_px, tgt_px = last * (1 - sp), last * (1 + tp)
+            abs_bit = f" last={last:.2f} geom_hint stop≈{stop_px:.2f} tgt≈{tgt_px:.2f}"
+        dist = idea.get("dist20")
+        ret5 = idea.get("ret5")
+        stats = ""
+        if dist is not None or ret5 is not None:
+            stats = f" dist20={dist} ret5={ret5}"
         lines.append(
-            f"{i}. {idea.get('symbol')} {idea.get('bias')} "
-            f"score={idea.get('score')} — {idea.get('note')} "
-            f"(stop~{float(idea.get('stop_hint_pct') or 0)*100:.1f}% / "
-            f"target~{float(idea.get('target_hint_pct') or 0)*100:.1f}%)"
+            f"{i}. {idea.get('symbol')} bias={bias} "
+            f"heuristic_rank={idea.get('score')} rule_id={rule}{stats}{abs_bit}"
         )
     return "\n".join(lines)
+
+
+def format_opportunities(ideas: list[dict[str, Any]], *, limit: int = 5) -> str:
+    """Alias — prefer ``format_market_features``."""
+    return format_market_features(ideas, limit=limit)
 
 
 async def scan_opportunities(
@@ -120,7 +156,7 @@ async def scan_opportunities(
     force: bool = False,
     cap: int = 10,
 ) -> list[dict[str, Any]]:
-    """Fetch candles, score, return ranked ideas (cached ~2.5 min)."""
+    """Fetch candles, score, return ranked features (cached ~2.5 min)."""
     symbols = _universe(positions, cap=cap)
     key = ",".join(symbols)
     now = time.monotonic()

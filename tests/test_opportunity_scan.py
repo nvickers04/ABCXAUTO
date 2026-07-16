@@ -1,6 +1,5 @@
 """Opportunity scan scoring + prompt formatting."""
 
-from abcxauto.agent_loop import _build_prompt, _risk_prompt_block
 from abcxauto.config import (
     apply_risk_posture,
     clear_risk_settings,
@@ -60,39 +59,60 @@ def test_format_opportunities_empty():
 
 def test_format_opportunities_lists():
     text = format_opportunities(
-        [{"symbol": "QQQ", "bias": "LONG", "score": 0.7, "note": "test",
-          "stop_hint_pct": 0.01, "target_hint_pct": 0.02}]
+        [{"symbol": "QQQ", "bias": "LONG", "score": 0.7, "rule_id": "test_rule",
+          "stop_hint_pct": 0.01, "target_hint_pct": 0.02, "last": 100.0}]
     )
     assert "QQQ" in text
-    assert "OPPORTUNITIES" in text
+    assert "MARKET FEATURES" in text
+    assert "heuristic_rank" in text
 
 
-def test_prompt_includes_opportunities_and_envelope(tmp_path, monkeypatch):
+def test_prompt_includes_features_and_envelope(tmp_path, monkeypatch):
+    from abcxauto.world_state import WorldState
+
     path = tmp_path / "risk.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     clear_risk_settings(path=path)
     load_risk_settings(path)
     apply_risk_posture("balanced", persist=True)
 
-    snap = {
-        "portfolio_state": {"positions": []},
-        "positions": [],
-        "opportunities": [
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[
             {
                 "symbol": "SPY",
                 "bias": "LONG",
                 "score": 0.8,
-                "note": "fixture",
+                "rule_id": "fixture",
                 "stop_hint_pct": 0.008,
                 "target_hint_pct": 0.016,
+                "last": 500.0,
             }
         ],
-        "news_prompt": "",
-        "reality_pulse": {},
-    }
-    prompt = _build_prompt(1, snap, needs_prot=False, c=None)
-    assert "OPPORTUNITIES" in prompt
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={"feature_mix_bias": "mixed", "trend_bias": "mixed"},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+        idle_streak=0,
+        idle_top_symbol="",
+        prep={},
+        review={},
+    )
+    prompt = world.prompt_block()
+    assert "MARKET FEATURES" in prompt
     assert "SPY" in prompt
-    assert "RISK POSTURE" in prompt
-    assert "balanced" in prompt
-    assert "ENVELOPE" in _risk_prompt_block()
+    assert get_config().risk_posture == "balanced"

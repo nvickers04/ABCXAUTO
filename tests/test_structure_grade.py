@@ -138,6 +138,72 @@ def test_structure_vocab_persist(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_quote_prefers_live_over_stale_opp(monkeypatch):
+    from abcxauto.agent_loop import _quote_for_action
+
+    class Conn:
+        connected = True
+
+    async def _tool(_c, name, a=None):
+        assert name == "quote"
+        assert (a or {}).get("symbol") == "QQQ"
+        return {"symbol": "QQQ", "last": 708.20}
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", _tool)
+    act = {
+        "params": {
+            "symbol": "QQQ",
+            "price_hint": 717.74,  # stale opp last Grok recycled
+            "stop_price": 711.99,
+            "target_price": 729.22,
+        }
+    }
+    snap = {
+        "opportunities": [{"symbol": "QQQ", "last": 717.74}],
+        "spy_quote": {"last": 500},
+    }
+    q = await _quote_for_action(act, snap, Conn())
+    assert q == pytest.approx(708.20)
+    # Stale hint overwritten for gates
+    assert act["params"]["price_hint"] == pytest.approx(708.20)
+
+
+@pytest.mark.asyncio
+async def test_wrong_side_fill_records_scrape(monkeypatch, tmp_path):
+    from abcxauto.agent_loop import _post_act_structure_and_plan
+    from abcxauto.structure_grade import recent_structure_lessons
+
+    monkeypatch.setenv("ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "ev.jsonl"))
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    await _post_act_structure_and_plan(
+        act={
+            "params": {
+                "symbol": "QQQ",
+                "direction": "LONG",
+                "stop_price": 711.99,
+                "target_price": 729.22,
+                "quantity": 9,
+            }
+        },
+        strat="market_bracket",
+        result={
+            "success": True,
+            "filled": True,
+            "symbol": "QQQ",
+            "entry_price": 708.17,
+        },
+        judgment={"thesis": "x"},
+        snap={"positions": []},
+        quote_last=708.17,
+        connector=None,
+    )
+    lessons = recent_structure_lessons(3)
+    assert lessons
+    assert lessons[0]["outcome"] == "scrape_suspect"
+    assert lessons[0]["symbol"] == "QQQ"
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     from types import SimpleNamespace
 

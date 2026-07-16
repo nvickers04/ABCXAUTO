@@ -96,9 +96,16 @@ _POSTURE_ENVELOPES: dict[str, dict[str, tuple[float, float]]] = {
     },
 }
 _POSTURE_PROMPT_BIAS: dict[str, str] = {
-    "defensive": "Prefer quality; size small-to-mid within max_risk_per_trade.",
-    "balanced": "Flat RTH: weigh ideas; pick size per trade inside max_risk_per_trade.",
-    "aggressive": "Prefer acting on ranked ideas when flat; size up when conviction high.",
+    "defensive": (
+        "Capital envelope: tight (see gates). Hunt requires setup_grade A (code). "
+        "Not a style tip."
+    ),
+    "balanced": (
+        "Capital envelope: mid. setup_grade C hunts blocked (code)."
+    ),
+    "aggressive": (
+        "Capital envelope: wide. Not a directive to trade more or chase heuristic_rank."
+    ),
 }
 _runtime_overrides: dict[str, Any] = {}
 _file_overrides: dict[str, Any] = {}
@@ -106,14 +113,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_RISK_SETTINGS_PATH = _REPO_ROOT / "risk_settings.json"
 
 DEFAULT_MANDATE = (
-    "RELY ON YOUR INTELLIGENCE. You OWN a paper IBKR portfolio — not a playbook, "
-    "not a scanner brain. You choose what to trade and how; the shell only gives "
-    "tools and order abilities. Protect first; act when edge or risk requires it. "
-    "Hold IS VALID when the book is protected. Hold is FORBIDDEN only while "
-    "unprotected STK exists (code enforces). Build judgment from the live book, "
-    "journal memory, and what you observe. Manage open risk first (stops, targets, "
-    "edits, exits). When you take a new stock entry, use bracket or market_bracket "
-    "with stop loss and take profit. Never blow up."
+    "RELY ON YOUR INTELLIGENCE. You OWN a paper IBKR portfolio. "
+    "The shell gives tools, facts, gates, and labeled heuristics — not a trading style. "
+    "Protect first. Hold IS VALID when the book is protected. Hold is FORBIDDEN only "
+    "while unprotected STK exists (code enforces). Build judgment from the live book, "
+    "journal memory, MARKET FEATURES (heuristic≠recommendation), and optional "
+    "OPERATOR CARD. Manage open risk first (stops, targets, edits, exits). "
+    "New stock entries use bracket or market_bracket with stop and take profit. "
+    "Never blow up."
 )
 
 
@@ -141,6 +148,8 @@ class Config:
     # Agent
     trading_mandate: str = field(default=DEFAULT_MANDATE, repr=False)
     system_prompt_extra: str = field(default="", repr=False)
+    # Human-authored beliefs only (empty = inject nothing into prompts)
+    operator_card: str = field(default="", repr=False)
     # Deprecated: legacy web dashboard scan loop (abcxauto.web); Pro path ignores these.
     scan_enabled: bool = False
     scan_interval_s: int = 900
@@ -233,6 +242,34 @@ def setup_file_logging(
         root.setLevel(logging.WARNING)
 
 
+def load_operator_card() -> str:
+    """Env ABCXAUTO_OPERATOR_CARD, else operator_card.txt, else empty."""
+    import os
+
+    env = (os.environ.get("ABCXAUTO_OPERATOR_CARD") or "").strip()
+    if env:
+        return env[:4000]
+    path_raw = (os.environ.get("ABCXAUTO_OPERATOR_CARD_PATH") or "").strip()
+    path = Path(path_raw) if path_raw else _REPO_ROOT / "operator_card.txt"
+    try:
+        if path.is_file():
+            return path.read_text(encoding="utf-8").strip()[:4000]
+    except OSError:
+        pass
+    return ""
+
+
+def format_operator_card_block(card: str | None = None) -> str:
+    """Labeled prompt block, or empty string when no card."""
+    text = (card if card is not None else load_operator_card()).strip()
+    if not text:
+        return ""
+    return (
+        "OPERATOR CARD (human-authored beliefs — optional; Grok may use or ignore):\n"
+        + text
+    )
+
+
 @lru_cache(maxsize=1)
 def _load_env_config() -> Config:
     load_dotenv()
@@ -251,6 +288,7 @@ def _load_env_config() -> Config:
         disconnect_halt_s=float(_env("ABCXAUTO_DISCONNECT_HALT_S", "120")),
         trading_mandate=mandate,
         system_prompt_extra=_env("ABCXAUTO_SYSTEM_PROMPT_EXTRA"),
+        operator_card=load_operator_card(),
         scan_enabled=_env_bool("ABCXAUTO_SCAN_ENABLED", False),
         scan_interval_s=int(_env("ABCXAUTO_SCAN_INTERVAL_S", "900")),
         cycle_sleep_s=float(_env("ABCXAUTO_CYCLE_SLEEP_S", "120")),

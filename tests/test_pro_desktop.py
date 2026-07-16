@@ -82,15 +82,17 @@ def test_overview_dashboard_agent_status():
     assert "Fills" in block
     assert "order blotter" in block.lower() or "Working" in block
     assert "Activity" in block
-    assert "Reality Pulse" in block
+    assert "Now" in block
+    assert "lbl_agent_now" in text
     assert "_dash_book" in block
     assert "_dash_agent" in block
-    assert "_dash_log" in block
+    assert "_dash_log" in block  # compat shim → agent
     assert "_refresh_book_tab" in block
     assert "_refresh_agent_tab" in block
     assert "_refresh_log_tab" in block
     assert "_dash_pulse" not in block
     assert '("pulse", "Pulse")' not in text
+    assert '("log", "Log")' not in text  # Log folded into Agent
     assert "_set_dash_tab" in text
     assert "DASH_TABS" in text
     # Portfolio NetLiq strip is not the Book tab primary content anymore
@@ -389,7 +391,7 @@ def test_scorecard_nav_and_show_tab(headless_pro, tmp_path, monkeypatch):
     headless_pro._show_tab("overview")
     assert headless_pro.dash_tabs_row.visible is True
     headless_pro._set_dash_tab("log")
-    assert headless_pro.dash_tab == "log"
+    assert headless_pro.dash_tab == "agent"  # Log folded into Agent
 
 
 @pytest.mark.asyncio

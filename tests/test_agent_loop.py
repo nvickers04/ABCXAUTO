@@ -349,8 +349,8 @@ async def test_intent_mismatch_end_to_end(monkeypatch):
     )
 
 
-@pytest.mark.asyncio
-async def test_hunt_cooldown_blocks_judgment(monkeypatch, tmp_path):
+def test_soft_hunt_cooldown_does_not_block_judgment(tmp_path, monkeypatch):
+    """Recent entry is prompt pressure only — Judge may still hunt (or switch)."""
     from abcxauto.memory import reset_journal
 
     j = reset_journal(path=str(tmp_path / "j2.db"), enabled=True)
@@ -365,6 +365,7 @@ async def test_hunt_cooldown_blocks_judgment(monkeypatch, tmp_path):
         opportunities=[{"symbol": "QQQ", "bias": "LONG", "score": 0.9}],
         recent_decisions=j.recent_decisions(limit=3),
         flat=True,
+        structure_cooldown={},
     )
     ok, reason, _ = validate_judgment(
         {
@@ -379,8 +380,30 @@ async def test_hunt_cooldown_blocks_judgment(monkeypatch, tmp_path):
         },
         world,
     )
+    assert ok is True, reason
+
+
+def test_structure_scrape_cooldown_blocks_same_symbol():
+    world = _world(
+        opportunities=[{"symbol": "QQQ", "bias": "LONG", "score": 0.9}],
+        flat=True,
+        structure_cooldown={"QQQ": "scrape_suspect"},
+    )
+    ok, reason, _ = validate_judgment(
+        {
+            "stance": "hunt",
+            "thesis": "Re-enter QQQ after scrape",
+            "focus": "QQQ #1",
+            "dismissed": "",
+            "intent": {"kind": "hunt", "symbol": "QQQ", "direction": "LONG"},
+            "risk_budget_pct": 0.5,
+            "regime_fit": True,
+            "setup_grade": "A",
+        },
+        world,
+    )
     assert ok is False
-    assert "cooldown" in reason.lower()
+    assert "structure cooldown" in reason.lower()
 
 
 def test_protect_forbids_idle_when_unprotected():

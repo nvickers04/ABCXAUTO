@@ -563,6 +563,43 @@ class ProEngine:
         except Exception as e:
             self.ui.put(("error", f"{label} SUITE ERROR: {e}"))
 
+    def _apply_open_risk(
+        self,
+        positions: list | None = None,
+        open_orders: list | None = None,
+        *,
+        note: bool = False,
+        allow_flat_close: bool = True,
+    ) -> None:
+        """Reconcile ActiveTradePlan from broker book. Never clears on pause/stop."""
+        from abcxauto.trade_plan import format_open_risk_line, sync_open_risk
+
+        pos = list(positions if positions is not None else (self.state.positions or []))
+        orders = list(
+            open_orders if open_orders is not None else (self.state.open_orders or [])
+        )
+        thesis = str(self.state.thesis or "")
+        try:
+            from abcxauto.memory import get_journal
+
+            thesis = thesis or (get_journal().get_working_thesis() or "")
+        except Exception:
+            pass
+        try:
+            plan = sync_open_risk(
+                pos,
+                orders,
+                thesis=thesis,
+                bump=False,
+                allow_flat_close=allow_flat_close,
+            )
+        except Exception as e:
+            logger.warning("open risk sync failed: %s", e)
+            return
+        self.state.trade_plan = plan.to_dict() if plan else None
+        if note and plan:
+            self._note("OPEN_RISK", format_open_risk_line(plan))
+
     def pause_engine(self) -> None:
         """Pause agent cycles without tearing down IBKR / monitor."""
         if not self.worker or not self.worker.is_alive():
@@ -573,7 +610,9 @@ class ProEngine:
         self.state.paused = True
         self.state.running = False
         self.state.status = "Connected" if self.state.connected else "Paused"
-        self._note("PAUSE", "Agent paused — IBKR still connected")
+        # Decisions-only: do not clear active_trade_plan or flatten.
+        self._note("PAUSE", "Agent paused — IBKR still connected; open risk kept")
+        self._apply_open_risk(note=True, allow_flat_close=False)
         if was_auto:
             try:
                 from abcxauto.agent_loop import run_session_review_on_stop
@@ -607,6 +646,8 @@ class ProEngine:
         self.worker = None
         self._worker_loop = None
         self.conn = None
+        # Keep active_trade_plan.json — Stop does not flatten or forget open risk.
+        self._apply_open_risk(note=True, allow_flat_close=False)
         if was_auto:
             try:
                 from abcxauto.agent_loop import run_session_review_on_stop
@@ -621,7 +662,10 @@ class ProEngine:
             except Exception:
                 pass
         if was_linked:
-            self._note("DISCONNECT", "Disconnected from IBKR")
+            self._note(
+                "DISCONNECT",
+                "Disconnected from IBKR — open risk plan preserved on disk",
+            )
 
     def request_snapshot(self) -> str | None:
         """Force one monitor snapshot (orders/fills/positions) on the worker loop."""
@@ -787,6 +831,16 @@ class ProEngine:
                 s.open_orders = snap.get("open_orders") or []
             if snap.get("fills") is not None:
                 s.recent_fills = list(snap.get("fills") or [])[-20:]
+            had_plan = bool(s.trade_plan)
+            # Never confirmed-flat-close while paused / not autonomous — monitor
+            # empty snaps must not wipe durable open risk.
+            allow_close = bool(s.autonomous) and not bool(s.paused)
+            self._apply_open_risk(
+                s.positions,
+                s.open_orders,
+                note=not had_plan,
+                allow_flat_close=allow_close,
+            )
             prot = snap.get("protection") or {}
             unprotected = list(prot.get("unprotected_symbols") or [])
             s.unprotected_count = len(unprotected)

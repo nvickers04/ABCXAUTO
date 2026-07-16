@@ -670,6 +670,27 @@ class TradeJournal:
             logger.exception("journal.recent_decisions failed")
             return []
 
+    def strategy_diversity(self, limit: int = 40) -> dict:
+        """Observe-only KPI: distinct strategies in recent decisions.
+
+        Does not influence the agent loop — Phase 5C-style operator metric.
+        """
+        skip = frozenset({"", "blocked", "skipped", "hold", "—", "-"})
+        decisions = self.recent_decisions(limit=max(1, int(limit)))
+        seen: list[str] = []
+        for d in decisions:
+            strat = str(d.get("strategy") or d.get("action") or "").strip().lower()
+            if not strat or strat in skip:
+                continue
+            if strat not in seen:
+                seen.append(strat)
+        return {
+            "n_decisions": len(decisions),
+            "n_distinct": len(seen),
+            "strategies": seen,
+            "limit": int(limit),
+        }
+
     def get_working_thesis(self) -> str:
         try:
             self._ensure_schema()

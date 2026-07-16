@@ -27,10 +27,10 @@ from abcxauto.send import send_action
 from abcxauto.session_cadence import maybe_auto_review_from_cycle
 from abcxauto.tools import run_readonly_tool
 from abcxauto.trade_plan import (
-    bump_plan_cycle,
     close_trade_plan,
     plan_from_hunt_action,
     save_trade_plan,
+    sync_open_risk,
 )
 from abcxauto.world_state import (
     STANCES,
@@ -47,7 +47,8 @@ VALID_ACTIONS = (
     "hold|set_risk|bracket|market_bracket|market_order|limit_order|"
     "stop_order|stop_limit|oca|modify_stop|modify_target|cancel_order|"
     "close_option|trailing_stop|trailing_stop_limit|"
-    "market_on_close|limit_on_close|market_on_open|limit_on_open"
+    "market_on_close|limit_on_close|market_on_open|limit_on_open|"
+    "covered_call|protective_put|collar"
 )
 ALLOWED_ACTIONS = frozenset(VALID_ACTIONS.split("|"))
 BLOCKED_STRAT = "blocked"
@@ -77,12 +78,14 @@ STANCE_ACTIONS: dict[str, frozenset[str]] = {
         "oca", "modify_stop", "modify_target", "cancel_order",
         "market_order", "limit_order", "stop_order", "stop_limit",
         "close_option", "trailing_stop", "trailing_stop_limit",
+        "protective_put",
     }),
     "manage": frozenset({
         "modify_stop", "modify_target", "cancel_order", "hold",
         "oca", "market_order", "limit_order", "stop_order", "stop_limit",
         "close_option", "trailing_stop", "trailing_stop_limit",
         "market_on_close", "limit_on_close",
+        "covered_call", "protective_put", "collar",
     }),
     "hunt": frozenset({"bracket", "market_bracket", "set_risk"}),
     "idle": frozenset({"hold"}),
@@ -299,9 +302,10 @@ def _judge_system() -> str:
         f"MANDATE:\n{mandate}\n"
         "You perceive WORLDSTATE (code truth). Set stance + thesis + intent for Act.\n"
         "stances: protect | manage | hunt | idle\n"
-        "If unprotected STK → stance=protect. If open trade_plan → prefer manage.\n"
-        "idle while flat + opportunities + balanced/aggressive REQUIRES dismissed "
-        "citing opportunity #1 symbol and why rejected.\n"
+        "If unprotected STK → stance=protect. "
+        "If open trade_plan / OPEN RISK → stance=manage (hunt forbidden).\n"
+        "idle while flat + market features + balanced/aggressive REQUIRES dismissed "
+        "citing top feature symbol and why rejected.\n"
         "Affirm, revise, or close working_thesis.\n"
         'JSON: {"stance":"...","thesis":"1-3 sentences","focus":"what mattered",'
         '"dismissed":"why top ideas rejected (required for idle when ideas present)",'
@@ -316,7 +320,9 @@ def _act_system() -> str:
         _build_rules()
         + "\nYou are ACT. Fulfill Judgment.intent with ONE allowlisted action.\n"
         "Do not contradict stance. idle → hold only. hunt → bracket/market_bracket "
-        "or set_risk. protect → oca/modify_*/exit by conId.\n"
+        "or set_risk. protect → oca/modify_*/protective_put/exit by conId. "
+        "manage → hold/trail/modify/exit or overlays covered_call|collar|protective_put "
+        "when long shares allow (see TRADE PLAYBOOK).\n"
         + expected_json_shape_hint()
     )
 
@@ -421,6 +427,15 @@ def validate_judgment(judgment: dict, world: WorldState) -> tuple[bool, str, dic
 
     if world.trade_plan and stance == "hunt":
         return False, "open ActiveTradePlan — manage/protect before hunt", j
+    from abcxauto.trade_plan import book_has_risk, load_flat_streak, load_trade_plan
+
+    if stance == "hunt" and book_has_risk(world.positions):
+        return False, "open book risk — manage before hunt", j
+    if stance == "hunt" and load_trade_plan():
+        return False, "open ActiveTradePlan on disk — manage before hunt", j
+    if stance == "hunt" and load_flat_streak() > 0:
+        # Recent empty snap(s) — book flat not confirmed; do not hunt yet.
+        return False, "book flat unconfirmed — wait before hunt", j
 
     posture = (world.effective_posture or world.risk_posture or "").lower()
     ideas = world.opportunities
@@ -435,9 +450,9 @@ def validate_judgment(judgment: dict, world: WorldState) -> tuple[bool, str, dic
     ):
         dismissed = j.get("dismissed") or ""
         if not dismissed:
-            return False, "idle requires dismissed against opportunity #1", j
+            return False, "idle requires dismissed against top feature symbol", j
         if top and top not in dismissed.upper():
-            return False, f"idle dismissed must cite opportunity #1 ({top})", j
+            return False, f"idle dismissed must cite top feature symbol ({top})", j
 
     thresh = idle_streak_threshold(posture)
     if (
@@ -464,21 +479,18 @@ def validate_judgment(judgment: dict, world: WorldState) -> tuple[bool, str, dic
             return False, "counter-regime hunt blocked under defensive", j
         sym = str(intent.get("symbol") or "").upper()
         if sym:
-            from abcxauto.world_state import hunt_cooldown_remaining
-
-            cool = hunt_cooldown_remaining(world.recent_decisions, sym)
-            if cool > 0:
-                return False, f"hunt cooldown on {sym} ({cool} cycles left)", j
+            # Soft hunt cooldown (recent entry) is prompt pressure only — do not
+            # fail-closed reject Judge (that caused QQQ hunt/block loops).
             struct_cool = getattr(world, "structure_cooldown", None) or {}
-            if sym in struct_cool and j.get("setup_grade") != "A":
+            if sym in struct_cool:
                 return (
                     False,
                     f"structure cooldown on {sym} ({struct_cool[sym]}) — "
-                    "need setup_grade A or hunt elsewhere",
+                    "hunt a different symbol or idle with dismissed citing top feature",
                     j,
                 )
 
-    # Thesis continuity: repeating no-edge without addressing open thesis / top opp
+    # Thesis continuity: address open thesis / top feature symbol
     open_thesis = (world.working_thesis or "").strip()
     if stance == "idle" and open_thesis and ideas and top:
         blob = f"{thesis} {focus} {j.get('dismissed') or ''}".upper()
@@ -486,7 +498,7 @@ def validate_judgment(judgment: dict, world: WorldState) -> tuple[bool, str, dic
             # soft: require some engagement
             if "REVISE" not in blob and "CLOSE" not in blob and "AFFIRM" not in blob:
                 if top not in blob:
-                    return False, "idle must engage open thesis or top opportunity", j
+                    return False, "idle must address open thesis or top feature symbol", j
 
     return True, "ok", j
 
@@ -549,9 +561,12 @@ def _build_judge_prompt(world: WorldState) -> str:
     posture = (world.effective_posture or "").lower()
     top = _top_opp_symbol(world)
     if world.needs_protection:
-        pressure = "PRESSURE: unprotected — stance MUST be protect."
+        pressure = "GATE: unprotected STK — stance MUST be protect (code)."
     elif world.trade_plan:
-        pressure = "PRESSURE: open ActiveTradePlan — prefer manage until closed."
+        pressure = (
+            "GATE: open risk / ActiveTradePlan — stance manage/protect; "
+            "hunt forbidden (code)."
+        )
     elif (
         world.flat
         and world.session_status == "regular"
@@ -559,26 +574,60 @@ def _build_judge_prompt(world: WorldState) -> str:
         and posture in ("balanced", "aggressive")
     ):
         pressure = (
-            f"PRESSURE: flat + ideas under {posture}. idle REQUIRES dismissed "
-            f"citing #{1} {top}. Or stance=hunt with setup_grade."
+            f"PROCESS: flat + market features present (posture={posture}). "
+            f"idle REQUIRES dismissed citing top feature symbol {top or '?'}. "
+            "Or stance=hunt with setup_grade."
         )
     thresh = idle_streak_threshold(posture)
     if world.idle_streak >= thresh and world.opportunities:
         pressure += (
-            f" IDLE STREAK={world.idle_streak}: cannot re-idle with same dismiss; "
-            "new reason or hunt."
+            f" PROCESS: IDLE STREAK={world.idle_streak} — cannot re-idle with "
+            "same dismiss; new reason or hunt."
         )
+    cool = getattr(world, "structure_cooldown", None) or {}
+    if cool:
+        pressure += (
+            f" GATE: STRUCTURE COOLDOWN (do not re-hunt): {cool}. "
+            "Different symbol or idle with dismissed citing top feature."
+        )
+    from abcxauto.world_state import hunt_cooldown_remaining
+
+    soft = []
+    for idea in (world.opportunities or [])[:5]:
+        sym = str(idea.get("symbol") or "").upper()
+        if not sym:
+            continue
+        n = hunt_cooldown_remaining(world.recent_decisions, sym)
+        if n > 0:
+            soft.append(f"{sym}({n})")
+    if soft:
+        pressure += (
+            f" PROCESS: soft recent-entry on {', '.join(soft)} — not a hard block."
+        )
+    from abcxauto.config import format_operator_card_block, get_config
+    from abcxauto.trade_playbook import format_trade_playbook, world_hints_from_world
+
+    playbook = format_trade_playbook(
+        "",
+        world_hints_from_world(world),
+        for_judge=True,
+    )
+    card = format_operator_card_block(getattr(get_config(), "operator_card", None))
+    card_bit = f"\n\n{card}" if card else ""
     return (
         f"=== JUDGE STAGE ===\nCycle {world.cycle}.\n{pressure}\n\n"
         f"{world.prompt_block()}\n\n"
+        f"{playbook}{card_bit}\n\n"
         f"Open working_thesis: {(world.working_thesis or '-')[:300]}\n"
-        "Affirm, revise, or close it in thesis.\n"
+        "Affirm, revise, or close it in thesis. "
+        "For manage overlays (covered_call/collar/put), say so in focus.\n"
         "Output judgment JSON only."
     )
 
 
 def _build_act_prompt(world: WorldState, judgment: dict) -> str:
     from abcxauto.structure_grade import format_structure_lessons_for_prompt
+    from abcxauto.trade_playbook import format_trade_playbook, world_hints_from_world
 
     lessons = format_structure_lessons_for_prompt(
         getattr(world, "structure_lessons", None)
@@ -590,14 +639,23 @@ def _build_act_prompt(world: WorldState, judgment: dict) -> str:
             f"SUITE TRAINER: pass_rate={vocab.get('pass_rate')} "
             f"failed={vocab.get('failed')}\n"
         )
+    stance = str((judgment or {}).get("stance") or "").lower()
+    playbook = format_trade_playbook(stance, world_hints_from_world(world))
+    from abcxauto.config import format_operator_card_block, get_config
+
+    card = format_operator_card_block(getattr(get_config(), "operator_card", None))
+    card_bit = f"{card}\n\n" if card else ""
     return (
         f"=== ACT STAGE ===\nCycle {world.cycle}.\n"
         f"JUDGMENT:\n{json.dumps(judgment, default=str)[:2000]}\n\n"
         f"{world.prompt_block(limit=2800)}\n\n"
         f"{lessons}\n{vocab_bit}"
-        "You OWN structure: pick order type + stop/target/qty. "
-        "Shell grades geometry vs live quote — wrong-side stops are rejected.\n"
+        "You OWN structure: pick order type + stop/target/qty from the LIVE quote "
+        "(price_hint = last). Never reuse yesterday's stop (e.g. 711.99) if last moved. "
+        "LONG: stop < live < target. Shell rejects wrong-side geometry.\n"
         f"{format_order_examples()}\n\n"
+        f"{playbook}\n\n"
+        f"{card_bit}"
         f"{format_position_inventory(world.positions)}\n"
         f"{expected_json_shape_hint()}\n"
         "Emit ONE action that fulfills intent. Include price_hint when hunting "
@@ -774,16 +832,21 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
         ideas = []
     s["opportunities"] = ideas
 
-    # Trade plan lifecycle: bump / close if flat
+    # Open-risk continuity: reconcile from broker; confirmed-flat close only
     try:
-        if not positions:
-            from abcxauto.trade_plan import load_trade_plan
-            if load_trade_plan():
-                close_trade_plan("flat_book")
-        else:
-            bump_plan_cycle()
+        thesis_hint = ""
+        try:
+            thesis_hint = get_journal().get_working_thesis() or ""
+        except Exception:
+            thesis_hint = ""
+        sync_open_risk(
+            positions,
+            s.get("open_orders") or [],
+            thesis=thesis_hint,
+            bump=bool(positions),
+        )
     except Exception:
-        logger.exception("trade plan bump failed")
+        logger.exception("open risk sync failed")
 
     world = build_world_state(
         cycle=n, snap=s, opportunities=ideas, news_items=s.get("news_items") or [],
@@ -884,6 +947,43 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
             forced = {"status": "blocked", "note": f"risk_budget: {breason}"}
             act["strategy"] = act["action"] = BLOCKED_STRAT
 
+    # Overlay share-lot guard (covered_call / collar / protective_put)
+    if forced is None and strat != BLOCKED_STRAT:
+        from abcxauto.structure_grade import append_structure_event
+        from abcxauto.trade_playbook import check_overlay_shares
+
+        ok_sh, sh_code, sh_msg = check_overlay_shares(
+            strat, act.get("params") or {}, positions
+        )
+        if not ok_sh:
+            overlay_name = strat
+            forced = {
+                "status": "blocked",
+                "note": sh_msg,
+                "reason_code": sh_code,
+            }
+            act["_structure_grade"] = sh_code
+            try:
+                append_structure_event(
+                    {
+                        "source": "cycle",
+                        "strategy": overlay_name,
+                        "symbol": str((act.get("params") or {}).get("symbol") or ""),
+                        "direction": "LONG",
+                        "params": {
+                            k: (act.get("params") or {}).get(k)
+                            for k in ("symbol", "shares", "strike", "expiration")
+                        },
+                        "outcome": sh_code,
+                        "reason_code": sh_code,
+                        "message": sh_msg,
+                    }
+                )
+            except Exception:
+                pass
+            strat = BLOCKED_STRAT
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+
     # Hold-streak: block serial hold after escalate threshold with same top opp
     posture = (world.effective_posture or "").lower()
     thresh = idle_streak_threshold(posture)
@@ -947,6 +1047,7 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
             act["strategy"] = act["action"] = BLOCKED_STRAT
             append_structure_event(
                 {
+                    "source": "cycle",
                     "strategy": chosen_strat,
                     "symbol": str((act.get("params") or {}).get("symbol") or "").upper(),
                     "direction": str((act.get("params") or {}).get("direction") or ""),
@@ -1009,51 +1110,66 @@ async def run_cycle(n: int, c: Any, g: GrokClient, h: List[dict], prev: float) -
     return out
 
 
+def _extract_last(q: dict | None) -> float | None:
+    if not isinstance(q, dict):
+        return None
+    for k in ("last", "price", "close", "c", "mark"):
+        if q.get(k) is not None:
+            try:
+                v = float(q[k])
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 async def _quote_for_action(act: dict, snap: dict, connector: Any = None) -> float | None:
-    """Best live last for the action symbol (never invents stop/target)."""
+    """Authoritative live last for geometry — never prefer stale opp candles.
+
+    Order: live connector quote → snap spy (if SPY) → Grok price_hint only if
+    within 1% of live (else ignored) → opportunity last as last resort.
+    """
     params = act.get("params") or {}
-    hint = params.get("price_hint")
-    if hint is not None:
-        try:
-            v = float(hint)
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass
-    if params.get("entry_price") is not None:
-        try:
-            v = float(params["entry_price"])
-            if v > 0:
-                return v
-        except (TypeError, ValueError):
-            pass
     sym = str(params.get("symbol") or "").upper()
-    spy = snap.get("spy_quote") or {}
-    if sym in ("", "SPY"):
-        for k in ("last", "price", "close", "c"):
-            if spy.get(k) is not None:
-                try:
-                    return float(spy[k])
-                except (TypeError, ValueError):
-                    pass
-    for idea in snap.get("opportunities") or []:
-        if str(idea.get("symbol") or "").upper() != sym:
-            continue
-        for k in ("last", "price", "close"):
-            if idea.get(k) is not None:
-                try:
-                    return float(idea[k])
-                except (TypeError, ValueError):
-                    pass
+    live: float | None = None
     if sym and connector is not None:
         try:
             q = await _tool(connector, "quote", {"symbol": sym})
-            if isinstance(q, dict):
-                for k in ("last", "price", "close", "c"):
-                    if q.get(k) is not None:
-                        return float(q[k])
+            live = _extract_last(q if isinstance(q, dict) else None)
         except Exception:
             logger.debug("quote fetch for %s failed", sym, exc_info=True)
+    if live is None and sym in ("", "SPY"):
+        live = _extract_last(snap.get("spy_quote") or {})
+    if live is not None:
+        # If Grok sent a fantasy price_hint far from live, overwrite for gates.
+        try:
+            hint = params.get("price_hint")
+            if hint is not None and abs(float(hint) - live) / live > 0.01:
+                params["price_hint"] = live
+                act["params"] = params
+        except (TypeError, ValueError):
+            pass
+        return live
+    # Fallbacks when live quote unavailable
+    try:
+        hint = float(params["price_hint"]) if params.get("price_hint") is not None else None
+        if hint and hint > 0:
+            return hint
+    except (TypeError, ValueError):
+        pass
+    try:
+        ep = float(params["entry_price"]) if params.get("entry_price") is not None else None
+        if ep and ep > 0:
+            return ep
+    except (TypeError, ValueError):
+        pass
+    for idea in snap.get("opportunities") or []:
+        if str(idea.get("symbol") or "").upper() != sym:
+            continue
+        last = _extract_last(idea)
+        if last is not None:
+            return last
     return None
 
 
@@ -1078,44 +1194,111 @@ async def _post_act_structure_and_plan(
     status = str((result or {}).get("status") or "").lower()
     params = act.get("params") or {}
     symbol = str(params.get("symbol") or result.get("symbol") or "").upper()
-    ok_dispatch = status not in (
-        "blocked", "rejected", "error", "failed", "held", "hold", "",
-    ) and strat not in (BLOCKED_STRAT, "hold", "skipped", "set_risk")
+    direction = str(params.get("direction") or result.get("direction") or "").upper()
+    # Broker results often use success/filled without status=
+    ok_dispatch = (
+        strat not in (BLOCKED_STRAT, "hold", "skipped", "set_risk")
+        and status not in ("blocked", "rejected", "error", "failed", "held", "hold")
+        and (
+            result.get("success") is True
+            or result.get("filled") is True
+            or status in ("executed", "submitted", "ok", "filled", "success")
+        )
+    )
 
     try:
         if ok_dispatch and strat in ("bracket", "market_bracket"):
-            plan = plan_from_hunt_action(act, str(judgment.get("thesis") or ""))
-            if plan:
-                try:
-                    fill_px = result.get("entry_price") or result.get("avg_fill_price")
+            fill_px = None
+            try:
+                raw_fill = result.get("entry_price") or result.get("avg_fill_price")
+                if raw_fill is not None:
+                    fill_px = float(raw_fill)
+            except (TypeError, ValueError):
+                fill_px = None
+
+            # Immediate scrape if stop is wrong-side of actual fill (stale hint bug)
+            scrape_now = False
+            try:
+                stop = float(params["stop_price"]) if params.get("stop_price") is not None else None
+            except (TypeError, ValueError):
+                stop = None
+            if fill_px and stop is not None:
+                if direction == "LONG" and stop >= fill_px:
+                    scrape_now = True
+                if direction == "SHORT" and stop <= fill_px:
+                    scrape_now = True
+
+            if scrape_now:
+                append_structure_event(
+                    {
+                        "source": "cycle",
+                        "strategy": strat,
+                        "symbol": symbol,
+                        "direction": direction,
+                        "quote": fill_px,
+                        "params": {
+                            k: params.get(k)
+                            for k in (
+                                "stop_price", "target_price", "entry_price", "quantity",
+                            )
+                        },
+                        "outcome": SCRAPE_SUSPECT,
+                        "reason_code": SCRAPE_SUSPECT,
+                        "message": (
+                            f"stop {stop} wrong-side of fill {fill_px} — "
+                            "rebuild stop from live quote next hunt"
+                        ),
+                    }
+                )
+                close_trade_plan("scrape_wrong_side_stop")
+            else:
+                plan = plan_from_hunt_action(act, str(judgment.get("thesis") or ""))
+                if plan:
                     if fill_px is not None:
-                        plan.entry_price = float(fill_px)
-                except (TypeError, ValueError):
-                    pass
-                save_trade_plan(plan)
-            append_structure_event(
-                {
-                    "strategy": strat,
-                    "symbol": symbol,
-                    "direction": str(params.get("direction") or ""),
-                    "quote": quote_last or result.get("entry_price"),
-                    "params": {
-                        k: params.get(k)
-                        for k in (
-                            "stop_price", "target_price", "entry_price", "quantity",
-                        )
-                    },
-                    "outcome": STRUCTURE_OK,
-                    "reason_code": STRUCTURE_OK,
-                    "message": "dispatched",
-                }
-            )
+                        plan.entry_price = fill_px
+                    save_trade_plan(plan)
+                append_structure_event(
+                    {
+                        "source": "cycle",
+                        "strategy": strat,
+                        "symbol": symbol,
+                        "direction": direction,
+                        "quote": quote_last or fill_px,
+                        "params": {
+                            k: params.get(k)
+                            for k in (
+                                "stop_price", "target_price", "entry_price", "quantity",
+                            )
+                        },
+                        "outcome": STRUCTURE_OK,
+                        "reason_code": STRUCTURE_OK,
+                        "message": "dispatched",
+                    }
+                )
         elif strat in (
             "market_order", "close_option", "limit_order", "stop_order",
         ) and ok_dispatch:
-            close_trade_plan("exit_act")
+            from abcxauto.trade_plan import load_trade_plan, stk_qty_for_symbol
 
-        # Scrape detection from recent fills (BOT+SLD within seconds)
+            plan = load_trade_plan()
+            if plan:
+                # Only clear plan when the plan symbol's STK qty is actually gone.
+                # Partial exits / option-only closes keep the plan.
+                if abs(stk_qty_for_symbol(positions, plan.symbol)) < 1e-9:
+                    close_trade_plan("exit_act")
+                else:
+                    try:
+                        sync_open_risk(
+                            positions,
+                            [],
+                            thesis=str(judgment.get("thesis") or ""),
+                            bump=False,
+                            allow_flat_close=False,
+                        )
+                    except Exception:
+                        pass
+
+        # Secondary scrape detection from fills (BOT+SLD within seconds)
         if symbol and ok_dispatch and strat in ("bracket", "market_bracket"):
             fills: list = []
             try:
@@ -1124,7 +1307,6 @@ async def _post_act_structure_and_plan(
             except Exception:
                 fills = []
             if not fills:
-                # journal fills as fallback
                 try:
                     import sqlite3
                     from abcxauto.memory.journal import get_journal
@@ -1143,9 +1325,10 @@ async def _post_act_structure_and_plan(
             if detect_scrape_from_fills(fills, symbol=symbol):
                 append_structure_event(
                     {
+                        "source": "cycle",
                         "strategy": strat,
                         "symbol": symbol,
-                        "direction": str(params.get("direction") or ""),
+                        "direction": direction,
                         "quote": quote_last,
                         "outcome": SCRAPE_SUSPECT,
                         "reason_code": SCRAPE_SUSPECT,
@@ -1153,9 +1336,6 @@ async def _post_act_structure_and_plan(
                     }
                 )
                 close_trade_plan("scrape_suspect")
-                # flat book after scrape
-                if not (snap.get("positions") or []):
-                    close_trade_plan("flat_after_scrape")
     except Exception:
         logger.exception("post_act structure/plan failed")
 

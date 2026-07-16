@@ -195,6 +195,7 @@ def append_structure_event(event: dict[str, Any]) -> None:
 
 
 def recent_structure_lessons(limit: int = 5) -> list[dict[str, Any]]:
+    """Prefer live-cycle lessons; skip suite/fixture noise (e.g. SPY @ 500)."""
     path = _path_events()
     if not path.is_file():
         return []
@@ -206,9 +207,22 @@ def recent_structure_lessons(limit: int = 5) -> list[dict[str, Any]]:
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
+                ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(ev, dict):
+                continue
+            src = str(ev.get("source") or "")
+            if src == "suite":
+                continue
+            try:
+                q = float(ev.get("quote") or 0)
+            except (TypeError, ValueError):
+                q = 0.0
+            # Drop obvious fixture quotes from suite dry-runs that leaked in
+            if q == 500.0 and str(ev.get("symbol") or "").upper() == "SPY":
+                continue
+            out.append(ev)
             if len(out) >= limit:
                 break
         return out
