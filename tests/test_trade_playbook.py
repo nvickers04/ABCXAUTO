@@ -86,6 +86,33 @@ def test_playbook_hunt_hides_overlays():
     )
     assert "market_bracket" in text or "bracket" in text
     assert "covered_call" not in text
+    assert "vertical_spread" in text or "iron_condor" in text
+
+
+def test_hunt_allowlist_accepts_vertical_rejects_overlay():
+    ok, _ = check_intent_coherence(
+        {"stance": "hunt", "intent": {"kind": "hunt", "symbol": "SPY"}},
+        "vertical_spread",
+        {"params": {"symbol": "SPY"}},
+    )
+    assert ok is True
+    ok_ic, _ = check_intent_coherence(
+        {"stance": "hunt", "intent": {"kind": "hunt", "symbol": "SPY"}},
+        "iron_condor",
+        {"params": {"symbol": "SPY"}},
+    )
+    assert ok_ic is True
+    ok_roll, reason = check_intent_coherence(
+        {"stance": "hunt", "intent": {"kind": "hunt", "symbol": "SPY"}},
+        "roll_option",
+        {"params": {"symbol": "SPY"}},
+    )
+    assert ok_roll is False
+    assert "contradict" in reason.lower()
+    assert "vertical_spread" in STANCE_ACTIONS["hunt"]
+    assert "roll_option" in STANCE_ACTIONS["manage"]
+    assert "roll_option" in STANCE_ACTIONS["protect"]
+    assert "roll_option" not in STANCE_ACTIONS["hunt"]
 
 
 def test_manage_allowlist_accepts_covered_call_hunt_rejects():
@@ -162,6 +189,7 @@ def test_act_prompt_includes_playbook_for_manage():
     assert "TRADE PLAYBOOK" in prompt
     assert "ORDER EXAMPLES" in prompt
     assert "covered_call" in prompt
+    assert "CONTROLS" in prompt
 
 
 def test_judge_prompt_includes_playbook():
@@ -172,7 +200,7 @@ def test_judge_prompt_includes_playbook():
     )
     prompt = _build_judge_prompt(world)
     assert "TRADE PLAYBOOK" in prompt
-
+    assert "CONTROLS" in prompt
 
 def test_strategy_diversity_observe_only(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))

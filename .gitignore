@@ -1,6 +1,8 @@
 ﻿risk_settings.json
 active_trade_plan.json
+active_trade_plans.json
 last_closed_trade_plan.json
+universe_allowlist.json
 flat_book_streak.json
 idle_streak_state.json
 operator_card.txt

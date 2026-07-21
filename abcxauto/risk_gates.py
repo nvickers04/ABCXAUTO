@@ -18,9 +18,14 @@ from typing import Any, Optional, Tuple
 
 from abcxauto.config import get_config
 from abcxauto.proposals import MANAGEMENT_STRATEGIES, OrderProposal
-from abcxauto.strategy_params import EXIT_ONLY_EXTRA
+from abcxauto.strategy_params import EXIT_ONLY_EXTRA, OPTION_STRATEGIES
 
 logger = logging.getLogger(__name__)
+
+# Always rejected when operator sets defined_risk_only (unlimited / naked risk).
+_DEFINED_RISK_FORBIDDEN = frozenset({"ratio_spread", "jade_lizard"})
+# Short premium naked — rejected when defined_risk_only unless action=BUY.
+_DEFINED_RISK_SHORT_OK_IF_LONG = frozenset({"straddle", "strangle"})
 
 
 def _journal_halt(reason: str, kind: str) -> None:
@@ -58,6 +63,30 @@ def is_exit_or_management(proposal: OrderProposal) -> bool:
     if getattr(proposal.params, "closing_position", False):
         return True
     return False
+
+
+def check_defined_risk_only(proposal: OrderProposal) -> Tuple[bool, str]:
+    """Gate: when defined_risk_only, reject unlimited-risk option shapes.
+
+    Operator control knob — not strategy taste. Returns (ok, reason).
+    """
+    cfg = get_config()
+    if not getattr(cfg, "defined_risk_only", False):
+        return True, "defined_risk_off"
+    strat = str(proposal.strategy or "")
+    if strat in _DEFINED_RISK_FORBIDDEN:
+        return False, (
+            f"defined_risk_only: {strat} has unlimited/naked risk side "
+            "(operator gate)"
+        )
+    if strat in _DEFINED_RISK_SHORT_OK_IF_LONG:
+        action = str(getattr(proposal.params, "action", "BUY") or "BUY").upper()
+        if action == "SELL":
+            return False, (
+                f"defined_risk_only: short {strat} rejected "
+                "(use action=BUY or disable defined_risk_only)"
+            )
+    return True, "ok"
 
 
 def _market_bracket_entry_proxy(params: Any) -> Optional[float]:
@@ -144,6 +173,28 @@ def estimate_notional(proposal: OrderProposal) -> Optional[float]:
         if entry is not None and qty > 0:
             return float(entry) * qty
         return None
+
+    # Cash-secured put: cash reserved ≈ strike × 100 × contracts
+    if strategy == "cash_secured_put":
+        try:
+            strike = float(getattr(params, "strike", 0) or 0)
+            contracts = int(
+                getattr(params, "contracts", None)
+                or getattr(params, "quantity", 0)
+                or 0
+            )
+        except (TypeError, ValueError):
+            return None
+        if strike > 0 and contracts > 0:
+            return strike * 100.0 * contracts
+        return None
+
+    # Option premium notional when limit_price present (multiplier 100)
+    if strategy in OPTION_STRATEGIES and limit is not None and qty > 0:
+        try:
+            return abs(float(limit)) * 100.0 * qty
+        except (TypeError, ValueError):
+            return None
 
     if limit is not None and qty > 0:
         return float(limit) * qty
@@ -312,6 +363,10 @@ class RiskGate:
         if self.is_halted:
             return False, f"Trading halted: {self.halt_reason}"
 
+        ok_dr, why_dr = check_defined_risk_only(proposal)
+        if not ok_dr:
+            return False, why_dr
+
         try:
             account = await connector.get_account_summary()
         except Exception as e:
@@ -371,11 +426,15 @@ class RiskGate:
                 )
             notional = estimate_notional(proposal)
             if notional is None:
-                return False, (
-                    "Risk gate: cannot estimate order notional for cash-only sizing "
-                    "(provide entry_price, limit_price, or price_hint)"
-                )
-            if notional > cash:
+                if proposal.strategy in OPTION_STRATEGIES:
+                    # Option premium often unknown without limit; broker enforces margin.
+                    pass
+                else:
+                    return False, (
+                        "Risk gate: cannot estimate order notional for cash-only sizing "
+                        "(provide entry_price, limit_price, or price_hint)"
+                    )
+            elif notional > cash:
                 return False, (
                     f"Cash-only: order notional {notional:.2f} exceeds available cash "
                     f"{cash:.2f}"
@@ -384,16 +443,20 @@ class RiskGate:
         if cfg.max_position_pct > 0:
             notional = estimate_notional(proposal)
             if notional is None:
-                return False, (
-                    "Risk gate: cannot estimate order notional for position sizing "
-                    "(provide entry_price, limit_price, or price_hint)"
-                )
-            max_notional = (cfg.max_position_pct / 100.0) * net_liq
-            if notional > max_notional:
-                return False, (
-                    f"Position size {notional:.2f} exceeds max "
-                    f"{cfg.max_position_pct}% of NL ({max_notional:.2f})"
-                )
+                if proposal.strategy in OPTION_STRATEGIES:
+                    pass
+                else:
+                    return False, (
+                        "Risk gate: cannot estimate order notional for position sizing "
+                        "(provide entry_price, limit_price, or price_hint)"
+                    )
+            else:
+                max_notional = (cfg.max_position_pct / 100.0) * net_liq
+                if notional > max_notional:
+                    return False, (
+                        f"Position size {notional:.2f} exceeds max "
+                        f"{cfg.max_position_pct}% of NL ({max_notional:.2f})"
+                    )
 
         if cfg.max_risk_per_trade_pct > 0 and proposal.strategy in (
             "bracket",
@@ -427,13 +490,6 @@ class RiskGate:
             if open_count >= cfg.max_open_positions:
                 return False, (
                     f"Max open positions reached ({open_count} >= {cfg.max_open_positions})"
-                )
-
-        if cfg.max_daily_trades > 0:
-            count = self.daily_trade_count()
-            if count >= cfg.max_daily_trades:
-                return False, (
-                    f"Max daily trades reached ({count} >= {cfg.max_daily_trades})"
                 )
 
         return True, "ok"

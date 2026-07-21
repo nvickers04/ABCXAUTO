@@ -17,9 +17,7 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "max_risk_per_trade_pct": 1.5,
         "daily_loss_limit_pct": 5.0,
         "max_position_pct": 12.0,
-        "max_open_positions": 6,
-        "max_daily_trades": 12,
-        "min_reward_risk": 1.0,
+        "max_peak_drawdown_pct": 12.0,
     },
     "market_bracket": {
         "symbol": "NVDA",
@@ -82,6 +80,7 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "expiration": "20260709",
         "strike": 745.0,
         "right": "C",
+        "quantity": 1,
     },
     "trailing_stop": {
         "symbol": "SPY",
@@ -318,16 +317,31 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
 SENDABLE_TYPES = frozenset(ORDER_EXAMPLES)
 
 
-def format_order_examples() -> str:
-    """Compact prompt section: how to send each allowlisted order type."""
+def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -> str:
+    """Compact prompt section: how to send each Act-allowlisted order type.
+
+    When ``allowed`` is None, uses ``abcxauto.agent_loop.ALLOWED_ACTIONS`` so
+    prompts never teach strategies Act will block.
+    """
+    if allowed is None:
+        try:
+            from abcxauto.agent_loop import ALLOWED_ACTIONS as _allowed
+        except Exception:
+            _allowed = frozenset(ORDER_EXAMPLES)
+        allowed = _allowed
     lines = [
-        "ORDER EXAMPLES (how to send)",
-        "Emit strategy + params. Entries need stop+target. Bare stock orders are exit-only.",
+        "ORDER EXAMPLES (how to send — Act allowlist only)",
+        "Emit strategy + params. Stock entries need stop+target. Bare stock orders are exit-only.",
         "Use direction LONG|SHORT for bracket/market_bracket/oca/trailing. hold params are {}.",
+        "Stock exits: target_conId + quantity (partial trim OK; omit qty = full). After trim check stop_qty_fact.",
+        "close_option: prefer conId; quantity may be partial. roll_option for lifecycle.",
+        "Option multi-leg / CSP: match param shapes below; gates may reject unlimited risk.",
         "set_risk retunes capital knobs inside the operator risk_posture envelope (no broker send).",
         "",
     ]
     for name in sorted(ORDER_EXAMPLES):
+        if name not in allowed:
+            continue
         params = ORDER_EXAMPLES[name]
         lines.append(f"{name}: {json.dumps(params, separators=(',', ':'))}")
     return "\n".join(lines)

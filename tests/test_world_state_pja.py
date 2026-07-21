@@ -36,9 +36,9 @@ def test_build_world_state_regime_and_portfolio(tmp_path, monkeypatch):
         "portfolio_state": {},
     }
     opps = [
-        {"symbol": "QQQ", "bias": "LONG", "score": 0.8},
-        {"symbol": "IWM", "bias": "LONG", "score": 0.7},
-        {"symbol": "SPY", "bias": "LONG", "score": 0.6},
+        {"symbol": "QQQ", "bias": "LONG", "score": 0.8, "above_sma20": True},
+        {"symbol": "IWM", "bias": "LONG", "score": 0.7, "above_sma20": True},
+        {"symbol": "SPY", "bias": "LONG", "score": 0.6, "above_sma20": True},
     ]
     ws = build_world_state(cycle=2, snap=snap, opportunities=opps, news_items=[])
     d = ws.to_dict()

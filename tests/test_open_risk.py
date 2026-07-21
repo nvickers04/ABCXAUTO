@@ -201,12 +201,40 @@ def _hunt_j() -> dict:
     }
 
 
-def test_hunt_rejected_when_book_not_flat():
+def test_hunt_allowed_when_book_open_and_capacity():
+    """Open book is not a hunt ban — capacity Fact gates new risk."""
     from abcxauto.agent_loop import validate_judgment
 
-    ok, reason, _ = validate_judgment(_hunt_j(), _judgment_world())
+    ok, reason, _ = validate_judgment(
+        _hunt_j(),
+        _judgment_world(
+            capacity={
+                "open_count": 1,
+                "max_open_positions": 6,
+                "slots_left": 5,
+                "allows_new_risk": True,
+            },
+        ),
+    )
+    assert ok is True, reason
+
+
+def test_hunt_rejected_when_capacity_full():
+    from abcxauto.agent_loop import validate_judgment
+
+    ok, reason, _ = validate_judgment(
+        _hunt_j(),
+        _judgment_world(
+            capacity={
+                "open_count": 6,
+                "max_open_positions": 6,
+                "slots_left": 0,
+                "allows_new_risk": False,
+            },
+        ),
+    )
     assert ok is False
-    assert "open book" in reason.lower() or "manage" in reason.lower()
+    assert "capacity" in reason.lower()
 
 
 def test_hunt_rejected_while_flat_streak_unconfirmed(tmp_path, monkeypatch):
@@ -296,3 +324,39 @@ def test_options_only_closes_stk_plan(tmp_path, monkeypatch):
     }
     assert maybe_close_on_confirmed_flat([opt], needed=2) is True
     assert load_trade_plan() is None
+
+
+def test_multi_plan_reconcile_and_migrate(tmp_path, monkeypatch):
+    from abcxauto.trade_plan import (
+        load_trade_plans,
+        reconcile_open_risk_all,
+        save_trade_plans,
+    )
+
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLANS_PATH", str(tmp_path / "plans.json"))
+    clear_trade_plan()
+    # Legacy single-file migrate
+    save_trade_plan(
+        ActiveTradePlan(symbol="SPY", direction="LONG", quantity=8, stop_price=500.0)
+    )
+    plans = load_trade_plans()
+    assert len(plans) >= 1
+    assert plans[0].symbol == "SPY"
+    # Two STK rows → two plans
+    positions = [_pos("SPY", qty=8, avg=500, mv=4000), _pos("QQQ", qty=5, avg=400, mv=2000)]
+    orders = _stop_tgt("SPY", stop=495) + [
+        {
+            "symbol": "QQQ",
+            "action": "SELL",
+            "order_type": "STP",
+            "aux_price": 390,
+            "order_id": 21,
+        }
+    ]
+    out = reconcile_open_risk_all(positions, orders, plans)
+    assert len(out) == 2
+    syms = {p.symbol for p in out}
+    assert syms == {"SPY", "QQQ"}
+    save_trade_plans(out)
+    assert "BOOK" in format_open_risk_line() or "SPY" in format_open_risk_line()

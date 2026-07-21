@@ -15,7 +15,7 @@ import asyncio
 import logging
 import time
 from datetime import date, datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from abcxauto.broker.order_types import is_stop_order
 from abcxauto.config import get_config
@@ -24,6 +24,8 @@ from abcxauto.memory import get_journal
 from abcxauto.risk_gates import get_risk_gate
 
 logger = logging.getLogger(__name__)
+
+WakeCallback = Callable[[str], None]
 
 
 def _account_float(account: Dict[str, Any], *keys: str) -> Optional[float]:
@@ -175,14 +177,25 @@ def build_protection_report(
 class PortfolioMonitor:
     """Owns the background task; exposes the latest snapshot for the UI."""
 
-    def __init__(self, session: Any, connector: Any) -> None:
+    def __init__(
+        self,
+        session: Any,
+        connector: Any,
+        *,
+        on_wake: WakeCallback | None = None,
+    ) -> None:
         self.session = session
         self.connector = connector
         self.cfg = get_config()
+        self.on_wake = on_wake
         self.latest: Dict[str, Any] = {}
         self._task: Optional[asyncio.Task] = None
         self._last_review_ts: float = 0.0
         self._last_unprotected_nudge_ts: float = 0.0
+        self._prev_unprotected: set[str] = set()
+        self._prev_fill_keys: set[str] = set()
+        self._prev_halted: bool = False
+        self._prev_had_plan: bool | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -220,12 +233,75 @@ class PortfolioMonitor:
                 logger.warning(f"Monitor tick failed: {e}")
             await asyncio.sleep(max(5, self.cfg.monitor_poll_s))
 
+    def _emit_wake(self, reason: str) -> None:
+        cb = self.on_wake
+        if cb is None:
+            return
+        try:
+            cb(reason)
+        except Exception as e:
+            logger.warning("Monitor wake callback failed: %s", e)
+
+    def _detect_pace_wakes(self, snapshot: Dict[str, Any]) -> None:
+        """Whitelist wakes for Pro adaptive pacing (no Grok from monitor)."""
+        if self.on_wake is None:
+            return
+        prot = snapshot.get("protection") or {}
+        unprot = {str(s).upper() for s in (prot.get("unprotected_symbols") or []) if s}
+        if unprot - self._prev_unprotected:
+            self._emit_wake("unprotected")
+        self._prev_unprotected = unprot
+
+        halted = bool(get_risk_gate().is_halted)
+        if halted and not self._prev_halted:
+            self._emit_wake("halt")
+        self._prev_halted = halted
+
+        fill_keys: set[str] = set()
+        for f in snapshot.get("fills") or []:
+            if not isinstance(f, dict):
+                continue
+            key = str(
+                f.get("execId")
+                or f.get("exec_id")
+                or f.get("execution_id")
+                or f.get("orderId")
+                or f.get("order_id")
+                or ""
+            )
+            if not key:
+                key = (
+                    f"{f.get('symbol')}|{f.get('side')}|{f.get('shares')}|{f.get('time')}"
+                )
+            fill_keys.add(key)
+        if self._prev_fill_keys and (fill_keys - self._prev_fill_keys):
+            self._emit_wake("fill")
+        if fill_keys:
+            self._prev_fill_keys = fill_keys
+
+        try:
+            from abcxauto.trade_plan import load_trade_plan
+
+            has_plan = load_trade_plan() is not None
+        except Exception:
+            has_plan = False
+        positions = snapshot.get("positions") or []
+        flat_book = not any(
+            abs(float(p.get("quantity") or p.get("position") or 0)) > 1e-9
+            for p in positions
+            if isinstance(p, dict)
+        )
+        if self._prev_had_plan is True and not has_plan and flat_book:
+            self._emit_wake("flat_confirmed")
+        self._prev_had_plan = has_plan
+
     async def _tick(self) -> None:
         snapshot = await self.take_snapshot()
         if not snapshot:
             return
 
         await self._maybe_auto_panic(snapshot)
+        self._detect_pace_wakes(snapshot)
 
         now = time.monotonic()
         unprotected = snapshot["protection"]["unprotected_symbols"]

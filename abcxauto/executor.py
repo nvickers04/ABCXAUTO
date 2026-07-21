@@ -172,6 +172,47 @@ def _opt_field_matches(pos: Dict[str, Any], key: str, expected: Any) -> bool:
     return str(raw).upper() == str(expected).upper()
 
 
+async def _resolve_close_option_kwargs(
+    kwargs: Dict[str, Any],
+    proposal: OrderProposal,
+    connector: Any,
+) -> Dict[str, Any]:
+    """Fill expiration/strike/right from ledger when Act sent conId."""
+    params = proposal.params
+    target_con = getattr(params, "conId", None) or getattr(params, "con_id", None)
+    if target_con is None:
+        return kwargs
+    target_con = str(target_con).strip()
+    try:
+        positions = await connector.get_positions()
+    except Exception:
+        return kwargs
+    for p in positions or []:
+        sec = str(p.get("sec_type") or p.get("secType") or "").upper()
+        if not sec.startswith("OPT"):
+            continue
+        if str(p.get("conId") or p.get("con_id") or "") != target_con:
+            continue
+        out = dict(kwargs)
+        out["symbol"] = str(p.get("symbol") or out.get("symbol") or "").upper()
+        exp = p.get("expiration") or p.get("lastTradeDateOrContractMonth")
+        if exp:
+            out["expiration"] = str(exp)
+        if p.get("strike") is not None:
+            out["strike"] = float(p["strike"])
+        if p.get("right"):
+            out["right"] = str(p["right"]).upper()[:1]
+        if out.get("quantity") is None:
+            try:
+                out["quantity"] = abs(int(float(p.get("quantity") or 0)))
+            except (TypeError, ValueError):
+                pass
+        out.pop("conId", None)
+        out.pop("con_id", None)
+        return out
+    return kwargs
+
+
 async def _verify_closes_option(proposal: OrderProposal, connector: Any) -> Optional[Dict[str, Any]]:
     """Return an error dict if close_option would not reduce a matching OPT position.
 
@@ -419,6 +460,8 @@ async def execute_proposal(
     method_name = proposal.gateway_method
     method = getattr(connector, method_name)
     kwargs = proposal.params.model_dump(exclude_none=True)
+    if proposal.strategy == "close_option":
+        kwargs = await _resolve_close_option_kwargs(kwargs, proposal, connector)
     logger.info(f"Executing proposal #{proposal.id}: {method_name}({kwargs})")
     result = await method(**kwargs)
     logger.info(f"Proposal #{proposal.id} result: {result}")

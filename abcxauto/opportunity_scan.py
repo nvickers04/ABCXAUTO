@@ -1,12 +1,14 @@
-"""Market-feature strip for the agent cycle prompt (heuristic ≠ recommendation).
+"""SCAN TAPE — unranked MDA metrics for Grok-operated scanning.
 
-Ranks a small liquid universe from MDA candles/quotes. Never places orders —
-Grok still chooses hold vs action. Internal field name remains ``opportunities``.
+Code fetches candle metrics (typically delayed). Never places orders.
+Internal list field remains ``opportunities`` for journal/UI compat.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import re
 import time
 from typing import Any
 
@@ -15,21 +17,77 @@ logger = logging.getLogger(__name__)
 _CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "ideas": []}
 _CACHE_TTL_S = 150.0
 
-_CORE = ("SPY", "QQQ", "IWM", "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA")
+_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,7}$")
+
+QUOTE_SOURCES_BLOCK = (
+    "QUOTE SOURCES (facts):\n"
+    "- MDA: SCAN TAPE / candles / news — typically ~15m delayed (or delayed "
+    "unless client proves live). Use for discovery only. Do NOT treat tape "
+    "`last` as live for bracket geometry.\n"
+    "- IBKR: book, fills, working orders, and LIVE last for stop/target "
+    "geometry when TWS is connected. Rebuild hunt structure from IBKR live "
+    "(or geometry fails closed)."
+)
 
 
-def _universe(positions: list[dict] | None, *, cap: int = 10) -> list[str]:
+def scan_fetch_cap() -> int:
+    raw = (os.environ.get("ABCXAUTO_SCAN_FETCH_CAP") or "").strip()
+    if not raw:
+        try:
+            from abcxauto.config import get_config
+
+            return max(1, int(getattr(get_config(), "scan_fetch_cap", 8) or 8))
+        except Exception:
+            return 8
+    try:
+        return max(1, min(32, int(raw)))
+    except ValueError:
+        return 8
+
+
+def normalize_tickers(raw: Any, *, cap: int | None = None) -> list[str]:
+    """Uppercase, dedupe, regex-validate; apply fetch cap."""
+    limit = scan_fetch_cap() if cap is None else max(1, int(cap))
+    out: list[str] = []
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        items = []
+    for item in items:
+        sym = str(item or "").upper().strip()
+        if not sym or not _TICKER_RE.match(sym):
+            continue
+        if sym not in out:
+            out.append(sym)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _universe(positions: list[dict] | None, *, cap: int = 40) -> list[str]:
+    """Book symbols (manage) + Universe sandbox legal set (unranked)."""
     out: list[str] = []
     for p in positions or []:
         sym = str((p or {}).get("symbol") or "").upper().strip()
-        if sym and sym not in out:
+        if sym and _TICKER_RE.match(sym) and sym not in out:
             out.append(sym)
-    for sym in _CORE:
-        if sym not in out:
-            out.append(sym)
-        if len(out) >= cap:
-            break
-    return out[:cap]
+    try:
+        from abcxauto.universe import legal_symbols
+
+        for sym in legal_symbols():
+            if sym not in out:
+                out.append(sym)
+            if len(out) >= max(1, int(cap)):
+                break
+    except Exception:
+        logger.exception("legal universe load failed")
+        for sym in ("SPY", "QQQ", "IWM"):
+            if sym not in out:
+                out.append(sym)
+    # Book first, then legal-set order — never alphabetize (A* tape bias).
+    return out[: max(1, int(cap))]
 
 
 def _closes(candles: list[dict]) -> list[float]:
@@ -51,8 +109,8 @@ def _sma(values: list[float], n: int) -> float | None:
     return sum(window) / float(n)
 
 
-def score_symbol(candles: list[dict], symbol: str) -> dict[str, Any] | None:
-    """Heuristic rank from SMA/momentum rules. Returns None if insufficient data."""
+def metrics_for_symbol(candles: list[dict], symbol: str) -> dict[str, Any] | None:
+    """Raw MDA candle metrics — no score, no shell bias tip."""
     closes = _closes(candles)
     if len(closes) < 30:
         return None
@@ -63,100 +121,141 @@ def score_symbol(candles: list[dict], symbol: str) -> dict[str, Any] | None:
         return None
     ret5 = (last / closes[-6] - 1.0) if len(closes) >= 6 else 0.0
     dist20 = (last - sma20) / sma20
-    score = 0.0
-    bias = "LONG"
-    rule_id = "neutral_weak_rule"
-    if sma50 and sma20 >= sma50 and -0.04 <= dist20 <= 0.01 and ret5 > -0.03:
-        score = 0.55 + max(0.0, 0.04 + dist20) * 5.0 + max(0.0, ret5) * 2.0
-        bias = "LONG"
-        rule_id = "sma20_pullback_rule"
-    elif dist20 > 0.03 and ret5 > 0.01:
-        score = 0.35 + min(0.25, ret5 * 3.0)
-        bias = "LONG"
-        rule_id = "momentum_continuation_rule"
-    elif sma50 and sma20 < sma50 and dist20 > 0.02:
-        score = 0.30 + min(0.2, dist20)
-        bias = "SHORT"
-        rule_id = "sma50_extension_short_rule"
-    else:
-        score = 0.15 + max(0.0, -abs(dist20)) * 0.5
-        bias = "LONG" if dist20 >= 0 else "SHORT"
-        rule_id = "neutral_weak_rule"
-    # Liquidity bump for index names (heuristic weight, not advice).
-    if symbol in ("SPY", "QQQ"):
-        score += 0.08
-    stop_hint = 0.008
-    target_hint = 0.016
     return {
-        "symbol": symbol,
-        "score": round(min(1.0, score), 3),
-        "bias": bias,
-        "rule_id": rule_id,
-        "note": rule_id,  # compat for older readers
+        "symbol": str(symbol or "").upper(),
         "last": round(last, 4),
+        "mda_last": round(last, 4),
         "sma20": round(sma20, 4),
+        "sma50": round(sma50, 4) if sma50 is not None else None,
         "dist20": round(dist20, 5),
         "ret5": round(ret5, 5),
-        "stop_hint_pct": stop_hint,
-        "target_hint_pct": target_hint,
+        "above_sma20": bool(last >= sma20),
+        "source": "mda",
+        "freshness": "delayed",
     }
 
 
-def format_market_features(ideas: list[dict[str, Any]], *, limit: int = 5) -> str:
-    """Prompt block: labeled heuristics, not trade recommendations."""
+def score_symbol(candles: list[dict], symbol: str) -> dict[str, Any] | None:
+    """Compat alias — returns metrics only (no score). Prefer metrics_for_symbol."""
+    return metrics_for_symbol(candles, symbol)
+
+
+def tape_symbols(ideas: list[dict[str, Any]] | None) -> list[str]:
+    out: list[str] = []
+    for idea in ideas or []:
+        sym = str(idea.get("symbol") or "").upper().strip()
+        if sym and sym not in out:
+            out.append(sym)
+    return out
+
+
+def dismiss_cites_tape(dismissed: str, ideas: list[dict[str, Any]] | None) -> bool:
+    blob = (dismissed or "").upper()
+    if not blob:
+        return False
+    for sym in tape_symbols(ideas):
+        if sym and sym in blob:
+            return True
+    return False
+
+
+def format_scan_tape(ideas: list[dict[str, Any]], *, limit: int = 12) -> str:
+    """Unranked SCAN TAPE prompt block (MDA delayed facts)."""
     if not ideas:
         return (
-            "MARKET FEATURES (heuristic ranking — not trade recommendations; "
-            "Grok decides): (none — MDA thin or no rule matches)"
+            "SCAN TAPE (unranked MDA metrics — typically delayed; "
+            "Grok operates the scanner; not trade recommendations): "
+            "(none — MDA thin or unconfigured)"
         )
     lines = [
-        "MARKET FEATURES (heuristic ranking — not trade recommendations; Grok decides).",
-        "Rebuild stop/target from LIVE quote each hunt; never reuse a prior stop price.",
-        "heuristic_rank is a sort key only — not edge or a directive to trade.",
+        "SCAN TAPE (unranked MDA metrics — typically delayed / not live).",
+        "Grok operates the scanner: pick hunt symbol from tape (or scan_request "
+        "more symbols). Shell does not recommend a top idea.",
+        "Do NOT use tape last for bracket geometry — use IBKR live on Act.",
+        QUOTE_SOURCES_BLOCK,
     ]
-    for i, idea in enumerate(ideas[:limit], 1):
-        try:
-            last = float(idea.get("last") or 0)
-        except (TypeError, ValueError):
-            last = 0.0
-        try:
-            sp = float(idea.get("stop_hint_pct") or 0.008)
-            tp = float(idea.get("target_hint_pct") or 0.016)
-        except (TypeError, ValueError):
-            sp, tp = 0.008, 0.016
-        bias = str(idea.get("bias") or "LONG").upper()
-        rule = str(idea.get("rule_id") or idea.get("note") or "rule")
-        abs_bit = ""
-        if last > 0:
-            if bias == "SHORT":
-                stop_px, tgt_px = last * (1 + sp), last * (1 - tp)
-            else:
-                stop_px, tgt_px = last * (1 - sp), last * (1 + tp)
-            abs_bit = f" last={last:.2f} geom_hint stop≈{stop_px:.2f} tgt≈{tgt_px:.2f}"
-        dist = idea.get("dist20")
-        ret5 = idea.get("ret5")
-        stats = ""
-        if dist is not None or ret5 is not None:
-            stats = f" dist20={dist} ret5={ret5}"
+    rows = sorted(
+        ideas[: max(1, limit)],
+        key=lambda x: str(x.get("symbol") or ""),
+    )
+    for idea in rows:
+        sym = idea.get("symbol")
+        src = idea.get("source") or "mda"
+        fresh = idea.get("freshness") or "delayed"
         lines.append(
-            f"{i}. {idea.get('symbol')} bias={bias} "
-            f"heuristic_rank={idea.get('score')} rule_id={rule}{stats}{abs_bit}"
+            f"- {sym} source={src} freshness={fresh} "
+            f"mda_last={idea.get('mda_last') or idea.get('last')} "
+            f"sma20={idea.get('sma20')} sma50={idea.get('sma50')} "
+            f"dist20={idea.get('dist20')} ret5={idea.get('ret5')} "
+            f"above_sma20={idea.get('above_sma20')}"
         )
     return "\n".join(lines)
 
 
-def format_opportunities(ideas: list[dict[str, Any]], *, limit: int = 5) -> str:
-    """Alias — prefer ``format_market_features``."""
-    return format_market_features(ideas, limit=limit)
+def format_market_features(ideas: list[dict[str, Any]], *, limit: int = 12) -> str:
+    """Alias — prefer ``format_scan_tape``."""
+    return format_scan_tape(ideas, limit=limit)
+
+
+def format_opportunities(ideas: list[dict[str, Any]], *, limit: int = 12) -> str:
+    return format_scan_tape(ideas, limit=limit)
+
+
+def merge_tape(
+    base: list[dict[str, Any]], extra: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    by_sym: dict[str, dict[str, Any]] = {}
+    for row in list(base or []) + list(extra or []):
+        sym = str(row.get("symbol") or "").upper()
+        if not sym:
+            continue
+        by_sym[sym] = row
+    return [by_sym[k] for k in sorted(by_sym.keys())]
+
+
+async def fetch_scan_metrics(
+    symbols: list[str] | None,
+    *,
+    cap: int | None = None,
+) -> list[dict[str, Any]]:
+    """Fetch MDA candle metrics for Grok-proposed or seed symbols."""
+    syms = normalize_tickers(symbols or [], cap=cap)
+    if not syms:
+        return []
+    ideas: list[dict[str, Any]] = []
+    try:
+        from abcxauto.marketdata.client import get_marketdata_client
+
+        client = get_marketdata_client()
+        configured = getattr(client, "is_configured", False)
+        if callable(configured):
+            configured = configured()
+        if not configured:
+            return []
+        for sym in syms:
+            try:
+                candles = await client.get_stock_candles(
+                    sym, resolution="D", countback=120
+                )
+            except Exception:
+                logger.exception("fetch_scan_metrics candles failed for %s", sym)
+                candles = []
+            row = metrics_for_symbol(candles or [], sym)
+            if row:
+                ideas.append(row)
+    except Exception:
+        logger.exception("fetch_scan_metrics failed")
+        return []
+    return merge_tape([], ideas)
 
 
 async def scan_opportunities(
     positions: list[dict] | None = None,
     *,
     force: bool = False,
-    cap: int = 10,
+    cap: int = 40,
 ) -> list[dict[str, Any]]:
-    """Fetch candles, score, return ranked features (cached ~2.5 min)."""
+    """Seed SCAN TAPE: book + Universe sandbox legal set, unranked (cached)."""
     symbols = _universe(positions, cap=cap)
     key = ",".join(symbols)
     now = time.monotonic()
@@ -168,33 +267,7 @@ async def scan_opportunities(
     ):
         return list(_CACHE["ideas"])
 
-    ideas: list[dict[str, Any]] = []
-    try:
-        from abcxauto.marketdata.client import get_marketdata_client
-
-        client = get_marketdata_client()
-        configured = getattr(client, "is_configured", False)
-        if callable(configured):
-            configured = configured()
-        if not configured:
-            _CACHE.update(ts=now, key=key, ideas=[])
-            return []
-        for sym in symbols:
-            try:
-                candles = await client.get_stock_candles(
-                    sym, resolution="D", countback=120
-                )
-            except Exception:
-                logger.exception("opportunity_scan candles failed for %s", sym)
-                candles = []
-            scored = score_symbol(candles or [], sym)
-            if scored:
-                ideas.append(scored)
-    except Exception:
-        logger.exception("scan_opportunities failed")
-        ideas = []
-
-    ideas.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
+    ideas = await fetch_scan_metrics(symbols, cap=cap)
     _CACHE.update(ts=now, key=key, ideas=list(ideas))
     return ideas
 

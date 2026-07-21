@@ -1,7 +1,8 @@
-"""ActiveTradePlan — durable open-trade lifecycle across cycles.
+"""ActiveTradePlan(s) — durable open-trade lifecycle across cycles.
 
-Broker book is source of truth: reconcile_open_risk keeps/rebuilds the plan
-across Stop/Start; confirmed-flat (not a single empty snap) closes it.
+Multi-plan book: ``active_trade_plans.json`` holds all open STK plans.
+Legacy ``active_trade_plan.json`` migrates on load. Broker book is source of
+truth; confirmed-flat (not a single empty snap) closes plans.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_PATH = _REPO_ROOT / "active_trade_plan.json"
+_DEFAULT_PLANS_PATH = _REPO_ROOT / "active_trade_plans.json"
 _DEFAULT_FLAT_STREAK_PATH = _REPO_ROOT / "flat_book_streak.json"
 _CONFIRMED_FLAT_N = 2
 
@@ -53,70 +55,185 @@ class ActiveTradePlan:
 
 
 def _path() -> Path:
+    """Legacy single-plan path (still written as mirror of primary for tools)."""
     import os
 
     raw = os.environ.get("ABCXAUTO_TRADE_PLAN_PATH", "").strip()
     return Path(raw) if raw else _DEFAULT_PATH
 
 
+def _plans_path() -> Path:
+    import os
+
+    raw = os.environ.get("ABCXAUTO_TRADE_PLANS_PATH", "").strip()
+    if raw:
+        return Path(raw)
+    # Derive beside legacy single-plan path when tests set TRADE_PLAN_PATH.
+    single = _path()
+    if single != _DEFAULT_PATH:
+        return single.with_name("active_trade_plans.json")
+    return _DEFAULT_PLANS_PATH
+
+
+def load_trade_plans(path: Path | None = None) -> list[ActiveTradePlan]:
+    """All open plans (multi-plan book). Migrates legacy single-file if needed."""
+    plans_p = path or _plans_path()
+    legacy = _path()
+    out: list[ActiveTradePlan] = []
+    if plans_p.is_file():
+        try:
+            raw = json.loads(plans_p.read_text(encoding="utf-8"))
+            items = raw.get("plans") if isinstance(raw, dict) else raw
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict) or item.get("status") == "closed":
+                        continue
+                    try:
+                        out.append(ActiveTradePlan.from_dict(item))
+                    except Exception:
+                        continue
+        except Exception:
+            logger.exception("load_trade_plans failed")
+    if not out and legacy.is_file():
+        try:
+            raw = json.loads(legacy.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and raw.get("status") != "closed":
+                out = [ActiveTradePlan.from_dict(raw)]
+                save_trade_plans(out, plans_p)
+        except Exception:
+            logger.exception("legacy trade plan migrate failed")
+    return out
+
+
+def save_trade_plans(
+    plans: list[ActiveTradePlan], path: Path | None = None
+) -> Path:
+    plans_p = path or _plans_path()
+    open_plans = [p for p in plans if p and str(p.status or "open") != "closed"]
+    plans_p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"plans": [p.to_dict() for p in open_plans], "ts": _utc_now()}
+    plans_p.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    # Mirror primary to legacy path for scripts / older readers.
+    legacy = _path()
+    if open_plans:
+        primary = open_plans[0]
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(
+            json.dumps(primary.to_dict(), indent=2) + "\n", encoding="utf-8"
+        )
+    else:
+        try:
+            if legacy.is_file():
+                legacy.unlink()
+        except OSError:
+            pass
+    return plans_p
+
+
 def load_trade_plan(path: Path | None = None) -> Optional[ActiveTradePlan]:
-    p = path or _path()
-    if not p.is_file():
-        return None
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict) or raw.get("status") == "closed":
-            return None
-        return ActiveTradePlan.from_dict(raw)
-    except Exception:
-        logger.exception("load_trade_plan failed")
-        return None
+    """Primary plan (first in multi-plan book) — back-compat."""
+    plans = load_trade_plans()
+    if plans:
+        return plans[0]
+    # Explicit legacy path override (tests sometimes pass path=)
+    if path is not None and path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and raw.get("status") != "closed":
+                return ActiveTradePlan.from_dict(raw)
+        except Exception:
+            logger.exception("load_trade_plan failed")
+    return None
 
 
 def save_trade_plan(plan: ActiveTradePlan, path: Path | None = None) -> Path:
-    p = path or _path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8")
-    return p
+    """Upsert one plan into the multi-plan book by symbol."""
+    plans = load_trade_plans()
+    sym = str(plan.symbol or "").upper()
+    plan.symbol = sym
+    replaced = False
+    for i, p in enumerate(plans):
+        if str(p.symbol or "").upper() == sym:
+            plans[i] = plan
+            replaced = True
+            break
+    if not replaced:
+        plans.append(plan)
+    return save_trade_plans(plans)
 
 
 def clear_trade_plan(path: Path | None = None) -> None:
-    p = path or _path()
-    try:
-        if p.is_file():
-            p.unlink()
-    except OSError:
-        logger.exception("clear_trade_plan failed")
+    """Clear entire multi-plan book (+ legacy file)."""
+    for p in (_plans_path(), _path()):
+        try:
+            if p.is_file():
+                p.unlink()
+        except OSError:
+            logger.exception("clear_trade_plan failed for %s", p)
 
 
-def close_trade_plan(reason: str = "", path: Path | None = None) -> None:
-    plan = load_trade_plan(path)
-    if not plan:
+def close_trade_plan(
+    reason: str = "",
+    path: Path | None = None,
+    *,
+    symbol: str | None = None,
+) -> None:
+    """Close one symbol (or primary if symbol omitted) and persist remaining."""
+    plans = load_trade_plans()
+    if not plans:
         clear_trade_plan(path)
         return
-    plan.status = "closed"
-    plan.closed_at = _utc_now()
-    plan.close_reason = reason or "closed"
-    # Persist closed snapshot then clear active
-    p = path or _path()
-    try:
-        archive = p.with_name("last_closed_trade_plan.json")
-        archive.write_text(json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8")
-    except Exception:
-        pass
-    clear_trade_plan(path)
+    sym = (symbol or "").upper() or str(plans[0].symbol or "").upper()
+    closed: ActiveTradePlan | None = None
+    kept: list[ActiveTradePlan] = []
+    for p in plans:
+        if str(p.symbol or "").upper() == sym:
+            p.status = "closed"
+            p.closed_at = _utc_now()
+            p.close_reason = reason or "closed"
+            closed = p
+        else:
+            kept.append(p)
+    if closed is not None:
+        try:
+            archive = _plans_path().with_name("last_closed_trade_plan.json")
+            archive.write_text(
+                json.dumps(closed.to_dict(), indent=2) + "\n", encoding="utf-8"
+            )
+        except Exception:
+            pass
+    if kept:
+        save_trade_plans(kept)
+    else:
+        clear_trade_plan(path)
 
 
 def bump_plan_cycle(path: Path | None = None) -> Optional[ActiveTradePlan]:
-    plan = load_trade_plan(path)
-    if not plan:
+    """Bump cycles on all open plans; time-stop any that expire."""
+    plans = load_trade_plans()
+    if not plans:
         return None
-    plan.cycles_open = int(plan.cycles_open or 0) + 1
-    if plan.max_hold_cycles and plan.cycles_open >= int(plan.max_hold_cycles):
-        close_trade_plan("time_stop", path)
-        return None
-    save_trade_plan(plan, path)
-    return plan
+    kept: list[ActiveTradePlan] = []
+    for plan in plans:
+        plan.cycles_open = int(plan.cycles_open or 0) + 1
+        if plan.max_hold_cycles and plan.cycles_open >= int(plan.max_hold_cycles):
+            plan.status = "closed"
+            plan.closed_at = _utc_now()
+            plan.close_reason = "time_stop"
+            try:
+                archive = _plans_path().with_name("last_closed_trade_plan.json")
+                archive.write_text(
+                    json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
+        else:
+            kept.append(plan)
+    if kept:
+        save_trade_plans(kept)
+        return kept[0]
+    clear_trade_plan(path)
+    return None
 
 
 def plan_from_hunt_action(act: dict, thesis: str = "") -> Optional[ActiveTradePlan]:
@@ -249,6 +366,90 @@ def stk_qty_for_symbol(positions: list[dict] | None, symbol: str) -> float:
     return total
 
 
+def working_stop_qty(open_orders: list[dict] | None, symbol: str, direction: str) -> float | None:
+    """Total working stop-order quantity for symbol (exit side). None if none."""
+    sym = (symbol or "").upper()
+    want_exit = "SELL" if str(direction or "LONG").upper() == "LONG" else "BUY"
+    total = 0.0
+    found = False
+    for o in open_orders or []:
+        if _order_symbol(o) != sym:
+            continue
+        action = _order_action(o)
+        if action and action != want_exit:
+            continue
+        otype = _order_type(o)
+        if not any(k in otype for k in ("STP", "TRAIL", "STOP")):
+            continue
+        q = _f(o.get("quantity") or o.get("totalQuantity") or o.get("total_quantity"))
+        if q is None:
+            continue
+        found = True
+        total += abs(q)
+    return total if found else None
+
+
+def stop_qty_mismatch_fact(
+    positions: list[dict] | None,
+    open_orders: list[dict] | None,
+    plan: ActiveTradePlan | None = None,
+) -> dict[str, Any] | None:
+    """Fact: working stop qty vs STK held (after trim, stop may be oversized).
+
+    Checks every open plan (or ``plan`` if given). First mismatch wins for
+    prompt Fact; ``all`` lists every plan checked.
+    """
+    plans = [plan] if plan is not None else load_trade_plans()
+    if plan is not None and not plans:
+        plans = [plan]
+    if not plans:
+        return None
+    checked: list[dict[str, Any]] = []
+    first_bad: dict[str, Any] | None = None
+    for p in plans:
+        if p is None or not p.symbol:
+            continue
+        held = abs(stk_qty_for_symbol(positions, p.symbol))
+        if held < 1e-9:
+            continue
+        stop_q = working_stop_qty(open_orders, p.symbol, p.direction)
+        if stop_q is None:
+            row = {
+                "symbol": p.symbol,
+                "held_qty": held,
+                "stop_order_qty": None,
+                "mismatch": True,
+                "note": "no working stop qty found",
+                "heuristic": "stop_qty vs held — heuristic ≠ recommendation",
+            }
+        else:
+            mismatch = abs(stop_q - held) > 0.51
+            row = {
+                "symbol": p.symbol,
+                "held_qty": held,
+                "stop_order_qty": stop_q,
+                "mismatch": mismatch,
+                "heuristic": "stop_qty vs held — heuristic ≠ recommendation",
+            }
+            if mismatch:
+                row["note"] = (
+                    "stop order qty ≠ held — after trim, resize stop "
+                    "(modify/oca/cancel+replace)"
+                )
+        checked.append(row)
+        if row.get("mismatch") and first_bad is None:
+            first_bad = row
+    if first_bad is None:
+        if not checked:
+            return None
+        out = dict(checked[0])
+        out["all"] = checked
+        return out
+    out = dict(first_bad)
+    out["all"] = checked
+    return out
+
+
 def book_has_risk(positions: list[dict] | None) -> bool:
     """True if any non-zero position exists (STK/ETF/OPT — blocks false-flat hunt)."""
     for p in positions or []:
@@ -271,6 +472,94 @@ def _avg_cost(pos: dict) -> float | None:
     return None
 
 
+def _refresh_plan_from_row(
+    plan: ActiveTradePlan,
+    row: dict[str, Any],
+    open_orders: list[dict] | None,
+    thesis: str = "",
+) -> ActiveTradePlan:
+    qty_signed = float(row["quantity"])
+    direction = "LONG" if qty_signed > 0 else "SHORT"
+    plan.quantity = abs(qty_signed)
+    plan.direction = direction
+    stop, target = _exits_from_orders(open_orders, plan.symbol, direction)
+    if stop is not None:
+        plan.stop_price = stop
+    if target is not None:
+        plan.target_price = target
+    if plan.entry_price is None:
+        plan.entry_price = _avg_cost(row["raw"])
+    if thesis and not (plan.thesis or "").strip():
+        plan.thesis = thesis[:500]
+    if plan.stop_price is not None:
+        plan.invalidation = f"stop {plan.stop_price}"
+    plan.status = "open"
+    return plan
+
+
+def reconcile_open_risk_all(
+    positions: list[dict] | None,
+    open_orders: list[dict] | None = None,
+    existing_plans: list[ActiveTradePlan] | None = None,
+    *,
+    thesis: str = "",
+) -> list[ActiveTradePlan]:
+    """Keep/rebuild plans for every open STK (multi-plan book)."""
+    plans = list(existing_plans) if existing_plans is not None else load_trade_plans()
+    rows = _stk_rows(positions)
+    if not rows:
+        return []
+
+    by_sym = {r["symbol"]: r for r in rows}
+    by_plan = {str(p.symbol or "").upper(): p for p in plans if p}
+    out: list[ActiveTradePlan] = []
+
+    for sym, row in by_sym.items():
+        if sym in by_plan:
+            out.append(
+                _refresh_plan_from_row(by_plan[sym], row, open_orders, thesis=thesis)
+            )
+        else:
+            qty_signed = float(row["quantity"])
+            direction = "LONG" if qty_signed > 0 else "SHORT"
+            stop, target = _exits_from_orders(open_orders, sym, direction)
+            out.append(
+                ActiveTradePlan(
+                    symbol=sym,
+                    direction=direction,
+                    thesis=(thesis or f"Rehydrated open risk {sym} {direction}")[:500],
+                    invalidation=(
+                        f"stop {stop}" if stop is not None else "stop hit / thesis invalid"
+                    ),
+                    entry_price=_avg_cost(row["raw"]),
+                    stop_price=stop,
+                    target_price=target,
+                    quantity=abs(qty_signed),
+                    cycles_open=0,
+                    status="open",
+                )
+            )
+
+    # Archive plans whose symbols left the STK book
+    for sym, plan in by_plan.items():
+        if sym not in by_sym:
+            try:
+                plan.status = "closed"
+                plan.closed_at = _utc_now()
+                plan.close_reason = "symbol_left_book"
+                archive = _plans_path().with_name("last_closed_trade_plan.json")
+                archive.write_text(
+                    json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
+
+    # Stable order: largest |qty| first (matches _stk_rows)
+    order = {r["symbol"]: i for i, r in enumerate(rows)}
+    out.sort(key=lambda p: order.get(str(p.symbol).upper(), 999))
+    return out
+
+
 def reconcile_open_risk(
     positions: list[dict] | None,
     open_orders: list[dict] | None = None,
@@ -278,59 +567,12 @@ def reconcile_open_risk(
     *,
     thesis: str = "",
 ) -> Optional[ActiveTradePlan]:
-    """Keep/rebuild ActiveTradePlan from broker book (never clears on empty).
-
-    Returns an open plan when STK risk exists; None when book has no STK
-    (caller decides confirmed-flat close separately).
-    """
-    plan = existing_plan if existing_plan is not None else load_trade_plan()
-    rows = _stk_rows(positions)
-    if not rows:
-        return None
-
-    by_sym = {r["symbol"]: r for r in rows}
-    if plan and plan.symbol in by_sym:
-        row = by_sym[plan.symbol]
-        qty = abs(float(row["quantity"]))
-        direction = "LONG" if float(row["quantity"]) > 0 else "SHORT"
-        plan.quantity = qty
-        plan.direction = direction
-        stop, target = _exits_from_orders(open_orders, plan.symbol, direction)
-        if stop is not None:
-            plan.stop_price = stop
-        if target is not None:
-            plan.target_price = target
-        if plan.entry_price is None:
-            plan.entry_price = _avg_cost(row["raw"])
-        if thesis and not (plan.thesis or "").strip():
-            plan.thesis = thesis[:500]
-        if plan.stop_price is not None:
-            plan.invalidation = f"stop {plan.stop_price}"
-        plan.status = "open"
-        return plan
-
-    # Plan symbol gone but other STK remains — archive then rebuild primary.
-    if plan and plan.symbol not in by_sym:
-        close_trade_plan("symbol_left_book", path=None)
-
-    # Rebuild from primary STK risk
-    row = rows[0]
-    symbol = row["symbol"]
-    qty_signed = float(row["quantity"])
-    direction = "LONG" if qty_signed > 0 else "SHORT"
-    stop, target = _exits_from_orders(open_orders, symbol, direction)
-    return ActiveTradePlan(
-        symbol=symbol,
-        direction=direction,
-        thesis=(thesis or f"Rehydrated open risk {symbol} {direction}")[:500],
-        invalidation=f"stop {stop}" if stop is not None else "stop hit / thesis invalid",
-        entry_price=_avg_cost(row["raw"]),
-        stop_price=stop,
-        target_price=target,
-        quantity=abs(qty_signed),
-        cycles_open=0,
-        status="open",
+    """Primary plan after multi-plan reconcile (back-compat)."""
+    existing = [existing_plan] if existing_plan is not None else None
+    plans = reconcile_open_risk_all(
+        positions, open_orders, existing, thesis=thesis
     )
+    return plans[0] if plans else None
 
 
 def _flat_streak_state() -> dict[str, Any]:
@@ -388,7 +630,7 @@ def maybe_close_on_confirmed_flat(
     needed: int = _CONFIRMED_FLAT_N,
     path: Path | None = None,
 ) -> bool:
-    """Close plan only after held→flat transition + ``needed`` empty STK snaps.
+    """Close book only after held→flat transition + ``needed`` empty STK snaps.
 
     Ignores empty books that never saw STK (startup / false-empty before first fill).
     Does not close while any option (or other) risk remains in ``positions``.
@@ -398,27 +640,47 @@ def maybe_close_on_confirmed_flat(
     if rows:
         _save_flat_streak_state(0, True)
         return False
-    # STK gone but options/other remain — close equity plan (stock leg flat).
+    plans = load_trade_plans()
+    # STK gone but options/other remain — close equity plans (stock legs flat).
     if book_has_risk(positions):
-        if load_trade_plan(path):
-            close_trade_plan("stk_flat_options_remain", path)
+        if plans:
+            clear_trade_plan(path)
+            try:
+                last = plans[0]
+                last.status = "closed"
+                last.closed_at = _utc_now()
+                last.close_reason = "stk_flat_options_remain"
+                archive = _plans_path().with_name("last_closed_trade_plan.json")
+                archive.write_text(
+                    json.dumps(last.to_dict(), indent=2) + "\n", encoding="utf-8"
+                )
+            except Exception:
+                pass
             _save_flat_streak_state(0, False)
             return True
         return False
-    if not st.get("ever_held") and not load_trade_plan(path):
-        # Never held in this streak file and no plan — nothing to close.
+    if not st.get("ever_held") and not plans:
         _save_flat_streak_state(0, False)
         return False
-    if not st.get("ever_held") and load_trade_plan(path):
-        # Plan on disk but we never marked held this process — still require
-        # consecutive empties, and set ever_held so we don't wipe on first blip.
+    if not st.get("ever_held") and plans:
         st["ever_held"] = True
     n = int(st.get("empty_count") or 0) + 1
     _save_flat_streak_state(n, True)
     if n < max(1, int(needed)):
         return False
-    if load_trade_plan(path):
-        close_trade_plan("confirmed_flat", path)
+    if plans:
+        clear_trade_plan(path)
+        try:
+            last = plans[0]
+            last.status = "closed"
+            last.closed_at = _utc_now()
+            last.close_reason = "confirmed_flat"
+            archive = _plans_path().with_name("last_closed_trade_plan.json")
+            archive.write_text(
+                json.dumps(last.to_dict(), indent=2) + "\n", encoding="utf-8"
+            )
+        except Exception:
+            pass
         _save_flat_streak_state(0, False)
         return True
     _save_flat_streak_state(0, False)
@@ -434,9 +696,9 @@ def sync_open_risk(
     allow_flat_close: bool = True,
     path: Path | None = None,
 ) -> Optional[ActiveTradePlan]:
-    """Reconcile + persist plan; confirmed-flat close when book empty.
+    """Reconcile + persist all STK plans; confirmed-flat close when book empty.
 
-    When ``bump`` and a plan remains for a held symbol, increment cycles_open.
+    When ``bump``, increment cycles_open on every plan; time-stop individually.
     Set ``allow_flat_close=False`` on Pause/Stop so an empty in-memory snap
     cannot wipe a durable plan.
     """
@@ -444,37 +706,107 @@ def sync_open_risk(
         return None
     if _stk_rows(positions):
         reset_flat_streak()
-    plan = reconcile_open_risk(
-        positions, open_orders, load_trade_plan(path), thesis=thesis
+    plans = reconcile_open_risk_all(
+        positions, open_orders, load_trade_plans(), thesis=thesis
     )
-    if not plan:
-        # Keep disk plan when we are not allowed to flat-close (pause/stop).
+    if not plans:
         if not allow_flat_close:
             return load_trade_plan(path)
         return None
     if bump:
-        plan.cycles_open = int(plan.cycles_open or 0) + 1
-        if plan.max_hold_cycles and plan.cycles_open >= int(plan.max_hold_cycles):
-            save_trade_plan(plan, path)  # persist before time_stop archive
-            close_trade_plan("time_stop", path)
-            return None
-    save_trade_plan(plan, path)
-    return plan
+        kept: list[ActiveTradePlan] = []
+        for plan in plans:
+            plan.cycles_open = int(plan.cycles_open or 0) + 1
+            if plan.max_hold_cycles and plan.cycles_open >= int(plan.max_hold_cycles):
+                plan.status = "closed"
+                plan.closed_at = _utc_now()
+                plan.close_reason = "time_stop"
+                try:
+                    archive = _plans_path().with_name("last_closed_trade_plan.json")
+                    archive.write_text(
+                        json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8"
+                    )
+                except Exception:
+                    pass
+            else:
+                kept.append(plan)
+        plans = kept
+    if plans:
+        save_trade_plans(plans)
+        return plans[0]
+    clear_trade_plan(path)
+    return None
 
 
-def format_open_risk_line(plan: ActiveTradePlan | None) -> str:
-    if not plan:
+def format_open_risk_line(plan: ActiveTradePlan | None = None) -> str:
+    """Primary / multi-plan open-risk line for UI and notes."""
+    plans = [plan] if plan is not None else load_trade_plans()
+    if plan is not None and not plans:
+        plans = [plan]
+    return format_open_risk_lines(plans)
+
+
+def format_open_risk_lines(plans: list[ActiveTradePlan] | None = None) -> str:
+    if plans is None:
+        plans = load_trade_plans()
+    if not plans:
         return "Open risk: (flat / no plan)"
-    bits = [
-        f"OPEN RISK  {plan.symbol} {plan.direction}",
-    ]
-    if plan.quantity is not None:
-        bits.append(f"x{plan.quantity:g}")
-    if plan.entry_price is not None:
-        bits.append(f"@{plan.entry_price}")
-    if plan.stop_price is not None:
-        bits.append(f"stop={plan.stop_price}")
-    if plan.target_price is not None:
-        bits.append(f"tgt={plan.target_price}")
-    bits.append(f"cycles={plan.cycles_open}/{plan.max_hold_cycles}")
-    return "  ".join(bits)
+    if len(plans) == 1:
+        p = plans[0]
+        bits = [f"OPEN RISK  {p.symbol} {p.direction}"]
+        if p.quantity is not None:
+            bits.append(f"x{p.quantity:g}")
+        if p.entry_price is not None:
+            bits.append(f"@{p.entry_price}")
+        if p.stop_price is not None:
+            bits.append(f"stop={p.stop_price}")
+        if p.target_price is not None:
+            bits.append(f"tgt={p.target_price}")
+        bits.append(f"cycles={p.cycles_open}/{p.max_hold_cycles}")
+        return "  ".join(bits)
+    parts = []
+    for p in plans:
+        stop_s = f"{p.stop_price}" if p.stop_price is not None else "?"
+        parts.append(f"{p.symbol} {p.direction} x{p.quantity:g} stop={stop_s}")
+    return f"OPEN RISK BOOK ({len(plans)}): " + " | ".join(parts)
+
+
+def open_position_count(positions: list[dict] | None) -> int:
+    """Non-zero position rows (STK/OPT/…) — same counting as max_open_positions gate."""
+    n = 0
+    for p in positions or []:
+        try:
+            qty = float(
+                p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0
+            )
+        except (TypeError, ValueError):
+            continue
+        if qty != 0:
+            n += 1
+    return n
+
+
+def capacity_fact(
+    positions: list[dict] | None,
+    *,
+    max_open_positions: int = 0,
+) -> dict[str, Any]:
+    """Fact: slots used vs max_open_positions (0 max = unlimited)."""
+    used = open_position_count(positions)
+    max_n = int(max_open_positions or 0)
+    if max_n <= 0:
+        return {
+            "open_count": used,
+            "max_open_positions": 0,
+            "slots_left": None,
+            "allows_new_risk": True,
+            "note": "max_open_positions disabled (unlimited capacity Fact)",
+        }
+    left = max(0, max_n - used)
+    return {
+        "open_count": used,
+        "max_open_positions": max_n,
+        "slots_left": left,
+        "allows_new_risk": left > 0,
+        "note": f"{used}/{max_n} open; {left} slot(s) for new risk",
+    }

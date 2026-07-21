@@ -22,6 +22,7 @@ from abcxauto.config import (
     risk_envelope_snapshot,
     risk_settings_path,
     setup_file_logging,
+    update_controls_config,
     update_risk_config,
 )
 from abcxauto.broker.connection import LIVE_CONFIRM_PHRASE
@@ -53,6 +54,8 @@ LOGO_SRC = "abcxauto_logo.png"
 NAV = [
     ("overview", "Dashboard", ft.Icons.DASHBOARD_OUTLINED, ft.Icons.DASHBOARD),
     ("positions", "Positions", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED, ft.Icons.ACCOUNT_BALANCE_WALLET),
+    ("controls", "Controls", ft.Icons.TUNE_OUTLINED, ft.Icons.TUNE),
+    ("universe", "Universe", ft.Icons.PUBLIC_OUTLINED, ft.Icons.PUBLIC),
     ("risk", "Risk", ft.Icons.SHIELD_OUTLINED, ft.Icons.SHIELD),
     ("scorecard", "Scorecard", ft.Icons.BAR_CHART_OUTLINED, ft.Icons.BAR_CHART),
     ("suite", "Test Suite", ft.Icons.SCIENCE_OUTLINED, ft.Icons.SCIENCE),
@@ -60,13 +63,6 @@ NAV = [
 _SCORECARD_REFRESH_S = 3.0
 TITLE = "ABCXAUTO Pro v0.4"
 PRO_TITLE = TITLE
-
-# Dashboard sub-tabs (center column only)
-DASH_TABS = (
-    ("book", "Book"),
-    ("agent", "Agent"),
-)
-
 
 class ProTerminal:
     def __init__(self, page: ft.Page):
@@ -117,6 +113,10 @@ class ProTerminal:
         )
         self.lbl_recent_fills = ft.Text(
             "No fills this session", color=MUTED, size=12, selectable=True
+        )
+        self.lbl_dash_pace = ft.Text("Pace: —", size=13, color=MUTED, selectable=True)
+        self.lbl_dash_attention = ft.Text(
+            "Attention: —", size=12, color=MUTED, selectable=True
         )
         self.lbl_proposal = ft.Text(
             "No proposal yet — Start agent or wait for a cycle.",
@@ -195,7 +195,7 @@ class ProTerminal:
         )
         self.lbl_risk_envelope = ft.Text("", size=12, color=MUTED, selectable=True)
         self.risk_dd_posture = ft.Dropdown(
-            label="Risk posture",
+            label="Capacity posture",
             value="balanced",
             options=[
                 ft.dropdown.Option("defensive", "Defensive"),
@@ -214,31 +214,175 @@ class ProTerminal:
         self.risk_sw_auto_panic = ft.Switch(value=True, active_color=BLUE)
         self.risk_sw_defined = ft.Switch(value=False, active_color=BLUE)
         self.risk_sw_cash = ft.Switch(value=False, active_color=BLUE)
-        self.risk_tf: dict[str, ft.TextField] = {}
-        for key, hint in (
-            ("max_risk_per_trade_pct", "Max risk per trade % (agent)"),
-            ("daily_loss_limit_pct", "Daily loss % NetLiq"),
-            ("max_position_pct", "Max position % NetLiq"),
-            ("max_open_positions", "Max open positions"),
-            ("max_daily_trades", "Max daily trades"),
-            ("min_reward_risk", "Min reward:risk"),
-            ("max_peak_drawdown_pct", "Max peak drawdown %"),
-            ("max_option_premium_pct", "Max option premium %"),
+        # Risk capital sliders (% of NetLiq / drawdown).
+        self.risk_labels: dict[str, ft.Text] = {}
+        self.risk_sliders: dict[str, ft.Slider] = {}
+        for key, title, left, right, vmax in (
+            ("max_risk_per_trade_pct", "Max risk / trade % NL", "0.25%", "6%", 6.0),
+            ("daily_loss_limit_pct", "Daily loss limit % NL", "1%", "15%", 15.0),
+            ("max_position_pct", "Max position % NL", "2%", "35%", 35.0),
+            ("max_peak_drawdown_pct", "Peak drawdown %", "0=off", "35%", 35.0),
+            ("max_option_premium_pct", "Max option premium %", "0=off", "12%", 12.0),
         ):
-            self.risk_tf[key] = ft.TextField(
-                label=hint,
-                value="0",
-                dense=True,
-                text_size=13,
-                color=TEXT,
-                label_style=ft.TextStyle(color=MUTED, size=12),
-                bgcolor=SURFACE,
-                border_color=BORDER,
-                focused_border_color=BLUE,
-                cursor_color=TEXT,
-                width=280,
-                read_only=False,
+            val_lbl = ft.Text("0", size=13, weight=ft.FontWeight.W_600, color=TEXT, width=44)
+            self.risk_labels[key] = val_lbl
+
+            def _on_risk(e, k=key, lbl=val_lbl):
+                v = round(float(e.control.value or 0), 2)
+                lbl.value = f"{v:g}"
+                try:
+                    self._safe_update()
+                except Exception:
+                    pass
+
+            self.risk_sliders[key] = ft.Slider(
+                min=0,
+                max=vmax,
+                divisions=max(1, int(vmax * 4)),
+                value=0,
+                label="{value}",
+                active_color=BLUE,
+                inactive_color=BORDER,
+                on_change=_on_risk,
+                expand=True,
             )
+            self.risk_sliders[key].data = (title, left, right)
+        # Controls dials — attention + toolbox + book capacity.
+        self.control_labels: dict[str, ft.Text] = {}
+        self.control_sliders: dict[str, ft.Slider] = {}
+        for key, title, left, right in (
+            (
+                "control_deliberation_pct",
+                "Deliberation (System 1 ↔ System 2)",
+                "S1 lean / quiet when protected",
+                "S2 mega-worker / require Act",
+            ),
+            (
+                "control_budget_pct",
+                "Intelligence budget",
+                "protect API $",
+                "more frequent Grok",
+            ),
+            (
+                "control_frequency_pct",
+                "Trade frequency",
+                "patient — few entries / quality",
+                "higher rate OK — process/streams",
+            ),
+            (
+                "control_rotation_pct",
+                "Capital rotation",
+                "hold protected book OK",
+                "redeploy / free cash for better setups",
+            ),
+            (
+                "control_complexity_pct",
+                "Structure complexity",
+                "stock brackets / exits only",
+                "full multi-leg toolbox",
+            ),
+        ):
+            val_lbl = ft.Text("50", size=13, weight=ft.FontWeight.W_600, color=TEXT, width=36)
+            self.control_labels[key] = val_lbl
+
+            def _on_change(e, k=key, lbl=val_lbl):
+                v = int(round(float(e.control.value or 0)))
+                lbl.value = str(v)
+                try:
+                    self._safe_update()
+                except Exception:
+                    pass
+
+            self.control_sliders[key] = ft.Slider(
+                min=0,
+                max=100,
+                divisions=20,
+                value=50,
+                label="{value}",
+                active_color=BLUE,
+                inactive_color=BORDER,
+                on_change=_on_change,
+                expand=True,
+            )
+            self.control_sliders[key].data = (title, left, right)
+        self.capacity_label = ft.Text("6", size=13, weight=ft.FontWeight.W_600, color=TEXT, width=36)
+
+        def _on_cap(e):
+            self.capacity_label.value = str(int(round(float(e.control.value or 0))))
+            try:
+                self._safe_update()
+            except Exception:
+                pass
+
+        self.capacity_slider = ft.Slider(
+            min=0,
+            max=25,
+            divisions=25,
+            value=6,
+            label="{value}",
+            active_color=BLUE,
+            inactive_color=BORDER,
+            on_change=_on_cap,
+            expand=True,
+        )
+        # Universe sandbox checkboxes + legal-set browser
+        from abcxauto.universe import ARENA_CATALOG, arena_checkbox_label, load_allowlist
+
+        self.universe_checks: dict[str, ft.Checkbox] = {}
+        for arena_id in ARENA_CATALOG:
+            self.universe_checks[arena_id] = ft.Checkbox(
+                label=arena_checkbox_label(arena_id),
+                value=arena_id in (load_allowlist().get("enabled_arenas") or []),
+                fill_color=BLUE,
+            )
+        self.universe_custom_tf = ft.TextField(
+            label="Custom tickers (comma-separated)",
+            value=",".join(load_allowlist().get("custom_symbols") or []),
+            dense=True,
+            text_size=13,
+            color=TEXT,
+            bgcolor=SURFACE,
+            border_color=BORDER,
+            focused_border_color=BLUE,
+            expand=True,
+        )
+        self.universe_exclude_tf = ft.TextField(
+            label="Exclude tickers",
+            value=",".join(load_allowlist().get("exclude_symbols") or []),
+            dense=True,
+            text_size=13,
+            color=TEXT,
+            bgcolor=SURFACE,
+            border_color=BORDER,
+            focused_border_color=BLUE,
+            expand=True,
+        )
+        self.universe_filter_tf = ft.TextField(
+            label="Filter legal set",
+            hint_text="symbol / arena / source — display only, not ranked",
+            dense=True,
+            text_size=13,
+            color=TEXT,
+            bgcolor=SURFACE,
+            border_color=BORDER,
+            focused_border_color=BLUE,
+            expand=True,
+            on_change=self._on_universe_filter,
+        )
+        self.lbl_universe_status = ft.Text("", size=12, color=MUTED, selectable=True)
+        self.lbl_universe_hint = ft.Text(
+            "Save keeps arenas. Refresh pulls IBKR membership (MDA seed if offline).",
+            size=12,
+            color=MUTED,
+            selectable=True,
+        )
+        self.universe_legal_list = ft.Column(spacing=2, tight=True, scroll=ft.ScrollMode.AUTO)
+        self.lbl_agent_universe = ft.Text(
+            "Universe: —",
+            size=12,
+            color=MUTED,
+            selectable=True,
+        )
         # Hydrate from risk_settings.json immediately (not only when Risk tab opens).
         try:
             load_risk_settings()
@@ -283,10 +427,10 @@ class ProTerminal:
         self.sidebar_labels: dict[str, ft.Text] = {}
         self.sidebar_icon_pair: dict[str, tuple] = {}
         self.lbl_center_title = ft.Text("Dashboard", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
-        self.dash_tab = "book"
+        self.dash_tab = "live"  # compat; Dashboard is a single surface now
         self.dash_tab_labels: dict[str, ft.Text] = {}
         self.dash_tab_bars: dict[str, ft.Container] = {}
-        self.dash_tabs_row = ft.Container(visible=True)
+        self.dash_tabs_row = ft.Container(visible=False, height=0)
         self.btn_run = self._btn("Start agent", WHITE, self._toggle_run)
         self.btn_run.tooltip = (
             "Start the Grok agent loop (connects IBKR if needed; requires XAI_API_KEY)"
@@ -478,53 +622,18 @@ class ProTerminal:
         )
 
     def _center_column(self) -> ft.Container:
-        def _dash_tab(key: str, label: str) -> ft.Container:
-            on = key == self.dash_tab
-            txt = ft.Text(
-                label,
-                size=15,
-                weight=ft.FontWeight.BOLD if on else ft.FontWeight.W_500,
-                color=TEXT if on else MUTED,
-            )
-            bar = ft.Container(
-                height=4,
-                width=max(28, len(label) * 7),
-                bgcolor=BLUE if on else BG,
-                border_radius=999,
-            )
-            self.dash_tab_labels[key] = txt
-            self.dash_tab_bars[key] = bar
-            return ft.Container(
-                expand=True,
-                ink=True,
-                on_click=lambda e, k=key: self._set_dash_tab(k),
-                content=ft.Column(
-                    [
-                        ft.Container(
-                            padding=ft.Padding.symmetric(vertical=12),
-                            alignment=ft.Alignment.CENTER,
-                            content=txt,
-                        ),
-                        ft.Container(alignment=ft.Alignment.CENTER, content=bar),
-                    ],
-                    spacing=0,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                ),
-            )
-
-        self.dash_tabs_row = ft.Container(
-            border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
-            content=ft.Row(
-                [_dash_tab(k, label) for k, label in DASH_TABS],
-                spacing=0,
-            ),
+        self.lbl_center_subtitle = ft.Text(
+            "Live ops while the agent runs — facts only, shell does not rank.",
+            size=12,
+            color=MUTED,
         )
         header = ft.Container(
             bgcolor=BG,
-            padding=ft.Padding.only(left=16, right=16, top=14, bottom=0),
+            padding=ft.Padding.only(left=16, right=16, top=14, bottom=10),
+            border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
             content=ft.Column(
-                [self.lbl_center_title, self.dash_tabs_row],
-                spacing=8,
+                [self.lbl_center_title, self.lbl_center_subtitle],
+                spacing=4,
             ),
         )
         return ft.Container(
@@ -718,27 +827,47 @@ class ProTerminal:
         titles = {
             "overview": "Dashboard",
             "positions": "Positions",
+            "controls": "Controls",
+            "universe": "Universe",
             "risk": "Risk",
             "scorecard": "Scorecard",
             "suite": "Test Suite",
         }
+        subtitles = {
+            "overview": "Live ops while the agent runs — facts only, shell does not rank.",
+            "positions": "Book table + working orders + session fills.",
+            "controls": "Attention + toolbox — disjoint from Risk and Universe.",
+            "universe": "Scanner sandbox — legal names for hunt / scan_request.",
+            "risk": "Capital survival — $/%% gates and halt.",
+            "scorecard": "Forward-test journal — gates, equity, dispatches.",
+            "suite": "Paper order gym — place/cancel mechanics.",
+        }
         self.lbl_center_title.value = titles.get(key, "Dashboard")
-        self.dash_tabs_row.visible = key == "overview"
+        if hasattr(self, "lbl_center_subtitle"):
+            self.lbl_center_subtitle.value = subtitles.get(key, "")
+            self.lbl_center_subtitle.visible = bool(subtitles.get(key))
         builders = {
             "overview": self._page_overview,
             "positions": self._page_positions,
+            "controls": self._page_controls,
+            "universe": self._page_universe,
             "risk": self._page_risk,
             "scorecard": self._page_scorecard,
             "suite": self._page_suite,
         }
-        if key == "risk":
+        if key in ("risk", "controls"):
             try:
                 load_risk_settings()
                 self._load_risk_form()
             except Exception:
-                logger.exception("risk form reload before nav failed")
+                logger.exception("risk/controls form reload before nav failed")
+        if key == "universe":
+            try:
+                self._load_universe_form()
+            except Exception:
+                logger.exception("universe form reload failed")
         self.content.content = builders.get(key, self._page_overview)()
-        if key == "risk":
+        if key in ("risk", "controls"):
             self._load_risk_form()
         if key == "scorecard":
             self._refresh_scorecard(force=True)
@@ -747,19 +876,8 @@ class ProTerminal:
         self._safe_update()
 
     def _set_dash_tab(self, key: str) -> None:
-        # Log folded into Agent — keep old key working for callers/tests.
-        if key == "log":
-            key = "agent"
-        self.dash_tab = key
-        for k, label in DASH_TABS:
-            on = k == key
-            if k in self.dash_tab_labels:
-                self.dash_tab_labels[k].weight = (
-                    ft.FontWeight.BOLD if on else ft.FontWeight.W_500
-                )
-                self.dash_tab_labels[k].color = TEXT if on else MUTED
-            if k in self.dash_tab_bars:
-                self.dash_tab_bars[k].bgcolor = BLUE if on else BG
+        """Compat no-op — Dashboard is a single live-ops surface."""
+        self.dash_tab = key or "live"
         if self.tab == "overview":
             self.content.content = self._page_overview()
         self._safe_update()
@@ -915,84 +1033,70 @@ class ProTerminal:
         )
 
     def _page_overview(self) -> ft.Column:
-        panels = {
-            "book": self._dash_book,
-            "agent": self._dash_agent,
-            "log": self._dash_agent,  # Log folded into Agent
-        }
-        body = panels.get(self.dash_tab, self._dash_book)()
-        return ft.Column([body], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
-
-    def _dash_book(self) -> ft.Column:
         return ft.Column(
-            [
-                self._section_refresh(
-                    "Book",
-                    self._refresh_book_tab,
-                    ft.Text(
-                        "Live IBKR order blotter — working (unfilled) and session fills. "
-                        "Positions live on the Positions page.",
-                        size=12,
-                        color=MUTED,
-                    ),
-                ),
-                self._section("Working", self.lbl_working_orders),
-                self._section("Fills", self.lbl_recent_fills),
-            ],
+            [self._dash_live()],
             spacing=0,
+            expand=True,
+            scroll=ft.ScrollMode.AUTO,
         )
 
-    def _dash_agent(self) -> ft.Column:
-        """Combined Now + Activity — one place for latest PJA state and the feed."""
-        mode_stats = ft.Column(
+    def _dash_live(self) -> ft.Column:
+        """Single Dashboard — insight while the agent is running."""
+        status = ft.Row(
             [
-                self._stat_line("Mode", self.lbl_mode),
-                self._stat_line("Cycles", self.lbl_cycles),
-                self._stat_line("Risk", self.lbl_risk),
+                self._card("Mode", self.lbl_mode),
+                self._card("Cycles", self.lbl_cycles),
+                self._card("Risk", self.lbl_risk),
+                self._card("Halt", self.lbl_book_halt),
+                self._card("Unprotected", self.lbl_book_unprotected),
+                self._card("Day PnL", self.lbl_book_pnl),
             ],
-            spacing=4,
-            tight=True,
+            spacing=8,
+            wrap=True,
         )
         return ft.Column(
             [
                 self._section_refresh(
-                    "Agent",
+                    "Live",
                     self._refresh_agent_tab,
                     ft.Text(
-                        "Perceive -> Judge -> Act — latest cycle on top, full Activity below.",
+                        "What matters this second: open risk, last cycle, pace. "
+                        "Orders & fills → Positions. Shell does not rank.",
                         size=12,
                         color=MUTED,
                     ),
-                    mode_stats,
+                    status,
+                    self.lbl_dash_pace,
+                    self.lbl_dash_attention,
+                    self.lbl_pulse_narrative,
                 ),
                 self._section(
                     "Now",
                     self.lbl_agent_now,
-                    self.lbl_agent_structure,
                     self.lbl_agent_plan,
+                    self.lbl_agent_structure,
                 ),
                 self._section(
-                    "World",
-                    self.lbl_agent_world,
-                    self.lbl_agent_posture,
-                    self.lbl_agent_opps,
-                ),
-                self._section(
-                    "Judgment",
+                    "Last cycle",
                     self.lbl_agent_judgment,
                     self.lbl_agent_read,
-                ),
-                self._section(
-                    "Action",
                     self.brain_action,
                     self.brain_rationale,
                     self.lbl_proposal,
                     self.lbl_agent_params,
                 ),
                 self._section(
+                    "Context",
+                    self.lbl_agent_world,
+                    self.lbl_agent_posture,
+                    self.lbl_agent_universe,
+                    self.lbl_book_decision,
+                    self.lbl_agent_opps,
+                ),
+                self._section(
                     "Activity",
                     ft.Text(
-                        "Newest cycles first — JUDGE / ACT, blocks, fills, connect/errors.",
+                        "Newest first — JUDGE / ACT, blocks, fills, pace, connect.",
                         size=12,
                         color=MUTED,
                     ),
@@ -1002,16 +1106,24 @@ class ProTerminal:
             spacing=0,
         )
 
+    def _dash_book(self) -> ft.Column:
+        """Compat — blotter moved to Positions."""
+        return self._dash_live()
+
+    def _dash_agent(self) -> ft.Column:
+        """Compat shim → live Dashboard."""
+        return self._dash_live()
+
     def _dash_log(self) -> ft.Column:
-        """Compat shim — Log tab merged into Agent."""
-        return self._dash_agent()
+        """Compat shim → live Dashboard."""
+        return self._dash_live()
 
     def _refresh_book_tab(self, _=None) -> None:
         err = self.engine.request_snapshot()
         if err:
             self._toast(err, color=AMBER)
         else:
-            self._toast("Refreshing orders & fills…", color=BLUE)
+            self._toast("Refreshing book snapshot…", color=BLUE)
         self._sync_widgets()
         self._safe_update()
 
@@ -1032,15 +1144,256 @@ class ProTerminal:
         except Exception:
             pass
         if err:
-            self._toast("Agent view refreshed (broker snapshot unavailable)", color=AMBER)
+            self._toast("Dashboard refreshed (broker snapshot unavailable)", color=AMBER)
         else:
-            self._toast("Refreshing agent…", color=BLUE)
+            self._toast("Refreshing dashboard…", color=BLUE)
         self._sync_widgets()
         self._safe_update()
 
     def _refresh_log_tab(self, _=None) -> None:
-        """Compat — same as agent refresh after Log merge."""
+        """Compat — same as dashboard refresh."""
         self._refresh_agent_tab(_)
+
+    def _control_row(self, key: str) -> ft.Column:
+        slider = self.control_sliders[key]
+        title, left, right = slider.data
+        return ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Text(title, size=13, weight=ft.FontWeight.W_600, color=TEXT),
+                        self.control_labels[key],
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                slider,
+                ft.Row(
+                    [
+                        ft.Text(f"0 · {left}", size=11, color=MUTED, expand=True),
+                        ft.Text(f"{right} · 100", size=11, color=MUTED),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+            ],
+            spacing=2,
+            tight=True,
+        )
+
+    def _risk_row(self, key: str) -> ft.Column:
+        slider = self.risk_sliders[key]
+        title, left, right = slider.data
+        return ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Text(title, size=13, weight=ft.FontWeight.W_600, color=TEXT),
+                        self.risk_labels[key],
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                slider,
+                ft.Row(
+                    [
+                        ft.Text(f"0 · {left}", size=11, color=MUTED, expand=True),
+                        ft.Text(f"{right}", size=11, color=MUTED),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+            ],
+            spacing=2,
+            tight=True,
+        )
+
+    def _page_controls(self) -> ft.Column:
+        dials = ft.Column(
+            [
+                ft.Text(
+                    "How the agent works the book — attention, frequency, structures, slots. "
+                    "Universe (scanner sandbox) is its own tab. Risk owns capital death knobs. "
+                    "Goal: book return on startup cash > cost of the model.",
+                    size=12,
+                    color=MUTED,
+                ),
+                self._control_row("control_deliberation_pct"),
+                self._control_row("control_budget_pct"),
+                self._control_row("control_frequency_pct"),
+                self._control_row("control_rotation_pct"),
+                self._control_row("control_complexity_pct"),
+                ft.Container(height=4),
+                ft.Row(
+                    [
+                        ft.Text(
+                            "Book capacity (max open positions)",
+                            size=13,
+                            weight=ft.FontWeight.W_600,
+                            color=TEXT,
+                        ),
+                        self.capacity_label,
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                self.capacity_slider,
+                ft.Row(
+                    [
+                        ft.Text("0 · unlimited gate off", size=11, color=MUTED, expand=True),
+                        ft.Text("25 slots", size=11, color=MUTED),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                ft.Text(
+                    "Capital rotation is process only — shell never auto-sells. "
+                    "High + thin cash → Grok is authorized to trim/exit to free room.",
+                    size=11,
+                    color=MUTED,
+                ),
+                ft.Container(height=4),
+                ft.Row(
+                    [self._btn("Save controls", BLUE, self._save_controls)],
+                    spacing=10,
+                ),
+            ],
+            spacing=12,
+            tight=True,
+        )
+        return ft.Column(
+            [
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                    border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+                    content=ft.Column(
+                        [
+                            ft.Text("Controls", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
+                            ft.Text(
+                                "Deliberation · Budget · Frequency · Rotation · Complexity · "
+                                "Capacity. Disjoint from Risk and Universe.",
+                                color=MUTED,
+                                size=14,
+                            ),
+                        ],
+                        spacing=6,
+                    ),
+                ),
+                ft.Container(
+                    padding=16,
+                    expand=True,
+                    content=ft.Column(
+                        [
+                            self.lbl_risk_status,
+                            ft.Container(height=8),
+                            self._section("Attention · toolbox · capacity", dials),
+                        ],
+                        scroll=ft.ScrollMode.AUTO,
+                        spacing=8,
+                    ),
+                ),
+            ],
+            expand=True,
+            spacing=0,
+        )
+
+    def _page_universe(self) -> ft.Column:
+        from abcxauto.universe import ARENA_CATALOG
+
+        groups: dict[str, list] = {}
+        for arena_id, meta in ARENA_CATALOG.items():
+            g = str(meta.get("group") or "other")
+            groups.setdefault(g, []).append(self.universe_checks[arena_id])
+        group_titles = {
+            "caps": "Cap bands",
+            "scans": "Live scans",
+            "etfs": "Index ETFs",
+            "commodities": "Commodities / macro",
+            "industries": "Industries",
+        }
+        sections = []
+        for g, checks in groups.items():
+            sections.append(
+                self._section(
+                    group_titles.get(g, g.replace("_", " ").title()),
+                    ft.Column(checks, spacing=2, tight=True),
+                )
+            )
+        self._render_universe_legal_list()
+        legal_panel = ft.Container(
+            bgcolor=SURFACE,
+            border=ft.Border.all(1, BORDER),
+            border_radius=12,
+            padding=12,
+            content=ft.Column(
+                [
+                    ft.Text(
+                        "Legal set (arena / scan order — not ranked)",
+                        size=13,
+                        weight=ft.FontWeight.W_600,
+                        color=TEXT,
+                    ),
+                    self.universe_filter_tf,
+                    ft.Container(
+                        height=260,
+                        content=self.universe_legal_list,
+                    ),
+                ],
+                spacing=8,
+                tight=True,
+            ),
+        )
+        body = ft.Column(
+            [
+                ft.Text(
+                    "Enable arenas → Refresh pulls membership from IBKR when connected. "
+                    "MDA-seed arenas are honest static lists (not live IBKR industry scans). "
+                    "Grok picks inside; shell never ranks.",
+                    size=12,
+                    color=MUTED,
+                ),
+                *sections,
+                ft.Container(height=4),
+                self.universe_custom_tf,
+                self.universe_exclude_tf,
+                self.lbl_universe_status,
+                self.lbl_universe_hint,
+                ft.Row(
+                    [
+                        self._btn("Save arenas", BLUE, self._save_universe),
+                        self._btn("Refresh membership", GREEN, self._refresh_universe),
+                    ],
+                    spacing=10,
+                ),
+                legal_panel,
+            ],
+            spacing=10,
+            tight=True,
+        )
+        return ft.Column(
+            [
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                    border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+                    content=ft.Column(
+                        [
+                            ft.Text("Universe", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
+                            ft.Text(
+                                "Scanner sandbox — which names are legal for hunt / scan_request.",
+                                color=MUTED,
+                                size=14,
+                            ),
+                        ],
+                        spacing=6,
+                    ),
+                ),
+                ft.Container(
+                    padding=16,
+                    expand=True,
+                    content=ft.Column(
+                        [body],
+                        scroll=ft.ScrollMode.AUTO,
+                        spacing=8,
+                    ),
+                ),
+            ],
+            expand=True,
+            spacing=0,
+        )
 
     def _page_risk(self) -> ft.Column:
         def _sw_row(label: str, sw: ft.Switch) -> ft.Row:
@@ -1049,17 +1402,17 @@ class ProTerminal:
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             )
 
-        posture_block = ft.Column(
+        preset = ft.Column(
             [
                 self.risk_dd_posture,
                 ft.Text(
-                    "Sets the envelope width and reseeds default capital knobs. "
-                    "Does not save your manual gate edits — use Save risk for that.",
+                    "Capital preset only — seeds Risk sliders. Never touches Controls "
+                    "or Universe.",
                     size=12,
                     color=MUTED,
                 ),
                 ft.Row(
-                    [self._btn("Apply posture", BLUE, self._apply_posture)],
+                    [self._btn("Apply capital preset", BLUE, self._apply_posture)],
                     spacing=10,
                 ),
             ],
@@ -1074,12 +1427,12 @@ class ProTerminal:
                 _sw_row("Cash-only sizing (block SHORT stock)", self.risk_sw_cash),
                 ft.Container(height=8),
                 ft.Text(
-                    "Gate values (clamped to current posture envelope). "
-                    "Save risk does not change posture.",
+                    "How the account can die — size, daily loss, drawdown. "
+                    "Exits always bypass halt.",
                     size=12,
                     color=MUTED,
                 ),
-                *self.risk_tf.values(),
+                *[self._risk_row(k) for k in self.risk_sliders],
                 ft.Container(height=4),
                 ft.Row(
                     [self._btn("Save risk", BLUE, self._save_risk_gates)],
@@ -1106,8 +1459,8 @@ class ProTerminal:
                         [
                             ft.Text("Risk", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
                             ft.Text(
-                                "Posture = envelope. Risk gates = capital limits. Apply them separately. "
-                                "Exits always bypass halt.",
+                                "Capital survival gates and halt. Disjoint from Controls "
+                                "and Universe.",
                                 color=MUTED,
                                 size=14,
                             ),
@@ -1124,9 +1477,9 @@ class ProTerminal:
                             self.lbl_risk_status,
                             self.lbl_risk_envelope,
                             ft.Container(height=8),
-                            self._section("Posture", posture_block),
+                            self._section("Capital preset", preset),
                             ft.Container(height=8),
-                            self._section("Risk gates", knobs),
+                            self._section("Gates", knobs),
                             ft.Container(height=8),
                             self._section("Halt", halt_actions),
                         ],
@@ -1145,7 +1498,6 @@ class ProTerminal:
         if posture not in RISK_POSTURES:
             posture = "balanced"
         self.risk_dd_posture.value = posture
-        # Re-bind options so Flet picks up the value after restart.
         self.risk_dd_posture.options = [
             ft.dropdown.Option("defensive", "Defensive"),
             ft.dropdown.Option("balanced", "Balanced"),
@@ -1155,14 +1507,117 @@ class ProTerminal:
         self.risk_sw_auto_panic.value = bool(snap.get("auto_panic_on_breach", False))
         self.risk_sw_defined.value = bool(snap.get("defined_risk_only", False))
         self.risk_sw_cash.value = bool(snap.get("cash_only", False))
-        for key, tf in self.risk_tf.items():
-            val = snap.get(key, 0)
-            if isinstance(val, float) and val == int(val):
-                tf.value = str(int(val))
-            else:
-                tf.value = str(val)
+        for key, slider in self.risk_sliders.items():
+            try:
+                v = float(snap.get(key, 0) or 0)
+            except (TypeError, ValueError):
+                v = 0.0
+            v = max(0.0, min(float(slider.max or 100), v))
+            slider.value = v
+            self.risk_labels[key].value = f"{v:g}"
+        for key, slider in self.control_sliders.items():
+            raw = snap.get(key, 50)
+            if key == "control_complexity_pct" and raw is None:
+                raw = snap.get("control_options_pct", 50)
+            try:
+                v = int(max(0, min(100, int(float(raw)))))
+            except (TypeError, ValueError):
+                v = 50
+            slider.value = float(v)
+            self.control_labels[key].value = str(v)
+        try:
+            cap = int(snap.get("max_open_positions", 0) or 0)
+        except (TypeError, ValueError):
+            cap = 0
+        cap = max(0, min(25, cap))
+        self.capacity_slider.value = float(cap)
+        self.capacity_label.value = str(cap)
         self._sync_risk_envelope_label()
         self._sync_risk_halt_label()
+
+    def _load_universe_form(self) -> None:
+        from abcxauto.universe import (
+            arena_checkbox_label,
+            load_allowlist,
+            universe_status_summary,
+        )
+
+        al = load_allowlist()
+        enabled = set(al.get("enabled_arenas") or [])
+        for arena_id, cb in self.universe_checks.items():
+            cb.value = arena_id in enabled
+            cb.label = arena_checkbox_label(arena_id)
+        self.universe_custom_tf.value = ",".join(al.get("custom_symbols") or [])
+        self.universe_exclude_tf.value = ",".join(al.get("exclude_symbols") or [])
+        self.lbl_universe_status.value = universe_status_summary()
+        self.lbl_universe_status.color = MUTED
+        self._render_universe_legal_list()
+
+    def _on_universe_filter(self, _=None) -> None:
+        self._render_universe_legal_list()
+        self._safe_update()
+
+    def _render_universe_legal_list(self) -> None:
+        from abcxauto.universe import membership_rows
+
+        q = str(getattr(self.universe_filter_tf, "value", None) or "")
+        rows = membership_rows(query=q)
+        controls: list[ft.Control] = []
+        if not rows:
+            controls.append(
+                ft.Text(
+                    "No legal symbols yet — enable arenas and Refresh membership.",
+                    size=12,
+                    color=MUTED,
+                )
+            )
+        else:
+            # Header
+            controls.append(
+                ft.Row(
+                    [
+                        ft.Text("Symbol", size=11, color=MUTED, width=72, weight=ft.FontWeight.W_600),
+                        ft.Text("Arena", size=11, color=MUTED, width=110, weight=ft.FontWeight.W_600),
+                        ft.Text("Source", size=11, color=MUTED, expand=True, weight=ft.FontWeight.W_600),
+                    ],
+                    spacing=8,
+                )
+            )
+            for r in rows[:200]:
+                src = str(r.get("source") or "?")
+                src_color = (
+                    GREEN
+                    if src == "ibkr"
+                    else (BLUE if src in ("custom",) else MUTED)
+                )
+                controls.append(
+                    ft.Row(
+                        [
+                            ft.Text(
+                                str(r.get("symbol") or ""),
+                                size=12,
+                                color=TEXT,
+                                width=72,
+                                weight=ft.FontWeight.W_600,
+                                selectable=True,
+                            ),
+                            ft.Text(
+                                str(r.get("arena") or ""),
+                                size=12,
+                                color=MUTED,
+                                width=110,
+                                selectable=True,
+                            ),
+                            ft.Text(src, size=12, color=src_color, expand=True, selectable=True),
+                        ],
+                        spacing=8,
+                    )
+                )
+            if len(rows) > 200:
+                controls.append(
+                    ft.Text(f"… {len(rows) - 200} more (filter to narrow)", size=11, color=MUTED)
+                )
+        self.universe_legal_list.controls = controls
 
     def _sync_risk_envelope_label(self) -> None:
         try:
@@ -1209,52 +1664,48 @@ class ProTerminal:
             self.lbl_risk_halt.color = MUTED
 
     def _apply_posture(self, _=None) -> None:
-        """Operator posture only — reseeds capital knobs + envelope; ignores gate form edits."""
+        """Risk-tab capital preset — never touches Controls or Universe."""
         try:
             posture = str(self.risk_dd_posture.value or "balanced").strip().lower()
             apply_risk_posture(posture)
             path = risk_settings_path()
             self._load_risk_form()
             self.lbl_risk_status.value = (
-                f"Posture {posture} applied (gates reseeded) → {path}"
+                f"Capital preset {posture} applied → {path}"
             )
             self.lbl_risk_status.color = GREEN
             self.page.overlay.append(
                 ft.SnackBar(
-                    ft.Text(f"Posture {posture} saved"),
+                    ft.Text(f"Capital preset {posture} saved"),
                     bgcolor=BLUE,
                     open=True,
                 )
             )
         except Exception as e:
-            self.lbl_risk_status.value = f"Posture apply failed: {e}"
+            self.lbl_risk_status.value = f"Preset apply failed: {e}"
             self.lbl_risk_status.color = RED
             try:
                 self.page.overlay.append(
-                    ft.SnackBar(ft.Text(f"Posture apply failed: {e}"), bgcolor=RED, open=True)
+                    ft.SnackBar(ft.Text(f"Preset apply failed: {e}"), bgcolor=RED, open=True)
                 )
             except Exception:
                 pass
         self._safe_update()
 
     def _save_risk_gates(self, _=None) -> None:
-        """Save toggles + gate fields only — does not change or reseed posture."""
+        """Save Risk capital toggles + sliders only."""
         try:
-            cfg = get_config()
-            if not (cfg.risk_posture or "").strip():
-                raise ValueError("Apply a posture first so gates have an envelope")
             payload: dict[str, Any] = {
                 "risk_gates_enabled": bool(self.risk_sw_gates.value),
                 "auto_panic_on_breach": bool(self.risk_sw_auto_panic.value),
                 "defined_risk_only": bool(self.risk_sw_defined.value),
                 "cash_only": bool(self.risk_sw_cash.value),
             }
-            int_keys = {"max_open_positions", "max_daily_trades"}
-            for key, tf in self.risk_tf.items():
-                raw = str(tf.value or "").strip()
-                if raw == "":
-                    continue
-                payload[key] = int(float(raw)) if key in int_keys else float(raw)
+            posture = str(self.risk_dd_posture.value or "").strip().lower()
+            if posture in RISK_POSTURES:
+                payload["risk_posture"] = posture
+            for key, slider in self.risk_sliders.items():
+                payload[key] = float(slider.value or 0)
             update_risk_config(**payload)
             path = risk_settings_path()
             self._load_risk_form()
@@ -1277,6 +1728,150 @@ class ProTerminal:
             except Exception:
                 pass
         self._safe_update()
+
+    def _save_controls(self, _=None) -> None:
+        """Persist Controls dials + book capacity — never Risk capital keys."""
+        try:
+            payload = {
+                key: int(round(float(slider.value or 50)))
+                for key, slider in self.control_sliders.items()
+            }
+            payload["max_open_positions"] = int(
+                round(float(self.capacity_slider.value or 0))
+            )
+            update_controls_config(**payload)
+            path = risk_settings_path()
+            self._load_risk_form()
+            self.lbl_risk_status.value = f"Controls saved → {path}"
+            self.lbl_risk_status.color = GREEN
+            self.page.overlay.append(
+                ft.SnackBar(
+                    ft.Text(f"Controls saved to {path.name}"),
+                    bgcolor=BLUE,
+                    open=True,
+                )
+            )
+        except Exception as e:
+            self.lbl_risk_status.value = f"Save controls failed: {e}"
+            self.lbl_risk_status.color = RED
+            try:
+                self.page.overlay.append(
+                    ft.SnackBar(ft.Text(f"Save controls failed: {e}"), bgcolor=RED, open=True)
+                )
+            except Exception:
+                pass
+        self._safe_update()
+
+    def _save_universe(self, _=None) -> None:
+        try:
+            from abcxauto.universe import normalize_symbols, save_allowlist
+
+            enabled = [
+                k for k, cb in self.universe_checks.items() if bool(cb.value)
+            ]
+            custom = normalize_symbols(
+                [x.strip() for x in str(self.universe_custom_tf.value or "").split(",")]
+            )
+            exclude = normalize_symbols(
+                [x.strip() for x in str(self.universe_exclude_tf.value or "").split(",")]
+            )
+            save_allowlist(
+                {
+                    "enabled_arenas": enabled,
+                    "custom_symbols": custom,
+                    "exclude_symbols": exclude,
+                }
+            )
+            self._load_universe_form()
+            self.lbl_universe_hint.value = (
+                "Arenas saved. Legal set is stale until you Refresh membership "
+                "(IBKR when connected)."
+            )
+            self.lbl_universe_hint.color = AMBER
+            self.page.overlay.append(
+                ft.SnackBar(
+                    ft.Text("Arenas saved — Refresh membership to pull IBKR"),
+                    bgcolor=BLUE,
+                    open=True,
+                )
+            )
+        except Exception as e:
+            self.lbl_universe_status.value = f"Save universe failed: {e}"
+            try:
+                self.page.overlay.append(
+                    ft.SnackBar(ft.Text(f"Save failed: {e}"), bgcolor=RED, open=True)
+                )
+            except Exception:
+                pass
+        self._safe_update()
+
+    def _refresh_universe(self, _=None) -> None:
+        async def _run():
+            try:
+                from abcxauto.universe import normalize_symbols, refresh_legal_set, save_allowlist
+
+                enabled = [
+                    k for k, cb in self.universe_checks.items() if bool(cb.value)
+                ]
+                custom = normalize_symbols(
+                    [
+                        x.strip()
+                        for x in str(self.universe_custom_tf.value or "").split(",")
+                    ]
+                )
+                exclude = normalize_symbols(
+                    [
+                        x.strip()
+                        for x in str(self.universe_exclude_tf.value or "").split(",")
+                    ]
+                )
+                save_allowlist(
+                    {
+                        "enabled_arenas": enabled,
+                        "custom_symbols": custom,
+                        "exclude_symbols": exclude,
+                    }
+                )
+                conn = getattr(self.engine, "conn", None)
+                if conn is None:
+                    try:
+                        from abcxauto.broker.connector import get_ibkr_connector
+
+                        conn = get_ibkr_connector()
+                    except Exception:
+                        conn = None
+                al = await refresh_legal_set(conn, persist=True)
+                self._load_universe_form()
+                connected = bool(getattr(conn, "connected", False))
+                self.lbl_universe_hint.value = (
+                    "Membership refreshed from IBKR."
+                    if connected and "ibkr" in str(al.get("source") or "")
+                    else "Membership refreshed (MDA seed / offline path — Connect for IBKR pulls)."
+                )
+                self.lbl_universe_hint.color = GREEN if connected else AMBER
+                self.page.overlay.append(
+                    ft.SnackBar(
+                        ft.Text(
+                            f"Legal set · {len(al.get('legal_symbols') or [])} symbols"
+                        ),
+                        bgcolor=GREEN,
+                        open=True,
+                    )
+                )
+            except Exception as e:
+                self.lbl_universe_status.value = f"Refresh failed: {e}"
+                try:
+                    self.page.overlay.append(
+                        ft.SnackBar(ft.Text(f"Refresh failed: {e}"), bgcolor=RED, open=True)
+                    )
+                except Exception:
+                    pass
+            self._safe_update()
+
+        try:
+            self.page.run_task(_run)
+        except Exception:
+            asyncio.get_event_loop().create_task(_run())
 
     # Back-compat alias if anything still wires the old handler.
     def _apply_risk(self, _=None) -> None:
@@ -1314,12 +1909,39 @@ class ProTerminal:
                     border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
                     content=ft.Column(
                         [
-                            ft.Text("Positions", size=20, weight=ft.FontWeight.BOLD, color=TEXT),
-                            ft.Text(
-                                "conId is the single source of truth — STK and OPT for the same "
-                                "symbol are distinct legs.",
-                                color=MUTED,
-                                size=14,
+                            ft.Row(
+                                [
+                                    ft.Column(
+                                        [
+                                            ft.Text(
+                                                "Positions",
+                                                size=20,
+                                                weight=ft.FontWeight.BOLD,
+                                                color=TEXT,
+                                            ),
+                                            ft.Text(
+                                                "Book + order blotter — conId is the source of truth.",
+                                                color=MUTED,
+                                                size=14,
+                                            ),
+                                        ],
+                                        spacing=4,
+                                        expand=True,
+                                    ),
+                                    ft.Container(
+                                        width=32,
+                                        height=32,
+                                        border_radius=16,
+                                        border=ft.Border.all(1, BORDER),
+                                        bgcolor=SURFACE,
+                                        alignment=ft.Alignment.CENTER,
+                                        ink=True,
+                                        tooltip="Refresh blotter",
+                                        on_click=self._refresh_book_tab,
+                                        content=ft.Icon(ft.Icons.REFRESH, size=16, color=TEXT),
+                                    ),
+                                ],
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
                             ),
                         ],
                         spacing=6,
@@ -1330,11 +1952,30 @@ class ProTerminal:
                     expand=True,
                     content=ft.Column(
                         [
+                            self.lbl_pos_summary,
                             self.pos_table,
                             ft.Divider(color=BORDER, height=1),
+                            ft.Text(
+                                "Working orders",
+                                size=15,
+                                weight=ft.FontWeight.BOLD,
+                                color=TEXT,
+                            ),
+                            self.lbl_working_orders,
+                            ft.Container(height=8),
+                            ft.Text(
+                                "Session fills",
+                                size=15,
+                                weight=ft.FontWeight.BOLD,
+                                color=TEXT,
+                            ),
+                            self.lbl_recent_fills,
+                            ft.Divider(color=BORDER, height=1),
+                            ft.Text("Ledger", size=15, weight=ft.FontWeight.BOLD, color=TEXT),
                             self.lbl_ledger_snippet,
                         ],
                         scroll=ft.ScrollMode.AUTO,
+                        spacing=8,
                     ),
                 ),
             ],
@@ -2203,7 +2844,8 @@ class ProTerminal:
             if lessons:
                 last = lessons[0]
                 gline += (
-                    f"\nLast lesson: {last.get('outcome') or last.get('reason_code')} "
+                    f"\nPrior lesson (journal): "
+                    f"{last.get('outcome') or last.get('reason_code')} "
                     f"{last.get('symbol') or ''} "
                     f"{str(last.get('message') or '')[:100]}"
                 )
@@ -2226,6 +2868,15 @@ class ProTerminal:
             now = f"c{s.cycles}  {stance_bit}{intent_bit}  →  {strat}  ·  {status}"
             if grade and grade not in ("ok", "hold", "set_risk", ""):
                 now += f"  [{grade}]"
+            pace = getattr(s, "pace", None) or {}
+            if pace.get("tier"):
+                wake = pace.get("wake_reason") or ""
+                wake_bit = f" wake={wake}" if wake else ""
+                now += (
+                    f"  ·  pace={pace.get('tier')}"
+                    f"/{int(float(pace.get('sleep_s') or 0))}s"
+                    f"{wake_bit}"
+                )
             self.lbl_agent_now.value = now
             self.lbl_agent_now.color = (
                 RED if blocked or (grade and "geometry" in grade)
@@ -2321,20 +2972,39 @@ class ProTerminal:
         else:
             self.lbl_agent_news.value = "News (World): (none this cycle)"
             self.lbl_agent_news.color = MUTED
+        try:
+            from abcxauto.universe import universe_glance_line
+
+            self.lbl_agent_universe.value = universe_glance_line()
+            self.lbl_agent_universe.color = TEXT
+        except Exception:
+            self.lbl_agent_universe.value = "Universe: (unavailable)"
+            self.lbl_agent_universe.color = MUTED
         opps = getattr(s, "opportunities", None) or []
         if opps:
             bits = []
-            for i, idea in enumerate(opps[:5], 1):
-                rule = idea.get("rule_id") or idea.get("note") or ""
+            # Preserve seed / legal order — never alphabetize (A* bias).
+            for idea in list(opps)[:12]:
                 bits.append(
-                    f"{i}. {idea.get('symbol')} {idea.get('bias')} "
-                    f"heuristic_rank={idea.get('score')} rule={rule}"
+                    f"- {idea.get('symbol')} "
+                    f"mda/{idea.get('freshness') or 'delayed'} "
+                    f"last={idea.get('mda_last') or idea.get('last')} "
+                    f"dist20={idea.get('dist20')} ret5={idea.get('ret5')}"
                 )
-            self.lbl_agent_opps.value = "Features (heuristic):\n" + "\n".join(bits)
+            ibkr_sym = getattr(s, "ibkr_live_symbol", None) or (
+                (getattr(s, "world_state", None) or {}).get("ibkr_live_symbol")
+            )
+            ibkr_last = getattr(s, "ibkr_live_last", None)
+            if ibkr_last is None:
+                ibkr_last = (getattr(s, "world_state", None) or {}).get("ibkr_live_last")
+            head = "SCAN TAPE (MDA delayed; unranked; Grok picks):\n" + "\n".join(bits)
+            if ibkr_sym and ibkr_last is not None:
+                head += f"\nIBKR live: {ibkr_sym} last={ibkr_last}"
+            self.lbl_agent_opps.value = head
             self.lbl_agent_opps.color = TEXT
         else:
             self.lbl_agent_opps.value = (
-                "Features (heuristic): (none — check MDA candles / Start agent)"
+                "SCAN TAPE: (none — check MDA / Start agent; Grok may scan_request)"
             )
             self.lbl_agent_opps.color = MUTED
         inv = getattr(s, "inventory", "") or ""
@@ -2354,10 +3024,53 @@ class ProTerminal:
         self.lbl_book_pnl.color = GREEN if daily >= 0 else RED
         self.lbl_book_unprotected.value = str(unprotected_n)
         self.lbl_book_unprotected.color = RED if unprotected_n else GREEN
-        self.lbl_book_decision.value = decision
+        self.lbl_book_decision.value = f"Last decision: {decision}"
         self.lbl_book_decision.color = AMBER if decision == "hold" else TEXT
+        self.lbl_book_decision.size = 12
         self.lbl_book_halt.value = "HALTED" if halted else "clear"
         self.lbl_book_halt.color = RED if halted else GREEN
+        pace = getattr(s, "pace", None) or {}
+        if pace.get("tier"):
+            wake = pace.get("wake_reason") or ""
+            budget = pace.get("budget") or pace.get("reason") or ""
+            wake_bit = f" · wake={wake}" if wake else ""
+            budget_bit = f" · {budget}" if budget and budget != "ok" else ""
+            self.lbl_dash_pace.value = (
+                f"Pace: {pace.get('tier')} / {int(float(pace.get('sleep_s') or 0))}s"
+                f"{wake_bit}{budget_bit}"
+            )
+            self.lbl_dash_pace.color = (
+                RED if str(pace.get("tier")) == "protect" else TEXT
+            )
+        else:
+            self.lbl_dash_pace.value = "Pace: — (Start agent for adaptive sleep)"
+            self.lbl_dash_pace.color = MUTED
+        ws = getattr(s, "world_state", None) or {}
+        cap = ws.get("capacity") if isinstance(ws, dict) else {}
+        if not isinstance(cap, dict):
+            cap = {}
+        idle = ws.get("idle_streak") if isinstance(ws, dict) else None
+        open_n = cap.get("open_count")
+        slots = cap.get("slots_left")
+        max_open = cap.get("max_open_positions")
+        allows = cap.get("allows_new_risk")
+        att_bits = []
+        if open_n is not None or max_open is not None:
+            att_bits.append(
+                f"book {open_n if open_n is not None else '?'} / "
+                f"{max_open if max_open not in (None, 0) else '∞'} open"
+            )
+        if slots is not None:
+            att_bits.append(f"slots_left={slots}")
+        if allows is not None:
+            att_bits.append("new-risk ok" if allows else "new-risk blocked")
+        if idle is not None:
+            att_bits.append(f"idle_streak={idle}")
+        att_bits.append(f"netliq={self.lbl_book_netliq.value}")
+        self.lbl_dash_attention.value = (
+            "Attention: " + " · ".join(att_bits) if att_bits else "Attention: —"
+        )
+        self.lbl_dash_attention.color = TEXT
         health = getattr(s, "mandate_health", "green") or "green"
         health_label = getattr(s, "mandate_health_label", "") or ""
         self.lbl_mandate_health.value = (
@@ -2497,7 +3210,7 @@ class ProTerminal:
     def _format_working_orders(self, orders: list[dict]) -> str:
         if not orders:
             return "No working orders"
-        lines = []
+        lines = [f"{len(orders)} working"]
         for o in (orders or [])[:25]:
             sym = o.get("symbol") or "?"
             side = o.get("action") or o.get("side") or "?"
@@ -2507,14 +3220,15 @@ class ProTerminal:
             otype = o.get("order_type") or o.get("orderType") or ""
             px = o.get("lmt_price") or o.get("aux_price")
             px_s = f" @ {px}" if px not in (None, "", 0) else ""
-            lines.append(f"{sym}  {side} {qty}  {otype}{px_s}  {status}  id={oid}")
+            lines.append(f"• {sym:<6}  {side} {qty}  {otype}{px_s}  {status}  id={oid}")
         return "\n".join(lines)
 
     def _format_recent_fills(self, fills: list[dict]) -> str:
         if not fills:
             return "No fills this session"
-        lines = []
-        for f in list(fills or [])[-20:][::-1]:
+        recent = list(fills or [])[-20:][::-1]
+        lines = [f"{len(fills)} fills this session (newest first)"]
+        for f in recent:
             sym = f.get("symbol") or "?"
             side = f.get("side") or "?"
             qty = f.get("quantity") or f.get("shares") or "?"
@@ -2524,7 +3238,7 @@ class ProTerminal:
             except (TypeError, ValueError):
                 px_s = str(px or "—")
             ts = str(f.get("ts") or "")[:19].replace("T", " ")
-            lines.append(f"{ts}  {sym}  {side} {qty} @ {px_s}")
+            lines.append(f"• {ts}  {sym:<6}  {side} {qty} @ {px_s}")
         return "\n".join(lines)
 
     def _refresh_scorecard(self, *, force: bool = False) -> None:

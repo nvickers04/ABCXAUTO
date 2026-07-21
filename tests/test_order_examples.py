@@ -46,12 +46,20 @@ def test_sendable_types_matches_examples():
 
 
 def test_format_order_examples():
+    from abcxauto.agent_loop import ALLOWED_ACTIONS
+
     text = format_order_examples()
     assert text
     assert "ORDER EXAMPLES" in text
     assert "market_bracket" in text
     assert "set_risk" in text
-    assert text.count("\n") < 90
+    assert "vertical_spread" in text  # Act allowlist parity
+    # Act-filtered: algo exits in ORDER_EXAMPLES but not ALLOWED_ACTIONS
+    assert "vwap" not in text or "vwap" in ALLOWED_ACTIONS
+    text_narrow = format_order_examples(allowed=frozenset({"hold", "market_bracket"}))
+    assert "market_bracket" in text_narrow
+    assert "vertical_spread" not in text_narrow
+    assert "hold" in text_narrow
 
 
 @pytest.mark.parametrize("strategy", sorted(STRATEGIES))

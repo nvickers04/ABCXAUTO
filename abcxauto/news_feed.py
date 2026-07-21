@@ -11,20 +11,35 @@ logger = logging.getLogger(__name__)
 _CACHE: dict[str, Any] = {"ts": 0.0, "items": [], "symbols": []}
 _CACHE_TTL_S = 90.0
 
-# Broad market context when the book is thin — not a trade allowlist.
+# Thin market context when book + sandbox are empty — not a trade allowlist.
 _MARKET_CONTEXT = (
-    "SPY", "QQQ", "IWM", "DIA", "TLT", "GLD", "USO",
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA",
+    "SPY",
+    "QQQ",
+    "IWM",
+    "DIA",
+    "TLT",
+    "GLD",
+    "USO",
 )
 
 
 def _universe(positions: list[dict] | None) -> list[str]:
-    """Book underlyings first, then broad market context (deduped, capped)."""
+    """Book underlyings first, then Universe legal sample, then thin index context."""
     out: list[str] = []
     for p in positions or []:
         sym = str((p or {}).get("symbol") or "").upper()
         if sym and sym not in out:
             out.append(sym)
+    try:
+        from abcxauto.universe import legal_symbols
+
+        for sym in legal_symbols():
+            if sym not in out:
+                out.append(sym)
+            if len(out) >= 14:
+                return out
+    except Exception:
+        logger.exception("news universe legal_symbols failed")
     for sym in _MARKET_CONTEXT:
         if sym not in out:
             out.append(sym)
@@ -44,7 +59,7 @@ async def fetch_agent_news(
     force: bool = False,
     per_symbol: int = 4,
 ) -> list[dict]:
-    """Fetch / cache headlines for book + market context."""
+    """Fetch / cache headlines for book + sandbox sample."""
     now = time.monotonic()
     symbols = _universe(positions)
     if (
@@ -58,6 +73,7 @@ async def fetch_agent_news(
     items: list[dict] = []
     try:
         from abcxauto.marketdata.client import get_marketdata_client
+
         client = get_marketdata_client()
         if not _configured(client):
             _CACHE.update(ts=now, items=[], symbols=symbols)

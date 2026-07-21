@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from abcxauto.config import get_config, resolve_effective_posture, risk_envelope_snapshot
-from abcxauto.opportunity_scan import format_market_features
+from abcxauto.opportunity_scan import QUOTE_SOURCES_BLOCK, format_scan_tape
 from abcxauto.session_cadence import load_prep, load_review, maybe_auto_prep_from_world
 from abcxauto.structure_grade import (
     format_structure_lessons_for_prompt,
@@ -18,7 +18,7 @@ from abcxauto.structure_grade import (
     recent_structure_lessons,
     structure_cooldown_symbols,
 )
-from abcxauto.trade_plan import load_trade_plan
+from abcxauto.trade_plan import capacity_fact, load_trade_plan, load_trade_plans
 
 logger = logging.getLogger(__name__)
 
@@ -79,40 +79,75 @@ def _session_phase(session_status: str, current_et: str | None = None) -> str:
 
 
 def _regime_from_opps(opportunities: list[dict], pulse: dict) -> dict[str, Any]:
-    """Feature-mix strip from heuristic biases + session (not regime truth)."""
+    """Feature-mix strip from tape metrics + session (not regime truth / not ranked)."""
     session = (pulse.get("session") or {}) if isinstance(pulse, dict) else {}
     status = str(session.get("status") or "").lower()
     phase = _session_phase(status, session.get("current_time_et"))
-    longs = sum(1 for o in opportunities[:5] if str(o.get("bias") or "").upper() == "LONG")
-    shorts = sum(1 for o in opportunities[:5] if str(o.get("bias") or "").upper() == "SHORT")
-    if longs >= 3 and longs > shorts:
+    rows = list(opportunities or [])[:12]
+    above = 0
+    below = 0
+    pos_ret = 0
+    dists: list[float] = []
+    for o in rows:
+        try:
+            d = float(o.get("dist20"))
+            dists.append(d)
+            if d >= 0:
+                above += 1
+            else:
+                below += 1
+        except (TypeError, ValueError):
+            if o.get("above_sma20") is True:
+                above += 1
+            elif o.get("above_sma20") is False:
+                below += 1
+        try:
+            if float(o.get("ret5") or 0) > 0:
+                pos_ret += 1
+        except (TypeError, ValueError):
+            pass
+    if above >= 3 and above > below:
         trend = "bullish"
-    elif shorts >= 3 and shorts > longs:
+    elif below >= 3 and below > above:
         trend = "bearish"
     else:
         trend = "mixed"
-    avg_score = 0.0
-    if opportunities:
-        avg_score = sum(float(o.get("score") or 0) for o in opportunities[:5]) / min(5, len(opportunities))
-    vol = "elevated" if avg_score > 0.7 else ("normal" if avg_score > 0.4 else "quiet")
+    med = 0.0
+    if dists:
+        sd = sorted(dists)
+        med = sd[len(sd) // 2]
+    vol = (
+        "elevated"
+        if abs(med) > 0.03 or pos_ret >= max(3, len(rows) // 2 + 1)
+        else ("normal" if rows else "quiet")
+    )
     return {
         "session_status": status or "unknown",
         "session_phase": phase,
-        "trend_bias": trend,  # internal key; prompts label as feature_mix_bias
+        "trend_bias": trend,
         "feature_mix_bias": trend,
         "vol_proxy": vol,
-        "top_longs": longs,
-        "top_shorts": shorts,
-        "avg_heuristic_rank": round(avg_score, 3),
-        "avg_opp_score": round(avg_score, 3),  # compat
-        "source": "heuristic_feature_mix",
+        "top_longs": above,
+        "top_shorts": below,
+        "median_dist20": round(med, 5),
+        "pos_ret5_count": pos_ret,
+        "avg_heuristic_rank": None,
+        "avg_opp_score": None,
+        "source": "tape_feature_mix",
     }
 
 
-def _portfolio_risk(positions: list[dict], net_liq: float) -> dict[str, Any]:
+def _portfolio_risk(
+    positions: list[dict],
+    net_liq: float,
+    *,
+    total_cash: float | None = None,
+) -> dict[str, Any]:
     n = len(positions or [])
     top_pct = 0.0
     top_sym = ""
+    by_sym: dict[str, float] = {}
+    long_mv = 0.0
     if net_liq and net_liq > 0:
         best = 0.0
         for p in positions or []:
@@ -120,14 +155,60 @@ def _portfolio_risk(positions: list[dict], net_liq: float) -> dict[str, Any]:
                 mv = abs(float(p.get("marketValue") or p.get("market_value") or 0))
             except (TypeError, ValueError):
                 mv = 0.0
+            try:
+                qty = float(p.get("quantity") or p.get("position") or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            if qty > 0:
+                long_mv += mv
+            sym = str(p.get("symbol") or "").upper()
+            if sym:
+                by_sym[sym] = by_sym.get(sym, 0.0) + mv
             if mv > best:
                 best = mv
                 top_sym = str(p.get("symbol") or "")
         top_pct = round(100.0 * best / float(net_liq), 2)
+    # Soft exposure Fact (not a hold gate): top names + share of NL.
+    exposure = {
+        "top_symbol": top_sym,
+        "top_concentration_pct": top_pct,
+        "symbols": sorted(
+            (
+                {
+                    "symbol": s,
+                    "pct_nl": round(100.0 * mv / float(net_liq), 2)
+                    if net_liq and net_liq > 0
+                    else 0.0,
+                }
+                for s, mv in by_sym.items()
+            ),
+            key=lambda r: -float(r.get("pct_nl") or 0),
+        )[:8],
+        "note": "Fact — soft concentration; not a narrative hold gate",
+    }
+    try:
+        cash = float(total_cash) if total_cash is not None else 0.0
+    except (TypeError, ValueError):
+        cash = 0.0
+    cash_pct = round(100.0 * cash / float(net_liq), 2) if net_liq and net_liq > 0 else 0.0
+    deployed_pct = (
+        round(100.0 * long_mv / float(net_liq), 2) if net_liq and net_liq > 0 else 0.0
+    )
+    from abcxauto.config import ROTATION_THIN_CASH_PCT
+
+    capital_liquidity = {
+        "total_cash": round(cash, 2),
+        "cash_pct_nl": cash_pct,
+        "deployed_long_pct_nl": deployed_pct,
+        "cash_thin": bool(cash_pct < float(ROTATION_THIN_CASH_PCT)),
+        "note": "Fact — liquidity vs NL; not a hold/sell gate",
+    }
     return {
         "n_positions": n,
         "top_symbol": top_sym,
         "top_concentration_pct": top_pct,
+        "exposure": exposure,
+        "capital_liquidity": capital_liquidity,
     }
 
 
@@ -168,16 +249,23 @@ class WorldState:
     working_thesis: str
     recent_decisions: list[dict]
     trade_plan: dict[str, Any] | None
-    idle_streak: int
-    idle_top_symbol: str
-    prep: dict[str, Any]
-    review: dict[str, Any]
+    trade_plans: list[dict[str, Any]] = field(default_factory=list)
+    capacity: dict[str, Any] = field(default_factory=dict)
+    idle_streak: int = 0
+    idle_top_symbol: str = ""
+    prep: dict[str, Any] = field(default_factory=dict)
+    review: dict[str, Any] = field(default_factory=dict)
     structure_lessons: list[dict] = field(default_factory=list)
     structure_vocab: dict[str, Any] = field(default_factory=dict)
     structure_cooldown: dict[str, str] = field(default_factory=dict)
     book: dict[str, Any] = field(default_factory=dict)
     pulse: dict[str, Any] = field(default_factory=dict)
     taken_at: str = ""
+    ibkr_live_last: float | None = None
+    ibkr_live_symbol: str = ""
+    scan_fetched: list[str] = field(default_factory=list)
+    option_facts: list[dict] = field(default_factory=list)
+    stop_qty_fact: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -190,7 +278,12 @@ class WorldState:
             "daily_pnl": self.daily_pnl,
             "n_positions": len(self.positions),
             "n_orders": len(self.open_orders),
-            "opportunities": self.opportunities[:5],
+            "opportunities": self.opportunities[:12],
+            "scan_fetched": list(self.scan_fetched),
+            "option_facts": list(self.option_facts[:8]),
+            "stop_qty_fact": self.stop_qty_fact,
+            "ibkr_live_last": self.ibkr_live_last,
+            "ibkr_live_symbol": self.ibkr_live_symbol,
             "news_items": [
                 {"symbol": n.get("symbol"), "headline": str(n.get("headline") or "")[:160]}
                 for n in self.news_items[:12]
@@ -205,6 +298,8 @@ class WorldState:
             "working_thesis": self.working_thesis[:400],
             "recent_decisions": self.recent_decisions[:3],
             "trade_plan": self.trade_plan,
+            "trade_plans": list(self.trade_plans[:12]),
+            "capacity": dict(self.capacity or {}),
             "idle_streak": self.idle_streak,
             "idle_top_symbol": self.idle_top_symbol,
             "structure_lessons": self.structure_lessons[:5],
@@ -256,12 +351,28 @@ class WorldState:
             "envelope": self.envelope,
             "working_thesis": self.working_thesis[:300],
             "trade_plan": self.trade_plan,
+            "trade_plans": list(self.trade_plans[:8]),
+            "capacity": dict(self.capacity or {}),
+            "exposure": (self.portfolio_risk or {}).get("exposure"),
+            "capital_liquidity": (self.portfolio_risk or {}).get("capital_liquidity"),
             "idle_streak": self.idle_streak,
             "prep": self.prep.get("bias") or self.prep.get("notes"),
             "review_lesson": self.review.get("next_change") or self.review.get("mistake"),
             "structure_cooldown": self.structure_cooldown,
             "suite_failed": (self.structure_vocab or {}).get("failed"),
-            "market_features": self.opportunities[:5],
+            "scan_tape": [
+                {
+                    "symbol": o.get("symbol"),
+                    "source": o.get("source") or "mda",
+                    "freshness": o.get("freshness") or "delayed",
+                    "mda_last": o.get("mda_last") or o.get("last"),
+                    "dist20": o.get("dist20"),
+                    "ret5": o.get("ret5"),
+                }
+                for o in self.opportunities[:12]
+            ],
+            "ibkr_live_last": getattr(self, "ibkr_live_last", None),
+            "ibkr_live_symbol": getattr(self, "ibkr_live_symbol", None),
             "news": [
                 f"[{n.get('symbol')}] {n.get('headline')}"
                 for n in self.news_items[:8]
@@ -273,15 +384,37 @@ class WorldState:
                     "symbol": p.get("symbol"),
                     "sec": p.get("secType") or p.get("sec_type"),
                     "qty": p.get("quantity") or p.get("position"),
+                    "expiration": p.get("expiration")
+                    or p.get("lastTradeDateOrContractMonth"),
+                    "strike": p.get("strike"),
+                    "right": p.get("right"),
                 }
-                for p in self.positions[:8]
+                for p in self.positions[:12]
             ],
+            "stop_qty_fact": self.stop_qty_fact,
+            "option_facts": self.option_facts[:8],
         }
         text = "WORLDSTATE (code truth — cite these facts):\n" + json.dumps(body, default=str)
-        feats = format_market_features(self.opportunities)
+        feats = format_scan_tape(self.opportunities)
         lessons = format_structure_lessons_for_prompt(self.structure_lessons)
-        out = text[:limit] + "\n\n" + feats + "\n\n" + lessons
-        return out[: limit + 1200]
+        try:
+            from abcxauto.option_facts import format_option_facts_for_prompt
+
+            opt_block = format_option_facts_for_prompt(self.option_facts)
+        except Exception:
+            opt_block = ""
+        out = (
+            text[:limit]
+            + "\n\n"
+            + QUOTE_SOURCES_BLOCK
+            + "\n\n"
+            + feats
+            + "\n\n"
+            + opt_block
+            + "\n\n"
+            + lessons
+        )
+        return out[: limit + 2200]
 
 
 def build_world_state(
@@ -310,6 +443,16 @@ def build_world_state(
         pnl = float(acct.get("dailypnl") or acct.get("DailyPnL") or acct.get("unrealizedpnl") or 0)
     except (TypeError, ValueError):
         pnl = 0.0
+    try:
+        total_cash = float(
+            acct.get("totalcashvalue")
+            or acct.get("TotalCashValue")
+            or acct.get("total_cash")
+            or acct.get("TotalCash")
+            or 0
+        )
+    except (TypeError, ValueError):
+        total_cash = 0.0
 
     cfg = get_config()
     posture = str(getattr(cfg, "risk_posture", "") or "")
@@ -327,14 +470,29 @@ def build_world_state(
     except Exception:
         pass
 
-    plan = load_trade_plan()
+    plans = load_trade_plans()
+    plan = plans[0] if plans else load_trade_plan()
     plan_dict = plan.to_dict() if plan else None
+    plans_dicts = [p.to_dict() for p in plans]
     idle = load_idle_streak()
     regime = _regime_from_opps(opportunities, pulse)
-    port_risk = _portfolio_risk(positions, net)
+    port_risk = _portfolio_risk(positions, net, total_cash=total_cash)
+    try:
+        max_open = int(getattr(cfg, "max_open_positions", 0) or 0)
+    except (TypeError, ValueError):
+        max_open = 0
+    cap = capacity_fact(positions, max_open_positions=max_open)
     lessons = recent_structure_lessons(5)
     vocab = load_structure_vocab()
     cool = structure_cooldown_symbols(lessons)
+    option_facts = list(snap.get("option_facts") or [])
+    stop_fact = None
+    try:
+        from abcxauto.trade_plan import stop_qty_mismatch_fact
+
+        stop_fact = stop_qty_mismatch_fact(positions, orders, None)
+    except Exception:
+        stop_fact = None
 
     book = snap.get("portfolio_state") or build_book_from_snap(snap)
     ws = WorldState(
@@ -365,6 +523,8 @@ def build_world_state(
             for d in recent[:3]
         ],
         trade_plan=plan_dict,
+        trade_plans=plans_dicts,
+        capacity=cap,
         idle_streak=int(idle.get("count") or 0),
         idle_top_symbol=str(idle.get("top_symbol") or ""),
         prep=load_prep(),
@@ -375,6 +535,8 @@ def build_world_state(
         book=book if isinstance(book, dict) else {},
         pulse=pulse if isinstance(pulse, dict) else {},
         taken_at=str(snap.get("taken_at") or ""),
+        option_facts=option_facts,
+        stop_qty_fact=stop_fact,
     )
     # Auto prep once/day
     try:
@@ -398,10 +560,19 @@ def update_idle_streak_after_judgment(
     world: WorldState,
 ) -> dict[str, Any]:
     """Update persisted idle streak from judgment stance."""
+    from abcxauto.opportunity_scan import tape_symbols
+
     stance = str(judgment.get("stance") or "").lower()
+    dismissed = str(judgment.get("dismissed") or "").upper()
     top = ""
-    if world.opportunities:
-        top = str(world.opportunities[0].get("symbol") or "").upper()
+    for sym in tape_symbols(world.opportunities):
+        if sym and sym in dismissed:
+            top = sym
+            break
+    if not top and world.opportunities:
+        # Stable A–Z tape: first symbol is alphabetical, not a rank tip
+        sorted_syms = sorted(tape_symbols(world.opportunities))
+        top = sorted_syms[0] if sorted_syms else ""
     state = load_idle_streak()
     if stance == "idle" and world.flat:
         if top and top == str(state.get("top_symbol") or "").upper():

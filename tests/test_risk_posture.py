@@ -40,8 +40,8 @@ def test_apply_risk_posture_seeds(tmp_path, monkeypatch):
     assert cfg.max_risk_per_trade_pct == 1.5
     assert cfg.daily_loss_limit_pct == 5.0
     assert cfg.max_position_pct == 12.0
-    assert cfg.max_open_positions == 6
-    assert cfg.max_daily_trades == 12
+    # Capital preset must not touch Controls book capacity
+    assert cfg.max_open_positions == 0
     assert cfg.auto_panic_on_breach is True
     assert path.is_file()
 
@@ -76,11 +76,11 @@ def test_set_risk_within_envelope(tmp_path, monkeypatch):
     load_risk_settings(path)
     apply_risk_posture("balanced", persist=True)
 
-    out = set_risk_knobs({"max_risk_per_trade_pct": 3.5, "max_daily_trades": 20})
+    out = set_risk_knobs({"max_risk_per_trade_pct": 3.5, "max_peak_drawdown_pct": 10.0})
     assert out["status"] == "ok"
     assert out["applied"]["max_risk_per_trade_pct"] == 3.5
     assert get_config().max_risk_per_trade_pct == 3.5
-    assert get_config().max_daily_trades == 20
+    assert get_config().max_peak_drawdown_pct == 10.0
 
 
 def test_set_risk_clamps_over_ceiling(tmp_path, monkeypatch):

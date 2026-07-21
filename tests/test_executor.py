@@ -95,8 +95,10 @@ async def test_dispatch_maps_strategy_to_gateway_method(strategy):
     assert method == STRATEGIES[strategy][1]
     # Every explicitly provided param must reach the gateway (symbol upper-cased);
     # closing_position is an exit-only assertion and never reaches the gateway.
+    # Fields with Field(exclude=True) stay on the model for gates but never hit IBKR.
+    _never_dispatch = frozenset({"closing_position", "price_hint"})
     for key, value in VALID_PAYLOADS[strategy].items():
-        if key == "closing_position":
+        if key in _never_dispatch:
             assert key not in kwargs
             continue
         expected = value.upper() if key == "symbol" else value
@@ -222,7 +224,34 @@ class TestCloseOptionVerification:
         assert result["success"] is True
         method, kwargs = gateway.calls[0]
         assert method == "close_option_position"
-        assert kwargs == {"symbol": "SPY", "expiration": "20260709", "strike": 745.0, "right": "C"}
+        assert kwargs["symbol"] == "SPY"
+        assert kwargs["expiration"] == "20260709"
+        assert kwargs["strike"] == 745.0
+        assert kwargs["right"] == "C"
+        assert kwargs.get("quantity") == 1
+
+    @pytest.mark.asyncio
+    async def test_close_option_by_conId_resolves_identity(self):
+        gateway = FakeGateway(positions=[
+            {
+                "symbol": "SPY", "quantity": -2, "sec_type": "OPT",
+                "strike": 745.0, "right": "C", "expiration": "20260709",
+                "conId": 999001,
+            },
+        ])
+        proposal = validate_proposal(
+            "close_option",
+            {"symbol": "SPY", "conId": 999001, "quantity": 1},
+            RATIONALE,
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        method, kwargs = gateway.calls[0]
+        assert method == "close_option_position"
+        assert kwargs["expiration"] == "20260709"
+        assert kwargs["strike"] == 745.0
+        assert kwargs["right"] == "C"
+        assert "conId" not in kwargs
 
     @pytest.mark.asyncio
     async def test_close_option_partial_allowed(self):

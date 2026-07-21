@@ -14,14 +14,24 @@ and can send every type in ORDER EXAMPLES. Protect first. **Hold is valid** when
 the book is protected; hold is **forbidden only while unprotected STK** exists
 (code enforces). Risk gates, brackets, and sizing are the floor — not a strategy.
 
-**Objectivity**: shell text is Fact, Gate, or labeled Heuristic
-(`heuristic ≠ recommendation`). Trading taste belongs only in an optional
-**Operator Card** (`ABCXAUTO_OPERATOR_CARD` / `operator_card.txt`) or in Grok’s
-judgment — never hard-coded narrative in prompts. Intelligence + journal memory
-drive judgment. Paper (TWS 7497) until forward P&L shows the book survives.
-Target footprint **~3.5–5k LOC**. Every feature must answer: *does this help the
-agent own the book under constraints without raising blow-up risk or burning idle
-API?* If not, it doesn't ship.
+**Control + Unbiased (non-negotiable):**
+
+1. **Control** — Three disjoint surfaces: **Risk** (capital survival sliders/halt),
+   **Controls** (deliberation, budget, frequency, structure complexity allowlist,
+   book capacity), **Universe** (IBKR sandbox arenas — legal symbols only).
+   Optional Operator Card, Pro START/Stop/pause, mandate. Goal: book return on
+   startup cash > cost of the model. Escapades are dials-only (no free-text briefs).
+2. **Unbiased** — Shell text/process is Fact, Gate, or labeled Heuristic
+   (`heuristic ≠ recommendation`). Universe membership is operator arena choice +
+   IBKR refresh — shell never ranks “best.” Grok picks inside the legal set.
+   Never hard-coded mega prison, ranked tape, or stance dogma. Hard gates:
+   unprotected, halt, Risk $, Controls capacity/complexity, Universe allowlist,
+   flat unconfirmed.
+
+Intelligence + journal memory drive judgment. Paper (TWS 7497) until forward P&L
+shows the book survives. Target footprint **~3.5–5k LOC**. Every feature must
+answer: *does this help the agent own the book under constraints without raising
+blow-up risk — while keeping Control + Unbiased?* If not, it doesn't ship.
 
 ---
 
@@ -63,14 +73,19 @@ abcxauto/
   send.py            dispatch façade → executor
   book.py            portfolio / book state façade
   risk.py            risk-gate façade
-  agent_loop.py      autonomous cycle engine (snap → Grok JSON → send)
+  agent_loop.py      Perceive → Allocator → Act streams (open/new/escapade) → send
+  mega_worker.py     Capacity Facts, stream select, one-send merge
+  universe.py        Universe tab sandbox (IBKR pull → legal set)
+  structure_complexity.py  Controls complexity → Act allowlist
+  trade_plan.py      Multi-plan book (`active_trade_plans.json`)
+  pacing.py          Adaptive cycle sleep + wake whitelist + grok_min budget
   cycle.py           thin shim re-exporting agent_loop for Pro/tests
   config.py          flat env config — every knob lives here
   llm.py             xAI client (ABCXAUTO_MODEL=grok-4.5)
   proposals.py       OrderProposal schemas + validation (risk layer 1)
   risk_gates.py      hard pre-trade gates + halt latch (risk layer 2)
   executor.py        single choke point: validate → gate → dispatch (risk layer 3)
-  monitor.py         P&L/protection poll, Grok review, auto-panic
+  monitor.py         P&L/protection poll; Pro wakes cycle (no parallel Grok)
   memory/            durable state: trades, cycles, halts (SQLite)
   broker/            ib_insync layer (connector, orders, connection)
   marketdata/        MarketData.app client + market hours

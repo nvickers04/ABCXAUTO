@@ -14,7 +14,7 @@ from abcxauto.objective_language import (
     assert_no_banned_phrases,
     find_banned_phrases,
 )
-from abcxauto.opportunity_scan import format_market_features, score_symbol
+from abcxauto.opportunity_scan import format_scan_tape, metrics_for_symbol
 from abcxauto.trade_playbook import format_trade_playbook
 
 
@@ -39,38 +39,37 @@ def test_posture_bias_has_no_banned_taste():
     assert "envelope" in posture_prompt_bias("aggressive").lower()
 
 
-def test_features_header_and_rule_ids():
-    text = format_market_features(
+def test_scan_tape_header_and_quote_sources():
+    text = format_scan_tape(
         [
             {
                 "symbol": "QQQ",
-                "bias": "LONG",
-                "score": 0.7,
-                "rule_id": "sma20_pullback_rule",
-                "last": 100.0,
+                "source": "mda",
+                "freshness": "delayed",
+                "mda_last": 100.0,
                 "dist20": -0.01,
                 "ret5": 0.0,
-                "stop_hint_pct": 0.008,
-                "target_hint_pct": 0.016,
+                "sma20": 101.0,
+                "sma50": 100.0,
+                "above_sma20": False,
             }
         ]
     )
-    assert "MARKET FEATURES" in text
-    assert "heuristic" in text.lower()
-    assert "not trade recommendations" in text.lower()
-    assert "heuristic_rank" in text
-    assert "sma20_pullback_rule" in text
-    assert_no_banned_phrases(text, label="features")
+    assert "SCAN TAPE" in text
+    assert "delayed" in text.lower()
+    assert "QUOTE SOURCES" in text or "IBKR" in text
+    assert "heuristic_rank" not in text
+    assert "MARKET FEATURES" not in text
+    assert_no_banned_phrases(text, label="scan_tape")
 
 
-def test_score_symbol_uses_rule_id_not_advice_note():
-    # Minimal candles enough for score path
+def test_metrics_no_advice_note():
     candles = [{"c": 100.0 + i * 0.1} for i in range(60)]
-    idea = score_symbol(candles, "SPY")
+    idea = metrics_for_symbol(candles, "SPY")
     assert idea is not None
-    assert "rule_id" in idea
-    assert "uptrend support" not in str(idea.get("note") or "").lower()
-    assert "uptrend support" not in str(idea.get("rule_id") or "").lower()
+    assert "score" not in idea
+    assert idea.get("source") == "mda"
+    assert "uptrend support" not in str(idea).lower()
 
 
 def test_operator_card_empty_by_default(tmp_path, monkeypatch):
@@ -92,8 +91,21 @@ def test_operator_card_injects_when_set(tmp_path, monkeypatch):
     assert "mean reversion" in card
     block = format_operator_card_block(card)
     assert "OPERATOR CARD" in block
-    assert "human-authored" in block
+    assert "secondary to CONTROLS" in block
     assert "mean reversion" in block
+
+
+def test_format_controls_block_always_present():
+    from abcxauto.config import format_controls_block
+
+    block = format_controls_block()
+    assert block.startswith("CONTROLS")
+    assert "deliberation=" in block
+    assert "intelligence_budget=" in block
+    assert "capital_rotation=" in block
+    assert "structure_complexity=" in block
+    assert "book_capacity" in block or "max_open_positions=" in block
+    assert "UNIVERSE" in block
 
 
 def test_judge_prompt_objective_and_card(tmp_path, monkeypatch):
@@ -113,7 +125,16 @@ def test_judge_prompt_objective_and_card(tmp_path, monkeypatch):
         daily_pnl=0.0,
         positions=[],
         open_orders=[],
-        opportunities=[{"symbol": "QQQ", "bias": "LONG", "score": 0.8, "rule_id": "x"}],
+        opportunities=[
+            {
+                "symbol": "QQQ",
+                "source": "mda",
+                "freshness": "delayed",
+                "mda_last": 100.0,
+                "dist20": 0.0,
+                "ret5": 0.0,
+            }
+        ],
         news_items=[],
         risk_posture="aggressive",
         effective_posture="aggressive",
@@ -136,17 +157,20 @@ def test_judge_prompt_objective_and_card(tmp_path, monkeypatch):
     )
     prompt = _build_judge_prompt(world)
     assert "GATE:" in prompt or "PROCESS:" in prompt
+    assert "operate the scanner" in prompt.lower() or "SCAN TAPE" in prompt
     assert "prefer manage" not in prompt.lower()
     assert "prefer acting" not in prompt.lower()
+    assert "CONTROLS" in prompt
+    assert "deliberation=" in prompt
     assert "OPERATOR CARD" in prompt
     assert "Fade extensions" in prompt
-    assert "not regime truth" in prompt or "feature_mix" in prompt
+    assert "QUOTE SOURCES" in prompt or "IBKR" in prompt
     assert find_banned_phrases(prompt) == [] or all(
         p not in prompt.lower() for p in ("prefer acting", "harvest", "mild bull")
     )
 
 
-def test_world_prompt_features_not_opportunities_header():
+def test_world_prompt_scan_tape_not_opportunities_header():
     from abcxauto.world_state import WorldState
 
     world = WorldState(
@@ -162,10 +186,11 @@ def test_world_prompt_features_not_opportunities_header():
         opportunities=[
             {
                 "symbol": "SPY",
-                "bias": "LONG",
-                "score": 0.5,
-                "rule_id": "neutral_weak_rule",
-                "last": 500.0,
+                "source": "mda",
+                "freshness": "delayed",
+                "mda_last": 500.0,
+                "dist20": 0.0,
+                "ret5": 0.0,
             }
         ],
         news_items=[],
@@ -184,6 +209,7 @@ def test_world_prompt_features_not_opportunities_header():
         review={},
     )
     block = world.prompt_block()
-    assert "MARKET FEATURES" in block
+    assert "SCAN TAPE" in block
+    assert "MARKET FEATURES" not in block
     assert "OPPORTUNITIES (" not in block
-    assert "feature_mix_bias" in block or "not regime truth" in block
+    assert "QUOTE SOURCES" in block

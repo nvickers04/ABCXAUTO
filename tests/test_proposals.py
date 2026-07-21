@@ -176,84 +176,10 @@ class TestCloseOption:
             )
 
 
-class TestMinRewardRisk:
-    """Bracket / market_bracket must meet min reward:risk when configured."""
+class TestMinRewardRiskRemoved:
+    """min_reward_risk hard gate removed — taste not capital blow-up."""
 
-    @pytest.fixture(autouse=True)
-    def _enable(self, monkeypatch):
-        base = get_config()
-        monkeypatch.setattr(
-            "abcxauto.proposals.get_config",
-            lambda: Config(**{**base.__dict__, "defined_risk_only": False, "min_reward_risk": 2.0}),
-        )
-
-    def test_bracket_below_min_rejected(self):
-        with pytest.raises(ProposalValidationError, match="reward:risk"):
-            validate_proposal(
-                "bracket",
-                {
-                    "symbol": "NVDA", "quantity": 10, "direction": "LONG",
-                    "entry_price": 100.0, "stop_price": 95.0, "target_price": 105.0,
-                },
-                RATIONALE,
-            )
-
-    def test_bracket_meets_min_accepted(self):
-        p = validate_proposal(
-            "bracket",
-            {
-                "symbol": "NVDA", "quantity": 10, "direction": "LONG",
-                "entry_price": 100.0, "stop_price": 95.0, "target_price": 110.0,
-                "price_hint": 100.0,
-            },
-            RATIONALE,
-            quote_last=100.0,
-        )
-        assert p.strategy == "bracket"
-
-    def test_market_bracket_skips_rr_without_price_hint(self):
-        # quote_last satisfies geometry; absent price_hint still skips R:R
-        p = validate_proposal(
-            "market_bracket",
-            {
-                "symbol": "NVDA", "quantity": 10, "direction": "LONG",
-                "stop_price": 97.0, "target_price": 106.0,
-            },
-            RATIONALE,
-            quote_last=100.0,
-        )
-        assert p.strategy == "market_bracket"
-        assert getattr(p.params, "price_hint", None) is None
-
-    def test_market_bracket_enforces_rr_with_price_hint(self):
-        p = validate_proposal(
-            "market_bracket",
-            {
-                "symbol": "NVDA", "quantity": 10, "direction": "LONG",
-                "stop_price": 95.0, "target_price": 110.0, "price_hint": 100.0,
-            },
-            RATIONALE,
-            quote_last=100.0,
-        )
-        assert p.params.price_hint == 100.0
-
-        with pytest.raises(ProposalValidationError, match="reward:risk"):
-            validate_proposal(
-                "market_bracket",
-                {
-                    "symbol": "NVDA", "quantity": 10, "direction": "LONG",
-                    "stop_price": 95.0, "target_price": 105.0, "price_hint": 100.0,
-                },
-                RATIONALE,
-                quote_last=100.0,
-            )
-
-    def test_disabled_skips(self, monkeypatch):
-        base = get_config()
-        monkeypatch.setattr(
-            "abcxauto.proposals.get_config",
-            lambda: Config(**{**base.__dict__, "min_reward_risk": 0}),
-        )
+    def test_low_rr_bracket_still_accepted(self):
         p = validate_proposal(
             "bracket",
             {
@@ -265,6 +191,18 @@ class TestMinRewardRisk:
             quote_last=100.0,
         )
         assert p.strategy == "bracket"
+
+    def test_market_bracket_with_price_hint_accepted(self):
+        p = validate_proposal(
+            "market_bracket",
+            {
+                "symbol": "NVDA", "quantity": 10, "direction": "LONG",
+                "stop_price": 95.0, "target_price": 105.0, "price_hint": 100.0,
+            },
+            RATIONALE,
+            quote_last=100.0,
+        )
+        assert p.params.price_hint == 100.0
 
     def test_market_bracket_accepts_side_buy_alias(self):
         """Live Grok often sends side=BUY instead of direction=LONG."""

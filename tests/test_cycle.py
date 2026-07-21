@@ -67,10 +67,16 @@ def _cfg(**overrides):
         cycle_sleep_s=300.0,
         max_risk_per_trade_pct=1.0,
         max_position_pct=10.0,
+        max_open_positions=6,
         marketdata_token="",
         trading_mandate="RELY ON YOUR INTELLIGENCE. Trade actively with brackets.",
         trading_mode="paper",
         risk_posture="balanced",
+        # S2 lean so Act path runs (tests assert Act prompts / invalid strat).
+        control_deliberation_pct=80,
+        control_budget_pct=50,
+        control_frequency_pct=50,
+        control_complexity_pct=50,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -125,13 +131,12 @@ def _pja_grok(act: dict, judgment: dict | None = None, prompts: list | None = No
 
 @pytest.fixture(autouse=True)
 def _reset_cadence(monkeypatch, tmp_path):
+    stub = _cfg(signal_only=False, grok_min_interval_s=0)
+    monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: stub)
+    monkeypatch.setattr("abcxauto.world_state.get_config", lambda: stub)
+    # Force Act path (S2) without replacing full config.get_config.
     monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(signal_only=False, grok_min_interval_s=0),
-    )
-    monkeypatch.setattr(
-        "abcxauto.world_state.get_config",
-        lambda: _cfg(signal_only=False, grok_min_interval_s=0),
+        "abcxauto.config.deliberation_requires_act", lambda cfg=None: True
     )
     # Avoid real MDA/connector in connection_status during prompts.
     monkeypatch.setattr(

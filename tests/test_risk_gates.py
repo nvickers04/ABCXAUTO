@@ -9,6 +9,7 @@ import pytest
 from abcxauto.config import Config, get_config
 from abcxauto.proposals import validate_proposal
 from abcxauto.risk_gates import (
+    check_defined_risk_only,
     estimate_bracket_risk_dollars,
     estimate_notional,
     is_exit_or_management,
@@ -172,7 +173,8 @@ async def test_max_open_positions_rejection(gate, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_max_daily_trades_rejection(gate, monkeypatch):
+async def test_max_daily_trades_removed_no_gate(gate, monkeypatch):
+    """Trade frequency is Controls process — no max_daily_trades hard gate."""
     monkeypatch.setattr(
         "abcxauto.risk_gates.get_config",
         lambda: _cfg(
@@ -186,8 +188,7 @@ async def test_max_daily_trades_rejection(gate, monkeypatch):
     gate.record_entry()
     gate.record_entry()
     ok, reason = await gate.pre_trade_check(_bracket(), conn)
-    assert ok is False
-    assert "max daily trades" in reason.lower()
+    assert ok is True, reason
 
 
 @pytest.mark.asyncio
@@ -346,7 +347,9 @@ def test_estimate_notional_bracket(monkeypatch):
     assert is_exit_or_management(_oca()) is True
 
 
-def _market_bracket(qty=10, stop=95.0, target=110.0, direction="LONG", price_hint=None):
+def _market_bracket(
+    qty=10, stop=95.0, target=110.0, direction="LONG", price_hint=None, *, quote_last=None
+):
     params = {
         "symbol": "NVDA",
         "quantity": qty,
@@ -356,13 +359,17 @@ def _market_bracket(qty=10, stop=95.0, target=110.0, direction="LONG", price_hin
     }
     if price_hint is not None:
         params["price_hint"] = price_hint
-    return validate_proposal("market_bracket", params, RATIONALE)
+    # Geometry needs a live quote when price_hint is omitted (not used for sizing).
+    q = quote_last if quote_last is not None else price_hint
+    if q is None:
+        q = (float(stop) + float(target)) / 2.0
+    return validate_proposal("market_bracket", params, RATIONALE, quote_last=q)
 
 
 def test_market_bracket_conservative_sizing_without_hint(monkeypatch):
     """Without price_hint: notional = max(stop,target)*qty; risk = |target-stop|*qty."""
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
-    mb = _market_bracket(qty=10, stop=95.0, target=110.0)
+    mb = _market_bracket(qty=10, stop=95.0, target=110.0, quote_last=100.0)
     # Conservative notional uses max(95, 110) = 110, NOT midpoint 102.5
     assert estimate_notional(mb) == pytest.approx(110.0 * 10)
     # Risk assumes fill at target extreme → full |110-95| = 15 per share
@@ -565,3 +572,103 @@ async def test_salvage_knobs_disabled(gate, monkeypatch):
         conn,
     )
     assert ok is True, reason
+
+
+def test_defined_risk_only_rejects_ratio_and_short_straddle(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_config",
+        lambda: _cfg(defined_risk_only=True),
+    )
+    monkeypatch.setattr(
+        "abcxauto.proposals.get_config",
+        lambda: _cfg(defined_risk_only=True, min_reward_risk=0),
+    )
+    ratio = validate_proposal(
+        "ratio_spread",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "long_strike": 500.0,
+            "short_strike": 510.0,
+            "right": "C",
+            "ratio": 2,
+            "quantity": 1,
+        },
+        RATIONALE,
+    )
+    ok, why = check_defined_risk_only(ratio)
+    assert ok is False
+    assert "defined_risk_only" in why
+
+    short_straddle = validate_proposal(
+        "straddle",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "strike": 500.0,
+            "quantity": 1,
+            "action": "SELL",
+        },
+        RATIONALE,
+    )
+    ok2, why2 = check_defined_risk_only(short_straddle)
+    assert ok2 is False
+    assert "short" in why2.lower()
+
+    long_straddle = validate_proposal(
+        "straddle",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "strike": 500.0,
+            "quantity": 1,
+            "action": "BUY",
+        },
+        RATIONALE,
+    )
+    ok3, _ = check_defined_risk_only(long_straddle)
+    assert ok3 is True
+
+    vertical = validate_proposal(
+        "vertical_spread",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "long_strike": 500.0,
+            "short_strike": 505.0,
+            "right": "C",
+            "quantity": 1,
+        },
+        RATIONALE,
+    )
+    ok4, _ = check_defined_risk_only(vertical)
+    assert ok4 is True
+
+
+def test_estimate_notional_csp_and_option_limit():
+    csp = validate_proposal(
+        "cash_secured_put",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "strike": 500.0,
+            "contracts": 2,
+        },
+        RATIONALE,
+    )
+    assert estimate_notional(csp) == 500.0 * 100 * 2
+
+    vert = validate_proposal(
+        "vertical_spread",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "long_strike": 500.0,
+            "short_strike": 505.0,
+            "right": "C",
+            "quantity": 1,
+            "limit_price": 1.25,
+        },
+        RATIONALE,
+    )
+    assert estimate_notional(vert) == pytest.approx(1.25 * 100 * 1)

@@ -221,18 +221,31 @@ class CancelOrderParams(BaseModel):
 
 
 class CloseOptionParams(BaseModel):
-    """Close an existing option position (sell-to-close if long, buy-to-close if short)."""
+    """Close an existing option position (sell-to-close if long, buy-to-close if short).
+
+    Prefer ``conId`` when known; else symbol+expiration+strike+right.
+    ``quantity`` may be partial (omit = close full matching leg).
+    """
 
     symbol: str
-    expiration: str
-    strike: float = Field(gt=0)
-    right: Literal["C", "P"]
+    expiration: Optional[str] = None
+    strike: Optional[float] = Field(default=None, gt=0)
+    right: Optional[Literal["C", "P"]] = None
     quantity: Optional[int] = Field(default=None, gt=0)
     limit_price: Optional[float] = Field(default=None, gt=0)
+    # Ledger identity for Act/gates; excluded from broker kwargs (resolved in executor).
+    conId: Optional[int] = Field(default=None, gt=0, exclude=True)
 
     @model_validator(mode="after")
     def _validate(self) -> "CloseOptionParams":
-        _check_expiration(self.expiration)
+        if self.conId is None and not (
+            self.expiration and self.strike is not None and self.right
+        ):
+            raise ValueError(
+                "close_option requires conId or expiration+strike+right"
+            )
+        if self.expiration:
+            _check_expiration(self.expiration)
         return self
 
 
@@ -372,7 +385,7 @@ def validate_proposal(
         raise ProposalValidationError(f"Invalid {strategy} params — {problems}") from e
     if hasattr(parsed, "symbol"):
         parsed.symbol = parsed.symbol.upper()
-    _check_min_reward_risk(strategy, parsed)
+    # min_reward_risk hard gate removed — taste/process, not capital blow-up.
 
     if strategy in ("market_bracket", "oca", "bracket"):
         from abcxauto.config import resolve_effective_posture

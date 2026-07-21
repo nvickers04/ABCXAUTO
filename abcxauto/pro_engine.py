@@ -198,6 +198,9 @@ class ViewState:
         "Start autonomous — Grok decides every RTH cycle; risk gates constrain."
     )
     opportunities: list[dict] = field(default_factory=list)
+    ibkr_live_last: float | None = None
+    ibkr_live_symbol: str = ""
+    scan_fetched: list[str] = field(default_factory=list)
     news_items: list[dict] = field(default_factory=list)
     market_read: str = ""
     risk_posture: str = ""
@@ -229,6 +232,7 @@ class ViewState:
     trade_count: int = 0
     gate_blocks: int = 0
     last_error: str | None = None
+    pace: dict = field(default_factory=dict)
 
 
 class ProEngine:
@@ -245,6 +249,12 @@ class ProEngine:
         self.monitor: Any = None
         self._worker_loop: asyncio.AbstractEventLoop | None = None
         self._suite_lock = threading.Lock()
+        self._wake_event: asyncio.Event | None = None
+        self._wake_reason: str = ""
+        self._wake_gate: Any = None
+        self._last_grok_mono: float = 0.0
+        self._last_pace: dict = {}
+        self._last_cycle_out: dict = {}
 
     def connect_broker(self) -> str | None:
         """Connect IBKR + start monitor without running agent cycles.
@@ -274,6 +284,7 @@ class ProEngine:
         """Start autonomous agent cycles (requires xAI; connects IBKR if needed)."""
         if not get_config().xai_api_key:
             return "XAI_API_KEY missing"
+        self._universe_refresh_on_start = True
         if self.worker and self.worker.is_alive():
             self.pause.clear()
             self.state.autonomous = True
@@ -696,6 +707,25 @@ class ProEngine:
                 pass
         self.monitor = None
 
+    def request_wake(self, reason: str) -> None:
+        """Interrupt cycle sleep for a whitelisted pace wake (monitor → engine)."""
+        from abcxauto.pacing import WakeGate
+
+        if not self.state.autonomous or self.pause.is_set() or self.stop.is_set():
+            return
+        if self._wake_gate is None:
+            self._wake_gate = WakeGate()
+        if not self._wake_gate.try_wake(reason):
+            return
+        self._wake_reason = str(reason or "").strip().lower()
+        ev = self._wake_event
+        if ev is not None:
+            ev.set()
+        try:
+            self.ui.put(("log", f"PACE WAKE: {self._wake_reason}"))
+        except Exception:
+            pass
+
     def _start_monitor(self) -> None:
         """Start PortfolioMonitor on the current worker asyncio loop (mirror web.py)."""
         self._stop_monitor()
@@ -708,7 +738,9 @@ class ProEngine:
             from abcxauto.monitor import PortfolioMonitor
 
             stub = _MonitorStubSession(self)
-            self.monitor = PortfolioMonitor(stub, self.conn)
+            self.monitor = PortfolioMonitor(
+                stub, self.conn, on_wake=self.request_wake
+            )
             self.monitor.start()
             self.ui.put(("log", "Portfolio monitor started (pro path)"))
         except Exception as e:
@@ -895,6 +927,19 @@ class ProEngine:
         s.brain_rationale = d.get("rationale") or "—"
         s.market_read = str(d.get("market_read") or "").strip()
         s.opportunities = list(d.get("opportunities") or [])
+        s.ibkr_live_last = d.get("ibkr_live_last")
+        if s.ibkr_live_last is None:
+            s.ibkr_live_last = (d.get("world_state") or {}).get("ibkr_live_last")
+        s.ibkr_live_symbol = str(
+            d.get("ibkr_live_symbol")
+            or (d.get("world_state") or {}).get("ibkr_live_symbol")
+            or ""
+        )
+        s.scan_fetched = list(
+            d.get("scan_fetched")
+            or (d.get("world_state") or {}).get("scan_fetched")
+            or []
+        )
         s.news_items = list(d.get("news_items") or [])
         s.risk_posture = str(d.get("risk_posture") or "")
         s.last_params = dict(d.get("params") or (d.get("action_obj") or {}).get("params") or {})
@@ -916,6 +961,7 @@ class ProEngine:
             or (s.world_state or {}).get("structure_lessons")
             or []
         )
+        s.pace = dict(d.get("pace") or {})
         s.positions = d.get("positions") or []
         s.open_orders = d.get("open_orders") or []
         s.inventory = d.get("inventory") or format_position_inventory(s.positions)
@@ -1008,6 +1054,17 @@ class ProEngine:
         if gen != self._gen:
             return
         self._worker_loop = asyncio.get_running_loop()
+        from abcxauto.pacing import (
+            WakeGate,
+            allow_grok_call,
+            compute_pace,
+            facts_from_cycle,
+            wait_for_pace,
+        )
+
+        self._wake_event = asyncio.Event()
+        self._wake_gate = WakeGate()
+        self._wake_reason = ""
         try:
             self.conn = get_ibkr_connector()
             await self.conn.connect()
@@ -1018,6 +1075,14 @@ class ProEngine:
                 self.state.running = False
                 self.state.status = "Connected"
             self._note("CONNECT", "IBKR linked")
+            try:
+                from abcxauto.universe import refresh_legal_set
+
+                al = await refresh_legal_set(self.conn, persist=True)
+                n = len(al.get("legal_symbols") or [])
+                self._note("UNIVERSE", f"sandbox refreshed n={n} src={al.get('source')}")
+            except Exception as ue:
+                self._note("UNIVERSE", f"refresh skipped: {ue}")
             self._start_monitor()
         except Exception as e:
             msg = f"IBKR connect failed: {e}"
@@ -1041,14 +1106,78 @@ class ProEngine:
                 if self.monitor is None or not getattr(self.monitor, "running", False):
                     if getattr(get_config(), "monitor_enabled", True):
                         self._start_monitor()
+                if getattr(self, "_universe_refresh_on_start", False) and self.conn is not None:
+                    self._universe_refresh_on_start = False
+                    try:
+                        from abcxauto.universe import refresh_legal_set
+
+                        al = await refresh_legal_set(self.conn, persist=True)
+                        n_legal = len(al.get("legal_symbols") or [])
+                        self._note(
+                            "UNIVERSE",
+                            f"start refresh n={n_legal} src={al.get('source')}",
+                        )
+                    except Exception as ue:
+                        self._note("UNIVERSE", f"start refresh skipped: {ue}")
                 if not self.state.autonomous or self.pause.is_set():
                     await asyncio.sleep(0.25)
                     continue
                 if g is None:
                     g = GrokClient()
+
+                cfg = get_config()
+                from abcxauto.config import effective_grok_min_interval_s
+
+                pending_wake = self._wake_reason
+                # Budget check uses last known pace tier (protect/urgent bypass).
+                last_tier = str((self._last_pace or {}).get("tier") or "")
+                if pending_wake in ("unprotected", "halt"):
+                    last_tier = "protect"
+                grok_min = effective_grok_min_interval_s(cfg)
+                allowed, budget_why = allow_grok_call(
+                    tier=last_tier,
+                    wake_reason=pending_wake,
+                    last_grok_mono=self._last_grok_mono,
+                    grok_min_interval_s=grok_min,
+                )
+                if not allowed:
+                    rem = max(
+                        1.0,
+                        grok_min - (time.monotonic() - self._last_grok_mono),
+                    )
+                    pace = {
+                        "tier": last_tier or "idle",
+                        "sleep_s": rem,
+                        "bypass_grok_min": False,
+                        "reason": "pace_budget",
+                        "wake_reason": pending_wake or "",
+                    }
+                    self._last_pace = pace
+                    self.state.pace = dict(pace)
+                    self._note("PACE", f"skipped_grok: pace_budget ({rem:.0f}s)")
+                    self._wake_event.clear()
+                    self._wake_reason = ""
+                    woken = await wait_for_pace(rem, self._wake_event)
+                    if woken == "woken" and self._wake_reason in (
+                        "unprotected",
+                        "halt",
+                    ):
+                        continue
+                    continue
+
                 n += 1
+                wake_for_cycle = pending_wake
+                self._wake_event.clear()
+                self._wake_reason = ""
+                out: dict = {}
                 try:
                     out = await run_cycle(n, self.conn, g, hist, prev)
+                    skipped = (
+                        "skipped_grok"
+                        in str(out.get("validation") or out.get("rationale") or "")
+                    )
+                    if not skipped:
+                        self._last_grok_mono = time.monotonic()
                     prev = out["pnl"]
                     rec = hist[-1] if hist else {}
                     out.setdefault("action_obj", rec.get("action", {}))
@@ -1073,21 +1202,31 @@ class ProEngine:
                     if not out.get("positions"):
                         snap = rec.get("snapshot") or {}
                         out["positions"] = snap.get("positions") or []
+                    facts = facts_from_cycle(
+                        out, wake_reason=wake_for_cycle, cfg=cfg
+                    )
+                    decision = compute_pace(facts, cfg)
+                    pace = decision.to_dict()
+                    pace["wake_reason"] = wake_for_cycle or ""
+                    pace["budget"] = budget_why
+                    out["pace"] = pace
+                    self._last_pace = pace
+                    self._last_cycle_out = out
                     self.ui.put(("cycle", out))
                 except Exception as e:
                     self.ui.put(("error", str(e)))
-                    last_pulse = {}
-                else:
-                    last_pulse = out.get("reality_pulse") or {}
-                cfg = get_config()
-                sleep_s = float(getattr(cfg, "cycle_sleep_s", 300) or 300)
-                # When RTH is closed, stretch idle sleep (skip stretch in fast-test sleeps).
-                sess = str(
-                    (last_pulse.get("session") or {}).get("status") or ""
-                ).lower()
-                if sess and sess != "regular" and sleep_s >= 60:
-                    sleep_s = max(sleep_s, 900.0)
-                await asyncio.sleep(sleep_s)
+                    facts = facts_from_cycle(
+                        self._last_cycle_out, wake_reason=wake_for_cycle, cfg=cfg
+                    )
+                    decision = compute_pace(facts, cfg)
+                    pace = decision.to_dict()
+                    pace["wake_reason"] = wake_for_cycle or ""
+                    self._last_pace = pace
+
+                sleep_s = float((self._last_pace or {}).get("sleep_s") or cfg.cycle_sleep_s)
+                self._wake_event.clear()
+                await wait_for_pace(sleep_s, self._wake_event)
         finally:
             self._stop_monitor()
             self._worker_loop = None
+            self._wake_event = None

@@ -1,4 +1,4 @@
-"""Opportunity scan scoring + prompt formatting."""
+"""SCAN TAPE metrics + prompt formatting."""
 
 from abcxauto.config import (
     apply_risk_posture,
@@ -8,7 +8,11 @@ from abcxauto.config import (
     load_risk_settings,
 )
 from abcxauto.opportunity_scan import (
+    dismiss_cites_tape,
     format_opportunities,
+    format_scan_tape,
+    metrics_for_symbol,
+    normalize_tickers,
     reset_opportunity_cache,
     score_symbol,
 )
@@ -30,7 +34,6 @@ def _uptrend_candles(n: int = 60, base: float = 100.0) -> list[dict]:
     rows = []
     price = base
     for i in range(n):
-        # Mild uptrend with a soft pullback near the end
         if i < n - 5:
             price += 0.15
         else:
@@ -39,35 +42,74 @@ def _uptrend_candles(n: int = 60, base: float = 100.0) -> list[dict]:
     return rows
 
 
-def test_score_symbol_insufficient_data():
-    assert score_symbol([{"c": 1.0}] * 5, "SPY") is None
+def test_metrics_insufficient_data():
+    assert metrics_for_symbol([{"c": 1.0}] * 5, "SPY") is None
 
 
-def test_score_symbol_ranks_spy_pullback():
-    idea = score_symbol(_uptrend_candles(), "SPY")
+def test_metrics_no_score_no_index_bump():
+    idea = metrics_for_symbol(_uptrend_candles(), "SPY")
     assert idea is not None
     assert idea["symbol"] == "SPY"
-    assert idea["bias"] in ("LONG", "SHORT")
-    assert 0 < float(idea["score"]) <= 1.0
-    assert "stop_hint_pct" in idea
+    assert "score" not in idea
+    assert idea["source"] == "mda"
+    assert idea["freshness"] == "delayed"
+    assert "dist20" in idea
+    spy = metrics_for_symbol(_uptrend_candles(), "SPY")
+    aapl = metrics_for_symbol(_uptrend_candles(), "AAPL")
+    # Same candles → same metrics; no SPY-only bump field
+    assert spy["dist20"] == aapl["dist20"]
 
 
-def test_format_opportunities_empty():
-    text = format_opportunities([])
-    assert "none" in text.lower()
+def test_score_symbol_compat_alias():
+    assert score_symbol([{"c": 1.0}] * 5, "SPY") is None
+    idea = score_symbol(_uptrend_candles(), "QQQ")
+    assert idea is not None
+    assert "score" not in idea
 
 
-def test_format_opportunities_lists():
-    text = format_opportunities(
-        [{"symbol": "QQQ", "bias": "LONG", "score": 0.7, "rule_id": "test_rule",
-          "stop_hint_pct": 0.01, "target_hint_pct": 0.02, "last": 100.0}]
+def test_normalize_tickers_cap_and_regex():
+    out = normalize_tickers(
+        ["nvda", "bad symbol", "XLE", "nvda", "TOOLONGTICKER12", "BRK.B"],
+        cap=3,
     )
+    assert out == ["NVDA", "XLE", "BRK.B"]
+
+
+def test_format_scan_tape():
+    text = format_scan_tape(
+        [
+            {
+                "symbol": "QQQ",
+                "source": "mda",
+                "freshness": "delayed",
+                "mda_last": 100.0,
+                "dist20": 0.01,
+                "ret5": 0.02,
+                "sma20": 99.0,
+                "sma50": 98.0,
+                "above_sma20": True,
+            }
+        ]
+    )
+    assert "SCAN TAPE" in text
     assert "QQQ" in text
-    assert "MARKET FEATURES" in text
-    assert "heuristic_rank" in text
+    assert "delayed" in text.lower()
+    assert "not live" in text.lower() or "IBKR" in text
+    assert "heuristic_rank" not in text
+    assert "MARKET FEATURES" not in text
 
 
-def test_prompt_includes_features_and_envelope(tmp_path, monkeypatch):
+def test_format_opportunities_alias():
+    assert "none" in format_opportunities([]).lower()
+
+
+def test_dismiss_cites_tape():
+    ideas = [{"symbol": "NVDA"}, {"symbol": "XLE"}]
+    assert dismiss_cites_tape("NVDA too extended", ideas)
+    assert not dismiss_cites_tape("no edge today", ideas)
+
+
+def test_prompt_includes_scan_tape_and_quote_sources(tmp_path, monkeypatch):
     from abcxauto.world_state import WorldState
 
     path = tmp_path / "risk.json"
@@ -82,19 +124,21 @@ def test_prompt_includes_features_and_envelope(tmp_path, monkeypatch):
         flat=True,
         needs_protection=False,
         unprotected=[],
-        net_liquidation=37000.0,
-        daily_pnl=0.0,
+        net_liquidation=100000,
+        daily_pnl=0,
         positions=[],
         open_orders=[],
         opportunities=[
             {
-                "symbol": "SPY",
-                "bias": "LONG",
-                "score": 0.8,
-                "rule_id": "fixture",
-                "stop_hint_pct": 0.008,
-                "target_hint_pct": 0.016,
-                "last": 500.0,
+                "symbol": "AAPL",
+                "source": "mda",
+                "freshness": "delayed",
+                "mda_last": 200,
+                "dist20": 0.0,
+                "ret5": 0.0,
+                "sma20": 200,
+                "sma50": 198,
+                "above_sma20": True,
             }
         ],
         news_items=[],
@@ -102,7 +146,7 @@ def test_prompt_includes_features_and_envelope(tmp_path, monkeypatch):
         effective_posture="balanced",
         gates={},
         envelope={},
-        regime={"feature_mix_bias": "mixed", "trend_bias": "mixed"},
+        regime={},
         portfolio_risk={},
         working_thesis="",
         recent_decisions=[],
@@ -113,6 +157,7 @@ def test_prompt_includes_features_and_envelope(tmp_path, monkeypatch):
         review={},
     )
     prompt = world.prompt_block()
-    assert "MARKET FEATURES" in prompt
-    assert "SPY" in prompt
-    assert get_config().risk_posture == "balanced"
+    assert "SCAN TAPE" in prompt
+    assert "QUOTE SOURCES" in prompt
+    assert "AAPL" in prompt
+    assert "MARKET FEATURES" not in prompt

@@ -16,8 +16,39 @@ _PLAYBOOK: list[dict[str, Any]] = [
     {
         "types": ("market_bracket", "bracket"),
         "stances": frozenset({"hunt"}),
-        "precondition": "stance=hunt; book flat (no open STK risk / plan)",
-        "shell_reject": "open risk, ActiveTradePlan, structure cooldown, bad geometry",
+        "precondition": (
+            "stance=hunt; capacity slots remain (max_open_positions); "
+            "not unprotected; flat confirmed when exiting flat"
+        ),
+        "shell_reject": "capacity full, unprotected, flat unconfirmed, structure cooldown, bad geometry",
+        "needs_long_lot": False,
+    },
+    {
+        "types": (
+            "vertical_spread",
+            "iron_condor",
+            "iron_butterfly",
+            "butterfly",
+            "calendar_spread",
+            "diagonal_spread",
+            "buy_option",
+            "cash_secured_put",
+            "straddle",
+            "strangle",
+            "ratio_spread",
+            "jade_lizard",
+        ),
+        "stances": frozenset({"hunt", "manage"}),
+        "precondition": (
+            "hunt: new-risk under capacity + CONTROLS; "
+            "manage: may add option structure on open book; "
+            "params must match Act order schema"
+        ),
+        "shell_reject": (
+            "stance allowlist; capacity / unprotected / flat-unconfirmed; "
+            "defined_risk_only rejects unlimited-risk shapes "
+            "(ratio_spread, jade_lizard, short straddle/strangle)"
+        ),
         "needs_long_lot": False,
     },
     {
@@ -35,6 +66,29 @@ _PLAYBOOK: list[dict[str, Any]] = [
         "needs_long_lot": False,
     },
     {
+        "types": ("market_order", "limit_order"),
+        "stances": frozenset({"manage", "protect"}),
+        "precondition": (
+            "exit by target_conId; quantity may be partial trim "
+            "(omit quantity = full close); closing_position required"
+        ),
+        "shell_reject": (
+            "inventory/conId gate; qty > held; after partial trim "
+            "stop_order_qty may mismatch held (Fact in WORLD)"
+        ),
+        "needs_long_lot": False,
+    },
+    {
+        "types": ("roll_option", "close_option"),
+        "stances": frozenset({"manage", "protect"}),
+        "precondition": (
+            "open OPT leg in book; close_option prefers conId "
+            "(or expiration+strike+right); quantity may be partial"
+        ),
+        "shell_reject": "stance allowlist; close_option must match live option legs",
+        "needs_long_lot": False,
+    },
+    {
         "types": ("covered_call",),
         "stances": frozenset({"manage"}),
         "precondition": "long STK ≥100 shares on the named symbol",
@@ -44,7 +98,10 @@ _PLAYBOOK: list[dict[str, Any]] = [
     {
         "types": ("protective_put",),
         "stances": frozenset({"manage", "protect"}),
-        "precondition": "long STK ≥100 shares on the named symbol",
+        "precondition": (
+            "long STK ≥100 shares; also used to add put wing when short call "
+            "already on (collar conversion path — Grok chooses)"
+        ),
         "shell_reject": "overlay_shares_insufficient / overlay_no_long_stock",
         "needs_long_lot": True,
     },
@@ -136,7 +193,8 @@ def format_trade_playbook(
         if hints.get("needs_protection"):
             stances = {"protect"}
         elif hints.get("has_trade_plan") or not hints.get("flat", True):
-            stances = {"manage", "protect"}
+            # Multitask: open book + capacity → manage/protect and hunt
+            stances = {"manage", "protect", "hunt"}
         elif hints.get("flat", True):
             stances = {"hunt", "idle"}
         else:

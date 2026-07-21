@@ -151,20 +151,39 @@ async def test_hold_path_skips_send(monkeypatch):
     assert out["strat"] == "hold"
     assert out["result"]["status"] == "hold"
     assert send_calls == []
-    assert calls == ["judge", "act"]
+    assert calls == ["judge"]  # idle synthesizes Act (skipped_act: idle_hold)
+    assert "skipped_act: idle_hold" in out["rationale"]
     assert out["judgment"]["stance"] == "idle"
     assert "world_state" in out
 
 
 @pytest.mark.asyncio
 async def test_act_prompt_includes_order_examples(monkeypatch):
+    """Hunt still calls Act — ORDER EXAMPLES live on the Act prompt only."""
     prompts: list[tuple[str, str]] = []
+    hunt_j = {
+        "stance": "hunt",
+        "thesis": "Look for a clean entry.",
+        "focus": "Tape.",
+        "dismissed": "QQQ - no edge this cycle",
+        "intent": {
+            "kind": "hunt", "symbol": "SPY", "direction": "LONG", "urgency": "med",
+        },
+        "risk_budget_pct": 0.5,
+        "regime_fit": True,
+        "setup_grade": "B",
+    }
+    hunt_act = {
+        "action": "hold",
+        "strategy": "hold",
+        "rationale": "no clean structure yet",
+    }
 
     async def tracking_grok(_g, prompt: str, *, stage: str = "act") -> str:
         prompts.append((stage, prompt))
         if stage == "judge" or "JUDGE STAGE" in prompt:
-            return json.dumps(_idle_judgment())
-        return json.dumps(_hold_act())
+            return json.dumps(hunt_j)
+        return json.dumps(hunt_act)
 
     monkeypatch.setattr("abcxauto.agent_loop.grok", tracking_grok)
     await run_cycle(1, FakeConnector(), None, [], 0.0)
@@ -230,7 +249,7 @@ def _world(**kwargs) -> WorldState:
 
 def test_idle_requires_dismissed_when_ideas_present():
     world = _world(
-        opportunities=[{"symbol": "QQQ", "bias": "LONG", "score": 0.8, "note": "up"}],
+        opportunities=[{"symbol": "QQQ", "source": "mda", "freshness": "delayed"}],
     )
     ok, reason, _ = validate_judgment(
         _idle_judgment(dismissed=""),
@@ -246,6 +265,13 @@ def test_idle_requires_dismissed_when_ideas_present():
     assert ok2 is True
     assert j["stance"] == "idle"
 
+    ok3, reason3, _ = validate_judgment(
+        _idle_judgment(dismissed="no edge in mega-caps today"),
+        world,
+    )
+    assert ok3 is False
+    assert "tape" in reason3.lower()
+
 
 def test_idle_streak_escalate_same_dismiss():
     from abcxauto.world_state import save_idle_streak
@@ -258,7 +284,7 @@ def test_idle_streak_escalate_same_dismiss():
         }
     )
     world = _world(
-        opportunities=[{"symbol": "QQQ", "bias": "LONG", "score": 0.8}],
+        opportunities=[{"symbol": "QQQ", "source": "mda", "freshness": "delayed"}],
         idle_streak=3,
         idle_top_symbol="QQQ",
         effective_posture="aggressive",
@@ -275,6 +301,55 @@ def test_idle_streak_escalate_same_dismiss():
         _idle_judgment(dismissed="QQQ — fresh: VIX spike kills edge"),
         world,
     )
+    assert ok2 is True
+
+
+@pytest.mark.asyncio
+async def test_hunt_quote_ignores_mda_tape():
+    from abcxauto.agent_loop import _quote_for_action
+
+    act = {
+        "strategy": "market_bracket",
+        "params": {"symbol": "NVDA", "price_hint": 999.0},
+    }
+    snap = {
+        "opportunities": [
+            {
+                "symbol": "NVDA",
+                "last": 100.0,
+                "mda_last": 100.0,
+                "source": "mda",
+                "freshness": "delayed",
+            }
+        ],
+    }
+    # No connector → hunt must not fall back to MDA tape
+    q = await _quote_for_action(act, snap, connector=None)
+    assert q is None
+
+
+def test_hunt_symbol_must_be_on_tape():
+    world = _world(
+        opportunities=[{"symbol": "AAPL", "source": "mda", "freshness": "delayed"}],
+        effective_posture="aggressive",
+    )
+    j = {
+        "stance": "hunt",
+        "thesis": "Hunt single name.",
+        "focus": "AAPL tape metrics.",
+        "dismissed": "",
+        "intent": {
+            "kind": "hunt", "symbol": "ZZZZ", "direction": "LONG", "urgency": "med",
+        },
+        "risk_budget_pct": 1.0,
+        "regime_fit": True,
+        "setup_grade": "B",
+    }
+    ok, reason, _ = validate_judgment(j, world)
+    assert ok is False
+    assert "tape" in reason.lower()
+    j["intent"]["symbol"] = "AAPL"
+    ok2, _, _ = validate_judgment(j, world)
     assert ok2 is True
 
 
@@ -411,3 +486,24 @@ def test_protect_forbids_idle_when_unprotected():
     ok, reason, _ = validate_judgment(_idle_judgment(), world)
     assert ok is False
     assert "protect" in reason.lower()
+
+
+def test_should_skip_act_respects_deliberation(monkeypatch):
+    from abcxauto.agent_loop import _should_skip_act
+    from abcxauto.config import update_risk_config, clear_runtime_overrides, get_config
+
+    clear_runtime_overrides()
+    get_config.cache_clear()
+    world = _world(flat=False, needs_protection=False)
+    world.trade_plan = {"symbol": "SPY"}
+    j = {
+        "stance": "manage",
+        "intent": {"kind": "manage", "symbol": "SPY"},
+    }
+    from abcxauto.config import update_controls_config
+
+    update_controls_config(control_deliberation_pct=40, persist=False)
+    assert _should_skip_act(j, world, needs_prot=False) is True
+    update_controls_config(control_deliberation_pct=80, persist=False)
+    assert _should_skip_act(j, world, needs_prot=False) is False
+    clear_runtime_overrides()

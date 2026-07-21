@@ -21,6 +21,9 @@ class _Cfg:
     xai_api_key = "test-key"
     cycle_sleep_s = 0.05
     grok_min_interval_s = 0.0
+    pace_protect_s = 0.05
+    pace_manage_s = 0.05
+    pace_idle_s = 0.05
     signal_only = False
     monitor_enabled = True
     trading_mandate = ""
@@ -324,6 +327,9 @@ async def test_pro_engine_wires_portfolio_monitor(monkeypatch):
         xai_api_key = "test-key"
         cycle_sleep_s = 0.05
         grok_min_interval_s = 0.0
+        pace_protect_s = 0.05
+        pace_manage_s = 0.05
+        pace_idle_s = 0.05
         signal_only = False
         monitor_enabled = True
         monitor_poll_s = 60

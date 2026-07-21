@@ -42,9 +42,11 @@ REQUIRED = (
     "re-test",
     "Order suite",
     "Activity",
-    "Working",
-    "Fills",
+    "Working orders",
+    "Session fills",
     "_refresh_book_tab",
+    "_dash_live",
+    "lbl_dash_pace",
     "What's happening",
     "ABCXAUTO",
 )
@@ -74,28 +76,34 @@ def test_overview_dashboard_agent_status():
     idx = text.index("def _page_overview")
     end = text.index("def _page_positions", idx)
     block = text[idx:end]
-    assert "Judgment" in block or "Decision" in block or "Last action" in block
-    assert "World" in block or "Consumed this cycle" in block or "market_read" in text
-    assert "Action" in block or "brain_action" in text
-    assert "Book" in block
-    assert "Working" in block
-    assert "Fills" in block
-    assert "order blotter" in block.lower() or "Working" in block
-    assert "Activity" in block
+    assert "_dash_live" in block
+    assert "Last cycle" in block
     assert "Now" in block
+    assert "Activity" in block
+    assert "Context" in block
+    assert "lbl_dash_pace" in block or "lbl_dash_pace" in text
+    assert "brain_action" in text
     assert "lbl_agent_now" in text
-    assert "_dash_book" in block
+    # Blotter lives on Positions, not Dashboard
+    assert 'self._section("Working"' not in block
+    assert 'self._section("Fills"' not in block
+    assert "lbl_working_orders" not in block
+    pos_idx = text.index("def _page_positions")
+    pos_end = text.index("def _page_scorecard", pos_idx)
+    pos_block = text[pos_idx:pos_end]
+    assert "lbl_working_orders" in pos_block
+    assert "lbl_recent_fills" in pos_block
+    assert "_dash_book" in block  # compat shim
     assert "_dash_agent" in block
-    assert "_dash_log" in block  # compat shim → agent
+    assert "_dash_log" in block
     assert "_refresh_book_tab" in block
     assert "_refresh_agent_tab" in block
     assert "_refresh_log_tab" in block
     assert "_dash_pulse" not in block
     assert '("pulse", "Pulse")' not in text
-    assert '("log", "Log")' not in text  # Log folded into Agent
+    assert '("log", "Log")' not in text
     assert "_set_dash_tab" in text
-    assert "DASH_TABS" in text
-    # Portfolio NetLiq strip is not the Book tab primary content anymore
+    assert "DASH_TABS" not in text
     assert 'self._stat_line("NetLiq"' not in block
     assert "VALIDATE & EXECUTE" not in block
     assert "ov_pos_table" not in block
@@ -107,6 +115,9 @@ def test_overview_dashboard_agent_status():
     assert "Dashboard" in text
     assert "Test Suite" in text
     assert "_page_risk" in text
+    assert "_page_controls" in text
+    assert "_save_controls" in text
+    assert '("controls", "Controls"' in text or "\"controls\", \"Controls\"" in text
     assert '("risk", "Risk"' in text or "\"risk\", \"Risk\"" in text
     assert "_sync_ibkr_account_label" in text
     assert "_toggle_trading_mode" in text
@@ -153,7 +164,7 @@ def test_book_strip_and_mandate_sync(headless_pro):
     assert headless_pro.lbl_book_netliq.value == "$100,000"
     assert "-50.00" in (headless_pro.lbl_book_pnl.value or "")
     assert headless_pro.lbl_book_unprotected.value == "0"
-    assert headless_pro.lbl_book_decision.value == "trade"
+    assert "trade" in (headless_pro.lbl_book_decision.value or "")
     assert headless_pro.lbl_book_halt.value == "clear"
     assert "green" in (headless_pro.lbl_mandate_health.value or "").lower()
 
@@ -175,7 +186,7 @@ def test_book_strip_and_mandate_sync(headless_pro):
     }
     headless_pro._sync_widgets()
     assert headless_pro.lbl_book_unprotected.value == "2"
-    assert headless_pro.lbl_book_decision.value == "hold"
+    assert "hold" in (headless_pro.lbl_book_decision.value or "")
     assert headless_pro.lbl_book_halt.value == "HALTED"
     assert "red" in (headless_pro.lbl_mandate_health.value or "").lower()
 
@@ -379,19 +390,19 @@ def test_scorecard_nav_and_show_tab(headless_pro, tmp_path, monkeypatch):
     headless_pro.sidebar_labels = {}
     headless_pro.lbl_center_title = type("T", (), {"value": ""})()
     headless_pro.content = type("C", (), {"content": None})()
-    headless_pro.dash_tabs_row = type("D", (), {"visible": True})()
+    headless_pro.dash_tabs_row = type("D", (), {"visible": False})()
+    headless_pro.lbl_center_subtitle = type("T", (), {"value": "", "visible": True})()
     headless_pro._show_tab("scorecard")
     assert headless_pro.tab == "scorecard"
     assert headless_pro.lbl_center_title.value == "Scorecard"
-    assert headless_pro.dash_tabs_row.visible is False
     assert headless_pro.content.content is not None
     headless_pro._show_tab("suite")
     assert headless_pro.tab == "suite"
     assert headless_pro.lbl_center_title.value == "Test Suite"
     headless_pro._show_tab("overview")
-    assert headless_pro.dash_tabs_row.visible is True
+    assert headless_pro.lbl_center_title.value == "Dashboard"
     headless_pro._set_dash_tab("log")
-    assert headless_pro.dash_tab == "agent"  # Log folded into Agent
+    assert headless_pro.dash_tab == "log"  # single live surface; key kept as-is
 
 
 @pytest.mark.asyncio
@@ -489,7 +500,7 @@ def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
     """Shipped _start() — same handler as Start path / toggle."""
     grok_n = [0]
 
-    async def fake_grok(_g, prompt: str) -> str:
+    async def fake_grok(_g, prompt: str, **_kwargs) -> str:
         if "ONE tweak" in prompt:
             return json.dumps({"type": "config", "config": {"cycle_sleep_s": 0.01}, "summary": "faster"})
         grok_n[0] += 1
@@ -542,14 +553,43 @@ def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
     monkeypatch.setattr("abcxauto.pro_engine.GrokClient", lambda: object())
     monkeypatch.setattr("abcxauto.pro_engine.asyncio.sleep", paced_sleep)
 
+    async def _fast_pace(_sleep_s, _wake, **_kw):
+        await paced_sleep(0.06)
+        return ""
+
+    monkeypatch.setattr("abcxauto.pacing.wait_for_pace", _fast_pace)
+
+    async def _no_scan(*_a, **_k):
+        return []
+
+    async def _no_news(*_a, **_k):
+        return []
+
+    monkeypatch.setattr("abcxauto.opportunity_scan.scan_opportunities", _no_scan)
+    monkeypatch.setattr("abcxauto.opportunity_scan.fetch_scan_metrics", _no_scan)
+    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _no_news)
+
     class _FastCfg:
         xai_api_key = "test-key"
         cycle_sleep_s = 0.05
-        grok_min_interval_s = 0.0
+        # Must be >0: pro_engine does `float(x or 120)` so 0.0 becomes 120.
+        grok_min_interval_s = 0.01
+        pace_protect_s = 0.05
+        pace_manage_s = 0.05
+        pace_idle_s = 0.05
         signal_only = False
         monitor_enabled = False
         trading_mandate = ""
-
+        risk_gates_enabled = False
+        control_deliberation_pct = 50
+        control_budget_pct = 50
+        control_complexity_pct = 50
+        control_frequency_pct = 50
+        control_rotation_pct = 50
+        max_open_positions = 0
+        operator_card = ""
+        risk_posture = ""
+        trading_mode = "paper"
     monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _FastCfg())
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _FastCfg())
 
