@@ -212,3 +212,17 @@ Daily/weekly KPIs: `python scripts/phase5_day_report.py` (`--week`).
 ```powershell
 $env:PYTHONPATH='.'; python -m pytest tests/ -q
 ```
+
+## Desktop Pro (web shell)
+
+Native window + Desktop icon for the web Pro UI:
+
+```bash
+pip install pywebview
+cd web-pro && npm install && npm run build && cd ..
+python scripts/install_desktop_icon.py
+python -m abcxauto --desktop
+```
+
+Default `python -m abcxauto` still launches Flet Pro. Use `--desktop` for this shell.
+See [`web-pro/README.md`](web-pro/README.md) and [`docs/CYCLE.md`](docs/CYCLE.md).

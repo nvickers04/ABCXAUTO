@@ -1,0 +1,124 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  --color-bg: #000000;
+  --color-surface: #0a0a0a;
+  --color-elevated: #16181c;
+  --color-hover: #1d1f23;
+  --color-fg: #e7e9ea;
+  --color-muted: #71767b;
+  --color-subtle: #536471;
+  --color-border: #2f3336;
+  --color-border-soft: #1e2024;
+  --color-primary: #1d9bf0;
+  --color-primary-hover: #1a8cd8;
+  --color-primary-fg: #ffffff;
+  --color-gain: #00ba7c;
+  --color-loss: #f4212e;
+  --color-warn: #ffd400;
+  --color-agent: #7856ff;
+
+  --font-sans: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+
+  --shadow-soft: 0 0 0 1px rgba(255, 255, 255, 0.04);
+
+  --motion-quick: 150ms;
+  --motion-fast: 250ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    border-color: var(--color-border);
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow: hidden;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: color-mix(in oklab, var(--color-primary) 35%, transparent);
+    color: var(--color-fg);
+  }
+
+  /* Tabular nums for finance */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Custom scrollbar — X-like subtle */
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
+  .scroll-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background: var(--color-border);
+    border-radius: var(--radius-full);
+  }
+  .scroll-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer utilities {
+  .text-gain {
+    color: var(--color-gain);
+  }
+  .text-loss {
+    color: var(--color-loss);
+  }
+  .bg-gain-soft {
+    background: color-mix(in oklab, var(--color-gain) 12%, transparent);
+  }
+  .bg-loss-soft {
+    background: color-mix(in oklab, var(--color-loss) 12%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

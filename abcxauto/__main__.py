@@ -1,6 +1,7 @@
 """ABCXAUTO Pro Desktop — launch: python -m abcxauto
 
-Default: Pro UI (``pro_desktop.run_app``).
+Default: Pro UI (``pro_desktop.run_app`` Flet).
+Use ``python -m abcxauto --desktop`` for the web Pro native window.
 Use ``python -m abcxauto --cleanup`` to kill stale Flet/Python Pro processes
 and clear project ``__pycache__``.
 Use ``python -m abcxauto --cleanup --aggressive --flet-cache`` for a deep clean.
@@ -48,6 +49,10 @@ def main() -> None:
                 kill_only="--kill-only" in sys.argv,
             )
         )
+    if "--desktop" in sys.argv or "--web" in sys.argv:
+        from abcxauto.desktop_app import run
+
+        raise SystemExit(run())
     if "--headless" in sys.argv:
         print(
             "Use Pro START AUTONOMOUS (agent_loop is the cycle engine).",
