@@ -332,11 +332,12 @@ def _judge_system() -> str:
         "(e.g. stance=manage + secondary_intent hunt under capacity).\n"
         "To fetch more MDA metrics: set scan_request.symbols (max cap; ticker regex). "
         "Or finalize stance/intent from the tape already present.\n"
-        "idle while flat + tape + balanced/aggressive REQUIRES dismissed citing "
-        "any tape symbol and why rejected.\n"
-        "hunt intent.symbol MUST be on the SCAN TAPE (seed ∪ fetched).\n"
-        "Affirm, revise, or close working_thesis.\n"
-        "Model API cost and long-run ROI goal are NOT control signals — own the book.\n"
+        "idle while flat + tape: write dismissed (why you pass) — real reason, not filler.\n"
+        "hunt intent.symbol MUST be legal Universe + on SCAN TAPE when tape present.\n"
+        "Soft preferences (not excuses to no-op forever): prefer quality setups under "
+        "defensive posture; avoid re-hunting structure_cooldown names; advance or "
+        "honestly close working_thesis.\n"
+        "Model API cost / ROI goal are NOT control signals — own the book.\n"
         'JSON: {"stance":"...","thesis":"1-3 sentences","focus":"what mattered",'
         '"dismissed":"why tape symbols rejected (required for idle when tape present)",'
         '"scan_request":{"symbols":[],"reason":""},'
@@ -445,7 +446,18 @@ def _extract_scan_request(judgment: dict) -> list[str]:
 
 
 def validate_judgment(judgment: dict, world: WorldState) -> tuple[bool, str, dict]:
-    """Fail closed. Returns (ok, reason, maybe_patched_judgment)."""
+    """Hard floor only. Soft taste lives in the Judge prompt + journal, not rejects.
+
+    Hard (code reject):
+      - schema (stance/thesis/focus/intent)
+      - unprotected → protect (idle/hunt forbidden)
+      - hunt: flat-unconfirmed, capacity, symbol, universe, on tape when tape exists
+      - idle + tape: non-empty dismissed (structured field — not keyword liturgy)
+
+    Soft (prompt only — never reject here):
+      - setup_grade × posture, regime_fit, idle-streak text, thesis AFFIRM ritual,
+        structure cooldown, secondary_intent dual-hunt theater
+    """
     j = dict(judgment or {})
     stance = str(j.get("stance") or "").strip().lower()
     if stance not in STANCES:
@@ -472,6 +484,7 @@ def validate_judgment(judgment: dict, world: WorldState) -> tuple[bool, str, dic
     except (TypeError, ValueError):
         j["risk_budget_pct"] = 0.0
 
+    # --- HARD: protect first ---
     if world.needs_protection:
         if stance in ("idle", "hunt"):
             return False, "unprotected STK — stance must be protect (idle/hunt forbidden)", j
@@ -480,53 +493,44 @@ def validate_judgment(judgment: dict, world: WorldState) -> tuple[bool, str, dic
 
     from abcxauto.mega_worker import capacity_allows_new_risk
     from abcxauto.trade_plan import load_flat_streak
+    from abcxauto.universe import is_legal_symbol
 
-    # Four hard gates only for new risk — open book is NOT a hunt ban.
+    ideas = world.opportunities
+    symbols = tape_symbols(ideas)
+
+    # --- HARD: new-risk entry floor (not shell taste) ---
     if stance == "hunt":
         if load_flat_streak() > 0:
             return False, "book flat unconfirmed — wait before new risk", j
         if not capacity_allows_new_risk(world):
             return False, "capacity full — no new risk (max_open_positions)", j
+        sym = str(intent.get("symbol") or "").upper()
+        if not sym:
+            return False, "hunt requires intent.symbol", j
+        intent["symbol"] = sym
+        j["intent"] = intent
+        if not is_legal_symbol(sym):
+            return False, f"hunt symbol {sym} outside Universe sandbox", j
+        # Tape membership when code actually produced a tape (fence, not ranking)
+        if ideas and sym not in symbols:
+            return False, f"hunt symbol {sym} not on SCAN TAPE", j
 
-    # Optional secondary_intent (fluid dual-intent under capacity)
+    # secondary_intent: normalize only (no dual-stream court)
     sec = j.get("secondary_intent")
     if sec is not None and sec != {} and not isinstance(sec, dict):
-        return False, "secondary_intent must be object or null", j
-    if isinstance(sec, dict) and sec:
+        j["secondary_intent"] = None
+    elif isinstance(sec, dict) and sec:
         sec_kind = str(sec.get("kind") or "").strip().lower()
         if sec_kind and sec_kind not in STANCES:
-            return False, f"invalid secondary_intent.kind {sec_kind!r}", j
-        if sec_kind == "hunt":
-            if world.needs_protection:
-                return False, "unprotected — secondary hunt forbidden", j
-            if load_flat_streak() > 0:
-                return False, "flat unconfirmed — secondary hunt forbidden", j
-            if not capacity_allows_new_risk(world):
-                return False, "capacity full — secondary hunt forbidden", j
-            from abcxauto.universe import is_legal_symbol
-
-            sec_sym_early = str(sec.get("symbol") or "").upper()
-            if sec_sym_early and not is_legal_symbol(sec_sym_early):
-                return False, f"secondary hunt {sec_sym_early} outside Universe sandbox", j
-        j["secondary_intent"] = sec
+            j["secondary_intent"] = None
+        else:
+            j["secondary_intent"] = sec
     else:
         j["secondary_intent"] = None
 
+    # --- STRUCTURED SOFT→HARD field only: force a reason when idling with tape ---
+    # Do NOT parse keywords / force ticker citation (that was process theater).
     posture = (world.effective_posture or world.risk_posture or "").lower()
-    ideas = world.opportunities
-    symbols = tape_symbols(ideas)
-    # Validate secondary hunt symbol against tape when present
-    if isinstance(j.get("secondary_intent"), dict):
-        sec = j["secondary_intent"]
-        if str(sec.get("kind") or "").lower() == "hunt":
-            sec_sym = str(sec.get("symbol") or "").upper()
-            if sec_sym and ideas and sec_sym not in symbols:
-                return (
-                    False,
-                    f"secondary hunt symbol {sec_sym} not on SCAN TAPE",
-                    j,
-                )
-
     if (
         stance == "idle"
         and world.flat
@@ -534,65 +538,25 @@ def validate_judgment(judgment: dict, world: WorldState) -> tuple[bool, str, dic
         and ideas
         and posture in ("balanced", "aggressive")
     ):
-        dismissed = j.get("dismissed") or ""
-        if not dismissed:
-            return False, "idle requires dismissed citing a SCAN TAPE symbol", j
-        if not dismiss_cites_tape(dismissed, ideas):
-            return False, "idle dismissed must cite a SCAN TAPE symbol", j
+        if len(j.get("dismissed") or "") < 8:
+            return False, "idle requires dismissed (why you pass on the tape)", j
 
-    thresh = idle_streak_threshold(posture)
-    idle_anchor = str(world.idle_top_symbol or "").upper()
-    if (
-        stance == "idle"
-        and world.flat
-        and ideas
-        and int(world.idle_streak or 0) >= thresh
-        and idle_anchor
-        and idle_anchor in symbols
-    ):
-        prev = str(load_idle_streak().get("last_dismiss") or "").strip()
-        cur = str(j.get("dismissed") or "").strip()
-        if prev and cur and cur == prev:
-            return False, "idle streak escalate — new dismiss reason or hunt", j
-
+    # Soft lessons attached for journal/prompt consumers (never reject)
+    soft: list[str] = []
+    cool = getattr(world, "structure_cooldown", None) or {}
     if stance == "hunt":
+        sym = str((j.get("intent") or {}).get("symbol") or "").upper()
+        if sym and sym in cool:
+            soft.append(f"structure_cooldown:{sym}={cool[sym]}")
         grade = j["setup_grade"]
         if posture == "defensive" and grade != "A":
-            return False, "defensive posture requires setup_grade A to hunt", j
+            soft.append("soft:defensive_prefers_grade_A")
         if posture == "balanced" and grade == "C":
-            return False, "balanced posture blocks setup_grade C hunts", j
-        rf = j.get("regime_fit")
-        if posture == "defensive" and rf in (False, "no", "false", "counter", 0, "0"):
-            return False, "counter-regime hunt blocked under defensive", j
-        sym = str(intent.get("symbol") or "").upper()
-        if not sym:
-            return False, "hunt requires intent.symbol on SCAN TAPE", j
-        if ideas and sym not in symbols:
-            return False, f"hunt symbol {sym} not on SCAN TAPE (MDA-validated)", j
-        from abcxauto.universe import is_legal_symbol
-
-        if not is_legal_symbol(sym):
-            return False, f"hunt symbol {sym} outside Universe sandbox", j
-        struct_cool = getattr(world, "structure_cooldown", None) or {}
-        if sym in struct_cool:
-            return (
-                False,
-                f"structure cooldown on {sym} ({struct_cool[sym]}) — "
-                "hunt a different tape symbol or idle with dismissed citing a tape symbol",
-                j,
-            )
-
-    open_thesis = (world.working_thesis or "").strip()
-    if stance == "idle" and open_thesis and ideas and len(open_thesis) > 20:
-        blob = f"{thesis} {focus} {j.get('dismissed') or ''}".upper()
-        if (
-            "REVISE" not in blob
-            and "CLOSE" not in blob
-            and "AFFIRM" not in blob
-            and not dismiss_cites_tape(blob, ideas)
-            and "THESIS" not in blob
-        ):
-            return False, "idle must address open thesis or a SCAN TAPE symbol", j
+            soft.append("soft:balanced_grade_C_is_thin")
+    if stance == "idle" and int(world.idle_streak or 0) >= idle_streak_threshold(posture):
+        soft.append(f"soft:idle_streak={world.idle_streak}")
+    if soft:
+        j["_soft_lessons"] = soft
 
     return True, "ok", j
 
@@ -655,34 +619,11 @@ def check_intent_coherence(
 def check_risk_budget(
     judgment: dict, act: dict, net_liq: float, gates: dict | None = None
 ) -> tuple[bool, str]:
-    strat = str(act.get("strategy") or act.get("action") or "").lower()
-    if strat not in ("bracket", "market_bracket"):
-        return True, "n/a"
-    params = act.get("params") or {}
-    try:
-        qty = float(params.get("quantity") or 0)
-        entry = float(params.get("entry_price") or 0)
-        stop = float(params.get("stop_price") or 0)
-    except (TypeError, ValueError):
-        return True, "n/a"
-    if qty <= 0 or entry <= 0 or stop <= 0 or net_liq <= 0:
-        return True, "n/a"
-    risk_dollars = abs(entry - stop) * qty
-    risk_pct = 100.0 * risk_dollars / float(net_liq)
-    try:
-        budget = float(judgment.get("risk_budget_pct") or 0)
-    except (TypeError, ValueError):
-        budget = 0.0
-    gate_max = None
-    if gates:
-        try:
-            gate_max = float(gates.get("max_risk_per_trade_pct") or 0)
-        except (TypeError, ValueError):
-            gate_max = None
-    cap = budget if budget > 0 else (gate_max or 0)
-    if cap > 0 and risk_pct > cap * 1.05:
-        return False, f"size risk {risk_pct:.2f}% > budget {cap:.2f}%"
-    return True, "ok"
+    """Advisory only. Hard size limits live in RiskGate.pre_trade_check.
+
+    Grok's risk_budget_pct is a self-hint, not a second reject court.
+    """
+    return True, "advisory"
 
 
 def _build_judge_prompt(world: WorldState, *, finalize: bool = False) -> str:
@@ -718,11 +659,10 @@ def _build_judge_prompt(world: WorldState, *, finalize: bool = False) -> str:
         and posture in ("balanced", "aggressive")
     ):
         pressure = (
-            f"PROCESS: flat + SCAN TAPE present (posture={posture}). "
-            "You operate the scanner. idle REQUIRES dismissed citing any tape "
-            f"symbol among [{syms}]. Or stance=hunt with intent.symbol on tape "
-            "and setup_grade. Optional scan_request for more MDA symbols "
-            "(skipped if finalize pass)."
+            f"SOFT: flat + SCAN TAPE present (posture={posture}). "
+            f"Tape names: [{syms}]. idle → write dismissed (why pass). "
+            "hunt → intent.symbol on tape + legal universe. "
+            "Optional scan_request for more MDA. Own the book — no filler idle."
         )
     if finalize:
         pressure += (
@@ -731,14 +671,13 @@ def _build_judge_prompt(world: WorldState, *, finalize: bool = False) -> str:
     thresh = idle_streak_threshold(posture)
     if world.idle_streak >= thresh and world.opportunities:
         pressure += (
-            f" PROCESS: IDLE STREAK={world.idle_streak} — cannot re-idle with "
-            "same dismiss; new reason or hunt."
+            f" SOFT: idle_streak={world.idle_streak} — raise bar; new reason or hunt "
+            "(shell will not hard-reject repeated dismiss text)."
         )
     cool = getattr(world, "structure_cooldown", None) or {}
     if cool:
         pressure += (
-            f" GATE: STRUCTURE COOLDOWN (do not re-hunt): {cool}. "
-            "Different tape symbol or idle with dismissed citing a tape symbol."
+            f" SOFT: structure lessons (prefer other names): {cool}."
         )
     fetched = getattr(world, "scan_fetched", None) or []
     if fetched:

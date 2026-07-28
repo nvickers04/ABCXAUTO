@@ -248,6 +248,7 @@ def _world(**kwargs) -> WorldState:
 
 
 def test_idle_requires_dismissed_when_ideas_present():
+    """Structured field only — non-empty dismissed, no ticker-citation court."""
     world = _world(
         opportunities=[{"symbol": "QQQ", "source": "mda", "freshness": "delayed"}],
     )
@@ -265,15 +266,16 @@ def test_idle_requires_dismissed_when_ideas_present():
     assert ok2 is True
     assert j["stance"] == "idle"
 
+    # Real reason without ticker citation is OK now (was process theater)
     ok3, reason3, _ = validate_judgment(
         _idle_judgment(dismissed="no edge in mega-caps today"),
         world,
     )
-    assert ok3 is False
-    assert "tape" in reason3.lower()
+    assert ok3 is True, reason3
 
 
-def test_idle_streak_escalate_same_dismiss():
+def test_idle_streak_is_soft_not_reject():
+    """Repeated dismiss is prompt pressure + soft lesson, not a hard reject."""
     from abcxauto.world_state import save_idle_streak
 
     save_idle_streak(
@@ -290,18 +292,12 @@ def test_idle_streak_escalate_same_dismiss():
         effective_posture="aggressive",
     )
     assert idle_streak_threshold("aggressive") == 2
-    ok, reason, _ = validate_judgment(
+    ok, reason, j = validate_judgment(
         _idle_judgment(dismissed="QQQ chop — no clean pullback entry"),
         world,
     )
-    assert ok is False
-    assert "streak" in reason.lower() or "escalate" in reason.lower()
-
-    ok2, _, _ = validate_judgment(
-        _idle_judgment(dismissed="QQQ — fresh: VIX spike kills edge"),
-        world,
-    )
-    assert ok2 is True
+    assert ok is True, reason
+    assert any("idle_streak" in s for s in (j.get("_soft_lessons") or []))
 
 
 @pytest.mark.asyncio
@@ -328,7 +324,8 @@ async def test_hunt_quote_ignores_mda_tape():
     assert q is None
 
 
-def test_hunt_symbol_must_be_on_tape():
+def test_hunt_symbol_must_be_on_tape(monkeypatch):
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = _world(
         opportunities=[{"symbol": "AAPL", "source": "mda", "freshness": "delayed"}],
         effective_posture="aggressive",
@@ -458,13 +455,13 @@ def test_soft_hunt_cooldown_does_not_block_judgment(tmp_path, monkeypatch):
     assert ok is True, reason
 
 
-def test_structure_scrape_cooldown_blocks_same_symbol():
+def test_structure_scrape_cooldown_is_soft_lesson():
     world = _world(
         opportunities=[{"symbol": "QQQ", "bias": "LONG", "score": 0.9}],
         flat=True,
         structure_cooldown={"QQQ": "scrape_suspect"},
     )
-    ok, reason, _ = validate_judgment(
+    ok, reason, j = validate_judgment(
         {
             "stance": "hunt",
             "thesis": "Re-enter QQQ after scrape",
@@ -477,8 +474,9 @@ def test_structure_scrape_cooldown_blocks_same_symbol():
         },
         world,
     )
-    assert ok is False
-    assert "structure cooldown" in reason.lower()
+    assert ok is True, reason
+    lessons = j.get("_soft_lessons") or []
+    assert any("structure_cooldown" in s for s in lessons)
 
 
 def test_protect_forbids_idle_when_unprotected():

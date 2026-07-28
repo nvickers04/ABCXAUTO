@@ -54,3 +54,21 @@ Not a multi-branch merge. Not escapade parallelism.
 ## Controls dials
 
 Still real: capacity, complexity allowlist, frequency as operator preference for **how aggressive the book can be** — not how many Grok calls to skip.
+
+## Hard vs soft (slim gates)
+
+Soft rules that lived only in prompts produced weak Grok output — so many were
+hardened into rejects. That over-corrected into a process court.
+
+**Compromise:**
+
+| Hard (reject) | Structured field (reject if missing) | Soft (prompt + `_soft_lessons`) |
+|---|---|---|
+| Unprotected → protect | Idle + tape → `dismissed` ≥ 8 chars | setup_grade × posture |
+| Hunt: capacity, flat-unconfirmed | | regime_fit |
+| Hunt: symbol legal + on tape | | idle streak / same dismiss |
+| Schema: stance/thesis/focus/intent | | structure cooldown |
+| Geometry / inventory / RiskGate | | thesis AFFIRM/REVISE keywords |
+| Complexity dial / intent symbol match on hunt entries | | Grok `risk_budget_pct` (RiskGate owns $) |
+
+Shell does **not** rank ideas. Soft lessons never block a cycle.
