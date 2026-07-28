@@ -212,3 +212,8 @@ Daily/weekly KPIs: `python scripts/phase5_day_report.py` (`--week`).
 ```powershell
 $env:PYTHONPATH='.'; python -m pytest tests/ -q
 ```
+
+## Web Pro shell (layout prototype)
+
+Browser companion under [`web-pro/`](web-pro/) — X Lights Out operator UI with paper-sim state.
+Does **not** replace Flet Pro or the Python risk core. See `web-pro/README.md`.
