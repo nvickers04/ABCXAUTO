@@ -1,4 +1,4 @@
-"""Adaptive pacing: tiers, grok budget, wakes, idle Act skip."""
+"""Adaptive pacing: tiers, wakes, market-rhythm sleep (not Act thrift)."""
 
 from __future__ import annotations
 
@@ -176,7 +176,7 @@ async def test_wait_for_pace_wakes():
 
 
 @pytest.mark.asyncio
-async def test_idle_skips_act_grok(monkeypatch, tmp_path):
+async def test_idle_still_runs_act(monkeypatch, tmp_path):
     from abcxauto.agent_loop import run_cycle
 
     monkeypatch.setattr(
@@ -251,7 +251,7 @@ async def test_idle_skips_act_grok(monkeypatch, tmp_path):
         calls.append(stage)
         if stage == "judge" or "JUDGE STAGE" in prompt:
             return json.dumps(judgment)
-        raise AssertionError("Act Grok must not run on clean idle")
+        return json.dumps({"action": "hold", "strategy": "hold", "rationale": "act hold"})
 
     class FakeConnector:
         connected = True
@@ -270,9 +270,8 @@ async def test_idle_skips_act_grok(monkeypatch, tmp_path):
 
     monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert calls == ["judge"]
+    assert calls == ["judge", "act"]
     assert out["strat"] == "hold"
-    assert "skipped_act: idle_hold" in out["rationale"]
 
 
 @pytest.mark.asyncio
@@ -390,8 +389,8 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_manage_hold_skips_act(monkeypatch, tmp_path):
-    """Judge said manage+hold → skip Act only (stance still Grok’s)."""
+async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
+    """Judge manage + hold intent → Act still runs (no thrift skip)."""
     from abcxauto.agent_loop import run_cycle
     from abcxauto.memory import reset_journal
     from abcxauto.world_state import reset_idle_streak
@@ -471,7 +470,11 @@ async def test_manage_hold_skips_act(monkeypatch, tmp_path):
         calls.append(stage)
         if stage == "judge" or "JUDGE STAGE" in prompt:
             return json.dumps(judgment)
-        raise AssertionError("Act must skip on manage/hold")
+        return json.dumps({
+            "action": "hold",
+            "strategy": "hold",
+            "rationale": "manage book — stop working",
+        })
 
     class FakeConnector:
         connected = True
@@ -490,6 +493,6 @@ async def test_manage_hold_skips_act(monkeypatch, tmp_path):
 
     monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert calls == ["judge"]
+    assert calls == ["judge", "act"]
     assert out["judgment"]["stance"] == "manage"
-    assert "manage_hold" in out["rationale"]
+    assert out["strat"] == "hold"

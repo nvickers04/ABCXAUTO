@@ -65,7 +65,8 @@ def test_safety_facts_prefer_open_risk():
     assert streams == ["open_risk"]
 
 
-def test_select_streams_dual_under_budget():
+def test_select_streams_single_focus_not_tree():
+    """One stream only — secondary hunt still maps to new_risk if primary is hunt-ish."""
     w = _world()
     cfg = SimpleNamespace(
         control_budget_pct=80,
@@ -73,6 +74,8 @@ def test_select_streams_dual_under_budget():
         control_deliberation_pct=70,
         control_rotation_pct=50,
     )
+    # manage with secondary hunt → single open_risk (book first) under primary_stream rules:
+    # manage stance → open_risk (not dual merge)
     streams = select_streams(
         {
             "stance": "manage",
@@ -82,8 +85,14 @@ def test_select_streams_dual_under_budget():
         w,
         cfg=cfg,
     )
-    assert "open_risk" in streams
-    assert "new_risk" in streams or "escapade" in streams
+    assert streams == ["open_risk"]
+    # hunt → single new_risk
+    streams2 = select_streams(
+        {"stance": "hunt", "intent": {"kind": "hunt", "symbol": "QQQ"}},
+        w,
+        cfg=cfg,
+    )
+    assert streams2 == ["new_risk"]
 
 
 def test_merge_open_risk_wins_on_safety():
@@ -120,9 +129,13 @@ def test_idle_single_stream_no_escapade():
             control_frequency_pct=90,
             control_deliberation_pct=90,
             control_rotation_pct=50,
+            max_open_positions=6,
         ),
     )
-    assert streams == ["open_risk"]
+    # Flat idle → single focus (new_risk when capacity); never multi/escapade.
+    assert len(streams) == 1
+    assert streams[0] in ("open_risk", "new_risk")
+    assert "escapade" not in streams
 
 
 def test_rotation_thin_cash_keeps_open_risk_and_suffix():

@@ -151,8 +151,8 @@ async def test_hold_path_skips_send(monkeypatch):
     assert out["strat"] == "hold"
     assert out["result"]["status"] == "hold"
     assert send_calls == []
-    assert calls == ["judge"]  # idle synthesizes Act (skipped_act: idle_hold)
-    assert "skipped_act: idle_hold" in out["rationale"]
+    # Always Judge + Act (no thrift skip). Hold comes from Act, not skip_act.
+    assert calls == ["judge", "act"]
     assert out["judgment"]["stance"] == "idle"
     assert "world_state" in out
 
@@ -488,9 +488,10 @@ def test_protect_forbids_idle_when_unprotected():
     assert "protect" in reason.lower()
 
 
-def test_should_skip_act_respects_deliberation(monkeypatch):
+def test_should_skip_act_always_false(monkeypatch):
+    """Thrift skip retired — model cost is not a cycle control."""
     from abcxauto.agent_loop import _should_skip_act
-    from abcxauto.config import update_risk_config, clear_runtime_overrides, get_config
+    from abcxauto.config import clear_runtime_overrides, get_config, update_controls_config
 
     clear_runtime_overrides()
     get_config.cache_clear()
@@ -500,10 +501,14 @@ def test_should_skip_act_respects_deliberation(monkeypatch):
         "stance": "manage",
         "intent": {"kind": "manage", "symbol": "SPY"},
     }
-    from abcxauto.config import update_controls_config
-
     update_controls_config(control_deliberation_pct=40, persist=False)
-    assert _should_skip_act(j, world, needs_prot=False) is True
+    assert _should_skip_act(j, world, needs_prot=False) is False
     update_controls_config(control_deliberation_pct=80, persist=False)
     assert _should_skip_act(j, world, needs_prot=False) is False
+    # idle also runs Act
+    assert _should_skip_act(
+        {"stance": "idle", "intent": {"kind": "idle"}},
+        _world(flat=True, needs_protection=False),
+        needs_prot=False,
+    ) is False
     clear_runtime_overrides()

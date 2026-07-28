@@ -1,6 +1,7 @@
 """Fact-based adaptive pacing for the Pro autonomous cycle.
 
-Process only: tiers and wake codes are gates, not trading taste.
+Process only: tiers and wake codes are market-rhythm gates, not trading taste
+and not model-cost thrift. Idle sleep is book state (flat + idle), not API budget.
 """
 
 from __future__ import annotations

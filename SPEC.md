@@ -19,8 +19,10 @@ the book is protected; hold is **forbidden only while unprotected STK** exists
 1. **Control** — Three disjoint surfaces: **Risk** (capital survival sliders/halt),
    **Controls** (deliberation, budget, frequency, structure complexity allowlist,
    book capacity), **Universe** (IBKR sandbox arenas — legal symbols only).
-   Optional Operator Card, Pro START/Stop/pause, mandate. Goal: book return on
-   startup cash > cost of the model. Escapades are dials-only (no free-text briefs).
+   Optional Operator Card, Pro START/Stop/pause, mandate.
+   **Scorecard goal** (not a cycle control): book return on startup cash >
+   cost of the model — never skip Judge/Act or thrift streams to chase that.
+   Escapades are dials-only (no free-text briefs). See ``docs/CYCLE.md``.
 2. **Unbiased** — Shell text/process is Fact, Gate, or labeled Heuristic
    (`heuristic ≠ recommendation`). Universe membership is operator arena choice +
    IBKR refresh — shell never ranks “best.” Grok picks inside the legal set.
@@ -73,8 +75,8 @@ abcxauto/
   send.py            dispatch façade → executor
   book.py            portfolio / book state façade
   risk.py            risk-gate façade
-  agent_loop.py      Perceive → Allocator → Act streams (open/new/escapade) → send
-  mega_worker.py     Capacity Facts, stream select, one-send merge
+  agent_loop.py      Perceive → Judge → Act (always) → hard gates → send
+  mega_worker.py     Capacity Facts + single Act focus (not multi-merge tree)
   universe.py        Universe tab sandbox (IBKR pull → legal set)
   structure_complexity.py  Controls complexity → Act allowlist
   trade_plan.py      Multi-plan book (`active_trade_plans.json`)

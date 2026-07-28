@@ -316,19 +316,19 @@ async def snap(c: Any) -> dict:
 def _judge_system() -> str:
     mandate = (get_config().trading_mandate or "")[:600]
     return (
-        "ABCXAUTO Allocator — attention + intelligence-budget spend. "
-        "Output ONLY valid JSON. No action orders.\n"
+        "ABCXAUTO portfolio owner — Judge stage. "
+        "You own the book under hard risk code. Output ONLY valid JSON. No orders.\n"
         f"MANDATE:\n{mandate}\n"
         f"{QUOTE_SOURCES_BLOCK}\n"
         "WORLDSTATE + SCAN TAPE are code facts. Tape is unranked MDA (delayed). "
         "You pick hunt symbols — shell does not recommend a top idea.\n"
         "stances: protect | manage | hunt | idle "
-        "(labels: open-risk work ↔ new-risk work; not role theater).\n"
+        "(what you intend with the book this cycle — not a cost budget).\n"
         "HARD GATES (code): unprotected STK → protect before new risk; "
         "halt blocks entries; capacity/sizing; flat unconfirmed → no new risk. "
         "Open book does NOT forbid hunt when capacity slots remain — multitask.\n"
-        "Prefer open-risk Act when safety Facts broken (unprotected / stop qty). "
-        "Optional secondary_intent when splitting attention "
+        "Prefer open-book work when safety Facts broken (unprotected / stop qty). "
+        "Optional secondary_intent when multitasking "
         "(e.g. stance=manage + secondary_intent hunt under capacity).\n"
         "To fetch more MDA metrics: set scan_request.symbols (max cap; ticker regex). "
         "Or finalize stance/intent from the tape already present.\n"
@@ -336,6 +336,7 @@ def _judge_system() -> str:
         "any tape symbol and why rejected.\n"
         "hunt intent.symbol MUST be on the SCAN TAPE (seed ∪ fetched).\n"
         "Affirm, revise, or close working_thesis.\n"
+        "Model API cost and long-run ROI goal are NOT control signals — own the book.\n"
         'JSON: {"stance":"...","thesis":"1-3 sentences","focus":"what mattered",'
         '"dismissed":"why tape symbols rejected (required for idle when tape present)",'
         '"scan_request":{"symbols":[],"reason":""},'
@@ -349,7 +350,10 @@ def _judge_system() -> str:
 def _act_system() -> str:
     return (
         _build_rules()
-        + "\nYou are ACT. Fulfill Judgment.intent with ONE allowlisted action.\n"
+        + "\nYou are ACT. Fulfill Judgment with ONE allowlisted action. "
+        "Always decide — hold is valid when the book is protected and nothing "
+        "meets the bar; hold is forbidden only while unprotected STK exists "
+        "(code enforces). Do not thrift-skip thinking for model cost.\n"
         f"{QUOTE_SOURCES_BLOCK}\n"
         "Hunt structure: use IBKR live last (price_hint / ibkr_live_last) for stock "
         "brackets. Do not size stops from MDA tape last.\n"
@@ -860,78 +864,22 @@ async def _run_act_streams(
     *,
     needs_prot: bool = False,
 ) -> dict:
-    """Phase 2/3: parallel open-risk / new-risk / escapade under budget; one send."""
-    from abcxauto.mega_worker import merge_send_queue, select_streams
+    """One Act per cycle. Stream label is prompt focus only — not a branch tree."""
+    from abcxauto.mega_worker import primary_stream
 
-    streams = select_streams(judgment, world, needs_prot=needs_prot)
-    if not streams:
-        return {
-            "action": "hold",
-            "strategy": "hold",
-            "rationale": "allocator: no Act streams (idle)",
-        }
-
-    async def _one(stream: str) -> dict:
-        j_use = dict(judgment or {})
-        if stream == "open_risk":
-            if str(j_use.get("stance") or "").lower() == "hunt":
-                j_use = {
-                    **j_use,
-                    "stance": "manage",
-                    "intent": {
-                        "kind": "manage",
-                        "symbol": ((j_use.get("intent") or {}) or {}).get("symbol"),
-                        "urgency": ((j_use.get("intent") or {}) or {}).get("urgency")
-                        or "med",
-                    },
-                }
-        elif stream in ("new_risk", "escapade"):
-            sec = j_use.get("secondary_intent") if isinstance(j_use.get("secondary_intent"), dict) else {}
-            intent = j_use.get("intent") if isinstance(j_use.get("intent"), dict) else {}
-            if str(j_use.get("stance") or "").lower() != "hunt" and sec.get("kind") == "hunt":
-                intent = sec
-            j_use = {
-                **j_use,
-                "stance": "hunt",
-                "intent": {
-                    "kind": "hunt",
-                    "symbol": intent.get("symbol"),
-                    "direction": intent.get("direction"),
-                    "urgency": intent.get("urgency") or "med",
-                },
-            }
-        raw = await grok(
-            g, _build_act_prompt(world, j_use, stream=stream), stage="act"
-        )
-        act = parse_json(raw) or {
-            "action": "hold",
-            "strategy": "hold",
-            "rationale": f"empty_act:{stream}",
-        }
-        act["_stream"] = stream
-        return act
-
-    if len(streams) == 1:
-        return await _one(streams[0])
-
-    results = await asyncio.gather(
-        *[_one(s) for s in streams], return_exceptions=True
+    stream = primary_stream(judgment, world, needs_prot=needs_prot)
+    j_use = dict(judgment or {})
+    # Keep Judgment as Grok wrote it; only tag focus for the Act prompt.
+    raw = await grok(
+        g, _build_act_prompt(world, j_use, stream=stream), stage="act"
     )
-    candidates: list[dict] = []
-    for stream, res in zip(streams, results):
-        if isinstance(res, Exception):
-            logger.warning("act stream %s failed: %s", stream, res)
-            continue
-        if isinstance(res, dict):
-            candidates.append(res)
-    merged = merge_send_queue(candidates, world=world, judgment=judgment)
-    if merged is None:
-        return {
-            "action": "hold",
-            "strategy": "hold",
-            "rationale": "allocator: streams empty after merge",
-        }
-    return merged
+    act = parse_json(raw) or {
+        "action": "hold",
+        "strategy": "hold",
+        "rationale": f"empty_act:{stream}",
+    }
+    act["_stream"] = stream
+    return act
 
 
 def _result_dict(
@@ -1046,41 +994,10 @@ def _journal_stages(
 def _should_skip_act(
     judgment: dict, world: WorldState, needs_prot: bool
 ) -> bool:
-    """Skip Act Grok when Judge already decided hold (idle or manage+hold).
+    """Retired thrift path. Always run Act — ROI/model-cost is not a control signal.
 
-    Stance still came from Grok — this is cheap process after judgment, not a
-    substitute for Judge. Disabled when Controls deliberation is S2-lean
-    (mega-worker / require Act).
+    Kept as a named function so tests/call sites stay stable; always False.
     """
-    if needs_prot or world.needs_protection:
-        return False
-    try:
-        from abcxauto.config import deliberation_requires_act
-
-        if deliberation_requires_act():
-            return False
-    except Exception:
-        pass
-    stance = str(judgment.get("stance") or "").lower()
-    intent = judgment.get("intent") or {}
-    kind = str(intent.get("kind") or stance).lower()
-    if stance == "idle" and kind in ("idle", "hold", ""):
-        if world.trade_plan:
-            return False
-        try:
-            from abcxauto.trade_plan import book_has_risk
-
-            if book_has_risk(world.positions):
-                return False
-        except Exception:
-            if world.positions:
-                return False
-        return True
-    # Manage + hold: Judge already decided; skip second Grok call (S1 lean only)
-    if stance == "manage" and kind in ("manage", "hold", ""):
-        if world.needs_protection:
-            return False
-        return True
     return False
 
 
@@ -1109,10 +1026,11 @@ async def run_cycle(
     h: List[dict],
     prev: float,
 ) -> dict:
-    """Perceive (code) → Judge (Grok) → Act (Grok) → gates/send → journal.
+    """Perceive → Judge → Act → hard gates/send → journal.
 
-    Shell does not invent stance or hold. When operator cadence allows a cycle,
-    Grok Judges. Act may be skipped only after Judge chose idle or manage+hold.
+    Straight ownership loop — not a skip/merge decision tree.
+    Shell does not invent stance. Act always runs after a valid Judge.
+    Model cost / long-run ROI is a scorecard goal, never a cycle control.
     """
     s = await snap(c)
     positions = s.get("positions") or []
@@ -1274,39 +1192,27 @@ async def run_cycle(
         except Exception:
             logger.debug("IBKR live quote for %s failed", hunt_sym, exc_info=True)
 
-    # --- ACT (allocator streams: open-risk / new-risk / escapade → one send) ---
-    if _should_skip_act(judgment, world, needs_prot):
-        skip_why = (
-            "manage_hold"
-            if str(judgment.get("stance") or "").lower() == "manage"
-            else "idle_hold"
-        )
+    # --- ACT (always — one focus stream; no thrift skip / multi-merge tree) ---
+    try:
+        act = await _run_act_streams(g, world, judgment, needs_prot=needs_prot)
+        if not act:
+            act = {"action": "hold", "strategy": "hold", "rationale": "empty_act"}
+    except Exception as exc:
+        logger.exception("act failed")
         act = {
-            "action": "hold",
-            "strategy": "hold",
-            "rationale": f"skipped_act: {skip_why}",
+            "action": BLOCKED_STRAT, "strategy": BLOCKED_STRAT,
+            "rationale": f"act_error: {exc}",
         }
-    else:
-        try:
-            act = await _run_act_streams(g, world, judgment, needs_prot=needs_prot)
-            if not act:
-                act = {"action": "hold", "strategy": "hold", "rationale": "empty_act"}
-        except Exception as exc:
-            logger.exception("act failed")
-            act = {
-                "action": BLOCKED_STRAT, "strategy": BLOCKED_STRAT,
-                "rationale": f"act_error: {exc}",
-            }
-            out = _result_dict(
-                n=n, s=s, act=act, strat=BLOCKED_STRAT,
-                result={"status": "blocked", "note": f"act_error: {exc}"},
-                pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-                validation=f"act_error: {exc}", kahneman=extract_kahneman(act),
-                judgment=judgment, world=world_dict, stage_error=str(exc),
-            )
-            _journal_stages(out, act, s, judgment)
-            h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-            return out
+        out = _result_dict(
+            n=n, s=s, act=act, strat=BLOCKED_STRAT,
+            result={"status": "blocked", "note": f"act_error: {exc}"},
+            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
+            validation=f"act_error: {exc}", kahneman=extract_kahneman(act),
+            judgment=judgment, world=world_dict, stage_error=str(exc),
+        )
+        _journal_stages(out, act, s, judgment)
+        h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
+        return out
 
     strat, forced = normalize_action(act)
     if strat == "hold" and needs_prot:
