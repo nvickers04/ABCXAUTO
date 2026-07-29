@@ -17,7 +17,7 @@ the book is protected; hold is **forbidden only while unprotected STK** exists
 **Control + Unbiased (non-negotiable):**
 
 1. **Control** — Three disjoint surfaces: **Risk** (capital survival sliders/halt),
-   **Controls** (deliberation, budget, frequency, structure complexity allowlist,
+   **Controls** (deliberation, budget, frequency, entry surface, option complexity,
    book capacity), **Universe** (IBKR sandbox arenas — legal symbols only).
    Optional Operator Card, Pro START/Stop/pause, mandate.
    **Scorecard goal** (not a cycle control): book return on startup cash >

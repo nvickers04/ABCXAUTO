@@ -3,7 +3,13 @@ import { Button } from "@/components/ui/button";
 import { useAbcxStore } from "@/store/abcx-store";
 
 const DIALS: {
-  key: "deliberation" | "budget" | "frequency" | "rotation" | "complexity";
+  key:
+    | "deliberation"
+    | "budget"
+    | "frequency"
+    | "rotation"
+    | "entrySurface"
+    | "complexity";
   title: string;
   left: string;
   right: string;
@@ -33,9 +39,15 @@ const DIALS: {
     right: "redeploy / free cash for better setups",
   },
   {
+    key: "entrySurface",
+    title: "Entry surface (restrict)",
+    left: "stock brackets only",
+    right: "options only — no stock entries",
+  },
+  {
     key: "complexity",
-    title: "Structure complexity",
-    left: "stock brackets / exits only",
+    title: "Option complexity (add)",
+    left: "defined-risk options",
     right: "full multi-leg toolbox",
   },
 ];
@@ -49,8 +61,9 @@ export function ControlsPage() {
       <div className="mb-4">
         <h2 className="text-xl font-bold text-fg">Controls</h2>
         <p className="mt-1 max-w-xl text-[13px] text-muted">
-          Attention + toolbox + book capacity. Disjoint from Risk and Universe. Taste lives
-          here — shell never invents stance.
+          Attention + toolbox + book capacity. Entry surface restricts stock vs options;
+          option complexity adds shapes. Disjoint from Risk. Taste lives here — shell never
+          invents stance.
         </p>
       </div>
 

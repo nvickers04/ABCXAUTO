@@ -94,8 +94,9 @@ Grok Act streams → one send. Steer via Controls dials — no free-text work br
 
 - **Pro Dashboard** — Live ops: pace/attention, open risk, last cycle (judge/act), unranked
   tape, activity. **Positions** holds the book table + working orders / fills blotter.
-- **Controls tab** — Deliberation, intelligence budget, trade frequency, **structure complexity**
-  (Act allowlist), **book capacity**. Disjoint from Risk.
+- **Controls tab** — Deliberation, intelligence budget, trade frequency, **entry surface**
+  (stock / mixed / options-only), **option complexity** (defined → full multi-leg), capital
+  rotation, book capacity (`max_open_positions`). Disjoint from Risk.
 - **Universe tab** — Arena toggles (IBKR vs MDA-seed labeled), legal-set browser with source tags,
   Save arenas vs Refresh membership. Grok picks inside; shell does not rank.
 - **Risk tab** — Capital survival sliders + halt (preset seeds Risk only). Save risk separate.

@@ -276,9 +276,15 @@ class ProTerminal:
                 "redeploy / free cash for better setups",
             ),
             (
+                "control_entry_surface_pct",
+                "Entry surface",
+                "stock brackets only",
+                "options only (no stock entries)",
+            ),
+            (
                 "control_complexity_pct",
-                "Structure complexity",
-                "stock brackets / exits only",
+                "Option complexity",
+                "defined-risk options",
                 "full multi-leg toolbox",
             ),
         ):
@@ -1218,6 +1224,7 @@ class ProTerminal:
                 self._control_row("control_budget_pct"),
                 self._control_row("control_frequency_pct"),
                 self._control_row("control_rotation_pct"),
+                self._control_row("control_entry_surface_pct"),
                 self._control_row("control_complexity_pct"),
                 ft.Container(height=4),
                 ft.Row(
@@ -1423,7 +1430,7 @@ class ProTerminal:
             [
                 _sw_row("Pre-trade gates (halt latch)", self.risk_sw_gates),
                 _sw_row("Auto-panic on daily-loss breach", self.risk_sw_auto_panic),
-                _sw_row("Defined-risk options only", self.risk_sw_defined),
+                _sw_row("Reject naked / unlimited option risk", self.risk_sw_defined),
                 _sw_row("Cash-only sizing (block SHORT stock)", self.risk_sw_cash),
                 ft.Container(height=8),
                 ft.Text(
@@ -1706,7 +1713,8 @@ class ProTerminal:
                 payload["risk_posture"] = posture
             for key, slider in self.risk_sliders.items():
                 payload[key] = float(slider.value or 0)
-            update_risk_config(**payload)
+            # Operator Risk tab — keep exact knobs (envelope clamp is for agent set_risk).
+            update_risk_config(**payload, _skip_clamp=True)
             path = risk_settings_path()
             self._load_risk_form()
             self.lbl_risk_status.value = f"Risk gates saved → {path}"

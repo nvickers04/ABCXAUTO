@@ -103,7 +103,8 @@ def test_format_controls_block_always_present():
     assert "deliberation=" in block
     assert "intelligence_budget=" in block
     assert "capital_rotation=" in block
-    assert "structure_complexity=" in block
+    assert "option_complexity=" in block
+    assert "entry_surface=" in block
     assert "book_capacity" in block or "max_open_positions=" in block
     assert "UNIVERSE" in block
 
@@ -156,12 +157,12 @@ def test_judge_prompt_objective_and_card(tmp_path, monkeypatch):
         review={},
     )
     prompt = _build_judge_prompt(world)
-    assert "GATE:" in prompt or "PROCESS:" in prompt
+    assert "CONTROLS" in prompt
+    assert "deliberation=" in prompt
+    assert "entry_surface=" in prompt or "option_complexity=" in prompt
     assert "operate the scanner" in prompt.lower() or "SCAN TAPE" in prompt
     assert "prefer manage" not in prompt.lower()
     assert "prefer acting" not in prompt.lower()
-    assert "CONTROLS" in prompt
-    assert "deliberation=" in prompt
     assert "OPERATOR CARD" in prompt
     assert "Fade extensions" in prompt
     assert "QUOTE SOURCES" in prompt or "IBKR" in prompt

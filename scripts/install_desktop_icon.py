@@ -5,6 +5,7 @@ Usage (from repo root):
   python scripts/install_desktop_icon.py
 
 Creates a launcher that runs:  python -m abcxauto --desktop
+(Live web Pro shell wired to ProEngine / IBKR.)
 """
 
 from __future__ import annotations
@@ -37,6 +38,37 @@ def _logo() -> Path:
 
 
 def _desktop_dir() -> Path:
+    # Windows: use the shell Known Folder (handles OneDrive Desktop redirect).
+    if platform.system() == "Windows":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            CSIDL_DESKTOP = 0x0000
+            SHGFP_TYPE_CURRENT = 0
+            buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+            if ctypes.windll.shell32.SHGetFolderPathW(
+                None, CSIDL_DESKTOP, None, SHGFP_TYPE_CURRENT, buf
+            ) == 0 and buf.value:
+                d = Path(buf.value)
+                if d.is_dir():
+                    return d
+        except Exception:
+            pass
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+            ) as key:
+                value, _ = winreg.QueryValueEx(key, "Desktop")
+                d = Path(os.path.expandvars(value))
+                if d.is_dir():
+                    return d
+        except Exception:
+            pass
+
     home = Path.home()
     # Linux XDG + common Desktop names
     for name in ("Desktop", "desktop", "Schreibtisch"):
@@ -110,33 +142,72 @@ StartupWMClass=ABCXAUTO Pro
     return desktop_file
 
 
+def _ensure_windows_ico(logo: Path) -> Path:
+    """Build assets/abcxauto-pro.ico from the logo PNG (Windows shortcuts need .ico)."""
+    ico = ASSETS / "abcxauto-pro.ico"
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise SystemExit(
+            "Pillow is required to build the Windows icon. Install with: pip install pillow"
+        ) from exc
+    ASSETS.mkdir(parents=True, exist_ok=True)
+    img = Image.open(logo).convert("RGBA")
+    sizes = [(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
+    img.save(ico, format="ICO", sizes=sizes)
+    return ico
+
+
 def _write_windows_launcher(dest: Path) -> Path:
     logo = _logo()
     ASSETS.mkdir(parents=True, exist_ok=True)
     icon_png = ASSETS / "abcxauto-pro.png"
-    shutil.copy2(logo, icon_png)
-    bat = dest / "ABCXAUTO Pro.bat"
-    py = _python()
-    bat.write_text(
-        f"""@echo off
-cd /d "{REPO}"
-"{py}" -m abcxauto --desktop
-if errorlevel 1 pause
+    if not icon_png.is_file() or icon_png.resolve() != logo.resolve():
+        shutil.copy2(logo, icon_png)
+    ico = _ensure_windows_ico(logo)
+    # Single Desktop icon only — no companion .bat/.vbs clutter.
+    lnk = _write_windows_shortcut(dest, Path(_python()), ico, args="-m abcxauto --desktop")
+    print(f"Desktop icon: {lnk}")
+    print(f"Icon file: {ico}")
+    return lnk
+
+
+def _write_windows_shortcut(
+    dest: Path, target: Path, ico: Path, *, args: str = ""
+) -> Path:
+    """Create a Desktop .lnk with a custom icon (visible as a real desktop icon)."""
+    lnk = dest / "ABCXAUTO Pro.lnk"
+    # Prefer pywin32; fall back to WScript.Shell via PowerShell if missing.
+    try:
+        import win32com.client  # type: ignore
+
+        shell = win32com.client.Dispatch("WScript.Shell")
+        shortcut = shell.CreateShortCut(str(lnk))
+        shortcut.TargetPath = str(target)
+        shortcut.Arguments = args
+        shortcut.WorkingDirectory = str(REPO)
+        shortcut.Description = "ABCXAUTO Pro"
+        shortcut.IconLocation = str(ico)
+        shortcut.save()
+    except ImportError:
+        import subprocess
+
+        ps = f"""
+$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}')
+$s.TargetPath = '{target}'
+$s.Arguments = '{args}'
+$s.WorkingDirectory = '{REPO}'
+$s.Description = 'ABCXAUTO Pro'
+$s.IconLocation = '{ico}'
+$s.Save()
 """
-    )
-    # VBS to hide console
-    vbs = dest / "ABCXAUTO Pro.vbs"
-    vbs.write_text(
-        f'''Set sh = CreateObject("WScript.Shell")
-sh.CurrentDirectory = "{REPO}"
-sh.Run """{py}"" -m abcxauto --desktop", 0, False
-'''
-    )
-    print(f"Created: {bat}")
-    print(f"Silent launcher: {vbs}")
-    print("Tip: right-click Desktop → New → Shortcut → point at the .vbs file,")
-    print(f"     then Change Icon… and pick {icon_png} (or convert to .ico).")
-    return bat
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    return lnk
 
 
 def main() -> int:
@@ -151,8 +222,8 @@ def main() -> int:
         _write_unix_launcher(dest)
     print()
     print("Done. Double-click “ABCXAUTO Pro” on your Desktop.")
-    print("First launch builds the UI if needed (Node required once).")
-    print("Optional native window:  pip install pywebview")
+    print("Launches web Pro with live IBKR (python -m abcxauto --desktop).")
+    print("Flet Pro (alternate):  python -m abcxauto")
     return 0
 
 

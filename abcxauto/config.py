@@ -41,6 +41,7 @@ CONTROL_KEYS = frozenset({
     "control_deliberation_pct",
     "control_budget_pct",
     "control_frequency_pct",
+    "control_entry_surface_pct",
     "control_complexity_pct",
     "control_rotation_pct",
     "max_open_positions",
@@ -59,7 +60,8 @@ _CONTROL_DEFAULTS: dict[str, int] = {
     "control_deliberation_pct": 50,
     "control_budget_pct": 50,
     "control_frequency_pct": 50,
-    "control_complexity_pct": 50,
+    "control_entry_surface_pct": 50,  # mixed
+    "control_complexity_pct": 50,  # defined options
     "control_rotation_pct": 50,
 }
 RISK_POSTURES = frozenset({"defensive", "balanced", "aggressive"})
@@ -207,7 +209,11 @@ class Config:
     control_deliberation_pct: int = 50  # 0=S1 lean … 100=S2 mega-worker
     control_budget_pct: int = 50  # 0=protect API $ … 100=more frequent Grok
     control_frequency_pct: int = 50  # 0=patient … 100=higher trade rate (process only)
-    control_complexity_pct: int = 50  # 0=stock only … 100=full multi-leg allowlist
+    # Entry surface: 0=stock only … 50=mixed … 100=options only (no new stock brackets).
+    control_entry_surface_pct: int = 50
+    # Option toolbox depth (only when entry surface allows options):
+    # 0–69=defined-risk … 70–100=full multi-leg.
+    control_complexity_pct: int = 50
     control_rotation_pct: int = 50  # 0=hold OK … 100=redeploy/rotate to free cash OK
     # Deprecated no-ops (kept so older tests/settings don't explode).
     max_daily_trades: int = 0
@@ -349,7 +355,7 @@ def format_controls_block(cfg: Any = None) -> str:
         max_open = int(getattr(c, "max_open_positions", 0) or 0)
     except (TypeError, ValueError):
         max_open = 0
-    from abcxauto.structure_complexity import complexity_fact
+    from abcxauto.structure_complexity import complexity_fact, entry_surface_fact
 
     lines = [
         "CONTROLS (operator — Fact of your settings; not shell strategy tips):",
@@ -362,6 +368,7 @@ def format_controls_block(cfg: Any = None) -> str:
         f"- capital_rotation={rotation} (0=hold protected book OK … 100=redeploy/"
         f"trim/exit to free cash for better setups OK — process only; shell never "
         f"auto-sells)",
+        f"- {entry_surface_fact(c)}",
         f"- {complexity_fact(c)}",
         f"- book_capacity max_open_positions={max_open} "
         f"(0=unlimited; Controls-owned hard gate)",
@@ -441,6 +448,9 @@ def _load_env_config() -> Config:
         ),
         control_budget_pct=int(float(_env("ABCXAUTO_CONTROL_BUDGET_PCT", "50"))),
         control_frequency_pct=int(float(_env("ABCXAUTO_CONTROL_FREQUENCY_PCT", "50"))),
+        control_entry_surface_pct=int(
+            float(_env("ABCXAUTO_CONTROL_ENTRY_SURFACE_PCT", "50"))
+        ),
         control_complexity_pct=int(
             float(
                 _env("ABCXAUTO_CONTROL_COMPLEXITY_PCT")
@@ -537,6 +547,20 @@ def _read_risk_file(settings_path: Path) -> dict[str, Any]:
             )
         except (TypeError, ValueError):
             pass
+    # Split legacy single complexity dial into entry surface + option complexity.
+    # Old <40 = stock-only → entry=stock. Old ≥40 = stock+options → entry=mixed
+    # (never auto-promote to options-only — that must be an explicit operator choice).
+    if "control_entry_surface_pct" not in cleaned:
+        try:
+            old_c = int(
+                cleaned.get(
+                    "control_complexity_pct",
+                    raw.get("control_complexity_pct", raw.get("control_options_pct", 50)),
+                )
+            )
+        except (TypeError, ValueError):
+            old_c = 50
+        cleaned["control_entry_surface_pct"] = 20 if old_c < 40 else 50
     return cleaned
 
 

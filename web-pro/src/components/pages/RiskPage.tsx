@@ -105,7 +105,7 @@ export function RiskPage() {
           onChange={(v) => setRisk({ autoPanic: v })}
         />
         <SwitchRow
-          label="Defined-risk options only"
+          label="Reject naked / unlimited option risk"
           checked={risk.definedRiskOnly}
           onChange={(v) => setRisk({ definedRiskOnly: v })}
         />

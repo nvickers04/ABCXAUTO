@@ -5,6 +5,7 @@ Shell builds the legal box; SCAN TAPE stays unranked; Grok picks inside.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -361,9 +362,31 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> list[str]:
         for t in str(spec.get("stockTypeFilter") or "CORP,ETF,ADR").split(",")
         if t.strip()
     }
+    data = None
     try:
         async with connector.async_lock:
-            data = await ib.reqScannerDataAsync(sub)
+            try:
+                data = await ib.reqScannerDataAsync(sub)
+            finally:
+                # IBKR allows one scanner sub at a time; always release it.
+                try:
+                    ib.cancelScannerSubscription(sub)
+                except Exception:
+                    pass
+                # Brief settle so the next arena scan is not cancelled by TWS.
+                await asyncio.sleep(0.35)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "cancel" in msg or "subscription" in msg:
+            logger.warning(
+                "IBKR scanner ended early scanCode=%s: %s",
+                spec.get("scanCode"),
+                exc,
+            )
+        else:
+            logger.exception("IBKR scanner failed scanCode=%s", spec.get("scanCode"))
+        return []
+    try:
         syms: list[str] = []
         for row in data or []:
             cd = getattr(row, "contractDetails", None)
@@ -386,7 +409,7 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> list[str]:
             syms.append(sym)
         return syms
     except Exception:
-        logger.exception("IBKR scanner failed scanCode=%s", spec.get("scanCode"))
+        logger.exception("IBKR scanner parse failed scanCode=%s", spec.get("scanCode"))
         return []
 
 

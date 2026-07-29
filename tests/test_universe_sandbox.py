@@ -1,12 +1,16 @@
-"""Universe sandbox + structure complexity gates."""
+"""Universe sandbox + entry surface / option complexity gates."""
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 
 from abcxauto.structure_complexity import (
     allowed_strategies,
     complexity_band,
+    entry_surface_band,
+    reject_reason,
     strategy_allowed,
 )
 from abcxauto.universe import (
@@ -28,26 +32,53 @@ def _iso_universe(tmp_path, monkeypatch):
     reset_universe_cache()
 
 
-def test_complexity_bands():
-    assert complexity_band(20) == "stock"
-    assert "vertical_spread" not in allowed_strategies(20)
-    assert "market_bracket" in allowed_strategies(20)
+def test_entry_surface_bands():
+    assert entry_surface_band(20) == "stock"
+    assert "market_bracket" in allowed_strategies(entry_pct=20, complexity=90)
+    assert "vertical_spread" not in allowed_strategies(entry_pct=20, complexity=90)
+
+    assert entry_surface_band(50) == "mixed"
+    assert "market_bracket" in allowed_strategies(entry_pct=50, complexity=50)
+    assert "vertical_spread" in allowed_strategies(entry_pct=50, complexity=50)
+    assert "jade_lizard" not in allowed_strategies(entry_pct=50, complexity=50)
+
+    assert entry_surface_band(80) == "options"
+    assert "market_bracket" not in allowed_strategies(entry_pct=80, complexity=90)
+    assert "vertical_spread" in allowed_strategies(entry_pct=80, complexity=50)
+    assert "jade_lizard" in allowed_strategies(entry_pct=80, complexity=90)
+
+
+def test_option_complexity_bands():
     assert complexity_band(50) == "defined"
-    assert "vertical_spread" in allowed_strategies(50)
-    assert "jade_lizard" not in allowed_strategies(50)
     assert complexity_band(90) == "full"
-    assert "jade_lizard" in allowed_strategies(90)
 
 
 def test_strategy_allowed_respects_config(monkeypatch):
-    from types import SimpleNamespace
-
     monkeypatch.setattr(
         "abcxauto.config.get_config",
-        lambda: SimpleNamespace(control_complexity_pct=20, control_options_pct=20),
+        lambda: SimpleNamespace(
+            control_entry_surface_pct=80,
+            control_complexity_pct=50,
+            control_options_pct=50,
+        ),
     )
-    assert strategy_allowed("market_bracket") is True
-    assert strategy_allowed("vertical_spread") is False
+    assert strategy_allowed("market_bracket") is False
+    assert strategy_allowed("vertical_spread") is True
+    assert "entry_surface=options" in (reject_reason("market_bracket") or "")
+
+
+def test_exits_always_allowed(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: SimpleNamespace(
+            control_entry_surface_pct=80,
+            control_complexity_pct=20,
+            control_options_pct=20,
+        ),
+    )
+    assert strategy_allowed("modify_stop") is True
+    assert strategy_allowed("close_option") is True
+    assert strategy_allowed("hold") is True
 
 
 @pytest.mark.asyncio
@@ -146,7 +177,7 @@ def test_rejects_unit_warrant_junk_tickers():
     assert is_common_equity_symbol("BRK.B")
     assert is_common_equity_symbol("LOW")
     assert is_common_equity_symbol("MU")
-    assert is_common_equity_symbol("MSTU")  # 4-char ETF — IBKR stockTypeFilter owns this
+    assert is_common_equity_symbol("MSTU")  # 4-char ETF â€” IBKR stockTypeFilter owns this
     assert not is_common_equity_symbol("AACOU")
     assert not is_common_equity_symbol("DMAAR")
     assert not is_common_equity_symbol("MESHU")

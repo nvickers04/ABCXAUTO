@@ -573,6 +573,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
     _SUPPRESSED_ERROR_CODES = {
         10168,  # Market data subscription not found (no IBKR data entitlement — we use external)
         10147,  # OrderId not found (stale cancel on old/filled orders)
+        165,    # HMDS / scanner subscription messages (cancel between arena scans)
         2104,   # Market data farm connection is OK
         2106,   # HMDS data farm connection is OK
         2158,   # Sec-def data farm connection is OK
@@ -600,6 +601,11 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
             return
         if lifecycle == "farm_ok":
             logger.debug(f"IBKR data farm OK [{errorCode}]: {errorString}")
+            return
+
+        msg_l = str(errorString or "").lower()
+        if "scanner subscription" in msg_l and "cancel" in msg_l:
+            logger.debug(f"IBKR [{errorCode}] scanner settle: {errorString}")
             return
 
         if errorCode in self._SUPPRESSED_ERROR_CODES:

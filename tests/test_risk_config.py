@@ -143,7 +143,8 @@ def test_controls_persist_and_clamp(tmp_path, monkeypatch):
     assert "intelligence_budget=20" in block
     assert "trade_frequency=75" in block
     assert "capital_rotation=90" in block
-    assert "structure_complexity=100" in block
+    assert "structure_complexity=100" in block or "option_complexity=100" in block
+    assert "entry_surface=" in block
     assert "require_act=True" in block
     assert "redeploy" in block.lower() or "free cash" in block.lower()
 
@@ -163,6 +164,22 @@ def test_legacy_options_migrates_to_complexity(tmp_path, monkeypatch):
     cfg = get_config()
     assert cfg.control_deliberation_pct == 90
     assert cfg.control_complexity_pct == 40
+    # Old options=40 → mixed entry surface (not stock-only, not options-only).
+    assert cfg.control_entry_surface_pct == 50
+
+
+def test_legacy_stock_complexity_migrates_entry_surface(tmp_path, monkeypatch):
+    path = tmp_path / "legacy_stock.json"
+    path.write_text('{"control_complexity_pct": 20}\n', encoding="utf-8")
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    from abcxauto import config as cfg_mod
+
+    cfg_mod._file_overrides = {}
+    cfg_mod._runtime_overrides.clear()
+    load_risk_settings(path)
+    cfg = get_config()
+    assert cfg.control_entry_surface_pct == 20
+    assert cfg.control_complexity_pct == 20
 
 
 def test_budget_scales_grok_min():

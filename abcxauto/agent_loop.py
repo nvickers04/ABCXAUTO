@@ -599,7 +599,11 @@ def check_intent_coherence(
     from abcxauto.structure_complexity import strategy_allowed
 
     if strat and strat not in ("blocked", "hold") and not strategy_allowed(strat):
-        return False, f"structure complexity dial blocks strategy {strat!r}"
+        from abcxauto.structure_complexity import reject_reason
+
+        return False, reject_reason(strat) or (
+            f"Controls allowlist blocks strategy {strat!r}"
+        )
     hunt_sym_strats = frozenset({"bracket", "market_bracket"}) | _HUNT_OPTION_ENTRIES
     if effective == "hunt" and strat in hunt_sym_strats:
         want_sym = str(use_intent.get("symbol") or intent.get("symbol") or "").upper()

@@ -57,6 +57,7 @@ export interface ControlsState {
   budget: number;
   frequency: number;
   rotation: number;
+  entrySurface: number;
   complexity: number;
   maxOpenPositions: number;
 }
@@ -119,7 +120,8 @@ export const DEFAULT_CONTROLS: ControlsState = {
   budget: 50,
   frequency: 45,
   rotation: 40,
-  complexity: 35,
+  entrySurface: 50,
+  complexity: 50,
   maxOpenPositions: 6,
 };
 
