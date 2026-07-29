@@ -1,11 +1,12 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Crosshair, X } from "lucide-react";
 import { cn, formatUsd, relativeTime } from "@/lib/utils";
 import { useAbcxStore } from "@/store/abcx-store";
 import {
   buildFocusSeries,
-  parseStopTarget,
+  buildFocusSideItems,
   type FocusRange,
+  type FocusSideItem,
 } from "@/lib/focus-chart";
 import { FocusChart, FocusLegend } from "@/components/charts/FocusChart";
 import { Button } from "@/components/ui/button";
@@ -22,30 +23,51 @@ export function FocusPage() {
   const activity = useAbcxStore((s) => s.activity);
   const mode = useAbcxStore((s) => s.mode);
   const [range, setRange] = useState<FocusRange>("5D");
+  const [activeId, setActiveId] = useState<string | null>(null);
 
-  const sym = (focusSymbol || "").toUpperCase();
-
-  const position = positions.find((p) => p.symbol === sym && p.type === "STK");
-  const symOrders = orders.filter((o) => o.symbol === sym);
-  const stopOrder = symOrders.find((o) => o.role === "stop" || o.type === "STP");
-  const targetOrder = symOrders.find((o) => o.role === "target");
-  const fromDetails = position ? parseStopTarget(position.details) : {};
-
-  const last = position?.price ?? 100;
-  const avgCost = position?.avgCost;
-  const stop = stopOrder?.price ?? fromDetails.stop;
-  const target = targetOrder?.price ?? fromDetails.target;
-
-  const { bars, levels, events } = useMemo(
-    () =>
-      buildFocusSeries(sym || "DEMO", range, {
-        last,
-        avgCost,
-        stop,
-        target,
-      }),
-    [sym, range, last, avgCost, stop, target],
+  const sideItems = useMemo(
+    () => buildFocusSideItems(positions, orders),
+    [positions, orders],
   );
+
+  // Keep active tab in sync with focusSymbol / book
+  useEffect(() => {
+    if (sideItems.length === 0) {
+      setActiveId(null);
+      return;
+    }
+    const bySym = focusSymbol
+      ? sideItems.find((i) => i.symbol === focusSymbol.toUpperCase())
+      : null;
+    if (bySym) {
+      setActiveId(bySym.id);
+      return;
+    }
+    if (!activeId || !sideItems.some((i) => i.id === activeId)) {
+      setActiveId(sideItems[0]!.id);
+      if (!focusSymbol) setFocusSymbol(sideItems[0]!.symbol);
+    }
+  }, [sideItems, focusSymbol]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const active: FocusSideItem | null =
+    sideItems.find((i) => i.id === activeId) ?? sideItems[0] ?? null;
+
+  const sym = active?.symbol ?? (focusSymbol || "").toUpperCase();
+
+  const { bars, levels, events, entry, side } = useMemo(() => {
+    if (!active) {
+      return buildFocusSeries(sym || "DEMO", range, { last: 100 });
+    }
+    return buildFocusSeries(active.symbol, range, {
+      last: active.last,
+      avgCost: active.kind === "position" ? active.entry : undefined,
+      plannedEntry: active.kind === "planned" ? active.entry : undefined,
+      stop: active.stop,
+      target: active.target,
+      side: active.side,
+      isPlanned: active.kind === "planned",
+    });
+  }, [active, range, sym]);
 
   const filteredActivity = activity.filter((a) => {
     if (!sym) return false;
@@ -53,215 +75,278 @@ export function FocusPage() {
     return blob.includes(sym);
   });
 
-  const bookNames = positions
-    .filter((p) => p.type === "STK")
-    .map((p) => p.symbol)
-    .filter((s, i, arr) => arr.indexOf(s) === i);
+  const pnlPct =
+    active?.entry && active.entry > 0 && active.kind === "position"
+      ? ((active.last - active.entry) / active.entry) * 100 * (active.side === "short" ? -1 : 1)
+      : null;
 
-  if (!sym) {
+  function selectItem(item: FocusSideItem) {
+    setActiveId(item.id);
+    setFocusSymbol(item.symbol);
+  }
+
+  if (sideItems.length === 0 && !sym) {
     return (
       <div className="flex min-h-[480px] flex-col items-center justify-center px-6 py-16 text-center">
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-elevated ring-1 ring-border">
           <Crosshair className="h-5 w-5 text-primary" />
         </div>
-        <h2 className="mt-4 text-[18px] font-bold text-fg">Single-name Focus</h2>
+        <h2 className="mt-4 text-[18px] font-bold text-fg">Focus</h2>
         <p className="mt-2 max-w-sm text-[13px] leading-snug text-muted">
-          Pick one symbol to watch agent levels and acts on the tape. Expand to the full
-          book later — this is Focus only.
+          Open a position or queue an entry — tabs appear on the right for each name.
         </p>
         <div className="mt-6 flex flex-wrap justify-center gap-2">
-          {bookNames.length > 0 ? (
-            bookNames.map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setFocusSymbol(s)}
-                className="rounded-full border border-border bg-elevated px-3 py-1.5 text-[13px] font-bold text-fg transition-colors hover:border-primary/40"
-              >
-                {s}
-              </button>
-            ))
-          ) : (
-            <>
-              {["NVDA", "AAPL", "SPY"].map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setFocusSymbol(s)}
-                  className="rounded-full border border-border bg-elevated px-3 py-1.5 text-[13px] font-bold text-fg transition-colors hover:border-primary/40"
-                >
-                  {s}
-                </button>
-              ))}
-            </>
-          )}
+          {["NVDA", "AAPL", "SPY"].map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setFocusSymbol(s)}
+              className="rounded-full border border-border bg-elevated px-3 py-1.5 text-[13px] font-bold text-fg hover:border-primary/40"
+            >
+              {s}
+            </button>
+          ))}
         </div>
-        <p className="mt-4 text-[11px] text-muted">
-          Or use Focus on a row in Positions / a chip in Universe.
-        </p>
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-0 flex-col">
-      {/* Header */}
-      <div className="border-b border-border px-4 py-3 sm:px-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-primary">
-                Focus
-              </span>
-              <h2 className="text-[22px] font-bold tracking-tight text-fg">{sym}</h2>
-              <span
-                className={cn(
-                  "text-[12px] font-semibold",
-                  mode === "Running" ? "text-gain" : "text-muted",
-                )}
-              >
-                {mode}
-              </span>
-            </div>
-            <div className="mt-1 flex flex-wrap items-baseline gap-3">
-              <span className="tabular text-[20px] font-bold text-fg">
-                {formatUsd(last)}
-              </span>
-              {position && (
+    <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+      {/* Main chart column */}
+      <div className="flex min-w-0 flex-1 flex-col border-b border-border lg:border-b-0 lg:border-r">
+        <div className="border-b border-border px-4 py-3 sm:px-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
                 <span
                   className={cn(
-                    "tabular text-[13px] font-semibold",
-                    position.uPnl >= 0 ? "text-gain" : "text-loss",
+                    "rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide",
+                    active?.kind === "planned"
+                      ? "bg-warn/15 text-warn"
+                      : "bg-primary/15 text-primary",
                   )}
                 >
-                  {formatUsd(position.uPnl, { signed: true })} uPnL
+                  {active?.kind === "planned" ? "Planned entry" : "Open"}
                 </span>
-              )}
-              {!position && (
-                <span className="text-[12px] text-muted">No open STK — levels from sim path</span>
-              )}
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex rounded-full border border-border bg-elevated p-0.5">
-              {RANGES.map((r) => (
-                <button
-                  key={r}
-                  type="button"
-                  onClick={() => setRange(r)}
+                <h2 className="text-[22px] font-bold tracking-tight text-fg">{sym}</h2>
+                {active && (
+                  <span className="text-[11px] font-semibold uppercase text-muted">
+                    {active.side}
+                  </span>
+                )}
+                <span
                   className={cn(
-                    "rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors",
-                    range === r ? "bg-fg text-bg" : "text-muted hover:text-fg",
+                    "text-[12px] font-semibold",
+                    mode === "Running" ? "text-gain" : "text-muted",
                   )}
                 >
-                  {r}
-                </button>
-              ))}
+                  {mode}
+                </span>
+              </div>
+
+              <div className="mt-1 flex flex-wrap items-baseline gap-3">
+                <span
+                  className={cn(
+                    "tabular text-[22px] font-bold",
+                    pnlPct == null
+                      ? "text-fg"
+                      : pnlPct >= 0
+                        ? "text-gain"
+                        : "text-loss",
+                  )}
+                >
+                  {formatUsd(active?.last ?? 0)}
+                </span>
+                {active?.kind === "position" && active.uPnl != null && (
+                  <span
+                    className={cn(
+                      "tabular text-[14px] font-bold",
+                      active.uPnl >= 0 ? "text-gain" : "text-loss",
+                    )}
+                  >
+                    {formatUsd(active.uPnl, { signed: true })}
+                    {pnlPct != null && (
+                      <span className="ml-1 text-[12px] font-semibold opacity-90">
+                        ({pnlPct >= 0 ? "+" : ""}
+                        {pnlPct.toFixed(2)}%)
+                      </span>
+                    )}
+                  </span>
+                )}
+                {active?.kind === "planned" && (
+                  <span className="text-[12px] text-warn">Awaiting fill</span>
+                )}
+              </div>
             </div>
-            <Button size="sm" variant="ghost" onClick={clearFocus} title="Clear focus">
-              <X className="h-3.5 w-3.5" />
-              Clear
-            </Button>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex rounded-full border border-border bg-elevated p-0.5">
+                {RANGES.map((r) => (
+                  <button
+                    key={r}
+                    type="button"
+                    onClick={() => setRange(r)}
+                    className={cn(
+                      "rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors",
+                      range === r ? "bg-fg text-bg" : "text-muted hover:text-fg",
+                    )}
+                  >
+                    {r}
+                  </button>
+                ))}
+              </div>
+              <Button size="sm" variant="ghost" onClick={clearFocus} title="Clear focus">
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </div>
           </div>
-        </div>
 
-        {/* Level chips */}
-        <div className="mt-3 flex flex-wrap gap-2">
-          {avgCost != null && (
-            <LevelChip label="Avg" value={avgCost} tone="muted" />
-          )}
-          {stop != null && <LevelChip label="Stop" value={stop} tone="loss" />}
-          {target != null && <LevelChip label="Target" value={target} tone="gain" />}
-          {symOrders.length > 0 && (
-            <span className="rounded-full border border-border px-2.5 py-1 text-[11px] text-muted">
-              {symOrders.length} working order{symOrders.length === 1 ? "" : "s"}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* Chart */}
-      <div className="border-b border-border px-2 py-3 sm:px-4">
-        <FocusChart bars={bars} levels={levels} events={events} height={360} />
-        <div className="mt-2 px-2">
-          <FocusLegend events={events} />
-          <p className="mt-1 text-[11px] text-muted">
-            Demo path — levels from book / working orders. Marks are agent events (sim), not
-            recommendations.
-          </p>
-        </div>
-      </div>
-
-      {/* Event strip + activity */}
-      <div className="grid min-h-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
-        <section className="border-b border-border px-4 py-4 lg:border-b-0 lg:border-r">
-          <h3 className="text-[13px] font-bold text-fg">On chart</h3>
-          <ul className="mt-3 space-y-2">
-            {events.map((ev) => (
-              <li
-                key={ev.id}
-                className="rounded-xl border border-border bg-elevated/40 px-3 py-2.5"
-              >
-                <div className="text-[13px] font-semibold text-fg">{ev.title}</div>
-                {ev.body && (
-                  <p className="mt-0.5 text-[12px] leading-snug text-muted">{ev.body}</p>
-                )}
-                <div className="mt-1 text-[11px] text-muted">
-                  @ {ev.t} · {ev.price.toFixed(2)}
-                </div>
-              </li>
-            ))}
-            {events.length === 0 && (
-              <li className="text-[13px] text-muted">No annotated events yet.</li>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {entry != null && (
+              <LevelChip
+                label={active?.kind === "planned" ? "Plan" : "Entry"}
+                value={entry}
+                tone="entry"
+              />
             )}
-          </ul>
-        </section>
-
-        <section className="min-h-0">
-          <div className="border-b border-border px-4 py-2.5">
-            <h3 className="text-[13px] font-bold text-fg">Activity · {sym}</h3>
-            <p className="text-[11px] text-muted">
-              Filtered feed — newest first
-              {filteredActivity[0]
-                ? ` · last ${relativeTime(filteredActivity[0].ts)}`
-                : ""}
-            </p>
-          </div>
-          {filteredActivity.length > 0 ? (
-            <ActivityFeed items={filteredActivity} />
-          ) : (
-            <p className="px-4 py-8 text-center text-[13px] text-muted">
-              No activity mentions {sym} yet — Start agent or pick a name in the book.
-            </p>
-          )}
-        </section>
-      </div>
-
-      {/* Quick switch book names */}
-      {bookNames.length > 1 && (
-        <div className="border-t border-border px-4 py-3">
-          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-muted">
-            Switch focus
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {bookNames.map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setFocusSymbol(s)}
-                className={cn(
-                  "rounded-full px-2.5 py-1 text-[12px] font-semibold transition-colors",
-                  s === sym
-                    ? "bg-fg text-bg"
-                    : "bg-elevated text-muted ring-1 ring-border hover:text-fg",
-                )}
-              >
-                {s}
-              </button>
-            ))}
+            {active?.stop != null && (
+              <LevelChip label="Stop" value={active.stop} tone="loss" />
+            )}
+            {active?.target != null && (
+              <LevelChip label="Target" value={active.target} tone="gain" />
+            )}
+            {active?.qty != null && (
+              <span className="rounded-full border border-border px-2.5 py-1 text-[11px] text-muted">
+                qty {active.qty}
+              </span>
+            )}
           </div>
         </div>
-      )}
+
+        <div className="border-b border-border px-2 py-3 sm:px-4">
+          <FocusChart
+            bars={bars}
+            levels={levels}
+            events={events}
+            entry={entry}
+            side={side}
+            height={380}
+          />
+          <div className="mt-2 px-2">
+            <FocusLegend events={events} hasEntry={entry != null} />
+            <p className="mt-1 text-[11px] text-muted">
+              Green = profit side of entry · Red = loss side · Line tints with live PnL.
+              Demo path; levels from book / working orders.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid min-h-0 flex-1 lg:grid-cols-2">
+          <section className="border-b border-border px-4 py-4 lg:border-b-0 lg:border-r">
+            <h3 className="text-[13px] font-bold text-fg">On chart</h3>
+            <ul className="mt-3 space-y-2">
+              {events.map((ev) => (
+                <li
+                  key={ev.id}
+                  className="rounded-xl border border-border bg-elevated/40 px-3 py-2.5"
+                >
+                  <div className="text-[13px] font-semibold text-fg">{ev.title}</div>
+                  {ev.body && (
+                    <p className="mt-0.5 text-[12px] leading-snug text-muted">{ev.body}</p>
+                  )}
+                  <div className="mt-1 text-[11px] text-muted">
+                    @ {ev.t} · {ev.price.toFixed(2)}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+          <section className="min-h-0">
+            <div className="border-b border-border px-4 py-2.5">
+              <h3 className="text-[13px] font-bold text-fg">Activity · {sym}</h3>
+              <p className="text-[11px] text-muted">
+                {filteredActivity[0]
+                  ? `Last ${relativeTime(filteredActivity[0].ts)}`
+                  : "No matches yet"}
+              </p>
+            </div>
+            {filteredActivity.length > 0 ? (
+              <ActivityFeed items={filteredActivity} />
+            ) : (
+              <p className="px-4 py-8 text-center text-[13px] text-muted">
+                No activity for {sym} yet.
+              </p>
+            )}
+          </section>
+        </div>
+      </div>
+
+      {/* Right tabs — positions + planned entries */}
+      <aside className="flex w-full shrink-0 flex-col bg-bg lg:w-[220px] xl:w-[240px]">
+        <div className="border-b border-border px-3 py-2.5">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-muted">
+            Book tabs
+          </div>
+          <p className="text-[11px] text-muted">Open + planned entries</p>
+        </div>
+        <div className="flex gap-1 overflow-x-auto p-2 lg:flex-col lg:overflow-y-auto scroll-thin">
+          {sideItems.map((item) => {
+            const selected = item.id === (active?.id ?? activeId);
+            const up =
+              item.kind === "position" && item.uPnl != null ? item.uPnl >= 0 : null;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => selectItem(item)}
+                className={cn(
+                  "flex min-w-[140px] flex-col rounded-xl border px-3 py-2.5 text-left transition-colors lg:min-w-0",
+                  selected
+                    ? "border-primary/50 bg-elevated"
+                    : "border-border bg-bg hover:bg-elevated/50",
+                )}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[14px] font-bold text-fg">{item.symbol}</span>
+                  <span
+                    className={cn(
+                      "rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase",
+                      item.kind === "planned"
+                        ? "bg-warn/15 text-warn"
+                        : "bg-elevated text-muted ring-1 ring-border",
+                    )}
+                  >
+                    {item.kind === "planned" ? "plan" : "pos"}
+                  </span>
+                </div>
+                <div className="mt-1 tabular text-[12px] text-muted">
+                  {item.entry != null ? `E ${item.entry.toFixed(2)}` : "—"}
+                  {item.stop != null ? ` · S ${item.stop.toFixed(2)}` : ""}
+                </div>
+                {item.kind === "position" && item.uPnl != null ? (
+                  <div
+                    className={cn(
+                      "mt-1 tabular text-[13px] font-bold",
+                      up ? "text-gain" : "text-loss",
+                    )}
+                  >
+                    {formatUsd(item.uPnl, { signed: true, compact: true })}
+                  </div>
+                ) : (
+                  <div className="mt-1 text-[12px] text-warn">Not filled</div>
+                )}
+                <div className="mt-0.5 truncate text-[10px] text-muted">{item.detail}</div>
+              </button>
+            );
+          })}
+          {sideItems.length === 0 && (
+            <p className="px-2 py-6 text-center text-[12px] text-muted">
+              No open or planned names
+            </p>
+          )}
+        </div>
+      </aside>
     </div>
   );
 }
@@ -273,7 +358,7 @@ function LevelChip({
 }: {
   label: string;
   value: number;
-  tone: "muted" | "loss" | "gain";
+  tone: "muted" | "loss" | "gain" | "entry";
 }) {
   return (
     <span
@@ -281,6 +366,7 @@ function LevelChip({
         "rounded-full border px-2.5 py-1 text-[11px] font-semibold tabular",
         tone === "loss" && "border-loss/30 text-loss",
         tone === "gain" && "border-gain/30 text-gain",
+        tone === "entry" && "border-primary/40 text-primary",
         tone === "muted" && "border-border text-muted",
       )}
     >
