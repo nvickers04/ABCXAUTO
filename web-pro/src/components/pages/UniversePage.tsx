@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   Check,
+  Crosshair,
   Loader2,
   Plus,
   RefreshCw,
@@ -60,6 +61,8 @@ export function UniversePage() {
   const universeFilter = useAbcxStore((s) => s.universeFilter);
   const setUniverseFilter = useAbcxStore((s) => s.setUniverseFilter);
   const connected = useAbcxStore((s) => s.connected);
+  const setFocusSymbol = useAbcxStore((s) => s.setFocusSymbol);
+  const focusSymbol = useAbcxStore((s) => s.focusSymbol);
 
   const [draftInclude, setDraftInclude] = useState("");
   const [draftExclude, setDraftExclude] = useState("");
@@ -160,7 +163,6 @@ export function UniversePage() {
 
   return (
     <div className="flex min-h-full flex-col">
-      {/* Hero */}
       <div className="border-b border-border px-4 py-4 sm:px-5">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div className="min-w-0">
@@ -171,8 +173,8 @@ export function UniversePage() {
               Where the agent can look
             </h2>
             <p className="mt-1 max-w-lg text-[13px] leading-snug text-muted">
-              Turn on arenas. The hunt pool is just the fence — not a ranked idea list.
-              Grok picks inside; this page never scores names.
+              Turn on arenas. Click a pool ticker to open Focus chart (levels + acts).
+              Pool is not ranked.
             </p>
           </div>
           <div className="flex flex-col items-end gap-1">
@@ -184,11 +186,22 @@ export function UniversePage() {
             </div>
           </div>
         </div>
+
+        {pool.length === 1 && (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-primary/30 bg-primary/10 px-3 py-2.5">
+            <div className="text-[13px] text-fg">
+              <span className="font-bold">Single-name fence</span>
+              <span className="text-muted"> — ideal for Focus on {pool[0]!.symbol}</span>
+            </div>
+            <Button size="sm" onClick={() => setFocusSymbol(pool[0]!.symbol)}>
+              <Crosshair className="h-3.5 w-3.5" />
+              Open Focus
+            </Button>
+          </div>
+        )}
       </div>
 
-      {/* Split */}
       <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-        {/* Left: configure */}
         <div className="space-y-6 border-b border-border px-4 py-5 sm:px-5 lg:border-b-0 lg:border-r">
           {groups.map((group) => (
             <section key={group.id}>
@@ -214,7 +227,6 @@ export function UniversePage() {
             </section>
           ))}
 
-          {/* Always include */}
           <section>
             <div className="mb-2.5">
               <h3 className="text-[13px] font-bold text-fg">Always include</h3>
@@ -233,7 +245,6 @@ export function UniversePage() {
             />
           </section>
 
-          {/* Never trade */}
           <section>
             <div className="mb-2.5">
               <h3 className="text-[13px] font-bold text-fg">Never trade</h3>
@@ -253,7 +264,6 @@ export function UniversePage() {
             />
           </section>
 
-          {/* Sync — plain language */}
           <section className="rounded-2xl border border-border bg-elevated/40 p-4">
             <div className="flex items-start gap-3">
               <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-bg ring-1 ring-border">
@@ -297,13 +307,12 @@ export function UniversePage() {
           </section>
         </div>
 
-        {/* Right: hunt pool */}
         <div className="flex min-h-[420px] flex-col px-4 py-5 sm:px-5">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div>
               <h3 className="text-[15px] font-bold text-fg">Hunt pool</h3>
               <p className="text-[12px] text-muted">
-                Eligible symbols only — unsorted on purpose.
+                Click a ticker → Focus chart. Not ranked.
               </p>
             </div>
             {selectedArena !== "all" && (
@@ -327,7 +336,6 @@ export function UniversePage() {
             />
           </div>
 
-          {/* Arena filter chips */}
           <div className="mb-4 flex flex-wrap gap-1.5">
             <FilterChip
               active={selectedArena === "all"}
@@ -364,8 +372,7 @@ export function UniversePage() {
             <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-dashed border-border px-6 py-16 text-center">
               <p className="text-[15px] font-semibold text-fg">Empty pool</p>
               <p className="mt-1 max-w-xs text-[13px] text-muted">
-                Enable at least one arena or add an always-include ticker. Until then the
-                agent has nowhere legal to hunt.
+                Enable at least one arena or add an always-include ticker.
               </p>
             </div>
           ) : (
@@ -374,13 +381,19 @@ export function UniversePage() {
                 <button
                   key={row.symbol}
                   type="button"
-                  title={`${row.symbol} · ${row.arena}`}
-                  className="group inline-flex items-center gap-1.5 rounded-full border border-border bg-elevated/50 px-3 py-1.5 text-left transition-colors hover:border-primary/40 hover:bg-elevated"
+                  title={`Focus ${row.symbol} · ${row.arena}`}
+                  onClick={() => setFocusSymbol(row.symbol)}
+                  className={cn(
+                    "group inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-left transition-colors",
+                    focusSymbol === row.symbol
+                      ? "border-primary/50 bg-primary/10"
+                      : "border-border bg-elevated/50 hover:border-primary/40 hover:bg-elevated",
+                  )}
                 >
                   <span className="text-[13px] font-bold tracking-tight text-fg">
                     {row.symbol}
                   </span>
-                  <span className="max-w-[72px] truncate text-[10px] text-muted group-hover:text-muted">
+                  <span className="max-w-[72px] truncate text-[10px] text-muted">
                     {row.arenaId === "custom" ? "pin" : row.source === "ibkr" ? "scan" : "seed"}
                   </span>
                 </button>
@@ -390,7 +403,7 @@ export function UniversePage() {
 
           <div className="mt-auto border-t border-border pt-3 text-[11px] text-muted">
             Showing {visible.length}
-            {visible.length !== pool.length ? ` of ${pool.length}` : ""} · not ranked ·
+            {visible.length !== pool.length ? ` of ${pool.length}` : ""} · click → Focus ·
             excludes: {excludes.length || "none"}
           </div>
         </div>

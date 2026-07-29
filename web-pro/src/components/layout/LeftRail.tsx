@@ -1,6 +1,7 @@
 import type { ComponentType } from "react";
 import {
   BarChart3,
+  Crosshair,
   FlaskConical,
   LayoutDashboard,
   Pause,
@@ -24,6 +25,7 @@ const ICONS: Record<
 > = {
   overview: LayoutDashboard,
   positions: Wallet,
+  focus: Crosshair,
   controls: SlidersHorizontal,
   universe: Globe2,
   risk: Shield,
@@ -40,8 +42,8 @@ export function LeftRail({ onClose }: { onClose?: () => void }) {
   const toggleRun = useAbcxStore((s) => s.toggleRun);
   const panicFlatten = useAbcxStore((s) => s.panicFlatten);
   const risk = useAbcxStore((s) => s.risk);
+  const focusSymbol = useAbcxStore((s) => s.focusSymbol);
 
-  // Drawer always shows labels; desktop collapses to icons mid-width.
   const expanded = Boolean(onClose);
 
   return (
@@ -62,7 +64,9 @@ export function LeftRail({ onClose }: { onClose?: () => void }) {
             <div className="truncate text-[17px] font-bold tracking-tight text-fg">
               ABCXAUTO
             </div>
-            <div className="truncate text-[11px] text-muted">Pro · paper</div>
+            <div className="truncate text-[11px] text-muted">
+              {focusSymbol ? `Focus · ${focusSymbol}` : "Pro · paper"}
+            </div>
           </div>
         </div>
         {onClose && (
@@ -92,8 +96,8 @@ export function LeftRail({ onClose }: { onClose?: () => void }) {
               }}
               className={cn(
                 "group flex items-center rounded-full px-3 py-2.5 text-left transition-colors",
-                expanded || true ? "gap-3.5" : "",
                 !expanded && "justify-center lg:justify-start lg:gap-3.5",
+                expanded && "gap-3.5",
                 active
                   ? "bg-elevated font-bold text-fg"
                   : "font-normal text-fg hover:bg-elevated/70",
@@ -113,6 +117,11 @@ export function LeftRail({ onClose }: { onClose?: () => void }) {
                 )}
               >
                 {item.label}
+                {item.id === "focus" && focusSymbol ? (
+                  <span className="ml-1 text-[12px] font-semibold text-primary">
+                    {focusSymbol}
+                  </span>
+                ) : null}
               </span>
             </button>
           );

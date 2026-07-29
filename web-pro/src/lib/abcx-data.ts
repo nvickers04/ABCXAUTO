@@ -3,6 +3,7 @@
 export type TabId =
   | "overview"
   | "positions"
+  | "focus"
   | "controls"
   | "universe"
   | "risk"
@@ -101,6 +102,7 @@ export interface SuiteTest {
 export const NAV: { id: TabId; label: string; desc: string }[] = [
   { id: "overview", label: "Dashboard", desc: "Live ops while the agent runs — facts only, shell does not rank." },
   { id: "positions", label: "Positions", desc: "Book table, working orders, and fills blotter." },
+  { id: "focus", label: "Focus", desc: "Single-name chart — levels, fills, agent marks on one tape." },
   { id: "controls", label: "Controls", desc: "Attention + toolbox — disjoint from Risk and Universe." },
   {
     id: "universe",

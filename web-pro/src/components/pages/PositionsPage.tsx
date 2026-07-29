@@ -1,9 +1,12 @@
+import { Crosshair } from "lucide-react";
 import { cn, formatUsd } from "@/lib/utils";
 import { useAbcxStore } from "@/store/abcx-store";
 
 export function PositionsPage() {
   const positions = useAbcxStore((s) => s.positions);
   const orders = useAbcxStore((s) => s.orders);
+  const setFocusSymbol = useAbcxStore((s) => s.setFocusSymbol);
+  const focusSymbol = useAbcxStore((s) => s.focusSymbol);
 
   const totalU = positions.reduce((a, p) => a + p.uPnl, 0);
 
@@ -22,12 +25,12 @@ export function PositionsPage() {
         </div>
 
         <div className="mt-3 overflow-x-auto scroll-thin rounded-xl border border-border">
-          <table className="w-full min-w-[640px] text-left text-[13px]">
+          <table className="w-full min-w-[720px] text-left text-[13px]">
             <thead className="bg-elevated/60 text-muted">
               <tr>
-                {["Symbol", "Type", "Qty", "Price", "uPnL", "Protection", "Details"].map(
+                {["Symbol", "Type", "Qty", "Price", "uPnL", "Protection", "Details", ""].map(
                   (h) => (
-                    <th key={h} className="px-3 py-2.5 font-medium">
+                    <th key={h || "actions"} className="px-3 py-2.5 font-medium">
                       {h}
                     </th>
                   ),
@@ -36,7 +39,13 @@ export function PositionsPage() {
             </thead>
             <tbody className="divide-y divide-border">
               {positions.map((p) => (
-                <tr key={p.conId} className="hover:bg-elevated/30">
+                <tr
+                  key={p.conId}
+                  className={cn(
+                    "hover:bg-elevated/30",
+                    focusSymbol === p.symbol && "bg-primary/5",
+                  )}
+                >
                   <td className="px-3 py-3 font-bold text-fg">{p.symbol}</td>
                   <td className="px-3 py-3 text-muted">{p.type}</td>
                   <td className="tabular px-3 py-3 text-fg">{p.qty}</td>
@@ -61,14 +70,27 @@ export function PositionsPage() {
                       {p.protected ? "protected" : "unprotected"}
                     </span>
                   </td>
-                  <td className="max-w-[220px] truncate px-3 py-3 text-muted">
+                  <td className="max-w-[200px] truncate px-3 py-3 text-muted">
                     {p.details}
+                  </td>
+                  <td className="px-3 py-3">
+                    {p.type === "STK" && (
+                      <button
+                        type="button"
+                        onClick={() => setFocusSymbol(p.symbol)}
+                        className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-[11px] font-semibold text-fg transition-colors hover:border-primary/40 hover:bg-elevated"
+                        title={`Focus ${p.symbol}`}
+                      >
+                        <Crosshair className="h-3 w-3 text-primary" />
+                        Focus
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
               {positions.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-muted">
+                  <td colSpan={8} className="px-3 py-8 text-center text-muted">
                     Flat — no open risk at broker (sim).
                   </td>
                 </tr>
@@ -78,7 +100,7 @@ export function PositionsPage() {
         </div>
       </section>
 
-      <section className="border-b border-border px-4 py-4">
+      <section className="px-4 py-4">
         <h2 className="text-sm font-bold text-fg">Working orders</h2>
         <ul className="mt-3 divide-y divide-border rounded-xl border border-border">
           {orders.map((o) => (
@@ -86,23 +108,27 @@ export function PositionsPage() {
               key={o.id}
               className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-[13px]"
             >
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2">
                 <span className="font-bold text-fg">{o.symbol}</span>
-                <span
-                  className={cn(
-                    "font-semibold",
-                    o.side === "BUY" ? "text-gain" : "text-loss",
-                  )}
-                >
-                  {o.side}
+                <span className="text-muted">
+                  {o.side} {o.type}
                 </span>
-                <span className="text-muted">{o.type}</span>
-                <span className="rounded-full border border-border px-2 py-0.5 text-[11px] text-muted">
+                <span className="rounded-full bg-elevated px-2 py-0.5 text-[10px] uppercase text-muted">
                   {o.role}
                 </span>
               </div>
-              <div className="tabular text-muted">
-                {o.qty} @ {formatUsd(o.price)} · {o.status}
+              <div className="flex items-center gap-3">
+                <span className="tabular text-fg">
+                  {o.qty} @ {formatUsd(o.price)}
+                </span>
+                <span className="text-muted">{o.status}</span>
+                <button
+                  type="button"
+                  onClick={() => setFocusSymbol(o.symbol)}
+                  className="text-[11px] font-semibold text-primary hover:underline"
+                >
+                  Focus
+                </button>
               </div>
             </li>
           ))}
@@ -110,14 +136,6 @@ export function PositionsPage() {
             <li className="px-3 py-6 text-center text-sm text-muted">No working orders</li>
           )}
         </ul>
-      </section>
-
-      <section className="px-4 py-4">
-        <h2 className="text-sm font-bold text-fg">Fills blotter</h2>
-        <p className="mt-2 text-[13px] text-muted">
-          Session fills appear here from the monitor. In this preview, protection attaches and
-          panic flatten write activity on Dashboard.
-        </p>
       </section>
     </div>
   );
