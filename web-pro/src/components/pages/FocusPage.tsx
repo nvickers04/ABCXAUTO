@@ -30,7 +30,6 @@ export function FocusPage() {
     [positions, orders],
   );
 
-  // Keep active tab in sync with focusSymbol / book
   useEffect(() => {
     if (sideItems.length === 0) {
       setActiveId(null);
@@ -95,26 +94,14 @@ export function FocusPage() {
         <p className="mt-2 max-w-sm text-[13px] leading-snug text-muted">
           Open a position or queue an entry — tabs appear on the right for each name.
         </p>
-        <div className="mt-6 flex flex-wrap justify-center gap-2">
-          {["NVDA", "AAPL", "SPY"].map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setFocusSymbol(s)}
-              className="rounded-full border border-border bg-elevated px-3 py-1.5 text-[13px] font-bold text-fg hover:border-primary/40"
-            >
-              {s}
-            </button>
-          ))}
-        </div>
       </div>
     );
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-      {/* Main chart column */}
-      <div className="flex min-w-0 flex-1 flex-col border-b border-border lg:border-b-0 lg:border-r">
+    <div className="flex h-full min-h-[640px] min-w-0 flex-col md:flex-row">
+      {/* Chart + detail */}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto scroll-thin border-b border-border md:border-b-0 md:border-r">
         <div className="border-b border-border px-4 py-3 sm:px-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
@@ -149,11 +136,7 @@ export function FocusPage() {
                 <span
                   className={cn(
                     "tabular text-[22px] font-bold",
-                    pnlPct == null
-                      ? "text-fg"
-                      : pnlPct >= 0
-                        ? "text-gain"
-                        : "text-loss",
+                    pnlPct == null ? "text-fg" : pnlPct >= 0 ? "text-gain" : "text-loss",
                   )}
                 >
                   {formatUsd(active?.last ?? 0)}
@@ -161,8 +144,8 @@ export function FocusPage() {
                 {active?.kind === "position" && active.uPnl != null && (
                   <span
                     className={cn(
-                      "tabular text-[14px] font-bold",
-                      active.uPnl >= 0 ? "text-gain" : "text-loss",
+                      "rounded-full px-2.5 py-0.5 tabular text-[14px] font-bold",
+                      active.uPnl >= 0 ? "bg-gain/15 text-gain" : "bg-loss/15 text-loss",
                     )}
                   >
                     {formatUsd(active.uPnl, { signed: true })}
@@ -236,13 +219,12 @@ export function FocusPage() {
           <div className="mt-2 px-2">
             <FocusLegend events={events} hasEntry={entry != null} />
             <p className="mt-1 text-[11px] text-muted">
-              Green = profit side of entry · Red = loss side · Line tints with live PnL.
-              Demo path; levels from book / working orders.
+              Green = profit vs entry · Red = loss · Line color follows live PnL.
             </p>
           </div>
         </div>
 
-        <div className="grid min-h-0 flex-1 lg:grid-cols-2">
+        <div className="grid min-h-0 lg:grid-cols-2">
           <section className="border-b border-border px-4 py-4 lg:border-b-0 lg:border-r">
             <h3 className="text-[13px] font-bold text-fg">On chart</h3>
             <ul className="mt-3 space-y-2">
@@ -255,14 +237,11 @@ export function FocusPage() {
                   {ev.body && (
                     <p className="mt-0.5 text-[12px] leading-snug text-muted">{ev.body}</p>
                   )}
-                  <div className="mt-1 text-[11px] text-muted">
-                    @ {ev.t} · {ev.price.toFixed(2)}
-                  </div>
                 </li>
               ))}
             </ul>
           </section>
-          <section className="min-h-0">
+          <section>
             <div className="border-b border-border px-4 py-2.5">
               <h3 className="text-[13px] font-bold text-fg">Activity · {sym}</h3>
               <p className="text-[11px] text-muted">
@@ -282,15 +261,15 @@ export function FocusPage() {
         </div>
       </div>
 
-      {/* Right tabs — positions + planned entries */}
-      <aside className="flex w-full shrink-0 flex-col bg-bg lg:w-[220px] xl:w-[240px]">
+      {/* Right position / planned tabs — always visible on md+ */}
+      <aside className="flex w-full shrink-0 flex-col border-t border-border bg-bg md:w-[200px] md:border-l md:border-t-0 lg:w-[220px]">
         <div className="border-b border-border px-3 py-2.5">
           <div className="text-[11px] font-bold uppercase tracking-wide text-muted">
-            Book tabs
+            Positions
           </div>
-          <p className="text-[11px] text-muted">Open + planned entries</p>
+          <p className="text-[11px] text-muted">Open + planned</p>
         </div>
-        <div className="flex gap-1 overflow-x-auto p-2 lg:flex-col lg:overflow-y-auto scroll-thin">
+        <div className="flex gap-1.5 overflow-x-auto p-2 md:flex-col md:overflow-y-auto scroll-thin">
           {sideItems.map((item) => {
             const selected = item.id === (active?.id ?? activeId);
             const up =
@@ -301,9 +280,9 @@ export function FocusPage() {
                 type="button"
                 onClick={() => selectItem(item)}
                 className={cn(
-                  "flex min-w-[140px] flex-col rounded-xl border px-3 py-2.5 text-left transition-colors lg:min-w-0",
+                  "flex min-w-[132px] flex-col rounded-xl border px-3 py-2.5 text-left transition-colors md:min-w-0",
                   selected
-                    ? "border-primary/50 bg-elevated"
+                    ? "border-primary/50 bg-elevated ring-1 ring-primary/20"
                     : "border-border bg-bg hover:bg-elevated/50",
                 )}
               >
@@ -320,31 +299,30 @@ export function FocusPage() {
                     {item.kind === "planned" ? "plan" : "pos"}
                   </span>
                 </div>
-                <div className="mt-1 tabular text-[12px] text-muted">
-                  {item.entry != null ? `E ${item.entry.toFixed(2)}` : "—"}
-                  {item.stop != null ? ` · S ${item.stop.toFixed(2)}` : ""}
+                <div className="mt-1 tabular text-[11px] text-muted">
+                  {item.entry != null ? (
+                    <span>
+                      Entry <span className="text-primary">{item.entry.toFixed(2)}</span>
+                    </span>
+                  ) : (
+                    "—"
+                  )}
                 </div>
                 {item.kind === "position" && item.uPnl != null ? (
                   <div
                     className={cn(
-                      "mt-1 tabular text-[13px] font-bold",
-                      up ? "text-gain" : "text-loss",
+                      "mt-1.5 rounded-md px-1.5 py-0.5 tabular text-[13px] font-bold",
+                      up ? "bg-gain/15 text-gain" : "bg-loss/15 text-loss",
                     )}
                   >
                     {formatUsd(item.uPnl, { signed: true, compact: true })}
                   </div>
                 ) : (
-                  <div className="mt-1 text-[12px] text-warn">Not filled</div>
+                  <div className="mt-1.5 text-[12px] font-semibold text-warn">Not filled</div>
                 )}
-                <div className="mt-0.5 truncate text-[10px] text-muted">{item.detail}</div>
               </button>
             );
           })}
-          {sideItems.length === 0 && (
-            <p className="px-2 py-6 text-center text-[12px] text-muted">
-              No open or planned names
-            </p>
-          )}
         </div>
       </aside>
     </div>

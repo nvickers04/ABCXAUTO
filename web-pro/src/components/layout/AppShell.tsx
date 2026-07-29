@@ -21,6 +21,9 @@ export function AppShell() {
   const tickSim = useAbcxStore((s) => s.tickSim);
   const connected = useAbcxStore((s) => s.connected);
 
+  // Focus owns the right edge for position tabs — hide account rail there
+  const showAccountRail = tab !== "focus";
+
   useEffect(() => {
     if (!toast) return;
     const t = window.setTimeout(clearToast, 2600);
@@ -35,7 +38,7 @@ export function AppShell() {
 
   return (
     <div className="flex h-full min-h-0 justify-center bg-bg text-fg">
-      <div className="flex h-full w-full max-w-[1360px] min-h-0">
+      <div className="flex h-full w-full max-w-[1440px] min-h-0">
         <div className="hidden h-full shrink-0 border-r border-border sm:block">
           <LeftRail />
         </div>
@@ -56,19 +59,21 @@ export function AppShell() {
 
         <main className="flex min-h-0 min-w-0 flex-1 flex-col border-x border-border bg-bg sm:border-l-0">
           <CenterHeader />
-          <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
-            {tab === "overview" && <DashboardPage />}
-            {tab === "positions" && <PositionsPage />}
-            {tab === "focus" && <FocusPage />}
-            {tab === "controls" && <ControlsPage />}
-            {tab === "universe" && <UniversePage />}
-            {tab === "risk" && <RiskPage />}
-            {tab === "scorecard" && <ScorecardPage />}
-            {tab === "suite" && <SuitePage />}
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
+              {tab === "overview" && <DashboardPage />}
+              {tab === "positions" && <PositionsPage />}
+              {tab === "focus" && <FocusPage />}
+              {tab === "controls" && <ControlsPage />}
+              {tab === "universe" && <UniversePage />}
+              {tab === "risk" && <RiskPage />}
+              {tab === "scorecard" && <ScorecardPage />}
+              {tab === "suite" && <SuitePage />}
+            </div>
           </div>
         </main>
 
-        <RightRail />
+        {showAccountRail && <RightRail />}
 
         {mobileRail === "right" && (
           <div className="fixed inset-0 z-40 flex justify-end xl:hidden">
