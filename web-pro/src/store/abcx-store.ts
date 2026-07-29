@@ -1,5 +1,14 @@
 import { create } from "zustand";
 import {
+  apiActivity,
+  apiBook,
+  apiConnect,
+  apiDisconnect,
+  apiHealth,
+  apiStatus,
+  type DataMode,
+} from "@/lib/pro-api";
+import {
   ARENAS,
   DEFAULT_CONTROLS,
   DEFAULT_RISK,
@@ -58,6 +67,9 @@ interface AbcxState {
   toast: string | null;
   mobileRail: "main" | "nav" | "right";
   focusSymbol: string | null;
+  dataSource: DataMode;
+  apiAvailable: boolean;
+  bookPollTimer: number | null;
   cycleTimer: number | null;
 
   setTab: (t: TabId) => void;
@@ -85,6 +97,10 @@ interface AbcxState {
   tickSim: () => void;
   startCycleLoop: () => void;
   stopCycleLoop: () => void;
+  refreshBook: () => Promise<void>;
+  bootstrapApi: () => Promise<void>;
+  startBookPoll: () => void;
+  stopBookPoll: () => void;
 }
 
 function sumUPnl(positions: Position[]) {
@@ -130,6 +146,9 @@ export const useAbcxStore = create<AbcxState>((set, get) => ({
   toast: null,
   mobileRail: "main",
   focusSymbol: "NVDA",
+  dataSource: "demo",
+  apiAvailable: false,
+  bookPollTimer: null,
   cycleTimer: null,
 
   setTab: (tab) => set({ tab, mobileRail: "main" }),
@@ -192,40 +211,159 @@ export const useAbcxStore = create<AbcxState>((set, get) => ({
   setSuiteFilter: (suiteFilter) => set({ suiteFilter }),
 
   toggleConnect: () => {
-    const { connected, mode, stopCycleLoop } = get();
-    if (connected) {
-      stopCycleLoop();
+    void (async () => {
+      const { connected, mode, stopCycleLoop, stopBookPoll, startBookPoll, refreshBook, apiAvailable } =
+        get();
+      if (connected) {
+        stopCycleLoop();
+        stopBookPoll();
+        if (apiAvailable) {
+          try {
+            await apiDisconnect();
+          } catch {
+            /* ignore */
+          }
+        }
+        set({
+          connected: false,
+          dataSource: "demo",
+          mode: mode === "Running" ? "Safe" : mode,
+          toast: "Disconnected from IBKR",
+          positions: INITIAL_POSITIONS.map((p) => ({ ...p })),
+          orders: INITIAL_ORDERS.map((o) => ({ ...o })),
+          activity: [
+            {
+              id: `c-${Date.now()}`,
+              kind: "connect",
+              title: "CONNECT · down",
+              body: "IBKR session closed. Showing demo book again.",
+              ts: new Date().toISOString(),
+            },
+            ...get().activity,
+          ],
+        });
+        return;
+      }
+      // Prefer live API when desktop/pro_api is running
+      const healthy = await apiHealth();
+      if (!healthy) {
+        set({
+          connected: true,
+          dataSource: "demo",
+          apiAvailable: false,
+          toast: "No local API — demo book (start: python -m abcxauto --desktop)",
+        });
+        return;
+      }
+      try {
+        const st = await apiConnect();
+        set({
+          connected: true,
+          apiAvailable: true,
+          dataSource: "live",
+          xaiOk: Boolean(st.xai_configured),
+          mdaOk: Boolean(st.mda_configured),
+          toast: `Connected · IBKR ${st.trading_mode || "paper"} :${st.ibkr_port ?? ""}`,
+          pulseNarrative: "Live book from TWS. Focus levels from broker orders.",
+        });
+        await refreshBook();
+        startBookPoll();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        set({
+          connected: false,
+          dataSource: "offline",
+          apiAvailable: true,
+          toast: `IBKR connect failed: ${msg}`,
+        });
+      }
+    })();
+  },
+
+  refreshBook: async () => {
+    try {
+      const book = await apiBook();
+      if (!book.live) {
+        set({
+          dataSource: get().connected ? "offline" : "demo",
+        });
+        return;
+      }
+      const positions = book.positions as Position[];
+      const orders = book.orders as WorkingOrder[];
+      const equity = book.account.netLiq || get().equity;
+      const dayPnl = book.account.dayPnl ?? get().dayPnl;
       set({
-        connected: false,
-        mode: mode === "Running" ? "Safe" : mode,
-        toast: "Disconnected from paper TWS (sim)",
-        activity: [
-          {
-            id: `c-${Date.now()}`,
-            kind: "connect",
-            title: "CONNECT · down",
-            body: "IBKR paper session closed. Positions remain at broker in real ops.",
-            ts: new Date().toISOString(),
-          },
-          ...get().activity,
-        ],
-      });
-    } else {
-      set({
+        positions,
+        orders,
+        equity,
+        dayPnl,
+        dataSource: "live",
         connected: true,
-        toast: "Connected · paper TWS 7497 (sim)",
-        activity: [
-          {
-            id: `c-${Date.now()}`,
-            kind: "connect",
-            title: "CONNECT · up",
-            body: "Paper account ready. NetLiq snapshot refreshed. Fail-closed gates armed.",
-            ts: new Date().toISOString(),
-          },
-          ...get().activity,
-        ],
+        agentNow: `Live book · ${positions.length} open · ${orders.length} working`,
       });
+      // Prefer first unprotected / first STK for focus if empty
+      if (!get().focusSymbol && positions.length) {
+        const stk = positions.find((p) => p.type === "STK") || positions[0];
+        if (stk) set({ focusSymbol: stk.symbol });
+      }
+      try {
+        const act = await apiActivity(30);
+        if (act.items?.length) {
+          set({
+            activity: act.items.map((a) => ({
+              id: a.id,
+              kind: (a.kind as ActivityItem["kind"]) || "system",
+              title: a.title,
+              body: a.body,
+              ts: a.ts,
+              meta: a.meta,
+            })),
+          });
+        }
+      } catch {
+        /* journal optional */
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      set({ toast: `Book refresh failed: ${msg}` });
     }
+  },
+
+  bootstrapApi: async () => {
+    const ok = await apiHealth();
+    set({ apiAvailable: ok });
+    if (!ok) return;
+    try {
+      const st = await apiStatus();
+      set({
+        xaiOk: Boolean(st.xai_configured),
+        mdaOk: Boolean(st.mda_configured),
+      });
+      if (st.ibkr_connected) {
+        set({ connected: true, dataSource: "live" });
+        await get().refreshBook();
+        get().startBookPoll();
+      }
+    } catch {
+      /* stay demo */
+    }
+  },
+
+  startBookPoll: () => {
+    get().stopBookPoll();
+    const id = window.setInterval(() => {
+      if (get().connected && get().dataSource === "live") {
+        void get().refreshBook();
+      }
+    }, 5000);
+    set({ bookPollTimer: id });
+  },
+
+  stopBookPoll: () => {
+    const t = get().bookPollTimer;
+    if (t != null) window.clearInterval(t);
+    set({ bookPollTimer: null });
   },
 
   toggleRun: () => {

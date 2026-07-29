@@ -11,6 +11,7 @@ import {
 import { FocusChart, FocusLegend } from "@/components/charts/FocusChart";
 import { Button } from "@/components/ui/button";
 import { ActivityFeed } from "@/components/feed/ActivityFeed";
+import { apiBars } from "@/lib/pro-api";
 
 const RANGES: FocusRange[] = ["1D", "5D", "1M"];
 
@@ -24,6 +25,9 @@ export function FocusPage() {
   const mode = useAbcxStore((s) => s.mode);
   const [range, setRange] = useState<FocusRange>("5D");
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [liveBars, setLiveBars] = useState<{ t: string; c: number }[] | null>(null);
+  const [barSource, setBarSource] = useState<string>("demo");
+  const dataSource = useAbcxStore((s) => s.dataSource);
 
   const sideItems = useMemo(
     () => buildFocusSideItems(positions, orders),
@@ -53,7 +57,37 @@ export function FocusPage() {
 
   const sym = active?.symbol ?? (focusSymbol || "").toUpperCase();
 
-  const { bars, levels, events, entry, side } = useMemo(() => {
+  useEffect(() => {
+    let cancelled = false;
+    if (!sym) {
+      setLiveBars(null);
+      setBarSource("demo");
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await apiBars(sym, range);
+        if (cancelled) return;
+        if (res.bars?.length) {
+          setLiveBars(res.bars.map((b) => ({ t: b.t, c: b.c })));
+          setBarSource(res.source || "live");
+        } else {
+          setLiveBars(null);
+          setBarSource("demo");
+        }
+      } catch {
+        if (!cancelled) {
+          setLiveBars(null);
+          setBarSource("demo");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sym, range, dataSource]);
+
+    const { bars, levels, events, entry, side } = useMemo(() => {
     if (!active) {
       return buildFocusSeries(sym || "DEMO", range, { last: 100 });
     }
@@ -65,8 +99,9 @@ export function FocusPage() {
       target: active.target,
       side: active.side,
       isPlanned: active.kind === "planned",
+      externalBars: liveBars ?? undefined,
     });
-  }, [active, range, sym]);
+  }, [active, range, sym, liveBars]);
 
   const filteredActivity = activity.filter((a) => {
     if (!sym) return false;
@@ -219,7 +254,8 @@ export function FocusPage() {
           <div className="mt-2 px-2">
             <FocusLegend events={events} hasEntry={entry != null} />
             <p className="mt-1 text-[11px] text-muted">
-              Green = profit vs entry · Red = loss · Line color follows live PnL.
+              Green = profit vs entry · Red = loss · Bars:{" "}
+              {barSource === "demo" ? "demo path" : barSource} · Book: {dataSource}
             </p>
           </div>
         </div>

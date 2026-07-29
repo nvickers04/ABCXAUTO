@@ -87,11 +87,10 @@ export function buildFocusSeries(
     plannedEntry?: number;
     side?: "long" | "short";
     isPlanned?: boolean;
+    /** Live OHLC closes from IBKR/MDA — when set, skip synthetic path */
+    externalBars?: { t: string; c: number }[];
   },
-): { bars: FocusBar[]; levels: ChartLevel[]; events: ChartEvent[]; entry: number | null; side: "long" | "short" } {
-  const n = range === "1D" ? 78 : range === "5D" ? 65 : 42;
-  const stepMin = range === "1D" ? 5 : range === "5D" ? 60 : 24 * 60;
-  const rnd = mulberry32(seedFromSymbol(symbol) + n);
+): { bars: FocusBar[]; levels: ChartLevel[]; events: ChartEvent[]; entry: number | null; side: "long" | "short"; barSource: "live" | "demo" } {
   const last = opts.last > 0 ? opts.last : 100;
   const side = opts.side ?? "long";
   const entryPx =
@@ -101,38 +100,76 @@ export function buildFocusSeries(
         ? opts.plannedEntry
         : null;
 
-  const prices: number[] = [last];
-  let p = last;
-  for (let i = 1; i < n; i++) {
-    const drift = (rnd() - 0.48) * (last * 0.004);
-    p = Math.max(last * 0.85, p - drift);
-    prices.unshift(p);
-  }
-  const scale = last / prices[prices.length - 1]!;
-  const now = Date.now();
-  const bars: FocusBar[] = prices.map((raw, i) => {
-    const px = Math.round(raw * scale * 100) / 100;
-    const ts = new Date(now - (n - 1 - i) * stepMin * 60_000);
-    const t =
-      range === "1D"
-        ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-        : range === "5D"
-          ? ts.toLocaleString([], {
-              weekday: "short",
-              hour: "2-digit",
-              minute: "2-digit",
-            })
-          : ts.toLocaleDateString([], { month: "short", day: "numeric" });
-    // Split series for green/red path vs entry (long: above = gain)
-    let priceGain: number | null = null;
-    let priceLoss: number | null = null;
-    if (entryPx != null) {
-      const inGain = side === "long" ? px >= entryPx : px <= entryPx;
-      if (inGain) priceGain = px;
-      else priceLoss = px;
+  let bars: FocusBar[];
+  let barSource: "live" | "demo" = "demo";
+
+  if (opts.externalBars && opts.externalBars.length >= 2) {
+    barSource = "live";
+    bars = opts.externalBars.map((row) => {
+      const px = Number(row.c);
+      const rawT = row.t;
+      let t = rawT;
+      try {
+        const d = new Date(rawT);
+        if (!Number.isNaN(d.getTime())) {
+          t =
+            range === "1M"
+              ? d.toLocaleDateString([], { month: "short", day: "numeric" })
+              : d.toLocaleString([], {
+                  month: "short",
+                  day: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                });
+        }
+      } catch {
+        /* keep raw */
+      }
+      let priceGain: number | null = null;
+      let priceLoss: number | null = null;
+      if (entryPx != null) {
+        const inGain = side === "long" ? px >= entryPx : px <= entryPx;
+        if (inGain) priceGain = px;
+        else priceLoss = px;
+      }
+      return { t, price: px, priceGain, priceLoss };
+    });
+  } else {
+    const n = range === "1D" ? 78 : range === "5D" ? 65 : 42;
+    const stepMin = range === "1D" ? 5 : range === "5D" ? 60 : 24 * 60;
+    const rnd = mulberry32(seedFromSymbol(symbol) + n);
+    const prices: number[] = [last];
+    let p = last;
+    for (let i = 1; i < n; i++) {
+      const drift = (rnd() - 0.48) * (last * 0.004);
+      p = Math.max(last * 0.85, p - drift);
+      prices.unshift(p);
     }
-    return { t, price: px, priceGain, priceLoss };
-  });
+    const scale = last / prices[prices.length - 1]!;
+    const now = Date.now();
+    bars = prices.map((raw, i) => {
+      const px = Math.round(raw * scale * 100) / 100;
+      const ts = new Date(now - (n - 1 - i) * stepMin * 60_000);
+      const t =
+        range === "1D"
+          ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+          : range === "5D"
+            ? ts.toLocaleString([], {
+                weekday: "short",
+                hour: "2-digit",
+                minute: "2-digit",
+              })
+            : ts.toLocaleDateString([], { month: "short", day: "numeric" });
+      let priceGain: number | null = null;
+      let priceLoss: number | null = null;
+      if (entryPx != null) {
+        const inGain = side === "long" ? px >= entryPx : px <= entryPx;
+        if (inGain) priceGain = px;
+        else priceLoss = px;
+      }
+      return { t, price: px, priceGain, priceLoss };
+    });
+  }
 
   const levels: ChartLevel[] = [{ role: "last", price: last, label: "Last" }];
   if (opts.isPlanned && opts.plannedEntry && opts.plannedEntry > 0) {
@@ -192,7 +229,7 @@ export function buildFocusSeries(
     });
   }
 
-  return { bars, levels, events, entry: entryPx, side };
+  return { bars, levels, events, entry: entryPx, side, barSource };
 }
 
 export function parseStopTarget(details: string): { stop?: number; target?: number } {
