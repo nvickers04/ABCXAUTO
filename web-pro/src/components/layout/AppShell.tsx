@@ -20,6 +20,7 @@ export function AppShell() {
   const setMobileRail = useAbcxStore((s) => s.setMobileRail);
   const tickSim = useAbcxStore((s) => s.tickSim);
   const connected = useAbcxStore((s) => s.connected);
+  const bootstrapApi = useAbcxStore((s) => s.bootstrapApi);
 
   // Focus owns the right edge for position tabs — hide account rail there
   const showAccountRail = tab !== "focus";
@@ -29,6 +30,10 @@ export function AppShell() {
     const t = window.setTimeout(clearToast, 2600);
     return () => window.clearTimeout(t);
   }, [toast, clearToast]);
+
+  useEffect(() => {
+    void bootstrapApi();
+  }, [bootstrapApi]);
 
   useEffect(() => {
     if (!connected) return;

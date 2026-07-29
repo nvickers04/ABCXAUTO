@@ -225,4 +225,7 @@ python -m abcxauto --desktop
 ```
 
 Default `python -m abcxauto` still launches Flet Pro. Use `--desktop` for this shell.
+
+**Live data:** `--desktop` serves FastAPI + UI. Connect requires paper TWS (7497).
+Book/Focus then read IBKR positions, stops, and historical bars (MDA fallback).
 See [`web-pro/README.md`](web-pro/README.md) and [`docs/CYCLE.md`](docs/CYCLE.md).

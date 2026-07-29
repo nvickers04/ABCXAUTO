@@ -8,6 +8,7 @@ export function CenterHeader() {
   const setMobileRail = useAbcxStore((s) => s.setMobileRail);
   const mode = useAbcxStore((s) => s.mode);
   const connected = useAbcxStore((s) => s.connected);
+  const dataSource = useAbcxStore((s) => s.dataSource);
   const risk = useAbcxStore((s) => s.risk);
   const meta = NAV.find((n) => n.id === tab) ?? NAV[0]!;
 
@@ -55,7 +56,7 @@ export function CenterHeader() {
 
         <div className="hidden items-center gap-3 text-[12px] text-muted md:flex">
           <span className={cn("font-medium", connected ? "text-gain" : "text-muted")}>
-            {connected ? "IBKR paper" : "Offline"}
+            {dataSource === "live" ? "IBKR live" : dataSource === "demo" && connected ? "Demo" : connected ? "IBKR" : "Offline"}
           </span>
           {risk.halt && <span className="font-semibold text-loss">Halt</span>}
         </div>

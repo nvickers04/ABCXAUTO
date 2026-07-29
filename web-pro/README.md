@@ -25,3 +25,22 @@ python scripts/install_desktop_icon.py
 ```
 
 Double-click **ABCXAUTO Pro** on your Desktop.
+
+
+## Live IBKR
+
+The desktop shell serves this UI **and** a local API:
+
+| Route | Source |
+|-------|--------|
+| `GET /api/book` | IBKR positions + orders + account |
+| `GET /api/bars/{SYM}` | IBKR historical (preferred) or MDA |
+| `POST /api/connect` | Connect TWS paper (default 7497) |
+
+```bash
+# TWS paper running with API enabled
+python -m abcxauto --desktop
+# Click Connect in the UI → book + Focus levels go live
+```
+
+Without TWS/API the UI keeps the demo book.
