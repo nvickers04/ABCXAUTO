@@ -5,6 +5,7 @@ import { RightRail } from "@/components/layout/RightRail";
 import { CenterHeader } from "@/components/layout/CenterHeader";
 import { DashboardPage } from "@/components/pages/DashboardPage";
 import { PositionsPage } from "@/components/pages/PositionsPage";
+import { FocusPage } from "@/components/pages/FocusPage";
 import { ControlsPage } from "@/components/pages/ControlsPage";
 import { UniversePage } from "@/components/pages/UniversePage";
 import { RiskPage } from "@/components/pages/RiskPage";
@@ -34,7 +35,6 @@ export function AppShell() {
 
   return (
     <div className="flex h-full min-h-0 justify-center bg-bg text-fg">
-      {/* Wider shell — more room for the feed */}
       <div className="flex h-full w-full max-w-[1360px] min-h-0">
         <div className="hidden h-full shrink-0 border-r border-border sm:block">
           <LeftRail />
@@ -59,6 +59,7 @@ export function AppShell() {
           <div className="min-h-0 flex-1 overflow-y-auto scroll-thin">
             {tab === "overview" && <DashboardPage />}
             {tab === "positions" && <PositionsPage />}
+            {tab === "focus" && <FocusPage />}
             {tab === "controls" && <ControlsPage />}
             {tab === "universe" && <UniversePage />}
             {tab === "risk" && <RiskPage />}

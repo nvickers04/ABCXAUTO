@@ -57,6 +57,7 @@ interface AbcxState {
   pulseNarrative: string;
   toast: string | null;
   mobileRail: "main" | "nav" | "right";
+  focusSymbol: string | null;
   cycleTimer: number | null;
 
   setTab: (t: TabId) => void;
@@ -69,6 +70,8 @@ interface AbcxState {
   setCustomSymbols: (v: string) => void;
   setExcludeSymbols: (v: string) => void;
   setUniverseFilter: (v: string) => void;
+  setFocusSymbol: (sym: string | null) => void;
+  clearFocus: () => void;
   setSuiteFilter: (f: "all" | "stock" | "manage" | "options") => void;
   toggleConnect: () => void;
   toggleRun: () => void;
@@ -126,6 +129,7 @@ export const useAbcxStore = create<AbcxState>((set, get) => ({
   pulseNarrative: "Paper demo. Connect simulates TWS 7497. Autonomy is Pro START-driven.",
   toast: null,
   mobileRail: "main",
+  focusSymbol: "NVDA",
   cycleTimer: null,
 
   setTab: (tab) => set({ tab, mobileRail: "main" }),
@@ -178,6 +182,13 @@ export const useAbcxStore = create<AbcxState>((set, get) => ({
   setCustomSymbols: (customSymbols) => set({ customSymbols }),
   setExcludeSymbols: (excludeSymbols) => set({ excludeSymbols }),
   setUniverseFilter: (universeFilter) => set({ universeFilter }),
+
+  setFocusSymbol: (sym) => {
+    const focusSymbol = sym ? sym.toUpperCase().trim() : null;
+    set({ focusSymbol, tab: focusSymbol ? "focus" : get().tab, mobileRail: "main" });
+    if (focusSymbol) set({ toast: `Focus · ${focusSymbol}` });
+  },
+  clearFocus: () => set({ focusSymbol: null, toast: "Focus cleared" }),
   setSuiteFilter: (suiteFilter) => set({ suiteFilter }),
 
   toggleConnect: () => {
