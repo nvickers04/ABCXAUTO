@@ -4,7 +4,8 @@
 
 ## Goal
 
-**Greater return on startup cash than the cost of the AI model.**
+**Give Grok a $1000 trading budget and walk away.** Book P&L on that sleeve
+must beat the cost of the AI model.
 
 Intelligence is a billable input, not free alpha. The wrapper should earn more
 from the book than it spends on model calls — or you are financing a very
@@ -17,35 +18,26 @@ expensive journal. That bar is an experiment, not a fixed dollar rule:
   Weigh API spend (calls / rough $) against book P&L and size over time — the
   right unit may not be “$100 per decision,” but the question stays the same.
 
-## Control + Unbiased (non-negotiable)
+## Autonomous + immutable floor (non-negotiable)
 
-1. **You control** — capacity (posture / capital box), deliberation vs quiet
-   process, intelligence budget (cadence / how often Grok may burn tokens),
-   Risk gates, optional Operator Card, Pro START/Stop/pause, and mandate.
-   The product is a wrapper you tune — including when to pay for deeper work.
-2. **Shell is unbiased** — Fact / Gate / labeled Heuristic only. Never invents
-   stance or hold, never ranks SCAN TAPE or “top idea,” never ships strategy
-   taste in prompts, never skips Judge behind your back to “save money.”
-   Taste = Controls / optional Card (you) or Grok judgment (AI).
-3. **Grok owns judgment** — when your budget allows a cycle, Judge runs. Act
-   may skip only under process rules you set (e.g. after Grok already chose
-   idle or manage+hold). Hard gates protect capital; they do not pick strategies.
+1. **Grok owns the dials** — settings, parameters, prompts, pacing, universe
+   focus, and strategy knobs. `self_tune` (alias `set_risk`) applies immediately.
+   No human approval, no proposal step, no operator Controls save.
+2. **Immutable floor is code** — daily-loss halt, max position size, max open
+   positions, defined-risk, cash-only, auto-panic, unprotected-STK protect-first,
+   exits never blocked, fail-closed. The agent may *tighten* these; it cannot
+   weaken them. Live remains gated.
+3. **Operator is setup + kill switch** — `.env` + paper TWS, then Start.
+   Stop / Halt / Panic / Ctrl+C. UI is status/monitoring only.
+4. **Scorecard** — book P&L on the **$1000 trading budget** must beat model API
+   cost. The agent reads its journal + scorecard every cycle and tunes itself.
 
-### Capacity ≠ deliberation ≠ budget
+`$1000` is a **sleeve**, not the IBKR account. Paper NetLiq is often ~$1M;
+percent gates use `min(NetLiq, budget)` so Grok sizes like $1000. Walk-away
+defaults: 2 max positions, 2% daily-loss halt, 1% risk/trade, 20% max position
+(of the sleeve), 5-minute cycle floor, defined-risk on.
 
-These are different levers (Kahneman-shaped, not “trade more”):
-
-| Lever | Question |
-|-------|----------|
-| **Capacity** | How much capital risk is *allowed*? (posture / envelope) |
-| **Deliberation** | System 1 lean (fast / quiet when protected) vs System 2 lean (mega‑worker effort — verifiable work on picks, not a shrug-hold) |
-| **Intelligence budget** | How often / how expensive may those decisions be? (cadence, Act-skip policy) so API $ tracks opportunity, not boredom |
-
-Posture is not eagerness. Quiet hold when protected can be correct — or it can
-be System 1 coasting. You set how careful and how costly thinking may be;
-Grok still decides *what* to do inside that box.
-
-Grok 4.5 **owns** a paper IBKR portfolio under hard risk rules. Protect first;
+Grok 4.5 **owns** a paper IBKR portfolio under that floor. Protect first;
 hold is valid when the book is protected. See `SPEC.md` for full doctrine.
 
 ## 1. Connections
@@ -92,32 +84,22 @@ Grok Act streams → one send. Steer via Controls dials — no free-text work br
 
 ## 3. Operator surfaces
 
-- **Pro Dashboard** — Live ops: pace/attention, open risk, last cycle (judge/act), unranked
-  tape, activity. **Positions** holds the book table + working orders / fills blotter.
-- **Controls tab** — Deliberation, intelligence budget, trade frequency, **entry surface**
-  (stock / mixed / options-only), **option complexity** (defined → full multi-leg), capital
-  rotation, book capacity (`max_open_positions`). Disjoint from Risk.
-- **Universe tab** — Arena toggles (IBKR vs MDA-seed labeled), legal-set browser with source tags,
-  Save arenas vs Refresh membership. Grok picks inside; shell does not rank.
-- **Risk tab** — Capital survival sliders + halt (preset seeds Risk only). Save risk separate.
-- **Test Suite** — paper place/cancel gym for order mechanics (not live curriculum trading).
-- **Operator Card** (optional, advanced) — free-text beliefs; empty by default.
-  Prefer Controls dials. Copy [`operator_card.example.txt`](operator_card.example.txt)
-  → `operator_card.txt` (gitignored) or set `ABCXAUTO_OPERATOR_CARD` only if you
-  need prose beyond the dials. The example is a blank outline — **not** loaded
-  into prompts and not shell strategy defaults.
+- **Pro Dashboard** — status only: pace, open risk, last cycle, tape, activity.
+- **Positions** — book table + working orders / fills.
+- **Controls / Universe / Risk tabs** — live values (agent-owned). Saves are
+  no-ops. Grok `self_tune`s these. Risk halt/resume remain the kill switch.
+- **Scorecard** — book P&L on the trading budget vs model cost (the only goal).
+- **Test Suite** — paper place/cancel gym for order mechanics.
+
+Kill switch: Stop agent, Risk Halt, Panic, or `Ctrl+C` on `--headless`.
+Positions stay at IBKR.
 
 ## 4. Run
 
 ```powershell
-python -m abcxauto
-```
-
-Launches **Pro** (Flet). Connect IBKR · Start agent · Close All Positions.
-
-```powershell
+python -m abcxauto --headless   # autonomous paper loop; Ctrl+C = kill switch
+python -m abcxauto              # Pro UI (status + kill switch)
 python -m abcxauto --cleanup --aggressive   # stale Flet/Python cleanup
-python -m abcxauto --headless               # exits 0; autonomy via Pro START
 ```
 
 ## 5. Supported orders
@@ -137,34 +119,27 @@ TRADE PLAYBOOK (preconditions + shell rejects only).
 | `close_option` | Close an option position |
 | `covered_call` / `collar` / `protective_put` | Manage overlays (share-lot gated) |
 | `vertical_spread` / `iron_condor` / `butterfly` / … | Multi-leg / CSP / roll (hunt or manage; see playbook) |
-| `set_risk` | Retune capital knobs inside posture envelope (no broker send) |
+| `self_tune` / `set_risk` | Agent retunes knobs (cannot weaken the floor; no broker send) |
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ABCXAUTO_CYCLE_SLEEP_S` | `120` | Hunt-floor sleep (adaptive pacing may sleep longer) |
-| `ABCXAUTO_GROK_MIN_INTERVAL_S` | `120` | Min Grok spacing unless protect / urgent wake |
+| `ABCXAUTO_CYCLE_SLEEP_S` | `300` | Hunt-floor sleep (agent may lengthen, not shorten) |
+| `ABCXAUTO_GROK_MIN_INTERVAL_S` | `300` | Min Grok spacing unless protect / urgent wake |
 | `ABCXAUTO_PACE_PROTECT_S` | `20` | Sleep when unprotected STK |
 | `ABCXAUTO_PACE_MANAGE_S` | `60` | Sleep with open risk / trade plan |
-| `ABCXAUTO_PACE_IDLE_S` | `240` | Idle-floor component when flat/idle |
-| `ABCXAUTO_MONITOR_POLL_S` | `30` | Snapshot refresh (may wake cycle) |
-| `ABCXAUTO_MODEL` | `grok-4.5` | xAI model |
-| `ABCXAUTO_RISK_POSTURE` | _(empty)_ | Risk capital preset: `defensive` / `balanced` / `aggressive` (Risk tab) |
-| `ABCXAUTO_CONTROL_DELIBERATION_PCT` | `50` | 0=S1 lean … 100=S2 mega-worker (≥60 disables cheap Act-skip) |
-| `ABCXAUTO_CONTROL_BUDGET_PCT` | `50` | Intelligence budget: 0=protect API $ … 100=more frequent Grok |
-| `ABCXAUTO_CONTROL_FREQUENCY_PCT` | `50` | Trade frequency: process/streams only (no max_daily_trades gate) |
-| `ABCXAUTO_CONTROL_ROTATION_PCT` | `50` | Capital rotation: hold OK ↔ redeploy/free cash OK (process; no auto-sell) |
-| `ABCXAUTO_CONTROL_COMPLEXITY_PCT` | `50` | Structure complexity: 0=stock only … 100=full multi-leg allowlist |
-| `ABCXAUTO_MAX_OPEN_POSITIONS` | `0` | Book capacity (Controls-owned; 0=unlimited) |
-| `ABCXAUTO_UNIVERSE_PATH` | `universe_allowlist.json` | Universe sandbox persistence |
-| `ABCXAUTO_OPERATOR_CARD` | _(empty)_ | Optional free-text (secondary to Controls) |
-| `ABCXAUTO_OPERATOR_CARD_PATH` | `operator_card.txt` | File fallback for Operator Card |
+| `ABCXAUTO_PACE_IDLE_S` | `600` | Idle-floor when flat/idle |
+| `ABCXAUTO_TRADING_BUDGET_USD` | `1000` | Sleeve Grok may work (`min(NetLiq, budget)`). Agent cannot raise. |
+| `ABCXAUTO_MAX_OPEN_POSITIONS` | `2` | Book capacity (floor ceiling; agent may lower to 1) |
+| `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `2` | Daily-loss halt vs sleeve (agent cannot raise) |
+| `ABCXAUTO_MAX_POSITION_PCT` | `20` | Max position vs sleeve (agent cannot raise) |
+| `ABCXAUTO_DEFINED_RISK_ONLY` | `true` | Locked on |
 | `ABCXAUTO_JOURNAL_PATH` | `journal.db` | SQLite journal |
 | `ABCXAUTO_RISK_SETTINGS_PATH` | `risk_settings.json` | Persisted Risk + Controls (gitignored) |
 
-Capital / daily-loss gates default off until you Apply posture or set env knobs.
-See `.env.template` for the full list.
+Capital / daily-loss gates are **on** against the $1000 sleeve. The agent cannot
+turn them off. See `.env.template` for the full list.
 
 ## Architecture
 
@@ -188,7 +163,10 @@ abcxauto/
   risk_gates.py         Hard pre-trade gates + halt latch
   executor.py / send.py Validate → gate → IBKR
   pro_desktop.py        Flet Pro cockpit
-  config.py             Env + Risk/Controls + optional Operator Card
+  self_tune.py          Agent self-mod (floor-clamped; no approval)
+  scorecard.py          Book return vs model cost
+  headless.py           Paper loop without UI
+  config.py             Env + walk-away floor + agent_state
   memory/               SQLite journal
   broker/               IBKR layer
 ```
@@ -198,15 +176,14 @@ abcxauto/
 Doctrine + Phase 5 ritual: `.cursor/skills/abcxauto-gym/`.
 Daily/weekly KPIs: `python scripts/phase5_day_report.py` (`--week`).
 
-## Control + Unbiased rule
+## Autonomy + floor
 
 | Pillar | Meaning |
 |--------|---------|
-| Goal | Book return on startup cash > cost of the model (weigh; don’t fixate on one $) |
-| Control | You set capacity, deliberation, intelligence budget, Risk gates, Card, start/stop — shell does not steal dials or fake hold to save tokens |
-| Unbiased Fact / Gate | Code + prompts; gates protect capital, never pick strategies |
-| Heuristic | Labeled `heuristic ≠ recommendation` |
-| Taste | Controls / Operator Card or Grok — **not** hard-coded shell prose |
+| Goal | Book P&L on the $1000 trading budget > cost of the model |
+| Autonomy | Grok self_tunes all non-risk knobs — no approval |
+| Immutable floor | Code: daily loss, size, defined-risk, protect-first, fail-closed, exits always |
+| Operator | Initial setup + emergency kill switch. UI = status |
 
 ## Tests
 

@@ -14,6 +14,7 @@ from abcxauto.risk_gates import (
     estimate_notional,
     is_exit_or_management,
     reset_risk_gate,
+    risk_base_usd,
 )
 from tests.test_proposals import RATIONALE, VALID_PAYLOADS
 
@@ -22,6 +23,8 @@ def _cfg(**overrides) -> Config:
     base = get_config()
     # Explicit salvage/capital knobs for unit tests (production defaults are off).
     defaults = {
+        "risk_posture": "balanced",  # 5% test stops; floor is tested in test_self_tune
+        "trading_budget_usd": 0.0,  # isolate % of NL; sleeve caps tested separately
         "cash_only": False,
         "max_peak_drawdown_pct": 0.0,
         "max_option_premium_pct": 0.0,
@@ -149,6 +152,34 @@ async def test_position_sizing_rejection(gate):
     assert "position size" in reason.lower() or "exceeds max" in reason.lower()
 
     ok, _ = await gate.pre_trade_check(_bracket(qty=10, entry=100.0), conn)
+    assert ok is True
+
+
+def test_risk_base_usd_uses_min_of_nl_and_budget():
+    fat = _cfg(trading_budget_usd=1000.0)
+    assert risk_base_usd(100_000.0, fat) == 1000.0
+    assert risk_base_usd(500.0, fat) == 500.0
+    no_sleeve = _cfg(trading_budget_usd=0.0)
+    assert risk_base_usd(100_000.0, no_sleeve) == 100_000.0
+
+
+@pytest.mark.asyncio
+async def test_trading_budget_sleeve_caps_large_account(gate, monkeypatch):
+    """$100k NL + $1000 budget + 20% max position → $200 cap, not $20k."""
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_config",
+        lambda: _cfg(
+            trading_budget_usd=1000.0,
+            max_position_pct=20.0,
+            daily_loss_limit_pct=0,
+        ),
+    )
+    conn = FakeConnector()
+    conn.account = {"netliquidation": 100_000.0, "dailypnl": 0.0}
+    ok, reason = await gate.pre_trade_check(_bracket(qty=5, entry=100.0), conn)
+    assert ok is False
+    assert "position" in reason.lower() or "exceeds" in reason.lower()
+    ok, _ = await gate.pre_trade_check(_bracket(qty=1, entry=100.0), conn)
     assert ok is True
 
 

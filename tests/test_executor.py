@@ -24,7 +24,7 @@ def _disable_risk_gates(monkeypatch):
     # defined-risk / R:R so every strategy in VALID_PAYLOADS remains constructible.
     monkeypatch.setattr(
         "abcxauto.proposals.get_config",
-        lambda: Config(**{**base.__dict__, "defined_risk_only": False, "min_reward_risk": 0}),
+        lambda: Config(**{**base.__dict__, "defined_risk_only": False, "min_reward_risk": 0, "risk_posture": "balanced"}),
     )
 
 

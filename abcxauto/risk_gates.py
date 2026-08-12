@@ -155,6 +155,29 @@ def _account_float(account: dict, *keys: str) -> Optional[float]:
     return None
 
 
+def risk_base_usd(net_liq: float, cfg: Any = None) -> float:
+    """Dollar base for % gates: min(NetLiq, trading_budget) when a sleeve is set.
+
+    A $1M paper account with a $1000 budget sizes like $1000, not $1M.
+    Budget 0 (tests) falls back to NetLiq.
+    """
+    if cfg is None:
+        cfg = get_config()
+    try:
+        nl = float(net_liq)
+    except (TypeError, ValueError):
+        nl = 0.0
+    try:
+        budget = float(getattr(cfg, "trading_budget_usd", 0) or 0)
+    except (TypeError, ValueError):
+        budget = 0.0
+    if budget > 0 and nl > 0:
+        return min(nl, budget)
+    if budget > 0:
+        return budget
+    return nl
+
+
 def estimate_notional(proposal: OrderProposal) -> Optional[float]:
     """Estimate order notional for position-sizing. None if not estimable."""
     params = proposal.params
@@ -384,13 +407,15 @@ class RiskGate:
             daily_pnl = 0.0
 
         self.update_equity(net_liq)
+        sleeve = risk_base_usd(net_liq, cfg)
 
         if cfg.daily_loss_limit_pct > 0:
-            limit = -(cfg.daily_loss_limit_pct / 100.0) * net_liq
+            limit = -(cfg.daily_loss_limit_pct / 100.0) * sleeve
             if daily_pnl <= limit:
                 reason = (
                     f"Daily loss circuit breaker: daily PnL {daily_pnl:.2f} <= "
-                    f"limit {limit:.2f} ({cfg.daily_loss_limit_pct}% of NL {net_liq:.2f})"
+                    f"limit {limit:.2f} ({cfg.daily_loss_limit_pct}% of sleeve "
+                    f"{sleeve:.2f}; NL {net_liq:.2f})"
                 )
                 self.halt(reason, kind="daily_loss")
                 return False, reason
@@ -398,13 +423,27 @@ class RiskGate:
         if cfg.max_peak_drawdown_pct > 0:
             peak = self.peak_equity
             if peak is not None and peak > 0:
-                floor = peak * (1.0 - cfg.max_peak_drawdown_pct / 100.0)
-                if net_liq <= floor:
-                    return False, (
-                        f"Peak drawdown gate: NetLiq {net_liq:.2f} <= "
-                        f"{cfg.max_peak_drawdown_pct}% below peak {peak:.2f} "
-                        f"(floor {floor:.2f}). Self-clears when equity recovers."
-                    )
+                try:
+                    budget = float(getattr(cfg, "trading_budget_usd", 0) or 0)
+                except (TypeError, ValueError):
+                    budget = 0.0
+                if budget > 0:
+                    max_drop = (cfg.max_peak_drawdown_pct / 100.0) * budget
+                    drop = peak - net_liq
+                    if drop >= max_drop:
+                        return False, (
+                            f"Peak drawdown gate: drop {drop:.2f} >= "
+                            f"{cfg.max_peak_drawdown_pct}% of ${budget:.0f} sleeve "
+                            f"(max drop {max_drop:.2f}). Self-clears when equity recovers."
+                        )
+                else:
+                    floor = peak * (1.0 - cfg.max_peak_drawdown_pct / 100.0)
+                    if net_liq <= floor:
+                        return False, (
+                            f"Peak drawdown gate: NetLiq {net_liq:.2f} <= "
+                            f"{cfg.max_peak_drawdown_pct}% below peak {peak:.2f} "
+                            f"(floor {floor:.2f}). Self-clears when equity recovers."
+                        )
 
         if cfg.cash_only:
             direction = getattr(proposal.params, "direction", None)
@@ -451,11 +490,12 @@ class RiskGate:
                         "(provide entry_price, limit_price, or price_hint)"
                     )
             else:
-                max_notional = (cfg.max_position_pct / 100.0) * net_liq
+                max_notional = (cfg.max_position_pct / 100.0) * sleeve
                 if notional > max_notional:
                     return False, (
                         f"Position size {notional:.2f} exceeds max "
-                        f"{cfg.max_position_pct}% of NL ({max_notional:.2f})"
+                        f"{cfg.max_position_pct}% of sleeve {sleeve:.2f} "
+                        f"(NL {net_liq:.2f})"
                     )
 
         if cfg.max_risk_per_trade_pct > 0 and proposal.strategy in (
@@ -467,11 +507,12 @@ class RiskGate:
                 return False, (
                     "Risk gate: cannot estimate dollars risked to stop for risk-per-trade cap"
                 )
-            max_risk = (cfg.max_risk_per_trade_pct / 100.0) * net_liq
+            max_risk = (cfg.max_risk_per_trade_pct / 100.0) * sleeve
             if risked > max_risk:
                 return False, (
                     f"Risk-per-trade {risked:.2f} exceeds max "
-                    f"{cfg.max_risk_per_trade_pct}% of NL ({max_risk:.2f})"
+                    f"{cfg.max_risk_per_trade_pct}% of sleeve {sleeve:.2f} "
+                    f"(NL {net_liq:.2f})"
                 )
 
         if cfg.max_open_positions > 0:

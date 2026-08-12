@@ -61,7 +61,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
 
-_HOLD_LIKE = frozenset({"hold", "skipped", "blocked", "set_risk", "none", "", "—"})
+_HOLD_LIKE = frozenset({"hold", "skipped", "blocked", "set_risk", "self_tune", "none", "", "—"})
 
 
 def _decision_kind(strat: str) -> str:
@@ -284,6 +284,12 @@ class ProEngine:
         """Start autonomous agent cycles (requires xAI; connects IBKR if needed)."""
         if not get_config().xai_api_key:
             return "XAI_API_KEY missing"
+        try:
+            from abcxauto.self_tune import ensure_immutable_floor
+
+            ensure_immutable_floor(persist=True)
+        except Exception:
+            logger.exception("immutable floor seed failed")
         self._universe_refresh_on_start = True
         if self.worker and self.worker.is_alive():
             self.pause.clear()

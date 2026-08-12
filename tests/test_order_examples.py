@@ -20,7 +20,7 @@ def _relax_proposal_gates(monkeypatch):
     base = get_config()
     monkeypatch.setattr(
         "abcxauto.proposals.get_config",
-        lambda: Config(**{**base.__dict__, "defined_risk_only": False, "min_reward_risk": 0}),
+        lambda: Config(**{**base.__dict__, "defined_risk_only": False, "min_reward_risk": 0, "risk_posture": "balanced"}),
     )
 
 
@@ -41,6 +41,11 @@ def test_set_risk_present():
     assert "max_risk_per_trade_pct" in ORDER_EXAMPLES["set_risk"]
 
 
+def test_self_tune_present():
+    assert "self_tune" in ORDER_EXAMPLES
+    assert "self_tune" in SENDABLE_TYPES
+
+
 def test_sendable_types_matches_examples():
     assert SENDABLE_TYPES == frozenset(ORDER_EXAMPLES)
 
@@ -53,6 +58,7 @@ def test_format_order_examples():
     assert "ORDER EXAMPLES" in text
     assert "market_bracket" in text
     assert "set_risk" in text
+    assert "self_tune" in text
     assert "vertical_spread" in text  # Act allowlist parity
     # Act-filtered: algo exits in ORDER_EXAMPLES but not ALLOWED_ACTIONS
     assert "vwap" not in text or "vwap" in ALLOWED_ACTIONS

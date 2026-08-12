@@ -8,6 +8,7 @@ from typing import Any
 _ALWAYS = frozenset({
     "hold",
     "set_risk",
+    "self_tune",
     "market_order",
     "limit_order",
     "stop_order",

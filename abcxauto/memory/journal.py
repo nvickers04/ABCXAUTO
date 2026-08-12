@@ -111,6 +111,24 @@ CREATE TABLE IF NOT EXISTS judgments (
     intent_json TEXT,
     judgment_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS model_usage (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    stage TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cost_usd REAL
+);
+
+CREATE TABLE IF NOT EXISTS self_tunes (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    applied_json TEXT,
+    clamped_json TEXT,
+    rejected_json TEXT,
+    rationale TEXT
+);
 """
 
 
@@ -1055,6 +1073,157 @@ class TradeJournal:
             return sorted(buckets.values(), key=lambda b: b["strategy"])
         except Exception:
             logger.exception("journal.strategy_performance failed")
+            return []
+
+    def record_model_usage(
+        self,
+        *,
+        stage: str = "",
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float = 0.0,
+        ts: Optional[str] = None,
+    ) -> Optional[int]:
+        if not self.enabled:
+            return None
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO model_usage (ts, stage, input_tokens, output_tokens, cost_usd)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ts or _utc_now_iso(),
+                        stage or None,
+                        int(input_tokens or 0),
+                        int(output_tokens or 0),
+                        float(cost_usd or 0.0),
+                    ),
+                )
+                conn.commit()
+                return int(cur.lastrowid)
+        except Exception:
+            logger.exception("journal.record_model_usage failed")
+            return None
+
+    def model_usage_totals(self) -> dict:
+        empty = {
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+        }
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS calls,
+                           COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                           COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                           COALESCE(SUM(cost_usd), 0) AS cost_usd
+                    FROM model_usage
+                    """
+                ).fetchone()
+            if not row:
+                return empty
+            return {
+                "calls": int(row["calls"] or 0),
+                "input_tokens": int(row["input_tokens"] or 0),
+                "output_tokens": int(row["output_tokens"] or 0),
+                "cost_usd": float(row["cost_usd"] or 0.0),
+            }
+        except Exception:
+            logger.exception("journal.model_usage_totals failed")
+            return empty
+
+    def startup_cash(self) -> Optional[float]:
+        """First recorded NetLiq — book P&L start. Return % uses the trading budget."""
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT net_liquidation FROM snapshots
+                    WHERE net_liquidation IS NOT NULL AND net_liquidation > 0
+                    ORDER BY id ASC LIMIT 1
+                    """
+                ).fetchone()
+            if not row:
+                return None
+            return float(row["net_liquidation"])
+        except Exception:
+            logger.exception("journal.startup_cash failed")
+            return None
+
+    def record_self_tune(
+        self,
+        *,
+        applied: Any = None,
+        clamped: Any = None,
+        rejected: Any = None,
+        rationale: str = "",
+        ts: Optional[str] = None,
+    ) -> Optional[int]:
+        if not self.enabled:
+            return None
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO self_tunes (ts, applied_json, clamped_json, rejected_json, rationale)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        ts or _utc_now_iso(),
+                        _json_dumps(applied or {}),
+                        _json_dumps(clamped or {}),
+                        _json_dumps(rejected or {}),
+                        (rationale or "")[:500],
+                    ),
+                )
+                conn.commit()
+                return int(cur.lastrowid)
+        except Exception:
+            logger.exception("journal.record_self_tune failed")
+            return None
+
+    def recent_self_tunes(self, limit: int = 8) -> List[dict]:
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, ts, applied_json, clamped_json, rejected_json, rationale
+                    FROM self_tunes
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            out: List[dict] = []
+            for row in rows:
+                item = dict(row)
+                for key, dest in (
+                    ("applied_json", "applied"),
+                    ("clamped_json", "clamped"),
+                    ("rejected_json", "rejected"),
+                ):
+                    raw = item.pop(key, None)
+                    if raw:
+                        try:
+                            item[dest] = json.loads(raw)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            item[dest] = raw
+                    else:
+                        item[dest] = {}
+                out.append(item)
+            return out
+        except Exception:
+            logger.exception("journal.recent_self_tunes failed")
             return []
 
 

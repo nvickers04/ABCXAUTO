@@ -188,7 +188,7 @@ class ProTerminal:
         )
         self.lbl_risk_halt = ft.Text("Halt: clear", size=14, weight=ft.FontWeight.W_600, color=GREEN)
         self.lbl_risk_status = ft.Text(
-            "Set posture — wide envelope; agent sizes per trade (set_risk).",
+            "$1000 sleeve locked — agent self_tunes; Halt/Stop is the kill switch.",
             size=12,
             color=MUTED,
             selectable=True,
@@ -1214,9 +1214,9 @@ class ProTerminal:
         dials = ft.Column(
             [
                 ft.Text(
-                    "How the agent works the book — attention, frequency, structures, slots. "
-                    "Universe (scanner sandbox) is its own tab. Risk owns capital death knobs. "
-                    "Goal: book return on startup cash > cost of the model.",
+                    "Agent-owned Controls (status only). Grok self_tunes these. "
+                    "Operator: Connect + Start/Stop kill switch. "
+                    "Goal: book P&L on the $1000 trading budget > cost of the model.",
                     size=12,
                     color=MUTED,
                 ),
@@ -1650,7 +1650,7 @@ class ProTerminal:
                 )
             else:
                 self.lbl_risk_envelope.value = (
-                    f"{path} · apply a posture to enable agent set_risk."
+                    f"{path} · $1000 sleeve locked — agent self_tune (cannot weaken)."
                 )
         except Exception:
             self.lbl_risk_envelope.value = ""
@@ -1671,175 +1671,41 @@ class ProTerminal:
             self.lbl_risk_halt.color = MUTED
 
     def _apply_posture(self, _=None) -> None:
-        """Risk-tab capital preset — never touches Controls or Universe."""
-        try:
-            posture = str(self.risk_dd_posture.value or "balanced").strip().lower()
-            apply_risk_posture(posture)
-            path = risk_settings_path()
-            self._load_risk_form()
-            self.lbl_risk_status.value = (
-                f"Capital preset {posture} applied → {path}"
-            )
-            self.lbl_risk_status.color = GREEN
-            self.page.overlay.append(
-                ft.SnackBar(
-                    ft.Text(f"Capital preset {posture} saved"),
-                    bgcolor=BLUE,
-                    open=True,
-                )
-            )
-        except Exception as e:
-            self.lbl_risk_status.value = f"Preset apply failed: {e}"
-            self.lbl_risk_status.color = RED
-            try:
-                self.page.overlay.append(
-                    ft.SnackBar(ft.Text(f"Preset apply failed: {e}"), bgcolor=RED, open=True)
-                )
-            except Exception:
-                pass
+        """Risk presets are agent-owned. Operator cannot loosen the floor."""
+        self.lbl_risk_status.value = (
+            "Operator cannot change risk presets — Grok self_tunes; "
+            "immutable floor is code. Use Halt / Stop as kill switch."
+        )
+        self.lbl_risk_status.color = AMBER
         self._safe_update()
 
     def _save_risk_gates(self, _=None) -> None:
-        """Save Risk capital toggles + sliders only."""
-        try:
-            payload: dict[str, Any] = {
-                "risk_gates_enabled": bool(self.risk_sw_gates.value),
-                "auto_panic_on_breach": bool(self.risk_sw_auto_panic.value),
-                "defined_risk_only": bool(self.risk_sw_defined.value),
-                "cash_only": bool(self.risk_sw_cash.value),
-            }
-            posture = str(self.risk_dd_posture.value or "").strip().lower()
-            if posture in RISK_POSTURES:
-                payload["risk_posture"] = posture
-            for key, slider in self.risk_sliders.items():
-                payload[key] = float(slider.value or 0)
-            # Operator Risk tab — keep exact knobs (envelope clamp is for agent set_risk).
-            update_risk_config(**payload, _skip_clamp=True)
-            path = risk_settings_path()
-            self._load_risk_form()
-            self.lbl_risk_status.value = f"Risk gates saved → {path}"
-            self.lbl_risk_status.color = GREEN
-            self.page.overlay.append(
-                ft.SnackBar(
-                    ft.Text(f"Risk gates saved to {path.name}"),
-                    bgcolor=BLUE,
-                    open=True,
-                )
-            )
-        except Exception as e:
-            self.lbl_risk_status.value = f"Save risk failed: {e}"
-            self.lbl_risk_status.color = RED
-            try:
-                self.page.overlay.append(
-                    ft.SnackBar(ft.Text(f"Save risk failed: {e}"), bgcolor=RED, open=True)
-                )
-            except Exception:
-                pass
+        """Risk knobs are agent-owned. Halt/resume remain operator kill switches."""
+        self.lbl_risk_status.value = (
+            "Risk sliders are status-only. Agent self_tune cannot weaken the floor. "
+            "Use Halt for emergency."
+        )
+        self.lbl_risk_status.color = AMBER
         self._safe_update()
 
     def _save_controls(self, _=None) -> None:
-        """Persist Controls dials + book capacity — never Risk capital keys."""
-        try:
-            payload = {
-                key: int(round(float(slider.value or 50)))
-                for key, slider in self.control_sliders.items()
-            }
-            payload["max_open_positions"] = int(
-                round(float(self.capacity_slider.value or 0))
-            )
-            update_controls_config(**payload)
-            path = risk_settings_path()
-            self._load_risk_form()
-            self.lbl_risk_status.value = f"Controls saved → {path}"
-            self.lbl_risk_status.color = GREEN
-            self.page.overlay.append(
-                ft.SnackBar(
-                    ft.Text(f"Controls saved to {path.name}"),
-                    bgcolor=BLUE,
-                    open=True,
-                )
-            )
-        except Exception as e:
-            self.lbl_risk_status.value = f"Save controls failed: {e}"
-            self.lbl_risk_status.color = RED
-            try:
-                self.page.overlay.append(
-                    ft.SnackBar(ft.Text(f"Save controls failed: {e}"), bgcolor=RED, open=True)
-                )
-            except Exception:
-                pass
+        self.lbl_risk_status.value = (
+            "Controls are agent-owned (self_tune). UI is monitoring only."
+        )
+        self.lbl_risk_status.color = AMBER
         self._safe_update()
 
     def _save_universe(self, _=None) -> None:
-        try:
-            from abcxauto.universe import normalize_symbols, save_allowlist
-
-            enabled = [
-                k for k, cb in self.universe_checks.items() if bool(cb.value)
-            ]
-            custom = normalize_symbols(
-                [x.strip() for x in str(self.universe_custom_tf.value or "").split(",")]
-            )
-            exclude = normalize_symbols(
-                [x.strip() for x in str(self.universe_exclude_tf.value or "").split(",")]
-            )
-            save_allowlist(
-                {
-                    "enabled_arenas": enabled,
-                    "custom_symbols": custom,
-                    "exclude_symbols": exclude,
-                }
-            )
-            self._load_universe_form()
-            self.lbl_universe_hint.value = (
-                "Arenas saved. Legal set is stale until you Refresh membership "
-                "(IBKR when connected)."
-            )
-            self.lbl_universe_hint.color = AMBER
-            self.page.overlay.append(
-                ft.SnackBar(
-                    ft.Text("Arenas saved — Refresh membership to pull IBKR"),
-                    bgcolor=BLUE,
-                    open=True,
-                )
-            )
-        except Exception as e:
-            self.lbl_universe_status.value = f"Save universe failed: {e}"
-            try:
-                self.page.overlay.append(
-                    ft.SnackBar(ft.Text(f"Save failed: {e}"), bgcolor=RED, open=True)
-                )
-            except Exception:
-                pass
+        self.lbl_universe_status.value = (
+            "Universe is agent-owned (self_tune). UI is monitoring only."
+        )
         self._safe_update()
 
     def _refresh_universe(self, _=None) -> None:
         async def _run():
             try:
-                from abcxauto.universe import normalize_symbols, refresh_legal_set, save_allowlist
+                from abcxauto.universe import refresh_legal_set
 
-                enabled = [
-                    k for k, cb in self.universe_checks.items() if bool(cb.value)
-                ]
-                custom = normalize_symbols(
-                    [
-                        x.strip()
-                        for x in str(self.universe_custom_tf.value or "").split(",")
-                    ]
-                )
-                exclude = normalize_symbols(
-                    [
-                        x.strip()
-                        for x in str(self.universe_exclude_tf.value or "").split(",")
-                    ]
-                )
-                save_allowlist(
-                    {
-                        "enabled_arenas": enabled,
-                        "custom_symbols": custom,
-                        "exclude_symbols": exclude,
-                    }
-                )
                 conn = getattr(self.engine, "conn", None)
                 if conn is None:
                     try:
@@ -2858,7 +2724,7 @@ class ProTerminal:
                     f"{str(last.get('message') or '')[:100]}"
                 )
             self.lbl_agent_structure.value = gline
-            bad = grade not in ("", "ok", "hold", "set_risk", "—")
+            bad = grade not in ("", "ok", "hold", "set_risk", "self_tune", "—")
             geom = "geometry" in grade or "scrape" in grade
             self.lbl_agent_structure.color = RED if bad and geom else (AMBER if bad else TEXT)
         else:
@@ -2874,7 +2740,7 @@ class ProTerminal:
             self.lbl_agent_now.color = MUTED
         else:
             now = f"c{s.cycles}  {stance_bit}{intent_bit}  →  {strat}  ·  {status}"
-            if grade and grade not in ("ok", "hold", "set_risk", ""):
+            if grade and grade not in ("ok", "hold", "set_risk", "self_tune", ""):
                 now += f"  [{grade}]"
             pace = getattr(s, "pace", None) or {}
             if pace.get("tier"):
@@ -3206,7 +3072,7 @@ class ProTerminal:
                 if rationale:
                     lines.append(f"         why: {rationale}")
                 sgrade = str(r.get("structure_grade") or "").strip()
-                if sgrade and sgrade not in ("ok", "hold", "set_risk"):
+                if sgrade and sgrade not in ("ok", "hold", "set_risk", "self_tune"):
                     lines.append(f"         structure: {sgrade}")
                 stage_err = str(r.get("stage_error") or "").strip()
                 if stage_err and stage_err not in status:
@@ -3337,7 +3203,7 @@ class ProTerminal:
                 or (item or {}).get("decision")
                 or ""
             ).lower()
-            if strat in ("hold", "skipped", "blocked", "set_risk", "none", ""):
+            if strat in ("hold", "skipped", "blocked", "set_risk", "self_tune", "none", ""):
                 hold_n += 1
             else:
                 trade_n += 1

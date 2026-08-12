@@ -90,8 +90,8 @@ def _judgment_for_act(act: dict, **extra) -> dict:
         stance, kind = "hunt", "hunt"
     elif strat in ("oca", "modify_stop", "modify_target", "market_order", "close_option"):
         stance, kind = "protect", "protect"
-    elif strat in ("set_risk",):
-        stance, kind = "hunt", "hunt"
+    elif strat in ("set_risk", "self_tune"):
+        stance, kind = "idle", "idle"
     elif strat == "hold":
         stance, kind = "idle", "idle"
     else:
@@ -726,8 +726,8 @@ def test_config_cadence_defaults(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     get_config.cache_clear()
     cfg = get_config()
-    assert cfg.cycle_sleep_s == 120.0
-    assert cfg.grok_min_interval_s == 120.0
-    assert "RELY ON YOUR INTELLIGENCE" in cfg.trading_mandate
+    assert cfg.cycle_sleep_s == 300.0
+    assert cfg.grok_min_interval_s == 300.0
+    assert "self_tune" in cfg.trading_mandate.lower() or "OWN a paper" in cfg.trading_mandate
     assert "cycle_sleep_s" in Config.__dataclass_fields__
     get_config.cache_clear()

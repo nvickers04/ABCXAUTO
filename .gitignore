@@ -1,4 +1,5 @@
 ﻿risk_settings.json
+agent_state.json
 active_trade_plan.json
 active_trade_plans.json
 last_closed_trade_plan.json

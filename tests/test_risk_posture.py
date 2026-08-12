@@ -36,12 +36,12 @@ def test_apply_risk_posture_seeds(tmp_path, monkeypatch):
     load_risk_settings(path)
 
     cfg = apply_risk_posture("balanced", persist=True)
-    assert cfg.risk_posture == "balanced"
-    assert cfg.max_risk_per_trade_pct == 1.5
-    assert cfg.daily_loss_limit_pct == 5.0
-    assert cfg.max_position_pct == 12.0
+    assert cfg.risk_posture == "defensive"  # walk-away floor identity
+    assert cfg.max_risk_per_trade_pct == 1.0  # clamped to floor ceiling
+    assert cfg.daily_loss_limit_pct == 2.0
+    assert cfg.max_position_pct == 12.0  # balanced seed already under 20% ceiling
     # Capital preset must not touch Controls book capacity
-    assert cfg.max_open_positions == 0
+    assert cfg.max_open_positions == 2
     assert cfg.auto_panic_on_breach is True
     assert path.is_file()
 
@@ -58,15 +58,16 @@ def test_clamp_risk_knobs_ceiling(tmp_path, monkeypatch):
     assert "max_risk_per_trade_pct" in notes
 
 
-def test_set_risk_requires_posture(tmp_path, monkeypatch):
+def test_set_risk_no_approval_needed(tmp_path, monkeypatch):
     path = tmp_path / "risk.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     clear_risk_settings(path=path)
     load_risk_settings(path)
     clear_runtime_overrides()
 
-    out = set_risk_knobs({"max_risk_per_trade_pct": 1.0}, persist=False)
-    assert out["status"] == "blocked"
+    out = set_risk_knobs({"max_risk_per_trade_pct": 0.5}, persist=False)
+    assert out["status"] == "ok"
+    assert get_config().max_risk_per_trade_pct == 0.5
 
 
 def test_set_risk_within_envelope(tmp_path, monkeypatch):
@@ -76,11 +77,11 @@ def test_set_risk_within_envelope(tmp_path, monkeypatch):
     load_risk_settings(path)
     apply_risk_posture("balanced", persist=True)
 
-    out = set_risk_knobs({"max_risk_per_trade_pct": 3.5, "max_peak_drawdown_pct": 10.0})
+    out = set_risk_knobs({"max_risk_per_trade_pct": 0.75, "max_peak_drawdown_pct": 5.0})
     assert out["status"] == "ok"
-    assert out["applied"]["max_risk_per_trade_pct"] == 3.5
-    assert get_config().max_risk_per_trade_pct == 3.5
-    assert get_config().max_peak_drawdown_pct == 10.0
+    assert out["applied"]["max_risk_per_trade_pct"] == 0.75
+    assert get_config().max_risk_per_trade_pct == 0.75
+    assert get_config().max_peak_drawdown_pct == 5.0
 
 
 def test_set_risk_clamps_over_ceiling(tmp_path, monkeypatch):
@@ -92,7 +93,7 @@ def test_set_risk_clamps_over_ceiling(tmp_path, monkeypatch):
 
     out = set_risk_knobs({"max_risk_per_trade_pct": 50.0})
     assert out["status"] == "ok"
-    assert out["applied"]["max_risk_per_trade_pct"] == 4.0
+    assert out["applied"]["max_risk_per_trade_pct"] == 1.0
     assert out["clamped"]
 
 
@@ -112,12 +113,12 @@ def test_executor_set_risk(tmp_path, monkeypatch):
 
     result = asyncio.run(
         safe_execute(
-            {"strategy": "set_risk", "params": {"max_risk_per_trade_pct": 2.0}},
+            {"strategy": "set_risk", "params": {"max_risk_per_trade_pct": 0.5}},
             _C(),
         )
     )
     assert result["status"] == "ok"
-    assert get_config().max_risk_per_trade_pct == 2.0
+    assert get_config().max_risk_per_trade_pct == 0.5
 
 
 def test_live_aggressive_effective_balanced(tmp_path, monkeypatch):
@@ -128,8 +129,8 @@ def test_live_aggressive_effective_balanced(tmp_path, monkeypatch):
     set_trading_mode("live", live_confirm="I_UNDERSTAND_LIVE_TRADING_RISK")
     apply_risk_posture("aggressive", persist=True)
     cfg = get_config()
-    assert cfg.risk_posture == "aggressive"
-    assert cfg.effective_risk_posture == "balanced"
-    # Seeds use effective (balanced) values
-    assert cfg.max_risk_per_trade_pct == 1.5
+    assert cfg.risk_posture == "defensive"
+    assert cfg.effective_risk_posture == "defensive"
+    # Floor clamps aggressive seeds
+    assert cfg.max_risk_per_trade_pct == 1.0
     set_trading_mode("paper")

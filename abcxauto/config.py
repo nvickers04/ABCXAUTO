@@ -27,6 +27,7 @@ RISK_CONFIG_KEYS = frozenset({
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
     "max_risk_per_trade_pct",
+    "trading_budget_usd",
 })
 # Knobs Grok may retune via set_risk (clamped to capital envelope).
 SET_RISK_KEYS = frozenset({
@@ -35,6 +36,7 @@ SET_RISK_KEYS = frozenset({
     "max_position_pct",
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
+    "trading_budget_usd",
 })
 # Controls tab — attention + toolbox + book capacity (disjoint from Risk).
 CONTROL_KEYS = frozenset({
@@ -57,12 +59,12 @@ ROTATION_REDEPLOY_PCT = 60
 # Cash share of NL below this counts as "thin" for rotation process (Fact threshold).
 ROTATION_THIN_CASH_PCT = 15.0
 _CONTROL_DEFAULTS: dict[str, int] = {
-    "control_deliberation_pct": 50,
-    "control_budget_pct": 50,
-    "control_frequency_pct": 50,
+    "control_deliberation_pct": 40,
+    "control_budget_pct": 25,
+    "control_frequency_pct": 30,
     "control_entry_surface_pct": 50,  # mixed
-    "control_complexity_pct": 50,  # defined options
-    "control_rotation_pct": 50,
+    "control_complexity_pct": 40,  # defined options
+    "control_rotation_pct": 40,
 }
 RISK_POSTURES = frozenset({"defensive", "balanced", "aggressive"})
 # Risk-only capital presets (never touch Controls / capacity / universe).
@@ -128,15 +130,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_RISK_SETTINGS_PATH = _REPO_ROOT / "risk_settings.json"
 
 DEFAULT_MANDATE = (
-    "RELY ON YOUR INTELLIGENCE. You OWN a paper IBKR portfolio. "
-    "The shell gives tools, facts, gates, and labeled heuristics — not a trading style. "
-    "Protect first. Hold IS VALID when the book is protected. Hold is FORBIDDEN only "
-    "while unprotected STK exists (code enforces). Build judgment from the live book, "
-    "journal memory, SCAN TAPE (unranked MDA delayed metrics; Grok operates the "
-    "scanner), IBKR live quotes for geometry, and operator CONTROLS (Controls tab). "
-    "Manage open risk first (stops, targets, edits, exits). "
-    "New stock entries use bracket or market_bracket with stop and take profit. "
-    "Never blow up."
+    "You OWN a paper IBKR book. The operator gave you a trading budget "
+    "(default $1000) — size and lose only inside that sleeve, even if NetLiq is larger. "
+    "No human approval. Hard risk is code and cannot be weakened (daily-loss halt, "
+    "max position, defined-risk, unprotected-STK protect-first, exits never blocked, "
+    "fail-closed). You MAY self_tune: Controls dials, pacing (only lengthen), universe "
+    "focus, prompt_extra, strategy tweaks, and tighter risk. "
+    "Primary scorecard: book P&L on the trading budget must beat model API cost. "
+    "Read your journal + scorecard every cycle and tune yourself. "
+    "Protect first. Hold IS VALID when protected. Hold is FORBIDDEN only while "
+    "unprotected STK exists (code enforces). Never blow up. Live remains gated."
 )
 
 
@@ -170,17 +173,17 @@ class Config:
     scan_enabled: bool = False
     scan_interval_s: int = 900
     # Max MDA symbols Grok may request per cycle via scan_request.
-    scan_fetch_cap: int = 8
+    scan_fetch_cap: int = 4
 
-    # Autonomous cycle cadence (Pro START AUTONOMOUS loop)
-    # Hunt-floor sleep between cycles — adaptive pacing may sleep longer when idle.
-    cycle_sleep_s: float = 120.0
-    # Min seconds between Grok decision calls when not in protect / urgent wake.
-    grok_min_interval_s: float = 120.0
-    # Adaptive pace tiers (see abcxauto.pacing); hunt floor stays cycle_sleep_s.
+    # Dollars the operator is willing to have Grok work (sleeve). Gates use
+    # min(NetLiq, budget) so a fat IBKR paper account cannot size like $1M.
+    trading_budget_usd: float = 1000.0
+    # Autonomous cycle cadence — long floors so model cost cannot eat a small sleeve.
+    cycle_sleep_s: float = 300.0
+    grok_min_interval_s: float = 300.0
     pace_protect_s: float = 20.0
     pace_manage_s: float = 60.0
-    pace_idle_s: float = 240.0
+    pace_idle_s: float = 600.0
 
     # Background P&L monitor
     monitor_enabled: bool = True
@@ -192,29 +195,24 @@ class Config:
     web_host: str = "127.0.0.1"
     web_port: int = 8000
 
-    # Risk gates: halt latch always available; capital limits default OFF until preset.
-    risk_posture: str = ""  # defensive|balanced|aggressive; empty = no posture yet
+    # Walk-away floor — ON by default; agent may tighten, never weaken.
+    risk_posture: str = "defensive"
     risk_gates_enabled: bool = True
-    daily_loss_limit_pct: float = 0.0  # 0 disables
-    max_position_pct: float = 0.0  # 0 disables
-    auto_panic_on_breach: bool = False
-    defined_risk_only: bool = False
-    cash_only: bool = False
-    max_peak_drawdown_pct: float = 0.0  # 0 disables; self-clears on recovery (no halt latch)
-    max_option_premium_pct: float = 0.0  # 0 disables
-    max_risk_per_trade_pct: float = 0.0  # 0 disables
-    # Controls — book capacity (not Risk). 0 disables max-open gate.
-    max_open_positions: int = 0
-    # Controls dials 0–100 — process / toolbox (disjoint from Risk capital).
-    control_deliberation_pct: int = 50  # 0=S1 lean … 100=S2 mega-worker
-    control_budget_pct: int = 50  # 0=protect API $ … 100=more frequent Grok
-    control_frequency_pct: int = 50  # 0=patient … 100=higher trade rate (process only)
-    # Entry surface: 0=stock only … 50=mixed … 100=options only (no new stock brackets).
+    daily_loss_limit_pct: float = 2.0
+    max_position_pct: float = 20.0
+    auto_panic_on_breach: bool = True
+    defined_risk_only: bool = True
+    cash_only: bool = True
+    max_peak_drawdown_pct: float = 8.0
+    max_option_premium_pct: float = 5.0
+    max_risk_per_trade_pct: float = 1.0
+    max_open_positions: int = 2
+    control_deliberation_pct: int = 40
+    control_budget_pct: int = 25
+    control_frequency_pct: int = 30
     control_entry_surface_pct: int = 50
-    # Option toolbox depth (only when entry surface allows options):
-    # 0–69=defined-risk … 70–100=full multi-leg.
-    control_complexity_pct: int = 50
-    control_rotation_pct: int = 50  # 0=hold OK … 100=redeploy/rotate to free cash OK
+    control_complexity_pct: int = 40
+    control_rotation_pct: int = 40
     # Deprecated no-ops (kept so older tests/settings don't explode).
     max_daily_trades: int = 0
     min_reward_risk: float = 0.0
@@ -358,7 +356,7 @@ def format_controls_block(cfg: Any = None) -> str:
     from abcxauto.structure_complexity import complexity_fact, entry_surface_fact
 
     lines = [
-        "CONTROLS (operator — Fact of your settings; not shell strategy tips):",
+        "CONTROLS (agent-owned — Fact of current self_tune; not operator dials):",
         f"- deliberation={delib} (0=System1 lean … 100=System2 mega-worker; "
         f"require_act={require_act})",
         f"- intelligence_budget={budget} (0=protect API $ … 100=more frequent Grok; "
@@ -417,47 +415,51 @@ def _load_env_config() -> Config:
         operator_card=load_operator_card(),
         scan_enabled=_env_bool("ABCXAUTO_SCAN_ENABLED", False),
         scan_interval_s=int(_env("ABCXAUTO_SCAN_INTERVAL_S", "900")),
-        scan_fetch_cap=int(_env("ABCXAUTO_SCAN_FETCH_CAP", "8")),
-        cycle_sleep_s=float(_env("ABCXAUTO_CYCLE_SLEEP_S", "120")),
-        grok_min_interval_s=float(_env("ABCXAUTO_GROK_MIN_INTERVAL_S", "120")),
+        scan_fetch_cap=int(_env("ABCXAUTO_SCAN_FETCH_CAP", "4")),
+        trading_budget_usd=float(
+            _env("ABCXAUTO_TRADING_BUDGET_USD")
+            or _env("ABCXAUTO_TARGET_CAPITAL", "1000")
+        ),
+        cycle_sleep_s=float(_env("ABCXAUTO_CYCLE_SLEEP_S", "300")),
+        grok_min_interval_s=float(_env("ABCXAUTO_GROK_MIN_INTERVAL_S", "300")),
         pace_protect_s=float(_env("ABCXAUTO_PACE_PROTECT_S", "20")),
         pace_manage_s=float(_env("ABCXAUTO_PACE_MANAGE_S", "60")),
-        pace_idle_s=float(_env("ABCXAUTO_PACE_IDLE_S", "240")),
+        pace_idle_s=float(_env("ABCXAUTO_PACE_IDLE_S", "600")),
         monitor_enabled=_env_bool("ABCXAUTO_MONITOR_ENABLED", True),
         monitor_poll_s=int(_env("ABCXAUTO_MONITOR_POLL_S", "30")),
         monitor_review_s=int(_env("ABCXAUTO_MONITOR_REVIEW_S", "300")),
         monitor_extended_hours=_env_bool("ABCXAUTO_MONITOR_EXTENDED_HOURS", False),
         web_host=_env("ABCXAUTO_WEB_HOST", "127.0.0.1"),
         web_port=int(_env("ABCXAUTO_WEB_PORT", "8000")),
-        risk_posture=_normalize_posture(_env("ABCXAUTO_RISK_POSTURE", "")),
+        risk_posture=_normalize_posture(_env("ABCXAUTO_RISK_POSTURE", "defensive")),
         risk_gates_enabled=_env_bool("ABCXAUTO_RISK_GATES_ENABLED", True),
-        daily_loss_limit_pct=float(_env("ABCXAUTO_DAILY_LOSS_LIMIT_PCT", "0")),
-        max_position_pct=float(_env("ABCXAUTO_MAX_POSITION_PCT", "0")),
-        max_open_positions=int(_env("ABCXAUTO_MAX_OPEN_POSITIONS", "0")),
-        auto_panic_on_breach=_env_bool("ABCXAUTO_AUTO_PANIC_ON_BREACH", False),
-        defined_risk_only=_env_bool("ABCXAUTO_DEFINED_RISK_ONLY", False),
-        cash_only=_env_bool("ABCXAUTO_CASH_ONLY", False),
-        max_peak_drawdown_pct=float(_env("ABCXAUTO_MAX_PEAK_DRAWDOWN_PCT", "0")),
-        max_option_premium_pct=float(_env("ABCXAUTO_MAX_OPTION_PREMIUM_PCT", "0")),
-        max_risk_per_trade_pct=float(_env("ABCXAUTO_MAX_RISK_PER_TRADE_PCT", "0")),
+        daily_loss_limit_pct=float(_env("ABCXAUTO_DAILY_LOSS_LIMIT_PCT", "2")),
+        max_position_pct=float(_env("ABCXAUTO_MAX_POSITION_PCT", "20")),
+        max_open_positions=int(_env("ABCXAUTO_MAX_OPEN_POSITIONS", "2")),
+        auto_panic_on_breach=_env_bool("ABCXAUTO_AUTO_PANIC_ON_BREACH", True),
+        defined_risk_only=_env_bool("ABCXAUTO_DEFINED_RISK_ONLY", True),
+        cash_only=_env_bool("ABCXAUTO_CASH_ONLY", True),
+        max_peak_drawdown_pct=float(_env("ABCXAUTO_MAX_PEAK_DRAWDOWN_PCT", "8")),
+        max_option_premium_pct=float(_env("ABCXAUTO_MAX_OPTION_PREMIUM_PCT", "5")),
+        max_risk_per_trade_pct=float(_env("ABCXAUTO_MAX_RISK_PER_TRADE_PCT", "1")),
         control_deliberation_pct=int(
             float(
                 _env("ABCXAUTO_CONTROL_DELIBERATION_PCT")
-                or _env("ABCXAUTO_CONTROL_MANAGE_PCT", "50")
+                or _env("ABCXAUTO_CONTROL_MANAGE_PCT", "40")
             )
         ),
-        control_budget_pct=int(float(_env("ABCXAUTO_CONTROL_BUDGET_PCT", "50"))),
-        control_frequency_pct=int(float(_env("ABCXAUTO_CONTROL_FREQUENCY_PCT", "50"))),
+        control_budget_pct=int(float(_env("ABCXAUTO_CONTROL_BUDGET_PCT", "25"))),
+        control_frequency_pct=int(float(_env("ABCXAUTO_CONTROL_FREQUENCY_PCT", "30"))),
         control_entry_surface_pct=int(
             float(_env("ABCXAUTO_CONTROL_ENTRY_SURFACE_PCT", "50"))
         ),
         control_complexity_pct=int(
             float(
                 _env("ABCXAUTO_CONTROL_COMPLEXITY_PCT")
-                or _env("ABCXAUTO_CONTROL_OPTIONS_PCT", "50")
+                or _env("ABCXAUTO_CONTROL_OPTIONS_PCT", "40")
             )
         ),
-        control_rotation_pct=int(float(_env("ABCXAUTO_CONTROL_ROTATION_PCT", "50"))),
+        control_rotation_pct=int(float(_env("ABCXAUTO_CONTROL_ROTATION_PCT", "40"))),
         suite_paper_place=_env_bool("ABCXAUTO_SUITE_PAPER_PLACE", True),
     )
 
@@ -598,15 +600,42 @@ load_risk_settings()
 
 
 def get_config() -> Config:
-    """Env-backed config plus file-persisted risk knobs and session overrides.
+    """Env-backed config plus file-persisted risk knobs, agent_state, session overrides.
 
-    Precedence: ``.env`` defaults < ``risk_settings.json`` < session overrides.
+    Precedence: ``.env`` defaults < ``risk_settings.json`` < ``agent_state.json``
+    < session overrides.
     """
     base = _load_env_config()
-    merged = {**_file_overrides, **_runtime_overrides}
-    if not merged:
-        return base
-    return replace(base, **merged)
+    agent_extra: dict[str, Any] = {}
+    try:
+        from abcxauto.self_tune import load_agent_state
+
+        raw = load_agent_state()
+        allowed = {
+            "cycle_sleep_s",
+            "grok_min_interval_s",
+            "pace_protect_s",
+            "pace_manage_s",
+            "pace_idle_s",
+            "scan_fetch_cap",
+            "system_prompt_extra",
+        }
+        agent_extra = {k: v for k, v in raw.items() if k in allowed}
+    except Exception:
+        agent_extra = {}
+    merged = {**_file_overrides, **agent_extra, **_runtime_overrides}
+    valid = {f.name for f in fields(Config)}
+    cleaned = {k: v for k, v in merged.items() if k in valid}
+    cfg = replace(base, **cleaned) if cleaned else base
+    try:
+        from abcxauto.self_tune import floor_clamp_config_fields
+
+        fixes = floor_clamp_config_fields(cfg)
+        if fixes:
+            cfg = replace(cfg, **{k: v for k, v in fixes.items() if k in valid})
+    except Exception:
+        pass
+    return cfg
 
 
 # Tests call get_config.cache_clear() to reload env; session Risk overrides stay.
@@ -729,7 +758,11 @@ def apply_risk_posture(
     *,
     persist: bool = True,
 ) -> Config:
-    """Risk-tab capital preset only — never touches Controls / capacity / universe."""
+    """Seed capital knobs, then clamp to the walk-away floor.
+
+    Operator UI no longer uses this. Kept for tests / emergency. Cannot weaken
+    daily-loss, size, defined-risk, or other floor gates.
+    """
     p = _normalize_posture(posture)
     if not p:
         raise ValueError(
@@ -740,11 +773,19 @@ def apply_risk_posture(
     if effective != p:
         logger.info("Live clamp: risk_posture %s → %s", p, effective)
     seed = dict(_POSTURE_SEEDS[effective])
+    from abcxauto.self_tune import clamp_risk_to_floor
+
+    clamped_seed: dict[str, Any] = {}
+    for key, value in seed.items():
+        new_v, _note = clamp_risk_to_floor(key, value)
+        clamped_seed[key] = new_v if new_v is not None else value
     payload: dict[str, Any] = {
-        "risk_posture": p,
+        "risk_posture": "defensive",  # walk-away floor identity
         "risk_gates_enabled": True,
         "auto_panic_on_breach": True,
-        **seed,
+        "defined_risk_only": True,
+        "cash_only": True,
+        **clamped_seed,
     }
     return update_risk_config(**payload, persist=persist, _skip_clamp=True)
 
@@ -754,33 +795,10 @@ def set_risk_knobs(
     *,
     persist: bool = True,
 ) -> dict[str, Any]:
-    """Agent ``set_risk`` path: clamp to envelope, persist, return result dict."""
-    cfg = get_config()
-    if not resolve_effective_posture(cfg.risk_posture, cfg.trading_mode):
-        return {
-            "status": "blocked",
-            "note": "set_risk requires an operator risk_posture first",
-            "strategy": "set_risk",
-        }
-    before = {k: getattr(cfg, k) for k in SET_RISK_KEYS}
-    applied, notes = clamp_risk_knobs(values)
-    if not applied:
-        return {
-            "status": "blocked",
-            "note": "set_risk: no valid knobs in params",
-            "strategy": "set_risk",
-            "before": before,
-        }
-    update_risk_config(**applied, persist=persist, _skip_clamp=True)
-    after = {k: getattr(get_config(), k) for k in SET_RISK_KEYS}
-    return {
-        "status": "ok",
-        "strategy": "set_risk",
-        "applied": applied,
-        "clamped": notes,
-        "before": before,
-        "after": after,
-    }
+    """Agent self-tune path (set_risk alias). No operator approval. Floor-clamped."""
+    from abcxauto.self_tune import apply_self_tune
+
+    return apply_self_tune(values or {}, persist=persist)
 
 
 def risk_envelope_snapshot() -> dict[str, Any]:

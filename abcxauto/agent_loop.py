@@ -58,7 +58,7 @@ _OPTION_ENTRY_ACTIONS = (
     "ratio_spread|jade_lizard"
 )
 VALID_ACTIONS = (
-    "hold|set_risk|bracket|market_bracket|market_order|limit_order|"
+    "hold|set_risk|self_tune|bracket|market_bracket|market_order|limit_order|"
     "stop_order|stop_limit|oca|modify_stop|modify_target|cancel_order|"
     "close_option|roll_option|trailing_stop|trailing_stop_limit|"
     "market_on_close|limit_on_close|market_on_open|limit_on_open|"
@@ -73,8 +73,9 @@ AWARENESS_HEART = (
     "Hold when protected or flat. Hold FORBIDDEN when unprotected STK.\n"
     "Close by conId only. Risk gates are hard. PnL is truth.\n"
     "Size each entry so stop risk fits max_risk_per_trade_pct. "
-    "set_risk retunes knobs inside the operator posture envelope only.\n"
-    "defined_risk_only (operator gate) rejects unlimited-risk option shapes.\n"
+    "self_tune (alias set_risk) retunes Controls, pacing, universe, prompts, "
+    "and may tighten risk — never weaken the immutable floor. No approval.\n"
+    "defined_risk_only is locked on. Scorecard: book return vs model cost.\n"
 )
 PROTECT_HOLD_RULES = (
     "PROTECT/HOLD: hold allowed when book is protected or flat. "
@@ -82,7 +83,7 @@ PROTECT_HOLD_RULES = (
     "by exact conId first. Stock entries need bracket/market_bracket with stop+target. "
     "Option entries use allowlisted multi-leg / CSP types (see ORDER EXAMPLES). "
     "market_order is EXIT-ONLY (target_conId). Use direction LONG|SHORT for stock. "
-    "set_risk adjusts capital knobs (not risk_posture)."
+    "self_tune/set_risk adjusts agent knobs (floor cannot be weakened)."
 )
 TWEAKS: Dict[str, Any] = {"max_risk_pct": 0.5}
 _HIST_KEYS = (
@@ -91,6 +92,7 @@ _HIST_KEYS = (
     "validation", "reasoning_chain", "impact",
 )
 
+_SELF_TUNE = frozenset({"set_risk", "self_tune"})
 STANCE_ACTIONS: dict[str, frozenset[str]] = {
     "protect": frozenset({
         "oca", "modify_stop", "modify_target", "cancel_order",
@@ -104,9 +106,10 @@ STANCE_ACTIONS: dict[str, frozenset[str]] = {
         "close_option", "roll_option", "trailing_stop", "trailing_stop_limit",
         "market_on_close", "limit_on_close",
         "covered_call", "protective_put", "collar",
+        "set_risk", "self_tune",
     }) | _HUNT_OPTION_ENTRIES,
-    "hunt": frozenset({"bracket", "market_bracket", "set_risk"}) | _HUNT_OPTION_ENTRIES,
-    "idle": frozenset({"hold"}),
+    "hunt": frozenset({"bracket", "market_bracket", "set_risk", "self_tune"}) | _HUNT_OPTION_ENTRIES,
+    "idle": frozenset({"hold", "set_risk", "self_tune"}),
 }
 
 
@@ -358,11 +361,11 @@ def _act_system() -> str:
         f"{QUOTE_SOURCES_BLOCK}\n"
         "Hunt structure: use IBKR live last (price_hint / ibkr_live_last) for stock "
         "brackets. Do not size stops from MDA tape last.\n"
-        "Do not contradict stance. idle → hold only. "
-        "hunt → bracket/market_bracket, set_risk, or allowlisted option entries "
+        "Do not contradict stance. idle → hold or self_tune. "
+        "hunt → bracket/market_bracket, self_tune/set_risk, or allowlisted option entries "
         "(vertical/iron/CSP/…). "
         "protect → oca/modify_*/protective_put/roll_option/close_option/exit by conId. "
-        "manage → hold/trail/modify/exit/roll/close_option, overlays "
+        "manage → hold/self_tune/trail/modify/exit/roll/close_option, overlays "
         "covered_call|collar|protective_put when long shares allow, or option "
         "structures (see TRADE PLAYBOOK + ORDER EXAMPLES).\n"
         + expected_json_shape_hint()
@@ -381,6 +384,20 @@ async def grok(g: GrokClient, p: str, *, stage: str = "act") -> str:
     async for _, ch in chat.stream():
         if ch.content:
             o += ch.content
+    try:
+        from abcxauto.memory import get_journal
+        from abcxauto.scorecard import estimate_cost_usd, estimate_tokens
+
+        inn = estimate_tokens(sys_msg) + estimate_tokens(p)
+        out_tok = estimate_tokens(o)
+        get_journal().record_model_usage(
+            stage=stage,
+            input_tokens=inn,
+            output_tokens=out_tok,
+            cost_usd=estimate_cost_usd(inn, out_tok),
+        )
+    except Exception:
+        logger.debug("model usage journal failed", exc_info=True)
     return o
 
 
@@ -598,7 +615,7 @@ def check_intent_coherence(
             use_intent = secondary
     from abcxauto.structure_complexity import strategy_allowed
 
-    if strat and strat not in ("blocked", "hold") and not strategy_allowed(strat):
+    if strat and strat not in ("blocked", "hold", "set_risk", "self_tune") and not strategy_allowed(strat):
         from abcxauto.structure_complexity import reject_reason
 
         return False, reject_reason(strat) or (
@@ -705,6 +722,8 @@ def _build_judge_prompt(world: WorldState, *, finalize: bool = False) -> str:
         format_operator_card_block,
         get_config,
     )
+    from abcxauto.scorecard import format_scorecard_block
+    from abcxauto.self_tune import format_floor_block
     from abcxauto.trade_playbook import format_trade_playbook, world_hints_from_world
 
     playbook = format_trade_playbook(
@@ -714,17 +733,47 @@ def _build_judge_prompt(world: WorldState, *, finalize: bool = False) -> str:
     )
     cfg = get_config()
     controls = format_controls_block(cfg)
+    floor = format_floor_block(cfg)
+    try:
+        score = format_scorecard_block(equity=getattr(world, "net_liquidation", None))
+    except Exception:
+        score = ""
     card = format_operator_card_block(getattr(cfg, "operator_card", None))
     card_bit = f"\n\n{card}" if card else ""
+    memory_bit = ""
+    try:
+        from abcxauto.memory import get_journal
+
+        jn = get_journal()
+        decs = jn.recent_decisions(limit=5) or []
+        tunes = jn.recent_self_tunes(limit=3) or []
+        if decs:
+            bits = []
+            for d in decs[:5]:
+                bits.append(
+                    f"{d.get('strategy') or d.get('action')}: "
+                    f"{str(d.get('rationale') or '')[:80]}"
+                )
+            memory_bit += "JOURNAL recent acts: " + " | ".join(bits) + "\n"
+        if tunes:
+            memory_bit += (
+                "JOURNAL recent self_tunes: "
+                + json.dumps([t.get("applied") for t in tunes], default=str)[:600]
+                + "\n"
+            )
+    except Exception:
+        pass
     return (
         f"=== JUDGE STAGE ===\nCycle {world.cycle}.\n{pressure}\n\n"
         f"{world.prompt_block()}\n\n"
-        f"{controls}\n\n"
+        f"{score}\n\n{floor}\n\n{controls}\n\n"
+        f"{memory_bit}"
         f"{playbook}{card_bit}\n\n"
         f"Open working_thesis: {(world.working_thesis or '-')[:300]}\n"
         "Affirm, revise, or close it in thesis. "
         "For manage overlays (covered_call/collar/put), say so in focus.\n"
-        "Output judgment JSON only."
+        "If scorecard is losing to the model bill, prefer self_tune (lengthen pacing / "
+        "narrow universe) over idle-forever. Output judgment JSON only."
     )
 
 
@@ -761,9 +810,16 @@ def _build_act_prompt(
         format_operator_card_block,
         get_config,
     )
+    from abcxauto.scorecard import format_scorecard_block
+    from abcxauto.self_tune import format_floor_block
 
     cfg = get_config()
     controls = format_controls_block(cfg)
+    floor = format_floor_block(cfg)
+    try:
+        score = format_scorecard_block(equity=getattr(world, "net_liquidation", None))
+    except Exception:
+        score = ""
     card = format_operator_card_block(getattr(cfg, "operator_card", None))
     card_bit = f"{card}\n\n" if card else ""
     ibkr_sym = str(getattr(world, "ibkr_live_symbol", "") or "")
@@ -784,6 +840,7 @@ def _build_act_prompt(
         f"{ibkr_bit}"
         f"JUDGMENT:\n{json.dumps(judgment, default=str)[:2000]}\n\n"
         f"{world.prompt_block(limit=2800)}\n\n"
+        f"{score}\n\n{floor}\n\n"
         f"{controls}\n\n"
         f"{lessons}\n{vocab_bit}"
         "You OWN structure: pick order type + stop/target/qty from IBKR LIVE quote "
@@ -1243,7 +1300,7 @@ async def run_cycle(
     try:
         ok, vmsg = validate_action_against_inventory(act, positions)
         validation = f"{'ok' if ok else 'rejected'}: {vmsg}"
-        if not ok and strat not in (BLOCKED_STRAT, "skipped", "set_risk"):
+        if not ok and strat not in (BLOCKED_STRAT, "skipped", "set_risk", "self_tune"):
             forced, strat = {"status": "validated_block", "reason": vmsg}, BLOCKED_STRAT
     except Exception:
         pass
@@ -1309,9 +1366,9 @@ async def run_cycle(
     elif strat == "hold":
         result = {"status": "hold", "strategy": "hold"}
         act["_structure_grade"] = "hold"
-    elif strat == "set_risk":
+    elif strat in ("set_risk", "self_tune"):
         result = await send_action(act, c)
-        act["_structure_grade"] = "set_risk"
+        act["_structure_grade"] = "self_tune"
     elif strat in ALLOWED_ACTIONS:
         result = await send_action(act, c)
         rc = str((result or {}).get("reason_code") or "")
@@ -1440,7 +1497,7 @@ async def _post_act_structure_and_plan(
     direction = str(params.get("direction") or result.get("direction") or "").upper()
     # Broker results often use success/filled without status=
     ok_dispatch = (
-        strat not in (BLOCKED_STRAT, "hold", "skipped", "set_risk")
+        strat not in (BLOCKED_STRAT, "hold", "skipped", "set_risk", "self_tune")
         and status not in ("blocked", "rejected", "error", "failed", "held", "hold")
         and (
             result.get("success") is True

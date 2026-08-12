@@ -16,19 +16,21 @@ the book is protected; hold is **forbidden only while unprotected STK** exists
 
 **Control + Unbiased (non-negotiable):**
 
-1. **Control** — Three disjoint surfaces: **Risk** (capital survival sliders/halt),
-   **Controls** (deliberation, budget, frequency, entry surface, option complexity,
-   book capacity), **Universe** (IBKR sandbox arenas — legal symbols only).
-   Optional Operator Card, Pro START/Stop/pause, mandate.
-   **Scorecard goal** (not a cycle control): book return on startup cash >
-   cost of the model — never skip Judge/Act or thrift streams to chase that.
-   Escapades are dials-only (no free-text briefs). See ``docs/CYCLE.md``.
-2. **Unbiased** — Shell text/process is Fact, Gate, or labeled Heuristic
-   (`heuristic ≠ recommendation`). Universe membership is operator arena choice +
-   IBKR refresh — shell never ranks “best.” Grok picks inside the legal set.
-   Never hard-coded mega prison, ranked tape, or stance dogma. Hard gates:
-   unprotected, halt, Risk $, Controls capacity/complexity, Universe allowlist,
-   flat unconfirmed.
+1. **Autonomy** — Grok self_tunes settings, pacing, universe, prompts, and
+   strategy knobs with **no human approval**. Operator = initial setup +
+   emergency kill switch. UI is status/monitoring only.
+2. **Immutable floor** — daily-loss halt, max position, max open positions,
+   defined-risk, cash-only, auto-panic, unprotected STK protect-first, exits
+   never blocked, fail-closed. Agent may tighten, never weaken. Live gated.
+3. **Unbiased** — Shell text/process is Fact, Gate, or labeled Heuristic.
+   Universe membership is legal-set only — shell never ranks “best.”
+   Hard gates protect capital, never pick strategies.
+4. **Scorecard** — book P&L on the $1000 trading budget > cost of the model.
+   Agent reads journal + scorecard and continuously tunes itself.
+
+`$1000` is a sleeve (`min(NetLiq, budget)`), not “the account is $1000.”
+Walk-away defaults: 2 positions, 2% daily loss of sleeve, 5-minute cycle floor.
+See ``docs/CYCLE.md``.
 
 Intelligence + journal memory drive judgment. Paper (TWS 7497) until forward P&L
 shows the book survives. Target footprint **~3.5–5k LOC**. Every feature must
@@ -51,7 +53,7 @@ blow-up risk — while keeping Control + Unbiased?* If not, it doesn't ship.
 | Every stock entry is a bracket (SL + TP) | `proposals.py` schema + `executor.py` |
 | Bare orders only to close, verified against live positions | `executor._verify_closes_position` |
 | Daily loss circuit breaker → halt latch + auto flatten | `risk_gates.py` + `monitor.py` |
-| Max position size (% of NetLiq) | `risk_gates.py` pre-trade check |
+| Max position size (% of trading-budget sleeve) | `risk_gates.py` pre-trade check |
 | Max open positions / max daily trades | `risk_gates.py` pre-trade check |
 | Fail closed: no account data → no new entries | `risk_gates.py` |
 | Exits are never blocked, even while halted | `risk_gates.py` |
@@ -61,7 +63,8 @@ blow-up risk — while keeping Control + Unbiased?* If not, it doesn't ship.
 
 All knobs env-driven (`ABCXAUTO_DAILY_LOSS_LIMIT_PCT`, `ABCXAUTO_MAX_POSITION_PCT`,
 `ABCXAUTO_MAX_OPEN_POSITIONS`, `ABCXAUTO_MAX_DAILY_TRADES`, `ABCXAUTO_AUTO_PANIC_ON_BREACH`).
-Conservative defaults; aggression is opt-in via `.env`, never the default.
+Conservative defaults; the agent cannot loosen past the walk-away floor.
+Aggression is not an operator preset.
 
 ## Architecture (target)
 
@@ -82,7 +85,9 @@ abcxauto/
   trade_plan.py      Multi-plan book (`active_trade_plans.json`)
   pacing.py          Adaptive cycle sleep + wake whitelist + grok_min budget
   cycle.py           thin shim re-exporting agent_loop for Pro/tests
-  config.py          flat env config — every knob lives here
+  self_tune.py       Agent self-mod; walk-away floor + $1000 sleeve
+  scorecard.py       Book P&L on trading budget vs model API cost
+  config.py          flat env config — sleeve + walk-away floor + agent_state
   llm.py             xAI client (ABCXAUTO_MODEL=grok-4.5)
   proposals.py       OrderProposal schemas + validation (risk layer 1)
   risk_gates.py      hard pre-trade gates + halt latch (risk layer 2)
@@ -107,11 +112,9 @@ profitability justification.**
 
 ## One runtime, one risk core
 
-- **Pro path** (`python -m abcxauto`): default UI; **START AUTONOMOUS** runs
-  `agent_loop` (via `cycle` shim) on `ABCXAUTO_CYCLE_SLEEP_S`. Headless CLI
-  (`--headless`) exits 0 and points operators to Pro START — autonomy is Pro-driven.
-  Monitor on the worker loop (auto-panic, snapshots, fills, peak equity). UI is
-  subordinate to portfolio state and journal memory.
+- **Pro path** (`python -m abcxauto`): status UI; Start runs `agent_loop`.
+  **Headless** (`python -m abcxauto --headless`) runs the same loop with no UI
+  (Ctrl+C kill switch). Floor is seeded on start. Live still gated.
 
 Every *trading* order funnels through `send` → `executor.safe_execute`.
 

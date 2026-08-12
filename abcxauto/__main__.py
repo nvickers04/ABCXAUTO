@@ -5,7 +5,8 @@ Use ``python -m abcxauto --desktop`` for the web Pro native window.
 Use ``python -m abcxauto --cleanup`` to kill stale Flet/Python Pro processes
 and clear project ``__pycache__``.
 Use ``python -m abcxauto --cleanup --aggressive --flet-cache`` for a deep clean.
-Use ``python -m abcxauto --headless`` to print how to run autonomy (Pro START).
+Use ``python -m abcxauto --headless`` to run the autonomous paper loop
+(no UI; Ctrl+C is the kill switch).
 """
 
 from __future__ import annotations
@@ -54,11 +55,9 @@ def main() -> None:
 
         raise SystemExit(run())
     if "--headless" in sys.argv:
-        print(
-            "Use Pro START AUTONOMOUS (agent_loop is the cycle engine).",
-            flush=True,
-        )
-        raise SystemExit(0)
+        from abcxauto.headless import run_headless
+
+        raise SystemExit(run_headless())
     # Clear stale Flet / titled Pro windows only — never match this
     # brand-new ``python -m abcxauto`` process.
     if not os.environ.get("ABCXAUTO_LAUNCH_PROBE"):

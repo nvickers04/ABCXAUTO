@@ -2,11 +2,18 @@
 
 ## Goal vs control
 
-**Long-run goal:** book return on startup cash > model cost.  
-That is a **scorecard metric**, not a control signal.
+**Long-run goal:** book P&L on the $1000 trading budget > model cost.  
+That is the **primary scorecard** and a **self-tune signal**.
+The IBKR paper account can be large; Grok only works a $1000 sleeve.
 
-Do **not** skip Judge, skip Act, stretch sleep, or collapse streams to “save API $.”  
-Cost shows up in Scorecard. Behavior stays: own the book under hard risk.
+Grok reads journal + scorecard every cycle. If the model bill is winning,
+`self_tune` lengthens pacing / narrows universe / lowers intelligence spend. Protect is
+never skipped to save tokens.
+
+## Autonomy
+
+No operator approval. `self_tune` / `set_risk` applies immediately inside the
+immutable floor. Operator = setup + kill switch.
 
 ## The loop (straight pipeline)
 
@@ -53,7 +60,9 @@ Not a multi-branch merge. Not escapade parallelism.
 
 ## Controls dials
 
-Still real: capacity, complexity allowlist, frequency as operator preference for **how aggressive the book can be** — not how many Grok calls to skip.
+Agent-owned via `self_tune`. UI shows current values (status only).
+Capacity, complexity allowlist, frequency = how the book may be worked —
+not how many Grok calls to skip. Floor: max 2 open positions on the $1000 sleeve.
 
 ## Hard vs soft (slim gates)
 

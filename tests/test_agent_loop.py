@@ -207,6 +207,7 @@ def test_normalize_noop_to_hold():
     assert strat == "hold"
     assert forced is None
     assert "hold" in ALLOWED_ACTIONS
+    assert "self_tune" in ALLOWED_ACTIONS
 
 
 @pytest.mark.asyncio

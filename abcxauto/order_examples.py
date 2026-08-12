@@ -14,10 +14,18 @@ from abcxauto.proposals import STRATEGIES
 ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
     "hold": {},
     "set_risk": {
-        "max_risk_per_trade_pct": 1.5,
-        "daily_loss_limit_pct": 5.0,
-        "max_position_pct": 12.0,
-        "max_peak_drawdown_pct": 12.0,
+        "max_risk_per_trade_pct": 0.75,
+        "cycle_sleep_s": 420,
+        "control_budget_pct": 20,
+        "enabled_arenas": ["index_etfs", "most_active"],
+        "prompt_extra": "",
+    },
+    "self_tune": {
+        "controls": {"control_budget_pct": 20, "control_frequency_pct": 25},
+        "pacing": {"cycle_sleep_s": 420, "pace_idle_s": 900},
+        "universe": {"enabled_arenas": ["index_etfs", "most_active"]},
+        "prompt_extra": "Prefer names I can size under $200 notional.",
+        "risk": {"max_risk_per_trade_pct": 0.75},
     },
     "market_bracket": {
         "symbol": "NVDA",
@@ -336,7 +344,9 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "Stock exits: target_conId + quantity (partial trim OK; omit qty = full). After trim check stop_qty_fact.",
         "close_option: prefer conId; quantity may be partial. roll_option for lifecycle.",
         "Option multi-leg / CSP: match param shapes below; gates may reject unlimited risk.",
-        "set_risk retunes capital knobs inside the operator risk_posture envelope (no broker send).",
+        "self_tune (alias set_risk) retunes agent knobs with no approval. "
+        "You may tighten risk and lengthen pacing; you cannot weaken the immutable floor. "
+        "Nested params: controls, pacing, universe, prompt_extra, tweaks, risk.",
         "",
     ]
     for name in sorted(ORDER_EXAMPLES):
@@ -356,3 +366,5 @@ def assert_examples_cover_strategies() -> None:
         raise AssertionError("ORDER_EXAMPLES must include hold")
     if "set_risk" not in ORDER_EXAMPLES:
         raise AssertionError("ORDER_EXAMPLES must include set_risk")
+    if "self_tune" not in ORDER_EXAMPLES:
+        raise AssertionError("ORDER_EXAMPLES must include self_tune")

@@ -45,6 +45,7 @@ def _clear_risk_overrides(tmp_path, monkeypatch):
 
     path = tmp_path / "risk_settings.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent_state.json"))
     clear_risk_settings(path=path)
     load_risk_settings(path)
     clear_runtime_overrides()

@@ -486,10 +486,13 @@ async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
             "note": "hold — no broker dispatch",
             "strategy": "hold",
         }
-    if strategy == "set_risk":
-        from abcxauto.config import set_risk_knobs
+    if strategy in ("set_risk", "self_tune", "set_controls", "set_self"):
+        from abcxauto.self_tune import apply_self_tune
 
-        return set_risk_knobs(action.get("params") or {})
+        return apply_self_tune(
+            action.get("params") or {},
+            rationale=str(action.get("rationale") or ""),
+        )
     if strategy in ("none", "", "skipped", "blocked"):
         return {
             "status": "blocked",
