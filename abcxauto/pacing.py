@@ -63,12 +63,20 @@ def compute_pace(facts: PaceFacts, cfg: Any) -> PaceDecision:
     idle_floor = _f(cfg, "pace_idle_s", 240.0)
 
     sess = str(facts.session_status or "").lower()
-    if sess and sess != "regular" and not facts.needs_protection:
-        sleep = max(cycle, 900.0)
-        return PaceDecision("closed", sleep, False, "session_closed")
+    grokfolio_on = bool(getattr(cfg, "grokfolio_enabled", False))
 
     if facts.needs_protection:
         return PaceDecision("protect", protect_s, True, "unprotected_stk")
+
+    if grokfolio_on:
+        from abcxauto.grokfolio import sleep_until_next_s
+
+        wait = sleep_until_next_s(cfg=cfg, session_status=sess or "regular")
+        return PaceDecision("grokfolio", wait, True, "grokfolio_schedule")
+
+    if sess and sess != "regular":
+        sleep = max(cycle, 900.0)
+        return PaceDecision("closed", sleep, False, "session_closed")
 
     if facts.has_open_risk and not facts.flat:
         return PaceDecision("manage", manage_s, False, "open_risk")
@@ -167,8 +175,11 @@ def allow_grok_call(
     """Return (allowed, reason). Protect / urgent wakes bypass the budget."""
     now = time.monotonic() if now_mono is None else now_mono
     wake = str(wake_reason or "").lower()
-    if str(tier or "") == "protect" or wake in URGENT_WAKES:
+    tier_s = str(tier or "")
+    if tier_s == "protect" or wake in URGENT_WAKES:
         return True, "urgent"
+    if tier_s == "grokfolio":
+        return True, "grokfolio"
     if last_grok_mono <= 0:
         return True, "first"
     elapsed = now - last_grok_mono

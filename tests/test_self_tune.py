@@ -1,4 +1,4 @@
-"""Walk-away floor + agent self_tune (no approval). $1000 is a trading sleeve."""
+"""Walk-away floor + agent self_tune (no approval). Size is % of NetLiq."""
 
 from abcxauto.config import (
     clear_risk_settings,
@@ -40,7 +40,7 @@ def test_defaults_are_1k_floor():
     assert cfg.daily_loss_limit_pct == 2.0
     assert cfg.max_position_pct == 20.0
     assert cfg.max_risk_per_trade_pct == 1.0
-    assert cfg.max_open_positions == 2
+    assert cfg.max_open_positions == 15
     assert cfg.defined_risk_only is True
     assert cfg.cash_only is True
     assert cfg.auto_panic_on_breach is True
@@ -48,7 +48,10 @@ def test_defaults_are_1k_floor():
     assert cfg.grok_min_interval_s == 300.0
     assert cfg.pace_idle_s == 600.0
     assert cfg.scan_fetch_cap == 4
-    assert cfg.trading_budget_usd == 1000.0
+    assert cfg.trading_budget_usd == 0.0
+    assert cfg.grokfolio_enabled is True
+    assert cfg.grokfolio_cadence == "both"
+    assert cfg.grokfolio_holdings == 15
 
 
 def test_cannot_weaken_daily_loss(tmp_path, monkeypatch):
@@ -76,11 +79,16 @@ def test_cannot_raise_max_open_positions():
     assert get_config().max_open_positions == MAX_OPEN_POSITIONS_RANGE[1]
 
 
-def test_cannot_raise_trading_budget():
+def test_cannot_set_trading_budget_sleeve():
     out = apply_self_tune({"trading_budget_usd": 50_000}, persist=False)
-    assert out["status"] == "ok"
-    assert get_config().trading_budget_usd == RISK_FLOOR["trading_budget_usd"][1]
-    assert "trading_budget_usd" in out["clamped"]
+    assert get_config().trading_budget_usd == 0.0
+    assert "trading_budget_usd" in (out.get("rejected") or {})
+
+
+def test_cannot_disable_grokfolio():
+    out = apply_self_tune({"grokfolio_enabled": False}, persist=False)
+    assert get_config().grokfolio_enabled is True
+    assert "grokfolio_enabled" in (out.get("rejected") or {}) or out["status"] == "blocked"
 
 
 def test_can_tighten_risk():
@@ -160,7 +168,7 @@ def test_ensure_floor_repairs_weak_settings(tmp_path, monkeypatch):
     cfg = get_config()
     assert cfg.daily_loss_limit_pct == 2.0
     assert cfg.defined_risk_only is True
-    assert cfg.max_open_positions == 2
+    assert cfg.max_open_positions == 15
 
 
 def test_clamp_risk_helper():
@@ -173,7 +181,8 @@ def test_get_config_clamps_weak_file(tmp_path, monkeypatch):
     path = tmp_path / "risk.json"
     path.write_text(
         '{"max_open_positions": 25, "daily_loss_limit_pct": 9, '
-        '"defined_risk_only": false, "risk_posture": "aggressive"}\n',
+        '"defined_risk_only": false, "risk_posture": "aggressive", '
+        '"trading_budget_usd": 1000}\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
@@ -181,10 +190,22 @@ def test_get_config_clamps_weak_file(tmp_path, monkeypatch):
 
     load_risk_settings(path)
     cfg = get_config()
-    assert cfg.max_open_positions == 2
+    assert cfg.max_open_positions == 15
     assert cfg.daily_loss_limit_pct == 2.0
     assert cfg.defined_risk_only is True
     assert cfg.risk_posture == "defensive"
+    assert cfg.trading_budget_usd == 0.0
+
+
+def test_get_config_repairs_old_max_open_floor_of_two(tmp_path, monkeypatch):
+    path = tmp_path / "risk.json"
+    path.write_text('{"max_open_positions": 2}\n', encoding="utf-8")
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    from abcxauto.config import load_risk_settings
+
+    load_risk_settings(path)
+    cfg = get_config()
+    assert cfg.max_open_positions == 15
 
 
 def test_idle_stance_allows_self_tune():

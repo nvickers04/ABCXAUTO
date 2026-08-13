@@ -160,6 +160,47 @@ def test_facts_from_cycle():
     assert facts.wake_reason == "unprotected"
 
 
+def test_grokfolio_pace_exceeds_cycle_ceiling():
+    d = compute_pace(
+        PaceFacts(
+            needs_protection=False,
+            flat=True,
+            session_status="closed",
+            last_stance="idle",
+        ),
+        _cfg(grokfolio_enabled=True, grokfolio_cadence="both", cycle_sleep_s=300),
+    )
+    assert d.tier == "grokfolio"
+    assert d.sleep_s >= 60.0
+    assert d.bypass_grok_min is True
+
+
+def test_protect_beats_grokfolio_wait():
+    d = compute_pace(
+        PaceFacts(
+            needs_protection=True,
+            flat=False,
+            session_status="closed",
+            last_stance="protect",
+        ),
+        _cfg(grokfolio_enabled=True, grokfolio_cadence="both"),
+    )
+    assert d.tier == "protect"
+    assert d.sleep_s == 20.0
+
+
+def test_grokfolio_bypasses_grok_min():
+    ok, why = allow_grok_call(
+        tier="grokfolio",
+        wake_reason="",
+        last_grok_mono=100.0,
+        now_mono=110.0,
+        grok_min_interval_s=300.0,
+    )
+    assert ok is True
+    assert why == "grokfolio"
+
+
 @pytest.mark.asyncio
 async def test_wait_for_pace_wakes():
     import asyncio

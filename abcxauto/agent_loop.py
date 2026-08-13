@@ -380,10 +380,39 @@ async def grok(g: GrokClient, p: str, *, stage: str = "act") -> str:
         temperature=g.temperature,
         max_tokens=min(2048, g.max_tokens),
     )
+    from abcxauto.think_stream import emit as think_emit
+
+    think_emit("stage", stage)
     o = ""
+    saw_think = False
+    saw_say = False
+    think_acc = ""
+    say_acc = ""
+
+    def _delta(prev: str, incoming: str) -> tuple[str, str]:
+        if not incoming:
+            return prev, ""
+        if incoming.startswith(prev):
+            return incoming, incoming[len(prev):]
+        return prev + incoming, incoming
+
     async for _, ch in chat.stream():
+        rc = getattr(ch, "reasoning_content", None) or ""
+        think_acc, think_piece = _delta(think_acc, rc)
+        if think_piece:
+            if not saw_think:
+                think_emit("say", "\n[think]\n")
+                saw_think = True
+            think_emit("think", think_piece)
         if ch.content:
-            o += ch.content
+            say_acc, say_piece = _delta(say_acc, ch.content)
+            if say_piece:
+                if not saw_say:
+                    think_emit("say", "\n[say]\n")
+                    saw_say = True
+                o += say_piece
+                think_emit("say", say_piece)
+    think_emit("stage_end", stage)
     try:
         from abcxauto.memory import get_journal
         from abcxauto.scorecard import estimate_cost_usd, estimate_tokens
@@ -1043,8 +1072,9 @@ async def run_cycle(
     inventory = format_position_inventory(positions)
     session = str((pulse.get("session") or {}).get("status") or "").lower()
     needs_prot = bool((s.get("protection") or {}).get("unprotected_symbols"))
+    grokfolio_on = bool(getattr(get_config(), "grokfolio_enabled", False))
 
-    if session != "regular" and not needs_prot:
+    if session != "regular" and not needs_prot and not grokfolio_on:
         act = {
             "action": "skipped", "strategy": "skipped",
             "rationale": "skipped_grok: session_closed",
@@ -1103,6 +1133,52 @@ async def run_cycle(
         cycle=n, snap=s, opportunities=ideas, news_items=s.get("news_items") or [],
     )
     world_dict = world.to_dict()
+
+    if grokfolio_on and not needs_prot:
+        try:
+            from abcxauto.grokfolio import handle_cycle as grokfolio_cycle
+
+            gf = await grokfolio_cycle(
+                n=n,
+                connector=c,
+                g=g,
+                hist=h,
+                prev=prev,
+                snap=s,
+                world=world,
+                world_dict=world_dict,
+                pnl=pnl,
+                eq=eq,
+                inventory=inventory,
+                needs_prot=needs_prot,
+            )
+            if gf is not None:
+                return gf
+        except Exception as exc:
+            logger.exception("grokfolio cycle failed")
+            act = {
+                "action": "hold",
+                "strategy": "hold",
+                "rationale": f"grokfolio_wait: error {exc}",
+            }
+            out = _result_dict(
+                n=n, s=s, act=act, strat="hold",
+                result={"status": "blocked", "note": act["rationale"]},
+                pnl=pnl, eq=eq, prev=prev, inventory=inventory,
+                validation=act["rationale"], kahneman=extract_kahneman(act),
+                judgment={"stance": "idle", "thesis": "grokfolio error", "focus": "schedule"},
+                world=world_dict, stage_error=str(exc),
+            )
+            try:
+                from abcxauto.grokfolio import sleep_until_next_s
+
+                wait = sleep_until_next_s(cfg=get_config(), session_status=session or "regular")
+            except Exception:
+                wait = 3600.0
+            out["pace"] = {"tier": "grokfolio", "sleep_s": wait, "reason": "grokfolio_error"}
+            _journal_stages(out, act, s, out.get("judgment"))
+            h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
+            return out
 
     # --- JUDGE (optional propose → MDA fetch → finalize) ---
     try:

@@ -34,18 +34,17 @@ def test_scorecard_losing_to_model_bill():
     assert sc["edge_usd"] < 0
 
 
-def test_scorecard_return_uses_trading_budget_not_fat_nl():
+def test_scorecard_return_is_pct_of_starting_net_liq():
     j = get_journal()
     j.record_snapshot(account={"NetLiquidation": 1_000_000.0, "DailyPnL": 0.0})
     j.record_snapshot(account={"NetLiquidation": 1_000_100.0, "DailyPnL": 100.0})
-    sc = compute_scorecard(equity=1_000_100.0, journal=j, trading_budget=1000.0)
+    sc = compute_scorecard(equity=1_000_100.0, journal=j)
     assert sc["book_pnl"] == 100.0
-    assert abs(sc["book_return_pct"] - 10.0) < 1e-9
-    assert sc["trading_budget_usd"] == 1000.0
+    assert abs(sc["book_return_pct"] - 0.01) < 1e-9
 
 
 def test_scorecard_no_history_does_not_invent_pnl():
     j = get_journal()
-    sc = compute_scorecard(equity=1_000_000.0, journal=j, trading_budget=1000.0)
+    sc = compute_scorecard(equity=1_000_000.0, journal=j)
     assert sc["book_pnl"] is None
     assert sc["startup_cash"] is None

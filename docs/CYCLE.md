@@ -1,83 +1,74 @@
-# Agent cycle — own the book (not a decision tree)
+# Agent cycle — Grokfolio owns the book
 
 ## Goal vs control
 
-**Long-run goal:** book P&L on the $1000 trading budget > model cost.  
+**Long-run goal:** book return % of starting NetLiq > model cost.
 That is the **primary scorecard** and a **self-tune signal**.
-The IBKR paper account can be large; Grok only works a $1000 sleeve.
+Size and risk are % of the book — the same at $1k, $100k, or $1M. No dollar sleeve.
 
-Grok reads journal + scorecard every cycle. If the model bill is winning,
-`self_tune` lengthens pacing / narrows universe / lowers intelligence spend. Protect is
-never skipped to save tokens.
+**Product:** Autopilot-style Grokfolio on this IBKR paper account. A scoring
+pass feeds Grok; Grok constructs ~15 long holdings as % of NetLiq; the shell
+diffs the book and sends gated actions. Clock is **hourly and/or daily** RTH
+(default both: daily at 10:00 ET, hourly 10-15 ET), not monthly. Hunt/hold
+scalping is not the product. Operator = setup + kill switch.
+
+Grok reads journal + scorecard every construct. Protect is never skipped.
 
 ## Autonomy
 
 No operator approval. `self_tune` / `set_risk` applies immediately inside the
-immutable floor. Operator = setup + kill switch.
+immutable floor. Agent cannot disable grokfolio or set a dollar sleeve.
+Operator = setup + kill switch. Paper-first; live gated.
+In Cursor, `python -m abcxauto` opens Pro and autostarts so the think stream
+is on screen (F5 = ABCXAUTO Pro). `--headless` is console-only outside Cursor.
 
-## The loop (straight pipeline)
+## The loop (Grokfolio)
 
 ```
 PERCEIVE  code facts (book, orders, account, protection, tape, news)
-    ↓
-JUDGE     Grok — stance / thesis / intent (JSON only)
-    ↓
-ACT       Grok — always runs after valid Judge; ONE action
-    ↓
+    |
+PROTECT   if unprotected STK: Judge/Act hunt path (hold forbidden)
+    |
+GROKFOLIO if enabled and not protect:
+            wait until next slot  OR  construct weights + gated diffs
+            (multiple sends in one session is intended)
+    |
 VERIFY    hard gates only (risk $, geometry, allowlist, protect rules)
-    ↓
-SEND      single choke point → broker (or reject with reason)
-    ↓
-REMEMBER  journal + trade plans
-    ↓
-WAIT      market rhythm (protect fast, manage, session closed) — not thrift
+    |
+SEND      choke point → broker (or reject with reason)
+    |
+REMEMBER  journal + grokfolio_state.json
+    |
+WAIT      until next hourly/daily slot (overnight to next 10:00 ET weekday OK)
+          protect-first still wakes
 ```
 
-## What we removed (allocator tree)
-
-| Old | Why it was wrong |
-|-----|------------------|
-| `_should_skip_act` thrift on idle/manage | Model cost became behavior |
-| Parallel open_risk / new_risk / escapade merge | Decision tree, not ownership |
-| “Allocator budget spend” prompt frame | Grok managed cost, not the book |
+If `ABCXAUTO_GROKFOLIO_ENABLED=false`, the legacy Perceive → Judge → Act
+hunt path remains.
 
 ## What stayed (non-negotiable)
 
-- Risk gates LLM-proof; exits never blocked  
-- Unprotected STK → protect first; hold forbidden while unprotected  
-- Universe allowlist; shell does not rank ideas  
-- IBKR live last for geometry (not MDA tape last)  
-- One send per cycle  
-
-## Focus stream (label only)
-
-`primary_stream` picks **prompt focus** for the single Act call:
-
-- `open_risk` — book continuity (protect/manage)  
-- `new_risk` — entry under capacity  
-
-Not a multi-branch merge. Not escapade parallelism.
+- Risk gates LLM-proof; exits never blocked
+- Unprotected STK → protect first; hold forbidden while unprotected
+- Universe allowlist; shell does not rank ideas
+- IBKR live last for geometry (not MDA tape last)
+- Fail-closed; paper-first; live gated
+- Grokfolio may send several gated actions in one cycle (old one-action
+  model does not apply here)
 
 ## Controls dials
 
 Agent-owned via `self_tune`. UI shows current values (status only).
-Capacity, complexity allowlist, frequency = how the book may be worked —
-not how many Grok calls to skip. Floor: max 2 open positions on the $1000 sleeve.
+Capacity floor is 8-15 open positions (default 15) when grokfolio is on.
+Old persisted `max_open_positions=2` is repaired to 15.
 
 ## Hard vs soft (slim gates)
 
-Soft rules that lived only in prompts produced weak Grok output — so many were
-hardened into rejects. That over-corrected into a process court.
-
-**Compromise:**
-
-| Hard (reject) | Structured field (reject if missing) | Soft (prompt + `_soft_lessons`) |
+| Hard (reject) | Structured field | Soft (prompt) |
 |---|---|---|
-| Unprotected → protect | Idle + tape → `dismissed` ≥ 8 chars | setup_grade × posture |
-| Hunt: capacity, flat-unconfirmed | | regime_fit |
-| Hunt: symbol legal + on tape | | idle streak / same dismiss |
-| Schema: stance/thesis/focus/intent | | structure cooldown |
-| Geometry / inventory / RiskGate | | thesis AFFIRM/REVISE keywords |
-| Complexity dial / intent symbol match on hunt entries | | Grok `risk_budget_pct` (RiskGate owns $) |
+| Unprotected → protect | Idle + tape → `dismissed` | setup_grade × posture |
+| Capacity / legal set / RiskGate | Schema: holdings JSON | regime_fit |
+| Geometry / inventory | | thesis AFFIRM/REVISE |
+| Defined-risk / cash-only / 2% daily loss / 20% max pos / 1% risk/trade / 8% peak DD | | |
 
 Shell does **not** rank ideas. Soft lessons never block a cycle.

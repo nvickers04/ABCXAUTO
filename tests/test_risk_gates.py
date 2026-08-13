@@ -24,7 +24,7 @@ def _cfg(**overrides) -> Config:
     # Explicit salvage/capital knobs for unit tests (production defaults are off).
     defaults = {
         "risk_posture": "balanced",  # 5% test stops; floor is tested in test_self_tune
-        "trading_budget_usd": 0.0,  # isolate % of NL; sleeve caps tested separately
+        "trading_budget_usd": 0.0,  # full NetLiq; % of portfolio
         "cash_only": False,
         "max_peak_drawdown_pct": 0.0,
         "max_option_premium_pct": 0.0,
@@ -155,31 +155,35 @@ async def test_position_sizing_rejection(gate):
     assert ok is True
 
 
-def test_risk_base_usd_uses_min_of_nl_and_budget():
-    fat = _cfg(trading_budget_usd=1000.0)
-    assert risk_base_usd(100_000.0, fat) == 1000.0
-    assert risk_base_usd(500.0, fat) == 500.0
-    no_sleeve = _cfg(trading_budget_usd=0.0)
-    assert risk_base_usd(100_000.0, no_sleeve) == 100_000.0
+def test_risk_base_usd_is_full_net_liq():
+    assert risk_base_usd(100_000.0) == 100_000.0
+    assert risk_base_usd(1_000.0) == 1_000.0
+    assert risk_base_usd(1_000_000.0) == 1_000_000.0
 
 
 @pytest.mark.asyncio
-async def test_trading_budget_sleeve_caps_large_account(gate, monkeypatch):
-    """$100k NL + $1000 budget + 20% max position → $200 cap, not $20k."""
+async def test_position_pct_scales_with_net_liq(gate, monkeypatch):
+    """20% of the book: $300 notional fails on $1k NL, passes on $1M NL."""
     monkeypatch.setattr(
         "abcxauto.risk_gates.get_config",
         lambda: _cfg(
-            trading_budget_usd=1000.0,
             max_position_pct=20.0,
             daily_loss_limit_pct=0,
         ),
     )
-    conn = FakeConnector()
-    conn.account = {"netliquidation": 100_000.0, "dailypnl": 0.0}
-    ok, reason = await gate.pre_trade_check(_bracket(qty=5, entry=100.0), conn)
+    small = FakeConnector()
+    small.account = {"netliquidation": 1_000.0, "dailypnl": 0.0, "TotalCashValue": 1_000.0}
+    ok, reason = await gate.pre_trade_check(_bracket(qty=3, entry=100.0), small)
     assert ok is False
     assert "position" in reason.lower() or "exceeds" in reason.lower()
-    ok, _ = await gate.pre_trade_check(_bracket(qty=1, entry=100.0), conn)
+
+    fat = FakeConnector()
+    fat.account = {
+        "netliquidation": 1_000_000.0,
+        "dailypnl": 0.0,
+        "TotalCashValue": 1_000_000.0,
+    }
+    ok, _ = await gate.pre_trade_check(_bracket(qty=3, entry=100.0), fat)
     assert ok is True
 
 

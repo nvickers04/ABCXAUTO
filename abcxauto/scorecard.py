@@ -1,4 +1,4 @@
-"""Primary scorecard: book P&L on the trading budget vs model API cost."""
+"""Primary scorecard: book return % of starting NetLiq vs model API cost."""
 
 from __future__ import annotations
 
@@ -50,9 +50,8 @@ def compute_scorecard(
     *,
     equity: float | None = None,
     journal: Any = None,
-    trading_budget: float | None = None,
 ) -> dict[str, Any]:
-    """Book P&L vs model cost, scored on the operator's trading budget sleeve."""
+    """Book P&L vs model cost, scored as % of starting NetLiq."""
     if journal is None:
         try:
             from abcxauto.memory import get_journal
@@ -89,24 +88,13 @@ def compute_scorecard(
         except Exception:
             pass
 
-    budget = trading_budget
-    if budget is None or budget <= 0:
-        try:
-            from abcxauto.config import get_config
-
-            budget = float(getattr(get_config(), "trading_budget_usd", 0) or 0)
-        except Exception:
-            budget = 0.0
-
     book_pnl = None
     book_return_pct = None
     if current is not None and startup is not None and startup > 0:
         try:
             current = float(current)
             book_pnl = current - float(startup)
-            denom = float(budget) if budget and budget > 0 else float(startup)
-            if denom:
-                book_return_pct = (book_pnl / denom) * 100.0
+            book_return_pct = (book_pnl / float(startup)) * 100.0
         except (TypeError, ValueError):
             current = None
             book_pnl = None
@@ -117,7 +105,6 @@ def compute_scorecard(
 
     return {
         "startup_cash": float(startup) if startup else None,
-        "trading_budget_usd": float(budget) if budget else None,
         "net_liquidation": current,
         "book_pnl": book_pnl,
         "book_return_pct": book_return_pct,
@@ -127,7 +114,7 @@ def compute_scorecard(
         "model_cost_usd": cost,
         "edge_usd": edge,
         "beating_model": beating,
-        "goal": "book P&L on the trading budget > cost of the model",
+        "goal": "book return % of starting NetLiq > cost of the model",
     }
 
 
@@ -150,14 +137,12 @@ def format_scorecard_block(
     ret_s = f"{ret:+.2f}%" if ret is not None else "n/a"
     edge = sc.get("edge_usd")
     edge_s = f"{edge:+.2f}" if edge is not None else "n/a"
-    sleeve = sc.get("trading_budget_usd")
-    sleeve_s = f"{sleeve:.0f}" if sleeve else "n/a"
     start = sc.get("startup_cash")
     start_s = f"{start:.2f}" if start is not None else "n/a"
     return (
         "SCORECARD (primary goal — also a self-tune signal):\n"
-        f"- trading_budget=${sleeve_s} first_NL={start_s} NL={sc.get('net_liquidation')}\n"
-        f"- book_pnl={pnl_s} ({ret_s} on the trading budget)\n"
+        f"- first_NL={start_s} NL={sc.get('net_liquidation')}\n"
+        f"- book_pnl={pnl_s} ({ret_s} of starting NetLiq)\n"
         f"- model_cost=${sc['model_cost_usd']:.4f} "
         f"({sc['model_calls']} calls, {sc['input_tokens']}+{sc['output_tokens']} tok)\n"
         f"- edge(book−model)={edge_s} → {verdict}\n"

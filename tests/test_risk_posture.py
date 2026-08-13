@@ -41,7 +41,7 @@ def test_apply_risk_posture_seeds(tmp_path, monkeypatch):
     assert cfg.daily_loss_limit_pct == 2.0
     assert cfg.max_position_pct == 12.0  # balanced seed already under 20% ceiling
     # Capital preset must not touch Controls book capacity
-    assert cfg.max_open_positions == 2
+    assert cfg.max_open_positions == 15
     assert cfg.auto_panic_on_breach is True
     assert path.is_file()
 

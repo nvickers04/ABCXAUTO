@@ -7,12 +7,12 @@ the LLM cannot talk its way around. Consolidates `nvickers04/ABCXAUTO` (main),
 `thesis` (strategy / thesis generation), and `GrokSimpleExecutionTrader` (minimal
 execution loop) into this repo.
 
-**Reality posture**: this is an **agentic portfolio** with a thin product shell
+**Reality posture**: this is an **agentic Grokfolio** with a thin product shell
 (`order_examples` → `connections` / `book` / `send` / `risk` → broker + gates),
-not a scanner brain. The agent **owns** a paper IBKR book under hard risk rules
-and can send every type in ORDER EXAMPLES. Protect first. **Hold is valid** when
-the book is protected; hold is **forbidden only while unprotected STK** exists
-(code enforces). Risk gates, brackets, and sizing are the floor — not a strategy.
+not a scanner brain. Grok **owns** the full paper IBKR book (~15 names) under
+hard risk rules and rebalances on an hourly/daily RTH clock. Protect first.
+**Hold is valid** when the book is protected; hold is **forbidden only while
+unprotected STK** exists (code enforces). Hunt scalping is not the product.
 
 **Control + Unbiased (non-negotiable):**
 
@@ -25,12 +25,13 @@ the book is protected; hold is **forbidden only while unprotected STK** exists
 3. **Unbiased** — Shell text/process is Fact, Gate, or labeled Heuristic.
    Universe membership is legal-set only — shell never ranks “best.”
    Hard gates protect capital, never pick strategies.
-4. **Scorecard** — book P&L on the $1000 trading budget > cost of the model.
+4. **Scorecard** — book return % of starting NetLiq > cost of the model.
    Agent reads journal + scorecard and continuously tunes itself.
 
-`$1000` is a sleeve (`min(NetLiq, budget)`), not “the account is $1000.”
-Walk-away defaults: 2 positions, 2% daily loss of sleeve, 5-minute cycle floor.
-See ``docs/CYCLE.md``.
+Size, loss, and scorecard are **% of the portfolio** — the same at $1k, $100k,
+or $1M. Walk-away defaults: 15 positions (Grokfolio), 2% daily loss, full NetLiq
+(no dollar sleeve). See ``docs/CYCLE.md``. Mainline is ``master``;
+the $1k sleeve is gone.
 
 Intelligence + journal memory drive judgment. Paper (TWS 7497) until forward P&L
 shows the book survives. Target footprint **~3.5–5k LOC**. Every feature must
@@ -53,7 +54,7 @@ blow-up risk — while keeping Control + Unbiased?* If not, it doesn't ship.
 | Every stock entry is a bracket (SL + TP) | `proposals.py` schema + `executor.py` |
 | Bare orders only to close, verified against live positions | `executor._verify_closes_position` |
 | Daily loss circuit breaker → halt latch + auto flatten | `risk_gates.py` + `monitor.py` |
-| Max position size (% of trading-budget sleeve) | `risk_gates.py` pre-trade check |
+| Max position size (% of NetLiq) | `risk_gates.py` pre-trade check |
 | Max open positions / max daily trades | `risk_gates.py` pre-trade check |
 | Fail closed: no account data → no new entries | `risk_gates.py` |
 | Exits are never blocked, even while halted | `risk_gates.py` |
@@ -78,16 +79,17 @@ abcxauto/
   send.py            dispatch façade → executor
   book.py            portfolio / book state façade
   risk.py            risk-gate façade
-  agent_loop.py      Perceive → Judge → Act (always) → hard gates → send
+  grokfolio.py       Hourly/daily portfolio owner (construct + gated diffs)
+  agent_loop.py      Perceive → Grokfolio (or Judge → Act) → hard gates → send
   mega_worker.py     Capacity Facts + single Act focus (not multi-merge tree)
   universe.py        Universe tab sandbox (IBKR pull → legal set)
   structure_complexity.py  Controls complexity → Act allowlist
   trade_plan.py      Multi-plan book (`active_trade_plans.json`)
   pacing.py          Adaptive cycle sleep + wake whitelist + grok_min budget
   cycle.py           thin shim re-exporting agent_loop for Pro/tests
-  self_tune.py       Agent self-mod; walk-away floor + $1000 sleeve
-  scorecard.py       Book P&L on trading budget vs model API cost
-  config.py          flat env config — sleeve + walk-away floor + agent_state
+  self_tune.py       Agent self-mod; walk-away floor (% of NetLiq)
+  scorecard.py       Book return % of starting NetLiq vs model API cost
+  config.py          flat env config — walk-away floor + agent_state
   llm.py             xAI client (ABCXAUTO_MODEL=grok-4.5)
   proposals.py       OrderProposal schemas + validation (risk layer 1)
   risk_gates.py      hard pre-trade gates + halt latch (risk layer 2)
@@ -112,9 +114,9 @@ profitability justification.**
 
 ## One runtime, one risk core
 
-- **Pro path** (`python -m abcxauto`): status UI; Start runs `agent_loop`.
-  **Headless** (`python -m abcxauto --headless`) runs the same loop with no UI
-  (Ctrl+C kill switch). Floor is seeded on start. Live still gated.
+- **Pro path** (`python -m abcxauto`): cockpit + think stream; autostarts in Cursor.
+  **Headless** (`python -m abcxauto --headless`) is console-only outside Cursor
+  (or with ``ABCXAUTO_FORCE_HEADLESS=1``). Floor is seeded on start. Live still gated.
 
 Every *trading* order funnels through `send` → `executor.safe_execute`.
 

@@ -1140,7 +1140,7 @@ class TradeJournal:
             return empty
 
     def startup_cash(self) -> Optional[float]:
-        """First recorded NetLiq — book P&L start. Return % uses the trading budget."""
+        """First recorded NetLiq — book P&L start and return-% denominator."""
         try:
             self._ensure_schema()
             with self._connect() as conn:

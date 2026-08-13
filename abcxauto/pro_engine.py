@@ -233,6 +233,7 @@ class ViewState:
     gate_blocks: int = 0
     last_error: str | None = None
     pace: dict = field(default_factory=dict)
+    think_live: str = ""
 
 
 class ProEngine:
@@ -255,6 +256,9 @@ class ProEngine:
         self._last_grok_mono: float = 0.0
         self._last_pace: dict = {}
         self._last_cycle_out: dict = {}
+        from abcxauto.think_stream import bind_engine
+
+        bind_engine(self)
 
     def connect_broker(self) -> str | None:
         """Connect IBKR + start monitor without running agent cycles.
@@ -899,7 +903,11 @@ class ProEngine:
                 halted=s.halted,
                 portfolio_raw=s.portfolio if isinstance(s.portfolio, dict) else None,
             )
-        elif kind in ("log", "error"):
+        elif kind == "log":
+            s.records.append(
+                {"cycle": 0, "type": "log", "msg": str(data), "ts": _now()}
+            )
+        elif kind == "error":
             s.records.append(
                 {"cycle": 0, "type": "error", "msg": str(data), "ts": _now()}
             )
@@ -1178,9 +1186,10 @@ class ProEngine:
                 out: dict = {}
                 try:
                     out = await run_cycle(n, self.conn, g, hist, prev)
+                    skipped_note = str(out.get("validation") or out.get("rationale") or "")
                     skipped = (
-                        "skipped_grok"
-                        in str(out.get("validation") or out.get("rationale") or "")
+                        "skipped_grok" in skipped_note
+                        or "grokfolio_wait" in skipped_note
                     )
                     if not skipped:
                         self._last_grok_mono = time.monotonic()
@@ -1211,10 +1220,23 @@ class ProEngine:
                     facts = facts_from_cycle(
                         out, wake_reason=wake_for_cycle, cfg=cfg
                     )
-                    decision = compute_pace(facts, cfg)
-                    pace = decision.to_dict()
-                    pace["wake_reason"] = wake_for_cycle or ""
-                    pace["budget"] = budget_why
+                    existing_pace = (
+                        out.get("pace") if isinstance(out.get("pace"), dict) else {}
+                    )
+                    if (
+                        not facts.needs_protection
+                        and str(existing_pace.get("tier") or "") == "grokfolio"
+                        and existing_pace.get("sleep_s") is not None
+                    ):
+                        pace = dict(existing_pace)
+                        pace.setdefault("bypass_grok_min", True)
+                        pace["wake_reason"] = wake_for_cycle or ""
+                        pace["budget"] = budget_why
+                    else:
+                        decision = compute_pace(facts, cfg)
+                        pace = decision.to_dict()
+                        pace["wake_reason"] = wake_for_cycle or ""
+                        pace["budget"] = budget_why
                     out["pace"] = pace
                     self._last_pace = pace
                     self._last_cycle_out = out

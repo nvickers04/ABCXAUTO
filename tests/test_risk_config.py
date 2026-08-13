@@ -32,7 +32,7 @@ def test_defaults_1k_floor():
     assert snap["max_position_pct"] == 20.0
     assert snap["auto_panic_on_breach"] is True
     assert snap["defined_risk_only"] is True
-    assert snap["max_open_positions"] == 2
+    assert snap["max_open_positions"] == 15
 
 
 def test_risk_and_controls_keys_disjoint():
@@ -70,7 +70,9 @@ def test_update_controls_capacity(tmp_path, monkeypatch):
     clear_risk_settings(path=path)
     load_risk_settings(path)
     update_controls_config(max_open_positions=12, control_complexity_pct=80)
-    assert get_config().max_open_positions == 2  # floor ceiling
+    assert get_config().max_open_positions == 12  # in grokfolio range
+    update_controls_config(max_open_positions=99, control_complexity_pct=80)
+    assert get_config().max_open_positions == 15  # floor ceiling
     assert get_config().control_complexity_pct == 80
 
 

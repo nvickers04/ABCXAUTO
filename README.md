@@ -2,10 +2,16 @@
 
 **Autonomous Grok-powered agentic portfolio for IBKR (paper-first).**
 
+The product is **Grokfolio / full NetLiq** on `master`. The $1k sleeve is gone.
+
 ## Goal
 
-**Give Grok a $1000 trading budget and walk away.** Book P&L on that sleeve
-must beat the cost of the AI model.
+**Grok owns the full paper book, in % of NetLiq**, like Autopilot's public
+Grok Portfolio — scoring → ~15 holdings → calendar rebalance — but on an
+**hourly and/or daily** RTH clock (not monthly), executed on **this IBKR paper
+account** (not Autopilot copy-trading). Hunt/hold scalping is not the product.
+
+Same rules at $1k, $100k, or $1M. Book return % must beat the cost of the AI model.
 
 Intelligence is a billable input, not free alpha. The wrapper should earn more
 from the book than it spends on model calls — or you are financing a very
@@ -29,13 +35,13 @@ expensive journal. That bar is an experiment, not a fixed dollar rule:
    weaken them. Live remains gated.
 3. **Operator is setup + kill switch** — `.env` + paper TWS, then Start.
    Stop / Halt / Panic / Ctrl+C. UI is status/monitoring only.
-4. **Scorecard** — book P&L on the **$1000 trading budget** must beat model API
+4. **Scorecard** — book return **% of starting NetLiq** must beat model API
    cost. The agent reads its journal + scorecard every cycle and tunes itself.
 
-`$1000` is a **sleeve**, not the IBKR account. Paper NetLiq is often ~$1M;
-percent gates use `min(NetLiq, budget)` so Grok sizes like $1000. Walk-away
-defaults: 2 max positions, 2% daily-loss halt, 1% risk/trade, 20% max position
-(of the sleeve), 5-minute cycle floor, defined-risk on.
+Size, daily-loss, risk-per-trade, and scorecard are **% of the portfolio**.
+Walk-away defaults: **15** max positions (Grokfolio book), 2% daily-loss halt,
+1% risk/trade, 20% max position, defined-risk on, `trading_budget_usd=0`
+(full NetLiq). Daily construct at 10:00 ET; hourly slots 10-15 ET RTH.
 
 Grok 4.5 **owns** a paper IBKR portfolio under that floor. Protect first;
 hold is valid when the book is protected. See `SPEC.md` for full doctrine.
@@ -58,7 +64,12 @@ copy .env.template .env   # fill XAI_API_KEY; optional MARKETDATA_TOKEN
 
 ## 2. How the agent thinks
 
-Each cycle is **Perceive → Judge → Act**:
+When Grokfolio is on (default), each cycle is **Perceive → (protect if needed) →
+Grokfolio construct/diff** on the hourly/daily clock. Hunt Judge/Act scalping
+is skipped. Protect-first still interrupts. Outside RTH the shell waits until
+the next 10:00 ET weekday slot.
+
+If Grokfolio is disabled, the legacy cycle is **Perceive → Judge → Act**:
 
 | Stage | Owner | Role |
 |-------|--------|------|
@@ -88,7 +99,7 @@ Grok Act streams → one send. Steer via Controls dials — no free-text work br
 - **Positions** — book table + working orders / fills.
 - **Controls / Universe / Risk tabs** — live values (agent-owned). Saves are
   no-ops. Grok `self_tune`s these. Risk halt/resume remain the kill switch.
-- **Scorecard** — book P&L on the trading budget vs model cost (the only goal).
+- **Scorecard** — book return % of starting NetLiq vs model cost (the only goal).
 - **Test Suite** — paper place/cancel gym for order mechanics.
 
 Kill switch: Stop agent, Risk Halt, Panic, or `Ctrl+C` on `--headless`.
@@ -97,10 +108,14 @@ Positions stay at IBKR.
 ## 4. Run
 
 ```powershell
-python -m abcxauto --headless   # autonomous paper loop; Ctrl+C = kill switch
-python -m abcxauto              # Pro UI (status + kill switch)
+python -m abcxauto              # Pro desktop + Grok stream (autostarts in Cursor)
+python -m abcxauto --headless   # console-only outside Cursor; Ctrl+C = kill
 python -m abcxauto --cleanup --aggressive   # stale Flet/Python cleanup
 ```
+
+In Cursor, F5 / Run **ABCXAUTO Pro** (or any `python -m abcxauto`) opens the
+cockpit and starts the agent so you can watch the think stream. Console-only:
+`$env:ABCXAUTO_FORCE_HEADLESS=1`. One IBKR client id **77**.
 
 ## 5. Supported orders
 
@@ -130,15 +145,17 @@ TRADE PLAYBOOK (preconditions + shell rejects only).
 | `ABCXAUTO_PACE_PROTECT_S` | `20` | Sleep when unprotected STK |
 | `ABCXAUTO_PACE_MANAGE_S` | `60` | Sleep with open risk / trade plan |
 | `ABCXAUTO_PACE_IDLE_S` | `600` | Idle-floor when flat/idle |
-| `ABCXAUTO_TRADING_BUDGET_USD` | `1000` | Sleeve Grok may work (`min(NetLiq, budget)`). Agent cannot raise. |
-| `ABCXAUTO_MAX_OPEN_POSITIONS` | `2` | Book capacity (floor ceiling; agent may lower to 1) |
-| `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `2` | Daily-loss halt vs sleeve (agent cannot raise) |
-| `ABCXAUTO_MAX_POSITION_PCT` | `20` | Max position vs sleeve (agent cannot raise) |
+| `ABCXAUTO_MAX_OPEN_POSITIONS` | `15` | Book capacity (floor 8-15; grokfolio default 15) |
+| `ABCXAUTO_GROKFOLIO_ENABLED` | `true` | Own the full book on hourly/daily clock |
+| `ABCXAUTO_GROKFOLIO_CADENCE` | `both` | `hourly` / `daily` / `both` |
+| `ABCXAUTO_GROKFOLIO_HOLDINGS` | `15` | Target names in the construct |
+| `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `2` | Daily-loss halt vs NetLiq (agent cannot raise) |
+| `ABCXAUTO_MAX_POSITION_PCT` | `20` | Max position vs NetLiq (agent cannot raise) |
 | `ABCXAUTO_DEFINED_RISK_ONLY` | `true` | Locked on |
 | `ABCXAUTO_JOURNAL_PATH` | `journal.db` | SQLite journal |
 | `ABCXAUTO_RISK_SETTINGS_PATH` | `risk_settings.json` | Persisted Risk + Controls (gitignored) |
 
-Capital / daily-loss gates are **on** against the $1000 sleeve. The agent cannot
+Capital / daily-loss gates are **on** as % of NetLiq. The agent cannot
 turn them off. See `.env.template` for the full list.
 
 ## Architecture
@@ -147,16 +164,16 @@ Thin product shell. Priority: **risk > execution > monitoring > thin UI**.
 
 ```
 abcxauto/
-  agent_loop.py         Perceive → Allocator → Act streams → one send
+  grokfolio.py          Hourly/daily book owner (construct + gated diffs)
+  agent_loop.py         Perceive → Grokfolio or Judge/Act → hard gates/send
   mega_worker.py        Capacity / stream select / send merge
   universe.py           IBKR sandbox legal set (Universe tab)
   structure_complexity.py  Act strategy allowlist from Controls dial
   trade_plan.py         Multi-plan open-risk book
-  pacing.py             Adaptive sleep tiers + wake whitelist + grok budget
+  pacing.py             Adaptive sleep tiers + grokfolio wait + wake whitelist
   world_state.py        Code truth for prompts (capacity + exposure Fact)
   opportunity_scan.py   SCAN TAPE from Universe legal set + MDA metrics
   trade_playbook.py     Preconditions + shell rejects (no style dogma)
-  trade_plan.py         Open-risk continuity across Stop/Start
   objective_language.py Banned taste phrases + taxonomy helpers
   structure_grade.py    Geometry / scrape lessons
   order_examples.py     How to send (param shapes)
@@ -166,13 +183,16 @@ abcxauto/
   self_tune.py          Agent self-mod (floor-clamped; no approval)
   scorecard.py          Book return vs model cost
   headless.py           Paper loop without UI
+  think_stream.py       Live Grok think/say (ASCII on Windows)
   config.py             Env + walk-away floor + agent_state
   memory/               SQLite journal
   broker/               IBKR layer
 ```
 
-**Adaptive pacing** (process): protect ~20s · manage ~60s · hunt floor =
-`CYCLE_SLEEP` · idle longer · wakes on unprotected/fill/halt/flat_confirmed.
+**Adaptive pacing** (process): protect ~20s interrupts Grokfolio wait.
+Grokfolio sleeps until the next hourly/daily slot (overnight until next
+10:00 ET weekday is OK). Hunt-floor `CYCLE_SLEEP` applies only when
+Grokfolio is off. Wakes on unprotected/fill/halt/flat_confirmed.
 Doctrine + Phase 5 ritual: `.cursor/skills/abcxauto-gym/`.
 Daily/weekly KPIs: `python scripts/phase5_day_report.py` (`--week`).
 
@@ -180,7 +200,7 @@ Daily/weekly KPIs: `python scripts/phase5_day_report.py` (`--week`).
 
 | Pillar | Meaning |
 |--------|---------|
-| Goal | Book P&L on the $1000 trading budget > cost of the model |
+| Goal | Book return % of starting NetLiq > cost of the model |
 | Autonomy | Grok self_tunes all non-risk knobs — no approval |
 | Immutable floor | Code: daily loss, size, defined-risk, protect-first, fail-closed, exits always |
 | Operator | Initial setup + emergency kill switch. UI = status |

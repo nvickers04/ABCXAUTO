@@ -188,7 +188,7 @@ class ProTerminal:
         )
         self.lbl_risk_halt = ft.Text("Halt: clear", size=14, weight=ft.FontWeight.W_600, color=GREEN)
         self.lbl_risk_status = ft.Text(
-            "$1000 sleeve locked — agent self_tunes; Halt/Stop is the kill switch.",
+            "% of NetLiq locked — agent self_tunes; Halt/Stop is the kill switch.",
             size=12,
             color=MUTED,
             selectable=True,
@@ -427,6 +427,13 @@ class ProTerminal:
         self.brain_rationale = ft.Text(
             "Start autonomous mode to see Grok decisions.", color=MUTED, size=13, selectable=True
         )
+        self.think_live = ft.Text(
+            "Grok stream: waiting for Judge/Act...",
+            color=MUTED,
+            size=11,
+            selectable=True,
+            max_lines=16,
+        )
         self.content = ft.Container(expand=True, padding=0)
         self.sidebar_btns: dict[str, ft.Container] = {}
         self.sidebar_icons: dict[str, ft.Icon] = {}
@@ -524,6 +531,10 @@ class ProTerminal:
         p.run_task(self._poll_loop)
         p.run_task(self._clock_loop)
         p.run_task(self._reveal_window)
+        from abcxauto.cursor_env import should_autostart
+
+        if should_autostart():
+            self._start()
         if probe := os.environ.get("ABCXAUTO_UI_PROBE"):
             Path(probe).write_text(
                 json.dumps({"title": p.title, "tab": self.tab, "ui_built": True,
@@ -1088,6 +1099,7 @@ class ProTerminal:
                     self.lbl_agent_read,
                     self.brain_action,
                     self.brain_rationale,
+                    self.think_live,
                     self.lbl_proposal,
                     self.lbl_agent_params,
                 ),
@@ -1216,7 +1228,7 @@ class ProTerminal:
                 ft.Text(
                     "Agent-owned Controls (status only). Grok self_tunes these. "
                     "Operator: Connect + Start/Stop kill switch. "
-                    "Goal: book P&L on the $1000 trading budget > cost of the model.",
+                    "Goal: book return % of starting NetLiq > cost of the model.",
                     size=12,
                     color=MUTED,
                 ),
@@ -1650,7 +1662,7 @@ class ProTerminal:
                 )
             else:
                 self.lbl_risk_envelope.value = (
-                    f"{path} · $1000 sleeve locked — agent self_tune (cannot weaken)."
+                    f"{path} · % of NetLiq locked — agent self_tune (cannot weaken)."
                 )
         except Exception:
             self.lbl_risk_envelope.value = ""
@@ -2678,6 +2690,13 @@ class ProTerminal:
         else:
             self.brain_rationale.value = "Why: —"
             self.brain_rationale.color = MUTED
+        live = str(getattr(s, "think_live", "") or "").strip()
+        if live:
+            self.think_live.value = live[-2500:]
+            self.think_live.color = TEXT
+        else:
+            self.think_live.value = "Grok stream: waiting for Judge/Act..."
+            self.think_live.color = MUTED
         act = s.last_action or {}
         strat = s.brain_strat or act.get("strategy") or act.get("action") or "—"
         result = s.last_result or {}
@@ -2940,6 +2959,24 @@ class ProTerminal:
             att_bits.append("new-risk ok" if allows else "new-risk blocked")
         if idle is not None:
             att_bits.append(f"idle_streak={idle}")
+        intent = getattr(s, "intent", None) or {}
+        gf_kind = ""
+        if str(intent.get("kind") or "") == "grokfolio":
+            n_h = intent.get("holdings")
+            gf_kind = f"grokfolio {n_h} names" if n_h is not None else "grokfolio"
+        else:
+            focus = str((getattr(s, "judgment", None) or {}).get("focus") or "")
+            if focus.lower().startswith("grokfolio"):
+                gf_kind = focus
+            elif str((getattr(s, "pace", None) or {}).get("tier") or "") == "grokfolio":
+                gf_kind = str(
+                    (s.pace or {}).get("reason") or "grokfolio wait"
+                )
+        res = getattr(s, "last_result", None) or {}
+        if not gf_kind and isinstance(res, dict) and res.get("kind"):
+            gf_kind = f"grokfolio {res.get('kind')}"
+        if gf_kind:
+            att_bits.insert(0, gf_kind)
         att_bits.append(f"netliq={self.lbl_book_netliq.value}")
         self.lbl_dash_attention.value = (
             "Attention: " + " · ".join(att_bits) if att_bits else "Attention: —"

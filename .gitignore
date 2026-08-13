@@ -22,3 +22,5 @@ logs/
 journal.db
 journal.db-wal
 journal.db-shm
+grokfolio_state.json
+data/state/grokfolio_state.json

@@ -36,7 +36,6 @@ SET_RISK_KEYS = frozenset({
     "max_position_pct",
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
-    "trading_budget_usd",
 })
 # Controls tab — attention + toolbox + book capacity (disjoint from Risk).
 CONTROL_KEYS = frozenset({
@@ -130,13 +129,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_RISK_SETTINGS_PATH = _REPO_ROOT / "risk_settings.json"
 
 DEFAULT_MANDATE = (
-    "You OWN a paper IBKR book. The operator gave you a trading budget "
-    "(default $1000) — size and lose only inside that sleeve, even if NetLiq is larger. "
+    "You OWN the whole paper IBKR book as % of NetLiq (full account; no dollar sleeve). "
+    "Product is Grokfolio: construct ~15 long holdings, rebalance on the hourly/daily "
+    "RTH clock. Hunt/hold scalping is NOT the product. Same rules at any NetLiq. "
     "No human approval. Hard risk is code and cannot be weakened (daily-loss halt, "
     "max position, defined-risk, unprotected-STK protect-first, exits never blocked, "
     "fail-closed). You MAY self_tune: Controls dials, pacing (only lengthen), universe "
-    "focus, prompt_extra, strategy tweaks, and tighter risk. "
-    "Primary scorecard: book P&L on the trading budget must beat model API cost. "
+    "focus, prompt_extra, strategy tweaks, and tighter risk. You cannot disable "
+    "grokfolio or set a dollar sleeve. "
+    "Primary scorecard: book return % on starting NetLiq must beat model API cost. "
     "Read your journal + scorecard every cycle and tune yourself. "
     "Protect first. Hold IS VALID when protected. Hold is FORBIDDEN only while "
     "unprotected STK exists (code enforces). Never blow up. Live remains gated."
@@ -175,10 +176,9 @@ class Config:
     # Max MDA symbols Grok may request per cycle via scan_request.
     scan_fetch_cap: int = 4
 
-    # Dollars the operator is willing to have Grok work (sleeve). Gates use
-    # min(NetLiq, budget) so a fat IBKR paper account cannot size like $1M.
-    trading_budget_usd: float = 1000.0
-    # Autonomous cycle cadence — long floors so model cost cannot eat a small sleeve.
+    # 0 = full NetLiq (default). Size/loss gates are always % of portfolio.
+    trading_budget_usd: float = 0.0
+    # Autonomous cycle cadence — long floors so model cost cannot eat a small book.
     cycle_sleep_s: float = 300.0
     grok_min_interval_s: float = 300.0
     pace_protect_s: float = 20.0
@@ -206,7 +206,11 @@ class Config:
     max_peak_drawdown_pct: float = 8.0
     max_option_premium_pct: float = 5.0
     max_risk_per_trade_pct: float = 1.0
-    max_open_positions: int = 2
+    max_open_positions: int = 15
+    # Grokfolio: Autopilot-style book owner on an hourly/daily clock.
+    grokfolio_enabled: bool = True
+    grokfolio_cadence: str = "both"  # hourly | daily | both
+    grokfolio_holdings: int = 15
     control_deliberation_pct: int = 40
     control_budget_pct: int = 25
     control_frequency_pct: int = 30
@@ -239,6 +243,11 @@ def _env_bool(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw.lower() in ("1", "true", "yes", "on")
+
+
+def _grokfolio_cadence_env() -> str:
+    raw = _env("ABCXAUTO_GROKFOLIO_CADENCE", "both").lower()
+    return raw if raw in ("hourly", "daily", "both") else "both"
 
 
 def setup_file_logging(
@@ -418,7 +427,8 @@ def _load_env_config() -> Config:
         scan_fetch_cap=int(_env("ABCXAUTO_SCAN_FETCH_CAP", "4")),
         trading_budget_usd=float(
             _env("ABCXAUTO_TRADING_BUDGET_USD")
-            or _env("ABCXAUTO_TARGET_CAPITAL", "1000")
+            or _env("ABCXAUTO_TARGET_CAPITAL")
+            or "0"
         ),
         cycle_sleep_s=float(_env("ABCXAUTO_CYCLE_SLEEP_S", "300")),
         grok_min_interval_s=float(_env("ABCXAUTO_GROK_MIN_INTERVAL_S", "300")),
@@ -435,7 +445,12 @@ def _load_env_config() -> Config:
         risk_gates_enabled=_env_bool("ABCXAUTO_RISK_GATES_ENABLED", True),
         daily_loss_limit_pct=float(_env("ABCXAUTO_DAILY_LOSS_LIMIT_PCT", "2")),
         max_position_pct=float(_env("ABCXAUTO_MAX_POSITION_PCT", "20")),
-        max_open_positions=int(_env("ABCXAUTO_MAX_OPEN_POSITIONS", "2")),
+        max_open_positions=int(_env("ABCXAUTO_MAX_OPEN_POSITIONS", "15")),
+        grokfolio_enabled=_env_bool("ABCXAUTO_GROKFOLIO_ENABLED", True),
+        grokfolio_cadence=_grokfolio_cadence_env(),
+        grokfolio_holdings=max(
+            1, min(30, int(_env("ABCXAUTO_GROKFOLIO_HOLDINGS", "15") or "15"))
+        ),
         auto_panic_on_breach=_env_bool("ABCXAUTO_AUTO_PANIC_ON_BREACH", True),
         defined_risk_only=_env_bool("ABCXAUTO_DEFINED_RISK_ONLY", True),
         cash_only=_env_bool("ABCXAUTO_CASH_ONLY", True),

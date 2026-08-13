@@ -100,3 +100,4 @@ def _isolate_open_risk_and_structure_files(tmp_path, monkeypatch):
         "ABCXAUTO_STRUCTURE_VOCAB_PATH", str(tmp_path / "structure_vocab.json")
     )
     monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle_streak.json"))
+    monkeypatch.setenv("ABCXAUTO_GROKFOLIO_PATH", str(tmp_path / "grokfolio_state.json"))

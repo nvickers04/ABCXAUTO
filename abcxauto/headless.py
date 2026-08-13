@@ -1,13 +1,181 @@
-"""Headless paper runner — no UI, no approval. Operator = Ctrl+C kill switch."""
+"""Headless paper runner — no UI, no approval. Operator = Ctrl+C kill switch.
+
+Prints every cycle so you can see what Grok judged and did.
+"""
 
 from __future__ import annotations
 
 import logging
+import re
 import signal
 import sys
 import time
+from typing import Any
 
-logger = logging.getLogger(__name__)
+from abcxauto.think_stream import ascii_text
+
+_SKIP_TYPES = frozenset({"monitor_snapshot", "ibkr_account", "trading_mode", "conn"})
+
+
+def _one_line(text: Any, n: int = 240) -> str:
+    t = " ".join(str(text or "").split())
+    if len(t) > n:
+        return t[: n - 3] + "..."
+    return t
+
+
+def format_cycle_digest(d: dict[str, Any]) -> str:
+    """Human cycle block: stance → action, why, result, next sleep."""
+    n = d.get("cycle")
+    j = d.get("judgment") or {}
+    stance = str(d.get("stance") or j.get("stance") or "-")
+    strat = str(d.get("strat") or d.get("action") or "-")
+    thesis = _one_line(d.get("thesis") or j.get("thesis") or "", 220)
+    why = _one_line(
+        d.get("rationale")
+        or d.get("market_read")
+        or j.get("focus")
+        or d.get("validation")
+        or "",
+        280,
+    )
+    result = d.get("result") if isinstance(d.get("result"), dict) else {}
+    status = _one_line(
+        result.get("status") or result.get("note") or d.get("validation") or "",
+        160,
+    )
+    err = _one_line(d.get("stage_error") or "", 200)
+    if "judge_error" in why or "UNAVAILABLE" in why or "AioRpcError" in why:
+        why = "judge_error: Grok API connection dropped"
+        if not status:
+            status = "blocked"
+    nl = d.get("equity")
+    pnl = d.get("pnl")
+    book = ""
+    try:
+        if nl is not None:
+            book = f"  NL={float(nl):.0f}"
+        if pnl is not None:
+            book += f" dPnL={float(pnl):+.2f}"
+    except (TypeError, ValueError):
+        book = ""
+    pace = d.get("pace") if isinstance(d.get("pace"), dict) else {}
+    sleep = pace.get("sleep_s")
+    tier = pace.get("tier") or pace.get("reason") or ""
+    gf_line = _grokfolio_digest_line(d, result, pace, j)
+    lines = [f"CYCLE {n}  {stance} -> {strat}{book}"]
+    if gf_line:
+        lines.append(gf_line)
+    if thesis:
+        lines.append(f"  thesis: {thesis}")
+    if why:
+        lines.append(f"  why: {why}")
+    if err:
+        lines.append(f"  error: {err}")
+    if status:
+        lines.append(f"  result: {status}")
+    if sleep is not None:
+        try:
+            lines.append(f"  next: sleep {float(sleep):.0f}s ({tier})")
+        except (TypeError, ValueError):
+            pass
+    return "\n".join(lines)
+
+
+def _grokfolio_digest_line(
+    d: dict[str, Any],
+    result: dict[str, Any],
+    pace: dict[str, Any],
+    judgment: dict[str, Any],
+) -> str:
+    """ASCII grokfolio wait vs run line for Windows consoles."""
+    rationale = str(d.get("rationale") or result.get("note") or "")
+    focus = str(judgment.get("focus") or "")
+    kind = str(result.get("kind") or "")
+    tier = str(pace.get("tier") or "")
+    reason = str(pace.get("reason") or "")
+    is_gf = (
+        tier == "grokfolio"
+        or "grokfolio" in rationale.lower()
+        or "grokfolio" in focus.lower()
+        or kind in ("daily", "hourly")
+        or "grokfolio" in reason
+    )
+    if not is_gf:
+        return ""
+    waiting = (
+        "wait" in rationale.lower()
+        or reason in ("grokfolio_schedule", "grokfolio_error")
+        or (not kind and "wait" in (focus + reason).lower())
+    )
+    if waiting:
+        try:
+            wait_s = float(pace.get("sleep_s") or 0)
+        except (TypeError, ValueError):
+            wait_s = 0.0
+        if wait_s <= 0:
+            m = re.search(r"(\d+(?:\.\d+)?)s", rationale)
+            wait_s = float(m.group(1)) if m else 0.0
+        return f"  GROKFOLIO wait - next slot in {wait_s:.0f}s"
+    holdings = result.get("holdings") if isinstance(result.get("holdings"), list) else []
+    actions = result.get("grokfolio") if isinstance(result.get("grokfolio"), list) else []
+    label = kind or "run"
+    return f"  GROKFOLIO {label} - {len(holdings)} holdings, {len(actions)} actions"
+
+
+def format_record(rec: dict[str, Any]) -> str | None:
+    """One operator-visible line/block from an engine record. None = skip noise."""
+    kind = str(rec.get("type") or "").lower()
+    if kind in _SKIP_TYPES:
+        return None
+    ts = rec.get("ts") or ""
+    prefix = f"[{ts}] " if ts else ""
+    if kind == "cycle":
+        return prefix + format_cycle_digest(rec)
+    msg = _one_line(rec.get("msg") or rec, 320)
+    if not msg:
+        return None
+    if kind in ("error", "err"):
+        low = msg.lower()
+        if any(
+            w in low
+            for w in ("started", "linked", "refreshed", "monitor started")
+        ) and not any(w in low for w in ("fail", "error", "died", "timeout")):
+            return f"{prefix}LOG {msg}"
+        return f"{prefix}ERROR {msg}"
+    if kind == "log":
+        return f"{prefix}LOG {msg}"
+    if kind == "pace":
+        return f"{prefix}PACE {msg}"
+    return f"{prefix}{kind.upper()} {msg}"
+
+
+def _drain_and_print(engine: Any, seen: int) -> int:
+    engine.drain_apply()
+    recs = list(engine.state.records or [])
+    for rec in recs[seen:]:
+        if not isinstance(rec, dict):
+            continue
+        line = format_record(rec)
+        if line:
+            print(ascii_text(line), flush=True)
+    return len(recs)
+
+
+def _quiet_ibkr_scanner_noise() -> None:
+    """ib_insync prints Error 162 scanner cancels to the console; drop those only."""
+
+    class _Drop162(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            msg = record.getMessage()
+            if "Error 162" in msg:
+                return False
+            if "scanner subscription cancelled" in msg.lower():
+                return False
+            return True
+
+    for name in ("ib_insync", "ib_insync.wrapper", "ib_insync.client"):
+        logging.getLogger(name).addFilter(_Drop162())
 
 
 def run_headless() -> int:
@@ -15,8 +183,11 @@ def run_headless() -> int:
     from abcxauto.config import get_config, setup_file_logging
     from abcxauto.pro_engine import ProEngine
     from abcxauto.self_tune import ensure_immutable_floor
+    from abcxauto.think_stream import stdout_printer, subscribe
 
     setup_file_logging()
+    _quiet_ibkr_scanner_noise()
+    subscribe(stdout_printer)
     cfg = get_config()
     if not cfg.is_paper:
         print("Headless refuses live mode. Paper only (TWS 7497 / Gateway 4002).", flush=True)
@@ -49,22 +220,51 @@ def run_headless() -> int:
         print(f"Start failed: {err}", flush=True)
         return 1
     print(
-        "ABCXAUTO headless paper — autonomous. "
-        "Immutable floor locked. Ctrl+C is the kill switch.",
+        "ABCXAUTO headless paper - grokfolio owner "
+        f"(~{int(getattr(cfg, 'grokfolio_holdings', 15) or 15)} names, "
+        f"{getattr(cfg, 'grokfolio_cadence', 'both')}). "
+        "Size is % of NetLiq. Ctrl+C is the kill switch.",
         flush=True,
     )
+    seen = 0
+    last_print = time.monotonic()
+    think_len = 0
     try:
         while not stopping["done"]:
             worker = engine.worker
             if worker is None or not worker.is_alive():
+                seen = _drain_and_print(engine, seen)
                 if engine.state.last_error:
-                    print(f"Worker died: {engine.state.last_error}", flush=True)
+                    print(f"Worker died: {ascii_text(engine.state.last_error)}", flush=True)
                     return 1
                 time.sleep(0.5)
                 if engine.worker is None or not engine.worker.is_alive():
                     print("Worker exited.", flush=True)
                     return 0
-            time.sleep(1.0)
+            before = seen
+            seen = _drain_and_print(engine, seen)
+            live_n = len(getattr(engine.state, "think_live", "") or "")
+            if seen > before or live_n != think_len:
+                last_print = time.monotonic()
+                think_len = live_n
+            elif time.monotonic() - last_print >= 90:
+                st = engine.state
+                pace = st.pace or {}
+                sleep = pace.get("sleep_s")
+                wait = f" next~{float(sleep):.0f}s" if sleep else ""
+                last = ascii_text(f"{st.stance or '-'}->{st.brain_strat or '-'}")
+                gf = ""
+                if str(pace.get("tier") or "") == "grokfolio":
+                    gf = " grokfolio"
+                print(
+                    ascii_text(
+                        f"waiting{gf}{wait}  connected={st.connected}  "
+                        f"last={last}  cycles={st.cycles}"
+                    ),
+                    flush=True,
+                )
+                last_print = time.monotonic()
+            time.sleep(0.5)
     except KeyboardInterrupt:
         _stop()
     return 0
