@@ -37,9 +37,9 @@ def test_apply_risk_posture_seeds(tmp_path, monkeypatch):
 
     cfg = apply_risk_posture("balanced", persist=True)
     assert cfg.risk_posture == "defensive"  # walk-away floor identity
-    assert cfg.max_risk_per_trade_pct == 1.0  # clamped to floor ceiling
-    assert cfg.daily_loss_limit_pct == 2.0
-    assert cfg.max_position_pct == 12.0  # balanced seed already under 20% ceiling
+    assert cfg.max_risk_per_trade_pct == 1.5  # balanced seed, under 25% ceiling
+    assert cfg.daily_loss_limit_pct == 5.0  # balanced seed, under 25% ceiling
+    assert cfg.max_position_pct == 12.0  # balanced seed already under 25% ceiling
     # Capital preset must not touch Controls book capacity
     assert cfg.max_open_positions == 15
     assert cfg.auto_panic_on_breach is True
@@ -54,7 +54,7 @@ def test_clamp_risk_knobs_ceiling(tmp_path, monkeypatch):
     apply_risk_posture("defensive", persist=True)
 
     applied, notes = clamp_risk_knobs({"max_risk_per_trade_pct": 99.0})
-    assert applied["max_risk_per_trade_pct"] == 2.0
+    assert applied["max_risk_per_trade_pct"] == 25.0
     assert "max_risk_per_trade_pct" in notes
 
 
@@ -93,7 +93,7 @@ def test_set_risk_clamps_over_ceiling(tmp_path, monkeypatch):
 
     out = set_risk_knobs({"max_risk_per_trade_pct": 50.0})
     assert out["status"] == "ok"
-    assert out["applied"]["max_risk_per_trade_pct"] == 1.0
+    assert out["applied"]["max_risk_per_trade_pct"] == 25.0
     assert out["clamped"]
 
 
@@ -132,5 +132,5 @@ def test_live_aggressive_effective_balanced(tmp_path, monkeypatch):
     assert cfg.risk_posture == "defensive"
     assert cfg.effective_risk_posture == "defensive"
     # Floor clamps aggressive seeds
-    assert cfg.max_risk_per_trade_pct == 1.0
+    assert cfg.max_risk_per_trade_pct == 1.5
     set_trading_mode("paper")

@@ -8,7 +8,6 @@ from typing import Any, Callable, Coroutine, Dict, List
 
 from xai_sdk.chat import tool
 
-from abcxauto.marketdata.client import get_marketdata_client
 from abcxauto.marketdata.market_hours import get_session_info
 
 logger = logging.getLogger(__name__)
@@ -24,8 +23,14 @@ def _schema(properties: Dict[str, Any], required: List[str]) -> Dict[str, Any]:
 TOOL_DEFINITIONS = [
     tool(
         name="quote",
-        description="Real-time quote: price, bid/ask, volume, change %.",
-        parameters=_schema({"symbol": _SYMBOL}, ["symbol"]),
+        description="IBKR live last/bid/ask (TWS stream). Use this for send geometry — not MDA.",
+        parameters=_schema(
+            {
+                "symbol": _SYMBOL,
+                "symbols": {"type": "array", "items": {"type": "string"}},
+            },
+            [],
+        ),
     ),
     tool(
         name="market_hours",
@@ -57,8 +62,53 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
     return text
 
 
+def _quote_symbols(args: Dict[str, Any]) -> List[str]:
+    raw = args.get("symbols")
+    if raw is None:
+        raw = args.get("symbol")
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        items = []
+    out: List[str] = []
+    for item in items:
+        sym = str(item or "").strip().upper()
+        if sym and sym not in out:
+            out.append(sym)
+        if len(out) >= 8:
+            break
+    return out
+
+
 async def _quote(args: Dict[str, Any], connector: Any) -> Any:
-    return await get_marketdata_client().get_quote(args["symbol"])
+    """IBKR live quote. No MDA fallback — delayed prints are a different tool."""
+    items = _quote_symbols(args)
+    if not items:
+        return {"error": "symbol required", "source": "ibkr"}
+    fresh = bool(args.get("fresh"))
+    batch = getattr(connector, "get_live_quotes", None)
+    single = getattr(connector, "get_live_quote", None)
+    if len(items) == 1 and callable(single):
+        try:
+            return await single(items[0], fresh=fresh)
+        except TypeError:
+            return await single(items[0])
+    if callable(batch):
+        try:
+            return await batch(items, fresh=fresh)
+        except TypeError:
+            return await batch(items)
+    if callable(single):
+        rows = []
+        for s in items:
+            try:
+                rows.append(await single(s, fresh=fresh))
+            except TypeError:
+                rows.append(await single(s))
+        return {"source": "ibkr", "freshness": "live", "quotes": rows}
+    return {"error": "IBKR live quote unavailable", "source": "ibkr"}
 
 
 async def _market_hours(args: Dict[str, Any], connector: Any) -> Any:

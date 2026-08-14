@@ -1,0 +1,173 @@
+"""Tool-call aliases: wrong names/keys still hit IBKR/MDA correctly."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from abcxauto.brain import BrainTurn, _run_tool
+from abcxauto.tool_args import (
+    OPTION_QUOTE_CAP,
+    fallback_quote_symbols,
+    hoist_send_params,
+    normalize_tool_call,
+    option_quote_specs,
+    strip_ambiguous_last,
+)
+from abcxauto.world_state import WorldState
+
+
+def _world(**kwargs) -> WorldState:
+    base = dict(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    base.update(kwargs)
+    return WorldState(**base)
+
+
+def test_alias_positions_to_book():
+    name, args = normalize_tool_call("positions", {})
+    assert name == "book"
+    assert args == {}
+
+
+def test_alias_get_quote_ticker():
+    name, args = normalize_tool_call("get_quote", {"ticker": "spy"})
+    assert name == "quote"
+    assert args["symbol"] == "spy"
+
+
+def test_bare_quote_uses_book_symbols():
+    name, args = normalize_tool_call(
+        "quote",
+        {},
+        fallback_symbols=fallback_quote_symbols(
+            _world(positions=[{"symbol": "IWM", "sec_type": "STK", "quantity": 10}]),
+            {},
+        ),
+    )
+    assert name == "quote"
+    assert "IWM" in args["symbols"]
+
+
+def test_send_hoists_flat_fields():
+    out = hoist_send_params(
+        {"strategy": "market_bracket", "symbol": "SPY", "direction": "LONG", "qty": 4}
+    )
+    assert out["params"]["symbol"] == "SPY"
+    assert out["params"]["direction"] == "LONG"
+    assert out["params"]["quantity"] == 4
+
+
+def test_candles_keeps_symbols_batch():
+    name, args = normalize_tool_call("candles", {"symbols": ["SPY", "QQQ"]})
+    assert name == "candles"
+    assert args["symbols"] == ["SPY", "QQQ"]
+    assert args.get("symbol") != "SPY"
+
+
+def test_option_chain_symbol_list_becomes_symbols():
+    name, args = normalize_tool_call("chain", {"symbol": ["IWM", "XLE"]})
+    assert name == "option_chain"
+    assert args["symbols"] == ["IWM", "XLE"]
+
+
+def test_option_quote_aliases():
+    name, args = normalize_tool_call(
+        "greeks",
+        {"ticker": "SPY", "expiry": "2026-08-21", "strike": 500, "right": "call"},
+    )
+    assert name == "option_quote"
+    assert args["symbol"] == "SPY"
+    assert args["expiration"] == "20260821"
+    assert args["right"] == "C"
+    assert args["contracts"][0]["symbol"] == "SPY"
+
+
+def test_option_quote_specs_batch():
+    specs = option_quote_specs({
+        "contracts": [
+            {"symbol": "SPY", "expiration": "2026-08-21", "strike": 500, "right": "call"},
+            {"ticker": "QQQ", "expiry": "20260821", "strike": 400, "right": "P"},
+        ]
+    })
+    assert len(specs) == 2
+    assert specs[0] == {"symbol": "SPY", "expiration": "20260821", "strike": 500, "right": "C"}
+    assert specs[1]["symbol"] == "QQQ"
+    assert specs[1]["right"] == "P"
+
+
+def test_option_quote_specs_cap():
+    specs = option_quote_specs({
+        "contracts": [
+            {"symbol": "SPY", "expiration": "20260821", "strike": 500 + i, "right": "C"}
+            for i in range(12)
+        ]
+    })
+    assert len(specs) == OPTION_QUOTE_CAP
+
+
+def test_strip_mda_last():
+    row = strip_ambiguous_last({"symbol": "SPY", "last": 500.0, "source": "mda"})
+    assert "last" not in row
+    assert row["mda_last"] == 500.0
+    live = strip_ambiguous_last({"symbol": "SPY", "last": 501.0, "source": "ibkr"})
+    assert live["last"] == 501.0
+
+
+@pytest.mark.asyncio
+async def test_run_tool_accepts_ticker_alias():
+    class Conn:
+        async def get_live_quote(self, symbol, fresh=False):
+            return {
+                "symbol": symbol,
+                "last": 501.0,
+                "source": "ibkr",
+                "freshness": "live",
+            }
+
+    raw = await _run_tool(
+        "get_quote",
+        {"ticker": "SPY"},
+        connector=Conn(),
+        world=_world(),
+        snap={},
+        turn=BrainTurn(),
+    )
+    data = json.loads(raw)
+    assert data["source"] == "ibkr"
+    assert data["last"] == 501.0
+
+
+@pytest.mark.asyncio
+async def test_run_tool_positions_alias_is_book():
+    raw = await _run_tool(
+        "positions",
+        {},
+        connector=object(),
+        world=_world(),
+        snap={},
+        turn=BrainTurn(),
+    )
+    data = json.loads(raw)
+    assert "world" in data

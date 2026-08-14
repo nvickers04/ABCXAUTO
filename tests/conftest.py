@@ -71,6 +71,60 @@ def _restore_tweaks():
         TWEAKS[k] = v
 
 
+def fake_grok_turn(act: dict, *, wakes: list | None = None):
+    """Pretend Grok sent ``act`` through the send clerk."""
+    from abcxauto.agent_loop import BLOCKED_STRAT, execute_ticket
+    from abcxauto.brain import BrainTurn
+
+    async def grok_turn(g, *, connector, world, snap, wake=""):
+        if wakes is not None:
+            wakes.append(wake)
+        ticket = dict(act)
+        if isinstance(act.get("params"), dict):
+            ticket["params"] = dict(act["params"])
+        result = await execute_ticket(ticket, connector, world, snap)
+        status = str((result or {}).get("status") or "").lower()
+        strat = str(ticket.get("strategy") or act.get("strategy") or "")
+        turn = BrainTurn(last_act=ticket, last_result=result or {})
+        if (
+            status in ("blocked", "rejected", "validated_block")
+            or strat == BLOCKED_STRAT
+        ):
+            turn.last_strat = BLOCKED_STRAT
+            turn.last_act["strategy"] = turn.last_act["action"] = BLOCKED_STRAT
+        elif strat == "hold" or status == "hold":
+            turn.last_strat = "hold"
+        else:
+            turn.last_strat = strat
+            turn.sends = [{"act": ticket, "result": result, "strat": strat}]
+        return turn
+
+    return grok_turn
+
+
+def grok_json_as_turn(fake_grok):
+    """Adapt a ticket JSON stub to grok_turn."""
+    import json as _json
+
+    async def grok_turn(g, *, connector, world, snap, wake=""):
+        raw = await fake_grok(g, wake, stage="act")
+        try:
+            payload = _json.loads(raw) if isinstance(raw, str) else dict(raw)
+        except Exception:
+            payload = {}
+        if "strategy" not in payload and "action" not in payload:
+            payload = {
+                "action": "hold",
+                "strategy": "hold",
+                "rationale": str(payload.get("thesis") or "no ticket"),
+            }
+        return await fake_grok_turn(payload)(
+            g, connector=connector, world=world, snap=snap, wake=wake
+        )
+
+    return grok_turn
+
+
 @pytest.fixture(autouse=True)
 def _stub_opportunity_scan(monkeypatch):
     """Avoid live MDA candle fan-out during unit tests."""
@@ -80,10 +134,6 @@ def _stub_opportunity_scan(monkeypatch):
 
     monkeypatch.setattr(
         "abcxauto.opportunity_scan.scan_opportunities",
-        _empty,
-    )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.scan_opportunities",
         _empty,
     )
 
@@ -96,8 +146,4 @@ def _isolate_open_risk_and_structure_files(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "structure_events.jsonl")
     )
-    monkeypatch.setenv(
-        "ABCXAUTO_STRUCTURE_VOCAB_PATH", str(tmp_path / "structure_vocab.json")
-    )
     monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle_streak.json"))
-    monkeypatch.setenv("ABCXAUTO_GROKFOLIO_PATH", str(tmp_path / "grokfolio_state.json"))

@@ -28,8 +28,9 @@ def teardown_function():
 
 def test_defaults_1k_floor():
     snap = risk_config_snapshot()
-    assert snap["daily_loss_limit_pct"] == 2.0
-    assert snap["max_position_pct"] == 20.0
+    assert snap["daily_loss_limit_pct"] == 25.0
+    assert snap["max_position_pct"] == 25.0
+    assert snap["max_peak_drawdown_pct"] == 25.0
     assert snap["auto_panic_on_breach"] is True
     assert snap["defined_risk_only"] is True
     assert snap["max_open_positions"] == 15
@@ -56,12 +57,12 @@ def test_update_controls_rejects_risk_keys():
 
 
 def test_update_risk_config_session_override():
-    update_risk_config(daily_loss_limit_pct=3.0, persist=False)
+    update_risk_config(daily_loss_limit_pct=50.0, persist=False)
     cfg = get_config()
-    # Immutable floor: cannot raise daily-loss above 2%
-    assert cfg.daily_loss_limit_pct == 2.0
+    # Immutable floor: cannot raise daily-loss above 25%
+    assert cfg.daily_loss_limit_pct == 25.0
     clear_runtime_overrides()
-    assert get_config().daily_loss_limit_pct == 2.0
+    assert get_config().daily_loss_limit_pct == 25.0
 
 
 def test_update_controls_capacity(tmp_path, monkeypatch):
@@ -70,9 +71,9 @@ def test_update_controls_capacity(tmp_path, monkeypatch):
     clear_risk_settings(path=path)
     load_risk_settings(path)
     update_controls_config(max_open_positions=12, control_complexity_pct=80)
-    assert get_config().max_open_positions == 12  # in grokfolio range
+    assert get_config().max_open_positions == 12
     update_controls_config(max_open_positions=99, control_complexity_pct=80)
-    assert get_config().max_open_positions == 15  # floor ceiling
+    assert get_config().max_open_positions == 25
     assert get_config().control_complexity_pct == 80
 
 
@@ -108,9 +109,9 @@ def test_unknown_key_rejected():
 def test_controls_defaults_conservative():
     snap = risk_config_snapshot()
     assert snap["control_deliberation_pct"] == 40
-    assert snap["control_budget_pct"] == 25
+    assert snap["control_budget_pct"] == 80
     assert snap["control_complexity_pct"] == 40
-    assert snap["control_frequency_pct"] == 30
+    assert snap["control_frequency_pct"] == 50
     assert snap["control_rotation_pct"] == 40
 
 
@@ -151,7 +152,7 @@ def test_controls_persist_and_clamp(tmp_path, monkeypatch):
     assert "structure_complexity=100" in block or "option_complexity=100" in block
     assert "entry_surface=" in block
     assert "require_act=True" in block
-    assert "redeploy" in block.lower() or "free cash" in block.lower()
+    assert "HEURISTIC" not in block
 
 
 def test_legacy_options_migrates_to_complexity(tmp_path, monkeypatch):

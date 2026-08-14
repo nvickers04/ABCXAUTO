@@ -109,8 +109,8 @@ def test_format_controls_block_always_present():
     assert "UNIVERSE" in block
 
 
-def test_judge_prompt_objective_and_card(tmp_path, monkeypatch):
-    from abcxauto.agent_loop import _build_judge_prompt
+def test_book_facts_objective_and_card(tmp_path, monkeypatch):
+    from abcxauto.brain import _book_payload
     from abcxauto.world_state import WorldState
 
     monkeypatch.setenv("ABCXAUTO_OPERATOR_CARD", "Fade extensions only.")
@@ -153,18 +153,16 @@ def test_judge_prompt_objective_and_card(tmp_path, monkeypatch):
         trade_plan=None,
         idle_streak=0,
         idle_top_symbol="",
-        prep={},
-        review={},
     )
-    prompt = _build_judge_prompt(world)
+    blob = _book_payload(world)
+    prompt = "\n".join(str(blob.get(k) or "") for k in ("world", "controls", "operator_card", "floor"))
     assert "CONTROLS" in prompt
     assert "deliberation=" in prompt
     assert "entry_surface=" in prompt or "option_complexity=" in prompt
-    assert "operate the scanner" in prompt.lower() or "SCAN TAPE" in prompt
+    assert "SCAN TAPE" in prompt or "scan_tape" in prompt.lower()
     assert "prefer manage" not in prompt.lower()
     assert "prefer acting" not in prompt.lower()
-    assert "OPERATOR CARD" in prompt
-    assert "Fade extensions" in prompt
+    assert "OPERATOR CARD" in prompt or "Fade extensions" in prompt
     assert "QUOTE SOURCES" in prompt or "IBKR" in prompt
     assert find_banned_phrases(prompt) == [] or all(
         p not in prompt.lower() for p in ("prefer acting", "harvest", "mild bull")
@@ -206,8 +204,6 @@ def test_world_prompt_scan_tape_not_opportunities_header():
         trade_plan=None,
         idle_streak=0,
         idle_top_symbol="",
-        prep={},
-        review={},
     )
     block = world.prompt_block()
     assert "SCAN TAPE" in block

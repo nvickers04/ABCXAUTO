@@ -226,7 +226,10 @@ def build_narrative(pulse: dict) -> str:
     if sess.get("countdown_to") and sess.get("countdown_human"):
         bits.append(f"{sess['countdown_to']} in {sess['countdown_human']}")
     age = fresh.get("mda_spy_quote_age_s")
-    if age is not None:
+    spy_src = (fresh.get("sources") or {}).get("spy")
+    if spy_src == "ibkr_live":
+        bits.append("SPY from IBKR live")
+    elif age is not None:
         bits.append(f"MDA data {age:.0f}s old")
     else:
         bits.append("MDA age n/a")
@@ -265,8 +268,10 @@ def build_reality_pulse(
     et = now.astimezone(ET)
     sess = _session_block(now, market_hours)
     spy = spy_quote or {}
+    spy_src = str(spy.get("source") or "").lower()
     quote_ts = _parse_ts(spy.get("timestamp") or spy.get("updated") or spy.get("time"))
     mda_age = _age_s(quote_ts, now)
+    ibkr_spy = spy_src.startswith("ibkr")
     snapshot_ts = _parse_ts(taken_at) or now
     snap_age = _age_s(snapshot_ts, now) or 0.0
 
@@ -316,9 +321,16 @@ def build_reality_pulse(
             "ibkr_snapshot_age_s": snap_age,
             "ibkr_connected": ibkr_connected,
             "sources": {
-                "mda_spy": "fresh"
-                if mda_age is not None and mda_age < 30
-                else ("stale" if mda_age is not None else "unknown"),
+                "mda_spy": (
+                    "unused"
+                    if ibkr_spy
+                    else (
+                        "fresh"
+                        if mda_age is not None and mda_age < 30
+                        else ("stale" if mda_age is not None else "unknown")
+                    )
+                ),
+                "spy": "ibkr_live" if ibkr_spy else ("mda" if spy else "unknown"),
                 "ibkr": "live" if ibkr_connected else "unknown",
             },
             "spy_last": spy.get("last") or spy.get("price"),

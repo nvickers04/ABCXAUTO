@@ -1,4 +1,4 @@
-# Agent cycle — Grokfolio owns the book
+# Agent cycle — paper lab, live follower
 
 ## Goal vs control
 
@@ -6,45 +6,37 @@
 That is the **primary scorecard** and a **self-tune signal**.
 Size and risk are % of the book — the same at $1k, $100k, or $1M. No dollar sleeve.
 
-**Product:** Autopilot-style Grokfolio on this IBKR paper account. A scoring
-pass feeds Grok; Grok constructs ~15 long holdings as % of NetLiq; the shell
-diffs the book and sends gated actions. Clock is **hourly and/or daily** RTH
-(default both: daily at 10:00 ET, hourly 10-15 ET), not monthly. Hunt/hold
-scalping is not the product. Operator = setup + kill switch.
+**Product:** Grok is the trader. The shell does not teach IBKR. Paper is the lab
+(TWS 7497). Live only follows a promoted snapshot. Operator = setup + kill switch.
 
-Grok reads journal + scorecard every construct. Protect is never skipped.
+Grok reads journal + scorecard every cycle. Protect-first is code.
 
 ## Autonomy
 
 No operator approval. `self_tune` / `set_risk` applies immediately inside the
-immutable floor. Agent cannot disable grokfolio or set a dollar sleeve.
-Operator = setup + kill switch. Paper-first; live gated.
+immutable floor. Agent cannot switch to live or set a dollar sleeve.
 In Cursor, `python -m abcxauto` opens Pro and autostarts so the think stream
-is on screen (F5 = ABCXAUTO Pro). `--headless` is console-only outside Cursor.
+is on screen (F5 = ABCXAUTO Pro). `--headless` is paper-only.
 
-## The loop (Grokfolio)
+## The loop
 
 ```
-PERCEIVE  code facts (book, orders, account, protection, tape, news)
+SNAP      code facts (book, orders, protection) — 25s box
     |
-PROTECT   if unprotected STK: Judge/Act hunt path (hold forbidden)
+GROK      tool loop (stalled stream / dead chat reset once)
+          skip if IBKR down or session closed (unless unprotected)
+          book / quote / universe / journal / scan / send
     |
-GROKFOLIO if enabled and not protect:
-            wait until next slot  OR  construct weights + gated diffs
-            (multiple sends in one session is intended)
+CLERK     send → execute_ticket (risk, geometry, allowlist, protect)
+          hold forbidden: unprotected STK; paper+flat+RTH
     |
-VERIFY    hard gates only (risk $, geometry, allowlist, protect rules)
+REMEMBER  journal + playbook_lab.json
+          promote → playbook_live.json when beating + ready_to_promote
     |
-SEND      choke point → broker (or reject with reason)
-    |
-REMEMBER  journal + grokfolio_state.json
-    |
-WAIT      until next hourly/daily slot (overnight to next 10:00 ET weekday OK)
-          protect-first still wakes
+WAIT      pace from book/session (protect still wakes)
 ```
 
-If `ABCXAUTO_GROKFOLIO_ENABLED=false`, the legacy Perceive → Judge → Act
-hunt path remains.
+Optional: none. The hourly/daily calendar construct was removed.
 
 ## What stayed (non-negotiable)
 
@@ -52,23 +44,22 @@ hunt path remains.
 - Unprotected STK → protect first; hold forbidden while unprotected
 - Universe allowlist; shell does not rank ideas
 - IBKR live last for geometry (not MDA tape last)
-- Fail-closed; paper-first; live gated
-- Grokfolio may send several gated actions in one cycle (old one-action
-  model does not apply here)
+- Fail-closed; paper lab always; live gated + promoted playbook
+- Two books = two processes, two client ids (never share 77)
 
 ## Controls dials
 
 Agent-owned via `self_tune`. UI shows current values (status only).
-Capacity floor is 8-15 open positions (default 15) when grokfolio is on.
-Old persisted `max_open_positions=2` is repaired to 15.
+Capacity 1-25 open positions (Grok sets N; default 15; 0 forbidden).
 
 ## Hard vs soft (slim gates)
 
-| Hard (reject) | Structured field | Soft (prompt) |
-|---|---|---|
-| Unprotected → protect | Idle + tape → `dismissed` | setup_grade × posture |
-| Capacity / legal set / RiskGate | Schema: holdings JSON | regime_fit |
-| Geometry / inventory | | thesis AFFIRM/REVISE |
-| Defined-risk / cash-only / 2% daily loss / 20% max pos / 1% risk/trade / 8% peak DD | | |
+| Hard (reject) | Structured field |
+|---|---|
+| Unprotected → protect | |
+| Capacity / legal set / RiskGate | Schema: lab_playbook JSON |
+| Live hunt without promoted playbook | |
+| Geometry / inventory | |
+| Defined-risk / cash-only / 2% daily loss / 20% max pos / 1% risk/trade / 8% peak DD | |
 
-Shell does **not** rank ideas. Soft lessons never block a cycle.
+Shell does **not** rank ideas. Do not add prompt tactics for a smarter model.

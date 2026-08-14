@@ -7,56 +7,31 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PRO = REPO / "abcxauto" / "pro_desktop.py"
 REQUIRED = (
-    "Dashboard",
-    "Positions",
-    "Risk",
-    "Controls",
-    "Scorecard",
-    "Test Suite",
-    "Close All Positions",
+    "ABCXAUTO",
+    "Grok stream",
     "Connect IBKR",
     "Disconnect IBKR",
-    "Start agent",
-    "Stop agent",
     "Start",
     "Stop",
-    "Re-test",
-    "re-test",
-    "Reality Pulse",
-    "Order suite",
-    "Activity",
-    "Now",
-    "Working",
-    "Fills",
-    "_refresh_book_tab",
-    "_refresh_agent_tab",
-    "_refresh_log_tab",
-    "What's happening",
-    "World",
-    "Judgment",
-    "Action",
-    "Perceive -> Judge -> Act",
-    "Structure grade",
-    "lbl_agent_now",
-    "ABCXAUTO",
-    "DASH_TABS",
-    "suite_filter",
-    "roll_option",
-    "Total value",
-    "lbl_ret_1w",
+    "Halt",
+    "Refresh book",
+    "_toggle_connect",
+    "_toggle_run",
+    "_toggle_halt",
+    "_open_disconnect_confirm_dialog",
+    "_toggle_trading_mode",
+    "think_live",
     "lbl_ibkr_status",
     "lbl_xai_status",
     "lbl_mda_status",
-    "_toggle_connect",
-    "_open_disconnect_confirm_dialog",
-    "_page_risk",
-    "_page_controls",
-    "update_risk_config",
-    "lbl_account_id",
-    "lbl_account_mode",
-    "_sync_ibkr_account_label",
-    "_toggle_trading_mode",
-    "paper-only",
+    "Working orders",
+    "Session fills",
+    "Activity",
+    "Copy stream",
+    "lbl_link",
+    "lbl_tools",
+    "lbl_playbook",
+    "lbl_score",
 )
 
 
@@ -81,6 +56,13 @@ def main() -> int:
             ok = False
         else:
             lines.append(f"PASS: {label!r}")
+    banned = ("Close All Positions", "Judge/Act", "Judgment", "PANIC FLATTEN")
+    for label in banned:
+        if label in text:
+            lines.append(f"FAIL: banned {label!r} present")
+            ok = False
+        else:
+            lines.append(f"PASS: no {label!r}")
     lines.append(f"RESULT={'PASS' if ok else 'FAIL'}")
     print("\n".join(lines))
     return 0 if ok else 1

@@ -1,4 +1,4 @@
-"""Perceive → Judge → Act autonomous loop.
+"""Wake loop: snap facts, Grok tools, clerk gates on send.
 
 ``abcxauto.cycle`` re-exports this API for test/UI compatibility.
 """
@@ -10,29 +10,17 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-
-from xai_sdk.chat import system, user
+from typing import Any, Dict, List
 
 from abcxauto.book import build_book_from_snap
-from abcxauto.config import get_config, resolve_effective_posture, risk_envelope_snapshot
-from abcxauto.connections import connection_status
+from abcxauto.config import get_config
+from abcxauto.connections import connection_status  # noqa: F401 — tests patch this
 from abcxauto.llm import GrokClient
 from abcxauto.memory import get_journal
 from abcxauto.monitor import build_protection_report
-from abcxauto.opportunity_scan import (
-    QUOTE_SOURCES_BLOCK,
-    dismiss_cites_tape,
-    fetch_scan_metrics,
-    merge_tape,
-    normalize_tickers,
-    scan_opportunities,
-    tape_symbols,
-)
-from abcxauto.order_examples import format_order_examples
+from abcxauto.order_examples import SENDABLE_TYPES
 from abcxauto.reality_pulse import build_reality_pulse
 from abcxauto.send import send_action
-from abcxauto.session_cadence import maybe_auto_review_from_cycle
 from abcxauto.tools import run_readonly_tool
 from abcxauto.trade_plan import (
     close_trade_plan,
@@ -41,126 +29,46 @@ from abcxauto.trade_plan import (
     sync_open_risk,
 )
 from abcxauto.world_state import (
-    STANCES,
     WorldState,
     build_world_state,
-    idle_streak_threshold,
-    load_idle_streak,
-    update_idle_streak_after_judgment,
+    capacity_allows_new_risk,
+    day_facts,
+    format_wake,
 )
+from abcxauto.brain import grok, grok_turn
 
 logger = logging.getLogger(__name__)
 
-# Option multi-leg / lifecycle (executor already knows these; Act must allow).
+# Option multi-leg / lifecycle (executor already knows these).
 _OPTION_ENTRY_ACTIONS = (
     "vertical_spread|iron_condor|iron_butterfly|butterfly|straddle|strangle|"
     "calendar_spread|diagonal_spread|buy_option|cash_secured_put|"
     "ratio_spread|jade_lizard"
 )
-VALID_ACTIONS = (
-    "hold|set_risk|self_tune|bracket|market_bracket|market_order|limit_order|"
-    "stop_order|stop_limit|oca|modify_stop|modify_target|cancel_order|"
-    "close_option|roll_option|trailing_stop|trailing_stop_limit|"
-    "market_on_close|limit_on_close|market_on_open|limit_on_open|"
-    "covered_call|protective_put|collar|"
-    + _OPTION_ENTRY_ACTIONS
-)
-ALLOWED_ACTIONS = frozenset(VALID_ACTIONS.split("|"))
+ALLOWED_ACTIONS = frozenset(SENDABLE_TYPES)
+VALID_ACTIONS = "|".join(sorted(ALLOWED_ACTIONS))
 BLOCKED_STRAT = "blocked"
 _HUNT_OPTION_ENTRIES = frozenset(_OPTION_ENTRY_ACTIONS.split("|"))
 AWARENESS_HEART = (
-    "\n=== AWARENESS ===\n"
-    "Hold when protected or flat. Hold FORBIDDEN when unprotected STK.\n"
-    "Close by conId only. Risk gates are hard. PnL is truth.\n"
-    "Size each entry so stop risk fits max_risk_per_trade_pct. "
-    "self_tune (alias set_risk) retunes Controls, pacing, universe, prompts, "
-    "and may tighten risk — never weaken the immutable floor. No approval.\n"
-    "defined_risk_only is locked on. Scorecard: book return vs model cost.\n"
-)
-PROTECT_HOLD_RULES = (
-    "PROTECT/HOLD: hold allowed when book is protected or flat. "
-    "HOLD FORBIDDEN when unprotected STK - protect (oca/modify_stop) or exit "
-    "by exact conId first. Stock entries need bracket/market_bracket with stop+target. "
-    "Option entries use allowlisted multi-leg / CSP types (see ORDER EXAMPLES). "
-    "market_order is EXIT-ONLY (target_conId). Use direction LONG|SHORT for stock. "
-    "self_tune/set_risk adjusts agent knobs (floor cannot be weakened)."
+    "\n=== SHELL ===\n"
+    "Orders: ORDER EXAMPLES only. Close STK by conId. "
+    "Hold forbidden while unprotected STK, and while paper+flat+RTH idle (code). "
+    "Risk gates and defined_risk_only cannot be bypassed. "
+    "self_tune cannot weaken the immutable floor.\n"
 )
 TWEAKS: Dict[str, Any] = {"max_risk_pct": 0.5}
+RULES = AWARENESS_HEART
+SNAP_S = 25.0
+_GROK_SESSIONS = frozenset({"premarket", "regular", "postmarket"})
 _HIST_KEYS = (
-    "cycle", "pnl", "pnl_chg", "reality_pulse", "kahneman", "kahneman_trace",
-    "order_lab", "order_suite", "retest", "lab_summary", "result", "inventory",
+    "cycle", "pnl", "pnl_chg", "reality_pulse",
+    "result", "inventory",
     "validation", "reasoning_chain", "impact",
 )
-
-_SELF_TUNE = frozenset({"set_risk", "self_tune"})
-STANCE_ACTIONS: dict[str, frozenset[str]] = {
-    "protect": frozenset({
-        "oca", "modify_stop", "modify_target", "cancel_order",
-        "market_order", "limit_order", "stop_order", "stop_limit",
-        "close_option", "roll_option", "trailing_stop", "trailing_stop_limit",
-        "protective_put",
-    }),
-    "manage": frozenset({
-        "modify_stop", "modify_target", "cancel_order", "hold",
-        "oca", "market_order", "limit_order", "stop_order", "stop_limit",
-        "close_option", "roll_option", "trailing_stop", "trailing_stop_limit",
-        "market_on_close", "limit_on_close",
-        "covered_call", "protective_put", "collar",
-        "set_risk", "self_tune",
-    }) | _HUNT_OPTION_ENTRIES,
-    "hunt": frozenset({"bracket", "market_bracket", "set_risk", "self_tune"}) | _HUNT_OPTION_ENTRIES,
-    "idle": frozenset({"hold", "set_risk", "self_tune"}),
-}
-
-
-def _build_rules() -> str:
-    mandate = (get_config().trading_mandate or "")[:800]
-    return (
-        "ABCXAUTO Pro PAPER. Output ONLY valid JSON.\n"
-        f"MANDATE:\n{mandate}\n\n{PROTECT_HOLD_RULES}\n"
-        f"action AND strategy MUST be one of: {', '.join(sorted(ALLOWED_ACTIONS))}. "
-        "noop aliases to hold. NEVER invent names.\n" + AWARENESS_HEART
-    )
-
-
-RULES = _build_rules()
-
-
-def extract_kahneman(_act: dict | None = None) -> dict[str, Any]:
-    """Stub — Kahneman soft-gate removed from the hot path."""
-    return {
-        "system1_scan": "", "system2_base_rate": "", "debias": {},
-        "pre_mortem": "", "alternatives": [], "bias_audit": [],
-        "complete": False,
-        "missing": ["system2_base_rate", "pre_mortem", "bias_audit"],
-    }
-
-
-def format_kahneman_trace(_k: dict | None = None) -> str:
-    return "KAHNEMAN: (disabled)"
-
-
-def expected_json_shape_hint() -> str:
-    return (
-        'ACT JSON: {"action":"...","strategy":"...","params":{},'
-        '"rationale":"why this action fulfills Judgment intent",'
-        '"target_conId":"..."} — must satisfy Judgment.intent; '
-        "hold when stance=idle; hold FORBIDDEN when unprotected STK. "
-        "bracket/market_bracket/oca use direction LONG|SHORT."
-    )
-
-
-def parse_json(text: str) -> dict:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", text, re.S)
-        if not m:
-            return {}
-        try:
-            return json.loads(m.group())
-        except json.JSONDecodeError:
-            return {}
+_HIST_CAP = 24
+_NEW_RISK = frozenset(_OPTION_ENTRY_ACTIONS.split("|")) | frozenset(
+    {"bracket", "market_bracket"}
+)
 
 
 def pnl_of(acct: dict) -> float:
@@ -277,21 +185,63 @@ def simulate_close_impact(action: dict, positions: list) -> dict:
     }
 
 
+def _seed_live_quotes(*quotes: Any) -> dict[str, float]:
+    qmap: dict[str, float] = {}
+    for q in quotes:
+        if not isinstance(q, dict):
+            continue
+        if q.get("error") and q.get("last") is None and q.get("mid") is None:
+            continue
+        last = q.get("last") if q.get("last") is not None else q.get("mid")
+        sym = str(q.get("symbol") or "").upper()
+        try:
+            px = float(last)
+        except (TypeError, ValueError):
+            continue
+        if sym and px > 0:
+            qmap[sym] = px
+    return qmap
+
+
 async def _tool(c: Any, n: str, a: dict | None = None) -> Any:
-    return json.loads(await run_readonly_tool(n, a or {}, c))
+    raw = await run_readonly_tool(n, a or {}, c)
+    try:
+        return json.loads(raw)
+    except (TypeError, json.JSONDecodeError, ValueError):
+        logger.warning("snap tool %s returned non-json", n)
+        return {"error": f"{n}: bad json"}
 
 
 async def snap(c: Any) -> dict:
-    acct, pos, orders, hours, spy = await asyncio.gather(
-        _tool(c, "account_summary"),
-        _tool(c, "positions"),
-        _tool(c, "open_orders"),
-        _tool(c, "market_hours"),
-        _tool(c, "quote", {"symbol": "SPY"}),
-    )
     try:
-        vix = await _tool(c, "quote", {"symbol": "VIX"})
-    except Exception:
+        acct, pos, orders, hours, spy, vix = await asyncio.wait_for(
+            asyncio.gather(
+                _tool(c, "account_summary"),
+                _tool(c, "positions"),
+                _tool(c, "open_orders"),
+                _tool(c, "market_hours"),
+                _tool(c, "quote", {"symbol": "SPY"}),
+                _tool(c, "quote", {"symbol": "VIX"}),
+                return_exceptions=True,
+            ),
+            timeout=SNAP_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("snap timed out after %.0fs", SNAP_S)
+        acct = pos = orders = hours = spy = vix = TimeoutError("snap")
+    pos_ok = isinstance(pos, list)
+    ord_ok = isinstance(orders, list)
+    if isinstance(acct, Exception):
+        acct = {}
+    if isinstance(pos, Exception) or isinstance(pos, dict):
+        pos = []
+    if isinstance(orders, Exception) or isinstance(orders, dict):
+        orders = []
+    if isinstance(hours, Exception):
+        hours = {}
+    if isinstance(spy, Exception):
+        spy = {}
+    if isinstance(vix, Exception) or not isinstance(vix, dict) or vix.get("error"):
         vix = {}
     pl = pos if isinstance(pos, list) else []
     ol = orders if isinstance(orders, list) else []
@@ -305,6 +255,8 @@ async def snap(c: Any) -> dict:
         "spy_quote": spy if isinstance(spy, dict) else {},
         "vix_quote": vix if isinstance(vix, dict) else {},
         "protection": protection,
+        "book_unreliable": not (pos_ok and ord_ok),
+        "ibkr_live_quotes": _seed_live_quotes(spy, vix),
     }
     base["reality_pulse"] = build_reality_pulse(
         account=base["account"], positions=pl, open_orders=ol,
@@ -312,122 +264,18 @@ async def snap(c: Any) -> dict:
         vix_quote=base["vix_quote"], protection=protection,
         ibkr_connected=bool(getattr(c, "connected", True)), taken_at=taken,
     )
+    fills: list = []
+    get_fills = getattr(c, "get_fills", None)
+    if callable(get_fills):
+        try:
+            raw_fills = await get_fills()
+            if isinstance(raw_fills, list):
+                fills = raw_fills[:20]
+        except Exception:
+            logger.debug("snap fills failed", exc_info=True)
+    base["fills"] = fills
     base["portfolio_state"] = build_book_from_snap(base)
     return base
-
-
-def _judge_system() -> str:
-    mandate = (get_config().trading_mandate or "")[:600]
-    return (
-        "ABCXAUTO portfolio owner — Judge stage. "
-        "You own the book under hard risk code. Output ONLY valid JSON. No orders.\n"
-        f"MANDATE:\n{mandate}\n"
-        f"{QUOTE_SOURCES_BLOCK}\n"
-        "WORLDSTATE + SCAN TAPE are code facts. Tape is unranked MDA (delayed). "
-        "You pick hunt symbols — shell does not recommend a top idea.\n"
-        "stances: protect | manage | hunt | idle "
-        "(what you intend with the book this cycle — not a cost budget).\n"
-        "HARD GATES (code): unprotected STK → protect before new risk; "
-        "halt blocks entries; capacity/sizing; flat unconfirmed → no new risk. "
-        "Open book does NOT forbid hunt when capacity slots remain — multitask.\n"
-        "Prefer open-book work when safety Facts broken (unprotected / stop qty). "
-        "Optional secondary_intent when multitasking "
-        "(e.g. stance=manage + secondary_intent hunt under capacity).\n"
-        "To fetch more MDA metrics: set scan_request.symbols (max cap; ticker regex). "
-        "Or finalize stance/intent from the tape already present.\n"
-        "idle while flat + tape: write dismissed (why you pass) — real reason, not filler.\n"
-        "hunt intent.symbol MUST be legal Universe + on SCAN TAPE when tape present.\n"
-        "Soft preferences (not excuses to no-op forever): prefer quality setups under "
-        "defensive posture; avoid re-hunting structure_cooldown names; advance or "
-        "honestly close working_thesis.\n"
-        "Model API cost / ROI goal are NOT control signals — own the book.\n"
-        'JSON: {"stance":"...","thesis":"1-3 sentences","focus":"what mattered",'
-        '"dismissed":"why tape symbols rejected (required for idle when tape present)",'
-        '"scan_request":{"symbols":[],"reason":""},'
-        '"intent":{"kind":"protect|manage|hunt|idle","symbol":null,'
-        '"direction":null,"urgency":"low|med|high"},'
-        '"secondary_intent":null,'
-        '"risk_budget_pct":0.5,"regime_fit":true,"setup_grade":"A|B|C"}'
-    )
-
-
-def _act_system() -> str:
-    return (
-        _build_rules()
-        + "\nYou are ACT. Fulfill Judgment with ONE allowlisted action. "
-        "Always decide — hold is valid when the book is protected and nothing "
-        "meets the bar; hold is forbidden only while unprotected STK exists "
-        "(code enforces). Do not thrift-skip thinking for model cost.\n"
-        f"{QUOTE_SOURCES_BLOCK}\n"
-        "Hunt structure: use IBKR live last (price_hint / ibkr_live_last) for stock "
-        "brackets. Do not size stops from MDA tape last.\n"
-        "Do not contradict stance. idle → hold or self_tune. "
-        "hunt → bracket/market_bracket, self_tune/set_risk, or allowlisted option entries "
-        "(vertical/iron/CSP/…). "
-        "protect → oca/modify_*/protective_put/roll_option/close_option/exit by conId. "
-        "manage → hold/self_tune/trail/modify/exit/roll/close_option, overlays "
-        "covered_call|collar|protective_put when long shares allow, or option "
-        "structures (see TRADE PLAYBOOK + ORDER EXAMPLES).\n"
-        + expected_json_shape_hint()
-    )
-
-
-async def grok(g: GrokClient, p: str, *, stage: str = "act") -> str:
-    sys_msg = _judge_system() if stage == "judge" else _act_system()
-    chat = g.client.chat.create(
-        model=g.model,
-        messages=[system(sys_msg + "\nTWEAKS=" + json.dumps(TWEAKS)), user(p)],
-        temperature=g.temperature,
-        max_tokens=min(2048, g.max_tokens),
-    )
-    from abcxauto.think_stream import emit as think_emit
-
-    think_emit("stage", stage)
-    o = ""
-    saw_think = False
-    saw_say = False
-    think_acc = ""
-    say_acc = ""
-
-    def _delta(prev: str, incoming: str) -> tuple[str, str]:
-        if not incoming:
-            return prev, ""
-        if incoming.startswith(prev):
-            return incoming, incoming[len(prev):]
-        return prev + incoming, incoming
-
-    async for _, ch in chat.stream():
-        rc = getattr(ch, "reasoning_content", None) or ""
-        think_acc, think_piece = _delta(think_acc, rc)
-        if think_piece:
-            if not saw_think:
-                think_emit("say", "\n[think]\n")
-                saw_think = True
-            think_emit("think", think_piece)
-        if ch.content:
-            say_acc, say_piece = _delta(say_acc, ch.content)
-            if say_piece:
-                if not saw_say:
-                    think_emit("say", "\n[say]\n")
-                    saw_say = True
-                o += say_piece
-                think_emit("say", say_piece)
-    think_emit("stage_end", stage)
-    try:
-        from abcxauto.memory import get_journal
-        from abcxauto.scorecard import estimate_cost_usd, estimate_tokens
-
-        inn = estimate_tokens(sys_msg) + estimate_tokens(p)
-        out_tok = estimate_tokens(o)
-        get_journal().record_model_usage(
-            stage=stage,
-            input_tokens=inn,
-            output_tokens=out_tok,
-            cost_usd=estimate_cost_usd(inn, out_tok),
-        )
-    except Exception:
-        logger.debug("model usage journal failed", exc_info=True)
-    return o
 
 
 def _prepare_close_params(act: dict, positions: list) -> None:
@@ -482,439 +330,363 @@ def _prepare_close_params(act: dict, positions: list) -> None:
         act["params"].setdefault("action", "SELL" if signed > 0 else "BUY")
 
 
-def _extract_scan_request(judgment: dict) -> list[str]:
-    raw = (judgment or {}).get("scan_request")
-    if isinstance(raw, dict):
-        return normalize_tickers(raw.get("symbols"))
-    if isinstance(raw, list):
-        return normalize_tickers(raw)
-    return []
-
-
-def validate_judgment(judgment: dict, world: WorldState) -> tuple[bool, str, dict]:
-    """Hard floor only. Soft taste lives in the Judge prompt + journal, not rejects.
-
-    Hard (code reject):
-      - schema (stance/thesis/focus/intent)
-      - unprotected → protect (idle/hunt forbidden)
-      - hunt: flat-unconfirmed, capacity, symbol, universe, on tape when tape exists
-      - idle + tape: non-empty dismissed (structured field — not keyword liturgy)
-
-    Soft (prompt only — never reject here):
-      - setup_grade × posture, regime_fit, idle-streak text, thesis AFFIRM ritual,
-        structure cooldown, secondary_intent dual-hunt theater
-    """
-    j = dict(judgment or {})
-    stance = str(j.get("stance") or "").strip().lower()
-    if stance not in STANCES:
-        return False, f"invalid or missing stance {stance!r}", j
-    thesis = str(j.get("thesis") or "").strip()
-    focus = str(j.get("focus") or "").strip()
-    if not thesis or not focus:
-        return False, "judgment requires thesis and focus", j
-    intent = j.get("intent")
-    if not isinstance(intent, dict):
-        return False, "judgment.intent must be an object", j
-    kind = str(intent.get("kind") or "").strip().lower()
-    if not kind:
-        return False, "judgment.intent.kind required", j
-    j["stance"] = stance
-    j["thesis"] = thesis
-    j["focus"] = focus
-    j["dismissed"] = str(j.get("dismissed") or "").strip()
-    j["setup_grade"] = str(j.get("setup_grade") or "B").upper()[:1] or "B"
-    if j["setup_grade"] not in ("A", "B", "C"):
-        j["setup_grade"] = "B"
+def _cfg_is_paper() -> bool:
     try:
-        j["risk_budget_pct"] = float(j.get("risk_budget_pct") or 0)
-    except (TypeError, ValueError):
-        j["risk_budget_pct"] = 0.0
-
-    # --- HARD: protect first ---
-    if world.needs_protection:
-        if stance in ("idle", "hunt"):
-            return False, "unprotected STK — stance must be protect (idle/hunt forbidden)", j
-        j["stance"] = "protect"
-        stance = "protect"
-
-    from abcxauto.mega_worker import capacity_allows_new_risk
-    from abcxauto.trade_plan import load_flat_streak
-    from abcxauto.universe import is_legal_symbol
-
-    ideas = world.opportunities
-    symbols = tape_symbols(ideas)
-
-    # --- HARD: new-risk entry floor (not shell taste) ---
-    if stance == "hunt":
-        if load_flat_streak() > 0:
-            return False, "book flat unconfirmed — wait before new risk", j
-        if not capacity_allows_new_risk(world):
-            return False, "capacity full — no new risk (max_open_positions)", j
-        sym = str(intent.get("symbol") or "").upper()
-        if not sym:
-            return False, "hunt requires intent.symbol", j
-        intent["symbol"] = sym
-        j["intent"] = intent
-        if not is_legal_symbol(sym):
-            return False, f"hunt symbol {sym} outside Universe sandbox", j
-        # Tape membership when code actually produced a tape (fence, not ranking)
-        if ideas and sym not in symbols:
-            return False, f"hunt symbol {sym} not on SCAN TAPE", j
-
-    # secondary_intent: normalize only (no dual-stream court)
-    sec = j.get("secondary_intent")
-    if sec is not None and sec != {} and not isinstance(sec, dict):
-        j["secondary_intent"] = None
-    elif isinstance(sec, dict) and sec:
-        sec_kind = str(sec.get("kind") or "").strip().lower()
-        if sec_kind and sec_kind not in STANCES:
-            j["secondary_intent"] = None
-        else:
-            j["secondary_intent"] = sec
-    else:
-        j["secondary_intent"] = None
-
-    # --- STRUCTURED SOFT→HARD field only: force a reason when idling with tape ---
-    # Do NOT parse keywords / force ticker citation (that was process theater).
-    posture = (world.effective_posture or world.risk_posture or "").lower()
-    if (
-        stance == "idle"
-        and world.flat
-        and world.session_status == "regular"
-        and ideas
-        and posture in ("balanced", "aggressive")
-    ):
-        if len(j.get("dismissed") or "") < 8:
-            return False, "idle requires dismissed (why you pass on the tape)", j
-
-    # Soft lessons attached for journal/prompt consumers (never reject)
-    soft: list[str] = []
-    cool = getattr(world, "structure_cooldown", None) or {}
-    if stance == "hunt":
-        sym = str((j.get("intent") or {}).get("symbol") or "").upper()
-        if sym and sym in cool:
-            soft.append(f"structure_cooldown:{sym}={cool[sym]}")
-        grade = j["setup_grade"]
-        if posture == "defensive" and grade != "A":
-            soft.append("soft:defensive_prefers_grade_A")
-        if posture == "balanced" and grade == "C":
-            soft.append("soft:balanced_grade_C_is_thin")
-    if stance == "idle" and int(world.idle_streak or 0) >= idle_streak_threshold(posture):
-        soft.append(f"soft:idle_streak={world.idle_streak}")
-    if soft:
-        j["_soft_lessons"] = soft
-
-    return True, "ok", j
-
-
-def check_intent_coherence(
-    judgment: dict, strat: str, act: dict
-) -> tuple[bool, str]:
-    stance = str(judgment.get("stance") or "").lower()
-    intent = judgment.get("intent") if isinstance(judgment.get("intent"), dict) else {}
-    secondary = (
-        judgment.get("secondary_intent")
-        if isinstance(judgment.get("secondary_intent"), dict)
-        else {}
-    )
-    stream = str((act or {}).get("_stream") or "").lower()
-    # Stream / secondary_intent may fulfill hunt while primary stance is manage.
-    effective = stance
-    use_intent = intent
-    if stream in ("new_risk", "escapade") or (
-        strat in (frozenset({"bracket", "market_bracket"}) | _HUNT_OPTION_ENTRIES)
-        and stance != "hunt"
-        and str(secondary.get("kind") or "").lower() == "hunt"
-    ):
-        effective = "hunt"
-        if secondary.get("kind") == "hunt":
-            use_intent = secondary
-    elif stream == "open_risk" and stance == "hunt":
-        effective = "manage"
-    allowed = STANCE_ACTIONS.get(effective, frozenset())
-    if strat not in allowed:
-        # Also accept if allowed under primary stance (dual-intent)
-        primary_ok = strat in STANCE_ACTIONS.get(stance, frozenset())
-        sec_stance = str(secondary.get("kind") or "").lower()
-        sec_ok = sec_stance and strat in STANCE_ACTIONS.get(sec_stance, frozenset())
-        if not (primary_ok or sec_ok):
-            return False, f"act {strat!r} contradicts stance {stance!r}"
-        if sec_ok and not primary_ok:
-            effective = sec_stance
-            use_intent = secondary
-    from abcxauto.structure_complexity import strategy_allowed
-
-    if strat and strat not in ("blocked", "hold", "set_risk", "self_tune") and not strategy_allowed(strat):
-        from abcxauto.structure_complexity import reject_reason
-
-        return False, reject_reason(strat) or (
-            f"Controls allowlist blocks strategy {strat!r}"
-        )
-    hunt_sym_strats = frozenset({"bracket", "market_bracket"}) | _HUNT_OPTION_ENTRIES
-    if effective == "hunt" and strat in hunt_sym_strats:
-        want_sym = str(use_intent.get("symbol") or intent.get("symbol") or "").upper()
-        got_sym = str(((act.get("params") or {}).get("symbol") or "")).upper()
-        if want_sym and got_sym and want_sym != got_sym:
-            return False, f"intent symbol {want_sym} != act {got_sym}"
-        if strat in ("bracket", "market_bracket"):
-            want_dir = str(
-                use_intent.get("direction") or intent.get("direction") or ""
-            ).upper()
-            got_dir = str(((act.get("params") or {}).get("direction") or "")).upper()
-            if want_dir and got_dir and want_dir != got_dir:
-                return False, f"intent direction {want_dir} != act {got_dir}"
-    return True, "ok"
-
-
-def check_risk_budget(
-    judgment: dict, act: dict, net_liq: float, gates: dict | None = None
-) -> tuple[bool, str]:
-    """Advisory only. Hard size limits live in RiskGate.pre_trade_check.
-
-    Grok's risk_budget_pct is a self-hint, not a second reject court.
-    """
-    return True, "advisory"
-
-
-def _build_judge_prompt(world: WorldState, *, finalize: bool = False) -> str:
-    pressure = ""
-    posture = (world.effective_posture or "").lower()
-    syms = ", ".join(tape_symbols(world.opportunities)[:12]) or "(empty)"
-    from abcxauto.mega_worker import capacity_allows_new_risk, safety_facts_broken
-
-    cap = getattr(world, "capacity", None) or {}
-    cap_note = cap.get("note") or ""
-    if world.needs_protection:
-        pressure = "GATE: unprotected STK — stance MUST be protect (code)."
-    elif safety_facts_broken(world):
-        pressure = (
-            "GATE: safety Facts broken (stop qty / protection) — "
-            "prefer open-risk manage/protect Act; new-risk only after safety."
-        )
-    elif not capacity_allows_new_risk(world):
-        pressure = (
-            f"GATE: capacity full ({cap_note}) — no new-risk hunt (code). "
-            "Open-risk manage/protect only."
-        )
-    elif world.trade_plan or getattr(world, "trade_plans", None):
-        pressure = (
-            f"FACT: open book + capacity ({cap_note}). "
-            "Multitask OK — manage open-risk and/or hunt new-risk under capacity. "
-            "Optional secondary_intent. scan_request allowed when capacity remains."
-        )
-    elif (
-        world.flat
-        and world.session_status == "regular"
-        and world.opportunities
-        and posture in ("balanced", "aggressive")
-    ):
-        pressure = (
-            f"SOFT: flat + SCAN TAPE present (posture={posture}). "
-            f"Tape names: [{syms}]. idle → write dismissed (why pass). "
-            "hunt → intent.symbol on tape + legal universe. "
-            "Optional scan_request for more MDA. Own the book — no filler idle."
-        )
-    if finalize:
-        pressure += (
-            " PROCESS: finalize pass — scan_request ignored; set stance/intent now."
-        )
-    thresh = idle_streak_threshold(posture)
-    if world.idle_streak >= thresh and world.opportunities:
-        pressure += (
-            f" SOFT: idle_streak={world.idle_streak} — raise bar; new reason or hunt "
-            "(shell will not hard-reject repeated dismiss text)."
-        )
-    cool = getattr(world, "structure_cooldown", None) or {}
-    if cool:
-        pressure += (
-            f" SOFT: structure lessons (prefer other names): {cool}."
-        )
-    fetched = getattr(world, "scan_fetched", None) or []
-    if fetched:
-        pressure += f" PROCESS: MDA fetch this cycle: {fetched}."
-    from abcxauto.world_state import hunt_cooldown_remaining
-
-    soft = []
-    for idea in (world.opportunities or [])[:8]:
-        sym = str(idea.get("symbol") or "").upper()
-        if not sym:
-            continue
-        n = hunt_cooldown_remaining(world.recent_decisions, sym)
-        if n > 0:
-            soft.append(f"{sym}({n})")
-    if soft:
-        pressure += (
-            f" PROCESS: soft recent-entry on {', '.join(soft)} — not a hard block."
-        )
-    from abcxauto.config import (
-        format_controls_block,
-        format_operator_card_block,
-        get_config,
-    )
-    from abcxauto.scorecard import format_scorecard_block
-    from abcxauto.self_tune import format_floor_block
-    from abcxauto.trade_playbook import format_trade_playbook, world_hints_from_world
-
-    playbook = format_trade_playbook(
-        "",
-        world_hints_from_world(world),
-        for_judge=True,
-    )
-    cfg = get_config()
-    controls = format_controls_block(cfg)
-    floor = format_floor_block(cfg)
-    try:
-        score = format_scorecard_block(equity=getattr(world, "net_liquidation", None))
+        cfg = get_config()
     except Exception:
-        score = ""
-    card = format_operator_card_block(getattr(cfg, "operator_card", None))
-    card_bit = f"\n\n{card}" if card else ""
-    memory_bit = ""
-    try:
-        from abcxauto.memory import get_journal
+        return True
+    if hasattr(cfg, "is_paper"):
+        try:
+            return bool(cfg.is_paper)
+        except Exception:
+            pass
+    return str(getattr(cfg, "trading_mode", "paper") or "paper").lower() != "live"
 
-        jn = get_journal()
-        decs = jn.recent_decisions(limit=5) or []
-        tunes = jn.recent_self_tunes(limit=3) or []
-        if decs:
-            bits = []
-            for d in decs[:5]:
-                bits.append(
-                    f"{d.get('strategy') or d.get('action')}: "
-                    f"{str(d.get('rationale') or '')[:80]}"
-                )
-            memory_bit += "JOURNAL recent acts: " + " | ".join(bits) + "\n"
-        if tunes:
-            memory_bit += (
-                "JOURNAL recent self_tunes: "
-                + json.dumps([t.get("applied") for t in tunes], default=str)[:600]
-                + "\n"
-            )
+
+def _new_risk_halted(world: WorldState) -> bool:
+    gates = world.gates if isinstance(world.gates, dict) else {}
+    if gates.get("halted") or gates.get("is_halted"):
+        return True
+    book = world.book if isinstance(world.book, dict) else {}
+    if book.get("halted"):
+        return True
+    try:
+        from abcxauto.risk_gates import get_risk_gate
+
+        return bool(get_risk_gate().is_halted)
+    except Exception:
+        return False
+
+
+def _wake_grok_for_session(session: str, *, needs_prot: bool) -> bool:
+    """Overnight/weekend closed skips Grok. Premarket and postmarket wake it."""
+    if needs_prot:
+        return True
+    return str(session or "").lower() in _GROK_SESSIONS
+
+
+def paper_hold_forbidden(world: WorldState) -> bool:
+    """Paper lab, flat, RTH, can take new risk: sitting in cash is not a tactic.
+
+    Hold stays valid on live, with an open protected book, outside regular hours,
+    while halted, while flat-unconfirmed, or while unprotected STK must be covered.
+    """
+    if not _cfg_is_paper():
+        return False
+    if world.needs_protection:
+        return False
+    if not world.flat:
+        return False
+    if str(world.session_status or "").lower() != "regular":
+        return False
+    if _book_unreliable(world):
+        return False
+    if _new_risk_halted(world):
+        return False
+    try:
+        from abcxauto.trade_plan import load_flat_streak
+
+        if load_flat_streak() > 0:
+            return False
     except Exception:
         pass
-    return (
-        f"=== JUDGE STAGE ===\nCycle {world.cycle}.\n{pressure}\n\n"
-        f"{world.prompt_block()}\n\n"
-        f"{score}\n\n{floor}\n\n{controls}\n\n"
-        f"{memory_bit}"
-        f"{playbook}{card_bit}\n\n"
-        f"Open working_thesis: {(world.working_thesis or '-')[:300]}\n"
-        "Affirm, revise, or close it in thesis. "
-        "For manage overlays (covered_call/collar/put), say so in focus.\n"
-        "If scorecard is losing to the model bill, prefer self_tune (lengthen pacing / "
-        "narrow universe) over idle-forever. Output judgment JSON only."
-    )
+    return True
 
 
-def _build_act_prompt(
+
+def _book_unreliable(world: WorldState | None = None, snap: dict | None = None) -> bool:
+    if isinstance(snap, dict) and snap.get("book_unreliable"):
+        return True
+    gates = getattr(world, "gates", None) if world is not None else None
+    return bool(isinstance(gates, dict) and gates.get("book_unreliable"))
+
+
+def is_new_risk(strat: str) -> bool:
+    return str(strat or "").lower() in _NEW_RISK
+
+
+_WORK_TOOLS = frozenset({
+    "book",
+    "scan",
+    "option_facts",
+    "quote",
+    "option_quote",
+    "option_chain",
+    "fills",
+    "news",
+    "candles",
+    "status",
+    "self_tune",
+    "write_lab_playbook",
+})
+
+
+def turn_did_work(turn: Any) -> bool:
+    """True if this turn tuned, wrote the playbook, or fetched live facts."""
+    if getattr(turn, "lab_playbook", None):
+        return True
+    for name in getattr(turn, "tool_trace", None) or []:
+        if str(name) in _WORK_TOOLS:
+            return True
+    for item in getattr(turn, "sends", None) or []:
+        strat = str((item or {}).get("strat") or "").lower()
+        if strat in ("self_tune", "set_risk", "write_lab_playbook"):
+            return True
+    return False
+
+
+def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
+    """Clerk gates on send. Returns (strat, forced_result_or_None)."""
+    from abcxauto.protect import promote_naked_entry
+
+    promote_naked_entry(act, list(getattr(world, "positions", None) or []))
+    strat, forced = normalize_action(act)
+    if forced is not None:
+        return BLOCKED_STRAT, forced
+    needs_prot = bool(getattr(world, "needs_protection", False) or getattr(world, "unprotected", None))
+    if strat == "hold" and needs_prot:
+        return BLOCKED_STRAT, {
+            "status": "blocked",
+            "note": "hold_forbidden - unprotected STK needs protection",
+        }
+    if strat == "hold" and paper_hold_forbidden(world):
+        return BLOCKED_STRAT, {
+            "status": "blocked",
+            "note": (
+                "hold_forbidden - paper flat RTH: hunt, self_tune, or "
+                "write_lab_playbook — do not idle (live may hold)"
+            ),
+        }
+    if is_new_risk(strat):
+        if _book_unreliable(world):
+            return BLOCKED_STRAT, {
+                "status": "blocked",
+                "note": "book unreliable — no new risk",
+            }
+        if needs_prot:
+            return BLOCKED_STRAT, {
+                "status": "blocked",
+                "note": "unprotected STK — protect first (no new risk)",
+            }
+        try:
+            from abcxauto.trade_plan import load_flat_streak
+
+            if load_flat_streak() > 0:
+                return BLOCKED_STRAT, {
+                    "status": "blocked",
+                    "note": "book flat unconfirmed — wait before new risk",
+                }
+        except Exception:
+            pass
+        if not capacity_allows_new_risk(world):
+            return BLOCKED_STRAT, {
+                "status": "blocked",
+                "note": "capacity full — no new risk (max_open_positions)",
+            }
+        from abcxauto.universe import is_legal_symbol
+
+        sym = str(((act.get("params") or {}).get("symbol") or "")).upper()
+        if not sym:
+            return BLOCKED_STRAT, {
+                "status": "blocked",
+                "note": "new risk requires params.symbol",
+            }
+        if not is_legal_symbol(sym):
+            return BLOCKED_STRAT, {
+                "status": "blocked",
+                "note": f"hunt symbol {sym} outside Universe sandbox",
+            }
+        from abcxauto.lab_playbook import live_new_risk_allowed
+
+        if not live_new_risk_allowed():
+            return BLOCKED_STRAT, {
+                "status": "blocked",
+                "note": "live follower — no promoted paper playbook (no new risk)",
+            }
+    from abcxauto.structure_complexity import strategy_allowed
+
+    if strat not in ("hold", "set_risk", "self_tune", BLOCKED_STRAT) and not strategy_allowed(strat):
+        from abcxauto.structure_complexity import reject_reason
+
+        return BLOCKED_STRAT, {
+            "status": "blocked",
+            "note": reject_reason(strat) or f"Controls allowlist blocks strategy {strat!r}",
+        }
+    return strat, None
+
+
+async def execute_ticket(
+    act: dict,
+    connector: Any,
     world: WorldState,
-    judgment: dict,
-    *,
-    stream: str = "",
-) -> str:
-    from abcxauto.structure_grade import format_structure_lessons_for_prompt
-    from abcxauto.trade_playbook import format_trade_playbook, world_hints_from_world
-    from abcxauto.mega_worker import stream_act_prompt_suffix
-
-    lessons = format_structure_lessons_for_prompt(
-        getattr(world, "structure_lessons", None)
-    )
-    vocab = getattr(world, "structure_vocab", None) or {}
-    vocab_bit = ""
-    if vocab:
-        vocab_bit = (
-            f"SUITE TRAINER: pass_rate={vocab.get('pass_rate')} "
-            f"failed={vocab.get('failed')}\n"
-        )
-    stance = str((judgment or {}).get("stance") or "").lower()
-    # Stream may override effective stance for playbook allowlist
-    stream_stance = stance
-    if stream == "open_risk" and stance == "hunt":
-        stream_stance = "manage"
-    elif stream in ("new_risk", "escapade"):
-        stream_stance = "hunt"
-    playbook = format_trade_playbook(stream_stance, world_hints_from_world(world))
-    from abcxauto.config import (
-        format_controls_block,
-        format_operator_card_block,
-        get_config,
-    )
-    from abcxauto.scorecard import format_scorecard_block
-    from abcxauto.self_tune import format_floor_block
-
-    cfg = get_config()
-    controls = format_controls_block(cfg)
-    floor = format_floor_block(cfg)
-    try:
-        score = format_scorecard_block(equity=getattr(world, "net_liquidation", None))
-    except Exception:
-        score = ""
-    card = format_operator_card_block(getattr(cfg, "operator_card", None))
-    card_bit = f"{card}\n\n" if card else ""
-    ibkr_sym = str(getattr(world, "ibkr_live_symbol", "") or "")
-    ibkr_last = getattr(world, "ibkr_live_last", None)
-    ibkr_bit = ""
-    if ibkr_last is not None and ibkr_sym:
-        ibkr_bit = (
-            f"IBKR LIVE (source=ibkr freshness=live): {ibkr_sym} last={ibkr_last}\n"
-            "Use this for price_hint / stop / target — not MDA tape last.\n"
-        )
-    stream_bit = ""
-    if stream:
-        stream_bit = stream_act_prompt_suffix(stream, world=world) + "\n"
-    return (
-        f"=== ACT STAGE ===\nCycle {world.cycle}.\n"
-        f"{stream_bit}"
-        f"{QUOTE_SOURCES_BLOCK}\n"
-        f"{ibkr_bit}"
-        f"JUDGMENT:\n{json.dumps(judgment, default=str)[:2000]}\n\n"
-        f"{world.prompt_block(limit=2800)}\n\n"
-        f"{score}\n\n{floor}\n\n"
-        f"{controls}\n\n"
-        f"{lessons}\n{vocab_bit}"
-        "You OWN structure: pick order type + stop/target/qty from IBKR LIVE quote "
-        "(price_hint = ibkr last). Never reuse a prior stop if last moved. "
-        "Do not use MDA delayed tape last for geometry. "
-        "LONG: stop < live < target. Shell rejects wrong-side geometry.\n"
-        f"{format_order_examples()}\n\n"
-        f"{playbook}\n\n"
-        f"{card_bit}"
-        f"{format_position_inventory(world.positions)}\n"
-        f"{expected_json_shape_hint()}\n"
-        "Emit ONE action that fulfills intent. Include price_hint when hunting "
-        "(live last). No contradictions."
-    )
-
-
-async def _run_act_streams(
-    g: GrokClient,
-    world: WorldState,
-    judgment: dict,
-    *,
-    needs_prot: bool = False,
+    snap: dict,
 ) -> dict:
-    """One Act per cycle. Stream label is prompt focus only — not a branch tree."""
-    from abcxauto.mega_worker import primary_stream
+    """Normalize, gate, geometry, then send_action. Never bypass the clerk."""
+    positions = list(snap.get("positions") or world.positions or [])
+    strat, forced = gate_ticket(act, world)
+    if forced is not None:
+        act["strategy"] = act["action"] = BLOCKED_STRAT
+        act["rationale"] = str(forced.get("note") or act.get("rationale") or "")
+        return forced
 
-    stream = primary_stream(judgment, world, needs_prot=needs_prot)
-    j_use = dict(judgment or {})
-    # Keep Judgment as Grok wrote it; only tag focus for the Act prompt.
-    raw = await grok(
-        g, _build_act_prompt(world, j_use, stream=stream), stage="act"
+    if strat != BLOCKED_STRAT:
+        from abcxauto.structure_grade import append_structure_event
+        from abcxauto.trade_playbook import check_overlay_shares
+
+        ok_sh, sh_code, sh_msg = check_overlay_shares(
+            strat, act.get("params") or {}, positions
+        )
+        if not ok_sh:
+            try:
+                append_structure_event(
+                    {
+                        "source": "cycle",
+                        "strategy": strat,
+                        "symbol": str((act.get("params") or {}).get("symbol") or ""),
+                        "direction": "LONG",
+                        "params": {
+                            k: (act.get("params") or {}).get(k)
+                            for k in ("symbol", "shares", "strike", "expiration")
+                        },
+                        "outcome": sh_code,
+                        "reason_code": sh_code,
+                        "message": sh_msg,
+                    }
+                )
+            except Exception:
+                pass
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            act["_structure_grade"] = sh_code
+            return {"status": "blocked", "note": sh_msg, "reason_code": sh_code}
+
+    _prepare_close_params(act, positions)
+    try:
+        ok, vmsg = validate_action_against_inventory(act, positions)
+        if not ok and strat not in (BLOCKED_STRAT, "skipped", "set_risk", "self_tune", "hold"):
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            return {"status": "validated_block", "reason": vmsg}
+    except Exception:
+        pass
+
+    impact = simulate_close_impact(act, positions)
+    act["_live_positions"], act["_impact"] = positions, impact
+
+    quote_last = await _quote_for_action(act, snap, connector)
+    if quote_last is not None:
+        act["_quote_last"] = quote_last
+        params = act.setdefault("params", {})
+        if isinstance(params, dict) and params.get("price_hint") is None:
+            params["price_hint"] = quote_last
+    act["_posture"] = world.effective_posture or world.risk_posture
+    from abcxauto.protect import fill_missing_protection
+
+    try:
+        cfg = get_config()
+    except Exception:
+        cfg = None
+    fill_missing_protection(
+        act,
+        quote_last=quote_last,
+        equity=equity_of(snap.get("account") or {}) or float(getattr(world, "net_liquidation", 0) or 0),
+        posture=str(act["_posture"] or "balanced"),
+        cfg=cfg,
+        positions=positions,
     )
-    act = parse_json(raw) or {
-        "action": "hold",
-        "strategy": "hold",
-        "rationale": f"empty_act:{stream}",
-    }
-    act["_stream"] = stream
-    return act
+    strat = str(act.get("strategy") or act.get("action") or strat).strip().lower()
+    chosen_strat = strat
+
+    if strat in ("market_bracket", "oca", "bracket"):
+        from abcxauto.structure_grade import (
+            GEOMETRY_REJECTED,
+            append_structure_event,
+            check_live_geometry,
+        )
+
+        ok_g, code, gmsg = check_live_geometry(
+            strat,
+            act.get("params") or {},
+            quote_last=quote_last,
+            posture=str(act["_posture"] or "balanced"),
+        )
+        act["_structure_grade"] = code
+        if not ok_g:
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            append_structure_event(
+                {
+                    "source": "cycle",
+                    "strategy": chosen_strat,
+                    "symbol": str((act.get("params") or {}).get("symbol") or "").upper(),
+                    "direction": str((act.get("params") or {}).get("direction") or ""),
+                    "quote": quote_last,
+                    "params": {
+                        k: (act.get("params") or {}).get(k)
+                        for k in ("stop_price", "target_price", "entry_price", "quantity")
+                    },
+                    "outcome": GEOMETRY_REJECTED,
+                    "reason_code": code,
+                    "message": gmsg[:300],
+                }
+            )
+            result = {
+                "status": "rejected",
+                "error": f"{code}: {gmsg}",
+                "reason_code": code,
+                "learn": gmsg,
+            }
+            await _post_act_structure_and_plan(
+                act=act, strat=chosen_strat, result=result, judgment={},
+                snap=snap, quote_last=quote_last, connector=connector,
+            )
+            return result
+
+    if strat == "hold":
+        result = {"status": "hold", "strategy": "hold"}
+        act["_structure_grade"] = "hold"
+    elif strat in ALLOWED_ACTIONS:
+        result = await send_action(act, connector)
+        rc = str((result or {}).get("reason_code") or "")
+        st = str((result or {}).get("status") or "").lower()
+        if rc:
+            act["_structure_grade"] = rc
+        elif st in ("rejected", "blocked", "error", "failed"):
+            act["_structure_grade"] = st
+        else:
+            act["_structure_grade"] = act.get("_structure_grade") or "ok"
+    else:
+        result = {"status": "blocked"}
+
+    await _post_act_structure_and_plan(
+        act=act,
+        strat=chosen_strat,
+        result=result or {},
+        judgment={},
+        snap=snap,
+        quote_last=quote_last,
+        connector=connector,
+    )
+    act["strategy"] = strat
+    act["action"] = act.get("action") or strat
+    return result or {"status": "blocked"}
+
+
+def stance_from_book(strat: str, s: dict) -> str:
+    """Pacing/UI label from the book — not a Judge form."""
+    if (s.get("protection") or {}).get("unprotected_symbols"):
+        return "protect"
+    st = str(strat or "").lower()
+    if st in _NEW_RISK:
+        return "hunt"
+    if s.get("positions"):
+        return "manage"
+    if st in ("hold", "skipped", "blocked", BLOCKED_STRAT):
+        return "idle"
+    return "idle"
 
 
 def _result_dict(
     *, n: int, s: dict, act: dict, strat: str, result: dict,
     pnl: float, eq: float, prev: float, inventory: str, validation: str,
-    kahneman: dict, impact: dict | None = None,
+    kahneman: dict | None = None, impact: dict | None = None,
     judgment: dict | None = None,
     world: dict | None = None,
     stage_error: str = "",
@@ -949,9 +721,7 @@ def _result_dict(
         "reasoning_chain": market_read or rationale or (act or {}).get("reasoning_chain") or "",
         "tweak_before": {}, "impact": impact or {},
         "reality_pulse": s.get("reality_pulse") or {},
-        "kahneman": kahneman, "kahneman_trace": format_kahneman_trace(kahneman),
-        "order_lab": {}, "order_suite": {}, "lab_summary": "",
-        "retest": {}, "reconfig": {},
+        "kahneman": kahneman or {}, "kahneman_trace": "",
         "opportunities": ideas[:5],
         "news_items": [
             {
@@ -965,8 +735,8 @@ def _result_dict(
         "params": (act.get("params") or {}) if isinstance(act, dict) else {},
         "judgment": j,
         "world_state": world or {},
-        "stance": j.get("stance") or "",
-        "thesis": j.get("thesis") or "",
+        "stance": j.get("stance") or stance_from_book(strat, s),
+        "thesis": j.get("thesis") or rationale,
         "dismissed": j.get("dismissed") or "",
         "intent": j.get("intent") or {},
         "stage_error": stage_error,
@@ -978,6 +748,7 @@ def _result_dict(
         "ibkr_live_last": (world or {}).get("ibkr_live_last"),
         "ibkr_live_symbol": (world or {}).get("ibkr_live_symbol") or "",
         "scan_fetched": list((world or {}).get("scan_fetched") or []),
+        "book_unreliable": bool(s.get("book_unreliable")),
     }
 
 
@@ -986,24 +757,22 @@ def _journal_stages(
 ) -> None:
     try:
         journal = get_journal()
-        strat = out.get("strat")
+        strat = str(out.get("strat") or "")
         result = out.get("result") or {}
         j = judgment or {}
         if j:
             journal.record_judgment(
                 cycle=out.get("cycle"),
-                stance=str(j.get("stance") or ""),
-                thesis=str(j.get("thesis") or ""),
+                stance=str(j.get("stance") or out.get("stance") or ""),
+                thesis=str(j.get("thesis") or out.get("thesis") or ""),
                 focus=str(j.get("focus") or ""),
                 dismissed=str(j.get("dismissed") or ""),
                 intent=j.get("intent") or {},
                 judgment=j,
             )
-            stance = str(j.get("stance") or "").lower()
-            if stance and stance != "idle":
-                thesis = str(j.get("thesis") or "").strip()
-                if thesis:
-                    journal.set_working_thesis(thesis)
+        thesis = str(j.get("thesis") or out.get("thesis") or act.get("rationale") or "").strip()
+        if thesis and strat not in ("hold", "skipped", "blocked", BLOCKED_STRAT):
+            journal.set_working_thesis(thesis[:400])
         journal.record_decision(
             cycle=out.get("cycle"),
             action=act.get("action") or strat,
@@ -1020,32 +789,67 @@ def _journal_stages(
         logger.warning("agent_loop: journal stages failed: %s", exc)
 
 
-def _should_skip_act(
-    judgment: dict, world: WorldState, needs_prot: bool
-) -> bool:
-    """Retired thrift path. Always run Act — ROI/model-cost is not a control signal.
-
-    Kept as a named function so tests/call sites stay stable; always False.
-    """
-    return False
-
-
-def _maybe_eod_review(world: WorldState, judgment: dict | None, strat: str) -> None:
+def _order_id_of(order: dict) -> int | None:
+    raw = order.get("order_id") if order.get("order_id") is not None else order.get("orderId")
     try:
-        phase = str((world.regime or {}).get("session_phase") or "")
-        if phase != "close":
-            return
-        maybe_auto_review_from_cycle(
-            {
-                "end_of_day": True,
-                "thesis": (judgment or {}).get("thesis") or world.working_thesis,
-                "what_worked": (judgment or {}).get("focus") or "",
-                "mistake": (judgment or {}).get("dismissed") or "",
-                "next_change": f"last_act={strat}",
-            }
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _collapse_stacked_exits_after_snap(c: Any, s: dict) -> None:
+    """Keep one covering STP/TRAIL per STK lot; cancel extras. Never flatten."""
+    try:
+        from abcxauto.executor import collapse_stacked_protective_exits
+
+        cancelled = await collapse_stacked_protective_exits(
+            c, s.get("positions") or [], s.get("open_orders") or []
         )
+        if not cancelled:
+            return
+        drop = set(cancelled)
+        s["open_orders"] = [
+            o for o in (s.get("open_orders") or [])
+            if _order_id_of(o) not in drop
+        ]
+        pl = s.get("positions") or []
+        ol = s.get("open_orders") or []
+        s["protection"] = build_protection_report(pl, ol)
+        try:
+            s["reality_pulse"] = build_reality_pulse(
+                account=s.get("account") or {},
+                positions=pl,
+                open_orders=ol,
+                market_hours=s.get("market_hours") or {},
+                spy_quote=s.get("spy_quote") or {},
+                vix_quote=s.get("vix_quote") or {},
+                protection=s["protection"],
+                ibkr_connected=bool(getattr(c, "connected", True)),
+                taken_at=str(s.get("taken_at") or ""),
+            )
+        except Exception:
+            logger.debug("reality_pulse rebuild after collapse failed", exc_info=True)
     except Exception:
-        logger.exception("eod review failed")
+        logger.exception("stacked protective-exit collapse failed")
+
+
+def _persist_cycle(out: dict) -> dict:
+    try:
+        from abcxauto.think_stream import write_last_turn
+
+        write_last_turn(out)
+    except Exception:
+        logger.debug("last_turn persist failed", exc_info=True)
+    return out
+
+
+def _append_hist(h: List[dict], rec: dict) -> None:
+    h.append(rec)
+    if len(h) <= _HIST_CAP:
+        return
+    del h[:-_HIST_CAP]
+    for old in h[:-3]:
+        old.pop("snapshot", None)
 
 
 async def run_cycle(
@@ -1055,13 +859,9 @@ async def run_cycle(
     h: List[dict],
     prev: float,
 ) -> dict:
-    """Perceive → Judge → Act → hard gates/send → journal.
-
-    Straight ownership loop — not a skip/merge decision tree.
-    Shell does not invent stance. Act always runs after a valid Judge.
-    Model cost / long-run ROI is a scorecard goal, never a cycle control.
-    """
+    """Snap facts, Grok tools, clerk on send, journal."""
     s = await snap(c)
+    await _collapse_stacked_exits_after_snap(c, s)
     positions = s.get("positions") or []
     for p in positions:
         if "conId" not in p and "con_id" in p:
@@ -1072,9 +872,39 @@ async def run_cycle(
     inventory = format_position_inventory(positions)
     session = str((pulse.get("session") or {}).get("status") or "").lower()
     needs_prot = bool((s.get("protection") or {}).get("unprotected_symbols"))
-    grokfolio_on = bool(getattr(get_config(), "grokfolio_enabled", False))
+    ibkr_up = bool(getattr(c, "connected", True))
 
-    if session != "regular" and not needs_prot and not grokfolio_on:
+    if not ibkr_up:
+        act = {
+            "action": "skipped", "strategy": "skipped",
+            "rationale": "skipped_grok: ibkr_down",
+        }
+        out = _result_dict(
+            n=n, s=s, act=act, strat="skipped",
+            result={"status": "skipped", "note": "skipped_grok: ibkr_down"},
+            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
+            validation="skipped_grok: ibkr_down",
+        )
+        _journal_stages(out, act, s, None)
+        _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
+        return _persist_cycle(out)
+
+    if s.get("book_unreliable"):
+        act = {
+            "action": "skipped", "strategy": "skipped",
+            "rationale": "skipped_grok: book_unreliable",
+        }
+        out = _result_dict(
+            n=n, s=s, act=act, strat="skipped",
+            result={"status": "skipped", "note": "skipped_grok: book_unreliable"},
+            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
+            validation="skipped_grok: book_unreliable",
+        )
+        _journal_stages(out, act, s, None)
+        _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
+        return _persist_cycle(out)
+
+    if not _wake_grok_for_session(session, needs_prot=needs_prot):
         act = {
             "action": "skipped", "strategy": "skipped",
             "rationale": "skipped_grok: session_closed",
@@ -1083,13 +913,16 @@ async def run_cycle(
             n=n, s=s, act=act, strat="skipped",
             result={"status": "skipped", "note": "skipped_grok: session_closed"},
             pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-            validation="skipped_grok: session_closed", kahneman=extract_kahneman(act),
+            validation="skipped_grok: session_closed",
         )
         _journal_stages(out, act, s, None)
-        h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-        return out
+        _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
+        return _persist_cycle(out)
 
-    # Open-risk continuity from broker book (Fact)
+    from abcxauto.think_stream import emit as think_emit
+
+    think_emit("say", "Book snap done — Grok has the tools.\n")
+
     try:
         thesis_hint = ""
         try:
@@ -1105,380 +938,101 @@ async def run_cycle(
     except Exception:
         logger.exception("open risk sync failed")
 
-    try:
-        from abcxauto.news_feed import fetch_agent_news, format_news_for_prompt
-        news_items = await fetch_agent_news(s.get("positions") or [])
-        s["news_prompt"] = format_news_for_prompt(news_items)
-        s["news_items"] = news_items
-    except Exception:
-        s["news_prompt"] = ""
-        s["news_items"] = []
-
-    try:
-        from abcxauto.option_facts import fetch_option_facts
-
-        s["option_facts"] = await fetch_option_facts(positions)
-    except Exception:
-        logger.debug("option_facts fetch failed", exc_info=True)
-        s["option_facts"] = []
-
-    try:
-        ideas = await scan_opportunities(positions)
-    except Exception:
-        logger.exception("opportunity scan failed")
-        ideas = []
-    s["opportunities"] = ideas
-
+    s.setdefault("news_items", [])
+    s.setdefault("option_facts", [])
+    s.setdefault("opportunities", [])
     world = build_world_state(
-        cycle=n, snap=s, opportunities=ideas, news_items=s.get("news_items") or [],
+        cycle=n, snap=s, opportunities=[], news_items=[],
     )
     world_dict = world.to_dict()
-
-    if grokfolio_on and not needs_prot:
-        try:
-            from abcxauto.grokfolio import handle_cycle as grokfolio_cycle
-
-            gf = await grokfolio_cycle(
-                n=n,
-                connector=c,
-                g=g,
-                hist=h,
-                prev=prev,
-                snap=s,
-                world=world,
-                world_dict=world_dict,
-                pnl=pnl,
-                eq=eq,
-                inventory=inventory,
-                needs_prot=needs_prot,
-            )
-            if gf is not None:
-                return gf
-        except Exception as exc:
-            logger.exception("grokfolio cycle failed")
-            act = {
-                "action": "hold",
-                "strategy": "hold",
-                "rationale": f"grokfolio_wait: error {exc}",
-            }
-            out = _result_dict(
-                n=n, s=s, act=act, strat="hold",
-                result={"status": "blocked", "note": act["rationale"]},
-                pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-                validation=act["rationale"], kahneman=extract_kahneman(act),
-                judgment={"stance": "idle", "thesis": "grokfolio error", "focus": "schedule"},
-                world=world_dict, stage_error=str(exc),
-            )
-            try:
-                from abcxauto.grokfolio import sleep_until_next_s
-
-                wait = sleep_until_next_s(cfg=get_config(), session_status=session or "regular")
-            except Exception:
-                wait = 3600.0
-            out["pace"] = {"tier": "grokfolio", "sleep_s": wait, "reason": "grokfolio_error"}
-            _journal_stages(out, act, s, out.get("judgment"))
-            h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-            return out
-
-    # --- JUDGE (optional propose → MDA fetch → finalize) ---
+    day = None
     try:
-        raw_j = await grok(g, _build_judge_prompt(world), stage="judge")
-        judgment = parse_json(raw_j) or {}
+        from abcxauto.scorecard import compute_scorecard
+
+        sc = compute_scorecard(equity=getattr(world, "net_liquidation", None))
+        day = day_facts(world, sc)
+    except Exception:
+        day = None
+    wake = format_wake(
+        cycle=n,
+        session=world.session_status,
+        flat=world.flat,
+        unprotected=world.unprotected,
+        ibkr_up=ibkr_up,
+        day=day,
+    )
+    think_emit("say", "Wake Grok.\n")
+
+    try:
+        turn = await grok_turn(g, connector=c, world=world, snap=s, wake=wake)
     except Exception as exc:
-        logger.exception("judge failed")
-        judgment = {}
-        stage_err = f"judge_error: {exc}"
-        act = {"action": BLOCKED_STRAT, "strategy": BLOCKED_STRAT, "rationale": stage_err}
+        logger.exception("grok_turn failed")
+        act = {
+            "action": BLOCKED_STRAT, "strategy": BLOCKED_STRAT,
+            "rationale": f"grok_error: {exc}",
+        }
         out = _result_dict(
             n=n, s=s, act=act, strat=BLOCKED_STRAT,
-            result={"status": "blocked", "note": stage_err},
+            result={"status": "blocked", "note": f"grok_error: {exc}"},
             pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-            validation=stage_err, kahneman=extract_kahneman(act),
-            judgment={}, world=world_dict, stage_error=stage_err,
+            validation=f"grok_error: {exc}",
+            world=world_dict, stage_error=str(exc),
         )
         _journal_stages(out, act, s, None)
-        h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-        return out
+        _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
+        return _persist_cycle(out)
 
-    scan_syms = _extract_scan_request(judgment)
-    from abcxauto.mega_worker import capacity_allows_new_risk
-    from abcxauto.universe import filter_to_legal
-
-    scan_syms = filter_to_legal(scan_syms)
-    allow_scan = (
-        bool(scan_syms)
-        and not needs_prot
-        and capacity_allows_new_risk(world)
-        and session == "regular"
-    )
-    if allow_scan:
-        try:
-            extra = await fetch_scan_metrics(scan_syms)
-            if extra:
-                ideas = merge_tape(ideas, extra)
-                s["opportunities"] = ideas
-                world.opportunities = ideas
-                world.scan_fetched = tape_symbols(extra)
-                world_dict = world.to_dict()
-                world_dict["scan_fetched"] = list(world.scan_fetched)
-            raw_j2 = await grok(
-                g, _build_judge_prompt(world, finalize=True), stage="judge"
-            )
-            judgment = parse_json(raw_j2) or judgment
-            if isinstance(judgment, dict):
-                judgment.pop("scan_request", None)
-        except Exception:
-            logger.exception("judge scan_request fetch/finalize failed")
-
-    ok_j, jreason, judgment = validate_judgment(judgment, world)
-    if not ok_j:
-        act = {
-            "action": BLOCKED_STRAT, "strategy": BLOCKED_STRAT,
-            "rationale": f"judgment_rejected: {jreason}",
-        }
-        out = _result_dict(
-            n=n, s=s, act=act, strat=BLOCKED_STRAT,
-            result={"status": "blocked", "note": f"judgment_rejected: {jreason}"},
-            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-            validation=f"judgment_rejected: {jreason}",
-            kahneman=extract_kahneman(act),
-            judgment=judgment, world=world_dict, stage_error=jreason,
-        )
-        _journal_stages(out, act, s, judgment)
-        h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-        return out
-
-    update_idle_streak_after_judgment(judgment, world)
-
-    # IBKR live quote for hunt symbol (geometry truth — not MDA tape)
-    hunt_sym = ""
-    if str(judgment.get("stance") or "").lower() == "hunt":
-        intent = judgment.get("intent") if isinstance(judgment.get("intent"), dict) else {}
-        hunt_sym = str(intent.get("symbol") or "").upper()
-    if hunt_sym and c is not None:
-        try:
-            q = await _tool(c, "quote", {"symbol": hunt_sym})
-            live = _extract_last(q if isinstance(q, dict) else None)
-            if live is not None:
-                world.ibkr_live_last = live
-                world.ibkr_live_symbol = hunt_sym
-                s["ibkr_live_last"] = live
-                s["ibkr_live_symbol"] = hunt_sym
-                world_dict = world.to_dict()
-        except Exception:
-            logger.debug("IBKR live quote for %s failed", hunt_sym, exc_info=True)
-
-    # --- ACT (always — one focus stream; no thrift skip / multi-merge tree) ---
-    try:
-        act = await _run_act_streams(g, world, judgment, needs_prot=needs_prot)
-        if not act:
-            act = {"action": "hold", "strategy": "hold", "rationale": "empty_act"}
-    except Exception as exc:
-        logger.exception("act failed")
-        act = {
-            "action": BLOCKED_STRAT, "strategy": BLOCKED_STRAT,
-            "rationale": f"act_error: {exc}",
-        }
-        out = _result_dict(
-            n=n, s=s, act=act, strat=BLOCKED_STRAT,
-            result={"status": "blocked", "note": f"act_error: {exc}"},
-            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-            validation=f"act_error: {exc}", kahneman=extract_kahneman(act),
-            judgment=judgment, world=world_dict, stage_error=str(exc),
-        )
-        _journal_stages(out, act, s, judgment)
-        h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-        return out
-
-    strat, forced = normalize_action(act)
-    if strat == "hold" and needs_prot:
-        strat = BLOCKED_STRAT
-        forced = {
-            "status": "blocked",
-            "note": "hold_forbidden - unprotected STK needs protection",
-        }
-        act["strategy"] = act["action"] = BLOCKED_STRAT
-
-    # Intent coherence
-    if forced is None and strat != BLOCKED_STRAT:
-        ok_i, ireason = check_intent_coherence(judgment, strat, act)
-        if not ok_i:
-            strat = BLOCKED_STRAT
-            forced = {"status": "blocked", "note": f"intent_mismatch: {ireason}"}
-            act["strategy"] = act["action"] = BLOCKED_STRAT
-            act["rationale"] = f"intent_mismatch: {ireason}"
-
-    # Risk budget vs size
-    if forced is None and strat != BLOCKED_STRAT:
-        ok_b, breason = check_risk_budget(
-            judgment, act, world.net_liquidation, world.gates
-        )
-        if not ok_b:
-            strat = BLOCKED_STRAT
-            forced = {"status": "blocked", "note": f"risk_budget: {breason}"}
-            act["strategy"] = act["action"] = BLOCKED_STRAT
-
-    # Overlay share-lot guard (covered_call / collar / protective_put)
-    if forced is None and strat != BLOCKED_STRAT:
-        from abcxauto.structure_grade import append_structure_event
-        from abcxauto.trade_playbook import check_overlay_shares
-
-        ok_sh, sh_code, sh_msg = check_overlay_shares(
-            strat, act.get("params") or {}, positions
-        )
-        if not ok_sh:
-            overlay_name = strat
-            forced = {
-                "status": "blocked",
-                "note": sh_msg,
-                "reason_code": sh_code,
-            }
-            act["_structure_grade"] = sh_code
-            try:
-                append_structure_event(
-                    {
-                        "source": "cycle",
-                        "strategy": overlay_name,
-                        "symbol": str((act.get("params") or {}).get("symbol") or ""),
-                        "direction": "LONG",
-                        "params": {
-                            k: (act.get("params") or {}).get(k)
-                            for k in ("symbol", "shares", "strike", "expiration")
-                        },
-                        "outcome": sh_code,
-                        "reason_code": sh_code,
-                        "message": sh_msg,
-                    }
-                )
-            except Exception:
-                pass
-            strat = BLOCKED_STRAT
-            act["strategy"] = act["action"] = BLOCKED_STRAT
-
-    # Hold-streak: block serial hold after escalate threshold with same top opp
-    posture = (world.effective_posture or "").lower()
-    thresh = idle_streak_threshold(posture)
-    if (
-        forced is None
-        and strat == "hold"
-        and judgment.get("stance") == "idle"
-        and world.flat
-        and ideas
-        and int(world.idle_streak or 0) >= thresh
-    ):
-        # streak already includes prior idles; this cycle's judgment was accepted
-        # with new dismiss — allow hold. If streak high and we somehow got here
-        # without new dismiss, validate_judgment already blocked.
-        pass
-
-    validation = "n/a"
-    _prepare_close_params(act, positions)
-    try:
-        ok, vmsg = validate_action_against_inventory(act, positions)
-        validation = f"{'ok' if ok else 'rejected'}: {vmsg}"
-        if not ok and strat not in (BLOCKED_STRAT, "skipped", "set_risk", "self_tune"):
-            forced, strat = {"status": "validated_block", "reason": vmsg}, BLOCKED_STRAT
-    except Exception:
-        pass
-
-    impact = simulate_close_impact(act, positions)
-    act["_live_positions"], act["_impact"] = positions, impact
-
-    quote_last = await _quote_for_action(act, s, c)
-    if quote_last is not None:
-        act["_quote_last"] = quote_last
-        params = act.setdefault("params", {})
-        if isinstance(params, dict) and params.get("price_hint") is None:
-            params["price_hint"] = quote_last
-    act["_posture"] = world.effective_posture or world.risk_posture
-    chosen_strat = strat
-
-    if forced is None and strat in ("market_bracket", "oca", "bracket"):
-        from abcxauto.structure_grade import (
-            GEOMETRY_REJECTED,
-            append_structure_event,
-            check_live_geometry,
-        )
-
-        ok_g, code, gmsg = check_live_geometry(
-            strat,
-            act.get("params") or {},
-            quote_last=quote_last,
-            posture=str(act["_posture"] or "balanced"),
-        )
-        act["_structure_grade"] = code
-        if not ok_g:
-            forced = {
-                "status": "rejected",
-                "error": f"{code}: {gmsg}",
-                "reason_code": code,
-                "learn": gmsg,
-            }
-            strat = BLOCKED_STRAT
-            act["strategy"] = act["action"] = BLOCKED_STRAT
-            append_structure_event(
-                {
-                    "source": "cycle",
-                    "strategy": chosen_strat,
-                    "symbol": str((act.get("params") or {}).get("symbol") or "").upper(),
-                    "direction": str((act.get("params") or {}).get("direction") or ""),
-                    "quote": quote_last,
-                    "params": {
-                        k: (act.get("params") or {}).get(k)
-                        for k in (
-                            "stop_price", "target_price", "entry_price", "quantity",
-                        )
-                    },
-                    "outcome": GEOMETRY_REJECTED,
-                    "reason_code": code,
-                    "message": gmsg[:300],
-                }
-            )
-
-    if forced is not None:
-        result = forced
-    elif strat == BLOCKED_STRAT:
-        result = {"status": "blocked"}
-    elif strat == "hold":
-        result = {"status": "hold", "strategy": "hold"}
-        act["_structure_grade"] = "hold"
-    elif strat in ("set_risk", "self_tune"):
-        result = await send_action(act, c)
-        act["_structure_grade"] = "self_tune"
-    elif strat in ALLOWED_ACTIONS:
-        result = await send_action(act, c)
-        rc = str((result or {}).get("reason_code") or "")
-        st = str((result or {}).get("status") or "").lower()
-        if rc:
-            act["_structure_grade"] = rc
-        elif st in ("rejected", "blocked", "error", "failed"):
-            act["_structure_grade"] = st
+    act = dict(turn.last_act or {})
+    result = dict(turn.last_result or {})
+    strat = str(turn.last_strat or act.get("strategy") or "hold")
+    if not turn.sends and strat not in (BLOCKED_STRAT, "blocked"):
+        if turn_did_work(turn):
+            strat = "hold"
+            act = act or {"action": "hold", "strategy": "hold", "rationale": "no send"}
+            result = {"status": "hold", "strategy": "hold"}
         else:
-            act["_structure_grade"] = act.get("_structure_grade") or "ok"
-    else:
-        result = {"status": "blocked"}
+            strat, forced = gate_ticket(act if act else {
+                "action": "hold", "strategy": "hold", "rationale": "no send",
+            }, world)
+            if forced is not None:
+                result = forced
+                act["strategy"] = act["action"] = BLOCKED_STRAT
+                act["rationale"] = str(forced.get("note") or "")
+            else:
+                strat = "hold"
+                act = act or {"action": "hold", "strategy": "hold", "rationale": "no send"}
+                result = {"status": "hold", "strategy": "hold"}
 
-    await _post_act_structure_and_plan(
-        act=act,
-        strat=chosen_strat if strat == BLOCKED_STRAT else strat,
-        result=result or {},
-        judgment=judgment,
-        snap=s,
-        quote_last=quote_last,
-        connector=c,
-    )
-
-    _maybe_eod_review(world, judgment, strat)
-
+    s["opportunities"] = list(world.opportunities or [])
+    s["news_items"] = list(world.news_items or [])
+    s["option_facts"] = list(world.option_facts or [])
+    if turn.text and not act.get("market_read"):
+        act["market_read"] = turn.text[:400]
+    tool_note = ""
+    if getattr(turn, "tool_budget_hit", False):
+        tool_note = "tool_rounds_exhausted"
+    impact = act.get("_impact") or simulate_close_impact(act, positions)
     out = _result_dict(
         n=n, s=s, act=act, strat=strat, result=result,
         pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-        validation=validation, kahneman=extract_kahneman(act), impact=impact,
-        judgment=judgment, world=world_dict,
+        validation=str(result.get("note") or result.get("status") or "ok"),
+        impact=impact, world=world.to_dict(),
+        judgment={"lab_playbook": turn.lab_playbook} if turn.lab_playbook else {},
+        stage_error=tool_note,
     )
-    _journal_stages(out, act, s, judgment)
-    h.append({"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-    return out
+    out["tool_trace"] = list(turn.tool_trace or [])
+    if turn.sends:
+        for item in turn.sends:
+            _journal_stages(
+                {**out, "strat": item.get("strat") or out.get("strat"),
+                 "result": item.get("result") or {},
+                 "rationale": (item.get("act") or {}).get("rationale") or ""},
+                item.get("act") or act, s, None,
+            )
+    else:
+        _journal_stages(out, act, s, None)
+    _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS if k in out}})
+    return _persist_cycle(out)
 
 
 def _extract_last(q: dict | None) -> float | None:
@@ -1509,7 +1063,7 @@ async def _quote_for_action(act: dict, snap: dict, connector: Any = None) -> flo
     live: float | None = None
     if sym and connector is not None:
         try:
-            q = await _tool(connector, "quote", {"symbol": sym})
+            q = await _tool(connector, "quote", {"symbol": sym, "fresh": True})
             live = _extract_last(q if isinstance(q, dict) else None)
         except Exception:
             logger.debug("quote fetch for %s failed", sym, exc_info=True)
@@ -1520,6 +1074,15 @@ async def _quote_for_action(act: dict, snap: dict, connector: Any = None) -> flo
                 live = v
         except (TypeError, ValueError):
             pass
+    if live is None and sym:
+        qmap = snap.get("ibkr_live_quotes") or {}
+        if isinstance(qmap, dict) and qmap.get(sym) is not None:
+            try:
+                v = float(qmap[sym])
+                if v > 0:
+                    live = v
+            except (TypeError, ValueError):
+                pass
     if live is None and sym in ("", "SPY"):
         live = _extract_last(snap.get("spy_quote") or {})
     if live is not None:
@@ -1760,18 +1323,3 @@ async def _post_act_structure_and_plan(
                 close_trade_plan("scrape_suspect")
     except Exception:
         logger.exception("post_act structure/plan failed")
-
-
-def run_session_review_on_stop(summary: Optional[dict] = None) -> dict | None:
-    """Operator stop / pause → write session review for next Judge."""
-    try:
-        return maybe_auto_review_from_cycle(
-            {
-                "force": True,
-                **(summary or {}),
-                "notes": "operator stop",
-            }
-        )
-    except Exception:
-        logger.exception("session review on stop failed")
-        return None

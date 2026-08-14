@@ -1,0 +1,10 @@
+---
+description: Stream-review loop upgrades anything that blocks desired results, then restarts Pro.
+alwaysApply: true
+---
+
+# Iterate the product, not only the clerk
+
+The 90s stream review is a build loop. Read the think stream and last turn. If anything in the repo is blocking the desired result — tools, facts, gates, desktop, tests, pacing, scorecard, persist, observability, IBKR/MDA split — **change it, test, restart Pro** (paper only). Do not wait for a “clerk bug” label. Same class as batch `option_quote`, full-book `option_facts`, lever snapshots, BAG, fill-lag ≠ flat.
+
+Grok still owns the book: `send` quantity, `self_tune`, `write_lab_playbook`. Do not grow the system prompt or inject strategy lectures. Do not flatten, enable live, or commit unless asked.

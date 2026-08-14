@@ -6,6 +6,7 @@ Internal list field remains ``opportunities`` for journal/UI compat.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -16,17 +17,15 @@ logger = logging.getLogger(__name__)
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "ideas": []}
 _CACHE_TTL_S = 150.0
+# Seed tape size matches the book tool payload (world_state / format_scan_tape).
+TAPE_SEED_CAP = 12
 
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,7}$")
 
 QUOTE_SOURCES_BLOCK = (
-    "QUOTE SOURCES (facts):\n"
-    "- MDA: SCAN TAPE / candles / news — typically ~15m delayed (or delayed "
-    "unless client proves live). Use for discovery only. Do NOT treat tape "
-    "`last` as live for bracket geometry.\n"
-    "- IBKR: book, fills, working orders, and LIVE last for stop/target "
-    "geometry when TWS is connected. Rebuild hunt structure from IBKR live "
-    "(or geometry fails closed)."
+    "QUOTE SOURCES:\n"
+    "- IBKR quote/option_quote/book: live TWS stream. Use for send geometry.\n"
+    "- MDA scan/candles/news: typically ~15 min delayed. Discovery and backtest."
 )
 
 
@@ -66,7 +65,7 @@ def normalize_tickers(raw: Any, *, cap: int | None = None) -> list[str]:
     return out
 
 
-def _universe(positions: list[dict] | None, *, cap: int = 40) -> list[str]:
+def _universe(positions: list[dict] | None, *, cap: int = TAPE_SEED_CAP) -> list[str]:
     """Book symbols (manage) + Universe sandbox legal set (unranked)."""
     out: list[str] = []
     for p in positions or []:
@@ -123,7 +122,6 @@ def metrics_for_symbol(candles: list[dict], symbol: str) -> dict[str, Any] | Non
     dist20 = (last - sma20) / sma20
     return {
         "symbol": str(symbol or "").upper(),
-        "last": round(last, 4),
         "mda_last": round(last, 4),
         "sma20": round(sma20, 4),
         "sma50": round(sma50, 4) if sma50 is not None else None,
@@ -169,9 +167,8 @@ def format_scan_tape(ideas: list[dict[str, Any]], *, limit: int = 12) -> str:
         )
     lines = [
         "SCAN TAPE (unranked MDA metrics — typically delayed / not live).",
-        "Grok operates the scanner: pick hunt symbol from tape (or scan_request "
-        "more symbols). Shell does not recommend a top idea.",
-        "Do NOT use tape last for bracket geometry — use IBKR live on Act.",
+        "Grok operates the scanner. Shell does not recommend a top idea.",
+        "Do not use tape last for send geometry — use IBKR quote.",
         QUOTE_SOURCES_BLOCK,
     ]
     rows = sorted(
@@ -232,7 +229,8 @@ async def fetch_scan_metrics(
             configured = configured()
         if not configured:
             return []
-        for sym in syms:
+
+        async def _one(sym: str) -> dict[str, Any] | None:
             try:
                 candles = await client.get_stock_candles(
                     sym, resolution="D", countback=120
@@ -240,9 +238,14 @@ async def fetch_scan_metrics(
             except Exception:
                 logger.exception("fetch_scan_metrics candles failed for %s", sym)
                 candles = []
-            row = metrics_for_symbol(candles or [], sym)
-            if row:
+            return metrics_for_symbol(candles or [], sym)
+
+        rows = await asyncio.gather(*[_one(s) for s in syms], return_exceptions=True)
+        for row in rows:
+            if isinstance(row, dict) and row.get("symbol"):
                 ideas.append(row)
+            elif isinstance(row, Exception):
+                logger.exception("fetch_scan_metrics gather failed: %s", row)
     except Exception:
         logger.exception("fetch_scan_metrics failed")
         return []
@@ -253,7 +256,7 @@ async def scan_opportunities(
     positions: list[dict] | None = None,
     *,
     force: bool = False,
-    cap: int = 40,
+    cap: int = TAPE_SEED_CAP,
 ) -> list[dict[str, Any]]:
     """Seed SCAN TAPE: book + Universe sandbox legal set, unranked (cached)."""
     symbols = _universe(positions, cap=cap)

@@ -26,6 +26,12 @@ _EXIT_ONLY_STRATEGIES = frozenset({
 # a matching open position (any nonzero qty) before dispatch.
 _PROTECTION_STRATEGIES = frozenset({"oca", "trailing_stop", "trailing_stop_limit"})
 
+# Protective exits: after a successful place, other working STP/TRAIL on the
+# same STK symbol / exit side are cancelled so the new order becomes protection.
+_STACKABLE_PROTECTION = frozenset({
+    "trailing_stop", "trailing_stop_limit", "oca", "stop_order", "stop_limit",
+})
+
 
 async def _verify_has_open_position(
     proposal: OrderProposal, connector: Any
@@ -389,6 +395,119 @@ async def _verify_cancel_not_last_stop(
     return None
 
 
+def _keep_ids_from_place_result(result: Dict[str, Any]) -> set[int]:
+    """Order ids created by the new place -- never cancel these."""
+    keep: set[int] = set()
+    keys = ("order_id", "orderId", "stop_order_id", "target_order_id")
+
+    def _eat(obj: Any) -> None:
+        if not isinstance(obj, dict):
+            return
+        for k in keys:
+            raw = obj.get(k)
+            if raw is None:
+                continue
+            try:
+                keep.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+        for v in obj.values():
+            if isinstance(v, dict):
+                _eat(v)
+
+    _eat(result)
+    return keep
+
+
+def _working_stop_oid(order: Dict[str, Any]) -> Optional[int]:
+    raw = order.get("order_id") if order.get("order_id") is not None else order.get("orderId")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _cancel_order_ids(
+    connector: Any, ids: list[int], *, log_label: str
+) -> list[int]:
+    """Cancel working order ids. Never used to flatten a position."""
+    cancel = getattr(connector, "cancel_order", None)
+    if cancel is None:
+        logger.warning("%s: connector has no cancel_order", log_label)
+        return []
+    cancelled: list[int] = []
+    for oid in ids:
+        try:
+            cres = await cancel(order_id=oid)
+        except TypeError:
+            try:
+                cres = await cancel(oid)
+            except Exception as e:
+                logger.warning("%s: cancel %s failed: %s", log_label, oid, e)
+                continue
+        except Exception as e:
+            logger.warning("%s: cancel %s failed: %s", log_label, oid, e)
+            continue
+        if isinstance(cres, dict) and cres.get("error"):
+            logger.warning("%s: cancel %s: %s", log_label, oid, cres.get("error"))
+            continue
+        cancelled.append(oid)
+        logger.info("%s: cancelled order_id=%s", log_label, oid)
+    return cancelled
+
+
+async def _replace_protective_exits_after_place(
+    proposal: OrderProposal,
+    connector: Any,
+    result: Dict[str, Any],
+) -> list[int]:
+    """After a successful protective place, cancel other working STP/TRAIL.
+
+    Place first (brief double-cover), then cancel old. Never cancel keep ids
+    from the place result. Never cancel LMT take-profits. If the place failed
+    or keep ids are missing, cancel nothing.
+    """
+    if proposal.strategy not in _STACKABLE_PROTECTION:
+        return []
+    if not _dispatch_succeeded(result):
+        return []
+    symbol = str(getattr(proposal.params, "symbol", "") or "").upper()
+    if not symbol:
+        return []
+    keep = _keep_ids_from_place_result(result)
+    if not keep:
+        logger.warning(
+            "replace-on-place skipped: no order_id in place result for %s %s",
+            proposal.strategy, symbol,
+        )
+        return []
+    try:
+        positions = await connector.get_positions()
+        orders = await connector.get_open_orders()
+    except Exception as e:
+        logger.warning("replace-on-place skipped: cannot read book (%s)", e)
+        return []
+    from abcxauto.trade_plan import iter_working_stops, stk_qty_for_symbol
+
+    held_signed = stk_qty_for_symbol(positions, symbol)
+    if abs(held_signed) < 1e-9:
+        return []
+    direction = "LONG" if held_signed > 0 else "SHORT"
+    to_cancel: list[int] = []
+    seen: set[int] = set()
+    for o, _qty in iter_working_stops(orders, symbol, direction):
+        oid = _working_stop_oid(o)
+        if oid is None or oid in keep or oid in seen:
+            continue
+        seen.add(oid)
+        to_cancel.append(oid)
+    if not to_cancel:
+        return []
+    return await _cancel_order_ids(
+        connector, to_cancel, log_label="replace-on-place"
+    )
+
+
 def _dispatch_succeeded(result: Dict[str, Any]) -> bool:
     if not isinstance(result, dict):
         return False
@@ -474,7 +593,35 @@ async def execute_proposal(
     ):
         get_risk_gate().record_entry()
 
+    if proposal.strategy in _STACKABLE_PROTECTION and _dispatch_succeeded(result):
+        try:
+            await _replace_protective_exits_after_place(proposal, connector, result)
+        except Exception as e:
+            logger.warning(
+                "replace-on-place after %s failed: %s", proposal.strategy, e
+            )
+
     return result
+
+
+async def collapse_stacked_protective_exits(
+    connector: Any,
+    positions: list | None,
+    open_orders: list | None,
+) -> list[int]:
+    """Keep one covering STP/TRAIL per STK lot; cancel extras via connector.
+
+    Prefers the newest covering order_id. Does not flatten the position and
+    never cancels the last remaining covering stop. Returns cancelled ids.
+    """
+    from abcxauto.trade_plan import stacked_stop_cancel_ids
+
+    ids = stacked_stop_cancel_ids(positions, open_orders)
+    if not ids:
+        return []
+    return await _cancel_order_ids(
+        connector, ids, log_label="collapse stacked exits"
+    )
 
 
 async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
@@ -500,7 +647,11 @@ async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
             "strategy": strategy or "blocked",
         }
     if not getattr(connector, "connected", False):
-        return {"status": "logged", "strategy": strategy, "params": action.get("params")}
+        return {
+            "status": "error",
+            "note": "ibkr_disconnected",
+            "strategy": strategy,
+        }
     params = action.get("params") or {}
     quote_last = action.get("_quote_last")
     if quote_last is None:

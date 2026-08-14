@@ -321,6 +321,46 @@ def _order_action(o: dict) -> str:
     return str(o.get("action") or o.get("side") or "").upper()
 
 
+def _order_id(o: dict) -> int | None:
+    raw = o.get("order_id") if o.get("order_id") is not None else o.get("orderId")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_protective_stop_type(otype: str) -> bool:
+    from abcxauto.broker.order_types import is_stop_order
+
+    text = (otype or "").upper()
+    if is_stop_order(text):
+        return True
+    return any(k in text for k in ("STP", "TRAIL", "STOP"))
+
+
+def iter_working_stops(
+    open_orders: list[dict] | None, symbol: str, direction: str
+):
+    """Yield (order, abs_qty) for working STP/TRAIL on the exit side."""
+    sym = (symbol or "").upper()
+    want_exit = "SELL" if str(direction or "LONG").upper() == "LONG" else "BUY"
+    for o in open_orders or []:
+        if _order_symbol(o) != sym:
+            continue
+        sec = str(o.get("sec_type") or o.get("secType") or "STK").upper()
+        if sec and not sec.startswith("STK") and sec != "ETF":
+            continue
+        action = _order_action(o)
+        if action and action != want_exit:
+            continue
+        if not _is_protective_stop_type(_order_type(o)):
+            continue
+        q = _f(o.get("quantity") or o.get("totalQuantity") or o.get("total_quantity"))
+        if q is None:
+            continue
+        yield o, abs(q)
+
+
 def _exits_from_orders(
     open_orders: list[dict] | None, symbol: str, direction: str
 ) -> tuple[float | None, float | None]:
@@ -387,6 +427,46 @@ def working_stop_qty(open_orders: list[dict] | None, symbol: str, direction: str
         found = True
         total += abs(q)
     return total if found else None
+
+
+def stacked_stop_cancel_ids(
+    positions: list[dict] | None,
+    open_orders: list[dict] | None,
+) -> list[int]:
+    """Per STK symbol, keep the newest covering STP/TRAIL; return extra ids.
+
+    A stop covers when its qty is at least the held lot (0.51 share slack).
+    If no single order covers, cancel nothing (do not strip the last stop).
+    If only one working stop exists, cancel nothing.
+    """
+    to_cancel: list[int] = []
+    seen: set[str] = set()
+    for row in _stk_rows(positions):
+        sym = row["symbol"]
+        if sym in seen:
+            continue
+        seen.add(sym)
+        held_signed = stk_qty_for_symbol(positions, sym)
+        held = abs(held_signed)
+        if held < 1e-9:
+            continue
+        direction = "LONG" if held_signed > 0 else "SHORT"
+        stops: list[tuple[int, float]] = []
+        for o, q in iter_working_stops(open_orders, sym, direction):
+            oid = _order_id(o)
+            if oid is None:
+                continue
+            stops.append((oid, q))
+        if len(stops) < 2:
+            continue
+        covering = [oid for oid, q in stops if q + 1e-9 >= held - 0.51]
+        if not covering:
+            continue
+        keep_id = max(covering)
+        for oid, _q in stops:
+            if oid != keep_id:
+                to_cancel.append(oid)
+    return to_cancel
 
 
 def stop_qty_mismatch_fact(

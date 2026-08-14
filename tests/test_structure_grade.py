@@ -16,8 +16,6 @@ from abcxauto.structure_grade import (
     detect_scrape_from_fills,
     format_structure_lessons_for_prompt,
     recent_structure_lessons,
-    save_structure_vocab,
-    load_structure_vocab,
 )
 
 
@@ -117,24 +115,6 @@ def test_detect_scrape_from_fills():
     ]
     assert detect_scrape_from_fills(fills, symbol="QQQ") is True
     assert detect_scrape_from_fills(fills, symbol="SPY") is False
-
-
-def test_structure_vocab_persist(tmp_path, monkeypatch):
-    monkeypatch.setenv("ABCXAUTO_STRUCTURE_VOCAB_PATH", str(tmp_path / "vocab.json"))
-    save_structure_vocab(
-        {
-            "taken_at": "t",
-            "source": "test",
-            "pass_rate": 0.9,
-            "results": [
-                {"strategy": "market_bracket", "pass": True},
-                {"strategy": "oca", "pass": False, "detail": "fail"},
-            ],
-        }
-    )
-    v = load_structure_vocab()
-    assert "oca" in v.get("failed", [])
-    assert "market_bracket" in v.get("passed", [])
 
 
 @pytest.mark.asyncio
@@ -265,8 +245,10 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
         send_calls.append(1)
         raise AssertionError("must not send inverted stop")
 
+    from tests.conftest import grok_json_as_turn
+
     monkeypatch.setattr("abcxauto.agent_loop._tool", _tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok", grok)
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(grok))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom)
     async def _opps(*_a, **_k):
         return [{"symbol": "QQQ", "bias": "LONG", "score": 0.9}]
@@ -274,7 +256,6 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     async def _news(*_a, **_k):
         return []
 
-    monkeypatch.setattr("abcxauto.agent_loop.scan_opportunities", _opps)
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _news)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",

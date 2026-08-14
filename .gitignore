@@ -22,5 +22,11 @@ logs/
 journal.db
 journal.db-wal
 journal.db-shm
+playbook_lab.json
+playbook_live.json
+data/state/playbook_lab.json
+data/state/playbook_live.json
+data/state/think_tail.txt
+data/state/last_turn.json
 grokfolio_state.json
 data/state/grokfolio_state.json

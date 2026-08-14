@@ -12,6 +12,7 @@ import pytest
 
 from abcxauto.pro_engine import ProEngine
 from abcxauto.cycle import TWEAKS
+from tests.conftest import grok_json_as_turn
 
 SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-80c4246a04fb\implementer")
 GOAL_SCRATCH = SCRATCH
@@ -47,27 +48,11 @@ def patch_config(monkeypatch):
 @pytest.mark.asyncio
 async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
     """Engine.start() drives >=3 run_cycle with inventory+validation in records."""
-    from abcxauto.order_suite import set_cached_suite
-
-    set_cached_suite(
-        {
-            "pass_rate": 1.0,
-            "passed": 10,
-            "failed": 0,
-            "strategies_tested": 10,
-            "results": [],
-            "summary": "cached healthy",
-            "taken_at": "t",
-            "source": "startup",
-            "idle_prevented": True,
-        }
-    )
     calls = {"grok": 0}
 
     async def fake_grok(_g, prompt: str, *, stage: str = "act") -> str:
         calls["grok"] += 1
         if stage == "judge" or "JUDGE STAGE" in prompt:
-            assert "WORLDSTATE" in prompt or "unprotected" in prompt.lower()
             return json.dumps({
                 "stance": "protect",
                 "thesis": "Protect SPY",
@@ -83,8 +68,7 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
                 "regime_fit": True,
                 "setup_grade": "A",
             })
-        # Act prompts carry the live ledger / order examples.
-        assert "LIVE POSITION LEDGER" in prompt or "ORDER EXAMPLES" in prompt
+        # Act JSON
         calls["act"] = calls.get("act", 0) + 1
         # Occasionally return a close with explicit conId target to exercise real protocol path
         if calls["act"] % 3 == 0:
@@ -135,9 +119,8 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
         return []
 
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
-    monkeypatch.setattr("abcxauto.agent_loop.scan_opportunities", _no_opps)
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _no_news)
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
     monkeypatch.setattr(
@@ -399,7 +382,7 @@ async def test_pro_engine_wires_portfolio_monitor(monkeypatch):
     monkeypatch.setattr("abcxauto.monitor.get_config", lambda: _MonCfg())
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _MonCfg())
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
 
     reset_risk_gate()
@@ -429,40 +412,6 @@ async def test_pro_engine_wires_portfolio_monitor(monkeypatch):
     eng.drain_apply()
     assert eng.monitor is None
     reset_risk_gate()
-
-
-def test_startup_suite_schedules_dry_run(monkeypatch):
-    """Startup suite path never paper-places (force_dry / no place_*)."""
-    from abcxauto.order_suite import clear_cached_suite
-
-    clear_cached_suite()
-    monkeypatch.delenv("ABCXAUTO_SUITE_PAPER_PLACE", raising=False)
-    calls = {"force_dry": None, "connector": "unset"}
-
-    async def fake_suite(**kwargs):
-        calls["force_dry"] = kwargs.get("force_dry")
-        calls["connector"] = kwargs.get("connector")
-        return {
-            "pass_rate": 1.0,
-            "passed": 1,
-            "failed": 0,
-            "results": [],
-            "summary": "dry",
-            "taken_at": "t",
-            "source": kwargs.get("source"),
-            "idle_prevented": True,
-            "mode": "dry_run",
-        }
-
-    monkeypatch.setattr("abcxauto.order_suite.run_order_suite", fake_suite)
-
-    async def _run():
-        eng = ProEngine()
-        await eng._run_suite_once("startup", allow_paper_place=False)
-
-    asyncio.run(_run())
-    assert calls["force_dry"] is True
-    assert calls["connector"] is None
 
 
 @pytest.mark.asyncio
@@ -564,7 +513,7 @@ async def test_start_after_connect_enables_autonomous(monkeypatch):
         return {"status": "held", "strategy": "hold"}
 
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _Cfg())
@@ -599,33 +548,3 @@ async def test_start_after_connect_enables_autonomous(monkeypatch):
 
     eng.stop_engine()
     eng.drain_apply()
-
-
-def test_ensure_broker_ready_uses_connect_not_start(monkeypatch):
-    """Test Suite readiness must not require xAI / autonomy."""
-
-    class _NoXaiCfg:
-        xai_api_key = ""
-        cycle_sleep_s = 0.05
-        monitor_enabled = True
-        trading_mandate = ""
-
-    class _Conn:
-        connected = True
-
-        async def connect(self):
-            return True
-
-    monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _NoXaiCfg())
-    monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
-    monkeypatch.setattr(
-        "abcxauto.pro_engine.ProEngine._start_monitor",
-        lambda self: setattr(self, "monitor", type("M", (), {"running": True})()),
-    )
-
-    eng = ProEngine()
-    err = eng.ensure_broker_ready(timeout=5.0)
-    assert err is None
-    assert eng.state.connected
-    assert eng.state.autonomous is False
-    eng.stop_engine()

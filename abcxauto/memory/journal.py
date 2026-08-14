@@ -1108,6 +1108,75 @@ class TradeJournal:
             logger.exception("journal.record_model_usage failed")
             return None
 
+    def model_usage_since(self, since_iso: str) -> dict:
+        """Model usage with ts >= since_iso. Empty dict-shaped totals on miss."""
+        empty = {
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+        }
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(*) AS calls,
+                           COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                           COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                           COALESCE(SUM(cost_usd), 0) AS cost_usd
+                    FROM model_usage
+                    WHERE ts >= ?
+                    """,
+                    (str(since_iso),),
+                ).fetchone()
+            if not row:
+                return empty
+            return {
+                "calls": int(row["calls"] or 0),
+                "input_tokens": int(row["input_tokens"] or 0),
+                "output_tokens": int(row["output_tokens"] or 0),
+                "cost_usd": float(row["cost_usd"] or 0.0),
+            }
+        except Exception:
+            logger.exception("journal.model_usage_since failed")
+            return empty
+
+    def nav_at_or_before(self, before_iso: str) -> tuple[Optional[float], Optional[str]]:
+        """Latest NetLiq at or before ``before_iso``. (None, None) if none."""
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT ts, net_liquidation FROM snapshots
+                    WHERE net_liquidation IS NOT NULL
+                      AND net_liquidation > 0
+                      AND ts <= ?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (str(before_iso),),
+                ).fetchone()
+            if not row or row["net_liquidation"] is None:
+                return None, None
+            return float(row["net_liquidation"]), str(row["ts"] or "") or None
+        except Exception:
+            logger.exception("journal.nav_at_or_before failed")
+            return None, None
+
+    def snapshot_count_since(self, since_iso: str) -> int:
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM snapshots WHERE ts >= ?",
+                    (str(since_iso),),
+                ).fetchone()
+            return int((row["n"] if row else 0) or 0)
+        except Exception:
+            logger.exception("journal.snapshot_count_since failed")
+            return 0
+
     def model_usage_totals(self) -> dict:
         empty = {
             "calls": 0,
@@ -1139,24 +1208,29 @@ class TradeJournal:
             logger.exception("journal.model_usage_totals failed")
             return empty
 
-    def startup_cash(self) -> Optional[float]:
-        """First recorded NetLiq — book P&L start and return-% denominator."""
+    def first_snapshot(self) -> tuple[Optional[float], Optional[str]]:
+        """Oldest NetLiq and its ts."""
         try:
             self._ensure_schema()
             with self._connect() as conn:
                 row = conn.execute(
                     """
-                    SELECT net_liquidation FROM snapshots
+                    SELECT ts, net_liquidation FROM snapshots
                     WHERE net_liquidation IS NOT NULL AND net_liquidation > 0
                     ORDER BY id ASC LIMIT 1
                     """
                 ).fetchone()
-            if not row:
-                return None
-            return float(row["net_liquidation"])
+            if not row or row["net_liquidation"] is None:
+                return None, None
+            return float(row["net_liquidation"]), str(row["ts"] or "") or None
         except Exception:
-            logger.exception("journal.startup_cash failed")
-            return None
+            logger.exception("journal.first_snapshot failed")
+            return None, None
+
+    def startup_cash(self) -> Optional[float]:
+        """First recorded NetLiq — book P&L start and return-% denominator."""
+        nl, _ts = self.first_snapshot()
+        return nl
 
     def record_self_tune(
         self,

@@ -1,12 +1,11 @@
 """Headless paper runner — no UI, no approval. Operator = Ctrl+C kill switch.
 
-Prints every cycle so you can see what Grok judged and did.
+Prints every cycle so you can see what Grok sent and why.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 import signal
 import sys
 import time
@@ -25,11 +24,11 @@ def _one_line(text: Any, n: int = 240) -> str:
 
 
 def format_cycle_digest(d: dict[str, Any]) -> str:
-    """Human cycle block: stance → action, why, result, next sleep."""
+    """Human cycle block: send, why, result, next sleep."""
     n = d.get("cycle")
     j = d.get("judgment") or {}
-    stance = str(d.get("stance") or j.get("stance") or "-")
     strat = str(d.get("strat") or d.get("action") or "-")
+    stance = str(d.get("stance") or j.get("stance") or "").strip()
     thesis = _one_line(d.get("thesis") or j.get("thesis") or "", 220)
     why = _one_line(
         d.get("rationale")
@@ -45,8 +44,8 @@ def format_cycle_digest(d: dict[str, Any]) -> str:
         160,
     )
     err = _one_line(d.get("stage_error") or "", 200)
-    if "judge_error" in why or "UNAVAILABLE" in why or "AioRpcError" in why:
-        why = "judge_error: Grok API connection dropped"
+    if "grok_error" in why or "judge_error" in why or "UNAVAILABLE" in why or "AioRpcError" in why:
+        why = "grok_error: Grok API connection dropped"
         if not status:
             status = "blocked"
     nl = d.get("equity")
@@ -62,10 +61,8 @@ def format_cycle_digest(d: dict[str, Any]) -> str:
     pace = d.get("pace") if isinstance(d.get("pace"), dict) else {}
     sleep = pace.get("sleep_s")
     tier = pace.get("tier") or pace.get("reason") or ""
-    gf_line = _grokfolio_digest_line(d, result, pace, j)
-    lines = [f"CYCLE {n}  {stance} -> {strat}{book}"]
-    if gf_line:
-        lines.append(gf_line)
+    lead = f"{stance} -> " if stance else ""
+    lines = [f"CYCLE {n}  {lead}{strat}{book}"]
     if thesis:
         lines.append(f"  thesis: {thesis}")
     if why:
@@ -80,47 +77,6 @@ def format_cycle_digest(d: dict[str, Any]) -> str:
         except (TypeError, ValueError):
             pass
     return "\n".join(lines)
-
-
-def _grokfolio_digest_line(
-    d: dict[str, Any],
-    result: dict[str, Any],
-    pace: dict[str, Any],
-    judgment: dict[str, Any],
-) -> str:
-    """ASCII grokfolio wait vs run line for Windows consoles."""
-    rationale = str(d.get("rationale") or result.get("note") or "")
-    focus = str(judgment.get("focus") or "")
-    kind = str(result.get("kind") or "")
-    tier = str(pace.get("tier") or "")
-    reason = str(pace.get("reason") or "")
-    is_gf = (
-        tier == "grokfolio"
-        or "grokfolio" in rationale.lower()
-        or "grokfolio" in focus.lower()
-        or kind in ("daily", "hourly")
-        or "grokfolio" in reason
-    )
-    if not is_gf:
-        return ""
-    waiting = (
-        "wait" in rationale.lower()
-        or reason in ("grokfolio_schedule", "grokfolio_error")
-        or (not kind and "wait" in (focus + reason).lower())
-    )
-    if waiting:
-        try:
-            wait_s = float(pace.get("sleep_s") or 0)
-        except (TypeError, ValueError):
-            wait_s = 0.0
-        if wait_s <= 0:
-            m = re.search(r"(\d+(?:\.\d+)?)s", rationale)
-            wait_s = float(m.group(1)) if m else 0.0
-        return f"  GROKFOLIO wait - next slot in {wait_s:.0f}s"
-    holdings = result.get("holdings") if isinstance(result.get("holdings"), list) else []
-    actions = result.get("grokfolio") if isinstance(result.get("grokfolio"), list) else []
-    label = kind or "run"
-    return f"  GROKFOLIO {label} - {len(holdings)} holdings, {len(actions)} actions"
 
 
 def format_record(rec: dict[str, Any]) -> str | None:
@@ -220,10 +176,8 @@ def run_headless() -> int:
         print(f"Start failed: {err}", flush=True)
         return 1
     print(
-        "ABCXAUTO headless paper - grokfolio owner "
-        f"(~{int(getattr(cfg, 'grokfolio_holdings', 15) or 15)} names, "
-        f"{getattr(cfg, 'grokfolio_cadence', 'both')}). "
-        "Size is % of NetLiq. Ctrl+C is the kill switch.",
+        "ABCXAUTO headless paper lab - Grok writes the playbook, "
+        "scorecard is book return vs model cost. Ctrl+C is the kill switch.",
         flush=True,
     )
     seen = 0
@@ -253,12 +207,9 @@ def run_headless() -> int:
                 sleep = pace.get("sleep_s")
                 wait = f" next~{float(sleep):.0f}s" if sleep else ""
                 last = ascii_text(f"{st.stance or '-'}->{st.brain_strat or '-'}")
-                gf = ""
-                if str(pace.get("tier") or "") == "grokfolio":
-                    gf = " grokfolio"
                 print(
                     ascii_text(
-                        f"waiting{gf}{wait}  connected={st.connected}  "
+                        f"waiting{wait}  connected={st.connected}  "
                         f"last={last}  cycles={st.cycles}"
                     ),
                     flush=True,

@@ -1,4 +1,4 @@
-"""WorldState — deterministic perceive layer for Judge/Act (no LLM)."""
+"""WorldState — live book facts for Grok tools (no LLM)."""
 
 from __future__ import annotations
 
@@ -11,10 +11,7 @@ from typing import Any
 
 from abcxauto.config import get_config, resolve_effective_posture, risk_envelope_snapshot
 from abcxauto.opportunity_scan import QUOTE_SOURCES_BLOCK, format_scan_tape
-from abcxauto.session_cadence import load_prep, load_review, maybe_auto_prep_from_world
 from abcxauto.structure_grade import (
-    format_structure_lessons_for_prompt,
-    load_structure_vocab,
     recent_structure_lessons,
     structure_cooldown_symbols,
 )
@@ -24,8 +21,360 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _IDLE_STATE_PATH = _REPO_ROOT / "idle_streak_state.json"
+FILL_WINDOW_S = 180.0
+COMBO_FACT = "IBKR BAG — short legs only as spread legs"
+COMBO_STRATS = frozenset({
+    "vertical_spread",
+    "iron_condor",
+    "iron_butterfly",
+    "butterfly",
+    "straddle",
+    "strangle",
+    "calendar_spread",
+    "diagonal_spread",
+    "ratio_spread",
+    "jade_lizard",
+})
 
-STANCES = frozenset({"protect", "manage", "hunt", "idle"})
+
+def fill_age_s(fill: dict[str, Any], now: datetime | None = None) -> float | None:
+    ts = str(fill.get("ts") or fill.get("time") or "")
+    if not ts:
+        return None
+    try:
+        raw = ts.replace("Z", "+00:00")
+        clock = now or datetime.now(timezone.utc)
+        return (clock - datetime.fromisoformat(raw)).total_seconds()
+    except ValueError:
+        return None
+
+
+def fill_in_window(fill: dict[str, Any], *, window_s: float = FILL_WINDOW_S) -> bool:
+    age = fill_age_s(fill)
+    if age is None:
+        return True
+    return age <= window_s
+
+
+def position_avg_facts(pos: dict[str, Any] | None) -> dict[str, Any]:
+    """STK avg is per-share. OPT IBKR averageCost is usually contract cash."""
+    p = pos if isinstance(pos, dict) else {}
+    raw = p.get("avgCost") if p.get("avgCost") is not None else p.get("avg_cost")
+    if raw is None:
+        raw = p.get("averageCost")
+    try:
+        raw_f = float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        raw_f = None
+    mkt = p.get("market_price") or p.get("marketPrice") or p.get("last")
+    try:
+        mkt_f = float(mkt) if mkt is not None else None
+    except (TypeError, ValueError):
+        mkt_f = None
+    sec = str(p.get("secType") or p.get("sec_type") or p.get("sec") or "STK").upper()
+    out: dict[str, Any] = {"avg": raw_f}
+    if not sec.startswith("OPT") or raw_f is None:
+        return out
+    contract = abs(raw_f) >= 5.0 and (mkt_f is None or abs(raw_f) > abs(mkt_f) * 3)
+    if contract:
+        out["avg"] = raw_f / 100.0
+        out["avg_usd"] = raw_f
+    else:
+        out["avg"] = raw_f
+        out["avg_usd"] = raw_f * 100.0
+    return out
+
+
+def compact_position(pos: dict[str, Any], *, extra: bool = True) -> dict[str, Any]:
+    p = pos if isinstance(pos, dict) else {}
+    avg_row = position_avg_facts(p)
+    row: dict[str, Any] = {
+        "conId": p.get("conId") or p.get("con_id"),
+        "symbol": p.get("symbol"),
+        "sec": p.get("secType") or p.get("sec_type"),
+        "qty": p.get("quantity") if p.get("quantity") is not None else p.get("position"),
+        "avg": avg_row.get("avg"),
+        "mkt": p.get("market_price") or p.get("marketPrice") or p.get("last"),
+    }
+    if avg_row.get("avg_usd") is not None:
+        row["avg_usd"] = avg_row["avg_usd"]
+    if extra:
+        if p.get("expiration") or p.get("lastTradeDateOrContractMonth"):
+            row["expiration"] = p.get("expiration") or p.get("lastTradeDateOrContractMonth")
+        if p.get("strike") is not None:
+            row["strike"] = p.get("strike")
+        if p.get("right"):
+            row["right"] = p.get("right")
+        local = p.get("local_symbol") or p.get("localSymbol")
+        if local:
+            row["local"] = local
+    return row
+
+
+def reconcile_book_with_fills(
+    positions: list[dict] | None,
+    orders: list[dict] | None,
+    fills: list[dict] | None,
+    *,
+    window_s: float = FILL_WINDOW_S,
+) -> tuple[list[dict], list[dict], bool]:
+    """Drop lots / working tickets that recent fills already closed."""
+    pos_out = [dict(p) for p in (positions or []) if isinstance(p, dict)]
+    ord_out = [dict(o) for o in (orders or []) if isinstance(o, dict)]
+    sold: dict[str, float] = {}
+    filled_ids: set[str] = set()
+    for f in fills or []:
+        if not isinstance(f, dict) or not fill_in_window(f, window_s=window_s):
+            continue
+        oid = f.get("order_id") if f.get("order_id") is not None else f.get("orderId")
+        if oid is not None and str(oid):
+            filled_ids.add(str(oid))
+        pid = f.get("permId") if f.get("permId") is not None else f.get("perm_id")
+        if pid is not None and str(pid):
+            filled_ids.add(str(pid))
+        side = str(f.get("side") or f.get("action") or "").upper()
+        if side not in ("SLD", "SELL"):
+            continue
+        cid = str(f.get("conId") or f.get("con_id") or "")
+        if not cid:
+            continue
+        try:
+            qty = abs(float(f.get("quantity") if f.get("quantity") is not None else f.get("shares") or 0))
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty > 0:
+            sold[cid] = sold.get(cid, 0.0) + qty
+    reconciled = False
+    kept_pos: list[dict] = []
+    for p in pos_out:
+        cid = str(p.get("conId") or p.get("con_id") or "")
+        try:
+            qty = abs(float(
+                p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0
+            ))
+        except (TypeError, ValueError):
+            qty = 0.0
+        take = sold.get(cid, 0.0) if cid else 0.0
+        if take > 0 and qty > 0:
+            reconciled = True
+            left = qty - take
+            if left < 1e-9:
+                continue
+            sign = 1.0
+            try:
+                raw_q = float(p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0)
+                if raw_q < 0:
+                    sign = -1.0
+            except (TypeError, ValueError):
+                pass
+            if "quantity" in p:
+                p["quantity"] = sign * left
+            if "position" in p:
+                p["position"] = sign * left
+        kept_pos.append(p)
+    kept_ord: list[dict] = []
+    for o in ord_out:
+        oid = str(o.get("order_id") if o.get("order_id") is not None else o.get("orderId") or "")
+        pid = str(o.get("permId") if o.get("permId") is not None else o.get("perm_id") or "")
+        if (oid and oid in filled_ids) or (pid and pid in filled_ids):
+            reconciled = True
+            continue
+        kept_ord.append(o)
+    return kept_pos, kept_ord, reconciled
+
+
+def book_is_flat(
+    positions: list[dict] | None,
+    orders: list[dict] | None,
+    fills: list[dict] | None = None,
+) -> bool:
+    """Empty book only when no lots, no working tickets, and no pending entry fill."""
+    from abcxauto.trade_plan import book_has_risk
+
+    if book_has_risk(positions):
+        return False
+    if any(isinstance(o, dict) for o in (orders or [])):
+        return False
+    held = {
+        str(p.get("conId") or p.get("con_id") or "")
+        for p in (positions or [])
+        if isinstance(p, dict)
+    }
+    held.discard("")
+    now = datetime.now(timezone.utc)
+    for f in fills or []:
+        if not isinstance(f, dict):
+            continue
+        side = str(f.get("side") or f.get("action") or "").upper()
+        if side not in ("BOT", "BUY"):
+            continue
+        cid = str(f.get("conId") or f.get("con_id") or "")
+        if cid and cid in held:
+            continue
+        ts = str(f.get("ts") or f.get("time") or "")
+        if ts:
+            try:
+                raw = ts.replace("Z", "+00:00")
+                age = (now - datetime.fromisoformat(raw)).total_seconds()
+                if age > 180:
+                    continue
+            except ValueError:
+                pass
+        return False
+    return True
+
+
+def compact_working_orders(
+    orders: list[dict] | None, *, limit: int = 12
+) -> list[dict[str, Any]]:
+    """Book facts: working order id, type, qty, stop/trail."""
+    rows: list[dict[str, Any]] = []
+    for o in orders or []:
+        if not isinstance(o, dict):
+            continue
+        oid = o.get("order_id")
+        if oid is None:
+            oid = o.get("orderId")
+        otype = o.get("order_type") or o.get("orderType")
+        sec = str(o.get("sec_type") or o.get("secType") or "STK").upper()
+        row = {
+            "order_id": oid,
+            "symbol": o.get("symbol"),
+            "sec": sec,
+            "type": otype,
+            "action": o.get("action") or o.get("side"),
+            "qty": o.get("quantity") if o.get("quantity") is not None else o.get("totalQuantity"),
+        }
+        if sec.startswith("OPT"):
+            if o.get("strike") is not None:
+                row["strike"] = o.get("strike")
+            if o.get("right"):
+                row["right"] = o.get("right")
+            if o.get("expiration"):
+                row["expiration"] = o.get("expiration")
+            local = o.get("local_symbol") or o.get("localSymbol")
+            if local:
+                row["local"] = local
+        stop = (
+            o.get("aux_price")
+            or o.get("auxPrice")
+            or o.get("stop_price")
+            or o.get("stopPrice")
+        )
+        if stop not in (None, 0, 0.0, "0"):
+            row["stop"] = stop
+        lmt = o.get("lmt_price") or o.get("lmtPrice") or o.get("limit_price")
+        if lmt not in (None, 0, 0.0, "0"):
+            row["lmt"] = lmt
+        trail = o.get("trail_percent") or o.get("trailingPercent") or o.get("trail_amount")
+        if trail not in (None, 0, 0.0, "0"):
+            row["trail"] = trail
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def concentration(positions: list[dict] | None) -> dict[str, Any]:
+    """Lots vs unique names. Clone list is a fact, not a rank."""
+    by_name: dict[str, dict[str, Any]] = {}
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        sym = str(p.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        try:
+            qty = abs(float(
+                p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0
+            ))
+        except (TypeError, ValueError):
+            continue
+        if qty < 1e-9:
+            continue
+        rec = by_name.setdefault(sym, {"lots": 0, "qty": 0.0})
+        rec["lots"] += 1
+        rec["qty"] += qty
+    lots = int(sum(int(v["lots"]) for v in by_name.values()))
+    return {
+        "names": len(by_name),
+        "lots": lots,
+        "by_name": by_name,
+        "cloned": sorted(s for s, v in by_name.items() if int(v["lots"]) > 1),
+    }
+
+
+def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Session forest: edge vs model, daily PnL, name concentration."""
+    sc = scorecard if isinstance(scorecard, dict) else {}
+    conc = concentration(getattr(world, "positions", None))
+    risk_pct = None
+    try:
+        risk_pct = float(getattr(get_config(), "max_risk_per_trade_pct", None) or 0) or None
+    except (TypeError, ValueError):
+        risk_pct = None
+    return {
+        "nl": getattr(world, "net_liquidation", None),
+        "daily_pnl": getattr(world, "daily_pnl", None),
+        "beating_model": sc.get("beating_model"),
+        "edge_usd": sc.get("edge_usd"),
+        "book_return_pct": sc.get("book_return_pct"),
+        "model_cost_usd": sc.get("model_cost_usd"),
+        "names": conc["names"],
+        "lots": conc["lots"],
+        "by_name": conc["by_name"],
+        "cloned": conc["cloned"],
+        "capacity": dict(getattr(world, "capacity", None) or {}),
+        "risk_per_trade_pct": risk_pct,
+        "playbook": _playbook_day(sc),
+    }
+
+
+def _playbook_day(scorecard: dict[str, Any] | None) -> dict[str, Any]:
+    try:
+        from abcxauto.lab_playbook import playbook_facts
+
+        return playbook_facts(scorecard)
+    except Exception:
+        return {}
+
+
+def format_wake(
+    *,
+    cycle: int,
+    session: str,
+    flat: bool,
+    unprotected: list[str] | None,
+    ibkr_up: bool,
+    day: dict[str, Any] | None = None,
+) -> str:
+    """Short fact line. No strategy lecture."""
+    unprot = ",".join(unprotected) if unprotected else "none"
+    parts = [
+        f"Cycle {cycle}. session={session} flat={flat} "
+        f"unprotected={unprot} ibkr={'up' if ibkr_up else 'down'}."
+    ]
+    if isinstance(day, dict) and day:
+        cloned = ",".join(str(s) for s in (day.get("cloned") or []) if s) or "none"
+        cap = day.get("capacity") if isinstance(day.get("capacity"), dict) else {}
+        open_n = cap.get("open_count", cap.get("open"))
+        max_n = cap.get("max_open_positions", cap.get("max"))
+        risk = day.get("risk_per_trade_pct")
+        parts.append(
+            f"names={day.get('names')} lots={day.get('lots')} cloned={cloned} "
+            f"edge={day.get('edge_usd')} beating={day.get('beating_model')} "
+            f"risk/trade={risk}% open={open_n}/{max_n}."
+        )
+        pb = day.get("playbook") if isinstance(day.get("playbook"), dict) else {}
+        if pb.get("revision") is not None:
+            parts.append(
+                f"playbook rev={pb.get('revision')} age={pb.get('age_h')}h "
+                f"ready={pb.get('ready_to_promote')} "
+                f"at_write_edge={pb.get('at_write_edge')} "
+                f"now_edge={pb.get('now_edge')}."
+            )
+    parts.append("Use tools. send if the book needs a ticket.")
+    return " ".join(parts)
 
 
 def _idle_path() -> Path:
@@ -253,19 +602,19 @@ class WorldState:
     capacity: dict[str, Any] = field(default_factory=dict)
     idle_streak: int = 0
     idle_top_symbol: str = ""
-    prep: dict[str, Any] = field(default_factory=dict)
-    review: dict[str, Any] = field(default_factory=dict)
     structure_lessons: list[dict] = field(default_factory=list)
-    structure_vocab: dict[str, Any] = field(default_factory=dict)
     structure_cooldown: dict[str, str] = field(default_factory=dict)
     book: dict[str, Any] = field(default_factory=dict)
     pulse: dict[str, Any] = field(default_factory=dict)
     taken_at: str = ""
     ibkr_live_last: float | None = None
     ibkr_live_symbol: str = ""
+    ibkr_live_quotes: dict[str, float] = field(default_factory=dict)
     scan_fetched: list[str] = field(default_factory=list)
     option_facts: list[dict] = field(default_factory=list)
+    fills: list[dict] = field(default_factory=list)
     stop_qty_fact: dict[str, Any] | None = None
+    book_reconciled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -284,6 +633,7 @@ class WorldState:
             "stop_qty_fact": self.stop_qty_fact,
             "ibkr_live_last": self.ibkr_live_last,
             "ibkr_live_symbol": self.ibkr_live_symbol,
+            "ibkr_live_quotes": dict(self.ibkr_live_quotes or {}),
             "news_items": [
                 {"symbol": n.get("symbol"), "headline": str(n.get("headline") or "")[:160]}
                 for n in self.news_items[:12]
@@ -303,27 +653,12 @@ class WorldState:
             "idle_streak": self.idle_streak,
             "idle_top_symbol": self.idle_top_symbol,
             "structure_lessons": self.structure_lessons[:5],
-            "structure_vocab": {
-                k: self.structure_vocab.get(k)
-                for k in ("pass_rate", "failed", "passed", "ts", "source")
-                if k in self.structure_vocab
-            },
             "structure_cooldown": dict(self.structure_cooldown),
-            "prep": {
-                k: self.prep.get(k)
-                for k in ("bias", "levels", "do_not_trade_if", "watchlist", "ts")
-                if k in self.prep
-            },
-            "review": {
-                k: self.review.get(k)
-                for k in ("what_worked", "mistake", "next_change", "ts")
-                if k in self.review
-            },
             "taken_at": self.taken_at,
         }
 
     def prompt_block(self, *, limit: int = 4500) -> str:
-        """Compact WORLD block for Judge/Act prompts."""
+        """Compact WORLD block for the book tool."""
         reg = dict(self.regime or {})
         # Prompt-facing: heuristic mix, not market-regime truth.
         regime_prompt = {
@@ -356,10 +691,7 @@ class WorldState:
             "exposure": (self.portfolio_risk or {}).get("exposure"),
             "capital_liquidity": (self.portfolio_risk or {}).get("capital_liquidity"),
             "idle_streak": self.idle_streak,
-            "prep": self.prep.get("bias") or self.prep.get("notes"),
-            "review_lesson": self.review.get("next_change") or self.review.get("mistake"),
             "structure_cooldown": self.structure_cooldown,
-            "suite_failed": (self.structure_vocab or {}).get("failed"),
             "scan_tape": [
                 {
                     "symbol": o.get("symbol"),
@@ -373,30 +705,21 @@ class WorldState:
             ],
             "ibkr_live_last": getattr(self, "ibkr_live_last", None),
             "ibkr_live_symbol": getattr(self, "ibkr_live_symbol", None),
+            "ibkr_live_quotes": dict(getattr(self, "ibkr_live_quotes", None) or {}),
             "news": [
                 f"[{n.get('symbol')}] {n.get('headline')}"
                 for n in self.news_items[:8]
                 if n.get("headline")
             ],
             "positions": [
-                {
-                    "conId": p.get("conId") or p.get("con_id"),
-                    "symbol": p.get("symbol"),
-                    "sec": p.get("secType") or p.get("sec_type"),
-                    "qty": p.get("quantity") or p.get("position"),
-                    "expiration": p.get("expiration")
-                    or p.get("lastTradeDateOrContractMonth"),
-                    "strike": p.get("strike"),
-                    "right": p.get("right"),
-                }
-                for p in self.positions[:12]
+                compact_position(p, extra=True) for p in self.positions[:12]
             ],
+            "working_orders": compact_working_orders(self.open_orders),
             "stop_qty_fact": self.stop_qty_fact,
             "option_facts": self.option_facts[:8],
         }
-        text = "WORLDSTATE (code truth — cite these facts):\n" + json.dumps(body, default=str)
+        text = "WORLDSTATE:\n" + json.dumps(body, default=str)
         feats = format_scan_tape(self.opportunities)
-        lessons = format_structure_lessons_for_prompt(self.structure_lessons)
         try:
             from abcxauto.option_facts import format_option_facts_for_prompt
 
@@ -411,8 +734,6 @@ class WorldState:
             + feats
             + "\n\n"
             + opt_block
-            + "\n\n"
-            + lessons
         )
         return out[: limit + 2200]
 
@@ -428,8 +749,14 @@ def build_world_state(
     from abcxauto.book import build_book_from_snap
     from abcxauto.memory import get_journal
 
-    positions = list(snap.get("positions") or [])
-    orders = list(snap.get("open_orders") or [])
+    positions, orders, book_reconciled = reconcile_book_with_fills(
+        list(snap.get("positions") or []),
+        list(snap.get("open_orders") or []),
+        snap.get("fills"),
+    )
+    snap["positions"] = positions
+    snap["open_orders"] = orders
+    snap["book_reconciled"] = book_reconciled
     acct = snap.get("account") or {}
     pulse = snap.get("reality_pulse") or {}
     protection = snap.get("protection") or {}
@@ -483,7 +810,6 @@ def build_world_state(
         max_open = 0
     cap = capacity_fact(positions, max_open_positions=max_open)
     lessons = recent_structure_lessons(5)
-    vocab = load_structure_vocab()
     cool = structure_cooldown_symbols(lessons)
     option_facts = list(snap.get("option_facts") or [])
     stop_fact = None
@@ -495,10 +821,14 @@ def build_world_state(
         stop_fact = None
 
     book = snap.get("portfolio_state") or build_book_from_snap(snap)
+    unreliable = bool(snap.get("book_unreliable"))
+    if unreliable:
+        gates = dict(gates) if isinstance(gates, dict) else {}
+        gates["book_unreliable"] = True
     ws = WorldState(
         cycle=cycle,
         session_status=session or "unknown",
-        flat=not positions,
+        flat=False if unreliable else book_is_flat(positions, orders, snap.get("fills")),
         needs_protection=bool(unprotected),
         unprotected=unprotected,
         net_liquidation=net,
@@ -527,61 +857,40 @@ def build_world_state(
         capacity=cap,
         idle_streak=int(idle.get("count") or 0),
         idle_top_symbol=str(idle.get("top_symbol") or ""),
-        prep=load_prep(),
-        review=load_review(),
         structure_lessons=lessons,
-        structure_vocab=vocab,
         structure_cooldown=cool,
         book=book if isinstance(book, dict) else {},
         pulse=pulse if isinstance(pulse, dict) else {},
         taken_at=str(snap.get("taken_at") or ""),
         option_facts=option_facts,
+        fills=list(snap.get("fills") or [])[:12],
         stop_qty_fact=stop_fact,
+        book_reconciled=book_reconciled,
+        ibkr_live_quotes=dict(snap.get("ibkr_live_quotes") or {}),
+        ibkr_live_symbol=str(
+            snap.get("ibkr_live_symbol")
+            or ("SPY" if "SPY" in (snap.get("ibkr_live_quotes") or {}) else "")
+        ),
+        ibkr_live_last=(
+            snap.get("ibkr_live_last")
+            if snap.get("ibkr_live_last") is not None
+            else (snap.get("ibkr_live_quotes") or {}).get("SPY")
+        ),
     )
-    # Auto prep once/day
-    try:
-        ws.prep = maybe_auto_prep_from_world(ws.to_dict())
-    except Exception:
-        pass
     return ws
 
 
-def idle_streak_threshold(posture: str) -> int:
-    p = (posture or "").lower()
-    if p == "aggressive":
-        return 2
-    if p == "defensive":
-        return 5
-    return 3
+def capacity_allows_new_risk(world: Any, cfg: Any = None) -> bool:
+    cap = getattr(world, "capacity", None) or {}
+    if isinstance(cap, dict) and "allows_new_risk" in cap:
+        return bool(cap.get("allows_new_risk"))
+    c = cfg if cfg is not None else get_config()
+    try:
+        max_n = int(getattr(c, "max_open_positions", 0) or 0)
+    except (TypeError, ValueError):
+        max_n = 0
+    if max_n <= 0:
+        return True
+    from abcxauto.trade_plan import open_position_count
 
-
-def update_idle_streak_after_judgment(
-    judgment: dict[str, Any],
-    world: WorldState,
-) -> dict[str, Any]:
-    """Update persisted idle streak from judgment stance."""
-    from abcxauto.opportunity_scan import tape_symbols
-
-    stance = str(judgment.get("stance") or "").lower()
-    dismissed = str(judgment.get("dismissed") or "").upper()
-    top = ""
-    for sym in tape_symbols(world.opportunities):
-        if sym and sym in dismissed:
-            top = sym
-            break
-    if not top and world.opportunities:
-        # Stable A–Z tape: first symbol is alphabetical, not a rank tip
-        sorted_syms = sorted(tape_symbols(world.opportunities))
-        top = sorted_syms[0] if sorted_syms else ""
-    state = load_idle_streak()
-    if stance == "idle" and world.flat:
-        if top and top == str(state.get("top_symbol") or "").upper():
-            state["count"] = int(state.get("count") or 0) + 1
-        else:
-            state["count"] = 1
-            state["top_symbol"] = top
-        state["last_dismiss"] = str(judgment.get("dismissed") or "")[:300]
-    else:
-        state = {"count": 0, "top_symbol": top, "last_dismiss": ""}
-    save_idle_streak(state)
-    return state
+    return open_position_count(getattr(world, "positions", None)) < max_n

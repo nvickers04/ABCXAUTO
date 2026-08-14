@@ -456,10 +456,11 @@ class IBKRQueriesMixin:
                 if t.order.orderType == 'TRAIL' and trail_pct:
                     aux = None  # suppress misleading computed aux
 
+                sec_type = t.contract.secType or 'STK'
                 order_data = {
                     'order_id': t.order.orderId,
                     'symbol': t.contract.symbol,
-                    'sec_type': t.contract.secType or 'STK',
+                    'sec_type': sec_type,
                     'action': t.order.action,
                     'quantity': t.order.totalQuantity,
                     'order_type': t.order.orderType,
@@ -467,6 +468,14 @@ class IBKRQueriesMixin:
                     'lmt_price': lmt_price,
                     'status': status,
                 }
+                if sec_type == 'OPT':
+                    order_data.update({
+                        'strike': t.contract.strike,
+                        'expiration': t.contract.lastTradeDateOrContractMonth,
+                        'right': t.contract.right,
+                        'multiplier': int(t.contract.multiplier or 100),
+                        'local_symbol': t.contract.localSymbol,
+                    })
                 if trail_pct:
                     order_data['trail_percent'] = trail_pct
                 orders.append(order_data)

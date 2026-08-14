@@ -14,7 +14,6 @@ logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _EVENTS_PATH = _REPO_ROOT / "structure_events.jsonl"
-_VOCAB_PATH = _REPO_ROOT / "structure_vocab.json"
 _SCRAPE_SECONDS = 15.0
 
 # Reason codes (stable for prompts / UI)
@@ -34,13 +33,6 @@ def _path_events() -> Path:
 
     raw = os.environ.get("ABCXAUTO_STRUCTURE_EVENTS_PATH", "").strip()
     return Path(raw) if raw else _EVENTS_PATH
-
-
-def _path_vocab() -> Path:
-    import os
-
-    raw = os.environ.get("ABCXAUTO_STRUCTURE_VOCAB_PATH", "").strip()
-    return Path(raw) if raw else _VOCAB_PATH
 
 
 def _utc_now() -> str:
@@ -298,75 +290,10 @@ def detect_scrape_from_fills(
     return False
 
 
-def save_structure_vocab(report: dict[str, Any]) -> Path:
-    """Persist slim suite trainer memory from an order_suite report."""
-    path = _path_vocab()
-    failed = sorted(
-        {
-            str(r.get("strategy"))
-            for r in (report.get("results") or [])
-            if r.get("strategy") and not r.get("pass")
-        }
-    )
-    passed = sorted(
-        {
-            str(r.get("strategy"))
-            for r in (report.get("results") or [])
-            if r.get("strategy") and r.get("pass")
-        }
-    )
-    data = {
-        "ts": report.get("taken_at") or _utc_now(),
-        "source": report.get("source") or "suite",
-        "pass_rate": report.get("pass_rate"),
-        "passed": passed,
-        "failed": failed,
-        "failed_details": [
-            {
-                "strategy": r.get("strategy"),
-                "detail": str(r.get("detail") or r.get("error") or "")[:200],
-            }
-            for r in (report.get("results") or [])
-            if r.get("strategy") and not r.get("pass")
-        ][:20],
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return path
-
-
-def load_structure_vocab() -> dict[str, Any]:
-    path = _path_vocab()
-    if not path.is_file():
-        # fall back to in-memory suite cache
-        try:
-            from abcxauto.order_suite import get_cached_suite
-
-            cached = get_cached_suite()
-            if cached:
-                return {
-                    "ts": cached.get("taken_at"),
-                    "source": cached.get("source") or "cache",
-                    "pass_rate": cached.get("pass_rate"),
-                    "passed": [],
-                    "failed": list(cached.get("failed_strategies") or []),
-                    "failed_details": [],
-                }
-        except Exception:
-            pass
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
-    except Exception:
-        logger.exception("load_structure_vocab failed")
-        return {}
-
-
 def format_structure_lessons_for_prompt(lessons: list[dict] | None = None) -> str:
     items = lessons if lessons is not None else recent_structure_lessons(5)
     if not items:
-        return "STRUCTURE LESSONS: (none yet — suite + live rejects will appear here)\n"
+        return "STRUCTURE LESSONS: (none yet — live rejects will appear here)\n"
     lines = ["STRUCTURE LESSONS (code gradebook — learn these facts):"]
     for ev in items:
         lines.append(

@@ -436,3 +436,204 @@ class TestProtectionRequiresPosition:
         proposal = validate_proposal("cancel_order", {"order_id": 103}, RATIONALE)
         result = await execute_proposal(proposal, gateway)
         assert result["success"] is True
+
+
+def _cancel_ids(gateway):
+    return [kw["order_id"] for name, kw in gateway.calls if name == "cancel_order"]
+
+
+class TestStackedProtectiveExits:
+    """Replace-on-place: a new protective exit becomes the protection."""
+
+    @pytest.mark.asyncio
+    async def test_trailing_stop_rejected_when_lot_covered(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "SPY", "quantity": 100, "sec_type": "STK"}],
+            open_orders=[
+                {
+                    "order_id": 200, "symbol": "SPY", "sec_type": "STK",
+                    "action": "SELL", "quantity": 100, "order_type": "STP",
+                },
+                {
+                    "order_id": 201, "symbol": "SPY", "sec_type": "STK",
+                    "action": "SELL", "quantity": 100, "order_type": "LMT",
+                },
+            ],
+        )
+        proposal = validate_proposal(
+            "trailing_stop", VALID_PAYLOADS["trailing_stop"], RATIONALE
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        assert result["order_id"] == 1234
+        assert gateway.calls[0][0] == "place_trailing_stop"
+        assert _cancel_ids(gateway) == [200]
+        assert 1234 not in _cancel_ids(gateway)
+        assert 201 not in _cancel_ids(gateway)
+
+    @pytest.mark.asyncio
+    async def test_trailing_stop_allowed_when_unprotected(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "SPY", "quantity": 100, "sec_type": "STK"}],
+            open_orders=[],
+        )
+        proposal = validate_proposal(
+            "trailing_stop", VALID_PAYLOADS["trailing_stop"], RATIONALE
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        assert gateway.calls[0][0] == "place_trailing_stop"
+        assert _cancel_ids(gateway) == []
+
+    @pytest.mark.asyncio
+    async def test_stop_order_rejected_when_covered(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "AAPL", "quantity": 10, "sec_type": "STK"}],
+            open_orders=[
+                {
+                    "order_id": 9, "symbol": "AAPL", "sec_type": "STK",
+                    "action": "SELL", "quantity": 10, "order_type": "TRAIL",
+                },
+            ],
+        )
+        proposal = validate_proposal(
+            "stop_order", VALID_PAYLOADS["stop_order"], RATIONALE
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        assert result["order_id"] == 1234
+        assert gateway.calls[0][0] == "place_stop_order"
+        assert _cancel_ids(gateway) == [9]
+        assert 1234 not in _cancel_ids(gateway)
+
+    @pytest.mark.asyncio
+    async def test_oca_rejected_when_covered(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "NVDA", "quantity": 10, "sec_type": "STK"}],
+            open_orders=[
+                {
+                    "order_id": 9, "symbol": "NVDA", "sec_type": "STK",
+                    "action": "SELL", "quantity": 10, "order_type": "STP",
+                },
+            ],
+        )
+        proposal = validate_proposal("oca", VALID_PAYLOADS["oca"], RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        assert result["order_id"] == 1234
+        assert gateway.calls[0][0] == "place_oca"
+        assert _cancel_ids(gateway) == [9]
+        assert 1234 not in _cancel_ids(gateway)
+
+    @pytest.mark.asyncio
+    async def test_failed_place_does_not_cancel_old_stops(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "SPY", "quantity": 100, "sec_type": "STK"}],
+            open_orders=[
+                {
+                    "order_id": 200, "symbol": "SPY", "sec_type": "STK",
+                    "action": "SELL", "quantity": 100, "order_type": "STP",
+                },
+            ],
+        )
+
+        async def _fail(**kwargs):
+            gateway.calls.append(("place_trailing_stop", kwargs))
+            return {"success": False, "error": "ibkr reject"}
+
+        gateway.place_trailing_stop = _fail
+        proposal = validate_proposal(
+            "trailing_stop", VALID_PAYLOADS["trailing_stop"], RATIONALE
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result.get("success") is False
+        assert "ibkr reject" in str(result.get("error") or "")
+        assert _cancel_ids(gateway) == []
+
+    @pytest.mark.asyncio
+    async def test_new_trail_cancels_scale_stops(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "SPY", "quantity": 50, "sec_type": "STK"}],
+            open_orders=[
+                {
+                    "order_id": 11, "symbol": "SPY", "sec_type": "STK",
+                    "action": "SELL", "quantity": 25, "order_type": "TRAIL",
+                },
+                {
+                    "order_id": 12, "symbol": "SPY", "sec_type": "STK",
+                    "action": "SELL", "quantity": 25, "order_type": "TRAIL",
+                },
+            ],
+        )
+        proposal = validate_proposal(
+            "trailing_stop", VALID_PAYLOADS["trailing_stop"], RATIONALE
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        assert sorted(_cancel_ids(gateway)) == [11, 12]
+        assert 1234 not in _cancel_ids(gateway)
+
+    @pytest.mark.asyncio
+    async def test_undercovered_stop_still_allowed(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "AAPL", "quantity": 50, "sec_type": "STK"}],
+            open_orders=[
+                {
+                    "order_id": 9, "symbol": "AAPL", "sec_type": "STK",
+                    "action": "SELL", "quantity": 20, "order_type": "STP",
+                },
+            ],
+        )
+        proposal = validate_proposal(
+            "stop_order", VALID_PAYLOADS["stop_order"], RATIONALE
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        assert _cancel_ids(gateway) == [9]
+        assert 1234 not in _cancel_ids(gateway)
+
+    @pytest.mark.asyncio
+    async def test_collapse_csco_keeps_newest_covering(self):
+        from abcxauto.executor import collapse_stacked_protective_exits
+
+        types = ("STP", "TRAIL")
+        orders = [
+            {
+                "order_id": 101 + i, "symbol": "CSCO", "sec_type": "STK",
+                "action": "SELL", "quantity": 50, "order_type": types[i % 2],
+            }
+            for i in range(7)
+        ]
+        gateway = FakeGateway(
+            positions=[{"symbol": "CSCO", "quantity": 50, "sec_type": "STK"}],
+            open_orders=orders,
+        )
+        cancelled = await collapse_stacked_protective_exits(
+            gateway, gateway.positions, gateway.open_orders
+        )
+        assert sorted(cancelled) == list(range(101, 107))
+        cancel_ids = [
+            kw["order_id"] for name, kw in gateway.calls if name == "cancel_order"
+        ]
+        assert sorted(cancel_ids) == list(range(101, 107))
+        assert 107 not in cancel_ids
+        assert not any(name != "cancel_order" for name, _kw in gateway.calls)
+
+    @pytest.mark.asyncio
+    async def test_collapse_does_not_cancel_last_stop(self):
+        from abcxauto.executor import collapse_stacked_protective_exits
+
+        gateway = FakeGateway(
+            positions=[{"symbol": "CSCO", "quantity": 50, "sec_type": "STK"}],
+            open_orders=[
+                {
+                    "order_id": 107, "symbol": "CSCO", "sec_type": "STK",
+                    "action": "SELL", "quantity": 50, "order_type": "STP",
+                },
+            ],
+        )
+        cancelled = await collapse_stacked_protective_exits(
+            gateway, gateway.positions, gateway.open_orders
+        )
+        assert cancelled == []
+        assert gateway.calls == []

@@ -186,13 +186,7 @@ class ViewState:
     reality_pulse: dict = field(default_factory=dict)
     kahneman: dict = field(default_factory=dict)
     kahneman_trace: str = ""
-    order_lab: dict = field(default_factory=dict)
-    lab_summary: str = ""
     reconfig: dict = field(default_factory=dict)
-    retest: dict = field(default_factory=dict)
-    order_suite: dict = field(default_factory=dict)
-    order_suite_summary: str = ""
-    lab_pass_rate: float = 0.0
     brain_strat: str = "—"
     brain_rationale: str = (
         "Start autonomous — Grok decides every RTH cycle; risk gates constrain."
@@ -234,6 +228,9 @@ class ViewState:
     last_error: str | None = None
     pace: dict = field(default_factory=dict)
     think_live: str = ""
+    tool_trace: list[str] = field(default_factory=list)
+    book_unreliable: bool = False
+    skip_reason: str = ""
 
 
 class ProEngine:
@@ -249,7 +246,6 @@ class ProEngine:
         self.state = ViewState()
         self.monitor: Any = None
         self._worker_loop: asyncio.AbstractEventLoop | None = None
-        self._suite_lock = threading.Lock()
         self._wake_event: asyncio.Event | None = None
         self._wake_reason: str = ""
         self._wake_gate: Any = None
@@ -294,8 +290,11 @@ class ProEngine:
             ensure_immutable_floor(persist=True)
         except Exception:
             logger.exception("immutable floor seed failed")
-        self._universe_refresh_on_start = True
-        if self.worker and self.worker.is_alive():
+        already = bool(self.worker and self.worker.is_alive())
+        # Connect path already refreshes universe; only re-scan when START
+        # resumes an existing IBKR worker (Connect then START).
+        self._universe_refresh_on_start = already
+        if already:
             self.pause.clear()
             self.state.autonomous = True
             self.state.paused = False
@@ -323,140 +322,6 @@ class ProEngine:
         )
         if len(self.state.records) > 200:
             self.state.records = self.state.records[-200:]
-
-    def run_startup_suite(self) -> None:
-        """Run order suite once at startup (always dry-run; never a second asyncio loop)."""
-        self._schedule_suite("startup", allow_paper_place=False)
-
-    def run_manual_suite(self) -> None:
-        """Start worker if needed, then paper place→cancel the full suite."""
-        from abcxauto.config import get_config
-        if not get_config().is_paper:
-            self.ui.put(("error", "Test Suite is paper-only — switch profile to Paper"))
-            return
-        err = self.ensure_broker_ready()
-        if err:
-            self.ui.put(("error", f"Test Suite: {err}"))
-            return
-        self._schedule_suite("manual", allow_paper_place=True)
-
-    def run_strategy_test(self, strategy: str) -> dict:
-        """Start worker if needed, then paper place→cancel one order type."""
-        from abcxauto.config import get_config
-        if not get_config().is_paper:
-            self.ui.put(("error", "Test Suite is paper-only — switch profile to Paper"))
-            return {"strategy": strategy, "pass": False, "detail": "live mode blocked"}
-        err = self.ensure_broker_ready()
-        if err:
-            self.ui.put(("error", f"Test Suite: {err}"))
-            return {"strategy": strategy, "pass": False, "detail": err}
-        loop = self._worker_loop
-        assert loop is not None and loop.is_running()
-        asyncio.run_coroutine_threadsafe(
-            self._run_strategy_broker_once(strategy), loop
-        )
-        return {"strategy": strategy, "mode": "paper_pending", "pass": True, "detail": "running on paper…"}
-
-    def ensure_broker_ready(self, timeout: float = 45.0) -> str | None:
-        """Connect IBKR (no agent cycles) and wait until the broker link is up."""
-        err = self.connect_broker()
-        if err:
-            return err
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            loop = self._worker_loop
-            conn = self.conn
-            if (
-                loop is not None
-                and loop.is_running()
-                and conn is not None
-                and bool(getattr(conn, "connected", False))
-            ):
-                return None
-            if self.worker is not None and not self.worker.is_alive():
-                return "IBKR connect failed — start TWS/Gateway on the paper port"
-            time.sleep(0.1)
-        return "Timed out waiting for paper IBKR connection"
-
-    def _merge_strategy_row(self, strategy: str, row: dict, *, mode: str) -> None:
-        from abcxauto.order_suite import (
-            format_order_suite_summary,
-            get_cached_suite,
-            set_cached_suite,
-        )
-
-        cached = get_cached_suite() or {}
-        results = [r for r in (cached.get("results") or []) if r.get("strategy") != strategy]
-        results.append(row)
-        passed = sum(1 for r in results if r.get("pass"))
-        failed = sum(1 for r in results if not r.get("pass"))
-        report = {
-            **cached,
-            "taken_at": row.get("taken_at") or cached.get("taken_at"),
-            "source": f"single:{strategy}",
-            "paper_only": True,
-            "mode": mode,
-            "results": results,
-            "passed": passed,
-            "failed": failed,
-            "pass_rate": round(passed / max(1, passed + failed), 3),
-            "strategies_tested": len(results),
-            "summary": (
-                f"order suite [single:{strategy}] "
-                f"{'PASS' if row.get('pass') else 'FAIL'} — "
-                f"{passed} pass / {failed} fail mode={mode}"
-            ),
-            "idle_prevented": True,
-        }
-        set_cached_suite(report)
-        self.state.order_suite = report
-        self.state.order_suite_summary = format_order_suite_summary(report)
-        self.state.lab_summary = self.state.order_suite_summary
-        self.ui.put(("order_suite", report))
-
-    async def _run_strategy_broker_once(self, strategy: str) -> None:
-        from abcxauto.order_suite import run_strategy_broker_test
-        from abcxauto.reality_pulse import build_reality_pulse
-
-        try:
-            with self._suite_lock:
-                conn = self.conn
-                if conn is None or not getattr(conn, "connected", False):
-                    conn = get_ibkr_connector()
-                    if not getattr(conn, "connected", False):
-                        await conn.connect()
-                    self.conn = conn
-                if not getattr(conn, "connected", False):
-                    raise RuntimeError("IBKR not connected")
-                pulse = build_reality_pulse(
-                    ibkr_connected=True,
-                    positions=self.state.positions,
-                )
-                row = await run_strategy_broker_test(
-                    strategy,
-                    connector=conn,
-                    pulse=pulse,
-                    positions=self.state.positions,
-                )
-            self._merge_strategy_row(
-                strategy, row, mode=str(row.get("mode") or "paper")
-            )
-            self.ui.put(
-                (
-                    "log",
-                    f"STRATEGY TEST {strategy}: "
-                    f"{'PASS' if row.get('pass') else 'FAIL'} mode={row.get('mode')}",
-                )
-            )
-        except Exception as e:
-            fail = {
-                "strategy": strategy,
-                "pass": False,
-                "mode": "broker_fail",
-                "detail": str(e)[:300],
-            }
-            self._merge_strategy_row(strategy, fail, mode="broker_fail")
-            self.ui.put(("error", f"STRATEGY TEST ERROR ({strategy}): {e}"))
 
     def switch_trading_mode(self, mode: str, *, live_confirm: str = "") -> None:
         """Apply session paper/live mode and reconnect broker when the worker is up."""
@@ -486,103 +351,6 @@ class ProEngine:
         except Exception as e:
             self.ui.put(("conn", False))
             self.ui.put(("error", f"Mode switch reconnect failed: {e}"))
-
-    def _schedule_suite(self, source: str, *, allow_paper_place: bool) -> None:
-        """Schedule suite on the worker loop. Manual paper tests never dry-run."""
-        if allow_paper_place:
-            err = self.ensure_broker_ready()
-            if err:
-                self.ui.put(("error", f"Test Suite: {err}"))
-                return
-        loop = self._worker_loop
-        if loop is not None and loop.is_running():
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._run_suite_once(source, allow_paper_place=allow_paper_place),
-                    loop,
-                )
-                return
-            except Exception as e:
-                if allow_paper_place:
-                    self.ui.put(("error", f"Test Suite schedule failed: {e}"))
-                    return
-                logger.warning(f"suite schedule on worker failed ({e}); startup dry-run")
-        if allow_paper_place:
-            self.ui.put(("error", "Test Suite: worker loop not ready"))
-            return
-        # Startup-only: schema dry-run on a private loop (no broker).
-        threading.Thread(
-            target=lambda: asyncio.run(
-                self._run_suite_once(source, allow_paper_place=False)
-            ),
-            daemon=True,
-        ).start()
-
-    async def _run_suite_once(
-        self, source: str, *, allow_paper_place: bool = False
-    ) -> None:
-        from abcxauto.order_suite import (
-            format_order_suite_summary,
-            paper_place_enabled,
-            run_order_suite,
-        )
-        from abcxauto.reality_pulse import build_reality_pulse
-
-        label = source.upper().replace("_", " ")
-        # Paper place→cancel on manual suite when paper mode (suite_paper_place default on).
-        # Startup / no-worker fallback always dry-run.
-        force_dry = not (allow_paper_place and paper_place_enabled())
-        try:
-            with self._suite_lock:
-                conn = self.conn
-                if not force_dry:
-                    if conn is None or not getattr(conn, "connected", False):
-                        conn = get_ibkr_connector()
-                        if not getattr(conn, "connected", False):
-                            await conn.connect()
-                        self.conn = conn
-                    if not getattr(conn, "connected", False):
-                        raise RuntimeError("IBKR not connected for paper suite")
-                pulse = build_reality_pulse(
-                    ibkr_connected=bool(getattr(conn, "connected", False))
-                    if conn
-                    else False,
-                    positions=self.state.positions,
-                )
-                report = await run_order_suite(
-                    connector=conn if not force_dry else None,
-                    pulse=pulse,
-                    positions=self.state.positions,
-                    source=source,
-                    force_dry=force_dry,
-                )
-            self.state.order_suite = report
-            self.state.order_suite_summary = format_order_suite_summary(report)
-            self.state.order_lab = {
-                "pass_rate": report.get("pass_rate"),
-                "passed": report.get("passed"),
-                "failed": report.get("failed"),
-                "results": report.get("results") or [],
-                "taken_at": report.get("taken_at"),
-                "summary": report.get("summary"),
-            }
-            self.state.lab_pass_rate = float(report.get("pass_rate") or 0)
-            self.state.lab_summary = self.state.order_suite_summary
-            self.state.retest = {
-                "after_suite": True,
-                "reason": source,
-                "summary": f"{source}: pass_rate={report.get('pass_rate')}",
-                "order_suite": report,
-            }
-            self.ui.put(
-                (
-                    "log",
-                    f"{label} ORDER SUITE: {report.get('summary')} idle_prevented=True",
-                )
-            )
-            self.ui.put(("order_suite", report))
-        except Exception as e:
-            self.ui.put(("error", f"{label} SUITE ERROR: {e}"))
 
     def _apply_open_risk(
         self,
@@ -625,7 +393,6 @@ class ProEngine:
         """Pause agent cycles without tearing down IBKR / monitor."""
         if not self.worker or not self.worker.is_alive():
             return
-        was_auto = bool(self.state.autonomous)
         self.pause.set()
         self.state.autonomous = False
         self.state.paused = True
@@ -634,25 +401,11 @@ class ProEngine:
         # Decisions-only: do not clear active_trade_plan or flatten.
         self._note("PAUSE", "Agent paused — IBKR still connected; open risk kept")
         self._apply_open_risk(note=True, allow_flat_close=False)
-        if was_auto:
-            try:
-                from abcxauto.agent_loop import run_session_review_on_stop
-
-                run_session_review_on_stop(
-                    {
-                        "thesis": self.state.thesis,
-                        "what_worked": self.state.market_read,
-                        "next_change": f"last={self.state.brain_strat}",
-                    }
-                )
-            except Exception:
-                pass
 
     def stop_engine(self) -> None:
         was_linked = bool(self.state.connected) or (
             self.worker is not None and self.worker.is_alive()
         )
-        was_auto = bool(self.state.autonomous or self.state.running)
         self.stop.set()
         self.pause.clear()
         self._gen += 1
@@ -669,19 +422,12 @@ class ProEngine:
         self.conn = None
         # Keep active_trade_plan.json — Stop does not flatten or forget open risk.
         self._apply_open_risk(note=True, allow_flat_close=False)
-        if was_auto:
-            try:
-                from abcxauto.agent_loop import run_session_review_on_stop
+        try:
+            from abcxauto.think_stream import mark_review_stale
 
-                run_session_review_on_stop(
-                    {
-                        "thesis": self.state.thesis,
-                        "what_worked": self.state.market_read,
-                        "next_change": f"last={self.state.brain_strat}",
-                    }
-                )
-            except Exception:
-                pass
+            mark_review_stale()
+        except Exception:
+            logger.debug("mark_review_stale on stop failed", exc_info=True)
         if was_linked:
             self._note(
                 "DISCONNECT",
@@ -790,18 +536,6 @@ class ProEngine:
     def apply_tweak_manual(self, tw: dict) -> str:
         return apply_tweak(tw)
 
-    async def grok_analyze_tweak(self, tw: dict) -> None:
-        try:
-            g = GrokClient()
-            txt = await grok(
-                g,
-                f"Analyze this portfolio tweak and suggest ONE follow-up:\n"
-                f"{json.dumps(tw)}\nJSON response.",
-            )
-            self.ui.put(("log", f"Grok analysis: {txt[:500]}"))
-        except Exception as e:
-            self.ui.put(("error", f"Analyze failed: {e}"))
-
     def _apply(self, kind: str, data: Any) -> None:
         s = self.state
         if kind == "conn":
@@ -812,26 +546,6 @@ class ProEngine:
             s.ibkr_account_name = str(payload.get("name") or "")
         elif kind == "cycle":
             self._on_cycle(data)
-        elif kind == "order_suite":
-            s.order_suite = data or {}
-            s.order_suite_summary = str((data or {}).get("summary") or "")
-            s.lab_pass_rate = float((data or {}).get("pass_rate") or 0)
-            s.order_lab = {
-                "pass_rate": (data or {}).get("pass_rate"),
-                "passed": (data or {}).get("passed"),
-                "failed": (data or {}).get("failed"),
-                "results": (data or {}).get("results") or [],
-            }
-            s.records.append(
-                {
-                    "cycle": 0,
-                    "type": "order_suite",
-                    "ts": _now(),
-                    "order_suite": data,
-                    "lab_summary": s.order_suite_summary,
-                    "msg": s.order_suite_summary,
-                }
-            )
         elif kind == "panic":
             s.records.append(
                 {
@@ -928,15 +642,7 @@ class ProEngine:
         s.reality_pulse = d.get("reality_pulse") or {}
         s.kahneman = d.get("kahneman") or {}
         s.kahneman_trace = d.get("kahneman_trace") or ""
-        s.order_lab = d.get("order_lab") or {}
-        s.lab_summary = d.get("lab_summary") or ""
         s.reconfig = d.get("reconfig") or {}
-        s.retest = d.get("retest") or {}
-        s.order_suite = d.get("order_suite") or s.order_suite
-        s.order_suite_summary = str(
-            (d.get("lab_summary") or (s.order_suite or {}).get("summary") or "")
-        )
-        s.lab_pass_rate = float((s.order_lab or {}).get("pass_rate") or 0)
         s.brain_strat = d.get("strat", "hold")
         s.brain_rationale = d.get("rationale") or "—"
         s.market_read = str(d.get("market_read") or "").strip()
@@ -964,6 +670,13 @@ class ProEngine:
         s.dismissed = str(d.get("dismissed") or s.judgment.get("dismissed") or "")
         s.intent = dict(d.get("intent") or s.judgment.get("intent") or {})
         s.stage_error = str(d.get("stage_error") or "")
+        s.tool_trace = list(d.get("tool_trace") or [])
+        s.book_unreliable = bool(
+            d.get("book_unreliable")
+            or ((d.get("world_state") or {}).get("gates") or {}).get("book_unreliable")
+        )
+        note = str((d.get("result") or {}).get("note") or d.get("validation") or "")
+        s.skip_reason = note if "skipped_grok" in note or "book_unreliable" in note else ""
         s.trade_plan = d.get("trade_plan")
         s.regime = dict(d.get("regime") or (s.world_state or {}).get("regime") or {})
         s.portfolio_risk = dict(
@@ -1185,12 +898,15 @@ class ProEngine:
                 self._wake_reason = ""
                 out: dict = {}
                 try:
+                    from abcxauto.think_stream import emit as think_emit
+
+                    think_emit(
+                        "say",
+                        f"Cycle {n}: book snap, then Grok.\n",
+                    )
                     out = await run_cycle(n, self.conn, g, hist, prev)
                     skipped_note = str(out.get("validation") or out.get("rationale") or "")
-                    skipped = (
-                        "skipped_grok" in skipped_note
-                        or "grokfolio_wait" in skipped_note
-                    )
+                    skipped = "skipped_grok" in skipped_note
                     if not skipped:
                         self._last_grok_mono = time.monotonic()
                     prev = out["pnl"]
@@ -1220,23 +936,10 @@ class ProEngine:
                     facts = facts_from_cycle(
                         out, wake_reason=wake_for_cycle, cfg=cfg
                     )
-                    existing_pace = (
-                        out.get("pace") if isinstance(out.get("pace"), dict) else {}
-                    )
-                    if (
-                        not facts.needs_protection
-                        and str(existing_pace.get("tier") or "") == "grokfolio"
-                        and existing_pace.get("sleep_s") is not None
-                    ):
-                        pace = dict(existing_pace)
-                        pace.setdefault("bypass_grok_min", True)
-                        pace["wake_reason"] = wake_for_cycle or ""
-                        pace["budget"] = budget_why
-                    else:
-                        decision = compute_pace(facts, cfg)
-                        pace = decision.to_dict()
-                        pace["wake_reason"] = wake_for_cycle or ""
-                        pace["budget"] = budget_why
+                    decision = compute_pace(facts, cfg)
+                    pace = decision.to_dict()
+                    pace["wake_reason"] = wake_for_cycle or ""
+                    pace["budget"] = budget_why
                     out["pace"] = pace
                     self._last_pace = pace
                     self._last_cycle_out = out

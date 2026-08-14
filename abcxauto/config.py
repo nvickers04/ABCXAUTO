@@ -51,7 +51,7 @@ CONTROL_KEYS = frozenset({
 PERSISTED_OPERATOR_KEYS = RISK_CONFIG_KEYS | CONTROL_KEYS
 # S2 lean at/above this: shell must not cheap-skip Act after Judge hold.
 DELIBERATION_REQUIRE_ACT_PCT = 60
-# Frequency ≥ this: allocator may spend budget on new-risk / escapade streams.
+# Frequency ≥ this: hunt/new-risk Act focus is allowed when capacity exists.
 FREQUENCY_ALLOW_NEW_RISK_PCT = 40
 # Rotation ≥ this + thin cash: labeled redeploy Heuristic + open_risk stream bias.
 ROTATION_REDEPLOY_PCT = 60
@@ -59,8 +59,8 @@ ROTATION_REDEPLOY_PCT = 60
 ROTATION_THIN_CASH_PCT = 15.0
 _CONTROL_DEFAULTS: dict[str, int] = {
     "control_deliberation_pct": 40,
-    "control_budget_pct": 25,
-    "control_frequency_pct": 30,
+    "control_budget_pct": 80,
+    "control_frequency_pct": 50,
     "control_entry_surface_pct": 50,  # mixed
     "control_complexity_pct": 40,  # defined options
     "control_rotation_pct": 40,
@@ -90,38 +90,31 @@ _POSTURE_SEEDS: dict[str, dict[str, Any]] = {
 # (floor, ceiling) for agent-tunable capital knobs only.
 _POSTURE_ENVELOPES: dict[str, dict[str, tuple[float, float]]] = {
     "defensive": {
-        "max_risk_per_trade_pct": (0.25, 2.0),
-        "daily_loss_limit_pct": (1.0, 6.0),
-        "max_position_pct": (2.0, 15.0),
-        "max_peak_drawdown_pct": (2.0, 15.0),
-        "max_option_premium_pct": (0.0, 5.0),
-    },
-    "balanced": {
-        "max_risk_per_trade_pct": (0.25, 4.0),
-        "daily_loss_limit_pct": (1.0, 10.0),
+        "max_risk_per_trade_pct": (0.25, 25.0),
+        "daily_loss_limit_pct": (0.5, 25.0),
         "max_position_pct": (2.0, 25.0),
         "max_peak_drawdown_pct": (2.0, 25.0),
-        "max_option_premium_pct": (0.0, 8.0),
+        "max_option_premium_pct": (0.0, 25.0),
+    },
+    "balanced": {
+        "max_risk_per_trade_pct": (0.25, 25.0),
+        "daily_loss_limit_pct": (0.5, 25.0),
+        "max_position_pct": (2.0, 25.0),
+        "max_peak_drawdown_pct": (2.0, 25.0),
+        "max_option_premium_pct": (0.0, 25.0),
     },
     "aggressive": {
-        "max_risk_per_trade_pct": (0.25, 6.0),
-        "daily_loss_limit_pct": (1.0, 15.0),
-        "max_position_pct": (2.0, 35.0),
-        "max_peak_drawdown_pct": (2.0, 35.0),
-        "max_option_premium_pct": (0.0, 12.0),
+        "max_risk_per_trade_pct": (0.25, 25.0),
+        "daily_loss_limit_pct": (0.5, 25.0),
+        "max_position_pct": (2.0, 25.0),
+        "max_peak_drawdown_pct": (2.0, 25.0),
+        "max_option_premium_pct": (0.0, 25.0),
     },
 }
 _POSTURE_PROMPT_BIAS: dict[str, str] = {
-    "defensive": (
-        "Capital envelope: tight (see Risk gates). Hunt requires setup_grade A (code). "
-        "Not a style tip."
-    ),
-    "balanced": (
-        "Capital envelope: mid. setup_grade C hunts blocked (code)."
-    ),
-    "aggressive": (
-        "Capital envelope: wide. Not a directive to trade more or chase a ranked tape."
-    ),
+    "defensive": "Capital envelope: tight (code).",
+    "balanced": "Capital envelope: mid (code).",
+    "aggressive": "Capital envelope: wide (code).",
 }
 _runtime_overrides: dict[str, Any] = {}
 _file_overrides: dict[str, Any] = {}
@@ -129,18 +122,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_RISK_SETTINGS_PATH = _REPO_ROOT / "risk_settings.json"
 
 DEFAULT_MANDATE = (
-    "You OWN the whole paper IBKR book as % of NetLiq (full account; no dollar sleeve). "
-    "Product is Grokfolio: construct ~15 long holdings, rebalance on the hourly/daily "
-    "RTH clock. Hunt/hold scalping is NOT the product. Same rules at any NetLiq. "
-    "No human approval. Hard risk is code and cannot be weakened (daily-loss halt, "
-    "max position, defined-risk, unprotected-STK protect-first, exits never blocked, "
-    "fail-closed). You MAY self_tune: Controls dials, pacing (only lengthen), universe "
-    "focus, prompt_extra, strategy tweaks, and tighter risk. You cannot disable "
-    "grokfolio or set a dollar sleeve. "
-    "Primary scorecard: book return % on starting NetLiq must beat model API cost. "
-    "Read your journal + scorecard every cycle and tune yourself. "
-    "Protect first. Hold IS VALID when protected. Hold is FORBIDDEN only while "
-    "unprotected STK exists (code enforces). Never blow up. Live remains gated."
+    "You own the whole IBKR book as % of NetLiq. The operator gives no strategy. "
+    "Invent one on paper; live only follows a promoted paper playbook. "
+    "Hard risk is code and cannot be weakened."
 )
 
 
@@ -148,7 +132,7 @@ DEFAULT_MANDATE = (
 class Config:
     # xAI / Grok
     xai_api_key: str = ""
-    model: str = "grok-4.5"
+    model: str = "grok-4.6"  # ABCXAUTO_MODEL
     temperature: float = 0.3
     max_tokens: int = 8192
 
@@ -174,16 +158,17 @@ class Config:
     scan_enabled: bool = False
     scan_interval_s: int = 900
     # Max MDA symbols Grok may request per cycle via scan_request.
-    scan_fetch_cap: int = 4
+    scan_fetch_cap: int = 8
 
     # 0 = full NetLiq (default). Size/loss gates are always % of portfolio.
     trading_budget_usd: float = 0.0
-    # Autonomous cycle cadence — long floors so model cost cannot eat a small book.
-    cycle_sleep_s: float = 300.0
-    grok_min_interval_s: float = 300.0
+    # Autonomous cycle cadence. 15s floor = paper spin-up; Grok may lengthen.
+    cycle_sleep_s: float = 15.0
+    grok_min_interval_s: float = 15.0
     pace_protect_s: float = 20.0
     pace_manage_s: float = 60.0
-    pace_idle_s: float = 600.0
+    pace_idle_s: float = 120.0
+    pace_spinup_s: float = 15.0
 
     # Background P&L monitor
     monitor_enabled: bool = True
@@ -198,22 +183,18 @@ class Config:
     # Walk-away floor — ON by default; agent may tighten, never weaken.
     risk_posture: str = "defensive"
     risk_gates_enabled: bool = True
-    daily_loss_limit_pct: float = 2.0
-    max_position_pct: float = 20.0
+    daily_loss_limit_pct: float = 25.0
+    max_position_pct: float = 25.0
     auto_panic_on_breach: bool = True
     defined_risk_only: bool = True
     cash_only: bool = True
-    max_peak_drawdown_pct: float = 8.0
-    max_option_premium_pct: float = 5.0
-    max_risk_per_trade_pct: float = 1.0
+    max_peak_drawdown_pct: float = 25.0,
+    max_option_premium_pct: float = 25.0
+    max_risk_per_trade_pct: float = 25.0
     max_open_positions: int = 15
-    # Grokfolio: Autopilot-style book owner on an hourly/daily clock.
-    grokfolio_enabled: bool = True
-    grokfolio_cadence: str = "both"  # hourly | daily | both
-    grokfolio_holdings: int = 15
     control_deliberation_pct: int = 40
-    control_budget_pct: int = 25
-    control_frequency_pct: int = 30
+    control_budget_pct: int = 80
+    control_frequency_pct: int = 50
     control_entry_surface_pct: int = 50
     control_complexity_pct: int = 40
     control_rotation_pct: int = 40
@@ -221,8 +202,6 @@ class Config:
     max_daily_trades: int = 0
     min_reward_risk: float = 0.0
     control_options_pct: int = 50  # migrate → control_complexity_pct on load
-    # Opt-in: False forces dry-run even on manual Re-test. Default True = paper place→cancel.
-    suite_paper_place: bool = True
 
     @property
     def is_paper(self) -> bool:
@@ -243,11 +222,6 @@ def _env_bool(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw.lower() in ("1", "true", "yes", "on")
-
-
-def _grokfolio_cadence_env() -> str:
-    raw = _env("ABCXAUTO_GROKFOLIO_CADENCE", "both").lower()
-    return raw if raw in ("hourly", "daily", "both") else "both"
 
 
 def setup_file_logging(
@@ -365,34 +339,15 @@ def format_controls_block(cfg: Any = None) -> str:
     from abcxauto.structure_complexity import complexity_fact, entry_surface_fact
 
     lines = [
-        "CONTROLS (agent-owned — Fact of current self_tune; not operator dials):",
-        f"- deliberation={delib} (0=System1 lean … 100=System2 mega-worker; "
-        f"require_act={require_act})",
-        f"- intelligence_budget={budget} (0=protect API $ … 100=more frequent Grok; "
-        f"effective_grok_min_s={grok_min:.0f})",
-        f"- trade_frequency={frequency} (0=patient … 100=higher trade rate OK — "
-        f"process/streams only; never bypasses unprotected or book capacity)",
-        f"- capital_rotation={rotation} (0=hold protected book OK … 100=redeploy/"
-        f"trim/exit to free cash for better setups OK — process only; shell never "
-        f"auto-sells)",
+        "CONTROLS:",
+        f"- deliberation={delib} (require_act={require_act})",
+        f"- intelligence_budget={budget} (effective_grok_min_s={grok_min:.0f})",
+        f"- trade_frequency={frequency}",
+        f"- capital_rotation={rotation}",
         f"- {entry_surface_fact(c)}",
         f"- {complexity_fact(c)}",
-        f"- book_capacity max_open_positions={max_open} "
-        f"(0=unlimited; Controls-owned hard gate)",
+        f"- book_capacity max_open_positions={max_open}",
     ]
-    if require_act:
-        lines.append(
-            "HEURISTIC (labeled; not a shell hold gate): System2 lean — show "
-            "base-rate / pre-mortem / alternatives in rationale when acting; "
-            "shell will not skip Act after manage/idle hold."
-        )
-    if rotation_redeploy_lean(c):
-        lines.append(
-            "HEURISTIC (labeled; not a shell sell gate): capital_rotation high — "
-            f"when cash is thin (<{ROTATION_THIN_CASH_PCT:.0f}% of NL), prefer "
-            "trim/exit/rotate weak or crowded names to free cash before forcing "
-            "new risk; shell does not auto-sell."
-        )
     try:
         from abcxauto.universe import universe_fact_block
 
@@ -409,7 +364,7 @@ def _load_env_config() -> Config:
     mandate = _env("ABCXAUTO_TRADING_MANDATE") or DEFAULT_MANDATE
     return Config(
         xai_api_key=_env("XAI_API_KEY") or _env("GROK_API_KEY"),
-        model=_env("ABCXAUTO_MODEL", "grok-4.5"),
+        model=_env("ABCXAUTO_MODEL", "grok-4.6"),
         temperature=float(_env("ABCXAUTO_TEMPERATURE", "0.3")),
         max_tokens=int(_env("ABCXAUTO_MAX_TOKENS", "8192")),
         marketdata_token=_env("MARKETDATA_TOKEN") or _env("MARKETDATA_API_KEY"),
@@ -424,17 +379,18 @@ def _load_env_config() -> Config:
         operator_card=load_operator_card(),
         scan_enabled=_env_bool("ABCXAUTO_SCAN_ENABLED", False),
         scan_interval_s=int(_env("ABCXAUTO_SCAN_INTERVAL_S", "900")),
-        scan_fetch_cap=int(_env("ABCXAUTO_SCAN_FETCH_CAP", "4")),
+        scan_fetch_cap=int(_env("ABCXAUTO_SCAN_FETCH_CAP", "8")),
         trading_budget_usd=float(
             _env("ABCXAUTO_TRADING_BUDGET_USD")
             or _env("ABCXAUTO_TARGET_CAPITAL")
             or "0"
         ),
-        cycle_sleep_s=float(_env("ABCXAUTO_CYCLE_SLEEP_S", "300")),
-        grok_min_interval_s=float(_env("ABCXAUTO_GROK_MIN_INTERVAL_S", "300")),
+        cycle_sleep_s=float(_env("ABCXAUTO_CYCLE_SLEEP_S", "15")),
+        grok_min_interval_s=float(_env("ABCXAUTO_GROK_MIN_INTERVAL_S", "15")),
         pace_protect_s=float(_env("ABCXAUTO_PACE_PROTECT_S", "20")),
         pace_manage_s=float(_env("ABCXAUTO_PACE_MANAGE_S", "60")),
-        pace_idle_s=float(_env("ABCXAUTO_PACE_IDLE_S", "600")),
+        pace_idle_s=float(_env("ABCXAUTO_PACE_IDLE_S", "120")),
+        pace_spinup_s=float(_env("ABCXAUTO_PACE_SPINUP_S", "15")),
         monitor_enabled=_env_bool("ABCXAUTO_MONITOR_ENABLED", True),
         monitor_poll_s=int(_env("ABCXAUTO_MONITOR_POLL_S", "30")),
         monitor_review_s=int(_env("ABCXAUTO_MONITOR_REVIEW_S", "300")),
@@ -443,28 +399,23 @@ def _load_env_config() -> Config:
         web_port=int(_env("ABCXAUTO_WEB_PORT", "8000")),
         risk_posture=_normalize_posture(_env("ABCXAUTO_RISK_POSTURE", "defensive")),
         risk_gates_enabled=_env_bool("ABCXAUTO_RISK_GATES_ENABLED", True),
-        daily_loss_limit_pct=float(_env("ABCXAUTO_DAILY_LOSS_LIMIT_PCT", "2")),
-        max_position_pct=float(_env("ABCXAUTO_MAX_POSITION_PCT", "20")),
+        daily_loss_limit_pct=float(_env("ABCXAUTO_DAILY_LOSS_LIMIT_PCT", "25")),
+        max_position_pct=float(_env("ABCXAUTO_MAX_POSITION_PCT", "25")),
         max_open_positions=int(_env("ABCXAUTO_MAX_OPEN_POSITIONS", "15")),
-        grokfolio_enabled=_env_bool("ABCXAUTO_GROKFOLIO_ENABLED", True),
-        grokfolio_cadence=_grokfolio_cadence_env(),
-        grokfolio_holdings=max(
-            1, min(30, int(_env("ABCXAUTO_GROKFOLIO_HOLDINGS", "15") or "15"))
-        ),
         auto_panic_on_breach=_env_bool("ABCXAUTO_AUTO_PANIC_ON_BREACH", True),
         defined_risk_only=_env_bool("ABCXAUTO_DEFINED_RISK_ONLY", True),
         cash_only=_env_bool("ABCXAUTO_CASH_ONLY", True),
-        max_peak_drawdown_pct=float(_env("ABCXAUTO_MAX_PEAK_DRAWDOWN_PCT", "8")),
-        max_option_premium_pct=float(_env("ABCXAUTO_MAX_OPTION_PREMIUM_PCT", "5")),
-        max_risk_per_trade_pct=float(_env("ABCXAUTO_MAX_RISK_PER_TRADE_PCT", "1")),
+        max_peak_drawdown_pct=float(_env("ABCXAUTO_MAX_PEAK_DRAWDOWN_PCT", "25")),
+        max_option_premium_pct=float(_env("ABCXAUTO_MAX_OPTION_PREMIUM_PCT", "25")),
+        max_risk_per_trade_pct=float(_env("ABCXAUTO_MAX_RISK_PER_TRADE_PCT", "25")),
         control_deliberation_pct=int(
             float(
                 _env("ABCXAUTO_CONTROL_DELIBERATION_PCT")
                 or _env("ABCXAUTO_CONTROL_MANAGE_PCT", "40")
             )
         ),
-        control_budget_pct=int(float(_env("ABCXAUTO_CONTROL_BUDGET_PCT", "25"))),
-        control_frequency_pct=int(float(_env("ABCXAUTO_CONTROL_FREQUENCY_PCT", "30"))),
+        control_budget_pct=int(float(_env("ABCXAUTO_CONTROL_BUDGET_PCT", "80"))),
+        control_frequency_pct=int(float(_env("ABCXAUTO_CONTROL_FREQUENCY_PCT", "50"))),
         control_entry_surface_pct=int(
             float(_env("ABCXAUTO_CONTROL_ENTRY_SURFACE_PCT", "50"))
         ),
@@ -475,7 +426,6 @@ def _load_env_config() -> Config:
             )
         ),
         control_rotation_pct=int(float(_env("ABCXAUTO_CONTROL_ROTATION_PCT", "40"))),
-        suite_paper_place=_env_bool("ABCXAUTO_SUITE_PAPER_PLACE", True),
     )
 
 

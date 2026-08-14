@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from abcxauto.world_state import WorldState
 from abcxauto.structure_complexity import (
     allowed_strategies,
     complexity_band,
@@ -79,6 +80,8 @@ def test_exits_always_allowed(monkeypatch):
     assert strategy_allowed("modify_stop") is True
     assert strategy_allowed("close_option") is True
     assert strategy_allowed("hold") is True
+    assert strategy_allowed("vwap") is True
+    assert strategy_allowed("market_on_open") is True
 
 
 @pytest.mark.asyncio
@@ -109,8 +112,7 @@ async def test_refresh_legal_offline_fallback():
 
 
 def test_hunt_outside_sandbox_rejected(tmp_path, monkeypatch):
-    from abcxauto.agent_loop import validate_judgment
-    from abcxauto.world_state import WorldState
+    from abcxauto.agent_loop import gate_ticket
 
     monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
     save_allowlist(
@@ -150,21 +152,17 @@ def test_hunt_outside_sandbox_rejected(tmp_path, monkeypatch):
             "allows_new_risk": True,
         },
     )
-    ok, reason, _ = validate_judgment(
+    strat, forced = gate_ticket(
         {
-            "stance": "hunt",
-            "thesis": "edge",
-            "focus": "ZZZZ",
-            "dismissed": "",
-            "intent": {"kind": "hunt", "symbol": "ZZZZ", "direction": "LONG"},
-            "risk_budget_pct": 1.0,
-            "regime_fit": True,
-            "setup_grade": "A",
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {"symbol": "ZZZZ", "quantity": 1, "direction": "LONG"},
+            "rationale": "edge",
         },
         world,
     )
-    assert ok is False
-    assert "sandbox" in reason.lower() or "universe" in reason.lower()
+    assert strat == "blocked"
+    assert "sandbox" in str((forced or {}).get("note") or "").lower() or "universe" in str((forced or {}).get("note") or "").lower()
 
 
 def test_load_default_arenas():

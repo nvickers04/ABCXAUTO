@@ -573,13 +573,11 @@ def universe_fact_block() -> str:
     src = al.get("source") or _CACHE.get("source") or "n/a"
     ts = al.get("refreshed_at") or "never"
     return (
-        "UNIVERSE SANDBOX (operator arenas — Fact; shell does not rank):\n"
+        "UNIVERSE:\n"
         f"- legal_n={len(legal)} source={src} refreshed_at={ts}\n"
         f"- arenas={arenas}\n"
         f"- custom={len(al.get('custom_symbols') or [])} "
         f"exclude={len(al.get('exclude_symbols') or [])}\n"
-        "Hunt / scan_request must name symbols in the legal set "
-        "(held book symbols stay visible for manage/protect)."
     )
 
 

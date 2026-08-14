@@ -312,45 +312,6 @@ class ProposalValidationError(Exception):
     """Raised when a propose_order payload fails validation (fed back to Grok)."""
 
 
-def _check_min_reward_risk(strategy: str, parsed: BaseModel) -> None:
-    """Enforce min reward:risk on bracket / market_bracket when configured.
-
-    For market_bracket: skip when ``price_hint`` is absent (R:R cannot be
-    computed honestly without an entry). Never use the stop/target midpoint.
-    """
-    if strategy not in ("bracket", "market_bracket"):
-        return
-
-    min_rr = float(get_config().min_reward_risk or 0)
-    if min_rr <= 0:
-        return
-
-    stop = float(parsed.stop_price)
-    target = float(parsed.target_price)
-    if strategy == "bracket":
-        entry = float(parsed.entry_price)
-    else:
-        hint = getattr(parsed, "price_hint", None)
-        if hint is None:
-            return
-        entry = float(hint)
-
-    risk = abs(entry - stop)
-    reward = abs(target - entry)
-    if risk <= 0:
-        raise ProposalValidationError(
-            f"{strategy} reward:risk undefined — |entry-stop| is zero "
-            f"(entry={entry}, stop={stop})"
-        )
-    ratio = reward / risk
-    if ratio < min_rr:
-        raise ProposalValidationError(
-            f"{strategy} reward:risk {ratio:.3f} is below minimum {min_rr} "
-            f"(|target-entry|={reward:.4f} / |entry-stop|={risk:.4f}). "
-            f"Widen the target or tighten the stop."
-        )
-
-
 def validate_proposal(
     strategy: str,
     params: Dict[str, Any],
@@ -385,7 +346,6 @@ def validate_proposal(
         raise ProposalValidationError(f"Invalid {strategy} params — {problems}") from e
     if hasattr(parsed, "symbol"):
         parsed.symbol = parsed.symbol.upper()
-    # min_reward_risk hard gate removed — taste/process, not capital blow-up.
 
     if strategy in ("market_bracket", "oca", "bracket"):
         from abcxauto.config import resolve_effective_posture

@@ -79,6 +79,32 @@ _PLAYBOOK: list[dict[str, Any]] = [
         "needs_long_lot": False,
     },
     {
+        "types": (
+            "stop_order",
+            "stop_limit",
+            "market_on_close",
+            "limit_on_close",
+            "market_on_open",
+            "limit_on_open",
+            "adaptive",
+            "midprice",
+            "relative",
+            "limit_order_gtd",
+            "fill_or_kill",
+            "immediate_or_cancel",
+            "vwap",
+            "twap",
+            "iceberg",
+            "snap_to_midpoint",
+        ),
+        "stances": frozenset({"manage", "protect"}),
+        "precondition": (
+            "exit by target_conId; closing_position required on bare/algo stock"
+        ),
+        "shell_reject": "stance allowlist; inventory/conId; cash-only / defined-risk gates",
+        "needs_long_lot": False,
+    },
+    {
         "types": ("roll_option", "close_option"),
         "stances": frozenset({"manage", "protect"}),
         "precondition": (

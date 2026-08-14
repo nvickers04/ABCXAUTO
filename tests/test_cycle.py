@@ -59,6 +59,19 @@ async def _fake_tool_closed(_c, name: str, _a=None):
     }.get(name, {})
 
 
+async def _fake_tool_session(session: str):
+    async def _tool(_c, name: str, _a=None):
+        return {
+            "account_summary": {"netliquidation": 1000, "unrealizedpnl": 5},
+            "positions": [],
+            "open_orders": [],
+            "market_hours": {"session": session, "minutes_to_open": 80},
+            "quote": {"symbol": "SPY", "last": 500},
+        }.get(name, {})
+
+    return _tool
+
+
 def _cfg(**overrides):
     """Minimal config stub for cycle cadence tests."""
     base = dict(
@@ -71,6 +84,7 @@ def _cfg(**overrides):
         marketdata_token="",
         trading_mandate="RELY ON YOUR INTELLIGENCE. Trade actively with brackets.",
         trading_mode="paper",
+        is_paper=True,
         risk_posture="balanced",
         # S2 lean so Act path runs (tests assert Act prompts / invalid strat).
         control_deliberation_pct=80,
@@ -116,17 +130,10 @@ def _judgment_for_act(act: dict, **extra) -> dict:
 
 
 def _pja_grok(act: dict, judgment: dict | None = None, prompts: list | None = None):
-    """Return async grok stub that answers Judge then Act."""
-    j = judgment if judgment is not None else _judgment_for_act(act)
+    """Return grok_turn stub that sends ``act`` through the clerk."""
+    from tests.conftest import fake_grok_turn
 
-    async def fake(_g, prompt: str, *, stage: str = "act") -> str:
-        if prompts is not None:
-            prompts.append(prompt)
-        if stage == "judge" or "JUDGE STAGE" in prompt:
-            return json.dumps(j)
-        return json.dumps(act)
-
-    return fake
+    return fake_grok_turn(act, wakes=prompts)
 
 
 @pytest.fixture(autouse=True)
@@ -164,7 +171,6 @@ def _reset_cadence(monkeypatch, tmp_path):
     async def _no_news(*_a, **_k):
         return []
 
-    monkeypatch.setattr("abcxauto.agent_loop.scan_opportunities", _no_opps)
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _no_news)
     yield
 
@@ -183,10 +189,14 @@ async def test_snap_with_fake_connector(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_hold_when_flat(monkeypatch):
-    """Agent proposing hold on a flat/protected book succeeds without send_action."""
+async def test_run_cycle_paper_flat_rth_blocks_hold(monkeypatch):
+    """Paper lab while flat in RTH cannot sit — hold is live-only / open-book."""
     before = dict(TWEAKS)
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: _cfg(signal_only=False, grok_min_interval_s=0, is_paper=True),
+    )
     send_calls: list[dict] = []
     prompts: list[str] = []
     act = {"action": "hold", "strategy": "hold", "rationale": "wait"}
@@ -196,28 +206,51 @@ async def test_run_cycle_hold_when_flat(monkeypatch):
         return {"status": "executed"}
 
     monkeypatch.setattr(
-        "abcxauto.agent_loop.grok",
+        "abcxauto.agent_loop.grok_turn",
         _pja_grok(act, prompts=prompts),
     )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     try:
         hist = []
         out = await run_cycle(1, FakeConnector(), None, hist, 0.0)
-        assert out["strat"] == "hold"
-        assert out["result"]["status"] == "hold"
+        assert out["strat"] == "blocked"
+        assert "hold_forbidden" in str(out["result"].get("note") or "").lower()
         assert send_calls == []
-        assert out["pnl"] == 5.0
-        assert out["positions"] == []
-        assert "unprotected_symbols" in out["protection"]
-        assert any("JUDGE STAGE" in p for p in prompts)
-        assert any("ORDER EXAMPLES" in p for p in prompts)
-        out2 = await run_cycle(2, FakeConnector(), None, hist, out["pnl"])
-        assert out2["tweak"] == "none"
-        assert out2.get("order_lab") == {}
-        assert out2["portfolio"].startswith("0 positions")
+        assert prompts  # Grok woke
+        from abcxauto.brain import brain_system_prompt
+
+        assert "ORDER EXAMPLES" in brain_system_prompt()
     finally:
         TWEAKS.clear()
         TWEAKS.update(before)
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_live_hold_when_flat(monkeypatch):
+    """Live follower may hold when flat."""
+    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: _cfg(
+            signal_only=False,
+            grok_min_interval_s=0,
+            trading_mode="live",
+            is_paper=False,
+        ),
+    )
+    send_calls: list[dict] = []
+    act = {"action": "hold", "strategy": "hold", "rationale": "wait"}
+
+    async def record_send(action, conn):
+        send_calls.append(action)
+        return {"status": "executed"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert out["strat"] == "hold"
+    assert out["result"]["status"] == "hold"
+    assert send_calls == []
 
 
 @pytest.mark.asyncio
@@ -248,13 +281,13 @@ async def test_run_cycle_rth_always_calls_grok(monkeypatch):
         return {"status": "executed", "strategy": a.get("strategy")}
 
     monkeypatch.setattr(
-        "abcxauto.agent_loop.grok",
+        "abcxauto.agent_loop.grok_turn",
         _pja_grok(act, prompts=grok_calls),
     )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _ok_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert len(grok_calls) >= 2
-    assert any("WORLDSTATE" in p or "JUDGE STAGE" in p for p in grok_calls)
+    assert len(grok_calls) >= 1
+    assert any("Cycle" in p for p in grok_calls)
     assert out["strat"] in ("market_bracket", "blocked", "hold")
 
 
@@ -298,13 +331,12 @@ async def test_run_cycle_protection_blocks_hold(monkeypatch):
     )
 
     monkeypatch.setattr(
-        "abcxauto.agent_loop.grok",
+        "abcxauto.agent_loop.grok_turn",
         _pja_grok(act, judgment=judgment, prompts=grok_calls),
     )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert len(grok_calls) == 2
-    assert any("protect" in p.lower() for p in grok_calls)
-    assert any("WORLDSTATE" in p for p in grok_calls)
+    assert len(grok_calls) == 1
+    assert any("unprotected" in p.lower() for p in grok_calls)
     assert out["strat"] == "blocked"
     assert "hold_forbidden" in str(out["result"].get("note") or "")
 
@@ -340,16 +372,17 @@ async def test_run_cycle_agent_decides_with_journal_memory(monkeypatch):
     }
 
     monkeypatch.setattr(
-        "abcxauto.agent_loop.grok",
+        "abcxauto.agent_loop.grok_turn",
         _pja_grok(act, prompts=grok_calls),
     )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert len(grok_calls) == 2
+    assert len(grok_calls) == 1
     joined = "\n".join(grok_calls)
-    assert "WORLDSTATE" in joined
-    assert "ORDER EXAMPLES" in joined
-    assert "working_thesis" in joined.lower() or "JUDGE STAGE" in joined
+    from abcxauto.brain import brain_system_prompt
+
+    assert "ORDER EXAMPLES" in brain_system_prompt()
+    assert "Cycle" in joined
     assert "MARKET HINTS" not in joined
     assert out["strat"] == "market_bracket"
     assert len(calls) == 1
@@ -404,20 +437,16 @@ async def test_run_cycle_prompt_flags_naked_stk(monkeypatch):
         return {"status": "executed", "strategy": action.get("strategy")}
 
     monkeypatch.setattr(
-        "abcxauto.agent_loop.grok",
+        "abcxauto.agent_loop.grok_turn",
         _pja_grok(act, prompts=prompts),
     )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert prompts
     joined = "\n".join(prompts)
-    assert "WORLDSTATE" in joined
-    assert "needs_protection" in joined or "unprotected" in joined.lower()
-    assert (
-        "GATE: unprotected" in joined
-        or "PRESSURE: unprotected" in joined
-        or "stance MUST be protect" in joined
-    )
+    assert "unprotected" in joined.lower()
+    assert "GATE: unprotected" not in joined
+    assert "stance MUST be protect" not in joined
     assert out["strat"] == "oca"
 
 
@@ -435,11 +464,49 @@ async def test_run_cycle_market_closed_skips_grok(monkeypatch):
         grok_calls.append(1)
         return json.dumps({"action": "market_bracket", "strategy": "market_bracket"})
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", tracking_grok)
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", tracking_grok)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert grok_calls == []
     assert out["strat"] == "skipped"
     assert "session_closed" in (out.get("validation") or "")
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_premarket_wakes_grok(monkeypatch):
+    """Premarket is prep time — Grok runs; hold is allowed (not RTH hunt)."""
+    monkeypatch.setattr(
+        "abcxauto.agent_loop._tool", await _fake_tool_session("premarket")
+    )
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: _cfg(signal_only=False, grok_min_interval_s=0),
+    )
+    wakes: list[str] = []
+    act = {"action": "hold", "strategy": "hold", "rationale": "premarket tape"}
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok_turn",
+        _pja_grok(act, prompts=wakes),
+    )
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert wakes
+    assert "session=premarket" in wakes[0]
+    assert out["strat"] == "hold"
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_postmarket_wakes_grok(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.agent_loop._tool", await _fake_tool_session("postmarket")
+    )
+    wakes: list[str] = []
+    act = {"action": "hold", "strategy": "hold", "rationale": "postmarket book"}
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok_turn",
+        _pja_grok(act, prompts=wakes),
+    )
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert wakes
+    assert out["strat"] == "hold"
 
 
 @pytest.mark.asyncio
@@ -463,7 +530,7 @@ async def test_run_cycle_does_not_write_jsonl(monkeypatch, tmp_path):
     async def _noop_send(action, conn):
         return {"status": "executed"}
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", _pja_grok(act))
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     monkeypatch.chdir(tmp_path)
     await run_cycle(1, FakeConnector(), None, [], 0.0)
@@ -512,7 +579,7 @@ async def test_run_cycle_blocks_invalid_strategy(monkeypatch):
     judgment = _judgment_for_act({"strategy": "hold"})
 
     monkeypatch.setattr(
-        "abcxauto.agent_loop.grok",
+        "abcxauto.agent_loop.grok_turn",
         _pja_grok(act, judgment=judgment),
     )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
@@ -544,7 +611,7 @@ async def test_run_cycle_allows_trade_without_kahneman(monkeypatch):
         "rationale": "no system2",
     }
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", _pja_grok(act))
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "bracket"
@@ -571,7 +638,7 @@ async def test_cycle_smoke_run_cycle_bracket_dispatch(monkeypatch, tmp_path):
         "rationale": "Current reality: RTH; smoke",
     }
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", _pja_grok(act))
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     snap_out = await snap(FakeConnector())
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
@@ -591,7 +658,6 @@ async def test_cycle_smoke_run_cycle_bracket_dispatch(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_no_suite_gate_on_autonomous_path(monkeypatch):
-    """order_suite is not invoked on the autonomous agent path."""
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     calls: list[dict] = []
 
@@ -613,12 +679,11 @@ async def test_no_suite_gate_on_autonomous_path(monkeypatch):
         "rationale": "try entry",
     }
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", _pja_grok(act))
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "bracket"
     assert len(calls) == 1
-    assert out.get("order_lab") == {}
     assert "low_pass_rate" not in out.get("validation", "")
 
 
@@ -627,15 +692,6 @@ async def test_no_prefer_bracket_only_playbook(monkeypatch):
     """prefer_bracket_only is removed — agent chooses structure; gates constrain."""
     assert "prefer_bracket_only" not in TWEAKS
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ALLOWED_ACTIONS",
-        frozenset(ALLOWED_ACTIONS | {"trailing_stop"}),
-    )
-    from abcxauto.agent_loop import STANCE_ACTIONS
-
-    patched = dict(STANCE_ACTIONS)
-    patched["manage"] = frozenset(patched["manage"] | {"trailing_stop"})
-    monkeypatch.setattr("abcxauto.agent_loop.STANCE_ACTIONS", patched)
     calls: list[dict] = []
 
     async def record_send(action, conn):
@@ -651,7 +707,7 @@ async def test_no_prefer_bracket_only_playbook(monkeypatch):
     judgment = _judgment_for_act(act, stance="manage")
 
     monkeypatch.setattr(
-        "abcxauto.agent_loop.grok",
+        "abcxauto.agent_loop.grok_turn",
         _pja_grok(act, judgment=judgment),
     )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
@@ -679,14 +735,12 @@ async def test_run_cycle_dispatches_bracket_to_send_action(monkeypatch):
         "rationale": "test bracket dispatch",
     }
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", _pja_grok(act))
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "bracket"
     assert len(calls) == 1
     assert calls[0]["strategy"] == "bracket"
-    # Kahneman soft-gate removed — stub reports incomplete.
-    assert out.get("kahneman", {}).get("complete") is False
 
 
 def test_apply_tweak_merges_config():
@@ -726,8 +780,9 @@ def test_config_cadence_defaults(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     get_config.cache_clear()
     cfg = get_config()
-    assert cfg.cycle_sleep_s == 300.0
-    assert cfg.grok_min_interval_s == 300.0
-    assert "self_tune" in cfg.trading_mandate.lower() or "OWN a paper" in cfg.trading_mandate
+    assert cfg.cycle_sleep_s == 15.0
+    assert cfg.grok_min_interval_s == 15.0
+    assert "operator gives no strategy" in cfg.trading_mandate.lower()
+    assert "promoted" in cfg.trading_mandate.lower()
     assert "cycle_sleep_s" in Config.__dataclass_fields__
     get_config.cache_clear()

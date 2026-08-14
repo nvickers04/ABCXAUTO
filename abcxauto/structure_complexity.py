@@ -25,6 +25,16 @@ _ALWAYS = frozenset({
     "limit_on_open",
     "close_option",
     "roll_option",
+    "adaptive",
+    "midprice",
+    "relative",
+    "limit_order_gtd",
+    "fill_or_kill",
+    "immediate_or_cancel",
+    "vwap",
+    "twap",
+    "iceberg",
+    "snap_to_midpoint",
 })
 
 # New stock risk — gated by entry surface (stock | mixed).
@@ -79,14 +89,7 @@ def complexity_pct(cfg: Any = None) -> int:
     from abcxauto.config import _control_pct, get_config
 
     c = cfg if cfg is not None else get_config()
-    if hasattr(c, "control_complexity_pct"):
-        try:
-            raw = getattr(c, "control_complexity_pct", None)
-            if raw is not None:
-                return _control_pct(c, "control_complexity_pct")
-        except Exception:
-            pass
-    return _control_pct(c, "control_options_pct")
+    return _control_pct(c, "control_complexity_pct")
 
 
 def complexity_band(pct: int | None = None, cfg: Any = None) -> str:

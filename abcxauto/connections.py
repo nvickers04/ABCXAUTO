@@ -64,8 +64,23 @@ def connection_status(connector: Any = None) -> Dict[str, Any]:
             mda_ok = False
     else:
         mda_ok = bool(mda_fn)
+    def _as_int(raw: Any, fallback: int) -> int:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return fallback
+
+    host = getattr(conn, "host", None)
+    if not isinstance(host, str) or not host:
+        host = str(getattr(cfg, "ibkr_host", "") or "")
     return {
         "ibkr_connected": bool(getattr(conn, "connected", False)),
+        "ibkr_host": host,
+        "ibkr_port": _as_int(getattr(conn, "port", None), int(getattr(cfg, "ibkr_port", 0) or 0)),
+        "ibkr_client_id": _as_int(
+            getattr(conn, "client_id", None),
+            int(getattr(cfg, "ibkr_client_id", 0) or 0),
+        ),
         "mda_configured": mda_ok,
         "xai_configured": bool(getattr(cfg, "xai_api_key", "") or ""),
         "trading_mode": str(getattr(cfg, "trading_mode", "paper") or "paper"),

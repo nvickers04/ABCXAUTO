@@ -33,21 +33,15 @@ def _account_float(account: dict, *keys: str) -> Optional[float]:
 
 
 def _slim_positions(positions: list, limit: int = 12) -> List[dict]:
+    from abcxauto.world_state import compact_position
+
     out: List[dict] = []
     for p in positions[:limit]:
         if not isinstance(p, dict):
             continue
-        out.append(
-            {
-                "conId": p.get("conId") or p.get("con_id"),
-                "symbol": p.get("symbol"),
-                "sec": p.get("secType") or p.get("sec_type"),
-                "qty": p.get("quantity") or p.get("position"),
-                "avg": p.get("avgCost") or p.get("avg_cost"),
-                "mkt": p.get("marketPrice") or p.get("market_price"),
-                "uPnL": p.get("unrealizedPNL") or p.get("unrealized_pnl"),
-            }
-        )
+        row = compact_position(p)
+        row["uPnL"] = p.get("unrealizedPNL") or p.get("unrealized_pnl")
+        out.append(row)
     return out
 
 

@@ -40,18 +40,27 @@ class IBKROptionsMixin:
     # ========== HELPER METHODS ==========
 
     async def _get_underlying_price(self, symbol: str) -> Optional[float]:
-        """Get current price of underlying via MarketData.app.
-
-        Uses MDA as the sole price source — no IBKR market data subscription
-        required. Returns None when no reliable price is available.
-        """
+        """IBKR live last/mid for send geometry; MDA only if IBKR has no tick."""
+        fn = getattr(self, "get_live_quote", None)
+        if callable(fn):
+            try:
+                q = await fn(symbol)
+            except Exception:
+                q = None
+            if isinstance(q, dict):
+                for key in ("last", "mid", "bid", "ask"):
+                    try:
+                        price = float(q.get(key) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if price > 0:
+                        return price
         try:
             dp = get_data_provider()
             q = dp.get_quote(symbol)
             if q is None:
                 logger.debug(f"_get_underlying_price({symbol}): MDA returned None")
                 return None
-            # Prefer mid (bid/ask midpoint), fall back to last
             price = q.mid or q.last
             if price and price > 0:
                 return float(price)
@@ -152,16 +161,64 @@ class IBKROptionsMixin:
         """
         Generic combo order placement - all multi-leg strategies use this.
 
-        Routes through individual legs to avoid IBKR TWS "riskless combination"
-        pop-ups that block the API on paper accounts.
+        One IBKR BAG so the short is a spread leg, not a naked write.
+        Riskless deep-ITM combos are blocked in ``_check_riskless_spread``
+        (those are the TWS pop-ups). Do not fall back to singles.
         """
         if not await self._ensure_connected():
             return {'error': 'Not connected'}
 
-        return await self._place_combo_as_singles(
+        return await self._place_combo_as_bag(
             symbol, expiration, strikes_rights_actions,
             quantity, combo_action, limit_price, strategy_name
         )
+
+    async def _place_combo_as_bag(
+        self,
+        symbol: str,
+        expiration: str,
+        strikes_rights_actions: List[Tuple[float, str, str, int]],
+        quantity: int,
+        combo_action: str,
+        limit_price: Optional[float],
+        strategy_name: str,
+    ) -> Dict[str, Any]:
+        """Place all legs as one BAG combo (defined-risk to IBKR)."""
+        try:
+            pairs = [(strike, right) for strike, right, _action, _ratio in strikes_rights_actions]
+            options = await self._create_options(symbol, expiration, pairs)
+            legs = [
+                (opt.conId, ratio, action)
+                for opt, (_k, _r, action, ratio) in zip(options, strikes_rights_actions)
+            ]
+            combo = self._build_combo(symbol, legs)
+            order = Order()
+            order.action = combo_action
+            order.totalQuantity = quantity
+            order.orderType = 'LMT' if limit_price is not None else 'MKT'
+            if limit_price is not None:
+                order.lmtPrice = float(limit_price)
+            order.tif = 'DAY'
+            order.transmit = True
+            trade = self.ib.placeOrder(combo, order)
+            rejection = await self._check_order_rejection(trade, strategy_name, symbol)
+            if rejection:
+                return rejection
+            return {
+                'success': True,
+                'order_id': trade.order.orderId,
+                'order_ids': [trade.order.orderId],
+                'symbol': symbol,
+                'strategy': strategy_name,
+                'expiration': expiration,
+                'quantity': quantity,
+                'limit_price': limit_price,
+                'note': 'IBKR combo (BAG)',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:
+            logger.exception("%s BAG combo failed", strategy_name)
+            return {'error': f'{strategy_name} combo failed: {exc}', 'symbol': symbol}
 
     async def _place_combo_as_singles(
         self,
@@ -173,44 +230,62 @@ class IBKROptionsMixin:
         limit_price: Optional[float],
         strategy_name: str,
     ) -> Dict[str, Any]:
-        """Place combo legs as individual orders (always used — combos disabled).
-        
-        The leg actions (BUY/SELL) are already correct for individual placement.
-        Do NOT reverse based on combo_action — that reversal only applied to
-        IBKR combo orders where 'SELL combo' means reverse all legs internally.
-        """
+        """Unused fallback: all legs or none. A half-spread is a naked write."""
         order_ids = []
         errors = []
         for strike, right, leg_action, ratio in strikes_rights_actions:
-            final_action = leg_action
             try:
                 result = await self._place_single_option(
                     symbol, expiration, strike, right,
-                    action=final_action, quantity=quantity * ratio,
+                    action=leg_action, quantity=quantity * ratio,
                     strategy_name=f'{strategy_name} leg',
                 )
                 if result.get('success'):
                     order_ids.append(result['order_id'])
-                    logger.info(f"{strategy_name} leg OK: {final_action} {symbol} {strike}{right}")
+                    logger.info(f"{strategy_name} leg OK: {leg_action} {symbol} {strike}{right}")
                 else:
                     errors.append(f"{strike}{right}: {result.get('error', 'unknown')}")
             except Exception as e:
                 errors.append(f"{strike}{right}: {e}")
 
-        if order_ids:
+        if errors:
+            self._cancel_combo_oids(order_ids)
             return {
-                'success': True,
-                'order_ids': order_ids,
+                'error': f'{strategy_name} incomplete: {"; ".join(errors)}',
+                'cancelled_order_ids': order_ids,
                 'symbol': symbol,
-                'strategy': f'{strategy_name} (individual legs)',
-                'expiration': expiration,
-                'quantity': quantity,
-                'limit_price': limit_price,
-                'note': f'Placed as {len(order_ids)} individual legs (combo rejected)',
-                'errors': errors if errors else None,
-                'timestamp': datetime.now(timezone.utc).isoformat(),
             }
-        return {'error': f'{strategy_name} individual legs all failed: {"; ".join(errors)}'}
+        return {
+            'success': True,
+            'order_ids': order_ids,
+            'symbol': symbol,
+            'strategy': f'{strategy_name} (individual legs)',
+            'expiration': expiration,
+            'quantity': quantity,
+            'limit_price': limit_price,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _cancel_combo_oids(self, order_ids: List[Any]) -> None:
+        want = {int(x) for x in order_ids if x}
+        if not want:
+            return
+        cancel = getattr(self, "_cancel_order_with_tracking", None)
+        try:
+            trades = list(self.ib.openTrades())
+        except Exception:
+            trades = []
+        for trade in trades:
+            oid = int(getattr(getattr(trade, "order", None), "orderId", 0) or 0)
+            if oid not in want:
+                continue
+            try:
+                if callable(cancel):
+                    cancel(trade.order, source="combo_rollback")
+                else:
+                    self.ib.cancelOrder(trade.order)
+            except Exception:
+                logger.debug("combo rollback cancel failed oid=%s", oid, exc_info=True)
 
     async def _place_single_option(
         self,
@@ -315,11 +390,65 @@ class IBKROptionsMixin:
                 'exchange': chain.exchange,
                 'expirations': valid_expirations,
                 'strikes': sorted(chain.strikes),
-                'multiplier': chain.multiplier
+                'multiplier': chain.multiplier,
+                'source': 'ibkr',
+                'freshness': 'live',
             }
         except Exception as e:
             logger.error(f"Failed to get option chain for {symbol}: {e}")
             return {'error': str(e)}
+
+    async def get_live_option_quote(
+        self,
+        symbol: str,
+        expiration: str,
+        strike: float,
+        right: str,
+    ) -> Dict[str, Any]:
+        """IBKR stream snapshot for one option contract."""
+        from abcxauto.broker.connection import safe_sleep as _safe_sleep
+        from abcxauto.broker.util import quote_from_ticker
+
+        sym = str(symbol or "").strip().upper()
+        exp = str(expiration or "").strip()
+        rgt = str(right or "").upper()[:1]
+        try:
+            k = float(strike)
+        except (TypeError, ValueError):
+            return {"error": "strike required", "source": "ibkr"}
+        if not sym or not exp or rgt not in ("C", "P"):
+            return {"error": "symbol, expiration, strike, right required", "source": "ibkr"}
+        contract = await self.qualify_option_contract(sym, exp, k, rgt)
+        if contract is None:
+            return {"error": "qualify failed", "source": "ibkr", "symbol": sym}
+        ticker = None
+        try:
+            req = getattr(self.ib, "reqTickersAsync", None)
+            if callable(req):
+                tickers = await req(contract)
+                ticker = tickers[0] if tickers else None
+            if ticker is None:
+                ticker = self.ib.reqMktData(contract, "", True, False)
+                await _safe_sleep(0.8)
+            out = quote_from_ticker(ticker, symbol=sym)
+            out.update({
+                "expiration": getattr(contract, "lastTradeDateOrContractMonth", exp),
+                "strike": getattr(contract, "strike", k),
+                "right": getattr(contract, "right", rgt),
+                "conId": getattr(contract, "conId", None),
+                "sec": "OPT",
+            })
+            if out.get("last") is None and out.get("mid") is None:
+                out["error"] = "no IBKR tick yet"
+            return out
+        except Exception as exc:
+            logger.warning("IBKR option quote failed for %s: %s", sym, exc)
+            return {"error": str(exc), "source": "ibkr", "symbol": sym}
+        finally:
+            try:
+                self.ib.cancelMktData(contract)
+            except Exception:
+                pass
 
     # ========== VERTICAL SPREADS ==========
 

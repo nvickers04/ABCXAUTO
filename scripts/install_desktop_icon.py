@@ -4,8 +4,8 @@
 Usage (from repo root):
   python scripts/install_desktop_icon.py
 
-Creates a launcher that runs:  python -m abcxauto --desktop
-(Live web Pro shell wired to ProEngine / IBKR.)
+Creates a launcher that runs:  python -m abcxauto
+(Flet Pro cockpit + think stream.)
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 ASSETS = REPO / "assets"
-WEB_LOGO = REPO / "web-pro" / "public" / "abcxauto_logo.png"
+WEB_LOGO = ASSETS / "abcxauto_logo.png"
 
 
 def _python() -> str:
@@ -34,7 +34,7 @@ def _logo() -> Path:
     ):
         if p.is_file():
             return p
-    raise SystemExit("No logo PNG found — expected web-pro/public/abcxauto_logo.png")
+    raise SystemExit("No logo PNG found — expected assets/abcxauto_logo.png")
 
 
 def _desktop_dir() -> Path:
@@ -97,7 +97,7 @@ def _write_unix_launcher(dest: Path) -> Path:
         content = f"""#!/bin/bash
 cd "{REPO}"
 export ABCXAUTO_DESKTOP=1
-exec "{py}" -m abcxauto --desktop
+exec "{py}" -m abcxauto
 """
         sh.write_text(content)
         sh.chmod(sh.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -122,7 +122,7 @@ set filePath to "{sh}"
 Type=Application
 Name=ABCXAUTO Pro
 Comment=Agentic IBKR portfolio cockpit
-Exec={py} -m abcxauto --desktop
+Exec={py} -m abcxauto
 Path={REPO}
 Icon={icon_png}
 Terminal=false
@@ -166,7 +166,7 @@ def _write_windows_launcher(dest: Path) -> Path:
         shutil.copy2(logo, icon_png)
     ico = _ensure_windows_ico(logo)
     # Single Desktop icon only — no companion .bat/.vbs clutter.
-    lnk = _write_windows_shortcut(dest, Path(_python()), ico, args="-m abcxauto --desktop")
+    lnk = _write_windows_shortcut(dest, Path(_python()), ico, args="-m abcxauto")
     print(f"Desktop icon: {lnk}")
     print(f"Icon file: {ico}")
     return lnk
@@ -222,8 +222,7 @@ def main() -> int:
         _write_unix_launcher(dest)
     print()
     print("Done. Double-click “ABCXAUTO Pro” on your Desktop.")
-    print("Launches web Pro with live IBKR (python -m abcxauto --desktop).")
-    print("Flet Pro (alternate):  python -m abcxauto")
+    print("Launches Flet Pro (python -m abcxauto).")
     return 0
 
 

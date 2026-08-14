@@ -109,6 +109,80 @@ async def test_fetch_option_facts_book_only_without_mda(monkeypatch):
     assert facts[0]["conId"] == 9
 
 
+@pytest.mark.asyncio
+async def test_fetch_option_facts_keeps_ibkr_and_strips_mda_prices(monkeypatch):
+    from abcxauto import option_facts as of
+
+    class FakeMDA:
+        is_configured = True
+
+        async def get_option_quote(self, occ, **_k):
+            return {"delta": 0.4, "iv": 0.2, "bid": 9.9, "ask": 10.1, "last": 10.0, "mid": 10.0}
+
+    class Conn:
+        async def get_live_option_quote(self, symbol, expiration, strike, right):
+            return {
+                "symbol": symbol,
+                "bid": 1.1,
+                "ask": 1.2,
+                "mid": 1.15,
+                "source": "ibkr",
+                "freshness": "live",
+            }
+
+    monkeypatch.setattr(
+        "abcxauto.marketdata.client.get_marketdata_client",
+        lambda: FakeMDA(),
+    )
+    facts = await of.fetch_option_facts(
+        [
+            {
+                "symbol": "SPY",
+                "sec_type": "OPT",
+                "quantity": 1,
+                "conId": 9,
+                "expiration": "20260718",
+                "strike": 500,
+                "right": "C",
+            }
+        ],
+        connector=Conn(),
+    )
+    assert facts[0]["ibkr"]["bid"] == 1.1
+    assert facts[0]["mda"]["delta"] == 0.4
+    assert "bid" not in facts[0]["mda"]
+    assert "ask" not in facts[0]["mda"]
+    assert "last" not in facts[0]["mda"]
+    assert "mid" not in facts[0]["mda"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_option_facts_covers_capacity(monkeypatch):
+    from abcxauto import option_facts as of
+
+    class FakeMDA:
+        is_configured = False
+
+    monkeypatch.setattr(
+        "abcxauto.marketdata.client.get_marketdata_client",
+        lambda: FakeMDA(),
+    )
+    rows = [
+        {
+            "symbol": "SPY",
+            "sec_type": "OPT",
+            "quantity": 1,
+            "conId": i,
+            "expiration": "20260718",
+            "strike": 500 + i,
+            "right": "C",
+        }
+        for i in range(15)
+    ]
+    facts = await of.fetch_option_facts(rows)
+    assert len(facts) == 15
+
+
 def test_close_option_accepts_conId_only():
     from abcxauto.proposals import validate_proposal
 
@@ -157,8 +231,6 @@ def test_world_prompt_includes_option_facts():
         trade_plan=None,
         idle_streak=0,
         idle_top_symbol="",
-        prep={},
-        review={},
         option_facts=[
             {
                 "conId": 1,

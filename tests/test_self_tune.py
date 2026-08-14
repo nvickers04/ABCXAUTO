@@ -15,6 +15,7 @@ from abcxauto.self_tune import (
     clamp_risk_to_floor,
     ensure_immutable_floor,
     is_self_tune_strategy,
+    levers_snapshot,
 )
 
 
@@ -37,21 +38,19 @@ def test_is_self_tune_alias():
 def test_defaults_are_1k_floor():
     cfg = get_config()
     assert cfg.risk_posture == "defensive"
-    assert cfg.daily_loss_limit_pct == 2.0
-    assert cfg.max_position_pct == 20.0
-    assert cfg.max_risk_per_trade_pct == 1.0
+    assert cfg.daily_loss_limit_pct == 25.0
+    assert cfg.max_position_pct == 25.0
+    assert cfg.max_risk_per_trade_pct == 25.0
+    assert cfg.max_peak_drawdown_pct == 25.0
     assert cfg.max_open_positions == 15
     assert cfg.defined_risk_only is True
     assert cfg.cash_only is True
     assert cfg.auto_panic_on_breach is True
-    assert cfg.cycle_sleep_s == 300.0
-    assert cfg.grok_min_interval_s == 300.0
-    assert cfg.pace_idle_s == 600.0
-    assert cfg.scan_fetch_cap == 4
+    assert cfg.cycle_sleep_s == 15.0
+    assert cfg.grok_min_interval_s == 15.0
+    assert cfg.pace_idle_s == 120.0
+    assert cfg.scan_fetch_cap == 8
     assert cfg.trading_budget_usd == 0.0
-    assert cfg.grokfolio_enabled is True
-    assert cfg.grokfolio_cadence == "both"
-    assert cfg.grokfolio_holdings == 15
 
 
 def test_cannot_weaken_daily_loss(tmp_path, monkeypatch):
@@ -85,10 +84,29 @@ def test_cannot_set_trading_budget_sleeve():
     assert "trading_budget_usd" in (out.get("rejected") or {})
 
 
-def test_cannot_disable_grokfolio():
-    out = apply_self_tune({"grokfolio_enabled": False}, persist=False)
-    assert get_config().grokfolio_enabled is True
-    assert "grokfolio_enabled" in (out.get("rejected") or {}) or out["status"] == "blocked"
+def test_size_ceiling_is_25_pct_of_nl():
+    v, note = clamp_risk_to_floor("max_risk_per_trade_pct", 50)
+    assert v == 25.0
+    assert note is not None
+    v2, _ = clamp_risk_to_floor("max_option_premium_pct", 50)
+    assert v2 == 25.0
+    v3, _ = clamp_risk_to_floor("max_position_pct", 50)
+    assert v3 == 25.0
+    v4, _ = clamp_risk_to_floor("daily_loss_limit_pct", 50)
+    assert v4 == 25.0
+    v5, _ = clamp_risk_to_floor("max_peak_drawdown_pct", 50)
+    assert v5 == 25.0
+
+
+def test_levers_snapshot_shows_now_and_range():
+    snap = levers_snapshot()
+    risk = snap["max_risk_per_trade_pct"]
+    assert risk["min"] == 0.25
+    assert risk["max"] == 25.0
+    assert risk["now"] is not None
+    assert snap["max_open_positions"]["min"] == MAX_OPEN_POSITIONS_RANGE[0]
+    assert snap["max_open_positions"]["max"] == MAX_OPEN_POSITIONS_RANGE[1]
+    assert snap["change"] == "self_tune"
 
 
 def test_can_tighten_risk():
@@ -166,7 +184,7 @@ def test_ensure_floor_repairs_weak_settings(tmp_path, monkeypatch):
     update_controls_config(max_open_positions=0, persist=False)
     ensure_immutable_floor(persist=False)
     cfg = get_config()
-    assert cfg.daily_loss_limit_pct == 2.0
+    assert cfg.daily_loss_limit_pct == 25.0
     assert cfg.defined_risk_only is True
     assert cfg.max_open_positions == 15
 
@@ -180,7 +198,7 @@ def test_clamp_risk_helper():
 def test_get_config_clamps_weak_file(tmp_path, monkeypatch):
     path = tmp_path / "risk.json"
     path.write_text(
-        '{"max_open_positions": 25, "daily_loss_limit_pct": 9, '
+        '{"max_open_positions": 25, "daily_loss_limit_pct": 50, '
         '"defined_risk_only": false, "risk_posture": "aggressive", '
         '"trading_budget_usd": 1000}\n',
         encoding="utf-8",
@@ -190,14 +208,14 @@ def test_get_config_clamps_weak_file(tmp_path, monkeypatch):
 
     load_risk_settings(path)
     cfg = get_config()
-    assert cfg.max_open_positions == 15
-    assert cfg.daily_loss_limit_pct == 2.0
+    assert cfg.max_open_positions == 25
+    assert cfg.daily_loss_limit_pct == 25.0
     assert cfg.defined_risk_only is True
     assert cfg.risk_posture == "defensive"
     assert cfg.trading_budget_usd == 0.0
 
 
-def test_get_config_repairs_old_max_open_floor_of_two(tmp_path, monkeypatch):
+def test_grok_may_set_open_positions_to_two(tmp_path, monkeypatch):
     path = tmp_path / "risk.json"
     path.write_text('{"max_open_positions": 2}\n', encoding="utf-8")
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
@@ -205,18 +223,21 @@ def test_get_config_repairs_old_max_open_floor_of_two(tmp_path, monkeypatch):
 
     load_risk_settings(path)
     cfg = get_config()
-    assert cfg.max_open_positions == 15
+    assert cfg.max_open_positions == 2
 
 
-def test_idle_stance_allows_self_tune():
-    from abcxauto.agent_loop import check_intent_coherence
+def test_can_self_tune_open_positions_to_three():
+    out = apply_self_tune({"max_open_positions": 3}, persist=False)
+    assert out["status"] == "ok"
+    assert get_config().max_open_positions == 3
 
-    ok, reason = check_intent_coherence(
-        {
-            "stance": "idle",
-            "intent": {"kind": "idle"},
-        },
-        "self_tune",
-        {"strategy": "self_tune", "params": {"cycle_sleep_s": 400}},
+
+def test_self_tune_is_sendable():
+    from abcxauto.agent_loop import ALLOWED_ACTIONS, normalize_action
+
+    strat, forced = normalize_action(
+        {"strategy": "self_tune", "params": {"cycle_sleep_s": 400}}
     )
-    assert ok, reason
+    assert strat == "self_tune"
+    assert forced is None
+    assert "self_tune" in ALLOWED_ACTIONS

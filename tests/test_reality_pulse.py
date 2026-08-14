@@ -86,6 +86,18 @@ def test_mda_unix_updated_yields_age_not_na():
     assert "MDA data" in pulse["narrative"]
 
 
+def test_ibkr_spy_quote_is_not_labeled_mda():
+    pulse = build_reality_pulse(
+        spy_quote={"last": 500.0, "source": "ibkr", "freshness": "live"},
+        market_hours={"session": "regular", "is_trading_day": True},
+        ibkr_connected=True,
+    )
+    assert pulse["data_freshness"]["sources"]["spy"] == "ibkr_live"
+    assert pulse["data_freshness"]["sources"]["mda_spy"] == "unused"
+    assert "SPY from IBKR live" in pulse["narrative"]
+    assert "MDA data" not in pulse["narrative"]
+
+
 def test_narrative_lists_mixed_instruments_separately():
     pulse = build_reality_pulse(positions=MIXED, market_hours={"session": "regular"})
     n = build_narrative(pulse)
@@ -94,7 +106,7 @@ def test_narrative_lists_mixed_instruments_separately():
 
 
 def test_awareness_heart_in_system_rules():
-    assert "AWARENESS" in AWARENESS_HEART or "awareness" in AWARENESS_HEART.lower()
-    assert "conId" in AWARENESS_HEART or "Hold forbidden" in AWARENESS_HEART
-    assert AWARENESS_HEART in RULES or "AWARENESS" in RULES
-    assert "HOLD" in RULES.upper() or "Hold forbidden" in RULES
+    assert "SHELL" in AWARENESS_HEART
+    assert "conId" in AWARENESS_HEART
+    assert AWARENESS_HEART in RULES
+    assert "Hold forbidden" in RULES or "hold forbidden" in RULES.lower()

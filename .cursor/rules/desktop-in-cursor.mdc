@@ -11,4 +11,4 @@ When starting the trader from Cursor (terminal, debug, or an agent shell), launc
 python -m abcxauto
 ```
 
-Do not use `--headless` unless the operator explicitly asks for console-only (`ABCXAUTO_FORCE_HEADLESS=1`). One IBKR client id (77). Kill leftovers before a second launch.
+Do not use `--headless` unless the operator explicitly asks for console-only (`ABCXAUTO_FORCE_HEADLESS=1`). Headless is paper-only. One IBKR client id per process (paper 77 on 7497; live needs a different id on 7496). Kill leftovers before a second launch. Do not enable live from Cursor unless the operator typed the confirm phrase and a promoted playbook exists.

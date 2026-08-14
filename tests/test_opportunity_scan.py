@@ -75,6 +75,12 @@ def test_normalize_tickers_cap_and_regex():
     assert out == ["NVDA", "XLE", "BRK.B"]
 
 
+def test_tape_seed_cap_matches_prompt():
+    from abcxauto.opportunity_scan import TAPE_SEED_CAP
+
+    assert TAPE_SEED_CAP == 12
+
+
 def test_format_scan_tape():
     text = format_scan_tape(
         [
@@ -153,8 +159,6 @@ def test_prompt_includes_scan_tape_and_quote_sources(tmp_path, monkeypatch):
         trade_plan=None,
         idle_streak=0,
         idle_top_symbol="",
-        prep={},
-        review={},
     )
     prompt = world.prompt_block()
     assert "SCAN TAPE" in prompt

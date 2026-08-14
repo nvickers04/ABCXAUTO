@@ -1,7 +1,7 @@
 """Book return vs model cost scorecard."""
 
 from abcxauto.memory import get_journal
-from abcxauto.scorecard import compute_scorecard, estimate_cost_usd, estimate_tokens
+from abcxauto.scorecard import compute_scorecard, estimate_cost_usd, estimate_tokens, format_scorecard_block
 
 
 def test_estimate_tokens_and_cost():
@@ -22,6 +22,7 @@ def test_scorecard_beating_when_book_ahead():
     assert sc["model_cost_usd"] == 0.01
     assert sc["beating_model"] is True
     assert abs(sc["edge_usd"] - 99.99) < 1e-9
+    assert "prefer" not in sc
 
 
 def test_scorecard_losing_to_model_bill():
@@ -32,6 +33,11 @@ def test_scorecard_losing_to_model_bill():
     sc = compute_scorecard(equity=999.0, journal=j)
     assert sc["beating_model"] is False
     assert sc["edge_usd"] < 0
+    text = format_scorecard_block(equity=999.0, journal=j)
+    assert "LOSING" in text
+    assert "do not sit" not in text.lower()
+    assert "not cash" not in text.lower()
+    assert "Do not skip protect" not in text
 
 
 def test_scorecard_return_is_pct_of_starting_net_liq():
@@ -48,3 +54,63 @@ def test_scorecard_no_history_does_not_invent_pnl():
     sc = compute_scorecard(equity=1_000_000.0, journal=j)
     assert sc["book_pnl"] is None
     assert sc["startup_cash"] is None
+
+
+def test_scorecard_windows_fastest_beating():
+    from datetime import datetime, timedelta, timezone
+
+    j = get_journal()
+    now = datetime(2026, 8, 14, 16, 0, tzinfo=timezone.utc)
+
+    def iso(dt):
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    j.record_snapshot(
+        account={"NetLiquidation": 1000.0, "DailyPnL": 0.0},
+        ts=iso(now - timedelta(hours=3)),
+    )
+    j.record_snapshot(
+        account={"NetLiquidation": 1000.0, "DailyPnL": 0.0},
+        ts=iso(now - timedelta(minutes=90)),
+    )
+    j.record_snapshot(
+        account={"NetLiquidation": 1030.0, "DailyPnL": 30.0},
+        ts=iso(now),
+    )
+    j.record_model_usage(
+        stage="act", input_tokens=10, output_tokens=10, cost_usd=1.0, ts=iso(now - timedelta(minutes=20))
+    )
+    sc = compute_scorecard(equity=1030.0, journal=j, now=now)
+    assert sc["beating_model"] is True
+    assert "1h" in sc["windows"]
+    assert sc["windows"]["1h"]["coverage"] == "ok"
+    assert sc["windows"]["1h"]["beating_model"] is True
+    assert sc["fastest_beating"] in ("15m", "1h", "4h")
+    text = format_scorecard_block(equity=1030.0, journal=j, sc=sc)
+    assert "fastest_beating" in text
+    assert "windows" in text
+    assert "prefer" not in sc
+    assert "prefer" not in text.lower()
+
+
+def test_scorecard_thin_window_not_fastest():
+    from datetime import datetime, timedelta, timezone
+
+    j = get_journal()
+    now = datetime(2026, 8, 14, 16, 0, tzinfo=timezone.utc)
+
+    def iso(dt):
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    j.record_snapshot(
+        account={"NetLiquidation": 1000.0, "DailyPnL": 0.0},
+        ts=iso(now - timedelta(minutes=5)),
+    )
+    j.record_snapshot(
+        account={"NetLiquidation": 1100.0, "DailyPnL": 100.0},
+        ts=iso(now),
+    )
+    sc = compute_scorecard(equity=1100.0, journal=j, now=now)
+    h1 = sc["windows"]["1h"]
+    assert h1["coverage"] in ("thin", "none")
+    assert sc["fastest_beating"] != "1h" or h1["coverage"] == "ok"

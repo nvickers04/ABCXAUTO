@@ -16,11 +16,18 @@ WAKE_WHITELIST = frozenset({"unprotected", "fill", "halt", "flat_confirmed"})
 _WAKE_DEBOUNCE_S = 15.0
 
 
+# Paper lab: keep the research loop fast until the book is actually full-ish.
+# One open lot used to drop us onto a 60s manage nap and kill volume.
+SPINUP_MAX_OPEN = 8
+SPINUP_SLEEP_S = 15.0
+
+
 @dataclass(frozen=True)
 class PaceFacts:
     needs_protection: bool = False
     flat: bool = True
     has_open_risk: bool = False
+    open_count: int = 0
     session_status: str = "regular"
     posture: str = ""
     features_present: bool = False
@@ -52,6 +59,17 @@ def _f(cfg: Any, name: str, default: float) -> float:
     return max(1.0, v)
 
 
+def _is_paper(cfg: Any) -> bool:
+    if cfg is None:
+        return True
+    if hasattr(cfg, "is_paper"):
+        try:
+            return bool(cfg.is_paper)
+        except Exception:
+            pass
+    return str(getattr(cfg, "trading_mode", "paper") or "paper").lower() != "live"
+
+
 def compute_pace(facts: PaceFacts, cfg: Any) -> PaceDecision:
     """Pick sleep tier from book/session facts (hunt floor = cycle_sleep_s)."""
     from abcxauto.config import effective_grok_min_interval_s
@@ -63,25 +81,54 @@ def compute_pace(facts: PaceFacts, cfg: Any) -> PaceDecision:
     idle_floor = _f(cfg, "pace_idle_s", 240.0)
 
     sess = str(facts.session_status or "").lower()
-    grokfolio_on = bool(getattr(cfg, "grokfolio_enabled", False))
 
     if facts.needs_protection:
         return PaceDecision("protect", protect_s, True, "unprotected_stk")
 
-    if grokfolio_on:
-        from abcxauto.grokfolio import sleep_until_next_s
-
-        wait = sleep_until_next_s(cfg=cfg, session_status=sess or "regular")
-        return PaceDecision("grokfolio", wait, True, "grokfolio_schedule")
-
-    if sess and sess != "regular":
+    if sess == "closed":
         sleep = max(cycle, 900.0)
         return PaceDecision("closed", sleep, False, "session_closed")
+
+    if sess in ("premarket", "postmarket"):
+        open_n = max(0, int(facts.open_count or 0))
+        if facts.has_open_risk and not facts.flat and not (
+            _is_paper(cfg) and open_n <= SPINUP_MAX_OPEN
+        ):
+            return PaceDecision("manage", manage_s, False, "extended_open_risk")
+        if _is_paper(cfg):
+            spin = _f(cfg, "pace_spinup_s", SPINUP_SLEEP_S)
+            return PaceDecision("spinup", spin, True, "extended_prep")
+        return PaceDecision("manage", max(cycle, manage_s), False, "extended_prep")
+
+    rth = sess in ("", "regular")
+    open_n = max(0, int(facts.open_count or 0))
+    # Paper under 8 opens: pull tape, try structures, keep volume.
+    # Bypasses grok_min so a long floor cannot stall the lab.
+    if (
+        _is_paper(cfg)
+        and rth
+        and not facts.needs_protection
+        and open_n <= SPINUP_MAX_OPEN
+    ):
+        spin = _f(cfg, "pace_spinup_s", SPINUP_SLEEP_S)
+        return PaceDecision("spinup", spin, True, "spinup_research")
 
     if facts.has_open_risk and not facts.flat:
         return PaceDecision("manage", manage_s, False, "open_risk")
 
     posture = str(facts.posture or "").lower()
+    # Floor locks risk_posture=defensive, which would never hit hunt_ok
+    # (balanced/aggressive only). Paper lab while flat in RTH must hunt, not idle.
+    paper_hunt = (
+        _is_paper(cfg)
+        and facts.flat
+        and not facts.has_open_risk
+        and not facts.needs_protection
+        and rth
+    )
+    if paper_hunt:
+        return PaceDecision("hunt", cycle, False, "hunt_window")
+
     if facts.flat and facts.last_stance == "idle":
         sleep = max(cycle, grok_min, idle_floor)
         return PaceDecision("idle", sleep, False, "idle_hold")
@@ -91,7 +138,7 @@ def compute_pace(facts: PaceFacts, cfg: Any) -> PaceDecision:
         and not facts.has_open_risk
         and posture in ("balanced", "aggressive")
         and facts.features_present
-        and sess in ("", "regular")
+        and rth
     )
     if hunt_ok:
         return PaceDecision("hunt", cycle, False, "hunt_window")
@@ -135,12 +182,19 @@ def facts_from_cycle(
         flat = not bool(out.get("positions") or world.get("positions"))
     plan = out.get("trade_plan") or world.get("trade_plan")
     has_plan = bool(plan)
+    positions = out.get("positions") or world.get("positions") or []
     try:
-        from abcxauto.trade_plan import book_has_risk
+        from abcxauto.trade_plan import book_has_risk, open_position_count
 
-        has_book = book_has_risk(out.get("positions") or [])
+        has_book = book_has_risk(positions)
+        open_n = open_position_count(positions)
     except Exception:
-        has_book = bool(out.get("positions"))
+        has_book = bool(positions)
+        open_n = sum(
+            1
+            for p in positions
+            if abs(float((p or {}).get("quantity") or (p or {}).get("position") or 0)) > 0
+        )
     posture = str(
         world.get("effective_posture")
         or world.get("risk_posture")
@@ -152,10 +206,15 @@ def facts_from_cycle(
     stance = str(
         out.get("stance") or judgment.get("stance") or world.get("last_stance") or ""
     ).lower()
+    if not stance:
+        strat = str(out.get("strat") or "").lower()
+        if strat in ("hold", "skipped"):
+            stance = "idle"
     return PaceFacts(
         needs_protection=needs,
         flat=bool(flat),
         has_open_risk=bool(has_plan or has_book),
+        open_count=int(open_n),
         session_status=sess or "regular",
         posture=posture,
         features_present=bool(ideas),
@@ -178,8 +237,8 @@ def allow_grok_call(
     tier_s = str(tier or "")
     if tier_s == "protect" or wake in URGENT_WAKES:
         return True, "urgent"
-    if tier_s == "grokfolio":
-        return True, "grokfolio"
+    if tier_s == "spinup":
+        return True, "spinup"
     if last_grok_mono <= 0:
         return True, "first"
     elapsed = now - last_grok_mono

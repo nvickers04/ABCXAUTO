@@ -1,18 +1,16 @@
 # ABCXAUTO — Consolidated Spec (Monorepo Vision)
 
-**One system**: an agentic Grok 4.5-powered IBKR portfolio agent that researches,
-proposes, risk-validates, and auto-executes — with hard-coded capital protection that
-the LLM cannot talk its way around. Consolidates `nvickers04/ABCXAUTO` (main),
+**One system**: Grok owns a paper IBKR book. The shell is a ticket window
+and a clerk — live facts, `ORDER EXAMPLES`, hard risk code. It does not
+teach IBKR or pick a strategy. Brain is `ABCXAUTO_MODEL` (grok-4.6 default).
+Consolidates `nvickers04/ABCXAUTO` (main),
 `ABC/ABCX` (IBKR execution layer, MarketData.app client, xAI SDK integration),
 `thesis` (strategy / thesis generation), and `GrokSimpleExecutionTrader` (minimal
 execution loop) into this repo.
 
-**Reality posture**: this is an **agentic Grokfolio** with a thin product shell
-(`order_examples` → `connections` / `book` / `send` / `risk` → broker + gates),
-not a scanner brain. Grok **owns** the full paper IBKR book (~15 names) under
-hard risk rules and rebalances on an hourly/daily RTH clock. Protect first.
-**Hold is valid** when the book is protected; hold is **forbidden only while
-unprotected STK** exists (code enforces). Hunt scalping is not the product.
+**Reality posture**: agentic paper lab. Grok invents the playbook. Live only
+follows a promoted snapshot. Protect-first and paper-flat-RTH hold-forbidden
+are **code**, not prompt tactics.
 
 **Control + Unbiased (non-negotiable):**
 
@@ -29,9 +27,9 @@ unprotected STK** exists (code enforces). Hunt scalping is not the product.
    Agent reads journal + scorecard and continuously tunes itself.
 
 Size, loss, and scorecard are **% of the portfolio** — the same at $1k, $100k,
-or $1M. Walk-away defaults: 15 positions (Grokfolio), 2% daily loss, full NetLiq
-(no dollar sleeve). See ``docs/CYCLE.md``. Mainline is ``master``;
-the $1k sleeve is gone.
+or $1M. Walk-away defaults: 15 positions, 2% daily loss, full NetLiq
+(no dollar sleeve). Paper is the lab; live follows a promoted playbook.
+See ``docs/CYCLE.md``. Mainline is ``master``.
 
 Intelligence + journal memory drive judgment. Paper (TWS 7497) until forward P&L
 shows the book survives. Target footprint **~3.5–5k LOC**. Every feature must
@@ -79,9 +77,9 @@ abcxauto/
   send.py            dispatch façade → executor
   book.py            portfolio / book state façade
   risk.py            risk-gate façade
-  grokfolio.py       Hourly/daily portfolio owner (construct + gated diffs)
-  agent_loop.py      Perceive → Grokfolio (or Judge → Act) → hard gates → send
-  mega_worker.py     Capacity Facts + single Act focus (not multi-merge tree)
+  lab_playbook.py    Paper lab instructions + live promote snapshot
+  brain.py           Grok tool loop (book, quote, scan, send)
+  agent_loop.py      Snap facts → Grok tools → clerk gates on send
   universe.py        Universe tab sandbox (IBKR pull → legal set)
   structure_complexity.py  Controls complexity → Act allowlist
   trade_plan.py      Multi-plan book (`active_trade_plans.json`)
@@ -90,7 +88,7 @@ abcxauto/
   self_tune.py       Agent self-mod; walk-away floor (% of NetLiq)
   scorecard.py       Book return % of starting NetLiq vs model API cost
   config.py          flat env config — walk-away floor + agent_state
-  llm.py             xAI client (ABCXAUTO_MODEL=grok-4.5)
+  llm.py             xAI client (`ABCXAUTO_MODEL`; grok-4.6 default)
   proposals.py       OrderProposal schemas + validation (risk layer 1)
   risk_gates.py      hard pre-trade gates + halt latch (risk layer 2)
   executor.py        single choke point: validate → gate → dispatch (risk layer 3)
@@ -104,7 +102,7 @@ scripts/             cleanup_pro, pro_gui_contract_check
 ```
 
 **Tech stack**: Python 3.11 · ib_insync · Flet (sole UI) ·
-xAI SDK (Grok 4.5) · MarketData.app · pytest. Memory: SQLite (stdlib, zero new deps)
+xAI SDK (Grok via `ABCXAUTO_MODEL`) · MarketData.app · pytest. Memory: SQLite (stdlib, zero new deps)
 now, Postgres when multi-session analytics justify it. **No new packages without a
 profitability justification.**
 
@@ -115,8 +113,8 @@ profitability justification.**
 ## One runtime, one risk core
 
 - **Pro path** (`python -m abcxauto`): cockpit + think stream; autostarts in Cursor.
-  **Headless** (`python -m abcxauto --headless`) is console-only outside Cursor
-  (or with ``ABCXAUTO_FORCE_HEADLESS=1``). Floor is seeded on start. Live still gated.
+  **Headless** is paper-only. Live needs confirm phrase + promoted playbook +
+  a separate TWS/client id. Floor is seeded on start.
 
 Every *trading* order funnels through `send` → `executor.safe_execute`.
 
@@ -127,7 +125,7 @@ Every *trading* order funnels through `send` → `executor.safe_execute`.
   positions, max daily trades, fail-closed; exits always bypass.
 - Executor integration at the single choke point; monitor auto-panic (halt + flatten once
   per breach); fix `place_oca` naked-position bug; env knobs + tests.
-- Upgrade brain to Grok 4.5 (`ABCXAUTO_MODEL`).
+- Brain is `ABCXAUTO_MODEL` (default grok-4.6).
 
 **Sprint 2 — Truth & memory (DONE 2026-07-09)**
 - Options risk parity: defined-risk-only default, `close_option` live-position check,

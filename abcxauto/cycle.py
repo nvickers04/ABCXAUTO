@@ -1,8 +1,4 @@
-"""Pro cycle public API — thin shim over ``abcxauto.agent_loop``.
-
-Hot-path logic lives in agent_loop. Tests / pro_engine / UI keep importing
-from ``abcxauto.cycle``.
-"""
+"""Pro cycle public API — thin shim over ``abcxauto.agent_loop``."""
 
 from __future__ import annotations
 
@@ -15,23 +11,20 @@ from abcxauto.agent_loop import (  # noqa: F401
     VALID_ACTIONS,
     _tool,
     apply_tweak,
-    check_intent_coherence,
     equity_of,
-    expected_json_shape_hint,
-    extract_kahneman,
-    format_kahneman_trace,
+    execute_ticket,
     format_position_inventory,
+    gate_ticket,
     grok,
+    grok_turn,
     normalize_action,
-    parse_json,
+    paper_hold_forbidden,
     pnl_of,
     risk_label,
     run_cycle,
-    run_session_review_on_stop,
     simulate_close_impact,
     snap,
     validate_action_against_inventory,
-    validate_judgment,
 )
 from abcxauto.executor import safe_execute  # noqa: F401
 
@@ -43,22 +36,19 @@ __all__ = [
     "TWEAKS",
     "VALID_ACTIONS",
     "apply_tweak",
-    "check_intent_coherence",
     "equity_of",
-    "expected_json_shape_hint",
-    "extract_kahneman",
-    "format_kahneman_trace",
+    "execute_ticket",
     "format_position_inventory",
+    "gate_ticket",
     "grok",
+    "grok_turn",
     "normalize_action",
-    "parse_json",
+    "paper_hold_forbidden",
     "pnl_of",
     "risk_label",
     "run_cycle",
-    "run_session_review_on_stop",
     "safe_execute",
     "simulate_close_impact",
     "snap",
     "validate_action_against_inventory",
-    "validate_judgment",
 ]

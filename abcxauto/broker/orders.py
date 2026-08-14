@@ -24,6 +24,40 @@ from abcxauto.broker.connection import safe_sleep as _safe_sleep
 logger = logging.getLogger(__name__)
 
 
+def _oid_matches(order: Any, order_id: int) -> bool:
+    try:
+        want = int(order_id)
+    except (TypeError, ValueError):
+        return False
+    for attr in ("orderId", "permId"):
+        raw = getattr(order, attr, None)
+        if raw in (None, 0, 0.0):
+            continue
+        try:
+            if int(raw) == want:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _finite_px(raw: Any) -> float | None:
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0 or v > 1e300:
+        return None
+    return v
+
+
+def modify_did_stick(*, requested: float, live: float | None, tol: float = 0.005) -> bool:
+    """True only if IBKR reread matches the requested modify."""
+    if live is None:
+        return False
+    return abs(float(live) - float(requested)) <= tol
+
+
 class IBKROrdersMixin:
     """
     Mixin class providing order placement and management methods.
@@ -960,6 +994,23 @@ class IBKROrdersMixin:
 
     # ========== MODIFY ORDER ==========
 
+    def _open_trade_for(self, order_id: int):
+        for trade in self.ib.openTrades():
+            if _oid_matches(trade.order, order_id):
+                return trade
+        return None
+
+    async def _reread_order_px(self, order_id: int, *, field: str) -> float | None:
+        req = getattr(self.ib, "reqAllOpenOrdersAsync", None)
+        if callable(req):
+            await req()
+        await _safe_sleep(0.4)
+        trade = self._open_trade_for(order_id)
+        if trade is None:
+            return None
+        raw = getattr(trade.order, field, None)
+        return _finite_px(raw)
+
     async def modify_stop_price(
         self,
         order_id: int,
@@ -981,23 +1032,30 @@ class IBKROrdersMixin:
             return {'error': 'Not connected'}
 
         try:
-            # Find the order
-            for trade in self.ib.openTrades():
-                if trade.order.orderId == order_id:
-                    # Modify the stop price
-                    trade.order.auxPrice = new_stop_price
-                    self.ib.placeOrder(trade.contract, trade.order)
-
-                    logger.info(f"Modified stop order {order_id} to ${new_stop_price:.2f}")
-
-                    return {
-                        'success': True,
-                        'order_id': order_id,
-                        'new_stop_price': new_stop_price,
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    }
-
-            return {'error': f'Order {order_id} not found'}
+            trade = self._open_trade_for(order_id)
+            if trade is None:
+                return {'error': f'Order {order_id} not found'}
+            trade.order.auxPrice = new_stop_price
+            self.ib.placeOrder(trade.contract, trade.order)
+            live = await self._reread_order_px(order_id, field="auxPrice")
+            if not modify_did_stick(requested=float(new_stop_price), live=live):
+                return {
+                    'error': (
+                        f'modify_stop did not stick: requested {new_stop_price} '
+                        f'live {live}'
+                    ),
+                    'order_id': order_id,
+                    'requested': new_stop_price,
+                    'live_stop': live,
+                }
+            logger.info(f"Modified stop order {order_id} to ${new_stop_price:.2f}")
+            return {
+                'success': True,
+                'order_id': order_id,
+                'new_stop_price': new_stop_price,
+                'live_stop': live,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
 
         except Exception as e:
             logger.error(f"Failed to modify order {order_id}: {e}")
@@ -1017,21 +1075,30 @@ class IBKROrdersMixin:
             return {'error': 'Not connected'}
 
         try:
-            for trade in self.ib.openTrades():
-                if trade.order.orderId == order_id:
-                    trade.order.lmtPrice = new_limit_price
-                    self.ib.placeOrder(trade.contract, trade.order)
-
-                    logger.info(f"Modified target order {order_id} to ${new_limit_price:.2f}")
-
-                    return {
-                        'success': True,
-                        'order_id': order_id,
-                        'new_limit_price': new_limit_price,
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    }
-
-            return {'error': f'Order {order_id} not found'}
+            trade = self._open_trade_for(order_id)
+            if trade is None:
+                return {'error': f'Order {order_id} not found'}
+            trade.order.lmtPrice = new_limit_price
+            self.ib.placeOrder(trade.contract, trade.order)
+            live = await self._reread_order_px(order_id, field="lmtPrice")
+            if not modify_did_stick(requested=float(new_limit_price), live=live):
+                return {
+                    'error': (
+                        f'modify_target did not stick: requested {new_limit_price} '
+                        f'live {live}'
+                    ),
+                    'order_id': order_id,
+                    'requested': new_limit_price,
+                    'live_lmt': live,
+                }
+            logger.info(f"Modified target order {order_id} to ${new_limit_price:.2f}")
+            return {
+                'success': True,
+                'order_id': order_id,
+                'new_limit_price': new_limit_price,
+                'live_lmt': live,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
 
         except Exception as e:
             logger.error(f"Failed to modify order {order_id}: {e}")

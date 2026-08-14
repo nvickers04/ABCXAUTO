@@ -1,13 +1,7 @@
-"""Trade-type playbook: filter, allowlist, share guard, prompt inclusion."""
+"""Trade-type playbook: overlay share guard (no stance allowlist)."""
 
 from __future__ import annotations
 
-from abcxauto.agent_loop import (
-    STANCE_ACTIONS,
-    _build_act_prompt,
-    _build_judge_prompt,
-    check_intent_coherence,
-)
 from abcxauto.trade_playbook import (
     OVERLAY_NO_LONG_STOCK,
     OVERLAY_SHARES_INSUFFICIENT,
@@ -43,8 +37,6 @@ def _world(**kwargs) -> WorldState:
         trade_plan=None,
         idle_streak=0,
         idle_top_symbol="",
-        prep={},
-        review={},
     )
     base.update(kwargs)
     return WorldState(**base)
@@ -89,51 +81,6 @@ def test_playbook_hunt_hides_overlays():
     assert "vertical_spread" in text or "iron_condor" in text
 
 
-def test_hunt_allowlist_accepts_vertical_rejects_overlay():
-    ok, _ = check_intent_coherence(
-        {"stance": "hunt", "intent": {"kind": "hunt", "symbol": "SPY"}},
-        "vertical_spread",
-        {"params": {"symbol": "SPY"}},
-    )
-    assert ok is True
-    ok_ic, _ = check_intent_coherence(
-        {"stance": "hunt", "intent": {"kind": "hunt", "symbol": "SPY"}},
-        "iron_condor",
-        {"params": {"symbol": "SPY"}},
-    )
-    assert ok_ic is True
-    ok_roll, reason = check_intent_coherence(
-        {"stance": "hunt", "intent": {"kind": "hunt", "symbol": "SPY"}},
-        "roll_option",
-        {"params": {"symbol": "SPY"}},
-    )
-    assert ok_roll is False
-    assert "contradict" in reason.lower()
-    assert "vertical_spread" in STANCE_ACTIONS["hunt"]
-    assert "roll_option" in STANCE_ACTIONS["manage"]
-    assert "roll_option" in STANCE_ACTIONS["protect"]
-    assert "roll_option" not in STANCE_ACTIONS["hunt"]
-
-
-def test_manage_allowlist_accepts_covered_call_hunt_rejects():
-    ok, _ = check_intent_coherence(
-        {"stance": "manage", "intent": {"kind": "manage"}},
-        "covered_call",
-        {"params": {"symbol": "IWM", "shares": 100}},
-    )
-    assert ok is True
-    ok2, reason = check_intent_coherence(
-        {"stance": "hunt", "intent": {"kind": "hunt", "symbol": "IWM"}},
-        "covered_call",
-        {"params": {"symbol": "IWM", "shares": 100}},
-    )
-    assert ok2 is False
-    assert "contradict" in reason.lower()
-    assert "covered_call" in STANCE_ACTIONS["manage"]
-    assert "protective_put" in STANCE_ACTIONS["protect"]
-    assert "covered_call" not in STANCE_ACTIONS["hunt"]
-
-
 def test_share_lot_guard_rejects_without_stock():
     ok, code, msg = check_overlay_shares(
         "covered_call",
@@ -170,37 +117,6 @@ def test_long_share_lots_ignores_shorts():
     )
     assert lots == {"IWM": 100.0}
 
-
-def test_act_prompt_includes_playbook_for_manage():
-    world = _world(
-        flat=False,
-        positions=[{"symbol": "IWM", "secType": "STK", "quantity": 122, "conId": 1}],
-        trade_plan={"symbol": "IWM", "direction": "LONG"},
-    )
-    prompt = _build_act_prompt(
-        world,
-        {
-            "stance": "manage",
-            "thesis": "manage IWM",
-            "focus": "consider covered call",
-            "intent": {"kind": "manage", "symbol": "IWM"},
-        },
-    )
-    assert "TRADE PLAYBOOK" in prompt
-    assert "ORDER EXAMPLES" in prompt
-    assert "covered_call" in prompt
-    assert "CONTROLS" in prompt
-
-
-def test_judge_prompt_includes_playbook():
-    world = _world(
-        flat=False,
-        positions=[{"symbol": "IWM", "secType": "STK", "quantity": 122}],
-        trade_plan={"symbol": "IWM"},
-    )
-    prompt = _build_judge_prompt(world)
-    assert "TRADE PLAYBOOK" in prompt
-    assert "CONTROLS" in prompt
 
 def test_strategy_diversity_observe_only(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))

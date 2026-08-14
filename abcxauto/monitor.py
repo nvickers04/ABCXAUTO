@@ -462,20 +462,11 @@ class PortfolioMonitor:
 
         if urgent:
             header = (
-                "[monitor] URGENT: unprotected position(s) detected: "
-                f"{', '.join(protection.get('unprotected_symbols', []))}. "
-                "Every position must have a stop loss and take profit. Immediately "
-                "propose an 'oca' protective pair (or trailing_stop) for each "
-                "unprotected position using sensible levels from current prices/ATR."
+                "[monitor] FACT: unprotected: "
+                f"{', '.join(protection.get('unprotected_symbols', []))}."
             )
         else:
-            header = (
-                "[monitor] Scheduled portfolio review. Assess P&L and current protection. "
-                "If a stop should be tightened (e.g. move to breakeven after a favorable "
-                "run) or a target adjusted, propose modify_stop / modify_target with the "
-                "order_id from the protection report. If everything is well-placed, reply "
-                "briefly with 'No changes needed' and one line of reasoning per position."
-            )
+            header = "[monitor] FACT: scheduled book snapshot."
 
         message = (
             f"{header}\n"

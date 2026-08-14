@@ -2,14 +2,15 @@
 
 **Autonomous Grok-powered agentic portfolio for IBKR (paper-first).**
 
-The product is **Grokfolio / full NetLiq** on `master`. The $1k sleeve is gone.
+The product is **Grok's lab on paper, live as a follower** — full NetLiq, no dollar sleeve.
 
 ## Goal
 
-**Grok owns the full paper book, in % of NetLiq**, like Autopilot's public
-Grok Portfolio — scoring → ~15 holdings → calendar rebalance — but on an
-**hourly and/or daily** RTH clock (not monthly), executed on **this IBKR paper
-account** (not Autopilot copy-trading). Hunt/hold scalping is not the product.
+**Grok owns the book.** The operator does not write a strategy. Grok invents
+standing instructions, tries them on **paper** (TWS 7497), reads the journal +
+scorecard, keeps what made book return % beat model cost, and does those
+winners more. **Live** (TWS 7496, confirm phrase, different client id) only
+follows a **promoted paper playbook**. It never copies paper fills.
 
 Same rules at $1k, $100k, or $1M. Book return % must beat the cost of the AI model.
 
@@ -32,19 +33,20 @@ expensive journal. That bar is an experiment, not a fixed dollar rule:
 2. **Immutable floor is code** — daily-loss halt, max position size, max open
    positions, defined-risk, cash-only, auto-panic, unprotected-STK protect-first,
    exits never blocked, fail-closed. The agent may *tighten* these; it cannot
-   weaken them. Live remains gated.
+   weaken them. Live remains gated until you connect 7496 with the confirm phrase
+   **and** a promoted playbook exists.
 3. **Operator is setup + kill switch** — `.env` + paper TWS, then Start.
    Stop / Halt / Panic / Ctrl+C. UI is status/monitoring only.
 4. **Scorecard** — book return **% of starting NetLiq** must beat model API
    cost. The agent reads its journal + scorecard every cycle and tunes itself.
 
 Size, daily-loss, risk-per-trade, and scorecard are **% of the portfolio**.
-Walk-away defaults: **15** max positions (Grokfolio book), 2% daily-loss halt,
+Walk-away defaults: **15** max positions, 2% daily-loss halt,
 1% risk/trade, 20% max position, defined-risk on, `trading_budget_usd=0`
-(full NetLiq). Daily construct at 10:00 ET; hourly slots 10-15 ET RTH.
+(full NetLiq).
 
-Grok 4.5 **owns** a paper IBKR portfolio under that floor. Protect first;
-hold is valid when the book is protected. See `SPEC.md` for full doctrine.
+Grok (`ABCXAUTO_MODEL`) **owns** a paper IBKR portfolio under that floor.
+The shell does not teach IBKR. Protect-first is code. See `SPEC.md`.
 
 ## 1. Connections
 
@@ -64,12 +66,10 @@ copy .env.template .env   # fill XAI_API_KEY; optional MARKETDATA_TOKEN
 
 ## 2. How the agent thinks
 
-When Grokfolio is on (default), each cycle is **Perceive → (protect if needed) →
-Grokfolio construct/diff** on the hourly/daily clock. Hunt Judge/Act scalping
-is skipped. Protect-first still interrupts. Outside RTH the shell waits until
-the next 10:00 ET weekday slot.
-
-If Grokfolio is disabled, the legacy cycle is **Perceive → Judge → Act**:
+Each cycle is **Perceive → Judge → Act**.
+Grok writes `lab_playbook` (its own instructions). Paper explores/exploits.
+Live hunt is blocked until that playbook is promoted (scorecard beating +
+`ready_to_promote`). Protect-first still interrupts.
 
 | Stage | Owner | Role |
 |-------|--------|------|
@@ -88,19 +88,16 @@ Stop agent = pause decisions only. Positions stay at IBKR. Open risk is a
 **multi-plan book** reconciled from the broker across Stop/Start
 (`active_trade_plans.json`; legacy `active_trade_plan.json` migrates).
 
-**Mega-worker (fluid + objective):** shell hard-gates unprotected / halt /
-capacity / flat-unconfirmed only. Open book does **not** forbid new-risk when
-slots remain. Allocator may run open-risk vs new-risk (and budgeted escapade)
-Grok Act streams → one send. Steer via Controls dials — no free-text work briefs.
+**Mega-worker:** shell hard-gates unprotected / halt / capacity. One Act per
+cycle: work the open book, or hunt a new entry if capacity allows. Steer via
+Controls dials — Grok self_tunes those; the UI is status only.
 
 ## 3. Operator surfaces
 
 - **Pro Dashboard** — status only: pace, open risk, last cycle, tape, activity.
 - **Positions** — book table + working orders / fills.
-- **Controls / Universe / Risk tabs** — live values (agent-owned). Saves are
-  no-ops. Grok `self_tune`s these. Risk halt/resume remain the kill switch.
+- **Risk** — floor display + Halt/Resume kill switch. Sliders are status-only.
 - **Scorecard** — book return % of starting NetLiq vs model cost (the only goal).
-- **Test Suite** — paper place/cancel gym for order mechanics.
 
 Kill switch: Stop agent, Risk Halt, Panic, or `Ctrl+C` on `--headless`.
 Positions stay at IBKR.
@@ -145,11 +142,8 @@ TRADE PLAYBOOK (preconditions + shell rejects only).
 | `ABCXAUTO_PACE_PROTECT_S` | `20` | Sleep when unprotected STK |
 | `ABCXAUTO_PACE_MANAGE_S` | `60` | Sleep with open risk / trade plan |
 | `ABCXAUTO_PACE_IDLE_S` | `600` | Idle-floor when flat/idle |
-| `ABCXAUTO_MAX_OPEN_POSITIONS` | `15` | Book capacity (floor 8-15; grokfolio default 15) |
-| `ABCXAUTO_GROKFOLIO_ENABLED` | `true` | Own the full book on hourly/daily clock |
-| `ABCXAUTO_GROKFOLIO_CADENCE` | `both` | `hourly` / `daily` / `both` |
-| `ABCXAUTO_GROKFOLIO_HOLDINGS` | `15` | Target names in the construct |
-| `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `2` | Daily-loss halt vs NetLiq (agent cannot raise) |
+| `ABCXAUTO_MAX_OPEN_POSITIONS` | `15` | Book capacity (Grok sets 1-25; 0 forbidden) |
+| `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `25` | Daily-loss halt vs NetLiq (agent cannot raise) |
 | `ABCXAUTO_MAX_POSITION_PCT` | `20` | Max position vs NetLiq (agent cannot raise) |
 | `ABCXAUTO_DEFINED_RISK_ONLY` | `true` | Locked on |
 | `ABCXAUTO_JOURNAL_PATH` | `journal.db` | SQLite journal |
@@ -164,18 +158,14 @@ Thin product shell. Priority: **risk > execution > monitoring > thin UI**.
 
 ```
 abcxauto/
-  grokfolio.py          Hourly/daily book owner (construct + gated diffs)
-  agent_loop.py         Perceive → Grokfolio or Judge/Act → hard gates/send
-  mega_worker.py        Capacity / stream select / send merge
-  universe.py           IBKR sandbox legal set (Universe tab)
-  structure_complexity.py  Act strategy allowlist from Controls dial
+  lab_playbook.py       Grok-written instructions; live follows a promote
+  brain.py              Grok tool loop (book, quote, scan, send)
+  agent_loop.py         Snap facts → Grok tools → clerk gates/send
+  universe.py           Legal symbol set (no Universe tab)
   trade_plan.py         Multi-plan open-risk book
-  pacing.py             Adaptive sleep tiers + grokfolio wait + wake whitelist
-  world_state.py        Code truth for prompts (capacity + exposure Fact)
-  opportunity_scan.py   SCAN TAPE from Universe legal set + MDA metrics
-  trade_playbook.py     Preconditions + shell rejects (no style dogma)
-  objective_language.py Banned taste phrases + taxonomy helpers
-  structure_grade.py    Geometry / scrape lessons
+  pacing.py             Adaptive sleep + wake whitelist
+  world_state.py        Code truth for prompts
+  opportunity_scan.py   SCAN TAPE + MDA metrics
   order_examples.py     How to send (param shapes)
   risk_gates.py         Hard pre-trade gates + halt latch
   executor.py / send.py Validate → gate → IBKR
@@ -189,12 +179,8 @@ abcxauto/
   broker/               IBKR layer
 ```
 
-**Adaptive pacing** (process): protect ~20s interrupts Grokfolio wait.
-Grokfolio sleeps until the next hourly/daily slot (overnight until next
-10:00 ET weekday is OK). Hunt-floor `CYCLE_SLEEP` applies only when
-Grokfolio is off. Wakes on unprotected/fill/halt/flat_confirmed.
-Doctrine + Phase 5 ritual: `.cursor/skills/abcxauto-gym/`.
-Daily/weekly KPIs: `python scripts/phase5_day_report.py` (`--week`).
+**Adaptive pacing** (process): protect ~20s interrupts. Hunt-floor
+`CYCLE_SLEEP` when hunting. Wakes on unprotected/fill/halt/flat_confirmed.
 
 ## Autonomy + floor
 
@@ -211,19 +197,10 @@ Daily/weekly KPIs: `python scripts/phase5_day_report.py` (`--week`).
 $env:PYTHONPATH='.'; python -m pytest tests/ -q
 ```
 
-## Desktop Pro (web shell)
+## Desktop icon
 
-Native window + Desktop icon for the web Pro UI:
-
-```bash
-pip install pywebview
-cd web-pro && npm install && npm run build && cd ..
+```powershell
 python scripts/install_desktop_icon.py
-python -m abcxauto --desktop
 ```
 
-Default `python -m abcxauto` still launches Flet Pro. Use `--desktop` for this shell.
-
-**Live data:** `--desktop` serves FastAPI + UI. Connect requires paper TWS (7497).
-Book/Focus then read IBKR positions, stops, and historical bars (MDA fallback).
-See [`web-pro/README.md`](web-pro/README.md) and [`docs/CYCLE.md`](docs/CYCLE.md).
+Launches Flet Pro (`python -m abcxauto`). See [`docs/CYCLE.md`](docs/CYCLE.md).

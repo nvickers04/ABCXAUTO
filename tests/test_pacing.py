@@ -54,6 +54,31 @@ def test_closed_stretches():
     assert d.sleep_s >= 900.0
 
 
+def test_premarket_paper_uses_prep_cadence():
+    d = compute_pace(
+        PaceFacts(session_status="premarket", flat=True, open_count=0),
+        _cfg(trading_mode="paper", cycle_sleep_s=300, pace_spinup_s=15),
+    )
+    assert d.tier == "spinup"
+    assert d.sleep_s == 15.0
+    assert d.reason == "extended_prep"
+    assert d.bypass_grok_min is True
+
+
+def test_postmarket_open_book_manages():
+    d = compute_pace(
+        PaceFacts(
+            session_status="postmarket",
+            flat=False,
+            has_open_risk=True,
+            open_count=9,
+        ),
+        _cfg(trading_mode="paper", pace_manage_s=60, pace_spinup_s=15),
+    )
+    assert d.tier == "manage"
+    assert d.reason == "extended_open_risk"
+
+
 def test_hunt_uses_cycle_floor():
     d = compute_pace(
         PaceFacts(
@@ -63,7 +88,7 @@ def test_hunt_uses_cycle_floor():
             last_stance="hunt",
             session_status="regular",
         ),
-        _cfg(cycle_sleep_s=120),
+        _cfg(trading_mode="live", cycle_sleep_s=120),
     )
     assert d.tier == "hunt"
     assert d.sleep_s == 120.0
@@ -78,10 +103,74 @@ def test_idle_stance_longer_sleep():
             last_stance="idle",
             session_status="regular",
         ),
-        _cfg(),
+        _cfg(trading_mode="live"),
     )
     assert d.tier == "idle"
     assert d.sleep_s >= 240.0
+
+
+def test_paper_defensive_flat_uses_spinup_cadence():
+    """0–1 positions on paper RTH: fast research, not 5-minute idle."""
+    d = compute_pace(
+        PaceFacts(
+            flat=True,
+            features_present=True,
+            posture="defensive",
+            last_stance="idle",
+            session_status="regular",
+            open_count=0,
+        ),
+        _cfg(trading_mode="paper", cycle_sleep_s=300, pace_spinup_s=15),
+    )
+    assert d.tier == "spinup"
+    assert d.sleep_s == 15.0
+    assert d.bypass_grok_min is True
+    assert d.reason == "spinup_research"
+
+
+def test_paper_one_position_still_spinup():
+    d = compute_pace(
+        PaceFacts(
+            flat=False,
+            has_open_risk=True,
+            open_count=1,
+            posture="defensive",
+            session_status="regular",
+        ),
+        _cfg(trading_mode="paper", pace_spinup_s=15, pace_manage_s=60),
+    )
+    assert d.tier == "spinup"
+    assert d.sleep_s == 15.0
+
+
+def test_paper_two_positions_still_spinup():
+    d = compute_pace(
+        PaceFacts(
+            flat=False,
+            has_open_risk=True,
+            open_count=2,
+            needs_protection=False,
+            session_status="regular",
+        ),
+        _cfg(trading_mode="paper", pace_manage_s=60, pace_spinup_s=15),
+    )
+    assert d.tier == "spinup"
+    assert d.sleep_s == 15.0
+
+
+def test_paper_full_book_manages():
+    d = compute_pace(
+        PaceFacts(
+            flat=False,
+            has_open_risk=True,
+            open_count=9,
+            needs_protection=False,
+            session_status="regular",
+        ),
+        _cfg(trading_mode="paper", pace_manage_s=60),
+    )
+    assert d.tier == "manage"
+    assert d.sleep_s == 60.0
 
 
 def test_manage_open_risk():
@@ -89,11 +178,12 @@ def test_manage_open_risk():
         PaceFacts(
             flat=False,
             has_open_risk=True,
+            open_count=2,
             needs_protection=False,
             last_stance="manage",
             session_status="regular",
         ),
-        _cfg(),
+        _cfg(trading_mode="live"),
     )
     assert d.tier == "manage"
     assert d.sleep_s == 60.0
@@ -126,6 +216,15 @@ def test_grok_min_blocks_idle_allows_protect():
         grok_min_interval_s=120.0,
     )
     assert ok3 is True
+    ok4, why4 = allow_grok_call(
+        tier="spinup",
+        wake_reason="",
+        last_grok_mono=100.0,
+        now_mono=105.0,
+        grok_min_interval_s=300.0,
+    )
+    assert ok4 is True
+    assert why4 == "spinup"
 
 
 def test_wake_whitelist_and_debounce():
@@ -158,47 +257,6 @@ def test_facts_from_cycle():
     assert facts.needs_protection is True
     assert facts.has_open_risk is True
     assert facts.wake_reason == "unprotected"
-
-
-def test_grokfolio_pace_exceeds_cycle_ceiling():
-    d = compute_pace(
-        PaceFacts(
-            needs_protection=False,
-            flat=True,
-            session_status="closed",
-            last_stance="idle",
-        ),
-        _cfg(grokfolio_enabled=True, grokfolio_cadence="both", cycle_sleep_s=300),
-    )
-    assert d.tier == "grokfolio"
-    assert d.sleep_s >= 60.0
-    assert d.bypass_grok_min is True
-
-
-def test_protect_beats_grokfolio_wait():
-    d = compute_pace(
-        PaceFacts(
-            needs_protection=True,
-            flat=False,
-            session_status="closed",
-            last_stance="protect",
-        ),
-        _cfg(grokfolio_enabled=True, grokfolio_cadence="both"),
-    )
-    assert d.tier == "protect"
-    assert d.sleep_s == 20.0
-
-
-def test_grokfolio_bypasses_grok_min():
-    ok, why = allow_grok_call(
-        tier="grokfolio",
-        wake_reason="",
-        last_grok_mono=100.0,
-        now_mono=110.0,
-        grok_min_interval_s=300.0,
-    )
-    assert ok is True
-    assert why == "grokfolio"
 
 
 @pytest.mark.asyncio
@@ -261,7 +319,7 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
     async def _empty(*_a, **_k):
         return []
 
-    monkeypatch.setattr("abcxauto.agent_loop.scan_opportunities", _empty)
+    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
     monkeypatch.setattr(
         "abcxauto.news_feed.fetch_agent_news", _empty
     )
@@ -276,23 +334,7 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
     reset_journal(path=str(tmp_path / "journal.db"), enabled=True)
     reset_idle_streak()
 
-    calls: list[str] = []
-    judgment = {
-        "stance": "idle",
-        "thesis": "No edge — stay flat.",
-        "focus": "Empty book.",
-        "dismissed": "",
-        "intent": {"kind": "idle", "symbol": None, "direction": None, "urgency": "low"},
-        "risk_budget_pct": 0.5,
-        "regime_fit": True,
-        "setup_grade": "C",
-    }
-
-    async def fake_grok(_g, prompt: str, *, stage: str = "act") -> str:
-        calls.append(stage)
-        if stage == "judge" or "JUDGE STAGE" in prompt:
-            return json.dumps(judgment)
-        return json.dumps({"action": "hold", "strategy": "hold", "rationale": "act hold"})
+    from tests.conftest import fake_grok_turn
 
     class FakeConnector:
         connected = True
@@ -309,10 +351,13 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
         async def get_account_summary(self):
             return {"netliquidation": 1000, "unrealizedpnl": 0}
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok_turn",
+        fake_grok_turn({"action": "hold", "strategy": "hold", "rationale": "act hold"}),
+    )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert calls == ["judge", "act"]
-    assert out["strat"] == "hold"
+    assert out["strat"] == "blocked"
+    assert "hold_forbidden" in str(out["result"].get("note") or "").lower()
 
 
 @pytest.mark.asyncio
@@ -365,7 +410,7 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
     async def _empty(*_a, **_k):
         return []
 
-    monkeypatch.setattr("abcxauto.agent_loop.scan_opportunities", _empty)
+    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
     monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
@@ -397,11 +442,7 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
         "rationale": "waiting for levels",
     }
 
-    async def fake_grok(_g, prompt: str, *, stage: str = "act") -> str:
-        calls.append(stage)
-        if stage == "judge" or "JUDGE STAGE" in prompt:
-            return json.dumps(judgment)
-        return json.dumps(act)
+    from tests.conftest import fake_grok_turn
 
     class FakeConnector:
         connected = True
@@ -418,15 +459,18 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
         async def get_account_summary(self):
             return {"netliquidation": 10000, "unrealizedpnl": 0}
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok_turn",
+        fake_grok_turn(act, wakes=calls),
+    )
 
     async def boom_send(*_a, **_k):
         return {"status": "blocked", "note": "test"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert "act" in calls
-    assert out["judgment"]["stance"] == "protect"
+    assert calls
+    assert out["strat"] == "blocked"
 
 
 @pytest.mark.asyncio
@@ -490,7 +534,7 @@ async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
     async def _empty(*_a, **_k):
         return []
 
-    monkeypatch.setattr("abcxauto.agent_loop.scan_opportunities", _empty)
+    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
 
     calls: list[str] = []
@@ -507,15 +551,7 @@ async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
         "setup_grade": "B",
     }
 
-    async def fake_grok(_g, prompt: str, *, stage: str = "act") -> str:
-        calls.append(stage)
-        if stage == "judge" or "JUDGE STAGE" in prompt:
-            return json.dumps(judgment)
-        return json.dumps({
-            "action": "hold",
-            "strategy": "hold",
-            "rationale": "manage book — stop working",
-        })
+    from tests.conftest import fake_grok_turn
 
     class FakeConnector:
         connected = True
@@ -532,8 +568,14 @@ async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
         async def get_account_summary(self):
             return {"netliquidation": 10000, "unrealizedpnl": -7}
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok", fake_grok)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok_turn",
+        fake_grok_turn({
+            "action": "hold",
+            "strategy": "hold",
+            "rationale": "manage book — stop working",
+        }, wakes=calls),
+    )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert calls == ["judge", "act"]
-    assert out["judgment"]["stance"] == "manage"
+    assert calls
     assert out["strat"] == "hold"

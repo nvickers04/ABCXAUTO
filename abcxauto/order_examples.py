@@ -15,16 +15,16 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
     "hold": {},
     "set_risk": {
         "max_risk_per_trade_pct": 0.75,
-        "cycle_sleep_s": 420,
-        "control_budget_pct": 20,
+        "cycle_sleep_s": 15,
+        "control_budget_pct": 90,
         "enabled_arenas": ["index_etfs", "most_active"],
         "prompt_extra": "",
     },
     "self_tune": {
-        "controls": {"control_budget_pct": 20, "control_frequency_pct": 25},
-        "pacing": {"cycle_sleep_s": 420, "pace_idle_s": 900},
+        "controls": {"control_budget_pct": 90, "control_frequency_pct": 50},
+        "pacing": {"cycle_sleep_s": 15, "pace_idle_s": 120},
         "universe": {"enabled_arenas": ["index_etfs", "most_active"]},
-        "prompt_extra": "Prefer names I can size under $200 notional.",
+        "prompt_extra": "",
         "risk": {"max_risk_per_trade_pct": 0.75},
     },
     "market_bracket": {
@@ -338,14 +338,20 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
             _allowed = frozenset(ORDER_EXAMPLES)
         allowed = _allowed
     lines = [
-        "ORDER EXAMPLES (how to send — Act allowlist only)",
-        "Emit strategy + params. Stock entries need stop+target. Bare stock orders are exit-only.",
+        "ORDER EXAMPLES (send tool — strategy + params)",
+        "Stock entries: symbol+direction. Clerk fills missing stop/target/qty. "
+        "Bare opens become a bracket; exits stay exits.",
         "Use direction LONG|SHORT for bracket/market_bracket/oca/trailing. hold params are {}.",
         "Stock exits: target_conId + quantity (partial trim OK; omit qty = full). After trim check stop_qty_fact.",
         "close_option: prefer conId; quantity may be partial. roll_option for lifecycle.",
-        "Option multi-leg / CSP: match param shapes below; gates may reject unlimited risk.",
+        "Option multi-leg / CSP: match param shapes below. "
+        "Algo/auction exits (vwap/twap/iceberg/adaptive/MOC/MOO/...) are sendable "
+        "on protect/manage/hunt; closing_position required. "
+        "defined_risk_only still rejects unlimited/naked shapes; cash-only still "
+        "rejects SHORT stock brackets.",
         "self_tune (alias set_risk) retunes agent knobs with no approval. "
-        "You may tighten risk and lengthen pacing; you cannot weaken the immutable floor. "
+        "You may tighten risk and change pacing inside floors; "
+        "you cannot weaken the immutable risk floor. "
         "Nested params: controls, pacing, universe, prompt_extra, tweaks, risk.",
         "",
     ]

@@ -1,14 +1,11 @@
 """ABCXAUTO Pro Desktop — launch: python -m abcxauto
 
-Default: Pro UI (``pro_desktop.run_app`` Flet).
-In Cursor, the cockpit always opens and the agent autostarts so the Grok
-think stream is visible. Use ``ABCXAUTO_FORCE_HEADLESS=1`` for console-only.
-Use ``python -m abcxauto --desktop`` for the web Pro native window.
+Default: Pro UI (``pro_desktop.run_app`` Flet) every run.
+``--headless`` does not skip the cockpit. Console-only only when
+``ABCXAUTO_FORCE_HEADLESS=1``. In Cursor the agent autostarts so the Grok
+think stream is visible.
 Use ``python -m abcxauto --cleanup`` to kill stale Flet/Python Pro processes
 and clear project ``__pycache__``.
-Use ``python -m abcxauto --cleanup --aggressive --flet-cache`` for a deep clean.
-Use ``python -m abcxauto --headless`` outside Cursor for the paper loop
-with no UI (Ctrl+C is the kill switch).
 """
 
 from __future__ import annotations
@@ -53,26 +50,33 @@ def main() -> None:
             )
         )
     if "--desktop" in sys.argv or "--web" in sys.argv:
-        from abcxauto.desktop_app import run
-
-        raise SystemExit(run())
+        print(
+            "web-pro / --desktop was removed. Use python -m abcxauto for Flet Pro.",
+            flush=True,
+        )
+        raise SystemExit(2)
     if "--headless" in sys.argv:
-        from abcxauto.cursor_env import prefer_desktop
+        force = (os.environ.get("ABCXAUTO_FORCE_HEADLESS") or "").strip().lower()
+        if force in ("1", "true", "yes", "on"):
+            if not os.environ.get("ABCXAUTO_LAUNCH_PROBE"):
+                _cleanup(aggressive=False, flet_cache=False, kill_only=True)
+                from abcxauto.think_stream import begin_run
 
-        if not prefer_desktop():
+                begin_run()
             from abcxauto.headless import run_headless
 
             raise SystemExit(run_headless())
-        os.environ.setdefault("ABCXAUTO_AUTOSTART", "1")
         print(
-            "Cursor: Pro desktop + Grok stream "
-            "(ABCXAUTO_FORCE_HEADLESS=1 for console-only)",
+            "Pro desktop opens every run. "
+            "ABCXAUTO_FORCE_HEADLESS=1 for console-only.",
             flush=True,
         )
-    # Clear stale Flet / titled Pro windows only — never match this
-    # brand-new ``python -m abcxauto`` process.
+    # Kill leftover ABCXAUTO Python/Flet — never this brand-new process.
     if not os.environ.get("ABCXAUTO_LAUNCH_PROBE"):
-        _cleanup(aggressive=False, flet_cache=False, ui_only=True)
+        _cleanup(aggressive=False, flet_cache=False, kill_only=True)
+        from abcxauto.think_stream import begin_run
+
+        begin_run()
     from abcxauto.cursor_env import should_autostart
     from abcxauto.pro_desktop import run_app
 

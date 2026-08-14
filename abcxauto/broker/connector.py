@@ -269,10 +269,11 @@ class IBKRQueriesMixin:
                 if t.order.orderType == 'TRAIL' and trail_pct:
                     aux = None
 
+                sec_type = t.contract.secType or 'STK'
                 order_data = {
                     'order_id': t.order.orderId,
                     'symbol': t.contract.symbol,
-                    'sec_type': t.contract.secType or 'STK',
+                    'sec_type': sec_type,
                     'action': t.order.action,
                     'quantity': t.order.totalQuantity,
                     'order_type': t.order.orderType,
@@ -282,6 +283,14 @@ class IBKRQueriesMixin:
                     'con_id': t.contract.conId,
                     'conId': t.contract.conId,
                 }
+                if sec_type == 'OPT':
+                    order_data.update({
+                        'strike': t.contract.strike,
+                        'expiration': t.contract.lastTradeDateOrContractMonth,
+                        'right': t.contract.right,
+                        'multiplier': int(t.contract.multiplier or 100),
+                        'local_symbol': t.contract.localSymbol,
+                    })
                 if trail_pct:
                     order_data['trail_percent'] = trail_pct
                 orders.append(order_data)
@@ -339,6 +348,8 @@ class IBKRQueriesMixin:
                     "order_id": getattr(execution, "orderId", None),
                     "symbol": getattr(contract, "symbol", None),
                     "sec_type": getattr(contract, "secType", None) or "STK",
+                    "conId": getattr(contract, "conId", None),
+                    "con_id": getattr(contract, "conId", None),
                     "side": getattr(execution, "side", None),
                     "quantity": getattr(execution, "shares", None),
                     "price": getattr(execution, "price", None),
@@ -374,6 +385,111 @@ class IBKRQueriesMixin:
         except Exception as e:
             logger.error(f"Failed to get executions: {e}")
             return []
+
+    _QUOTE_CACHE_S = 2.5
+
+    def _live_quote_cached(self, symbol: str) -> Optional[Dict[str, Any]]:
+        bag = getattr(self, "_quote_cache", None)
+        if not isinstance(bag, dict):
+            return None
+        hit = bag.get(symbol)
+        if not hit:
+            return None
+        ts, payload = hit
+        try:
+            if time.monotonic() - float(ts) > self._QUOTE_CACHE_S:
+                return None
+        except (TypeError, ValueError):
+            return None
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def _live_quote_remember(self, symbol: str, payload: Dict[str, Any]) -> None:
+        if not payload or payload.get("error"):
+            return
+        if payload.get("last") is None and payload.get("mid") is None:
+            return
+        bag = getattr(self, "_quote_cache", None)
+        if not isinstance(bag, dict):
+            bag = {}
+            self._quote_cache = bag
+        if len(bag) >= 32:
+            bag.clear()
+        bag[symbol] = (time.monotonic(), dict(payload))
+
+    async def get_live_quotes(self, symbols: List[str], *, fresh: bool = False) -> Dict[str, Any]:
+        """IBKR live quotes for up to 8 symbols (parallel, short cache)."""
+        seen: List[str] = []
+        for raw in symbols or []:
+            sym = str(raw or "").strip().upper()
+            if sym and sym not in seen:
+                seen.append(sym)
+            if len(seen) >= 8:
+                break
+        rows = await asyncio.gather(*[self.get_live_quote(s, fresh=fresh) for s in seen])
+        return {
+            "source": "ibkr",
+            "freshness": "live",
+            "quotes": [r for r in rows if isinstance(r, dict)],
+        }
+
+    async def get_live_quote(self, symbol: str, *, fresh: bool = False) -> Dict[str, Any]:
+        """IBKR stream snapshot for STK. Live last/bid/ask for send geometry."""
+        from abcxauto.broker.util import quote_from_ticker
+
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return {"error": "symbol required", "source": "ibkr"}
+        if not fresh:
+            cached = self._live_quote_cached(sym)
+            if cached is not None:
+                cached["cached"] = True
+                return cached
+        if not await self._ensure_connected():
+            return {"error": "Not connected", "source": "ibkr", "symbol": sym}
+        contract = None
+        try:
+            if sym in ("VIX", "^VIX"):
+                try:
+                    from ib_insync.contract import Index
+
+                    idx = Index("VIX", "CBOE")
+                    await self.ib.qualifyContractsAsync(idx)
+                    if int(getattr(idx, "conId", 0) or 0) > 0:
+                        contract = idx
+                except Exception:
+                    logger.debug("VIX Index qualify failed", exc_info=True)
+            if contract is None:
+                prepare = getattr(self, "_prepare_contract", None)
+                if callable(prepare):
+                    contract = await prepare(sym)
+        except Exception as exc:
+            logger.warning("qualify %s failed: %s", sym, exc)
+            return {"error": str(exc), "source": "ibkr", "symbol": sym}
+        if contract is None:
+            return {"error": "qualify failed", "source": "ibkr", "symbol": sym}
+        ticker = None
+        try:
+            req = getattr(self.ib, "reqTickersAsync", None)
+            if callable(req):
+                tickers = await req(contract)
+                ticker = tickers[0] if tickers else None
+            if ticker is None:
+                ticker = self.ib.reqMktData(contract, "", True, False)
+                await _safe_sleep(0.8)
+            out = quote_from_ticker(ticker, symbol=sym)
+            if out.get("last") is None and out.get("mid") is None:
+                out["error"] = "no IBKR tick yet"
+            else:
+                self._live_quote_remember(sym, out)
+            return out
+        except Exception as exc:
+            logger.warning("IBKR live quote failed for %s: %s", sym, exc)
+            return {"error": str(exc), "source": "ibkr", "symbol": sym}
+        finally:
+            try:
+                self.ib.cancelMktData(contract)
+            except Exception:
+                pass
 
 
 # Import mixins after defining base classes to avoid circular imports

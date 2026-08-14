@@ -2,7 +2,8 @@
 
 Immutable floor (code): daily-loss halt, max position size, max open positions,
 defined-risk, cash-only, auto-panic, fail-closed, exits never blocked, live gated.
-The agent may *tighten* risk and *lengthen* pacing. It cannot weaken the floor.
+The agent may *tighten* risk and retune pacing within floors. It cannot weaken the
+immutable risk floor. Empty-book paper spin-up is allowed to run fast.
 """
 
 from __future__ import annotations
@@ -15,16 +16,14 @@ logger = logging.getLogger(__name__)
 # Risk knobs: agent may set within [min, max]. max is the immutable ceiling.
 # Percents of NetLiq — same at $1k, $100k, or $1M.
 RISK_FLOOR: dict[str, tuple[float, float]] = {
-    "daily_loss_limit_pct": (0.5, 2.0),
-    "max_position_pct": (5.0, 20.0),
-    "max_risk_per_trade_pct": (0.25, 1.0),
-    "max_peak_drawdown_pct": (2.0, 8.0),
-    "max_option_premium_pct": (1.0, 5.0),
+    "daily_loss_limit_pct": (0.5, 25.0),
+    "max_position_pct": (5.0, 25.0),
+    "max_risk_per_trade_pct": (0.25, 25.0),
+    "max_peak_drawdown_pct": (2.0, 25.0),
+    "max_option_premium_pct": (1.0, 25.0),
 }
-# Integer capacity: 0 would disable the gate — forbidden.
-# Grokfolio needs ~15 names; old floor of 2 is repaired to 15 (not left as in-range).
-MAX_OPEN_POSITIONS_RANGE = (8, 15)
-_OLD_MAX_OPEN_FLOOR = 2
+# Integer capacity: 0 would disable the gate — forbidden. Grok sets N.
+MAX_OPEN_POSITIONS_RANGE = (1, 25)
 
 # Booleans the agent cannot turn off.
 LOCKED_TRUE: frozenset[str] = frozenset({
@@ -34,11 +33,12 @@ LOCKED_TRUE: frozenset[str] = frozenset({
     "cash_only",
 })
 
-# Pacing: agent may lengthen, never shorten below these (model-cost floor).
+# Pacing: agent may shorten or lengthen inside [floor, ceiling].
+# 15s floor lets 0–1 position paper research; it is not a 5-minute nap.
 PACING_FLOORS: dict[str, float] = {
-    "cycle_sleep_s": 300.0,
-    "grok_min_interval_s": 300.0,
-    "pace_idle_s": 600.0,
+    "cycle_sleep_s": 15.0,
+    "grok_min_interval_s": 15.0,
+    "pace_idle_s": 60.0,
     "pace_protect_s": 20.0,
     "pace_manage_s": 60.0,
 }
@@ -50,7 +50,7 @@ PACING_CEILINGS: dict[str, float] = {
     "pace_manage_s": 600.0,
 }
 
-SCAN_FETCH_CAP_RANGE = (1, 4)
+SCAN_FETCH_CAP_RANGE = (1, 8)
 PROMPT_EXTRA_MAX = 2000
 CONTROL_KEYS_TUNABLE = frozenset({
     "control_deliberation_pct",
@@ -69,21 +69,21 @@ UNSUPERVISED_DEFAULTS: dict[str, Any] = {
     "auto_panic_on_breach": True,
     "defined_risk_only": True,
     "cash_only": True,
-    "daily_loss_limit_pct": 2.0,
-    "max_position_pct": 20.0,
-    "max_risk_per_trade_pct": 1.0,
-    "max_peak_drawdown_pct": 8.0,
-    "max_option_premium_pct": 5.0,
+    "daily_loss_limit_pct": 25.0,
+    "max_position_pct": 25.0,
+    "max_risk_per_trade_pct": 25.0,
+    "max_peak_drawdown_pct": 25.0,
+    "max_option_premium_pct": 25.0,
     "max_open_positions": 15,
-    "cycle_sleep_s": 300.0,
-    "grok_min_interval_s": 300.0,
+    "cycle_sleep_s": 15.0,
+    "grok_min_interval_s": 15.0,
     "pace_protect_s": 20.0,
     "pace_manage_s": 60.0,
-    "pace_idle_s": 600.0,
-    "scan_fetch_cap": 4,
+    "pace_idle_s": 120.0,
+    "scan_fetch_cap": 8,
     "control_deliberation_pct": 40,
-    "control_budget_pct": 25,
-    "control_frequency_pct": 30,
+    "control_budget_pct": 80,
+    "control_frequency_pct": 50,
     "control_entry_surface_pct": 50,
     "control_complexity_pct": 40,
     "control_rotation_pct": 40,
@@ -215,9 +215,6 @@ def apply_self_tune(
             continue
         if key == "trading_budget_usd":
             rejected[key] = "size and risk are % of NetLiq — no dollar sleeve"
-            continue
-        if key in ("grokfolio_enabled", "grokfolio_cadence", "grokfolio_holdings"):
-            rejected[key] = "grokfolio is the product — agent cannot disable or retune it"
             continue
         if key in RISK_FLOOR or key == "max_open_positions":
             before[key] = getattr(cfg, key, None)
@@ -423,21 +420,27 @@ def load_agent_state() -> dict[str, Any]:
 def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
     """Fields that must change so ``cfg`` cannot be weaker than the walk-away floor."""
     fixes: dict[str, Any] = {}
+    _old_size_defaults = {
+        "max_risk_per_trade_pct": 1.0,
+        "max_option_premium_pct": 5.0,
+        "max_position_pct": 20.0,
+    }
     for key, (lo, hi) in RISK_FLOOR.items():
         cur = _f(getattr(cfg, key, None))
         if cur is None or cur <= 0 or cur > hi:
+            fixes[key] = UNSUPERVISED_DEFAULTS[key]
+        elif key in _old_size_defaults and abs(cur - _old_size_defaults[key]) < 1e-9:
             fixes[key] = UNSUPERVISED_DEFAULTS[key]
         elif cur < lo:
             fixes[key] = lo
     mop = _i(getattr(cfg, "max_open_positions", 0))
     lo_p, hi_p = MAX_OPEN_POSITIONS_RANGE
-    grokfolio_on = bool(getattr(cfg, "grokfolio_enabled", True))
-    # Old walk-away floor was 2. If grokfolio is on, 2 must not stick even if
-    # a wider range would treat it as in-range.
-    if grokfolio_on and (mop is None or mop == _OLD_MAX_OPEN_FLOOR or mop < lo_p):
-        fixes["max_open_positions"] = UNSUPERVISED_DEFAULTS["max_open_positions"]
-    elif mop is None or mop < lo_p or mop > hi_p:
-        fixes["max_open_positions"] = UNSUPERVISED_DEFAULTS["max_open_positions"]
+    if mop is None or mop < lo_p or mop > hi_p:
+        fixes["max_open_positions"] = (
+            UNSUPERVISED_DEFAULTS["max_open_positions"]
+            if mop is None or mop < lo_p
+            else hi_p
+        )
     for key in LOCKED_TRUE:
         if not bool(getattr(cfg, key, False)):
             fixes[key] = True
@@ -546,6 +549,38 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
     }
 
 
+def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
+    """Current knobs + allowed ranges. Facts for status/book — not a lecture."""
+    from abcxauto.config import get_config
+
+    c = cfg if cfg is not None else get_config()
+
+    def _pct(key: str) -> dict[str, Any]:
+        lo, hi = RISK_FLOOR[key]
+        return {
+            "now": getattr(c, key, None),
+            "min": lo,
+            "max": hi,
+            "unit": "pct_nl",
+        }
+
+    lo_open, hi_open = MAX_OPEN_POSITIONS_RANGE
+    return {
+        "max_risk_per_trade_pct": _pct("max_risk_per_trade_pct"),
+        "max_option_premium_pct": _pct("max_option_premium_pct"),
+        "max_position_pct": _pct("max_position_pct"),
+        "daily_loss_limit_pct": _pct("daily_loss_limit_pct"),
+        "max_peak_drawdown_pct": _pct("max_peak_drawdown_pct"),
+        "max_open_positions": {
+            "now": getattr(c, "max_open_positions", None),
+            "min": lo_open,
+            "max": hi_open,
+            "unit": "slots",
+        },
+        "change": "self_tune",
+    }
+
+
 def format_floor_block(cfg: Any = None) -> str:
     """Prompt fact: what the agent may change vs what code locks."""
     from abcxauto.config import get_config
@@ -560,13 +595,14 @@ def format_floor_block(cfg: Any = None) -> str:
         f"max_position≤{RISK_FLOOR['max_position_pct'][1]}% of NL, "
         f"risk/trade≤{RISK_FLOOR['max_risk_per_trade_pct'][1]}% of NL, "
         f"open_positions {MAX_OPEN_POSITIONS_RANGE[0]}–{MAX_OPEN_POSITIONS_RANGE[1]} "
-        "(grokfolio default 15; agent cannot disable grokfolio or set a $ sleeve), "
+        "(you set the count; 0 forbidden; write lab_playbook; cannot set a $ sleeve or flip live), "
         f"cycle_sleep≥{PACING_FLOORS['cycle_sleep_s']:.0f}s, "
         "exits never blocked, fail-closed, live gated.",
-        "You MAY: tighten risk, lengthen pacing, retune Controls dials, "
-        "change universe arenas/symbols, set prompt_extra, set tweaks, "
+        "You MAY: tighten risk, shorten or lengthen pacing inside those floors, "
+        "retune Controls dials, change universe arenas/symbols, set prompt_extra, "
+        "set tweaks, "
         f"scan_fetch_cap {SCAN_FETCH_CAP_RANGE[0]}–{SCAN_FETCH_CAP_RANGE[1]}.",
-        "Action: self_tune (alias set_risk) with params. Allowed in idle/manage/hunt.",
+        "Action: self_tune (alias set_risk).",
         f"daily_loss={getattr(c, 'daily_loss_limit_pct', None)}%NL "
         f"max_pos={getattr(c, 'max_position_pct', None)}%NL "
         f"risk/trade={getattr(c, 'max_risk_per_trade_pct', None)}%NL "

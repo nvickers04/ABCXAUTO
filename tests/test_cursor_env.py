@@ -47,3 +47,51 @@ def test_autostart_when_flagged(monkeypatch):
     monkeypatch.delenv("ABCXAUTO_UI_PROBE", raising=False)
     monkeypatch.delenv("ABCXAUTO_LAUNCH_PROBE", raising=False)
     assert should_autostart() is True
+
+
+def test_headless_flag_still_opens_pro(monkeypatch):
+    import sys
+
+    import abcxauto.__main__ as m
+
+    monkeypatch.delenv("ABCXAUTO_FORCE_HEADLESS", raising=False)
+    monkeypatch.setenv("ABCXAUTO_LAUNCH_PROBE", "1")
+    monkeypatch.setattr(sys, "argv", ["abcxauto", "--headless"])
+    monkeypatch.setattr(m, "_cleanup", lambda **_k: 0)
+    called: dict[str, bool] = {}
+    monkeypatch.setattr(
+        "abcxauto.pro_desktop.run_app",
+        lambda: called.__setitem__("pro", True),
+    )
+    monkeypatch.setattr(
+        "abcxauto.headless.run_headless",
+        lambda: called.__setitem__("headless", True) or 0,
+    )
+    m.main()
+    assert called.get("pro") is True
+    assert "headless" not in called
+
+
+def test_force_headless_skips_pro(monkeypatch):
+    import sys
+
+    import abcxauto.__main__ as m
+    import pytest
+
+    monkeypatch.setenv("ABCXAUTO_FORCE_HEADLESS", "1")
+    monkeypatch.setenv("ABCXAUTO_LAUNCH_PROBE", "1")
+    monkeypatch.setattr(sys, "argv", ["abcxauto", "--headless"])
+    monkeypatch.setattr(m, "_cleanup", lambda **_k: 0)
+    called: dict[str, bool] = {}
+    monkeypatch.setattr(
+        "abcxauto.pro_desktop.run_app",
+        lambda: called.__setitem__("pro", True),
+    )
+    monkeypatch.setattr(
+        "abcxauto.headless.run_headless",
+        lambda: called.__setitem__("headless", True) or 0,
+    )
+    with pytest.raises(SystemExit):
+        m.main()
+    assert called.get("headless") is True
+    assert "pro" not in called
