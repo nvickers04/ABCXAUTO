@@ -900,13 +900,10 @@ def _portfolio_risk(
     deployed_pct = (
         round(100.0 * long_mv / float(net_liq), 2) if net_liq and net_liq > 0 else 0.0
     )
-    from abcxauto.config import ROTATION_THIN_CASH_PCT
-
     capital_liquidity = {
         "total_cash": round(cash, 2),
         "cash_pct_nl": cash_pct,
         "deployed_long_pct_nl": deployed_pct,
-        "cash_thin": bool(cash_pct < float(ROTATION_THIN_CASH_PCT)),
         "note": "Fact — liquidity vs NL; not a hold/sell gate",
     }
     return {

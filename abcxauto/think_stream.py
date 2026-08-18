@@ -217,12 +217,6 @@ def begin_run() -> dict[str, Any]:
     global _run
     mark_review_stale(archive_tail=True)
     try:
-        from abcxauto.pacing import expire_premarket_wake_if_stale
-
-        expire_premarket_wake_if_stale()
-    except Exception:
-        logger.debug("premarket_wake clear on begin_run failed", exc_info=True)
-    try:
         from abcxauto.wake_bus import ensure_next_look
 
         ensure_next_look(previous_set_at="")

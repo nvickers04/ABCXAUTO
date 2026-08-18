@@ -23,7 +23,7 @@ def _relax_proposal_gates(monkeypatch):
     base = get_config()
     monkeypatch.setattr(
         "abcxauto.proposals.get_config",
-        lambda: Config(**{**base.__dict__, "defined_risk_only": False, "min_reward_risk": 0, "risk_posture": "balanced"}),
+        lambda: Config(**{**base.__dict__, "defined_risk_only": False, "risk_posture": "balanced"}),
     )
 
 

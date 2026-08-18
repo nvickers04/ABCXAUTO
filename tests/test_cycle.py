@@ -9,8 +9,6 @@ import pytest
 
 from abcxauto.cycle import (
     ALLOWED_ACTIONS,
-    TWEAKS,
-    apply_tweak,
     equity_of,
     normalize_action,
     pnl_of,
@@ -141,10 +139,6 @@ def _reset_cadence(monkeypatch, tmp_path):
     stub = _cfg(signal_only=False, grok_min_interval_s=0)
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: stub)
     monkeypatch.setattr("abcxauto.world_state.get_config", lambda: stub)
-    # Force Act path (S2) without replacing full config.get_config.
-    monkeypatch.setattr(
-        "abcxauto.config.deliberation_requires_act", lambda cfg=None: True
-    )
     # Avoid real MDA/connector in connection_status during prompts.
     monkeypatch.setattr(
         "abcxauto.agent_loop.connection_status",
@@ -192,7 +186,6 @@ async def test_snap_with_fake_connector(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_cycle_paper_flat_rth_may_hold(monkeypatch):
     """Hold is allowed. Unprotected STK is the only hold block."""
-    before = dict(TWEAKS)
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
@@ -211,18 +204,14 @@ async def test_run_cycle_paper_flat_rth_may_hold(monkeypatch):
         _pja_grok(act, prompts=prompts),
     )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
-    try:
-        hist = []
-        out = await run_cycle(1, FakeConnector(), None, hist, 0.0)
-        assert out["strat"] == "hold"
-        assert send_calls == []
-        assert prompts  # Grok woke
-        from abcxauto.brain import brain_system_prompt
+    hist = []
+    out = await run_cycle(1, FakeConnector(), None, hist, 0.0)
+    assert out["strat"] == "hold"
+    assert send_calls == []
+    assert prompts  # Grok woke
+    from abcxauto.brain import brain_system_prompt
 
-        assert "ORDER EXAMPLES" in brain_system_prompt()
-    finally:
-        TWEAKS.clear()
-        TWEAKS.update(before)
+    assert "ORDER EXAMPLES" in brain_system_prompt()
 
 
 @pytest.mark.asyncio
@@ -704,7 +693,6 @@ async def test_no_suite_gate_on_autonomous_path(monkeypatch):
 @pytest.mark.asyncio
 async def test_no_prefer_bracket_only_playbook(monkeypatch):
     """prefer_bracket_only is removed — agent chooses structure; gates constrain."""
-    assert "prefer_bracket_only" not in TWEAKS
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     calls: list[dict] = []
 
@@ -757,21 +745,13 @@ async def test_run_cycle_dispatches_bracket_to_send_action(monkeypatch):
     assert calls[0]["strategy"] == "bracket"
 
 
-def test_apply_tweak_merges_config():
-    before = dict(TWEAKS)
-    try:
-        summary = apply_tweak({"type": "config", "config": {"cycle_sleep_s": 3}, "summary": "faster"})
-        assert summary == "faster"
-        assert TWEAKS["cycle_sleep_s"] == 3
-    finally:
-        TWEAKS.clear()
-        TWEAKS.update(before)
+def test_no_dead_operator_tweak_surface():
+    from abcxauto import agent_loop, cycle
 
-
-def test_tweaks_static_safety_defaults():
-    assert "lab_min_pass_rate" not in TWEAKS
-    assert "prefer_bracket_only" not in TWEAKS
-    assert float(TWEAKS.get("max_risk_pct", 0)) == 0.5
+    assert not hasattr(agent_loop, "TWEAKS")
+    assert not hasattr(cycle, "apply_tweak")
+    assert "lab_min_pass_rate" not in dir(agent_loop)
+    assert "prefer_bracket_only" not in dir(agent_loop)
 
 
 def test_pnl_and_equity():
@@ -785,21 +765,12 @@ def test_risk_label_compliant():
     assert risk_label({"protection": {"unprotected_symbols": []}}) == "COMPLIANT"
 
 
-def test_config_cadence_defaults(monkeypatch):
+def test_config_has_no_metronome_fields(monkeypatch):
     from abcxauto.config import Config, get_config
 
-    for key in (
-        "ABCXAUTO_CYCLE_SLEEP_S",
-        "ABCXAUTO_GROK_MIN_INTERVAL_S",
-        "ABCXAUTO_SIGNAL_ONLY",
-    ):
-        monkeypatch.delenv(key, raising=False)
     get_config.cache_clear()
     cfg = get_config()
-    assert cfg.cycle_sleep_s == 15.0
-    assert cfg.grok_min_interval_s == 15.0
-    assert "invent strategy on paper" in cfg.trading_mandate.lower()
-    assert "promoted" in cfg.trading_mandate.lower()
-    assert "operator gives" not in cfg.trading_mandate.lower()
-    assert "cycle_sleep_s" in Config.__dataclass_fields__
+    assert not hasattr(cfg, "trading_mandate")
+    assert "cycle_sleep_s" not in Config.__dataclass_fields__
+    assert "control_budget_pct" not in Config.__dataclass_fields__
     get_config.cache_clear()

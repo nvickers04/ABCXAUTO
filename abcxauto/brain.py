@@ -18,7 +18,7 @@ from xai_sdk.chat import developer, system, tool, tool_result, user
 
 from abcxauto.llm import GrokClient, build_system_prompt
 from abcxauto.opportunity_scan import fetch_scan_metrics, normalize_tickers
-from abcxauto.order_examples import format_order_examples
+from abcxauto.order_examples import format_order_examples, ticket_strategy_names
 from abcxauto.think_stream import emit as think_emit
 from abcxauto.tools import run_readonly_tool
 from abcxauto.tool_args import (
@@ -35,7 +35,7 @@ from abcxauto.world_state import WorldState
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 24
-_MUTATING_TOOLS = frozenset({"send", "write_lab_playbook"})
+_MUTATING_TOOLS = frozenset({"send", "self_tune", "write_lab_playbook"})
 STREAM_CHUNK_S = 8.0
 STREAM_IDLE_LIMIT = 6
 STREAM_LOOP_UNIT = 12
@@ -169,16 +169,56 @@ AGENT_TOOLS = [
         name="send",
         description=(
             "One IBKR ticket per call. Call send again this turn for another ticket. "
-            "strategy + params must match ORDER EXAMPLES. Hard risk is code."
+            "strategy name + fields match ORDER EXAMPLES. Knobs are self_tune, not a ticket. "
+            "Hard risk is code."
         ),
         parameters=_schema(
             {
-                "strategy": {"type": "string"},
-                "params": {"type": "object"},
+                "strategy": {
+                    "type": "string",
+                    "enum": ticket_strategy_names(),
+                    "description": "Ticket name from ORDER EXAMPLES.",
+                },
+                "symbol": _QUOTE_SCHEMA,
+                "quantity": {"type": "number"},
+                "direction": {"type": "string", "description": "LONG or SHORT"},
+                "stop_price": {"type": "number"},
+                "target_price": {"type": "number"},
+                "entry_price": {"type": "number"},
+                "limit_price": {"type": "number"},
+                "order_id": {"type": "integer"},
+                "expiration": {"type": "string", "description": "YYYYMMDD"},
+                "strike": {"type": "number"},
+                "right": {"type": "string", "description": "C or P"},
+                "params": {
+                    "type": "object",
+                    "description": "Extra ticket fields from ORDER EXAMPLES if not top-level.",
+                },
                 "target_conId": {"type": "string"},
                 "rationale": {"type": "string"},
             },
             ["strategy"],
+        ),
+    ),
+    tool(
+        name="self_tune",
+        description=(
+            "Retune knobs now. Floor cannot be weakened. Not a ticket — send is the book."
+        ),
+        parameters=_schema(
+            {
+                "max_risk_per_trade_pct": {"type": "number"},
+                "daily_loss_limit_pct": {"type": "number"},
+                "max_position_pct": {"type": "number"},
+                "max_peak_drawdown_pct": {"type": "number"},
+                "max_option_premium_pct": {"type": "number"},
+                "max_open_positions": {"type": "integer"},
+                "enabled_arenas": _SYMBOLS_SCHEMA,
+                "custom_symbols": _SYMBOLS_SCHEMA,
+                "exclude_symbols": _SYMBOLS_SCHEMA,
+                "rationale": {"type": "string"},
+            },
+            [],
         ),
     ),
     tool(
@@ -1000,6 +1040,27 @@ async def _run_tool(
         turn.last_result = result
         turn.last_strat = strat
         return _clip(result)
+    if name == "self_tune":
+        from abcxauto.self_tune import apply_self_tune
+
+        blob = dict(args)
+        if isinstance(blob.get("params"), dict):
+            nested = dict(blob.pop("params"))
+            nested.update(blob)
+            blob = nested
+        rationale = str(blob.pop("rationale", "") or "")
+        result = apply_self_tune(blob, persist=True, rationale=rationale)
+        if not isinstance(result, dict):
+            result = {"raw": result}
+        else:
+            result = dict(result)
+        strat = "self_tune"
+        act = {"action": strat, "strategy": strat, "params": blob, "rationale": rationale}
+        turn.sends.append({"act": dict(act), "result": result, "strat": strat})
+        turn.last_act = dict(act)
+        turn.last_result = result
+        turn.last_strat = strat
+        return _clip(result)
     if name == "playbook":
         from abcxauto.lab_playbook import playbook_payload
 
@@ -1014,10 +1075,6 @@ async def _run_tool(
         if note:
             return _clip({"status": "rejected", "note": note})
         args = dict(args)
-        args["research_tools"] = [
-            str(x) for x in turn.tool_trace if str(x) in
-            ("book", "scan", "news", "candles", "option_facts")
-        ]
         judgment = {"lab_playbook": args}
         state = apply_from_judgment(judgment)
         turn.lab_playbook = state

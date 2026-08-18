@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, List
 
 from abcxauto.book import build_book_from_snap
 from abcxauto.config import get_config
@@ -56,7 +56,6 @@ AWARENESS_HEART = (
     "Risk gates and defined_risk_only cannot be bypassed. "
     "self_tune cannot weaken the immutable floor.\n"
 )
-TWEAKS: Dict[str, Any] = {"max_risk_pct": 0.5}
 RULES = AWARENESS_HEART
 SNAP_S = 25.0
 _HIST_KEYS = (
@@ -86,12 +85,6 @@ def equity_of(acct: dict) -> float:
         except (TypeError, ValueError):
             pass
     return 0.0
-
-
-def apply_tweak(tw: dict) -> str:
-    if tw.get("type") == "config" and tw.get("config"):
-        TWEAKS.update(tw["config"])
-    return tw.get("summary", str(tw))
 
 
 def normalize_action(act: dict) -> tuple[str, dict | None]:
@@ -682,7 +675,7 @@ def _result_dict(
     ).strip()
     return {
         "cycle": n, "pnl": pnl, "pnl_chg": pnl - prev, "equity": eq,
-        "strat": strat, "result": result, "tweak": "none", "tweak_obj": {},
+        "strat": strat, "result": result,
         "risk": risk_label(s),
         "portfolio": f"{len(positions)} positions | {len(s.get('open_orders') or [])} orders",
         "portfolio_state": s.get("portfolio_state") or {},
@@ -694,7 +687,7 @@ def _result_dict(
         "taken_at": s.get("taken_at") or "", "inventory": inventory,
         "validation": validation,
         "reasoning_chain": market_read or rationale or (act or {}).get("reasoning_chain") or "",
-        "tweak_before": {}, "impact": impact or {},
+        "impact": impact or {},
         "reality_pulse": s.get("reality_pulse") or {},
         "kahneman": kahneman or {}, "kahneman_trace": "",
         "opportunities": ideas[:5],

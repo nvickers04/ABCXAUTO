@@ -1,12 +1,10 @@
-"""Shell objectivity: banned taste phrases, features header, Operator Card."""
+"""Shell objectivity: banned taste phrases, features header."""
 
 from __future__ import annotations
 
 from abcxauto.config import (
     _POSTURE_PROMPT_BIAS,
-    format_operator_card_block,
     get_config,
-    load_operator_card,
     posture_prompt_bias,
 )
 from abcxauto.objective_language import (
@@ -15,21 +13,17 @@ from abcxauto.objective_language import (
     find_banned_phrases,
 )
 from abcxauto.opportunity_scan import format_scan_tape, metrics_for_symbol
-from abcxauto.trade_playbook import format_trade_playbook
 
 
 def test_banned_list_nonempty():
     assert len(BANNED_TASTE_PHRASES) >= 5
 
 
-def test_playbook_has_no_banned_taste():
-    text = format_trade_playbook(
-        "manage",
-        {"flat": False, "long_lots": {"IWM": 122}, "has_trade_plan": True},
-    )
-    assert "Precondition:" in text
-    assert "Shell reject:" in text
-    assert_no_banned_phrases(text, label="playbook")
+def test_order_examples_have_no_banned_taste():
+    from abcxauto.order_examples import format_order_examples
+
+    text = format_order_examples()
+    assert_no_banned_phrases(text, label="order_examples")
 
 
 def test_posture_bias_has_no_banned_taste():
@@ -72,48 +66,10 @@ def test_metrics_no_advice_note():
     assert "uptrend support" not in str(idea).lower()
 
 
-def test_operator_card_empty_by_default(tmp_path, monkeypatch):
-    monkeypatch.delenv("ABCXAUTO_OPERATOR_CARD", raising=False)
-    monkeypatch.setenv("ABCXAUTO_OPERATOR_CARD_PATH", str(tmp_path / "missing.txt"))
-    get_config.cache_clear()
-    assert load_operator_card() == ""
-    assert format_operator_card_block("") == ""
-    assert "OPERATOR CARD" not in format_operator_card_block(None) or load_operator_card() == ""
-
-
-def test_operator_card_injects_when_set(tmp_path, monkeypatch):
-    path = tmp_path / "operator_card.txt"
-    path.write_text("I like mean reversion on indexes.", encoding="utf-8")
-    monkeypatch.delenv("ABCXAUTO_OPERATOR_CARD", raising=False)
-    monkeypatch.setenv("ABCXAUTO_OPERATOR_CARD_PATH", str(path))
-    get_config.cache_clear()
-    card = load_operator_card()
-    assert "mean reversion" in card
-    block = format_operator_card_block(card)
-    assert "OPERATOR CARD" in block
-    assert "secondary to CONTROLS" in block
-    assert "mean reversion" in block
-
-
-def test_format_controls_block_always_present():
-    from abcxauto.config import format_controls_block
-
-    block = format_controls_block()
-    assert block.startswith("CONTROLS")
-    assert "deliberation=" in block
-    assert "intelligence_budget=" in block
-    assert "capital_rotation=" in block
-    assert "option_complexity=" in block
-    assert "entry_surface=" in block
-    assert "book_capacity" in block or "max_open_positions=" in block
-    assert "UNIVERSE" not in block
-
-
-def test_book_facts_objective_and_card(tmp_path, monkeypatch):
+def test_book_facts_have_no_controls_lecture(tmp_path, monkeypatch):
     from abcxauto.brain import _book_payload
     from abcxauto.world_state import WorldState
 
-    monkeypatch.setenv("ABCXAUTO_OPERATOR_CARD", "Fade extensions only.")
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     get_config.cache_clear()
 

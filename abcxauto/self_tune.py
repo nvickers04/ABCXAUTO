@@ -1,9 +1,9 @@
-"""Agent self-modification — all non-risk knobs, no human approval.
+"""Agent self-modification — live knobs only, no human approval.
 
 Immutable floor (code): daily-loss halt, max position size, max open positions,
 defined-risk, cash-only, auto-panic, fail-closed, exits never blocked, live gated.
-The agent may *tighten* risk and retune pacing within floors. It cannot weaken the
-immutable risk floor. Empty-book paper spin-up is allowed to run fast.
+The agent may *tighten* risk. It cannot weaken the immutable risk floor.
+Cadence is wake_bus; process % dials do not exist.
 """
 
 from __future__ import annotations
@@ -33,32 +33,7 @@ LOCKED_TRUE: frozenset[str] = frozenset({
     "cash_only",
 })
 
-# Pacing: agent may shorten or lengthen inside [floor, ceiling].
-# 15s floor lets 0–1 position paper research; it is not a 5-minute nap.
-PACING_FLOORS: dict[str, float] = {
-    "cycle_sleep_s": 15.0,
-    "grok_min_interval_s": 15.0,
-    "pace_idle_s": 60.0,
-    "pace_protect_s": 20.0,
-    "pace_manage_s": 60.0,
-}
-PACING_CEILINGS: dict[str, float] = {
-    "cycle_sleep_s": 3600.0,
-    "grok_min_interval_s": 3600.0,
-    "pace_idle_s": 7200.0,
-    "pace_protect_s": 120.0,
-    "pace_manage_s": 600.0,
-}
-
 SCAN_FETCH_CAP_RANGE = (1, 8)
-CONTROL_KEYS_TUNABLE = frozenset({
-    "control_deliberation_pct",
-    "control_budget_pct",
-    "control_frequency_pct",
-    "control_entry_surface_pct",
-    "control_complexity_pct",
-    "control_rotation_pct",
-})
 
 # Unsupervised defaults — walk-away % of the full book.
 UNSUPERVISED_DEFAULTS: dict[str, Any] = {
@@ -74,18 +49,7 @@ UNSUPERVISED_DEFAULTS: dict[str, Any] = {
     "max_peak_drawdown_pct": 25.0,
     "max_option_premium_pct": 25.0,
     "max_open_positions": 15,
-    "cycle_sleep_s": 15.0,
-    "grok_min_interval_s": 15.0,
-    "pace_protect_s": 20.0,
-    "pace_manage_s": 60.0,
-    "pace_idle_s": 120.0,
     "scan_fetch_cap": 8,
-    "control_deliberation_pct": 40,
-    "control_budget_pct": 80,
-    "control_frequency_pct": 50,
-    "control_entry_surface_pct": 50,
-    "control_complexity_pct": 40,
-    "control_rotation_pct": 40,
 }
 
 _SELF_TUNE_ALIASES = frozenset({
@@ -132,17 +96,6 @@ def clamp_risk_to_floor(key: str, value: Any) -> tuple[Any, dict[str, Any] | Non
     return clamped, note
 
 
-def clamp_pacing(key: str, value: Any) -> tuple[float | None, dict[str, Any] | None]:
-    raw = _f(value)
-    if raw is None or key not in PACING_FLOORS:
-        return None, None
-    lo = PACING_FLOORS[key]
-    hi = PACING_CEILINGS.get(key, 86400.0)
-    clamped = max(lo, min(hi, raw))
-    note = {"raw": raw, "clamped": clamped} if clamped != raw else None
-    return clamped, note
-
-
 def _flatten_params(params: dict[str, Any]) -> dict[str, Any]:
     """Accept nested self_tune payload or flat set_risk-style knobs."""
     out: dict[str, Any] = {}
@@ -172,7 +125,6 @@ def apply_self_tune(
     No operator approval. Returns a result dict suitable for executor/journal.
     """
     from abcxauto.config import (
-        CONTROL_KEYS,
         get_config,
         update_controls_config,
         update_risk_config,
@@ -195,10 +147,8 @@ def apply_self_tune(
 
     risk_payload: dict[str, Any] = {}
     controls_payload: dict[str, Any] = {}
-    pacing_payload: dict[str, Any] = {}
     scan_cap: int | None = None
     universe_payload: dict[str, Any] = {}
-    tweaks_payload: dict[str, Any] = {}
 
     for key, value in flat.items():
         if key in LOCKED_TRUE:
@@ -227,27 +177,6 @@ def apply_self_tune(
             else:
                 risk_payload[key] = new_v
             continue
-        if key in CONTROL_KEYS_TUNABLE or key in CONTROL_KEYS:
-            if key not in CONTROL_KEYS_TUNABLE and key != "max_open_positions":
-                rejected[key] = "not agent-tunable"
-                continue
-            before[key] = getattr(cfg, key, None)
-            n = _i(value)
-            if n is None:
-                rejected[key] = "invalid value"
-                continue
-            controls_payload[key] = max(0, min(100, n))
-            continue
-        if key in PACING_FLOORS:
-            before[key] = getattr(cfg, key, None)
-            new_v, note = clamp_pacing(key, value)
-            if new_v is None:
-                rejected[key] = "invalid value"
-                continue
-            if note:
-                clamped[key] = note
-            pacing_payload[key] = new_v
-            continue
         if key == "scan_fetch_cap":
             before[key] = getattr(cfg, "scan_fetch_cap", None)
             n = _i(value)
@@ -262,13 +191,8 @@ def apply_self_tune(
         if key in ("enabled_arenas", "custom_symbols", "exclude_symbols"):
             universe_payload[key] = value
             continue
-        if key.startswith("tweak_") or key in ("max_risk_pct",):
-            tweaks_payload[key.replace("tweak_", "", 1) if key.startswith("tweak_") else key] = value
-            continue
         rejected[key] = "unknown or not agent-tunable"
 
-    if isinstance(raw.get("tweaks"), dict):
-        tweaks_payload.update(raw["tweaks"])
     if isinstance(raw.get("universe"), dict):
         universe_payload.update({
             k: v for k, v in raw["universe"].items()
@@ -284,26 +208,13 @@ def apply_self_tune(
     if controls_payload:
         update_controls_config(**controls_payload, **persist_kw)
         applied.update(controls_payload)
-    if pacing_payload or scan_cap is not None:
-        from abcxauto.config import _runtime_overrides, save_risk_settings
+    if scan_cap is not None:
+        from abcxauto.config import _runtime_overrides
 
-        extra: dict[str, Any] = dict(pacing_payload)
-        if scan_cap is not None:
-            extra["scan_fetch_cap"] = scan_cap
+        extra = {"scan_fetch_cap": scan_cap}
         _runtime_overrides.update(extra)
         if persist:
             try:
-                # Pacing/prompt live on Config; persist known file keys only.
-                file_keys = {
-                    k: v for k, v in extra.items()
-                    if k in CONTROL_KEYS or k in (
-                        "daily_loss_limit_pct", "max_position_pct",
-                        "max_risk_per_trade_pct", "max_peak_drawdown_pct",
-                        "max_option_premium_pct",
-                    )
-                }
-                if file_keys:
-                    save_risk_settings(file_keys)
                 _persist_agent_state(extra)
             except Exception:
                 logger.exception("self_tune persist extra failed")
@@ -319,15 +230,6 @@ def apply_self_tune(
         except Exception as exc:
             logger.exception("self_tune universe failed")
             rejected["universe"] = str(exc)
-
-    if tweaks_payload:
-        try:
-            from abcxauto.agent_loop import TWEAKS
-
-            TWEAKS.update(tweaks_payload)
-            applied["tweaks"] = tweaks_payload
-        except Exception as exc:
-            rejected["tweaks"] = str(exc)
 
     if not applied:
         return {
@@ -350,7 +252,7 @@ def apply_self_tune(
     except Exception:
         logger.debug("journal self_tune record failed", exc_info=True)
 
-    after = {k: getattr(get_config(), k, None) for k in list(applied) if k not in ("universe", "tweaks")}
+    after = {k: getattr(get_config(), k, None) for k in list(applied) if k != "universe"}
     return {
         "status": "ok",
         "strategy": "self_tune",
@@ -364,7 +266,7 @@ def apply_self_tune(
 
 
 def _persist_agent_state(extra: dict[str, Any]) -> None:
-    """Persist pacing / prompt extra beside risk_settings (agent-owned)."""
+    """Persist scan_fetch_cap beside risk_settings (agent-owned)."""
     import json
     from pathlib import Path
 
@@ -435,10 +337,6 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
             fixes[key] = True
     if str(getattr(cfg, "risk_posture", "") or "") != "defensive":
         fixes["risk_posture"] = "defensive"
-    for key, lo in PACING_FLOORS.items():
-        cur = _f(getattr(cfg, key, None))
-        if cur is None or cur < lo:
-            fixes[key] = UNSUPERVISED_DEFAULTS.get(key, lo)
     cap = _i(getattr(cfg, "scan_fetch_cap", 8))
     lo_c, hi_c = SCAN_FETCH_CAP_RANGE
     if cap is None or cap < lo_c or cap > hi_c:
@@ -473,21 +371,12 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
     }
     controls_fix = {
         k: v for k, v in fixes.items()
-        if k == "max_open_positions" or k in CONTROL_KEYS_TUNABLE
+        if k == "max_open_positions"
     }
     extra_fix = {
         k: v for k, v in fixes.items()
-        if k in PACING_FLOORS or k == "scan_fetch_cap"
+        if k == "scan_fetch_cap"
     }
-
-    state = load_agent_state()
-    if not state:
-        for key, default in UNSUPERVISED_DEFAULTS.items():
-            if key not in CONTROL_KEYS_TUNABLE:
-                continue
-            cur = _i(getattr(cfg, key, 50))
-            if cur == 50:
-                controls_fix[key] = default
 
     if persist:
         if risk_fix:
@@ -525,8 +414,7 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
 
     overlay = load_agent_state()
     if overlay:
-        allowed = set(PACING_FLOORS) | {"scan_fetch_cap"}
-        cleaned = {k: v for k, v in overlay.items() if k in allowed}
+        cleaned = {k: v for k, v in overlay.items() if k == "scan_fetch_cap"}
         if cleaned:
             _runtime_overrides.update(cleaned)
 

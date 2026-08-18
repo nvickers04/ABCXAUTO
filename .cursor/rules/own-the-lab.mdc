@@ -9,6 +9,6 @@ You are on the hook for clerk lies and wasted xAI spend. Do not wait for a “fi
 
 **Evidence first.** Read `data/state/think_tail.txt`, `data/state/last_turn.json`, and `logs/app.log`. If Grok asks the operator for lot names, or `open_lots` is empty while `flat=false`, the wake/last-turn facts are wrong — fix persist, not the prompt.
 
-**Token burn is a clerk bug.** Kill Pro if Grok is looping tools with no ticket. Premarket is one research wake, then wait for the bell (unprotected STK still interrupts). Do not launch when TWS 7497 refuses. Do not launch before the last hour to open.
+**Token burn is a clerk bug.** Kill Pro if Grok is looping tools with no ticket. Do not launch when TWS 7497 refuses. Do not launch before the last hour to open. Supervisor useful hours are weekdays 8:30–16:00 ET; premarket Grok wakes are allowed, closed/postmarket are not (unprotected STK still interrupts).
 
-**After a fix:** test. Restart Pro only when the operator wants it on or RTH is useful. Do not relaunch into a burn. Grok still owns `send`, `self_tune`, `write_lab_playbook`. Do not flatten, enable live, commit, or grow the system prompt unless asked.
+**After a fix:** test. Restart Pro only when the operator wants it on or RTH is useful. Do not relaunch into a burn. Grok still owns `send`, `self_tune`, `write_lab_playbook`, `set_wake`. Do not flatten, enable live, commit, or grow the system prompt unless asked.

@@ -15,15 +15,13 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
     "hold": {},
     "set_risk": {
         "max_risk_per_trade_pct": 0.75,
-        "cycle_sleep_s": 15,
-        "control_budget_pct": 90,
+        "max_open_positions": 15,
         "enabled_arenas": ["index_etfs", "most_active"],
     },
     "self_tune": {
-        "controls": {"control_budget_pct": 90, "control_frequency_pct": 50},
-        "pacing": {"cycle_sleep_s": 15, "pace_idle_s": 120},
-        "universe": {"enabled_arenas": ["index_etfs", "most_active"]},
-        "risk": {"max_risk_per_trade_pct": 0.75},
+        "max_risk_per_trade_pct": 0.75,
+        "max_open_positions": 15,
+        "enabled_arenas": ["index_etfs", "most_active"],
     },
     "market_bracket": {
         "symbol": "NVDA",
@@ -321,6 +319,13 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
 }
 
 SENDABLE_TYPES = frozenset(ORDER_EXAMPLES)
+# Knobs are the self_tune tool. Keep send aliases in the dict for old tickets.
+NOT_TICKETS = frozenset({"self_tune", "set_risk"})
+
+
+def ticket_strategy_names() -> list[str]:
+    """send strategy enum — tickets only, so knobs are not buried in this list."""
+    return sorted(k for k in ORDER_EXAMPLES if k not in NOT_TICKETS)
 
 
 def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -> str:
@@ -347,14 +352,10 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "on protect/manage/hunt; closing_position required. "
         "defined_risk_only still rejects unlimited/naked shapes; cash-only still "
         "rejects SHORT stock brackets.",
-        "self_tune (alias set_risk) retunes agent knobs with no approval. "
-        "You may tighten risk and change pacing inside floors; "
-        "you cannot weaken the immutable risk floor. "
-        "Nested params: controls, pacing, universe, tweaks, risk.",
         "",
     ]
     for name in sorted(ORDER_EXAMPLES):
-        if name not in allowed:
+        if name not in allowed or name in NOT_TICKETS:
             continue
         params = ORDER_EXAMPLES[name]
         lines.append(f"{name}: {json.dumps(params, separators=(',', ':'))}")

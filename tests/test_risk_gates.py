@@ -30,7 +30,6 @@ def _cfg(**overrides) -> Config:
         "max_option_premium_pct": 0.0,
         "max_risk_per_trade_pct": 0.0,
         "defined_risk_only": False,
-        "min_reward_risk": 0.0,
     }
     data = {**base.__dict__, **defaults, **overrides}
     return Config(**data)
@@ -70,7 +69,6 @@ def gate(monkeypatch):
         daily_loss_limit_pct=2.0,
         max_position_pct=10.0,
         max_open_positions=5,
-        max_daily_trades=20,
         auto_panic_on_breach=True,
     )
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
@@ -213,7 +211,6 @@ async def test_max_daily_trades_removed_no_gate(gate, monkeypatch):
     monkeypatch.setattr(
         "abcxauto.risk_gates.get_config",
         lambda: _cfg(
-            max_daily_trades=2,
             max_position_pct=0,
             daily_loss_limit_pct=0,
             max_open_positions=0,
@@ -260,7 +257,6 @@ async def test_disabled_knobs_skip_rules(gate, monkeypatch):
             daily_loss_limit_pct=0,
             max_position_pct=0,
             max_open_positions=0,
-            max_daily_trades=0,
             cash_only=False,
             max_peak_drawdown_pct=0,
             max_option_premium_pct=0,
@@ -290,7 +286,6 @@ async def test_executor_records_entry_on_success(monkeypatch):
         max_position_pct=50.0,
         daily_loss_limit_pct=0,
         max_open_positions=0,
-        max_daily_trades=20,
     )
     monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
@@ -473,7 +468,6 @@ async def test_cash_only_rejects_short_bracket(gate, monkeypatch):
             max_position_pct=0,
             daily_loss_limit_pct=0,
             max_open_positions=0,
-            max_daily_trades=0,
         ),
     )
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
@@ -496,7 +490,6 @@ async def test_cash_only_rejects_notional_over_cash(gate, monkeypatch):
             max_position_pct=0,
             daily_loss_limit_pct=0,
             max_open_positions=0,
-            max_daily_trades=0,
         ),
     )
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
@@ -522,7 +515,6 @@ async def test_peak_drawdown_rejects_and_self_clears(gate, monkeypatch):
             max_position_pct=0,
             daily_loss_limit_pct=0,
             max_open_positions=0,
-            max_daily_trades=0,
             cash_only=False,
         ),
     )
@@ -555,7 +547,6 @@ async def test_risk_per_trade_cap(gate, monkeypatch):
             max_position_pct=0,
             daily_loss_limit_pct=0,
             max_open_positions=0,
-            max_daily_trades=0,
             cash_only=False,
         ),
     )
@@ -586,7 +577,6 @@ async def test_salvage_knobs_disabled(gate, monkeypatch):
             max_position_pct=0,
             daily_loss_limit_pct=0,
             max_open_positions=0,
-            max_daily_trades=0,
         ),
     )
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
@@ -616,7 +606,7 @@ def test_defined_risk_only_rejects_ratio_and_short_straddle(monkeypatch):
     )
     monkeypatch.setattr(
         "abcxauto.proposals.get_config",
-        lambda: _cfg(defined_risk_only=True, min_reward_risk=0),
+        lambda: _cfg(defined_risk_only=True),
     )
     ratio = validate_proposal(
         "ratio_spread",

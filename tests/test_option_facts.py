@@ -248,22 +248,3 @@ def test_world_prompt_includes_option_facts():
     block = ws.prompt_block()
     assert "OPTION FACTS" in block
     assert "SPY" in block
-
-
-def test_operator_card_example_not_loaded_by_default(tmp_path, monkeypatch):
-    """example file must not become the live Card."""
-    monkeypatch.delenv("ABCXAUTO_OPERATOR_CARD", raising=False)
-    monkeypatch.setenv(
-        "ABCXAUTO_OPERATOR_CARD_PATH", str(tmp_path / "missing_card.txt")
-    )
-    from abcxauto.config import load_operator_card
-
-    assert load_operator_card() == ""
-    # example exists in repo but is not the load path
-    from pathlib import Path
-
-    example = Path(__file__).resolve().parents[1] / "operator_card.example.txt"
-    assert example.is_file()
-    assert "shell defaults" in example.read_text(encoding="utf-8").lower() or (
-        "not shell" in example.read_text(encoding="utf-8").lower()
-    )

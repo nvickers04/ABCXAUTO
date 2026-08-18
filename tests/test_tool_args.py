@@ -92,6 +92,12 @@ def test_option_chain_symbol_list_becomes_symbols():
     assert args["symbols"] == ["IWM", "XLE"]
 
 
+def test_set_risk_alias_is_self_tune():
+    name, args = normalize_tool_call("set_risk", {"max_risk_per_trade_pct": 0.5})
+    assert name == "self_tune"
+    assert args["max_risk_per_trade_pct"] == 0.5
+
+
 def test_option_quote_aliases():
     name, args = normalize_tool_call(
         "greeks",

@@ -32,8 +32,6 @@ def test_clamp_keeps_instructions(tmp_path, monkeypatch):
         {
             "mode": "exploit",
             "instructions": "Buy strength in legal names with defined-risk brackets.",
-            "do_more": "winners",
-            "stop_doing": "chop",
             "ready_to_promote": True,
         }
     )
@@ -48,18 +46,14 @@ def test_clamp_patch_keeps_omitted_fields(tmp_path, monkeypatch):
         {
             "mode": "explore",
             "instructions": "Hunt defined-risk debit in legal names.",
-            "do_more": "size to max_risk_per_trade_pct",
-            "stop_doing": "1 lot slot fills",
             "ready_to_promote": False,
         }
     )
-    patch = clamp_update({"do_more": "size to the envelope; no clones"})
+    patch = clamp_update({"ready_to_promote": True})
     assert patch is not None
     assert patch["instructions"] == "Hunt defined-risk debit in legal names."
-    assert patch["stop_doing"] == "1 lot slot fills"
-    assert patch["do_more"] == "size to the envelope; no clones"
+    assert patch["ready_to_promote"] is True
     assert patch["mode"] == "explore"
-    assert patch["ready_to_promote"] is False
 
 
 def test_new_instructions_replace_the_notebook(tmp_path, monkeypatch):
@@ -68,16 +62,12 @@ def test_new_instructions_replace_the_notebook(tmp_path, monkeypatch):
         {
             "mode": "explore",
             "instructions": "Old slogans.",
-            "do_more": "clones",
-            "stop_doing": "lottery",
             "ready_to_promote": False,
         }
     )
     patch = clamp_update({"instructions": "Defined-risk debit. Size vs the envelope."})
     assert patch is not None
     assert patch["instructions"] == "Defined-risk debit. Size vs the envelope."
-    assert patch["do_more"] == ""
-    assert patch["stop_doing"] == ""
 
 
 def test_paper_may_hunt_without_playbook(monkeypatch, tmp_path):

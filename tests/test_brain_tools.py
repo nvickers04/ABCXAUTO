@@ -68,6 +68,7 @@ def test_agent_tools_cover_ibkr_and_mda():
         "option_quote",
         "option_facts",
         "send",
+        "self_tune",
         "playbook",
         "write_lab_playbook",
         "set_wake",
@@ -852,17 +853,100 @@ async def test_read_tools_run_in_parallel(monkeypatch):
     assert elapsed < 0.30
 
 
-def test_send_tool_says_one_ticket_per_call():
+def _tool_fn(name: str):
     for t in AGENT_TOOLS:
         fn = getattr(t, "function", None)
-        name = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
-        if name != "send":
-            continue
-        desc = str(getattr(fn, "description", "") or "")
-        assert "again this turn" in desc.lower()
-        assert "place one ticket" not in desc.lower()
-        return
-    raise AssertionError("send tool missing")
+        got = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
+        if got == name:
+            return fn
+    raise AssertionError(f"{name} tool missing")
+
+
+def _tool_props(name: str) -> dict:
+    fn = _tool_fn(name)
+    params = getattr(fn, "parameters", None) or {}
+    if isinstance(params, str):
+        params = json.loads(params)
+    elif hasattr(params, "model_dump"):
+        params = params.model_dump()
+    return dict((params or {}).get("properties") or {})
+
+
+def test_send_tool_says_one_ticket_per_call():
+    fn = _tool_fn("send")
+    desc = str(getattr(fn, "description", "") or "")
+    assert "again this turn" in desc.lower()
+    assert "place one ticket" not in desc.lower()
+    assert "self_tune" in desc.lower()
+    props = _tool_props("send")
+    strat = props.get("strategy") or {}
+    assert "enum" in strat
+    assert "self_tune" not in strat["enum"]
+    assert "bracket" in strat["enum"]
+    assert "symbol" in props
+    assert "quantity" in props
+
+
+def test_self_tune_tool_is_flat():
+    props = _tool_props("self_tune")
+    assert "max_risk_per_trade_pct" in props
+    assert "enabled_arenas" in props
+    assert "controls" not in props
+    assert "params" not in props
+
+
+@pytest.mark.asyncio
+async def test_self_tune_tool_applies_flat_knobs(monkeypatch):
+    seen: dict = {}
+
+    def fake_apply(params, persist=True, rationale=""):
+        seen["params"] = dict(params)
+        seen["rationale"] = rationale
+        return {"status": "ok", "strategy": "self_tune", "applied": params}
+
+    monkeypatch.setattr("abcxauto.self_tune.apply_self_tune", fake_apply)
+    turn = BrainTurn()
+    raw = await _run_tool(
+        "self_tune",
+        {
+            "max_risk_per_trade_pct": 0.75,
+            "enabled_arenas": ["index_etfs"],
+            "rationale": "cut size",
+        },
+        connector=None,
+        world=_world(),
+        snap={},
+        turn=turn,
+    )
+    data = json.loads(raw)
+    assert data["status"] == "ok"
+    assert seen["params"]["max_risk_per_trade_pct"] == 0.75
+    assert seen["params"]["enabled_arenas"] == ["index_etfs"]
+    assert "controls" not in seen["params"]
+    assert seen["rationale"] == "cut size"
+    assert turn.last_strat == "self_tune"
+
+
+@pytest.mark.asyncio
+async def test_set_risk_alias_is_self_tune_tool(monkeypatch):
+    seen: dict = {}
+
+    def fake_apply(params, persist=True, rationale=""):
+        seen["params"] = dict(params)
+        return {"status": "ok", "strategy": "self_tune", "applied": params}
+
+    monkeypatch.setattr("abcxauto.self_tune.apply_self_tune", fake_apply)
+    turn = BrainTurn()
+    await _run_tool(
+        "set_risk",
+        {"max_risk_per_trade_pct": 0.5},
+        connector=None,
+        world=_world(),
+        snap={},
+        turn=turn,
+    )
+    assert turn.last_strat == "self_tune"
+    assert seen["params"]["max_risk_per_trade_pct"] == 0.5
 
 
 @pytest.mark.asyncio

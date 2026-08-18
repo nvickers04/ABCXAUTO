@@ -17,12 +17,7 @@ from abcxauto.broker.connector import get_ibkr_connector
 from abcxauto.config import get_config
 from abcxauto.llm import GrokClient
 from abcxauto.agent_loop import run_cycle, snap
-from abcxauto.cycle import (
-    TWEAKS,
-    apply_tweak,
-    format_position_inventory,
-    grok,
-)
+from abcxauto.cycle import format_position_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +167,6 @@ class ViewState:
     recent_fills: list[dict] = field(default_factory=list)
     inventory: str = ""
     records: list[dict] = field(default_factory=list)
-    tweaks: list[dict] = field(default_factory=list)
     connected: bool = False
     ibkr_account_id: str = ""
     ibkr_account_name: str = ""
@@ -525,16 +519,12 @@ class ProEngine:
 
     def clear_logs(self) -> None:
         self.state.records.clear()
-        self.state.tweaks.clear()
         self.state.close_attempts = 0
         self.state.close_ok = 0
         self.state.mismatches = 0
         self.state.hold_count = 0
         self.state.trade_count = 0
         self.state.gate_blocks = 0
-
-    def apply_tweak_manual(self, tw: dict) -> str:
-        return apply_tweak(tw)
 
     def _apply(self, kind: str, data: Any) -> None:
         s = self.state
@@ -739,17 +729,6 @@ class ProEngine:
         )
         rec = {**d, "ts": _now(), "type": "cycle"}
         s.records.append(rec)
-        if d.get("tweak") and d["tweak"] != "none":
-            s.tweaks.append(
-                {
-                    "cycle": d["cycle"],
-                    "summary": d["tweak"],
-                    "obj": d.get("tweak_obj", {}),
-                    "before": d.get("tweak_before") or {},
-                    "after": dict(TWEAKS),
-                    "ts": _now(),
-                }
-            )
 
     async def _do_panic(self) -> None:
         try:

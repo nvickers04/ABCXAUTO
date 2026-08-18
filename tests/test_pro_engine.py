@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from abcxauto.pro_engine import ProEngine
-from abcxauto.cycle import TWEAKS
 from tests.conftest import grok_json_as_turn
 
 SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-80c4246a04fb\implementer")
@@ -32,22 +31,18 @@ class _Cfg:
     risk_posture = "balanced"
 
 
-_DEFAULT_TWEAKS = {
-    "max_risk_pct": 0.5,
-}
-
-
 @pytest.fixture(autouse=True)
 def patch_config(monkeypatch):
     monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _Cfg())
-    yield
-    TWEAKS.clear()
-    TWEAKS.update(_DEFAULT_TWEAKS)
 
 
 @pytest.mark.asyncio
-async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
+async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_path):
     """Engine.start() drives >=3 run_cycle with inventory+validation in records."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.wake_bus.min_look_s", lambda: 0.05)
+    monkeypatch.setattr("abcxauto.wake_bus.default_look_s", lambda **_k: 0.05)
+    monkeypatch.setattr("abcxauto.wake_bus.pulse_sleep_s", lambda *_a, **_k: 0.05)
     calls = {"grok": 0}
 
     async def fake_grok(_g, prompt: str, *, stage: str = "act") -> str:
@@ -137,7 +132,7 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
     assert err is None, f"start err: {err}"
     assert eng.state.running
 
-    # Let it run a bit (worker thread + async); PJA = 2 Grok calls/cycle
+    # Wake-bus pulse; default look is shortened via env for this test.
     deadline = time.time() + 20
     while time.time() < deadline and eng.state.cycles < 3:
         eng.drain_apply()
@@ -153,11 +148,6 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
     inv_recs = [r for r in eng.state.records if r.get("inventory")]
     assert len(inv_recs) >= 3
     assert any("LIVE POSITION LEDGER" in (r.get("inventory") or "") for r in inv_recs)
-    # Manual tweak path still works (no per-cycle auto-reconfig)
-    eng.apply_tweak_manual(
-        {"type": "config", "config": {"cycle_sleep_s": 0.02}, "summary": "manual-faster"}
-    )
-    assert TWEAKS.get("cycle_sleep_s") == 0.02
     # validation present
     assert any(r.get("validation") for r in eng.state.records if r.get("type") != "panic")
     # exercise close + conId target naming (real path)
@@ -176,7 +166,6 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
             "ProEngine integration test (test_pro_engine.py)",
             f"cycles={eng.state.cycles}",
             f"records={len(eng.state.records)}",
-            f"tweaks={len(eng.state.tweaks)}",
             f"grok_calls={calls['grok']}",
             "inventory_in_records=True",
             "validation_in_records=True",
@@ -190,7 +179,6 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch):
             "ProEngine integration test (test_pro_engine.py)",
             f"cycles={eng.state.cycles}",
             f"records={len(eng.state.records)}",
-            f"tweaks={len(eng.state.tweaks)}",
             f"grok_calls={calls['grok']}",
             "inventory_in_records=True",
             "validation_in_records=True",
@@ -207,7 +195,6 @@ def test_pro_engine_passes_new_fields_through_records(monkeypatch):
     eng = ProEngine()
     # no start, just check dataclass has the attrs used by apply
     assert hasattr(eng.state, "records")
-    assert hasattr(eng.state, "tweaks")
     assert hasattr(eng.state, "portfolio")
     assert hasattr(eng.state, "mandate_health")
     assert hasattr(eng.state, "last_decision")

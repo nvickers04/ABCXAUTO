@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, fields, replace
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -37,34 +37,12 @@ SET_RISK_KEYS = frozenset({
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
 })
-# Controls tab — attention + toolbox + book capacity (disjoint from Risk).
+# Book capacity only. Process % dials were unwired from send and are gone.
 CONTROL_KEYS = frozenset({
-    "control_deliberation_pct",
-    "control_budget_pct",
-    "control_frequency_pct",
-    "control_entry_surface_pct",
-    "control_complexity_pct",
-    "control_rotation_pct",
     "max_open_positions",
 })
 # Persisted together in risk_settings.json but saved via disjoint APIs.
 PERSISTED_OPERATOR_KEYS = RISK_CONFIG_KEYS | CONTROL_KEYS
-# S2 lean at/above this: shell must not cheap-skip Act after Judge hold.
-DELIBERATION_REQUIRE_ACT_PCT = 60
-# Frequency ≥ this: hunt/new-risk Act focus is allowed when capacity exists.
-FREQUENCY_ALLOW_NEW_RISK_PCT = 40
-# Rotation ≥ this + thin cash: labeled redeploy Heuristic + open_risk stream bias.
-ROTATION_REDEPLOY_PCT = 60
-# Cash share of NL below this counts as "thin" for rotation process (Fact threshold).
-ROTATION_THIN_CASH_PCT = 15.0
-_CONTROL_DEFAULTS: dict[str, int] = {
-    "control_deliberation_pct": 40,
-    "control_budget_pct": 80,
-    "control_frequency_pct": 50,
-    "control_entry_surface_pct": 50,  # mixed
-    "control_complexity_pct": 40,  # defined options
-    "control_rotation_pct": 40,
-}
 RISK_POSTURES = frozenset({"defensive", "balanced", "aggressive"})
 # Risk-only capital presets (never touch Controls / capacity / universe).
 _POSTURE_SEEDS: dict[str, dict[str, Any]] = {
@@ -121,12 +99,6 @@ _file_overrides: dict[str, Any] = {}
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_RISK_SETTINGS_PATH = _REPO_ROOT / "risk_settings.json"
 
-DEFAULT_MANDATE = (
-    "You own the whole IBKR book as % of NetLiq. "
-    "Invent strategy on paper; live only follows a promoted paper playbook. "
-    "Hard risk is code and cannot be weakened."
-)
-
 
 @dataclass(frozen=True)
 class Config:
@@ -149,36 +121,17 @@ class Config:
     # After broker disconnect, halt new entries if still down after N seconds (0 = disable)
     disconnect_halt_s: float = 120.0
 
-    # Agent
-    trading_mandate: str = field(default=DEFAULT_MANDATE, repr=False)
-    system_prompt_extra: str = field(default="", repr=False)
-    # Human-authored beliefs only (empty = inject nothing into prompts)
-    operator_card: str = field(default="", repr=False)
-    # Deprecated: legacy web dashboard scan loop (abcxauto.web); Pro path ignores these.
-    scan_enabled: bool = False
-    scan_interval_s: int = 900
-    # Max MDA symbols Grok may request per cycle via scan_request.
+    # Max MDA symbols Grok may request per scan.
     scan_fetch_cap: int = 8
 
     # 0 = full NetLiq (default). Size/loss gates are always % of portfolio.
     trading_budget_usd: float = 0.0
-    # Autonomous cycle cadence. 15s floor = paper spin-up; Grok may lengthen.
-    cycle_sleep_s: float = 15.0
-    grok_min_interval_s: float = 15.0
-    pace_protect_s: float = 20.0
-    pace_manage_s: float = 60.0
-    pace_idle_s: float = 120.0
-    pace_spinup_s: float = 15.0
 
     # Background P&L monitor
     monitor_enabled: bool = True
     monitor_poll_s: int = 30
     monitor_review_s: int = 300
     monitor_extended_hours: bool = False
-
-    # Deprecated: legacy web dashboard bind (abcxauto.web); Pro cockpit is the sole UI.
-    web_host: str = "127.0.0.1"
-    web_port: int = 8000
 
     # Walk-away floor — ON by default; agent may tighten, never weaken.
     risk_posture: str = "defensive"
@@ -188,20 +141,10 @@ class Config:
     auto_panic_on_breach: bool = True
     defined_risk_only: bool = True
     cash_only: bool = True
-    max_peak_drawdown_pct: float = 25.0,
+    max_peak_drawdown_pct: float = 25.0
     max_option_premium_pct: float = 25.0
     max_risk_per_trade_pct: float = 25.0
     max_open_positions: int = 15
-    control_deliberation_pct: int = 40
-    control_budget_pct: int = 80
-    control_frequency_pct: int = 50
-    control_entry_surface_pct: int = 50
-    control_complexity_pct: int = 40
-    control_rotation_pct: int = 40
-    # Deprecated no-ops (kept so older tests/settings don't explode).
-    max_daily_trades: int = 0
-    min_reward_risk: float = 0.0
-    control_options_pct: int = 50  # migrate → control_complexity_pct on load
 
     @property
     def is_paper(self) -> bool:
@@ -257,104 +200,9 @@ def setup_file_logging(
         root.setLevel(logging.WARNING)
 
 
-def load_operator_card() -> str:
-    """Env ABCXAUTO_OPERATOR_CARD, else operator_card.txt, else empty."""
-    import os
-
-    env = (os.environ.get("ABCXAUTO_OPERATOR_CARD") or "").strip()
-    if env:
-        return env[:4000]
-    path_raw = (os.environ.get("ABCXAUTO_OPERATOR_CARD_PATH") or "").strip()
-    path = Path(path_raw) if path_raw else _REPO_ROOT / "operator_card.txt"
-    try:
-        if path.is_file():
-            return path.read_text(encoding="utf-8").strip()[:4000]
-    except OSError:
-        pass
-    return ""
-
-
-def format_operator_card_block(card: str | None = None) -> str:
-    """Optional free-text Card (advanced). Prefer Controls tab dials."""
-    text = (card if card is not None else load_operator_card()).strip()
-    if not text:
-        return ""
-    return (
-        "OPERATOR CARD (optional free-text — secondary to CONTROLS dials):\n"
-        + text
-    )
-
-
-def _control_pct(cfg: Any, key: str, default: int = 50) -> int:
-    try:
-        raw = getattr(cfg, key, default)
-        if raw is None:
-            raw = default
-        return int(max(0, min(100, int(float(raw)))))
-    except (TypeError, ValueError):
-        return default
-
-
-def deliberation_requires_act(cfg: Any = None) -> bool:
-    """True when Controls deliberation is S2-lean — no cheap Act-skip."""
-    c = cfg if cfg is not None else get_config()
-    return _control_pct(c, "control_deliberation_pct") >= DELIBERATION_REQUIRE_ACT_PCT
-
-
-def effective_grok_min_interval_s(cfg: Any = None) -> float:
-    """Grok spacing after Intelligence budget dial (higher budget → shorter wait).
-
-    At budget 50 → base interval. At 0 → ~1.75× base. At 100 → ~0.4× base.
-    Floor 5s so protect path still works under tests.
-    """
-    c = cfg if cfg is not None else get_config()
-    try:
-        base = float(getattr(c, "grok_min_interval_s", 120.0) or 120.0)
-    except (TypeError, ValueError):
-        base = 120.0
-    budget = _control_pct(c, "control_budget_pct")
-    mult = 1.75 - (budget / 100.0) * 1.35
-    return max(5.0, base * mult)
-
-
-def rotation_redeploy_lean(cfg: Any = None) -> bool:
-    """True when Controls rotation dial authorizes redeploy pressure (process)."""
-    c = cfg if cfg is not None else get_config()
-    return _control_pct(c, "control_rotation_pct") >= ROTATION_REDEPLOY_PCT
-
-
-def format_controls_block(cfg: Any = None) -> str:
-    """Fact block: Controls tab — deliberation, budget, frequency, complexity, rotation, capacity."""
-    c = cfg if cfg is not None else get_config()
-    delib = _control_pct(c, "control_deliberation_pct")
-    budget = _control_pct(c, "control_budget_pct")
-    frequency = _control_pct(c, "control_frequency_pct")
-    rotation = _control_pct(c, "control_rotation_pct")
-    require_act = deliberation_requires_act(c)
-    grok_min = effective_grok_min_interval_s(c)
-    try:
-        max_open = int(getattr(c, "max_open_positions", 0) or 0)
-    except (TypeError, ValueError):
-        max_open = 0
-    from abcxauto.structure_complexity import complexity_fact, entry_surface_fact
-
-    lines = [
-        "CONTROLS:",
-        f"- deliberation={delib} (require_act={require_act})",
-        f"- intelligence_budget={budget} (effective_grok_min_s={grok_min:.0f})",
-        f"- trade_frequency={frequency}",
-        f"- capital_rotation={rotation}",
-        f"- {entry_surface_fact(c)}",
-        f"- {complexity_fact(c)}",
-        f"- book_capacity max_open_positions={max_open}",
-    ]
-    return "\n".join(lines)
-
-
 @lru_cache(maxsize=1)
 def _load_env_config() -> Config:
     load_dotenv()
-    mandate = _env("ABCXAUTO_TRADING_MANDATE") or DEFAULT_MANDATE
     return Config(
         xai_api_key=_env("XAI_API_KEY") or _env("GROK_API_KEY"),
         model=_env("ABCXAUTO_MODEL", "grok-4.6"),
@@ -367,29 +215,16 @@ def _load_env_config() -> Config:
         trading_mode=_env("TRADING_MODE", "paper"),
         live_confirm=_env("ABCXAUTO_LIVE_CONFIRM"),
         disconnect_halt_s=float(_env("ABCXAUTO_DISCONNECT_HALT_S", "120")),
-        trading_mandate=mandate,
-        system_prompt_extra=_env("ABCXAUTO_SYSTEM_PROMPT_EXTRA"),
-        operator_card=load_operator_card(),
-        scan_enabled=_env_bool("ABCXAUTO_SCAN_ENABLED", False),
-        scan_interval_s=int(_env("ABCXAUTO_SCAN_INTERVAL_S", "900")),
         scan_fetch_cap=int(_env("ABCXAUTO_SCAN_FETCH_CAP", "8")),
         trading_budget_usd=float(
             _env("ABCXAUTO_TRADING_BUDGET_USD")
             or _env("ABCXAUTO_TARGET_CAPITAL")
             or "0"
         ),
-        cycle_sleep_s=float(_env("ABCXAUTO_CYCLE_SLEEP_S", "15")),
-        grok_min_interval_s=float(_env("ABCXAUTO_GROK_MIN_INTERVAL_S", "15")),
-        pace_protect_s=float(_env("ABCXAUTO_PACE_PROTECT_S", "20")),
-        pace_manage_s=float(_env("ABCXAUTO_PACE_MANAGE_S", "60")),
-        pace_idle_s=float(_env("ABCXAUTO_PACE_IDLE_S", "120")),
-        pace_spinup_s=float(_env("ABCXAUTO_PACE_SPINUP_S", "15")),
         monitor_enabled=_env_bool("ABCXAUTO_MONITOR_ENABLED", True),
         monitor_poll_s=int(_env("ABCXAUTO_MONITOR_POLL_S", "30")),
         monitor_review_s=int(_env("ABCXAUTO_MONITOR_REVIEW_S", "300")),
         monitor_extended_hours=_env_bool("ABCXAUTO_MONITOR_EXTENDED_HOURS", False),
-        web_host=_env("ABCXAUTO_WEB_HOST", "127.0.0.1"),
-        web_port=int(_env("ABCXAUTO_WEB_PORT", "8000")),
         risk_posture=_normalize_posture(_env("ABCXAUTO_RISK_POSTURE", "defensive")),
         risk_gates_enabled=_env_bool("ABCXAUTO_RISK_GATES_ENABLED", True),
         daily_loss_limit_pct=float(_env("ABCXAUTO_DAILY_LOSS_LIMIT_PCT", "25")),
@@ -401,24 +236,6 @@ def _load_env_config() -> Config:
         max_peak_drawdown_pct=float(_env("ABCXAUTO_MAX_PEAK_DRAWDOWN_PCT", "25")),
         max_option_premium_pct=float(_env("ABCXAUTO_MAX_OPTION_PREMIUM_PCT", "25")),
         max_risk_per_trade_pct=float(_env("ABCXAUTO_MAX_RISK_PER_TRADE_PCT", "25")),
-        control_deliberation_pct=int(
-            float(
-                _env("ABCXAUTO_CONTROL_DELIBERATION_PCT")
-                or _env("ABCXAUTO_CONTROL_MANAGE_PCT", "40")
-            )
-        ),
-        control_budget_pct=int(float(_env("ABCXAUTO_CONTROL_BUDGET_PCT", "80"))),
-        control_frequency_pct=int(float(_env("ABCXAUTO_CONTROL_FREQUENCY_PCT", "50"))),
-        control_entry_surface_pct=int(
-            float(_env("ABCXAUTO_CONTROL_ENTRY_SURFACE_PCT", "50"))
-        ),
-        control_complexity_pct=int(
-            float(
-                _env("ABCXAUTO_CONTROL_COMPLEXITY_PCT")
-                or _env("ABCXAUTO_CONTROL_OPTIONS_PCT", "40")
-            )
-        ),
-        control_rotation_pct=int(float(_env("ABCXAUTO_CONTROL_ROTATION_PCT", "40"))),
     )
 
 
@@ -463,8 +280,6 @@ def _coerce_risk_value(key: str, value: Any) -> Any:
         return str(value).strip().lower() in ("1", "true", "yes", "on")
     if key == "max_open_positions":
         return int(max(0, min(10_000, int(float(value)))))
-    if key in CONTROL_KEYS and key.startswith("control_"):
-        return int(max(0, min(100, int(float(value)))))
     return float(value)
 
 
@@ -480,47 +295,12 @@ def _read_risk_file(settings_path: Path) -> dict[str, Any]:
         return {}
     cleaned: dict[str, Any] = {}
     for key, value in raw.items():
-        # Ignore removed knobs (max_daily_trades, min_reward_risk, …).
-        if key not in PERSISTED_OPERATOR_KEYS and key not in (
-            "control_options_pct",
-            "control_manage_pct",
-        ):
+        if key not in PERSISTED_OPERATOR_KEYS:
             continue
         try:
-            if key in ("control_options_pct", "control_manage_pct"):
-                continue  # migrated below
             cleaned[key] = _coerce_risk_value(key, value)
         except (TypeError, ValueError):
             logger.warning("Ignoring invalid risk setting %s=%r", key, value)
-    # Migrate legacy dials.
-    if "control_deliberation_pct" not in cleaned and "control_manage_pct" in raw:
-        try:
-            cleaned["control_deliberation_pct"] = _coerce_risk_value(
-                "control_deliberation_pct", raw["control_manage_pct"]
-            )
-        except (TypeError, ValueError):
-            pass
-    if "control_complexity_pct" not in cleaned and "control_options_pct" in raw:
-        try:
-            cleaned["control_complexity_pct"] = _coerce_risk_value(
-                "control_complexity_pct", raw["control_options_pct"]
-            )
-        except (TypeError, ValueError):
-            pass
-    # Split legacy single complexity dial into entry surface + option complexity.
-    # Old <40 = stock-only → entry=stock. Old ≥40 = stock+options → entry=mixed
-    # (never auto-promote to options-only — that must be an explicit operator choice).
-    if "control_entry_surface_pct" not in cleaned:
-        try:
-            old_c = int(
-                cleaned.get(
-                    "control_complexity_pct",
-                    raw.get("control_complexity_pct", raw.get("control_options_pct", 50)),
-                )
-            )
-        except (TypeError, ValueError):
-            old_c = 50
-        cleaned["control_entry_surface_pct"] = 20 if old_c < 40 else 50
     return cleaned
 
 
@@ -570,13 +350,7 @@ def get_config() -> Config:
 
         raw = load_agent_state()
         allowed = {
-            "cycle_sleep_s",
-            "grok_min_interval_s",
-            "pace_protect_s",
-            "pace_manage_s",
-            "pace_idle_s",
             "scan_fetch_cap",
-            "system_prompt_extra",
         }
         agent_extra = {k: v for k, v in raw.items() if k in allowed}
     except Exception:
@@ -633,7 +407,7 @@ def update_risk_config(**kwargs: Any) -> Config:
 
 
 def update_controls_config(**kwargs: Any) -> Config:
-    """Apply Controls-tab overrides only (never Risk capital keys)."""
+    """Apply book-capacity overrides only (never Risk capital keys)."""
     persist = bool(kwargs.pop("persist", True))
     unknown = set(kwargs) - CONTROL_KEYS
     if unknown:

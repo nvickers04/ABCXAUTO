@@ -9,7 +9,6 @@ from abcxauto.config import (
 )
 from abcxauto.self_tune import (
     MAX_OPEN_POSITIONS_RANGE,
-    PACING_FLOORS,
     RISK_FLOOR,
     apply_self_tune,
     clamp_risk_to_floor,
@@ -46,11 +45,10 @@ def test_defaults_are_1k_floor():
     assert cfg.defined_risk_only is True
     assert cfg.cash_only is True
     assert cfg.auto_panic_on_breach is True
-    assert cfg.cycle_sleep_s == 15.0
-    assert cfg.grok_min_interval_s == 15.0
-    assert cfg.pace_idle_s == 120.0
     assert cfg.scan_fetch_cap == 8
     assert cfg.trading_budget_usd == 0.0
+    assert not hasattr(cfg, "cycle_sleep_s")
+    assert not hasattr(cfg, "control_budget_pct")
 
 
 def test_cannot_weaken_daily_loss(tmp_path, monkeypatch):
@@ -115,27 +113,21 @@ def test_can_tighten_risk():
     assert get_config().max_risk_per_trade_pct == 0.5
 
 
-def test_cannot_shorten_cycle_sleep():
-    out = apply_self_tune({"cycle_sleep_s": 5}, persist=False)
-    assert out["status"] == "ok"
-    assert get_config().cycle_sleep_s == PACING_FLOORS["cycle_sleep_s"]
-
-
-def test_can_lengthen_pacing():
-    out = apply_self_tune({"cycle_sleep_s": 480, "pace_idle_s": 900}, persist=False)
-    assert out["status"] == "ok"
-    assert get_config().cycle_sleep_s == 480.0
-    assert get_config().pace_idle_s == 900.0
-
-
-def test_can_retune_controls():
+def test_dead_pacing_and_control_dials_are_rejected():
     out = apply_self_tune(
-        {"controls": {"control_budget_pct": 10, "control_frequency_pct": 20}},
+        {
+            "cycle_sleep_s": 480,
+            "pace_idle_s": 900,
+            "controls": {"control_budget_pct": 10, "control_frequency_pct": 20},
+        },
         persist=False,
     )
-    assert out["status"] == "ok"
-    assert get_config().control_budget_pct == 10
-    assert get_config().control_frequency_pct == 20
+    rejected = out.get("rejected") or {}
+    assert "cycle_sleep_s" in rejected
+    assert "pace_idle_s" in rejected
+    assert "control_budget_pct" in rejected
+    assert "control_frequency_pct" in rejected
+    assert out["status"] == "blocked" or not (out.get("applied") or {})
 
 
 def test_cannot_switch_to_live():
@@ -164,7 +156,6 @@ def test_nested_self_tune_universe(tmp_path, monkeypatch):
 def test_prompt_extra_is_gone():
     out = apply_self_tune({"prompt_extra": "Prefer cheap defined-risk verticals."}, persist=False)
     assert "prompt_extra" in (out.get("rejected") or {})
-    assert "Prefer cheap" not in str(get_config().system_prompt_extra or "")
 
 
 def test_ensure_floor_repairs_weak_settings(tmp_path, monkeypatch):
@@ -236,7 +227,7 @@ def test_self_tune_is_sendable():
     from abcxauto.agent_loop import ALLOWED_ACTIONS, normalize_action
 
     strat, forced = normalize_action(
-        {"strategy": "self_tune", "params": {"cycle_sleep_s": 400}}
+        {"strategy": "self_tune", "params": {"max_risk_per_trade_pct": 0.5}}
     )
     assert strat == "self_tune"
     assert forced is None

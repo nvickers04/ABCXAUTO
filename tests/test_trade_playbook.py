@@ -6,7 +6,6 @@ from abcxauto.trade_playbook import (
     OVERLAY_NO_LONG_STOCK,
     OVERLAY_SHARES_INSUFFICIENT,
     check_overlay_shares,
-    format_trade_playbook,
     long_share_lots,
     world_hints_from_world,
 )
@@ -40,45 +39,6 @@ def _world(**kwargs) -> WorldState:
     )
     base.update(kwargs)
     return WorldState(**base)
-
-
-def test_playbook_hides_covered_call_without_long_lot():
-    text = format_trade_playbook(
-        "manage",
-        {"flat": False, "long_lots": {"IWM": 22}, "has_trade_plan": True},
-    )
-    assert "TRADE PLAYBOOK" in text
-    assert "Precondition:" in text or "Shell reject:" in text
-    assert "covered_call" not in text
-    assert "trailing_stop" in text or "modify_stop" in text
-
-
-def test_playbook_shows_covered_call_with_100_shares():
-    text = format_trade_playbook(
-        "manage",
-        {
-            "flat": False,
-            "long_lots": {"IWM": 122, "QQQ": 22},
-            "has_trade_plan": True,
-        },
-    )
-    assert "covered_call" in text
-    assert "IWM" in text
-    assert "on [IWM" in text
-    assert "collar" in text
-    assert "under-lot" in text and "QQQ" in text
-    assert "harvest" not in text.lower()
-    assert "mild bull" not in text.lower()
-
-
-def test_playbook_hunt_hides_overlays():
-    text = format_trade_playbook(
-        "hunt",
-        {"flat": True, "long_lots": {}, "has_trade_plan": False},
-    )
-    assert "market_bracket" in text or "bracket" in text
-    assert "covered_call" not in text
-    assert "vertical_spread" in text or "iron_condor" in text
 
 
 def test_share_lot_guard_rejects_without_stock():

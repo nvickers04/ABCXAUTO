@@ -6,11 +6,6 @@ import pytest
 
 SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-eafc232c6c32\implementer")
 
-# Static safety defaults from cycle.TWEAKS — restore after tests that clear TWEAKS.
-STATIC_TWEAKS = {
-    "max_risk_pct": 0.5,
-}
-
 
 class _Cfg:
     xai_api_key = "test-key"
@@ -54,21 +49,6 @@ def _clear_risk_overrides(tmp_path, monkeypatch):
     clear_risk_settings(path=path)
     clear_runtime_overrides()
     get_config.cache_clear()
-
-
-@pytest.fixture(autouse=True)
-def _restore_tweaks():
-    """Ensure static safety TWEAKS survive tests that clear the dict."""
-    from abcxauto.cycle import TWEAKS
-
-    before = dict(TWEAKS)
-    yield
-    TWEAKS.clear()
-    TWEAKS.update(STATIC_TWEAKS)
-    TWEAKS.update({k: v for k, v in before.items() if k in STATIC_TWEAKS or k in TWEAKS})
-    # Prefer known static defaults after every test
-    for k, v in STATIC_TWEAKS.items():
-        TWEAKS[k] = v
 
 
 def fake_grok_turn(act: dict, *, wakes: list | None = None):

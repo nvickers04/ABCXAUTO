@@ -155,7 +155,7 @@ async def test_hold_path_skips_send(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_paper_flat_rth_blocks_hold(monkeypatch):
+async def test_paper_flat_rth_hold_does_not_send(monkeypatch):
     send_calls: list = []
 
     async def boom_send(*_a, **_k):

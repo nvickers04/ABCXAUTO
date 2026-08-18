@@ -1,183 +1,74 @@
-# ABCXAUTO — Consolidated Spec (Monorepo Vision)
+# ABCXAUTO spec
 
-**One system**: Grok owns a paper IBKR book. The shell is a ticket window
-and a clerk — live facts, `ORDER EXAMPLES`, hard risk code. It does not
-teach IBKR or pick a strategy. Brain is `ABCXAUTO_MODEL` (grok-4.6 default).
-Consolidates `nvickers04/ABCXAUTO` (main),
-`ABC/ABCX` (IBKR execution layer, MarketData.app client, xAI SDK integration),
-`thesis` (strategy / thesis generation), and `GrokSimpleExecutionTrader` (minimal
-execution loop) into this repo.
+Grok owns a paper IBKR book. The clerk is facts, hard gates, and a wake clock.
+Brain is `ABCXAUTO_MODEL` (default grok-4.6). Mainline is `master`.
 
-**Reality posture**: agentic paper lab. Grok invents the playbook. Live only
-follows a promoted snapshot. Protect-first and paper-flat-RTH hold-forbidden
-are **code**, not prompt tactics.
+Paper (TWS **7497**) is the lab. Live (TWS **7496**, confirm phrase, a different
+client id) only follows a **promoted paper playbook**. It never copies paper fills.
 
-**Control + Unbiased (non-negotiable):**
+Size, daily-loss, and the scorecard are **% of NetLiq**. Book return % must beat
+the cost of the model. Same rules at $1k, $100k, or $1M.
 
-1. **Autonomy** — Grok self_tunes settings, pacing, universe, prompts, and
-   strategy knobs with **no human approval**. Operator = initial setup +
-   emergency kill switch. UI is status/monitoring only.
-2. **Immutable floor** — daily-loss halt, max position, max open positions,
-   defined-risk, cash-only, auto-panic, unprotected STK protect-first, exits
-   never blocked, fail-closed. Agent may tighten, never weaken. Live gated.
-3. **Unbiased** — Shell text/process is Fact, Gate, or labeled Heuristic.
-   Universe membership is legal-set only — shell never ranks “best.”
-   Hard gates protect capital, never pick strategies.
-4. **Scorecard** — book return % of starting NetLiq > cost of the model.
-   Agent reads journal + scorecard and continuously tunes itself.
+## Split of labor
 
-Size, loss, and scorecard are **% of the portfolio** — the same at $1k, $100k,
-or $1M. Walk-away defaults: 15 positions, 2% daily loss, full NetLiq
-(no dollar sleeve). Paper is the lab; live follows a promoted playbook.
-See ``docs/CYCLE.md``. Mainline is ``master``.
+| Owner | Job |
+|-------|-----|
+| **Grok** | Tickets (`send`), knobs (`self_tune`), lab notebook (`write_lab_playbook`), next look (`set_wake`) |
+| **Clerk** | Live facts, `ORDER EXAMPLES`, hard gates, default look if Grok skips `set_wake` |
+| **Operator** | `.env` + paper TWS, Start, kill switch. UI is status. No strategy card. |
 
-Intelligence + journal memory drive judgment. Paper (TWS 7497) until forward P&L
-shows the book survives. Target footprint **~3.5–5k LOC**. Every feature must
-answer: *does this help the agent own the book under constraints without raising
-blow-up risk — while keeping Control + Unbiased?* If not, it doesn't ship.
+Do not grow the system prompt. Do not inject strategy menus or a Judge/Act form.
+Switch the brain with `ABCXAUTO_MODEL`; keep the clerk.
 
----
+## Hard gates (code)
 
-## Priority order (immutable)
+- `send` is the only broker path
+- Defined-risk and cash-only
+- Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %;
+  capacity `max_open_positions` (default 15)
+- Unprotected stock: last-stop / protect-first; hold blocked only while unprotected STK
+- Live new risk needs a promoted playbook
+- Ticket geometry uses **IBKR last**, not MDA
+- Exits never blocked; fail-closed if the book is unknown
+- Agent may tighten floors via `self_tune`; it cannot weaken them or switch to live
+
+Walk-away ceilings: **25%** daily-loss, **25%** max position, **25%** risk/trade,
+defined-risk on, cash-only, full NetLiq (`trading_budget_usd=0`).
+
+## Loop
+
+See [`docs/CYCLE.md`](docs/CYCLE.md). Short form: wake → snap → Grok tools →
+clerk `send` → `ensure_next_look`. Pulse ~10s. Closed/postmarket does not call
+Grok (unprotected still does).
+
+## Priority
 
 1. **Risk** — hard gates, LLM-proof
-2. **Execution** — correct order placement through `send` / executor
-3. **Monitoring** — protection audit, auto-panic, P&L truth
-4. **Thin UI** — Flet Pro cockpit only (operator surface; not the brain)
+2. **Execution** — `send` → executor
+3. **Monitoring** — protection, halt, P&L truth
+4. **Thin UI** — Flet Pro cockpit
 
-## Non-negotiable risk invariants (enforced in code, not prompts)
+## Tools
 
-| Invariant | Enforcement point |
-|---|---|
-| Every stock entry is a bracket (SL + TP) | `proposals.py` schema + `executor.py` |
-| Bare orders only to close, verified against live positions | `executor._verify_closes_position` |
-| Daily loss circuit breaker → halt latch + auto flatten | `risk_gates.py` + `monitor.py` |
-| Max position size (% of NetLiq) | `risk_gates.py` pre-trade check |
-| Max open positions / max daily trades | `risk_gates.py` pre-trade check |
-| Fail closed: no account data → no new entries | `risk_gates.py` |
-| Exits are never blocked, even while halted | `risk_gates.py` |
-| A working stop is never cancelled to "clean up" a failed target | `broker/orders.py` |
-| Options entries: defined-risk only by default | `proposals.py` (Sprint 2) |
-| Hold forbidden only while unprotected STK | cycle / protection audit |
+IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 
-All knobs env-driven (`ABCXAUTO_DAILY_LOSS_LIMIT_PCT`, `ABCXAUTO_MAX_POSITION_PCT`,
-`ABCXAUTO_MAX_OPEN_POSITIONS`, `ABCXAUTO_MAX_DAILY_TRADES`, `ABCXAUTO_AUTO_PANIC_ON_BREACH`).
-Conservative defaults; the agent cannot loosen past the walk-away floor.
-Aggression is not an operator preset.
+MDA ~15m delayed: `scan`, `news`, `candles`, `option_facts` (greeks).
 
-## Architecture (target)
+Other: `odds` (Polymarket, not send geometry), `playbook`, `write_lab_playbook`,
+`set_wake`, `send`, `self_tune` (flat knobs).
 
-Thin shell (~3.5–5k LOC). Priority: **risk > execution > monitoring > thin UI**.
+Universe is a watchlist Grok can change via `self_tune`; `send` is not limited
+to it. Clerk writes `journal.db`; there is no `journal` tool.
 
-```
-abcxauto/
-  __main__.py        Pro UI default; --cleanup; --headless → Pro START message
-  order_examples.py  ORDER EXAMPLES — agent sendable-type contract
-  connections.py     IBKR + optional MDA façade
-  send.py            dispatch façade → executor
-  book.py            portfolio / book state façade
-  risk.py            risk-gate façade
-  lab_playbook.py    Paper lab instructions + live promote snapshot
-  brain.py           Grok tool loop (book, quote, scan, send)
-  agent_loop.py      Snap facts → Grok tools → clerk gates on send
-  universe.py        Universe tab sandbox (IBKR pull → legal set)
-  structure_complexity.py  Controls complexity → Act allowlist
-  trade_plan.py      Multi-plan book (`active_trade_plans.json`)
-  pacing.py          Adaptive cycle sleep + wake whitelist + grok_min budget
-  cycle.py           thin shim re-exporting agent_loop for Pro/tests
-  self_tune.py       Agent self-mod; walk-away floor (% of NetLiq)
-  scorecard.py       Book return % of starting NetLiq vs model API cost
-  config.py          flat env config — walk-away floor + agent_state
-  llm.py             xAI client (`ABCXAUTO_MODEL`; grok-4.6 default)
-  proposals.py       OrderProposal schemas + validation (risk layer 1)
-  risk_gates.py      hard pre-trade gates + halt latch (risk layer 2)
-  executor.py        single choke point: validate → gate → dispatch (risk layer 3)
-  monitor.py         P&L/protection poll; Pro wakes cycle (no parallel Grok)
-  memory/            durable state: trades, cycles, halts (SQLite)
-  broker/            ib_insync layer (connector, orders, connection)
-  marketdata/        MarketData.app client + market hours
-  pro_desktop.py     Flet Pro cockpit (thin operator UI)
-tests/               pytest; risk gates and executor paths must stay green
-scripts/             cleanup_pro, pro_gui_contract_check
-```
+## Runtime
 
-**Tech stack**: Python 3.11 · ib_insync · Flet (sole UI) ·
-xAI SDK (Grok via `ABCXAUTO_MODEL`) · MarketData.app · pytest. Memory: SQLite (stdlib, zero new deps)
-now, Postgres when multi-session analytics justify it. **No new packages without a
-profitability justification.**
+`python -m abcxauto` — supervisor + Pro + think stream. Useful hours weekdays
+**8:30–16:00 ET**. Probe TWS **7497** before launch. `--cleanup` marks operator
+stop. Headless paper only (`ABCXAUTO_FORCE_HEADLESS=1`).
 
-**Sendable types (ORDER EXAMPLES)**: `hold`, `bracket`, `market_bracket`, `oca`,
-`modify_stop`, `modify_target`, `cancel_order`, bare exits with `closing_position`
-(`market_order` / `limit_order` / `stop_order` / `stop_limit`), and `close_option`.
+Two books = two processes, two client ids.
 
-## One runtime, one risk core
+## Tech
 
-- **Pro path** (`python -m abcxauto`): cockpit + think stream; autostarts in Cursor.
-  **Headless** is paper-only. Live needs confirm phrase + promoted playbook +
-  a separate TWS/client id. Floor is seeded on start.
-
-Every *trading* order funnels through `send` → `executor.safe_execute`.
-
-## Sprint plan
-
-**Sprint 1 — Ironclad risk (DONE 2026-07-09)**
-- `risk_gates.py`: halt latch, daily-loss circuit breaker, position sizing, max
-  positions, max daily trades, fail-closed; exits always bypass.
-- Executor integration at the single choke point; monitor auto-panic (halt + flatten once
-  per breach); fix `place_oca` naked-position bug; env knobs + tests.
-- Brain is `ABCXAUTO_MODEL` (default grok-4.6).
-
-**Sprint 2 — Truth & memory (DONE 2026-07-09)**
-- Options risk parity: defined-risk-only default, `close_option` live-position check,
-  option protection audit in monitor.
-- Gate `cancel_order` when it would strip the last stop from a position.
-- Salvage from `thesis` repo (audit verdict: only its hard-gate ideas; GSET is empty,
-  ABC's platform is weaker than what's here): cash-only sizing off `TotalCashValue`
-  (config `ABCXAUTO_CASH_ONLY`), peak-drawdown gate, option premium exposure cap,
-  ATR/risk-per-trade size cap, min reward:risk validator on brackets — all into
-  `risk_gates.py` / `proposals.py`. Do NOT port its mechanical theses, lunar timing,
-  bare-market stock executor, or ABC's signal zoo / Postgres research host.
-- `memory/`: SQLite trade journal — every proposal, gate decision, fill, exit, halt, and
-  cycle P&L. This is the dataset that proves or kills the edge.
-
-**Sprint 3 — Prove the edge (engine + scorecard landed 2026-07-09; evidence pending)**
-- Historical backtest harness removed from the live monorepo (LOC reduction); forward-test
-  scorecard in Pro UI remains the live evidence path.
-- Forward-test scorecard in Pro UI: paper P&L vs SPY benchmark, per-strategy attribution.
-  [Scorecard tab DONE — daily counters, equity sparkline, recent dispatches; SPY
-  benchmark + per-strategy attribution still open]
-- Remaining: accumulate forward-test days; wire kill criteria into live strategy config.
-
-**Backtest evidence log (2021-01-01 → 2026-07-01 daily, auto-sized 1% risk /
-10% max position, 95% sizing headroom after bias fix):**
-- `sma_pullback` — APPROVED for paper, SPY/QQQ ONLY. SPY +0.322 E_R (71 trades),
-  QQQ +0.169 (59), positive through 2022 bear + 2024-25 chop; SPY parameter surface
-  uniformly positive (18/18 cells — plateau, not a spike; expect out-of-sample
-  regression from the best cell). Breadth test FAILED elsewhere: DIA +0.055 marginal,
-  XLK/XLF/XLE/GLD all negative with n>=50 (kill candidates). Edge is index-specific.
-- `breakout` — not enabled. After the sizing-bias fix: SPY +0.063 (198), QQQ +0.054
-  (185, earlier kill flag withdrawn as bias artifact), IWM −0.032 (118). Roughly
-  zero-edge after costs everywhere; nothing argues for enabling it.
-- `mean_reversion` — watch-only. SPY +0.142 (33), QQQ +0.752 (34) but samples too
-  thin to promote; IWM killed (−0.325, 21).
-- Methodology note: original auto-sizing rejected gap-up fills (sizing vs starting
-  cash at signal close vs gate at fill open); fixed via 95% sizing headroom. Verdicts
-  above are post-fix.
-- Kill criteria: any strategy with negative expectancy after N trades is disabled in code.
-
-**Sprint 4 — Live readiness (partial DONE 2026-07-09; live still gated on forward evidence)**
-- Live port + `ABCXAUTO_LIVE_CONFIRM` guard; disconnect reconnect + halt (kind=`disconnect`,
-  persists until manual resume); bracket emergency flatten; rotating `logs/app.log`.
-- Final re-audit NO-GO items closed: Pro monitor wired; suite dry-run default; decision_space
-  dry-run; kind-aware halt reset; market_bracket conservative sizing / `price_hint` R:R;
-  protection orders require an open position; connector client id from config.
-
-**Paper readiness (2026-07-09):** **CONDITIONAL GO** for supervised paper on SPY/QQQ —
-operator present, Panic known, suite dry-run. Not unsupervised overnight
-until ≥ several clean paper sessions. Live money still blocked by SPEC exit criteria.
-
-## Definition of "profitable" (exit criteria for paper)
-
-- ≥ 60 trading days forward paper record, positive net P&L after modeled commissions.
-- Max drawdown within the daily/total loss limits with zero risk-gate violations.
-- Positive expectancy in forward test for every enabled strategy.
+Python 3.11 · ib_insync · Flet · xAI SDK · MarketData.app · pytest.
+Memory: SQLite. No new packages without a profitability reason.

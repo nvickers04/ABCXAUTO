@@ -1,60 +1,60 @@
 # Asset Balancing Control X Auto (ABCXAUTO)
 
-**Autonomous Grok-powered agentic portfolio for IBKR (paper-first).**
+**Grok owns a paper IBKR book. The clerk is facts, hard gates, and a wake clock.**
 
-The product is **Grok's lab on paper, live as a follower** — full NetLiq, no dollar sleeve.
+Grok (`ABCXAUTO_MODEL`, default grok-4.6) invents tickets and standing notes. Live (TWS **7496**, confirm phrase, a different client id) only follows a **promoted paper playbook**. It never copies paper fills.
 
-## Goal
+Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of NetLiq**. Book return % must beat the cost of the model.
 
-**Grok owns the book.** The operator does not write a strategy. Grok invents
-standing instructions, tries them on **paper** (TWS 7497), reads the journal +
-scorecard, keeps what made book return % beat model cost, and does those
-winners more. **Live** (TWS 7496, confirm phrase, different client id) only
-follows a **promoted paper playbook**. It never copies paper fills.
+## Split of labor
 
-Same rules at $1k, $100k, or $1M. Book return % must beat the cost of the AI model.
+| Owner | Job |
+|-------|-----|
+| **Grok** | Tickets (`send`), risk/watchlist knobs (`self_tune`), lab notebook (`write_lab_playbook`), next look (`set_wake`) |
+| **Clerk (code)** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, default look if Grok skips `set_wake` |
+| **Operator** | `.env` + paper TWS, Start, kill switch. UI is status. No approval step. |
 
-Intelligence is a billable input, not free alpha. The wrapper should earn more
-from the book than it spends on model calls — or you are financing a very
-expensive journal. That bar is an experiment, not a fixed dollar rule:
+Do not grow the system prompt. Strategy is Grok’s. Switch the brain with `ABCXAUTO_MODEL`; keep the clerk.
 
-- At small paper edge, burning large API spend on “looks fine → hold” is waste.
-- At real notionals (e.g. multi‑thousand‑dollar trades), under‑spending on
-  thinking can be the expensive mistake.
-- The frontier to find: **return from intelligence > cost of intelligence.**
-  Weigh API spend (calls / rough $) against book P&L and size over time — the
-  right unit may not be “$100 per decision,” but the question stays the same.
+## Hard gates (code)
 
-## Autonomous + immutable floor (non-negotiable)
+- `send` is the only broker path
+- Defined-risk and cash-only
+- Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %; capacity `max_open_positions` (default 15)
+- Unprotected stock: last-stop / protect-first; hold is blocked only while unprotected STK
+- Live new risk needs a promoted playbook
+- Ticket geometry uses **IBKR last**, not MDA
+- Exits are never blocked; fail-closed if the book is unknown
+- Agent may **tighten** floors via `self_tune`; it cannot weaken them or switch to live
 
-1. **Grok owns the dials** — settings, parameters, prompts, pacing, universe
-   focus, and strategy knobs. `self_tune` (alias `set_risk`) applies immediately.
-   No human approval, no proposal step, no operator Controls save.
-2. **Immutable floor is code** — daily-loss halt, max position size, max open
-   positions, defined-risk, cash-only, auto-panic, unprotected-STK protect-first,
-   exits never blocked, fail-closed. The agent may *tighten* these; it cannot
-   weaken them. Live remains gated until you connect 7496 with the confirm phrase
-   **and** a promoted playbook exists.
-3. **Operator is setup + kill switch** — `.env` + paper TWS, then Start.
-   Stop / Halt / Panic / Ctrl+C. UI is status/monitoring only.
-4. **Scorecard** — book return **% of starting NetLiq** must beat model API
-   cost. The agent reads its journal + scorecard every cycle and tunes itself.
+Grok may retune knobs immediately. No proposal step.
 
-Size, daily-loss, risk-per-trade, and scorecard are **% of the portfolio**.
-Walk-away defaults: **15** max positions, 2% daily-loss halt,
-1% risk/trade, 20% max position, defined-risk on, `trading_budget_usd=0`
-(full NetLiq).
+## Loop
 
-Grok (`ABCXAUTO_MODEL`) **owns** a paper IBKR portfolio under that floor.
-The shell does not teach IBKR. Protect-first is code. See `SPEC.md`.
+```
+WAKE     Grok set_wake, or clerk default look (60s open / 90s else)
+         fill / order_change / mark move / unprotected can come sooner
+         pulse ~10s; closed/postmarket does not call Grok (unprotected still does)
+    |
+SNAP     IBKR book, orders, protection
+    |
+GROK     tools (facts + send). Wake is a short line — Grok fetches what it needs.
+    |
+CLERK    send → gates → IBKR. Journal write is clerk, not a Grok tool.
+    |
+LOOK     ensure_next_look so the desk is never parked
+```
+
+`python -m abcxauto` wraps Pro in a supervisor: useful hours are weekdays **8:30–16:00 ET**, TWS **7497** must be listening, crash relaunches, clean window close stays down. `--cleanup` marks operator stop.
 
 ## 1. Connections
 
 | Need | How |
 |------|-----|
-| TWS paper | API on port **7497** (or Gateway 4002) |
+| TWS paper | API on port **7497** (Gateway 4002). Probe the port before launch. |
 | xAI | `XAI_API_KEY` in `.env` |
-| MarketData.app | optional `MARKETDATA_TOKEN` for quotes/chains/news |
+| MarketData.app | optional `MARKETDATA_TOKEN` — `scan` / `news` / `candles` / `option_facts` greeks, ~15m delayed |
+| Polymarket | `odds` implied probs — context, not send geometry |
 
 ```powershell
 cd C:\Users\nvick\ABCXAUTO
@@ -64,143 +64,105 @@ pip install -r requirements.txt
 copy .env.template .env   # fill XAI_API_KEY; optional MARKETDATA_TOKEN
 ```
 
-## 2. How the agent thinks
+Paper client id is `IBKR_CLIENT_ID` (template default **42**). Live needs a **different** id on **7496**. Two books = two processes.
 
-Each cycle is **Perceive → Judge → Act**.
-Grok writes `lab_playbook` (its own instructions). Paper explores/exploits.
-Live hunt is blocked until that playbook is promoted (scorecard beating +
-`ready_to_promote`). Protect-first still interrupts.
+## 2. Grok tools
 
-| Stage | Owner | Role |
-|-------|--------|------|
-| Perceive | Code | Book, orders, SCAN TAPE, news, open risk, option facts (MDA greeks/IV) |
-| Judge | Grok | Operates scanner (`scan_request` → MDA); stance + thesis + intent |
-| Act | Grok | Structure vs **IBKR live** quote (not MDA tape last) |
-| Grade | Code | Geometry / share-lot / risk gates — accept or reject with reason codes |
+IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 
-Act may send stock brackets **and** allowlisted option structures (vertical,
-iron condor, CSP, roll, overlays, …) under stance maps + `defined_risk_only`
-gate. Partial stock/option closes by quantity; `stop_qty_fact` flags post-trim
-stop size mismatch. Shell does not prefer a structure — Controls dials / Grok
-choose (optional Card is secondary free-text).
+MDA delayed: `scan`, `news`, `candles`, `option_facts` (greeks).
 
-Stop agent = pause decisions only. Positions stay at IBKR. Open risk is a
-**multi-plan book** reconciled from the broker across Stop/Start
-(`active_trade_plans.json`; legacy `active_trade_plan.json` migrates).
+Other: `odds` (Polymarket), `playbook` (notebook + score since last write), `write_lab_playbook` (paper notebook, up to 8000 chars), `set_wake`, `send`, `self_tune` (flat knobs; `send self_tune` still works).
 
-**Mega-worker:** shell hard-gates unprotected / halt / capacity. One Act per
-cycle: work the open book, or hunt a new entry if capacity allows. Steer via
-Controls dials — Grok self_tunes those; the UI is status only.
+Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limited to it. Clerk still writes `journal.db`; there is no `journal` tool.
 
 ## 3. Operator surfaces
 
-- **Pro Dashboard** — status only: pace, open risk, last cycle, tape, activity.
-- **Positions** — book table + working orders / fills.
-- **Risk** — floor display + Halt/Resume kill switch. Sliders are status-only.
-- **Scorecard** — book return % of starting NetLiq vs model cost (the only goal).
+- **Pro** — Flet cockpit + Grok think stream
+- **Book / positions** — lots, working orders, fills
+- **Risk** — floor display + Halt / Resume / Panic. Sliders are status-only
+- **Scorecard** — book return % of starting NetLiq vs model cost
 
-Kill switch: Stop agent, Risk Halt, Panic, or `Ctrl+C` on `--headless`.
-Positions stay at IBKR.
+Kill switch: Stop agent, Risk Halt, Panic, `Ctrl+C` on headless, or `python -m abcxauto --cleanup`. Positions stay at IBKR. Open risk is a multi-plan book reconciled from the broker (`active_trade_plans.json`).
 
 ## 4. Run
 
 ```powershell
-python -m abcxauto              # Pro desktop + Grok stream (autostarts in Cursor)
-python -m abcxauto --headless   # console-only outside Cursor; Ctrl+C = kill
-python -m abcxauto --cleanup --aggressive   # stale Flet/Python cleanup
+python -m abcxauto              # supervisor + Pro desktop + think stream
+python -m abcxauto --cleanup --aggressive   # kill leftovers; marks operator stop
 ```
 
-In Cursor, F5 / Run **ABCXAUTO Pro** (or any `python -m abcxauto`) opens the
-cockpit and starts the agent so you can watch the think stream. Console-only:
-`$env:ABCXAUTO_FORCE_HEADLESS=1`. One IBKR client id **77**.
+Console-only (paper): `$env:ABCXAUTO_FORCE_HEADLESS=1`. Do not launch if 7497 refuses. Do not enable live unless you typed the confirm phrase and a promoted playbook exists.
 
-## 5. Supported orders
+Desktop icon: `python scripts/install_desktop_icon.py`.
 
-Matches `ORDER_EXAMPLES` / sendable types. Manage stance can also use overlays
-(`covered_call`, `collar`, `protective_put`) when long ≥100 shares — see
-TRADE PLAYBOOK (preconditions + shell rejects only).
+## 5. Send
 
-| Type | Role |
+Tickets must match `ORDER EXAMPLES` (`abcxauto/order_examples.py`). Stock entries are brackets (stop + target). Bare stock orders close only. Options: verticals, condors, CSP, rolls, overlays, and the rest of the schema — **defined-risk** still gates.
+
+| Kind | Role |
 |------|------|
 | `hold` | No-op when protected |
-| `bracket` / `market_bracket` | Entry with stop + target |
-| `oca` | Attach stop + target to an open position |
+| `bracket` / `market_bracket` / `oca` | Entry or attach protection |
 | `modify_stop` / `modify_target` / `trailing_stop` | Adjust protection |
 | `cancel_order` | Cancel by order id |
-| `market_order` / `limit_order` / `stop_order` / `stop_limit` | Exit only (`closing_position`) |
-| `close_option` | Close an option position |
-| `covered_call` / `collar` / `protective_put` | Manage overlays (share-lot gated) |
-| `vertical_spread` / `iron_condor` / `butterfly` / … | Multi-leg / CSP / roll (hunt or manage; see playbook) |
-| `self_tune` / `set_risk` | Agent retunes knobs (cannot weaken the floor; no broker send) |
+| `market_order` / `limit_order` / `stop_order` / … | Exit (`closing_position`) |
+| `close_option` / `roll_option` / spreads / overlays | Option book |
+| `self_tune` tool (`set_risk` alias) | Retune knobs inside the floor (not a ticket) |
 
 ## Configuration
 
+Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** max position, **25%** risk/trade, defined-risk on, cash-only, `trading_budget_usd=0` (full NetLiq), **15** max open positions.
+
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ABCXAUTO_CYCLE_SLEEP_S` | `300` | Hunt-floor sleep (agent may lengthen, not shorten) |
-| `ABCXAUTO_GROK_MIN_INTERVAL_S` | `300` | Min Grok spacing unless protect / urgent wake |
-| `ABCXAUTO_PACE_PROTECT_S` | `20` | Sleep when unprotected STK |
-| `ABCXAUTO_PACE_MANAGE_S` | `60` | Sleep with open risk / trade plan |
-| `ABCXAUTO_PACE_IDLE_S` | `600` | Idle-floor when flat/idle |
-| `ABCXAUTO_MAX_OPEN_POSITIONS` | `15` | Book capacity (Grok sets 1-25; 0 forbidden) |
-| `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `25` | Daily-loss halt vs NetLiq (agent cannot raise) |
-| `ABCXAUTO_MAX_POSITION_PCT` | `20` | Max position vs NetLiq (agent cannot raise) |
+| `ABCXAUTO_MODEL` | `grok-4.6` | Brain |
+| `IBKR_PORT` | `7497` | Paper TWS |
+| `IBKR_CLIENT_ID` | `42` | One id per process |
+| `ABCXAUTO_MAX_OPEN_POSITIONS` | `15` | Capacity (Grok may set 1–25) |
+| `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `25` | Daily-loss halt vs NetLiq |
+| `ABCXAUTO_MAX_POSITION_PCT` | `25` | Max position vs NetLiq |
+| `ABCXAUTO_MAX_RISK_PER_TRADE_PCT` | `25` | Max risk per ticket vs NetLiq |
 | `ABCXAUTO_DEFINED_RISK_ONLY` | `true` | Locked on |
-| `ABCXAUTO_JOURNAL_PATH` | `journal.db` | SQLite journal |
-| `ABCXAUTO_RISK_SETTINGS_PATH` | `risk_settings.json` | Persisted Risk + Controls (gitignored) |
+| `ABCXAUTO_JOURNAL_PATH` | `journal.db` | Clerk SQLite journal |
+| `ABCXAUTO_DEFAULT_LOOK_S` | `90` (`60` when open and not flat) | Clerk look if Grok skips `set_wake` |
 
-Capital / daily-loss gates are **on** as % of NetLiq. The agent cannot
-turn them off. See `.env.template` for the full list.
+See `.env.template` for the rest. Live: `TRADING_MODE=live`, port **7496**, `ABCXAUTO_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING_RISK`, and a promoted playbook.
 
 ## Architecture
 
-Thin product shell. Priority: **risk > execution > monitoring > thin UI**.
+Priority: **risk > execution > monitoring > thin UI**.
 
 ```
 abcxauto/
-  lab_playbook.py       Grok-written instructions; live follows a promote
-  brain.py              Grok tool loop (book, quote, scan, send)
-  agent_loop.py         Snap facts → Grok tools → clerk gates/send
-  universe.py           Legal symbol set (no Universe tab)
-  trade_plan.py         Multi-plan open-risk book
-  pacing.py             Adaptive sleep + wake whitelist
-  world_state.py        Code truth for prompts
-  opportunity_scan.py   SCAN TAPE + MDA metrics
-  order_examples.py     How to send (param shapes)
-  risk_gates.py         Hard pre-trade gates + halt latch
+  __main__.py           Pro + supervisor; --cleanup = operator stop
+  supervisor.py         Useful hours + TWS probe; relaunch on crash
+  wake_bus.py           Grok alarm + default look + book-event pulse
+  agent_loop.py         Snap → Grok tools → clerk send
+  brain.py              Tool loop (facts + send + self_tune + set_wake)
+  llm.py                Short system prompt; no prompt_extra
+  order_examples.py     Sendable ticket shapes
   executor.py / send.py Validate → gate → IBKR
-  pro_desktop.py        Flet Pro cockpit
-  self_tune.py          Agent self-mod (floor-clamped; no approval)
+  risk_gates.py         Hard pre-trade gates + halt latch
+  lab_playbook.py       Paper notebook; live follows a promote
+  universe.py           Watchlist for scan seed; not a send sandbox
+  self_tune.py          Floor-clamped knobs
   scorecard.py          Book return vs model cost
-  headless.py           Paper loop without UI
-  think_stream.py       Live Grok think/say (ASCII on Windows)
-  config.py             Env + walk-away floor + agent_state
-  memory/               SQLite journal
-  broker/               IBKR layer
+  prediction_odds.py    Polymarket implied probs
+  path_math.py          Expectancy / Kelly facts (Grok still sizes)
+  world_state.py        Wake facts
+  trade_plan.py         Multi-plan open-risk book
+  pro_desktop.py        Flet cockpit
+  think_stream.py       Live Grok think/say
+  config.py             Env + walk-away floor
+  memory/               SQLite journal (clerk)
+  broker/               IBKR
 ```
 
-**Adaptive pacing** (process): protect ~20s interrupts. Hunt-floor
-`CYCLE_SLEEP` when hunting. Wakes on unprotected/fill/halt/flat_confirmed.
-
-## Autonomy + floor
-
-| Pillar | Meaning |
-|--------|---------|
-| Goal | Book return % of starting NetLiq > cost of the model |
-| Autonomy | Grok self_tunes all non-risk knobs — no approval |
-| Immutable floor | Code: daily loss, size, defined-risk, protect-first, fail-closed, exits always |
-| Operator | Initial setup + emergency kill switch. UI = status |
+See [`SPEC.md`](SPEC.md) and [`docs/CYCLE.md`](docs/CYCLE.md).
 
 ## Tests
 
 ```powershell
 $env:PYTHONPATH='.'; python -m pytest tests/ -q
 ```
-
-## Desktop icon
-
-```powershell
-python scripts/install_desktop_icon.py
-```
-
-Launches Flet Pro (`python -m abcxauto`). See [`docs/CYCLE.md`](docs/CYCLE.md).

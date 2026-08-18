@@ -24,21 +24,8 @@ _LEDGER_CAP = 12
 _PATCH_KEYS = (
     "instructions",
     "mode",
-    "do_more",
-    "stop_doing",
     "ready_to_promote",
-    "basis",
-    "evidence",
 )
-_RESEARCH_TOOLS = frozenset({
-    "strategies",
-    "book",
-    "scan",
-    "news",
-    "candles",
-    "journal",
-    "option_facts",
-})
 _STALE_H_DEFAULT = 1.0
 _CARD_WINDOWS = ("15m", "1h", "4h")
 
@@ -124,47 +111,11 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
     if mode not in ("explore", "exploit"):
         mode = "explore"
     ready = raw["ready_to_promote"] if "ready_to_promote" in raw else prev.get("ready_to_promote")
-    replacing = bool(instructions) and "instructions" in raw
-    if replacing:
-        do_more = str(raw.get("do_more") or "")[:800] if "do_more" in raw else ""
-        stop_doing = str(raw.get("stop_doing") or "")[:800] if "stop_doing" in raw else ""
-    else:
-        do_more = _field(raw, prev, "do_more")[:800]
-        stop_doing = _field(raw, prev, "stop_doing")[:800]
     return {
         "mode": mode,
         "instructions": instructions,
-        "do_more": do_more,
-        "stop_doing": stop_doing,
         "ready_to_promote": bool(ready),
-        "basis": _basis_list(raw, prev),
-        "evidence": _field(raw, prev, "evidence")[:800],
-        "research_tools": [
-            str(x) for x in (raw.get("research_tools") or prev.get("research_tools") or [])
-            if str(x).strip()
-        ][:16],
     }
-
-
-def _basis_list(raw: dict[str, Any], prev: dict[str, Any]) -> list[str]:
-    from abcxauto.strategy_catalog import resolve_basis
-
-    if "basis" not in raw:
-        prev_b = prev.get("basis") if isinstance(prev.get("basis"), list) else []
-        return [str(x) for x in prev_b if str(x).strip()][:12]
-    items = raw.get("basis")
-    if isinstance(items, str):
-        items = [items]
-    if not isinstance(items, list):
-        items = []
-    out: list[str] = []
-    for item in items:
-        key = resolve_basis(str(item))
-        if key and key not in out:
-            out.append(key)
-        if len(out) >= 12:
-            break
-    return out
 
 
 def grounding_error(
@@ -200,10 +151,6 @@ def _ledger_card(state: dict[str, Any], scorecard: dict[str, Any] | None = None)
         "beating_model": sc.get("beating_model"),
         "edge_usd": sc.get("edge_usd"),
         "book_return_pct": sc.get("book_return_pct"),
-        "do_more": str(state.get("do_more") or "")[:200],
-        "stop_doing": str(state.get("stop_doing") or "")[:200],
-        "basis": list(state.get("basis") or [])[:12],
-        "evidence": str(state.get("evidence") or "")[:240],
         "instructions": str(state.get("instructions") or "")[:_MAX_INSTRUCTIONS],
     }
 
@@ -221,7 +168,6 @@ def _compact_card(card: dict[str, Any] | None) -> dict[str, Any]:
         "closed_edge": c.get("closed_edge"),
         "closed_beating": c.get("closed_beating"),
         "closed_at": c.get("closed_at"),
-        "basis": list(c.get("basis") or [])[:8],
     }
 
 
@@ -558,8 +504,6 @@ def clear_lab(*, reason: str = "") -> dict[str, Any]:
     state = {
         "mode": "explore",
         "instructions": "",
-        "do_more": "",
-        "stop_doing": "",
         "ready_to_promote": False,
         "promoted": False,
         "revision": 0,

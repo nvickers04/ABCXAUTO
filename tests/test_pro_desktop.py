@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from abcxauto.cycle import TWEAKS, run_cycle
+from abcxauto.cycle import run_cycle
 from abcxauto.pro_desktop import ProTerminal
 
 PRO_SRC = Path(__file__).resolve().parents[1] / "abcxauto" / "pro_desktop.py"
@@ -398,16 +398,11 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
         lambda: SimpleNamespace(signal_only=False, grok_min_interval_s=0, trading_mandate=""),
     )
     hist, prev = [], 0.0
-    before = dict(TWEAKS)
-    try:
-        for n in range(1, 4):
-            out = await run_cycle(n, _Conn(), object(), hist, prev)
-            prev = out["pnl"]
-            assert out.get("inventory")
-        assert calls["grok"] >= 3
-    finally:
-        TWEAKS.clear()
-        TWEAKS.update(before)
+    for n in range(1, 4):
+        out = await run_cycle(n, _Conn(), object(), hist, prev)
+        prev = out["pnl"]
+        assert out.get("inventory")
+    assert calls["grok"] >= 3
 
 
 def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
@@ -490,40 +485,34 @@ def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
         control_frequency_pct = 50
         control_rotation_pct = 50
         max_open_positions = 0
-        operator_card = ""
         risk_posture = ""
         trading_mode = "paper"
 
     monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _FastCfg())
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _FastCfg())
 
-    before = dict(TWEAKS)
-    try:
-        headless_pro._start()
-        state = headless_pro.engine.state
-        assert state.running
-        assert headless_pro.engine.worker and headless_pro.engine.worker.is_alive()
-        deadline = time.time() + 18
-        while time.time() < deadline and state.cycles < 1:
-            headless_pro.engine.drain_apply()
-            headless_pro._sync_widgets()
-            time.sleep(0.04)
-        seen = state.cycles
-        extra = time.time() + 0.8
-        while time.time() < extra:
-            headless_pro.engine.drain_apply()
-            headless_pro._sync_widgets()
-            time.sleep(0.04)
-        headless_pro._stop()
-        assert seen >= 1
-        assert state.cycles == seen
-        assert headless_pro.lbl_cycles.value == str(state.cycles)
-        assert len(state.equity_hist) >= 1
-        SCRATCH.mkdir(parents=True, exist_ok=True)
-        (SCRATCH / "pro_integration_notes.txt").write_text(
-            f"cycles={state.cycles} result=PASS\n",
-            encoding="utf-8",
-        )
-    finally:
-        TWEAKS.clear()
-        TWEAKS.update(before)
+    headless_pro._start()
+    state = headless_pro.engine.state
+    assert state.running
+    assert headless_pro.engine.worker and headless_pro.engine.worker.is_alive()
+    deadline = time.time() + 18
+    while time.time() < deadline and state.cycles < 1:
+        headless_pro.engine.drain_apply()
+        headless_pro._sync_widgets()
+        time.sleep(0.04)
+    seen = state.cycles
+    extra = time.time() + 0.8
+    while time.time() < extra:
+        headless_pro.engine.drain_apply()
+        headless_pro._sync_widgets()
+        time.sleep(0.04)
+    headless_pro._stop()
+    assert seen >= 1
+    assert state.cycles == seen
+    assert headless_pro.lbl_cycles.value == str(state.cycles)
+    assert len(state.equity_hist) >= 1
+    SCRATCH.mkdir(parents=True, exist_ok=True)
+    (SCRATCH / "pro_integration_notes.txt").write_text(
+        f"cycles={state.cycles} result=PASS\n",
+        encoding="utf-8",
+    )

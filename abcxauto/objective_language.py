@@ -1,7 +1,7 @@
 """Objectivity taxonomy + banned taste phrases for shell prompts.
 
-Shell text must be Fact, Gate, or labeled Heuristic. Taste belongs only in
-Operator Card (human-authored) or Grok judgment — never hard-coded narrative.
+Shell text must be Fact, Gate, or labeled Heuristic. Taste belongs in
+Grok judgment — never hard-coded narrative.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ TAXONOMY = {
     "fact": "Observable broker/market/code state",
     "gate": "Hard rule enforced in code",
     "heuristic": "Computed signal; must say heuristic ≠ recommendation",
-    "taste": "Style/narrative — Operator Card or delete",
+    "taste": "Style/narrative — Grok judgment or delete",
 }
 
 # Case-insensitive substrings forbidden in shell playbook/posture/features/pressure.

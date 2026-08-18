@@ -1,298 +1,12 @@
-"""Adaptive pacing: tiers, wakes, market-rhythm sleep (not Act thrift)."""
+"""Wake-bus pulse: debounce + interruptible sleep."""
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
 
-from abcxauto.pacing import (
-    PaceFacts,
-    WakeGate,
-    allow_grok_call,
-    compute_pace,
-    facts_from_cycle,
-    wait_for_pace,
-)
-
-
-def _cfg(**kw):
-    base = dict(
-        cycle_sleep_s=120.0,
-        grok_min_interval_s=120.0,
-        pace_protect_s=20.0,
-        pace_manage_s=60.0,
-        pace_idle_s=240.0,
-        risk_posture="balanced",
-    )
-    base.update(kw)
-    return SimpleNamespace(**base)
-
-
-def test_protect_beats_idle():
-    d = compute_pace(
-        PaceFacts(
-            needs_protection=True,
-            flat=False,
-            last_stance="idle",
-            session_status="regular",
-        ),
-        _cfg(),
-    )
-    assert d.tier == "protect"
-    assert d.sleep_s == 20.0
-    assert d.bypass_grok_min is True
-
-
-def test_closed_stretches():
-    d = compute_pace(
-        PaceFacts(session_status="closed", flat=True),
-        _cfg(cycle_sleep_s=120),
-    )
-    assert d.tier == "closed"
-    assert d.sleep_s >= 900.0
-
-
-def test_premarket_paper_waits_for_rth():
-    d = compute_pace(
-        PaceFacts(
-            session_status="premarket",
-            flat=True,
-            open_count=0,
-            countdown_s=90 * 60,
-            countdown_to="open",
-        ),
-        _cfg(trading_mode="paper", cycle_sleep_s=300, pace_spinup_s=15),
-    )
-    assert d.tier == "extended"
-    assert d.sleep_s >= 300.0
-    assert d.reason == "extended_wait"
-    assert d.bypass_grok_min is False
-
-
-def test_premarket_last_hour_one_wake_then_waits(tmp_path, monkeypatch):
-    from abcxauto.pacing import (
-        clear_premarket_wake,
-        mark_premarket_wake_done,
-        premarket_research_spent,
-    )
-
-    monkeypatch.setenv("ABCXAUTO_PREMARKET_WAKE_PATH", str(tmp_path / "pm.json"))
-    clear_premarket_wake()
-    facts = PaceFacts(
-        session_status="premarket",
-        flat=True,
-        open_count=0,
-        countdown_s=40 * 60,
-        countdown_to="open",
-    )
-    cfg = _cfg(trading_mode="paper", cycle_sleep_s=300, pace_spinup_s=15)
-    first = compute_pace(facts, cfg)
-    assert first.tier == "spinup"
-    assert first.reason == "premarket_research"
-    mark_premarket_wake_done()
-    assert premarket_research_spent() is True
-    second = compute_pace(facts, cfg)
-    assert second.tier == "extended"
-    assert second.reason == "premarket_research_done"
-    hunt_facts = PaceFacts(
-        session_status="premarket",
-        flat=True,
-        open_count=0,
-        countdown_s=4 * 60,
-        countdown_to="open",
-    )
-    hunt = compute_pace(hunt_facts, cfg)
-    assert hunt.tier == "spinup"
-    assert hunt.reason == "premarket_open_hunt"
-    from abcxauto.pacing import mark_premarket_open_hunt_done
-
-    mark_premarket_open_hunt_done()
-    after = compute_pace(hunt_facts, cfg)
-    assert after.reason == "premarket_open_hunt_done"
-
-
-def test_premarket_last_hour_spins_research(tmp_path, monkeypatch):
-    monkeypatch.setenv("ABCXAUTO_PREMARKET_WAKE_PATH", str(tmp_path / "pm.json"))
-    from abcxauto.pacing import clear_premarket_wake
-
-    clear_premarket_wake()
-    d = compute_pace(
-        PaceFacts(
-            session_status="premarket",
-            flat=True,
-            open_count=0,
-            countdown_s=40 * 60,
-            countdown_to="open",
-        ),
-        _cfg(trading_mode="paper", cycle_sleep_s=300, pace_spinup_s=15),
-    )
-    assert d.tier == "spinup"
-    assert d.sleep_s == 15.0
-    assert d.reason == "premarket_research"
-
-
-def test_postmarket_open_book_waits():
-    d = compute_pace(
-        PaceFacts(
-            session_status="postmarket",
-            flat=False,
-            has_open_risk=True,
-            open_count=9,
-        ),
-        _cfg(trading_mode="paper", pace_manage_s=60, pace_spinup_s=15),
-    )
-    assert d.tier == "extended"
-    assert d.reason == "extended_wait"
-
-
-def test_hunt_uses_cycle_floor():
-    d = compute_pace(
-        PaceFacts(
-            flat=True,
-            features_present=True,
-            posture="aggressive",
-            last_stance="hunt",
-            session_status="regular",
-        ),
-        _cfg(trading_mode="live", cycle_sleep_s=120),
-    )
-    assert d.tier == "hunt"
-    assert d.sleep_s == 120.0
-
-
-def test_idle_stance_longer_sleep():
-    d = compute_pace(
-        PaceFacts(
-            flat=True,
-            features_present=True,
-            posture="balanced",
-            last_stance="idle",
-            session_status="regular",
-        ),
-        _cfg(trading_mode="live"),
-    )
-    assert d.tier == "idle"
-    assert d.sleep_s >= 240.0
-
-
-def test_paper_defensive_flat_uses_spinup_cadence():
-    """0–1 positions on paper RTH: fast research, not 5-minute idle."""
-    d = compute_pace(
-        PaceFacts(
-            flat=True,
-            features_present=True,
-            posture="defensive",
-            last_stance="idle",
-            session_status="regular",
-            open_count=0,
-        ),
-        _cfg(trading_mode="paper", cycle_sleep_s=300, pace_spinup_s=15),
-    )
-    assert d.tier == "spinup"
-    assert d.sleep_s == 15.0
-    assert d.bypass_grok_min is True
-    assert d.reason == "spinup_research"
-
-
-def test_paper_one_position_still_spinup():
-    d = compute_pace(
-        PaceFacts(
-            flat=False,
-            has_open_risk=True,
-            open_count=1,
-            posture="defensive",
-            session_status="regular",
-        ),
-        _cfg(trading_mode="paper", pace_spinup_s=15, pace_manage_s=60),
-    )
-    assert d.tier == "spinup"
-    assert d.sleep_s == 15.0
-
-
-def test_paper_two_positions_still_spinup():
-    d = compute_pace(
-        PaceFacts(
-            flat=False,
-            has_open_risk=True,
-            open_count=2,
-            needs_protection=False,
-            session_status="regular",
-        ),
-        _cfg(trading_mode="paper", pace_manage_s=60, pace_spinup_s=15),
-    )
-    assert d.tier == "spinup"
-    assert d.sleep_s == 15.0
-
-
-def test_paper_full_book_manages():
-    d = compute_pace(
-        PaceFacts(
-            flat=False,
-            has_open_risk=True,
-            open_count=9,
-            needs_protection=False,
-            session_status="regular",
-        ),
-        _cfg(trading_mode="paper", pace_manage_s=60),
-    )
-    assert d.tier == "manage"
-    assert d.sleep_s == 60.0
-
-
-def test_manage_open_risk():
-    d = compute_pace(
-        PaceFacts(
-            flat=False,
-            has_open_risk=True,
-            open_count=2,
-            needs_protection=False,
-            last_stance="manage",
-            session_status="regular",
-        ),
-        _cfg(trading_mode="live"),
-    )
-    assert d.tier == "manage"
-    assert d.sleep_s == 60.0
-
-
-def test_grok_min_blocks_idle_allows_protect():
-    ok, why = allow_grok_call(
-        tier="idle",
-        wake_reason="",
-        last_grok_mono=100.0,
-        now_mono=150.0,
-        grok_min_interval_s=120.0,
-    )
-    assert ok is False
-    assert why == "pace_budget"
-    ok2, why2 = allow_grok_call(
-        tier="protect",
-        wake_reason="",
-        last_grok_mono=100.0,
-        now_mono=150.0,
-        grok_min_interval_s=120.0,
-    )
-    assert ok2 is True
-    assert why2 == "urgent"
-    ok3, _ = allow_grok_call(
-        tier="hunt",
-        wake_reason="unprotected",
-        last_grok_mono=100.0,
-        now_mono=150.0,
-        grok_min_interval_s=120.0,
-    )
-    assert ok3 is True
-    ok4, why4 = allow_grok_call(
-        tier="spinup",
-        wake_reason="",
-        last_grok_mono=100.0,
-        now_mono=105.0,
-        grok_min_interval_s=300.0,
-    )
-    assert ok4 is True
-    assert why4 == "spinup"
+from abcxauto.pacing import WakeGate, wait_for_pace
 
 
 def test_wake_whitelist_and_debounce():
@@ -303,28 +17,6 @@ def test_wake_whitelist_and_debounce():
     assert g.try_wake("fill", now_mono=30.0) is True
     assert g.try_wake("unprotected", now_mono=31.0) is True
     assert g.try_wake("unprotected", now_mono=31.5) is True  # urgent always
-
-
-def test_facts_from_cycle():
-    facts = facts_from_cycle(
-        {
-            "world_state": {
-                "needs_protection": True,
-                "flat": False,
-                "unprotected": ["IWM"],
-                "effective_posture": "aggressive",
-                "session_status": "regular",
-            },
-            "judgment": {"stance": "protect"},
-            "opportunities": [{"symbol": "QQQ"}],
-            "positions": [{"symbol": "IWM", "quantity": 100, "sec_type": "STK"}],
-            "trade_plan": {"symbol": "IWM"},
-        },
-        wake_reason="unprotected",
-    )
-    assert facts.needs_protection is True
-    assert facts.has_open_risk is True
-    assert facts.wake_reason == "unprotected"
 
 
 @pytest.mark.asyncio
@@ -349,17 +41,13 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
-            trading_mandate="RELY ON YOUR INTELLIGENCE.",
             trading_mode="paper",
-            grok_min_interval_s=0,
-            signal_only=False,
             risk_posture="balanced",
         ),
     )
     monkeypatch.setattr(
         "abcxauto.world_state.get_config",
         lambda: SimpleNamespace(
-            trading_mandate="RELY ON YOUR INTELLIGENCE.",
             trading_mode="paper",
             risk_posture="balanced",
         ),
@@ -388,9 +76,6 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
         return []
 
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
-    monkeypatch.setattr(
-        "abcxauto.news_feed.fetch_agent_news", _empty
-    )
     monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
@@ -434,17 +119,13 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
-            trading_mandate="RELY ON YOUR INTELLIGENCE.",
             trading_mode="paper",
-            grok_min_interval_s=0,
-            signal_only=False,
             risk_posture="balanced",
         ),
     )
     monkeypatch.setattr(
         "abcxauto.world_state.get_config",
         lambda: SimpleNamespace(
-            trading_mandate="RELY ON YOUR INTELLIGENCE.",
             trading_mode="paper",
             risk_posture="balanced",
         ),
@@ -478,7 +159,6 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
         return []
 
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
-    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
     monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
@@ -491,18 +171,6 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
     reset_idle_streak()
 
     calls: list[str] = []
-    judgment = {
-        "stance": "protect",
-        "thesis": "Need stop on IWM.",
-        "focus": "Unprotected STK.",
-        "dismissed": "",
-        "intent": {
-            "kind": "protect", "symbol": "IWM", "direction": "LONG", "urgency": "high",
-        },
-        "risk_budget_pct": 0.5,
-        "regime_fit": True,
-        "setup_grade": "A",
-    }
     act = {
         "action": "hold",
         "strategy": "hold",
@@ -542,7 +210,6 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
-    """Judge manage + hold intent → Act still runs (no thrift skip)."""
     from abcxauto.agent_loop import run_cycle
     from abcxauto.memory import reset_journal
     from abcxauto.world_state import reset_idle_streak
@@ -556,10 +223,7 @@ async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
     reset_idle_streak()
 
     cfg = SimpleNamespace(
-        trading_mandate="RELY ON YOUR INTELLIGENCE.",
         trading_mode="paper",
-        grok_min_interval_s=0,
-        signal_only=False,
         risk_posture="aggressive",
     )
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: cfg)
@@ -602,21 +266,8 @@ async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
         return []
 
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
-    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
 
     calls: list[str] = []
-    judgment = {
-        "stance": "manage",
-        "thesis": "Hold SPY with stop working.",
-        "focus": "Protected.",
-        "dismissed": "",
-        "intent": {
-            "kind": "hold", "symbol": "SPY", "direction": "LONG", "urgency": "low",
-        },
-        "risk_budget_pct": 0.5,
-        "regime_fit": True,
-        "setup_grade": "B",
-    }
 
     from tests.conftest import fake_grok_turn
 

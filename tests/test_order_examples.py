@@ -20,7 +20,7 @@ def _relax_proposal_gates(monkeypatch):
     base = get_config()
     monkeypatch.setattr(
         "abcxauto.proposals.get_config",
-        lambda: Config(**{**base.__dict__, "defined_risk_only": False, "min_reward_risk": 0, "risk_posture": "balanced"}),
+        lambda: Config(**{**base.__dict__, "defined_risk_only": False, "risk_posture": "balanced"}),
     )
 
 
@@ -44,6 +44,7 @@ def test_set_risk_present():
 def test_self_tune_present():
     assert "self_tune" in ORDER_EXAMPLES
     assert "self_tune" in SENDABLE_TYPES
+    assert "controls" not in ORDER_EXAMPLES["self_tune"]
 
 
 def test_sendable_types_matches_examples():
@@ -52,17 +53,20 @@ def test_sendable_types_matches_examples():
 
 def test_format_order_examples():
     from abcxauto.agent_loop import ALLOWED_ACTIONS
+    from abcxauto.order_examples import NOT_TICKETS, ticket_strategy_names
 
     text = format_order_examples()
     assert text
     assert "ORDER EXAMPLES" in text
     assert "market_bracket" in text
-    assert "set_risk" in text
-    assert "self_tune" in text
     assert "vertical_spread" in text  # Act allowlist parity
     assert "vwap" in text
     assert "vwap" in ALLOWED_ACTIONS
     assert "market_on_open" in ALLOWED_ACTIONS
+    assert "self_tune:" not in text
+    assert "set_risk:" not in text
+    assert "self_tune" not in ticket_strategy_names()
+    assert NOT_TICKETS <= SENDABLE_TYPES
     text_narrow = format_order_examples(allowed=frozenset({"hold", "market_bracket"}))
     assert "market_bracket" in text_narrow
     assert "vertical_spread" not in text_narrow
