@@ -92,7 +92,7 @@ def classify_error_code(error_code: int) -> Optional[str]:
     """Return a lifecycle hint for ``ibkr_core`` error handling.
 
     Returns:
-        ``tws_lost`` — schedule fast reconnect (1100, 2110).
+        ``tws_lost`` — IBKR↔TWS link down; API socket may still be up (1100, 2110).
         ``tws_restored`` — connectivity back; session may need refresh (1101, 1102).
         ``farm_ok`` — informational farm message (suppress noise).
         ``None`` — no special handling.

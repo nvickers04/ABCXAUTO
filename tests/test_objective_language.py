@@ -106,7 +106,7 @@ def test_format_controls_block_always_present():
     assert "option_complexity=" in block
     assert "entry_surface=" in block
     assert "book_capacity" in block or "max_open_positions=" in block
-    assert "UNIVERSE" in block
+    assert "UNIVERSE" not in block
 
 
 def test_book_facts_objective_and_card(tmp_path, monkeypatch):
@@ -114,6 +114,7 @@ def test_book_facts_objective_and_card(tmp_path, monkeypatch):
     from abcxauto.world_state import WorldState
 
     monkeypatch.setenv("ABCXAUTO_OPERATOR_CARD", "Fade extensions only.")
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     get_config.cache_clear()
 
     world = WorldState(
@@ -155,14 +156,16 @@ def test_book_facts_objective_and_card(tmp_path, monkeypatch):
         idle_top_symbol="",
     )
     blob = _book_payload(world)
-    prompt = "\n".join(str(blob.get(k) or "") for k in ("world", "controls", "operator_card", "floor"))
-    assert "CONTROLS" in prompt
-    assert "deliberation=" in prompt
-    assert "entry_surface=" in prompt or "option_complexity=" in prompt
+    prompt = "\n".join(str(blob.get(k) or "") for k in ("world", "levers", "playbook"))
+    assert "controls" not in blob
+    assert "CONTROLS" not in prompt
+    assert "mandate_summary" not in str(blob)
+    assert "MANDATE" not in prompt
     assert "SCAN TAPE" in prompt or "scan_tape" in prompt.lower()
     assert "prefer manage" not in prompt.lower()
     assert "prefer acting" not in prompt.lower()
-    assert "OPERATOR CARD" in prompt or "Fade extensions" in prompt
+    assert "floor" not in blob
+    assert "operator_card" not in blob
     assert "QUOTE SOURCES" in prompt or "IBKR" in prompt
     assert find_banned_phrases(prompt) == [] or all(
         p not in prompt.lower() for p in ("prefer acting", "harvest", "mild bull")

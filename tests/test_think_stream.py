@@ -52,6 +52,7 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
     monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
     monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 0.0)
     monkeypatch.setattr(ts, "_last_tail_write", 0.0)
     st = SimpleNamespace(think_live="")
@@ -63,16 +64,64 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     assert "Wake Grok" in (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
     ts.write_last_turn({
         "cycle": 3,
-        "strat": "hold",
-        "rationale": "premarket",
-        "validation": "ok",
+        "strat": "skipped",
+        "rationale": "skipped_grok: book_unreliable",
+        "validation": "skipped_grok: book_unreliable",
         "tool_trace": ["book", "quote"],
         "scan_fetched": ["NVDA"],
-        "reality_pulse": {"session": {"status": "premarket"}},
+        "book_unreliable": True,
+        "equity": 0,
+        "reality_pulse": {
+            "session": {"status": "premarket"},
+            "data_freshness": {"ibkr_connected": False},
+        },
+        "positions": [
+            {
+                "symbol": "IWM",
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260821",
+                "right": "C",
+                "strike": 306,
+            }
+        ],
+        "world_state": {"flat": True, "net_liquidation": 0, "gates": {"book_unreliable": True}},
     })
     last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
     assert last["tool_trace"] == ["book", "quote"]
     assert last["session"]["status"] == "premarket"
+    assert last["ibkr_connected"] is False
+    assert last["book_unreliable"] is True
+    assert last["skip_reason"] == "book_unreliable"
+    assert last["flat"] is True
+    assert last["open_lots"] == ["IWM 260821C306 long 1"]
+    ts.write_last_turn({
+        "cycle": 4,
+        "strat": "in_progress",
+        "rationale": "grok_turn",
+        "reality_pulse": {"ibkr_connected": True},
+        "positions": [
+            {
+                "symbol": "QQQ",
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260821",
+                "right": "C",
+                "strike": 735,
+            }
+        ],
+        "world_state": {"flat": False, "net_liquidation": 36000},
+    })
+    live = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert live["strat"] == "in_progress"
+    assert live["stale"] is False
+    assert live["ibkr_connected"] is True
+    assert live["open_lots"] == ["QQQ 260821C735 long 1"]
+    assert live["mix"].get("long_c") == 1
+    assert live.get("previous_strat") == "skipped"
+    brief = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+    assert brief["strat"] == "skipped"
+    assert brief["open_lots"] == ["IWM 260821C306 long 1"]
 
 
 def test_run_identity_stale_last_turn(tmp_path, monkeypatch):
@@ -94,6 +143,29 @@ def test_run_identity_stale_last_turn(tmp_path, monkeypatch):
     assert stale["stale"] is True
     assert ts.last_turn_is_live(stale) is False
     assert ts.last_turn_is_live(live) is False
+
+
+def test_stop_keeps_think_tail_new_run_archives(tmp_path, monkeypatch):
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
+    monkeypatch.setattr(ts, "THINK_PREV_PATH", tmp_path / "think_prev.txt")
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")
+    monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 0.0)
+    monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+    ts._run = {}
+    st = SimpleNamespace(think_live="mid-turn think about IWM\n")
+    ts.bind_engine(SimpleNamespace(state=st))
+    try:
+        ts.emit("say", "still working\n")
+        ts.mark_review_stale()
+        assert "still working" in (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
+        ts.begin_run()
+        assert "still working" in (tmp_path / "think_prev.txt").read_text(encoding="utf-8")
+        assert (tmp_path / "think_tail.txt").read_text(encoding="utf-8") == ""
+    finally:
+        ts.bind_engine(None)
 
 
 def test_bind_engine_keeps_prior_cycle_on_new_wake():

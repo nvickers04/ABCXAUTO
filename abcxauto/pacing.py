@@ -7,9 +7,16 @@ and not model-cost thrift. Idle sleep is book state (flat + idle), not API budge
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import os
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 URGENT_WAKES = frozenset({"unprotected", "halt"})
 WAKE_WHITELIST = frozenset({"unprotected", "fill", "halt", "flat_confirmed"})
@@ -20,6 +27,96 @@ _WAKE_DEBOUNCE_S = 15.0
 # One open lot used to drop us onto a 60s manage nap and kill volume.
 SPINUP_MAX_OPEN = 8
 SPINUP_SLEEP_S = 15.0
+# Last hour of premarket only. 4–8 AM ET is not research; it is a token bill.
+PREMARKET_RESEARCH_S = 3600.0
+# Second Grok wake: look for a ticket in the last minutes before the bell.
+PREMARKET_OPEN_HUNT_S = 300.0
+_STATE_DIR = Path(__file__).resolve().parents[1] / "data" / "state"
+PREMARKET_WAKE_PATH = _STATE_DIR / "premarket_wake.json"
+
+
+def _premarket_wake_path() -> Path:
+    raw = (os.environ.get("ABCXAUTO_PREMARKET_WAKE_PATH") or "").strip()
+    return Path(raw) if raw else PREMARKET_WAKE_PATH
+
+
+def _et_date() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        return datetime.now().date().isoformat()
+
+
+def _read_premarket_stamp() -> dict[str, Any]:
+    p = _premarket_wake_path()
+    if not p.is_file():
+        return {}
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    if raw.get("done") and "research" not in raw:
+        raw["research"] = True
+    day = str(raw.get("date") or "")
+    if day and day != _et_date():
+        return {}
+    return raw
+
+
+def _write_premarket_stamp(payload: dict[str, Any]) -> None:
+    try:
+        p = _premarket_wake_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        row = dict(payload)
+        row["date"] = _et_date()
+        p.write_text(json.dumps(row), encoding="utf-8")
+    except OSError:
+        logger.debug("premarket_wake stamp failed", exc_info=True)
+
+
+def clear_premarket_wake() -> None:
+    try:
+        p = _premarket_wake_path()
+        if p.is_file():
+            p.unlink()
+    except OSError:
+        logger.debug("premarket_wake clear failed", exc_info=True)
+
+
+def expire_premarket_wake_if_stale() -> None:
+    """Drop yesterday's stamp. Keep today's research so a restart does not re-tour."""
+    p = _premarket_wake_path()
+    if not p.is_file():
+        return
+    raw = _read_premarket_stamp()
+    if not raw:
+        clear_premarket_wake()
+
+
+def mark_premarket_wake_done() -> None:
+    """One Grok research wake per premarket session. Unprotected still interrupts."""
+    raw = _read_premarket_stamp()
+    raw["research"] = True
+    _write_premarket_stamp(raw)
+
+
+def mark_premarket_open_hunt_done() -> None:
+    raw = _read_premarket_stamp()
+    raw["research"] = True
+    raw["open_hunt"] = True
+    _write_premarket_stamp(raw)
+
+
+def premarket_research_spent() -> bool:
+    return bool(_read_premarket_stamp().get("research"))
+
+
+def premarket_open_hunt_spent() -> bool:
+    return bool(_read_premarket_stamp().get("open_hunt"))
 
 
 @dataclass(frozen=True)
@@ -33,6 +130,8 @@ class PaceFacts:
     features_present: bool = False
     last_stance: str = ""
     wake_reason: str = ""
+    countdown_s: float | None = None
+    countdown_to: str = ""
 
 
 @dataclass(frozen=True)
@@ -57,6 +156,46 @@ def _f(cfg: Any, name: str, default: float) -> float:
     except (TypeError, ValueError):
         v = default
     return max(1.0, v)
+
+
+def premarket_research_open(
+    session: str,
+    *,
+    countdown_s: float | None,
+    countdown_to: str = "open",
+) -> bool:
+    """True in the last hour before the RTH bell."""
+    if str(session or "").lower() != "premarket":
+        return False
+    if str(countdown_to or "open").lower() not in ("", "open"):
+        return False
+    if countdown_s is None:
+        return False
+    try:
+        left = float(countdown_s)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= left <= PREMARKET_RESEARCH_S
+
+
+def premarket_open_hunt_open(
+    session: str,
+    *,
+    countdown_s: float | None,
+    countdown_to: str = "open",
+) -> bool:
+    """True in the last minutes before the RTH bell."""
+    if str(session or "").lower() != "premarket":
+        return False
+    if str(countdown_to or "open").lower() not in ("", "open"):
+        return False
+    if countdown_s is None:
+        return False
+    try:
+        left = float(countdown_s)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= left <= PREMARKET_OPEN_HUNT_S
 
 
 def _is_paper(cfg: Any) -> bool:
@@ -89,16 +228,37 @@ def compute_pace(facts: PaceFacts, cfg: Any) -> PaceDecision:
         sleep = max(cycle, 900.0)
         return PaceDecision("closed", sleep, False, "session_closed")
 
-    if sess in ("premarket", "postmarket"):
-        open_n = max(0, int(facts.open_count or 0))
-        if facts.has_open_risk and not facts.flat and not (
-            _is_paper(cfg) and open_n <= SPINUP_MAX_OPEN
-        ):
-            return PaceDecision("manage", manage_s, False, "extended_open_risk")
-        if _is_paper(cfg):
+    if sess == "premarket" and premarket_research_open(
+        sess, countdown_s=facts.countdown_s, countdown_to=facts.countdown_to
+    ):
+        hunt = premarket_open_hunt_open(
+            sess, countdown_s=facts.countdown_s, countdown_to=facts.countdown_to
+        )
+        if not premarket_research_spent():
+            if _is_paper(cfg):
+                spin = _f(cfg, "pace_spinup_s", SPINUP_SLEEP_S)
+                return PaceDecision("spinup", spin, True, "premarket_research")
+            return PaceDecision("manage", max(cycle, manage_s), False, "premarket_research")
+        if hunt and not premarket_open_hunt_spent():
             spin = _f(cfg, "pace_spinup_s", SPINUP_SLEEP_S)
-            return PaceDecision("spinup", spin, True, "extended_prep")
-        return PaceDecision("manage", max(cycle, manage_s), False, "extended_prep")
+            return PaceDecision("spinup", spin, True, "premarket_open_hunt")
+        left = facts.countdown_s
+        try:
+            left_f = float(left) if left is not None else 300.0
+        except (TypeError, ValueError):
+            left_f = 300.0
+        if hunt:
+            return PaceDecision(
+                "extended", max(5.0, min(left_f, 15.0)), False, "premarket_open_hunt_done"
+            )
+        until_hunt = max(15.0, left_f - PREMARKET_OPEN_HUNT_S)
+        return PaceDecision(
+            "extended", min(until_hunt, 300.0), False, "premarket_research_done"
+        )
+
+    if sess in ("premarket", "postmarket"):
+        sleep = max(cycle, 300.0)
+        return PaceDecision("extended", sleep, False, "extended_wait")
 
     rth = sess in ("", "regular")
     open_n = max(0, int(facts.open_count or 0))
@@ -161,11 +321,17 @@ def facts_from_cycle(
     world = out.get("world_state") or {}
     judgment = out.get("judgment") or {}
     pulse = out.get("reality_pulse") or {}
+    sess_block = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
     sess = str(
-        (pulse.get("session") or {}).get("status")
+        sess_block.get("status")
         or world.get("session_status")
         or ""
     ).lower()
+    try:
+        countdown_s = float(sess_block["countdown_s"]) if sess_block.get("countdown_s") is not None else None
+    except (TypeError, ValueError):
+        countdown_s = None
+    countdown_to = str(sess_block.get("countdown_to") or "")
     unprotected = list(
         out.get("unprotected")
         or world.get("unprotected")
@@ -220,6 +386,8 @@ def facts_from_cycle(
         features_present=bool(ideas),
         last_stance=stance,
         wake_reason=str(wake_reason or ""),
+        countdown_s=countdown_s,
+        countdown_to=countdown_to,
     )
 
 

@@ -17,9 +17,11 @@ HORIZONS: tuple[tuple[str, int | None], ...] = (
     ("inception", None),
 )
 
-# Conservative Grok 4.5-ish placeholders; override via env if billing is known.
-_DEFAULT_IN_USD_PER_MTOK = 3.0
-_DEFAULT_OUT_USD_PER_MTOK = 15.0
+# grok-4.6 list rates (xAI, <200k prompt). Override via env if billing differs.
+_DEFAULT_IN_USD_PER_MTOK = 2.0
+_DEFAULT_OUT_USD_PER_MTOK = 6.0
+_DEFAULT_CACHED_USD_PER_MTOK = 0.5
+_LONG_PROMPT_TOKENS = 200_000
 
 
 def _cfg_float(name: str, default: float) -> float:
@@ -38,18 +40,36 @@ def estimate_cost_usd(
     input_tokens: int,
     output_tokens: int,
     *,
+    cached_tokens: int = 0,
     in_rate: float | None = None,
     out_rate: float | None = None,
+    cached_rate: float | None = None,
 ) -> float:
+    inn_n = max(0, int(input_tokens or 0))
+    out_n = max(0, int(output_tokens or 0))
+    cached_n = max(0, int(cached_tokens or 0))
+    prompt = inn_n + cached_n
+    long = prompt >= _LONG_PROMPT_TOKENS
     inn = in_rate if in_rate is not None else _cfg_float(
         "ABCXAUTO_MODEL_INPUT_USD_PER_MTOK", _DEFAULT_IN_USD_PER_MTOK
     )
     out = out_rate if out_rate is not None else _cfg_float(
         "ABCXAUTO_MODEL_OUTPUT_USD_PER_MTOK", _DEFAULT_OUT_USD_PER_MTOK
     )
-    return (max(0, input_tokens) / 1_000_000.0) * inn + (
-        max(0, output_tokens) / 1_000_000.0
-    ) * out
+    cached = cached_rate if cached_rate is not None else _cfg_float(
+        "ABCXAUTO_MODEL_CACHED_USD_PER_MTOK", _DEFAULT_CACHED_USD_PER_MTOK
+    )
+    if long and in_rate is None:
+        inn *= 2.0
+    if long and out_rate is None:
+        out *= 2.0
+    if long and cached_rate is None:
+        cached *= 2.0
+    return (
+        (inn_n / 1_000_000.0) * inn
+        + (cached_n / 1_000_000.0) * cached
+        + (out_n / 1_000_000.0) * out
+    )
 
 
 def estimate_tokens(text: str) -> int:
@@ -57,6 +77,89 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, int(len(text) / 4))
+
+
+def _usage_int(src: Any, *names: str) -> int:
+    if src is None:
+        return 0
+    for name in names:
+        if "." in name:
+            cur: Any = src
+            ok = True
+            for part in name.split("."):
+                if isinstance(cur, dict):
+                    cur = cur.get(part)
+                else:
+                    cur = getattr(cur, part, None)
+                if cur is None:
+                    ok = False
+                    break
+            raw = cur if ok else None
+        elif isinstance(src, dict):
+            raw = src.get(name)
+        else:
+            raw = getattr(src, name, None)
+        if raw is None:
+            continue
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def usage_from_response(
+    resp: Any,
+    *extra: Any,
+    think_text: str = "",
+    say_text: str = "",
+) -> dict[str, int]:
+    """Pull prompt/completion/cached/reasoning from an xAI response, else estimate."""
+    blob = None
+    for obj in (resp, *extra):
+        if obj is None:
+            continue
+        if isinstance(obj, dict) and obj.get("usage") is not None:
+            blob = obj.get("usage")
+            break
+        got = getattr(obj, "usage", None)
+        if got is not None:
+            blob = got
+            break
+        if isinstance(obj, dict) and (
+            obj.get("prompt_tokens") is not None or obj.get("input_tokens") is not None
+        ):
+            blob = obj
+            break
+    inn = _usage_int(blob, "prompt_tokens", "input_tokens", "prompt_text_tokens")
+    cached = _usage_int(
+        blob,
+        "cached_tokens",
+        "cached_prompt_tokens",
+        "prompt_tokens_details.cached_tokens",
+    )
+    out = _usage_int(blob, "completion_tokens", "output_tokens")
+    reason = _usage_int(
+        blob,
+        "reasoning_tokens",
+        "completion_tokens_details.reasoning_tokens",
+    )
+    if blob is None or (inn == 0 and out == 0 and reason == 0):
+        out = estimate_tokens(say_text) if say_text else 0
+        reason = estimate_tokens(think_text) if think_text else 0
+        return {
+            "input_tokens": 0,
+            "cached_tokens": 0,
+            "output_tokens": out + reason,
+            "reasoning_tokens": reason,
+        }
+    billed_out = out if out else reason
+    return {
+        "input_tokens": inn,
+        "cached_tokens": cached,
+        "output_tokens": billed_out,
+        "reasoning_tokens": reason,
+    }
 
 
 def _utc(now: datetime | None = None) -> datetime:

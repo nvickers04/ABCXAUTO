@@ -222,6 +222,27 @@ def test_hunt_allowed_when_book_open_and_capacity(monkeypatch):
     assert strat == "market_bracket"
 
 
+def test_hunt_rejected_on_structure_cooldown(monkeypatch):
+    from abcxauto.agent_loop import gate_ticket
+
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    strat, forced = gate_ticket(
+        _hunt_act("QQQ"),
+        _judgment_world(
+            structure_cooldown={"QQQ": "scrape_suspect"},
+            capacity={
+                "open_count": 1,
+                "max_open_positions": 6,
+                "slots_left": 5,
+                "allows_new_risk": True,
+            },
+        ),
+    )
+    assert strat == "blocked"
+    assert "cooldown" in str((forced or {}).get("note") or "").lower()
+
+
 def test_hunt_rejected_when_capacity_full():
     from abcxauto.agent_loop import gate_ticket
 

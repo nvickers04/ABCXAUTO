@@ -594,12 +594,24 @@ async def execute_proposal(
         get_risk_gate().record_entry()
 
     if proposal.strategy in _STACKABLE_PROTECTION and _dispatch_succeeded(result):
-        try:
-            await _replace_protective_exits_after_place(proposal, connector, result)
-        except Exception as e:
-            logger.warning(
-                "replace-on-place after %s failed: %s", proposal.strategy, e
-            )
+        if not isinstance(result, dict):
+            result = {"raw": result}
+        else:
+            result = dict(result)
+        keep = _keep_ids_from_place_result(result)
+        if not keep:
+            result["replace_skipped"] = "no_order_id"
+        else:
+            try:
+                cancelled = await _replace_protective_exits_after_place(
+                    proposal, connector, result
+                )
+                result["replaced_ids"] = list(cancelled or [])
+            except Exception as e:
+                result["replace_skipped"] = str(e)[:200]
+                logger.warning(
+                    "replace-on-place after %s failed: %s", proposal.strategy, e
+                )
 
     return result
 

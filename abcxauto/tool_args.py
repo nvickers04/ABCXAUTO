@@ -37,6 +37,10 @@ TOOL_ALIASES = {
     "history": "candles",
     "screener": "scan",
     "tape": "scan",
+    "polymarket": "odds",
+    "kalshi": "odds",
+    "betting": "odds",
+    "prediction": "odds",
 }
 
 _ARG_KEYS = {
@@ -49,6 +53,7 @@ _ARG_KEYS = {
     "countback": ("countback", "count", "bars", "n"),
     "strategy": ("strategy", "action", "order_type", "type"),
     "rationale": ("rationale", "reason", "why", "note"),
+    "query": ("query", "q", "search", "event"),
     "target_conId": ("target_conId", "target_conid", "conId", "con_id"),
 }
 
@@ -240,7 +245,7 @@ def normalize_tool_call(
             out["symbols"] = out["symbol"]
             out.pop("symbol", None)
 
-    if canon in ("scan", "news") and out.get("symbols") in (None, "", []):
+    if canon in ("scan", "news", "odds") and out.get("symbols") in (None, "", []):
         if out.get("symbol"):
             out["symbols"] = _as_symbols(out.get("symbol"))
 

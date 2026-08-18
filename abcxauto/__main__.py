@@ -42,6 +42,9 @@ def _cleanup(
 
 def main() -> None:
     if "--cleanup" in sys.argv:
+        from abcxauto.supervisor import mark_operator_stop
+
+        mark_operator_stop()
         raise SystemExit(
             _cleanup(
                 aggressive="--aggressive" in sys.argv,
@@ -71,8 +74,17 @@ def main() -> None:
             "ABCXAUTO_FORCE_HEADLESS=1 for console-only.",
             flush=True,
         )
+    supervised = bool((os.environ.get("ABCXAUTO_SUPERVISED") or "").strip())
+    probe = bool(os.environ.get("ABCXAUTO_LAUNCH_PROBE"))
+    if not probe and not supervised:
+        from abcxauto.supervisor import clear_operator_stop, supervise
+
+        clear_operator_stop()
+        _cleanup(aggressive=False, flet_cache=False, kill_only=True)
+        print("supervisor: launching Pro child", flush=True)
+        raise SystemExit(supervise())
     # Kill leftover ABCXAUTO Python/Flet — never this brand-new process.
-    if not os.environ.get("ABCXAUTO_LAUNCH_PROBE"):
+    if not probe:
         _cleanup(aggressive=False, flet_cache=False, kill_only=True)
         from abcxauto.think_stream import begin_run
 

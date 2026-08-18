@@ -15,10 +15,65 @@ from abcxauto.world_state import (
     concentration,
     day_facts,
     format_wake,
+    lot_ident,
+    lot_labels,
     position_avg_facts,
     reconcile_book_with_fills,
     reset_idle_streak,
+    structure_mix,
 )
+
+
+def test_lot_ident_matches_lot_labels_without_mtm():
+    pos = {
+        "symbol": "IWM",
+        "secType": "OPT",
+        "quantity": 1,
+        "expiration": "20260821",
+        "right": "C",
+        "strike": 306.0,
+        "avgCost": 310.0,
+        "market_price": 2.4,
+        "conId": 7,
+    }
+    assert lot_ident(pos) == "IWM 260821C306.0 long 1"
+    labels = lot_labels([pos])
+    assert labels[0].startswith("IWM 260821C306.0 long 1")
+    assert "-23%" in labels[0]
+
+
+def test_structure_mix_counts_vertical():
+    mix = structure_mix(
+        [
+            {
+                "symbol": "QQQ",
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260918",
+                "right": "C",
+                "strike": 745,
+            },
+            {
+                "symbol": "QQQ",
+                "secType": "OPT",
+                "quantity": -1,
+                "expiration": "20260918",
+                "right": "C",
+                "strike": 750,
+            },
+            {
+                "symbol": "IWM",
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260821",
+                "right": "C",
+                "strike": 306,
+            },
+        ]
+    )
+    assert mix["long_c"] == 2
+    assert mix["short_c"] == 1
+    assert mix["vert"] == 1
 
 
 def test_concentration_flags_cloned_names():
@@ -34,6 +89,88 @@ def test_concentration_flags_cloned_names():
     assert out["lots"] == 4
     assert out["cloned"] == ["XLE"]
     assert out["by_name"]["XLE"]["lots"] == 2
+    assert out["by_name"]["XLE"]["extra"] == 2
+
+
+def test_concentration_vertical_is_not_cloned():
+    out = concentration(
+        [
+            {
+                "symbol": "QQQ",
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260821",
+                "right": "C",
+                "strike": 735,
+            },
+            {
+                "symbol": "QQQ",
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260918",
+                "right": "C",
+                "strike": 745,
+            },
+            {
+                "symbol": "QQQ",
+                "secType": "OPT",
+                "quantity": -1,
+                "expiration": "20260918",
+                "right": "C",
+                "strike": 750,
+            },
+            {
+                "symbol": "JPM",
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260918",
+                "right": "C",
+                "strike": 370,
+            },
+            {
+                "symbol": "JPM",
+                "secType": "OPT",
+                "quantity": -1,
+                "expiration": "20260918",
+                "right": "C",
+                "strike": 375,
+            },
+            {
+                "symbol": "XLE",
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260821",
+                "right": "C",
+                "strike": 62.5,
+            },
+            {
+                "symbol": "XLE",
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260821",
+                "right": "C",
+                "strike": 63,
+            },
+            {
+                "symbol": "XLE",
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260828",
+                "right": "C",
+                "strike": 63,
+            },
+        ]
+    )
+    assert out["lots"] == 8
+    assert out["by_name"]["QQQ"]["lots"] == 3
+    assert out["by_name"]["QQQ"]["vert"] == 1
+    assert out["by_name"]["QQQ"]["extra"] == 1
+    assert out["by_name"]["QQQ"]["structures"] == 2
+    assert out["by_name"]["JPM"]["vert"] == 1
+    assert out["by_name"]["JPM"]["extra"] == 0
+    assert "QQQ" not in out["cloned"]
+    assert "JPM" not in out["cloned"]
+    assert out["cloned"] == ["XLE"]
 
 
 def test_day_facts_carry_edge_and_clones():
@@ -59,9 +196,14 @@ def test_day_facts_carry_edge_and_clones():
     assert day["cloned"] == ["XLF"]
     assert day["names"] == 1
     assert day["lots"] == 2
+    assert day["structures"] == 2
+    assert day["open_lots"] == ["XLF STK long 1", "XLF STK long 1"]
 
 
 def test_format_wake_includes_day_facts():
+    from abcxauto.wake_bus import note_wake
+
+    note_wake(None)
     text = format_wake(
         cycle=3,
         session="regular",
@@ -73,15 +215,25 @@ def test_format_wake_includes_day_facts():
             "lots": 8,
             "cloned": ["IWM", "XLE"],
             "edge_usd": -549.0,
+            "daily_pnl": -95.0,
             "beating_model": False,
             "risk_per_trade_pct": 25.0,
+            "open_lots": ["IWM 260821C306 x1", "QQQ 260821C735 x1"],
             "capacity": {"open_count": 8, "max_open_positions": 15},
+            "mix": {"long_c": 7, "short_c": 1, "vert": 1},
             "playbook": {
                 "revision": 51,
                 "age_h": 20.4,
+                "stale": True,
                 "ready_to_promote": False,
                 "at_write_edge": -549.0,
+                "since_write_edge": -91.0,
                 "now_edge": -640.0,
+                "win_4h": -12.0,
+                "ledger": [
+                    {"revision": 50, "edge_usd": -400.0},
+                    {"revision": 51, "edge_usd": -549.0},
+                ],
             },
         },
     )
@@ -89,16 +241,88 @@ def test_format_wake_includes_day_facts():
     assert "session=regular" in text
     assert "names=3" in text
     assert "lots=8" in text
-    assert "cloned=IWM,XLE" in text
+    assert "cloned=IWM,XLE" not in text
+    assert "cloned=" not in text
+    assert "struct=" not in text
     assert "edge=-549.0" in text
+    assert "dayPnL=-95.0" in text
     assert "beating=False" in text
     assert "risk/trade=25.0%" in text
     assert "open=8/15" in text
+    assert "open_lots=IWM 260821C306 x1,QQQ 260821C735 x1" in text
     assert "playbook rev=51" in text
-    assert "age=20.4h" in text
-    assert "at_write_edge=-549.0" in text
+    assert "age=" not in text
+    assert "at_write_edge=" not in text
+    assert "since_write=-91.0" in text
     assert "now_edge=-640.0" in text
-    assert "Use tools." in text
+    assert "4h=-12.0" in text
+    assert "stale=" not in text
+    assert "mix=longC:7,shortC:1,vert:1" in text
+    assert "ledger r50:-400.0 r51:-549.0" in text
+    assert text.rstrip().endswith("send|set_wake.")
+    assert "set_wake owns the next look" not in text
+    assert "This is a delta" not in text
+    assert "no operator" not in text.lower()
+    assert "clerk wake" not in text.lower()
+
+
+def test_format_wake_fill_is_delta_not_discovery():
+    from abcxauto.think_stream import write_desk_brief
+    from abcxauto.wake_bus import BookEvent, note_wake
+
+    write_desk_brief({
+        "cycle": 1,
+        "strat": "close_option",
+        "sends": 2,
+        "open_lots": ["XLF 260828C58.5 x1 -42%"],
+        "net_liquidation": 35800,
+        "mix": {"long_c": 10, "vert": 2},
+        "rationale": "close tails",
+    })
+    note_wake(BookEvent(kind="fill", detail="SPY 260821C780 filled"))
+    try:
+        text = format_wake(
+            cycle=2,
+            session="regular",
+            flat=False,
+            unprotected=[],
+            ibkr_up=True,
+            day={
+                "nl": 35805,
+                "daily_pnl": -40.0,
+                "names": 3,
+                "lots": 11,
+                "open_lots": ["XLF 260828C58.5 x1 -42%", "QQQ 260918C745 x1"],
+                "capacity": {"open_count": 11, "max_open_positions": 15},
+                "mix": {"long_c": 10, "vert": 2},
+                "playbook": {
+                    "revision": 1,
+                    "since_write_edge": -200.0,
+                    "now_edge": -800.0,
+                    "win_4h": -12.0,
+                },
+            },
+        )
+    finally:
+        note_wake(None)
+    assert text.startswith("event=fill SPY 260821C780 filled.")
+    assert "prev=close_option sends=2" in text
+    assert "This is a delta" in text
+    assert text.rstrip().endswith("send|set_wake.")
+    assert "send or set_wake" not in text
+    assert "playbook" not in text
+    assert "Cycle 2." not in text
+    assert "names=3" not in text
+    assert "open_lots=XLF 260828C58.5 x1 -42%,QQQ 260918C745 x1" in text
+    assert "dayPnL=-40.0" in text
+
+
+def test_daily_pnl_of_ignores_unrealized_and_keeps_zero():
+    from abcxauto.world_state import daily_pnl_of
+
+    assert daily_pnl_of({"dailypnl": 0.0, "unrealizedpnl": -800.0}) == 0.0
+    assert daily_pnl_of({"DailyPnL": -12.5, "unrealizedpnl": 99.0}) == -12.5
+    assert daily_pnl_of({"unrealizedpnl": -12.5}) is None
 
 
 def test_book_is_flat_false_when_working_order_or_pending_fill():
@@ -151,6 +375,19 @@ def test_compact_position_keeps_option_identity():
     assert row["strike"] == 63.0
     assert row["right"] == "C"
     assert "XLE" in str(row["local"])
+
+
+def test_compact_position_includes_mtm_pct():
+    from abcxauto.world_state import compact_position
+
+    row = compact_position({
+        "symbol": "QQQ",
+        "secType": "OPT",
+        "quantity": 1,
+        "avgCost": 4.0,
+        "market_price": 5.0,
+    })
+    assert row.get("mtm_pct") == 25.0
 
 
 def test_option_avg_is_per_share_when_ibkr_sends_contract_cash():
@@ -287,6 +524,43 @@ def test_compact_working_orders_keeps_option_identity():
     assert rows[0]["right"] == "C"
     assert rows[0]["lmt"] == 1.18
     assert "310" in str(rows[0].get("local") or "")
+    assert rows[0]["role"] == "entry"
+
+
+def test_compact_working_orders_tags_exit_of_long_call():
+    from abcxauto.world_state import compact_working_orders
+
+    pos = {
+        "symbol": "XLF",
+        "sec_type": "OPT",
+        "quantity": 1,
+        "strike": 58.5,
+        "right": "C",
+        "expiration": "20260828",
+        "conId": 899950329,
+    }
+    rows = compact_working_orders(
+        [
+            {
+                "order_id": 3421,
+                "symbol": "XLF",
+                "sec_type": "OPT",
+                "order_type": "LMT",
+                "action": "SELL",
+                "quantity": 1,
+                "lmt_price": 0.26,
+                "strike": 58.5,
+                "right": "C",
+                "expiration": "20260828",
+                "conId": 899950329,
+            }
+        ],
+        positions=[pos],
+    )
+    assert rows[0]["role"] == "exit"
+    assert "XLF" in str(rows[0]["covers"])
+    assert "long" in str(rows[0]["covers"])
+    assert rows[0]["conId"] == 899950329
 
 
 def test_trade_plan_round_trip(tmp_path, monkeypatch):

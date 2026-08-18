@@ -103,7 +103,7 @@ async def test_refresh_legal_offline_fallback():
     assert "USO" not in legal
     assert is_legal_symbol("SPY")
     assert not is_legal_symbol("USO")
-    assert filter_to_legal(["SPY", "ZZZZ", "GLD"]) == ["SPY", "GLD"]
+    assert filter_to_legal(["SPY", "ZZZZ", "GLD"]) == ["SPY", "ZZZZ", "GLD"]
     mem = {r["symbol"]: r for r in al.get("membership") or []}
     assert mem["SPY"]["source"] == "mda_fallback"
     assert mem["ROKU"]["arena"] == "custom"
@@ -111,10 +111,14 @@ async def test_refresh_legal_offline_fallback():
     assert "legal" in universe_glance_line().lower()
 
 
-def test_hunt_outside_sandbox_rejected(tmp_path, monkeypatch):
+def test_hunt_is_not_limited_to_watchlist(tmp_path, monkeypatch):
     from abcxauto.agent_loop import gate_ticket
 
     monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    monkeypatch.setattr(
+        "abcxauto.structure_complexity.strategy_allowed",
+        lambda *_a, **_k: True,
+    )
     save_allowlist(
         {
             "enabled_arenas": ["index_etfs"],
@@ -161,8 +165,11 @@ def test_hunt_outside_sandbox_rejected(tmp_path, monkeypatch):
         },
         world,
     )
-    assert strat == "blocked"
-    assert "sandbox" in str((forced or {}).get("note") or "").lower() or "universe" in str((forced or {}).get("note") or "").lower()
+    note = str((forced or {}).get("note") or "").lower()
+    assert "sandbox" not in note
+    assert "universe" not in note
+    assert strat == "market_bracket"
+    assert forced is None
 
 
 def test_load_default_arenas():

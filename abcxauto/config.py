@@ -122,8 +122,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_RISK_SETTINGS_PATH = _REPO_ROOT / "risk_settings.json"
 
 DEFAULT_MANDATE = (
-    "You own the whole IBKR book as % of NetLiq. The operator gives no strategy. "
-    "Invent one on paper; live only follows a promoted paper playbook. "
+    "You own the whole IBKR book as % of NetLiq. "
+    "Invent strategy on paper; live only follows a promoted paper playbook. "
     "Hard risk is code and cannot be weakened."
 )
 
@@ -348,13 +348,6 @@ def format_controls_block(cfg: Any = None) -> str:
         f"- {complexity_fact(c)}",
         f"- book_capacity max_open_positions={max_open}",
     ]
-    try:
-        from abcxauto.universe import universe_fact_block
-
-        lines.append("")
-        lines.append(universe_fact_block())
-    except Exception:
-        pass
     return "\n".join(lines)
 
 

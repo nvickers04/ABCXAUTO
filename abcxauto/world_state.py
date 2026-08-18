@@ -108,6 +108,16 @@ def compact_position(pos: dict[str, Any], *, extra: bool = True) -> dict[str, An
         local = p.get("local_symbol") or p.get("localSymbol")
         if local:
             row["local"] = local
+        try:
+            qty = float(row.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        suffix = _lot_mtm_suffix(row, qty)
+        if suffix:
+            try:
+                row["mtm_pct"] = float(suffix.strip().rstrip("%"))
+            except (TypeError, ValueError):
+                pass
     return row
 
 
@@ -224,10 +234,77 @@ def book_is_flat(
     return True
 
 
+def _row_con_id(row: dict[str, Any] | None) -> str:
+    p = row if isinstance(row, dict) else {}
+    for key in ("conId", "con_id"):
+        v = p.get(key)
+        if v not in (None, "", 0, "0"):
+            return str(v)
+    return ""
+
+
+def _row_signed_qty(row: dict[str, Any] | None) -> float:
+    p = row if isinstance(row, dict) else {}
+    raw = p.get("qty")
+    if raw is None:
+        raw = p.get("quantity") if p.get("quantity") is not None else p.get("position")
+    if raw is None:
+        raw = p.get("totalQuantity")
+    try:
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _qty_side(qty: float) -> tuple[str, str]:
+    side = "short" if qty < 0 else "long"
+    mag = abs(qty)
+    qty_s = str(int(mag)) if float(mag).is_integer() else f"{mag:g}"
+    return side, qty_s
+
+
+def _contract_fp(row: dict[str, Any] | None, *, use_id: bool = True) -> tuple[Any, ...]:
+    """Match a working ticket to an open lot without requiring conId."""
+    p = row if isinstance(row, dict) else {}
+    if use_id:
+        cid = _row_con_id(p)
+        if cid:
+            return ("id", cid)
+    sym = str(p.get("symbol") or "").upper()
+    sec = str(p.get("sec") or p.get("sec_type") or p.get("secType") or "STK").upper()
+    if sec.startswith("OPT") or sec == "FOP":
+        exp = str(p.get("expiration") or p.get("lastTradeDateOrContractMonth") or "")
+        exp = exp[-6:] if len(exp) >= 6 else exp
+        right = str(p.get("right") or "")[:1].upper()
+        strike = p.get("strike")
+        try:
+            strike_s = f"{float(strike):g}"
+        except (TypeError, ValueError):
+            strike_s = str(strike or "")
+        return ("opt", sym, exp, right, strike_s)
+    return ("stk", sym, sec)
+
+
 def compact_working_orders(
-    orders: list[dict] | None, *, limit: int = 12
+    orders: list[dict] | None,
+    *,
+    positions: list[dict] | None = None,
+    limit: int = 12,
 ) -> list[dict[str, Any]]:
-    """Book facts: working order id, type, qty, stop/trail."""
+    """Book facts: working order id, type, qty, stop/trail, exit vs entry."""
+    by_id: dict[str, dict[str, Any]] = {}
+    by_fp: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        qty = _row_signed_qty(p)
+        if abs(qty) < 1e-9:
+            continue
+        rec = {"ident": lot_ident(p), "qty": qty}
+        cid = _row_con_id(p)
+        if cid:
+            by_id[cid] = rec
+        by_fp[_contract_fp(p, use_id=False)] = rec
     rows: list[dict[str, Any]] = []
     for o in orders or []:
         if not isinstance(o, dict):
@@ -237,7 +314,8 @@ def compact_working_orders(
             oid = o.get("orderId")
         otype = o.get("order_type") or o.get("orderType")
         sec = str(o.get("sec_type") or o.get("secType") or "STK").upper()
-        row = {
+        action = str(o.get("action") or o.get("side") or "").upper()
+        row: dict[str, Any] = {
             "order_id": oid,
             "symbol": o.get("symbol"),
             "sec": sec,
@@ -245,6 +323,10 @@ def compact_working_orders(
             "action": o.get("action") or o.get("side"),
             "qty": o.get("quantity") if o.get("quantity") is not None else o.get("totalQuantity"),
         }
+        cid_raw = o.get("conId") if o.get("conId") not in (None, "", 0, "0") else o.get("con_id")
+        if cid_raw not in (None, "", 0, "0"):
+            row["conId"] = cid_raw
+        cid = _row_con_id(o)
         if sec.startswith("OPT"):
             if o.get("strike") is not None:
                 row["strike"] = o.get("strike")
@@ -269,6 +351,30 @@ def compact_working_orders(
         trail = o.get("trail_percent") or o.get("trailingPercent") or o.get("trail_amount")
         if trail not in (None, 0, 0.0, "0"):
             row["trail"] = trail
+        if sec == "BAG":
+            legs = o.get("combo_legs") or o.get("comboLegs")
+            if isinstance(legs, list) and legs:
+                row["legs"] = len(legs)
+            reserved = o.get("reserved_slots")
+            if reserved not in (None, 0, 0.0, "0"):
+                row["reserved_slots"] = reserved
+        lot = by_id.get(cid) if cid else None
+        if lot is None:
+            lot = by_fp.get(_contract_fp(o, use_id=False))
+        if lot:
+            row["covers"] = lot["ident"]
+            lot_qty = float(lot.get("qty") or 0)
+            closing = (action in {"SELL", "SLD"} and lot_qty > 0) or (
+                action in {"BUY", "BOT"} and lot_qty < 0
+            )
+            otype_u = str(otype or "").upper()
+            if not closing and not action and (
+                "STP" in otype_u or otype_u.startswith("TRAIL")
+            ):
+                closing = True
+            row["role"] = "exit" if closing else "add"
+        else:
+            row["role"] = "entry"
         rows.append(row)
         if len(rows) >= limit:
             break
@@ -276,32 +382,228 @@ def compact_working_orders(
 
 
 def concentration(positions: list[dict] | None) -> dict[str, Any]:
-    """Lots vs unique names. Clone list is a fact, not a rank."""
+    """Lots vs names. cloned = extra same-side lots, not vertical legs."""
     by_name: dict[str, dict[str, Any]] = {}
+    buckets: dict[tuple[str, str], dict[str, int]] = {}
     for p in positions or []:
         if not isinstance(p, dict):
             continue
         sym = str(p.get("symbol") or "").strip().upper()
         if not sym:
             continue
-        try:
-            qty = abs(float(
-                p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0
-            ))
-        except (TypeError, ValueError):
+        qty = _row_signed_qty(p)
+        if abs(qty) < 1e-9:
             continue
-        if qty < 1e-9:
-            continue
-        rec = by_name.setdefault(sym, {"lots": 0, "qty": 0.0})
+        rec = by_name.setdefault(
+            sym,
+            {
+                "lots": 0,
+                "qty": 0.0,
+                "long": 0,
+                "short": 0,
+                "vert": 0,
+                "extra": 0,
+                "structures": 0,
+            },
+        )
         rec["lots"] += 1
-        rec["qty"] += qty
+        rec["qty"] += abs(qty)
+        if qty > 0:
+            rec["long"] += 1
+        else:
+            rec["short"] += 1
+        sec = str(p.get("secType") or p.get("sec_type") or p.get("sec") or "STK").upper()
+        exp = ""
+        if sec in ("OPT", "FOP"):
+            exp = str(p.get("expiration") or p.get("lastTradeDateOrContractMonth") or "")
+        bucket = buckets.setdefault((sym, exp), {"long": 0, "short": 0})
+        if qty > 0:
+            bucket["long"] += 1
+        else:
+            bucket["short"] += 1
+    for (sym, _exp), bucket in buckets.items():
+        rec = by_name[sym]
+        rec["vert"] += min(bucket["long"], bucket["short"])
+        rec["extra"] += abs(bucket["long"] - bucket["short"])
+    for rec in by_name.values():
+        rec["structures"] = int(rec["vert"]) + int(rec["extra"])
     lots = int(sum(int(v["lots"]) for v in by_name.values()))
+    structures = int(sum(int(v["structures"]) for v in by_name.values()))
     return {
         "names": len(by_name),
         "lots": lots,
+        "structures": structures,
         "by_name": by_name,
-        "cloned": sorted(s for s, v in by_name.items() if int(v["lots"]) > 1),
+        "cloned": sorted(s for s, v in by_name.items() if int(v["extra"]) > 1),
     }
+
+
+def structure_mix(positions: list[dict] | None) -> dict[str, int]:
+    """Clerk count of book geometry. Not a rank or a strategy menu."""
+    long_c = short_c = long_p = short_p = stk = 0
+    paired: dict[tuple[str, str], dict[str, int]] = {}
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        row = compact_position(p, extra=True)
+        try:
+            qty = float(row.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(qty) < 1e-9:
+            continue
+        sec = str(row.get("sec") or "STK").upper()
+        if sec == "STK":
+            stk += 1
+            continue
+        if sec not in ("OPT", "FOP"):
+            continue
+        right = str(row.get("right") or "").upper()[:1]
+        sym = str(row.get("symbol") or "").upper()
+        exp = str(row.get("expiration") or "")
+        key = (sym, exp)
+        bucket = paired.setdefault(key, {"long": 0, "short": 0})
+        if qty > 0:
+            bucket["long"] += 1
+            if right == "P":
+                long_p += 1
+            else:
+                long_c += 1
+        else:
+            bucket["short"] += 1
+            if right == "P":
+                short_p += 1
+            else:
+                short_c += 1
+    vert = int(sum(min(v["long"], v["short"]) for v in paired.values()))
+    return {
+        "long_c": long_c,
+        "short_c": short_c,
+        "long_p": long_p,
+        "short_p": short_p,
+        "stk": stk,
+        "vert": vert,
+    }
+
+
+def format_mix(mix: dict[str, Any] | None) -> str:
+    m = mix if isinstance(mix, dict) else {}
+    bits = []
+    for key, label in (
+        ("long_c", "longC"),
+        ("short_c", "shortC"),
+        ("long_p", "longP"),
+        ("short_p", "shortP"),
+        ("vert", "vert"),
+        ("stk", "stk"),
+    ):
+        try:
+            n = int(m.get(key) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n:
+            bits.append(f"{label}:{n}")
+    return ",".join(bits)
+
+
+def _lot_mtm_suffix(row: dict[str, Any], qty: float) -> str:
+    try:
+        avg = float(row.get("avg"))
+        mkt = float(row.get("mkt"))
+    except (TypeError, ValueError):
+        return ""
+    if avg == 0 or mkt is None:
+        return ""
+    if qty < 0:
+        pct = (avg - mkt) / abs(avg) * 100.0
+    else:
+        pct = (mkt - avg) / abs(avg) * 100.0
+    return f" {pct:+.0f}%"
+
+
+def _lot_card_tag(ident: str, row: dict[str, Any]) -> str:
+    try:
+        from abcxauto.lab_playbook import load_lab
+
+        lab = load_lab()
+    except Exception:
+        return ""
+    pre = lab.get("lots_at_write") if isinstance(lab.get("lots_at_write"), list) else []
+    if not pre:
+        return ""
+    keys = {str(x) for x in pre if x}
+    con = str(row.get("conId") or row.get("con_id") or "")
+    if con and con in keys:
+        return " pre"
+    if ident in keys:
+        return " pre"
+    for s in keys:
+        if ident.startswith(s) or s.startswith(ident):
+            return " pre"
+    return " this"
+
+
+def lot_ident(pos: dict[str, Any] | None) -> str:
+    """Contract identity for one lot. No MTM, no card tag — safe to call per paint."""
+    row = compact_position(pos if isinstance(pos, dict) else {}, extra=True)
+    qty = _row_signed_qty(row)
+    side, qty_s = _qty_side(qty)
+    sym = str(row.get("symbol") or "?").upper()
+    sec = str(row.get("sec") or "STK").upper()
+    if sec in ("OPT", "FOP"):
+        exp = str(row.get("expiration") or "")
+        exp = exp[-6:] if len(exp) >= 6 else exp
+        right = str(row.get("right") or "")[:1]
+        return f"{sym} {exp}{right}{row.get('strike')} {side} {qty_s}"
+    return f"{sym} {sec} {side} {qty_s}"
+
+
+def lot_labels(positions: list[dict] | None, *, limit: int = 16) -> list[str]:
+    """Short lot identities for wake / last_turn. Not a rank."""
+    labels: list[str] = []
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        row = compact_position(p, extra=True)
+        try:
+            qty = float(row.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(qty) < 1e-9:
+            continue
+        ident = lot_ident(p)
+        extra = _lot_mtm_suffix(row, qty)
+        card = _lot_card_tag(ident, row)
+        if extra or card:
+            ident = f"{ident}{extra}{card}"
+        labels.append(ident)
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+def account_float(account: dict[str, Any] | None, *keys: str) -> float | None:
+    """Read a numeric IBKR tag. 0.0 is valid — do not fall through with ``or``."""
+    acct = account if isinstance(account, dict) else {}
+    for key in keys:
+        if key in acct and acct[key] is not None:
+            try:
+                return float(acct[key])
+            except (TypeError, ValueError):
+                continue
+        lower = str(key).lower()
+        for ak, av in acct.items():
+            if str(ak).lower() == lower and av is not None:
+                try:
+                    return float(av)
+                except (TypeError, ValueError):
+                    break
+    return None
+
+
+def daily_pnl_of(account: dict[str, Any] | None) -> float | None:
+    """IBKR DailyPnL (today vs prior close). Not UnrealizedPnL vs average cost."""
+    return account_float(account, "dailypnl", "DailyPnL")
 
 
 def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -322,8 +624,11 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "model_cost_usd": sc.get("model_cost_usd"),
         "names": conc["names"],
         "lots": conc["lots"],
+        "structures": conc["structures"],
         "by_name": conc["by_name"],
         "cloned": conc["cloned"],
+        "open_lots": lot_labels(getattr(world, "positions", None)),
+        "mix": structure_mix(getattr(world, "positions", None)),
         "capacity": dict(getattr(world, "capacity", None) or {}),
         "risk_per_trade_pct": risk_pct,
         "playbook": _playbook_day(sc),
@@ -332,9 +637,9 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
 
 def _playbook_day(scorecard: dict[str, Any] | None) -> dict[str, Any]:
     try:
-        from abcxauto.lab_playbook import playbook_facts
+        from abcxauto.lab_playbook import playbook_glance
 
-        return playbook_facts(scorecard)
+        return playbook_glance(scorecard)
     except Exception:
         return {}
 
@@ -348,32 +653,84 @@ def format_wake(
     ibkr_up: bool,
     day: dict[str, Any] | None = None,
 ) -> str:
-    """Short fact line. No strategy lecture."""
+    """Desk brief. Fill/order_change is a delta, not a discovery assignment."""
     unprot = ",".join(unprotected) if unprotected else "none"
+    day = day if isinstance(day, dict) else {}
+    lots = day.get("open_lots") or []
+    lot_s = ",".join(str(x) for x in lots[:12]) if lots else ""
+    mix_s = format_mix(day.get("mix") if isinstance(day.get("mix"), dict) else {})
+    cap = day.get("capacity") if isinstance(day.get("capacity"), dict) else {}
+    open_n = cap.get("open_count", cap.get("open"))
+    max_n = cap.get("max_open_positions", cap.get("max"))
+    ev = None
+    try:
+        from abcxauto.wake_bus import last_wake
+
+        ev = last_wake()
+    except Exception:
+        ev = None
+    kind = str(ev.kind or "") if ev is not None else ""
+    brief: dict[str, Any] = {}
+    try:
+        from abcxauto.think_stream import load_desk_brief
+
+        brief = load_desk_brief()
+    except Exception:
+        brief = {}
+    prev_strat = brief.get("strat") or brief.get("previous_strat") or ""
+    prev_sends = brief.get("sends") if brief.get("sends") is not None else 0
+    if kind in ("fill", "order_change", "book_move"):
+        detail = (ev.detail or "").strip() if ev is not None else ""
+        event_s = f"event={kind} {detail}.".strip() if detail else f"event={kind}."
+        parts = [
+            event_s,
+            f"prev={prev_strat or '—'} sends={prev_sends}.",
+            f"session={session} flat={flat} NL={day.get('nl')} "
+            f"open={open_n}/{max_n} mix={mix_s or 'none'}.",
+        ]
+        if lot_s:
+            parts.append(f"open_lots={lot_s}.")
+        if unprot != "none":
+            parts.append(f"unprotected={unprot}.")
+        dp = day.get("daily_pnl")
+        parts.append(f"dayPnL={dp if dp is not None else '?'}.")
+        parts.append("This is a delta. send|set_wake.")
+        return " ".join(p for p in parts if p)
+    risk = day.get("risk_per_trade_pct")
     parts = [
         f"Cycle {cycle}. session={session} flat={flat} "
-        f"unprotected={unprot} ibkr={'up' if ibkr_up else 'down'}."
+        f"unprotected={unprot} ibkr={'up' if ibkr_up else 'down'}.",
     ]
-    if isinstance(day, dict) and day:
-        cloned = ",".join(str(s) for s in (day.get("cloned") or []) if s) or "none"
-        cap = day.get("capacity") if isinstance(day.get("capacity"), dict) else {}
-        open_n = cap.get("open_count", cap.get("open"))
-        max_n = cap.get("max_open_positions", cap.get("max"))
-        risk = day.get("risk_per_trade_pct")
+    if day:
+        dp = day.get("daily_pnl")
         parts.append(
-            f"names={day.get('names')} lots={day.get('lots')} cloned={cloned} "
+            f"names={day.get('names')} lots={day.get('lots')} "
+            f"dayPnL={dp if dp is not None else '?'} "
             f"edge={day.get('edge_usd')} beating={day.get('beating_model')} "
             f"risk/trade={risk}% open={open_n}/{max_n}."
         )
+        if lot_s:
+            parts.append(f"open_lots={lot_s}.")
+        if mix_s:
+            parts.append(f"mix={mix_s}.")
+        if ev is not None:
+            parts.append(f"event={ev.kind} {ev.detail}.".strip())
+        if prev_strat:
+            parts.append(f"prev={prev_strat} sends={prev_sends}.")
         pb = day.get("playbook") if isinstance(day.get("playbook"), dict) else {}
         if pb.get("revision") is not None:
             parts.append(
-                f"playbook rev={pb.get('revision')} age={pb.get('age_h')}h "
-                f"ready={pb.get('ready_to_promote')} "
-                f"at_write_edge={pb.get('at_write_edge')} "
-                f"now_edge={pb.get('now_edge')}."
+                f"playbook rev={pb.get('revision')} "
+                f"since_write={pb.get('since_write_edge')} "
+                f"now_edge={pb.get('now_edge')} "
+                f"4h={pb.get('win_4h')}."
             )
-    parts.append("Use tools. send if the book needs a ticket.")
+            from abcxauto.lab_playbook import format_ledger_line
+
+            ledger = format_ledger_line(pb)
+            if ledger:
+                parts.append(f"ledger {ledger}.")
+    parts.append("send|set_wake.")
     return " ".join(parts)
 
 
@@ -655,6 +1012,8 @@ class WorldState:
             "structure_lessons": self.structure_lessons[:5],
             "structure_cooldown": dict(self.structure_cooldown),
             "taken_at": self.taken_at,
+            "mix": structure_mix(self.positions),
+            "open_lots": lot_labels(self.positions),
         }
 
     def prompt_block(self, *, limit: int = 4500) -> str:
@@ -763,12 +1122,11 @@ def build_world_state(
     unprotected = list(protection.get("unprotected_symbols") or [])
     session = str((pulse.get("session") or {}).get("status") or "").lower()
     try:
-        net = float(acct.get("netliquidation") or acct.get("NetLiquidation") or 0)
+        net = float(account_float(acct, "netliquidation", "NetLiquidation") or 0)
     except (TypeError, ValueError):
         net = 0.0
-    try:
-        pnl = float(acct.get("dailypnl") or acct.get("DailyPnL") or acct.get("unrealizedpnl") or 0)
-    except (TypeError, ValueError):
+    pnl = daily_pnl_of(acct)
+    if pnl is None:
         pnl = 0.0
     try:
         total_cash = float(
@@ -808,7 +1166,7 @@ def build_world_state(
         max_open = int(getattr(cfg, "max_open_positions", 0) or 0)
     except (TypeError, ValueError):
         max_open = 0
-    cap = capacity_fact(positions, max_open_positions=max_open)
+    cap = capacity_fact(positions, max_open_positions=max_open, open_orders=orders)
     lessons = recent_structure_lessons(5)
     cool = structure_cooldown_symbols(lessons)
     option_facts = list(snap.get("option_facts") or [])
@@ -891,6 +1249,10 @@ def capacity_allows_new_risk(world: Any, cfg: Any = None) -> bool:
         max_n = 0
     if max_n <= 0:
         return True
-    from abcxauto.trade_plan import open_position_count
+    from abcxauto.trade_plan import open_position_count, working_entry_slots
 
-    return open_position_count(getattr(world, "positions", None)) < max_n
+    used = open_position_count(getattr(world, "positions", None))
+    pending = working_entry_slots(
+        getattr(world, "open_orders", None), getattr(world, "positions", None)
+    )
+    return used + pending < max_n

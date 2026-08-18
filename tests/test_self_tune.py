@@ -161,10 +161,10 @@ def test_nested_self_tune_universe(tmp_path, monkeypatch):
     assert "universe" in out["applied"]
 
 
-def test_prompt_extra():
+def test_prompt_extra_is_gone():
     out = apply_self_tune({"prompt_extra": "Prefer cheap defined-risk verticals."}, persist=False)
-    assert out["status"] == "ok"
-    assert "Prefer cheap" in get_config().system_prompt_extra
+    assert "prompt_extra" in (out.get("rejected") or {})
+    assert "Prefer cheap" not in str(get_config().system_prompt_extra or "")
 
 
 def test_ensure_floor_repairs_weak_settings(tmp_path, monkeypatch):

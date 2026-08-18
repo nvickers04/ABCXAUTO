@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS model_usage (
     stage TEXT,
     input_tokens INTEGER,
     output_tokens INTEGER,
+    cached_tokens INTEGER,
     cost_usd REAL
 );
 
@@ -265,6 +266,14 @@ class TradeJournal:
                 parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as conn:
                 conn.executescript(_SCHEMA_SQL)
+                cols = {
+                    str(r[1])
+                    for r in conn.execute("PRAGMA table_info(model_usage)").fetchall()
+                }
+                if "cached_tokens" not in cols:
+                    conn.execute(
+                        "ALTER TABLE model_usage ADD COLUMN cached_tokens INTEGER DEFAULT 0"
+                    )
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.commit()
             self._initialized = True
@@ -970,6 +979,32 @@ class TradeJournal:
             logger.exception("journal.account_performance failed")
             return empty
 
+    def closed_fill_pnls(self, limit: int = 200) -> List[float]:
+        """Realized P&L on closing fills. Openers are usually 0 / missing."""
+        try:
+            self._ensure_schema()
+            cap = max(8, min(500, int(limit or 200)))
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT realized_pnl FROM fills
+                    WHERE realized_pnl IS NOT NULL
+                      AND ABS(realized_pnl) > 1e-9
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (cap,),
+                ).fetchall()
+            out: List[float] = []
+            for row in rows:
+                try:
+                    out.append(float(row["realized_pnl"]))
+                except (TypeError, ValueError, KeyError):
+                    continue
+            return out
+        except Exception:
+            logger.exception("journal.closed_fill_pnls failed")
+            return []
 
     def strategy_performance(self, since_day: Optional[str] = None) -> List[dict]:
         """Per-strategy realized P&L attribution from fills joined through dispatches.
@@ -1081,6 +1116,7 @@ class TradeJournal:
         stage: str = "",
         input_tokens: int = 0,
         output_tokens: int = 0,
+        cached_tokens: int = 0,
         cost_usd: float = 0.0,
         ts: Optional[str] = None,
     ) -> Optional[int]:
@@ -1091,14 +1127,17 @@ class TradeJournal:
             with self._connect() as conn:
                 cur = conn.execute(
                     """
-                    INSERT INTO model_usage (ts, stage, input_tokens, output_tokens, cost_usd)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO model_usage (
+                        ts, stage, input_tokens, output_tokens, cached_tokens, cost_usd
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ts or _utc_now_iso(),
                         stage or None,
                         int(input_tokens or 0),
                         int(output_tokens or 0),
+                        int(cached_tokens or 0),
                         float(cost_usd or 0.0),
                     ),
                 )
@@ -1114,6 +1153,7 @@ class TradeJournal:
             "calls": 0,
             "input_tokens": 0,
             "output_tokens": 0,
+            "cached_tokens": 0,
             "cost_usd": 0.0,
         }
         try:
@@ -1124,6 +1164,7 @@ class TradeJournal:
                     SELECT COUNT(*) AS calls,
                            COALESCE(SUM(input_tokens), 0) AS input_tokens,
                            COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                           COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
                            COALESCE(SUM(cost_usd), 0) AS cost_usd
                     FROM model_usage
                     WHERE ts >= ?
@@ -1136,6 +1177,7 @@ class TradeJournal:
                 "calls": int(row["calls"] or 0),
                 "input_tokens": int(row["input_tokens"] or 0),
                 "output_tokens": int(row["output_tokens"] or 0),
+                "cached_tokens": int(row["cached_tokens"] or 0),
                 "cost_usd": float(row["cost_usd"] or 0.0),
             }
         except Exception:
@@ -1182,6 +1224,7 @@ class TradeJournal:
             "calls": 0,
             "input_tokens": 0,
             "output_tokens": 0,
+            "cached_tokens": 0,
             "cost_usd": 0.0,
         }
         try:
@@ -1192,6 +1235,7 @@ class TradeJournal:
                     SELECT COUNT(*) AS calls,
                            COALESCE(SUM(input_tokens), 0) AS input_tokens,
                            COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                           COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
                            COALESCE(SUM(cost_usd), 0) AS cost_usd
                     FROM model_usage
                     """
@@ -1202,6 +1246,7 @@ class TradeJournal:
                 "calls": int(row["calls"] or 0),
                 "input_tokens": int(row["input_tokens"] or 0),
                 "output_tokens": int(row["output_tokens"] or 0),
+                "cached_tokens": int(row["cached_tokens"] or 0),
                 "cost_usd": float(row["cost_usd"] or 0.0),
             }
         except Exception:

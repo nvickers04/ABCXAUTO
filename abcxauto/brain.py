@@ -11,18 +11,16 @@ import asyncio
 import json
 import logging
 import re
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from xai_sdk.chat import system, tool, tool_result, user
+from xai_sdk.chat import developer, system, tool, tool_result, user
 
 from abcxauto.llm import GrokClient, build_system_prompt
 from abcxauto.opportunity_scan import fetch_scan_metrics, normalize_tickers
 from abcxauto.order_examples import format_order_examples
 from abcxauto.think_stream import emit as think_emit
 from abcxauto.tools import run_readonly_tool
-from abcxauto.universe import filter_to_legal
 from abcxauto.tool_args import (
     CANDLE_CAP,
     CHAIN_CAP,
@@ -40,13 +38,12 @@ MAX_TOOL_ROUNDS = 24
 _MUTATING_TOOLS = frozenset({"send", "write_lab_playbook"})
 STREAM_CHUNK_S = 8.0
 STREAM_IDLE_LIMIT = 6
-STREAM_MAX_S = 90.0
 STREAM_LOOP_UNIT = 12
 STREAM_LOOP_COPIES = 6
+STREAM_LOOP_SENTENCE_COPIES = 3
 TOOL_S = 20.0
 SEND_S = 45.0
 CHAIN_S = 60.0
-TURN_S = 300.0
 _QUOTE_SCHEMA = {"type": "string", "description": "Ticker, e.g. AAPL"}
 _SYMBOLS_SCHEMA = {"type": "array", "items": {"type": "string"}}
 
@@ -85,8 +82,22 @@ AGENT_TOOLS = [
         parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, []),
     ),
     tool(
+        name="odds",
+        description=(
+            "Prediction-market implied probs (Polymarket). Crowd odds for events, "
+            "not IBKR last."
+        ),
+        parameters=_schema(
+            {
+                "symbols": _SYMBOLS_SCHEMA,
+                "query": {"type": "string", "description": "Event search, e.g. Fed September"},
+            },
+            [],
+        ),
+    ),
+    tool(
         name="scan",
-        description="MDA tape metrics (~15 min delayed). Discovery only, not live last.",
+        description="MDA tape metrics (~15 min delayed).",
         parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, ["symbols"]),
     ),
     tool(
@@ -171,27 +182,55 @@ AGENT_TOOLS = [
         ),
     ),
     tool(
-        name="universe",
-        description="Legal symbols and enabled arenas. Hunt only inside this set.",
-        parameters=_schema({}, []),
-    ),
-    tool(
-        name="journal",
-        description="Working thesis plus recent decisions and dispatches.",
-        parameters=_schema({}, []),
+        name="playbook",
+        description=(
+            "Your lab notebook (instructions) plus score since the last write. "
+            "Optional revision= for a prior card. Not a standing order."
+        ),
+        parameters=_schema(
+            {
+                "revision": {"type": "integer"},
+                "full": {"type": "boolean"},
+            },
+            [],
+        ),
     ),
     tool(
         name="write_lab_playbook",
-        description="Paper only: rewrite your standing lab instructions.",
+        description=(
+            "Paper only: write or replace the lab notebook. instructions is the "
+            "notes. Optional mode / ready_to_promote. send is the book."
+        ),
         parameters=_schema(
             {
-                "instructions": {"type": "string"},
+                "instructions": {
+                    "type": "string",
+                    "description": "The notebook. Replaces the previous notes.",
+                },
                 "mode": {"type": "string", "description": "explore or exploit"},
-                "do_more": {"type": "string"},
-                "stop_doing": {"type": "string"},
                 "ready_to_promote": {"type": "boolean"},
             },
-            ["instructions"],
+            [],
+        ),
+    ),
+    tool(
+        name="set_wake",
+        description=(
+            "Next look. Always set a clock; a fill, order change, or material "
+            "mark move can come sooner. Empty wake_if = any book event. "
+            "If you skip this, the clerk looks again soon. "
+            "Unprotected stock still interrupts."
+        ),
+        parameters=_schema(
+            {
+                "wake_in_s": {"type": "number"},
+                "wake_at": {"type": "string"},
+                "wake_if": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            [],
         ),
     ),
 ]
@@ -205,7 +244,7 @@ def brain_system_prompt() -> str:
         + AWARENESS_HEART
         + "\n"
         + format_order_examples()
-        + "\nUse tools. send is the only way to change the book."
+        + "\nsend is the only way to change the book."
     )
 
 
@@ -259,6 +298,40 @@ def _same_phrase_loop(text: str, *, unit: int, copies: int) -> bool:
     return False
 
 
+def _tail_chunk_loop(text: str, *, min_unit: int = 24, copies: int = 3) -> bool:
+    if not text or copies < 2:
+        return False
+    n = len(text)
+    max_unit = min(180, n // copies)
+    for unit in range(max_unit, min_unit - 1, -1):
+        chunk = text[-unit:]
+        if chunk.strip() and text[-unit * copies :].count(chunk) >= copies:
+            return True
+    return False
+
+
+def _repeated_sentence_loop(
+    text: str, *, copies: int = STREAM_LOOP_SENTENCE_COPIES
+) -> bool:
+    if not text or copies < 2:
+        return False
+    tail = text[-2400:]
+    parts = [p.strip() for p in re.split(r"[.!;]", tail) if len(p.strip()) >= 24]
+    if len(parts) >= copies:
+        last = parts[-1]
+        if last and parts[-copies:].count(last) >= copies:
+            return True
+        if last and tail.count(last) >= copies:
+            return True
+    words = tail.split()
+    if len(words) >= copies * 8:
+        unit = " ".join(words[-8:])
+        window = " ".join(words[-(copies * 8) :])
+        if unit and window.count(unit) >= copies:
+            return True
+    return False
+
+
 def stream_is_looping(
     text: str,
     *,
@@ -271,10 +344,13 @@ def stream_is_looping(
     cadence = _CADENCE_LOOP.findall(text)
     if len(cadence) >= copies:
         return True
-    if _same_phrase_loop(text.replace("?", "'"), unit=unit, copies=copies):
+    raw = text.replace("?", "'")
+    if _same_phrase_loop(raw, unit=unit, copies=copies):
         return True
     folded = _fold_loop_text(text)
-    return folded != text.replace("?", "'").strip() and _same_phrase_loop(
+    if _tail_chunk_loop(folded) or _repeated_sentence_loop(folded):
+        return True
+    return folded != raw.strip() and _same_phrase_loop(
         folded, unit=unit, copies=copies
     )
 
@@ -306,14 +382,9 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
     last_ch: Any = None
     last_resp: Any = None
     agen = chat.stream().__aiter__()
-    t0 = time.monotonic()
     idle = 0
     reason = "ok"
     while True:
-        if time.monotonic() - t0 >= STREAM_MAX_S:
-            think_emit("say", "\n[stream time box]\n")
-            reason = "time_box"
-            break
         try:
             resp, ch = await asyncio.wait_for(anext(agen), timeout=STREAM_CHUNK_S)
         except StopAsyncIteration:
@@ -362,14 +433,21 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
     think_emit("stage_end", stage)
     try:
         from abcxauto.memory import get_journal
-        from abcxauto.scorecard import estimate_cost_usd, estimate_tokens
+        from abcxauto.scorecard import estimate_cost_usd, usage_from_response
 
-        out_tok = estimate_tokens(o)
+        used = usage_from_response(
+            last_resp, last_ch, think_text=think_acc, say_text=o
+        )
         get_journal().record_model_usage(
             stage=stage,
-            input_tokens=0,
-            output_tokens=out_tok,
-            cost_usd=estimate_cost_usd(0, out_tok),
+            input_tokens=int(used.get("input_tokens") or 0),
+            output_tokens=int(used.get("output_tokens") or 0),
+            cached_tokens=int(used.get("cached_tokens") or 0),
+            cost_usd=estimate_cost_usd(
+                int(used.get("input_tokens") or 0),
+                int(used.get("output_tokens") or 0),
+                cached_tokens=int(used.get("cached_tokens") or 0),
+            ),
         )
     except Exception:
         logger.debug("model usage journal failed", exc_info=True)
@@ -394,7 +472,9 @@ async def grok(g: GrokClient, p: str, *, stage: str = "grok") -> str:
     return text
 
 
-CHAT_ROTATE_EVERY = 12
+# Boot / alarm / operator: new chat. Fill / order_change / book_move: same episode.
+EPISODE_KINDS = frozenset({"fill", "order_change", "book_move", "unprotected"})
+EPISODE_MAX = 8
 
 
 def _reset_chat(g: GrokClient) -> None:
@@ -407,7 +487,6 @@ def _new_chat(g: GrokClient) -> Any:
         "model": g.model,
         "messages": [system(brain_system_prompt())],
         "tools": list(AGENT_TOOLS),
-        "tool_choice": "auto",
         "temperature": g.temperature,
         "max_tokens": int(g.max_tokens or 8192),
         "include": ["verbose_streaming"],
@@ -422,11 +501,11 @@ def _new_chat(g: GrokClient) -> Any:
     return chat
 
 
-def _ensure_chat(g: GrokClient) -> Any:
-    n = int(getattr(g, "_wake_n", 0) or 0) + 1
-    g._wake_n = n
+def _ensure_chat(g: GrokClient, *, kind: str = "") -> Any:
     chat = getattr(g, "chat", None)
-    if chat is not None and n <= CHAT_ROTATE_EVERY:
+    n = int(getattr(g, "_wake_n", 0) or 0)
+    if kind in EPISODE_KINDS and chat is not None and 0 < n < EPISODE_MAX:
+        g._wake_n = n + 1
         return chat
     return _new_chat(g)
 
@@ -434,16 +513,23 @@ def _ensure_chat(g: GrokClient) -> Any:
 def _open_wake(g: GrokClient, wake: str, *, reset: bool = False) -> Any:
     if reset:
         _reset_chat(g)
-    chat = _ensure_chat(g)
-    chat.append(user(wake))
+    kind = ""
+    try:
+        from abcxauto.wake_bus import last_wake
+
+        ev = last_wake()
+        if ev is not None:
+            kind = str(ev.kind or "")
+    except Exception:
+        kind = ""
+    chat = _ensure_chat(g, kind=kind)
+    chat.append(developer(wake))
     return chat
 
 
 def _book_facts(world: WorldState) -> dict[str, Any]:
-    from abcxauto.universe import legal_symbols
     from abcxauto.world_state import COMBO_FACT, compact_position, compact_working_orders
 
-    legal = legal_symbols()
     return {
         "cycle": world.cycle,
         "session": world.session_status,
@@ -463,7 +549,9 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         "positions": [
             compact_position(p) for p in (world.positions or [])[:16]
         ],
-        "working_orders": compact_working_orders(world.open_orders),
+        "working_orders": compact_working_orders(
+            world.open_orders, positions=world.positions
+        ),
         "fills": [
             {
                 "symbol": f.get("symbol"),
@@ -491,19 +579,16 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
             for n in (world.news_items or [])[:8]
             if n.get("headline")
         ],
-        "working_thesis": str(world.working_thesis or "")[:300],
         "trade_plan": world.trade_plan,
         "book_unreliable": bool((world.gates or {}).get("book_unreliable")),
-        "legal_n": len(legal),
-        "legal_sample": legal[:40],
+        "structure_cooldown": dict(getattr(world, "structure_cooldown", None) or {}),
     }
 
 
 def _book_payload(world: WorldState) -> dict[str, Any]:
-    from abcxauto.config import format_controls_block, format_operator_card_block, get_config
-    from abcxauto.lab_playbook import format_block as format_lab_playbook
-    from abcxauto.scorecard import format_scorecard_block
-    from abcxauto.self_tune import format_floor_block, levers_snapshot
+    from abcxauto.config import get_config
+    from abcxauto.lab_playbook import playbook_glance
+    from abcxauto.self_tune import levers_snapshot
     from abcxauto.world_state import day_facts
 
     cfg = get_config()
@@ -511,30 +596,37 @@ def _book_payload(world: WorldState) -> dict[str, Any]:
         from abcxauto.scorecard import compute_scorecard
 
         sc = compute_scorecard(equity=getattr(world, "net_liquidation", None))
-        score = format_scorecard_block(
-            equity=getattr(world, "net_liquidation", None), sc=sc
-        )
     except Exception:
         sc = {}
-        score = ""
-    card = format_operator_card_block(getattr(cfg, "operator_card", None))
     facts = _book_facts(world)
     return {
         "day": day_facts(world, sc),
         "world": facts,
         "ibkr_live_quotes": dict(world.ibkr_live_quotes or {}),
-        "scorecard": score,
         "score_windows": {
             "fastest_beating": (sc or {}).get("fastest_beating"),
             "best_pace": (sc or {}).get("best_pace"),
             "windows": (sc or {}).get("windows") or {},
         },
-        "floor": format_floor_block(cfg),
         "levers": levers_snapshot(cfg),
-        "controls": format_controls_block(cfg),
-        "lab_playbook": format_lab_playbook(),
-        "operator_card": card or "",
+        "playbook": playbook_glance(sc),
+        "path": _path_block(world, cfg),
     }
+
+
+def _path_block(world: WorldState, cfg: Any) -> dict[str, Any]:
+    try:
+        from abcxauto.memory import get_journal
+        from abcxauto.path_math import path_from_journal
+
+        risk = getattr(cfg, "max_risk_per_trade_pct", None)
+        return path_from_journal(
+            get_journal(),
+            equity=getattr(world, "net_liquidation", None),
+            risk_pct=risk,
+        )
+    except Exception:
+        return {"n": 0, "note": "path unavailable"}
 
 
 def _stash_live(world: WorldState, snap: dict[str, Any], data: dict[str, Any]) -> None:
@@ -630,9 +722,9 @@ async def _mda_news(symbols: list[str], *, per_symbol: int = 4) -> list[dict[str
 async def _one_option_quote(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
     from abcxauto.option_facts import mda_greeks_only, occ_symbol
 
-    syms = filter_to_legal(normalize_tickers(spec.get("symbol")))
+    syms = normalize_tickers(spec.get("symbol"))
     if not syms:
-        return {"error": "legal symbol required", "source": "ibkr", **spec}
+        return {"error": "symbol required", "source": "ibkr", **spec}
     live_fn = getattr(connector, "get_live_option_quote", None)
     live: dict[str, Any] = {}
     if callable(live_fn):
@@ -731,7 +823,7 @@ async def _run_tool(
     if name == "news":
         from abcxauto.news_feed import fetch_agent_news
 
-        asked = filter_to_legal(normalize_tickers(args.get("symbols")))
+        asked = normalize_tickers(args.get("symbols"))
         if asked:
             items = await _mda_news(asked)
         else:
@@ -744,10 +836,23 @@ async def _run_tool(
             "use": "context_not_live_last",
             "items": items[:24],
         })
+    if name == "odds":
+        from abcxauto.config import get_config
+        from abcxauto.prediction_odds import fetch_odds
+
+        asked = normalize_tickers(args.get("symbols"))
+        q = str(args.get("query") or "").strip()
+        payload = await fetch_odds(
+            symbols=asked,
+            query=q,
+            positions=list(world.positions or snap.get("positions") or []),
+        )
+        payload["path"] = _path_block(world, get_config())
+        return _clip(payload)
     if name == "scan":
         from abcxauto.opportunity_scan import merge_tape, tape_symbols
 
-        syms = filter_to_legal(normalize_tickers(args.get("symbols")))
+        syms = normalize_tickers(args.get("symbols"))
         extra = await fetch_scan_metrics(syms) if syms else []
         if extra:
             ideas = merge_tape(list(world.opportunities or []), extra)
@@ -765,11 +870,11 @@ async def _run_tool(
     if name == "candles":
         from abcxauto.marketdata.client import get_marketdata_client
 
-        syms = filter_to_legal(
-            normalize_tickers(args.get("symbols") or args.get("symbol"), cap=CANDLE_CAP)
+        syms = normalize_tickers(
+            args.get("symbols") or args.get("symbol"), cap=CANDLE_CAP
         )
         if not syms:
-            return json.dumps({"error": "legal symbol required", "source": "mda"})
+            return json.dumps({"error": "symbol required", "source": "mda"})
         try:
             countback = int(args.get("countback") or 60)
         except (TypeError, ValueError):
@@ -811,11 +916,11 @@ async def _run_tool(
         fn = getattr(connector, "get_option_chain", None)
         if not callable(fn):
             return json.dumps({"error": "IBKR option chain unavailable", "source": "ibkr"})
-        syms = filter_to_legal(
-            normalize_tickers(args.get("symbols") or args.get("symbol"), cap=CHAIN_CAP)
+        syms = normalize_tickers(
+            args.get("symbols") or args.get("symbol"), cap=CHAIN_CAP
         )
         if not syms:
-            return json.dumps({"error": "legal symbol required", "source": "ibkr"})
+            return json.dumps({"error": "symbol required", "source": "ibkr"})
         try:
             min_dte = int(args.get("min_dte") or 7)
             max_dte = int(args.get("max_dte") or 45)
@@ -895,66 +1000,44 @@ async def _run_tool(
         turn.last_result = result
         turn.last_strat = strat
         return _clip(result)
-    if name == "universe":
-        from abcxauto.universe import legal_symbols, load_allowlist
+    if name == "playbook":
+        from abcxauto.lab_playbook import playbook_payload
 
-        al = load_allowlist()
-        legal = legal_symbols()
-        return _clip({
-            "arenas": list(al.get("enabled_arenas") or []),
-            "custom": list(al.get("custom_symbols") or []),
-            "exclude": list(al.get("exclude_symbols") or []),
-            "source": al.get("source") or "",
-            "refreshed_at": al.get("refreshed_at") or "",
-            "legal_n": len(legal),
-            "legal": legal[:80],
-        })
-    if name == "journal":
-        from abcxauto.memory import get_journal
-
-        j = get_journal()
-        decisions = []
-        for row in j.recent_decisions(6):
-            if not isinstance(row, dict):
-                continue
-            decisions.append({
-                "ts": row.get("ts"),
-                "cycle": row.get("cycle"),
-                "action": row.get("action"),
-                "strategy": row.get("strategy"),
-                "rationale": str(row.get("rationale") or "")[:240],
-            })
-        dispatches = []
-        for row in j.recent_dispatches(8):
-            if not isinstance(row, dict):
-                continue
-            res = row.get("result") if isinstance(row.get("result"), dict) else {}
-            dispatches.append({
-                "ts": row.get("ts"),
-                "ok": row.get("ok"),
-                "status": res.get("status"),
-                "note": str(res.get("note") or res.get("error") or "")[:160],
-                "strategy": res.get("strategy"),
-            })
-        try:
-            from abcxauto.scorecard import compute_scorecard
-
-            score = compute_scorecard()
-        except Exception:
-            score = {}
-        return _clip({
-            "thesis": j.get_working_thesis() or "",
-            "decisions": decisions,
-            "dispatches": dispatches,
-            "scorecard": score,
-        })
+        full = args.get("full")
+        if isinstance(full, str):
+            full = full.strip().lower() in ("1", "true", "yes", "on")
+        return _clip(playbook_payload(args.get("revision"), full=bool(full)))
     if name == "write_lab_playbook":
-        from abcxauto.lab_playbook import apply_from_judgment
+        from abcxauto.lab_playbook import apply_from_judgment, grounding_error
 
+        note = grounding_error(args, tool_trace=turn.tool_trace)
+        if note:
+            return _clip({"status": "rejected", "note": note})
+        args = dict(args)
+        args["research_tools"] = [
+            str(x) for x in turn.tool_trace if str(x) in
+            ("book", "scan", "news", "candles", "option_facts")
+        ]
         judgment = {"lab_playbook": args}
         state = apply_from_judgment(judgment)
         turn.lab_playbook = state
         return _clip(state or {"status": "ignored", "note": "live cannot rewrite lab"})
+    if name == "set_wake":
+        from abcxauto.wake_bus import set_wake
+
+        ifs = args.get("wake_if")
+        alarm = set_wake(
+            wake_in_s=args.get("wake_in_s"),
+            wake_at=args.get("wake_at"),
+            wake_if=ifs,
+            flat=getattr(world, "flat", None),
+            session=str(getattr(world, "session_status") or ""),
+        )
+        return _clip({
+            "status": "ok",
+            "wake_at": alarm.wake_at,
+            "wake_if": list(alarm.wake_if),
+        })
     return json.dumps({"error": f"unknown tool {name}"})
 
 
@@ -967,25 +1050,9 @@ async def grok_turn(
     wake: str,
 ) -> BrainTurn:
     """One Grok tool loop. send() is the only broker path."""
-    turn = BrainTurn()
-    try:
-        return await asyncio.wait_for(
-            _grok_turn_impl(
-                g, connector=connector, world=world, snap=snap, wake=wake, turn=turn
-            ),
-            timeout=TURN_S,
-        )
-    except asyncio.TimeoutError:
-        think_emit("say", "\n[turn time box]\n")
-        turn.tool_budget_hit = True
-        if not turn.last_act:
-            turn.last_act = {
-                "action": "hold",
-                "strategy": "hold",
-                "rationale": f"turn_time_box: {TURN_S:.0f}s",
-            }
-            turn.last_result = {"status": "hold", "note": f"turn_time_box: {TURN_S:.0f}s"}
-        return turn
+    return await _grok_turn_impl(
+        g, connector=connector, world=world, snap=snap, wake=wake, turn=BrainTurn()
+    )
 
 
 def _parse_tool_call(
@@ -1159,6 +1226,7 @@ async def _grok_turn_impl(
     if exhausted:
         turn.tool_budget_hit = True
         think_emit("say", "\n[tool budget exhausted]\n")
+    _reset_chat(g)
     if not turn.sends:
         turn.last_act = turn.last_act or {
             "action": "hold",

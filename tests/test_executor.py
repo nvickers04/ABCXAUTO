@@ -468,6 +468,7 @@ class TestStackedProtectiveExits:
         assert result["order_id"] == 1234
         assert gateway.calls[0][0] == "place_trailing_stop"
         assert _cancel_ids(gateway) == [200]
+        assert result.get("replaced_ids") == [200]
         assert 1234 not in _cancel_ids(gateway)
         assert 201 not in _cancel_ids(gateway)
 
@@ -484,6 +485,28 @@ class TestStackedProtectiveExits:
         assert result["success"] is True
         assert gateway.calls[0][0] == "place_trailing_stop"
         assert _cancel_ids(gateway) == []
+        assert result.get("replaced_ids") == []
+        assert "replace_skipped" not in result
+
+
+    @pytest.mark.asyncio
+    async def test_replace_skipped_when_place_has_no_order_id(self):
+        gateway = FakeGateway(
+            positions=[{"symbol": "SPY", "quantity": 100, "sec_type": "STK"}],
+            open_orders=[],
+        )
+
+        async def _place(**kwargs):
+            gateway.calls.append(("place_trailing_stop", kwargs))
+            return {"success": True}
+
+        gateway.place_trailing_stop = _place
+        proposal = validate_proposal(
+            "trailing_stop", VALID_PAYLOADS["trailing_stop"], RATIONALE
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        assert result.get("replace_skipped") == "no_order_id"
 
     @pytest.mark.asyncio
     async def test_stop_order_rejected_when_covered(self):

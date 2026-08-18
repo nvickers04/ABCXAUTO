@@ -147,3 +147,19 @@ def _isolate_open_risk_and_structure_files(tmp_path, monkeypatch):
         "ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "structure_events.jsonl")
     )
     monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle_streak.json"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_desk_state(tmp_path, monkeypatch):
+    """Pytest must not clobber the live last_turn / wake / playbook."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "grok_wake.json"))
+    monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "playbook_lab.json"))
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "playbook_live.json"))
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
+    monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
+    monkeypatch.setattr(ts, "THINK_PREV_PATH", tmp_path / "think_prev.txt")
+    monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")

@@ -16,12 +16,12 @@ from typing import Any
 from abcxauto.broker.connector import get_ibkr_connector
 from abcxauto.config import get_config
 from abcxauto.llm import GrokClient
+from abcxauto.agent_loop import run_cycle, snap
 from abcxauto.cycle import (
     TWEAKS,
     apply_tweak,
     format_position_inventory,
     grok,
-    run_cycle,
 )
 
 logger = logging.getLogger(__name__)
@@ -576,7 +576,9 @@ class ProEngine:
             except (TypeError, ValueError):
                 pass
             try:
-                pnl = acct.get("dailypnl") or acct.get("DailyPnL")
+                from abcxauto.world_state import daily_pnl_of
+
+                pnl = daily_pnl_of(acct)
                 if pnl is not None:
                     s.pnl = float(pnl)
             except (TypeError, ValueError):
@@ -781,20 +783,40 @@ class ProEngine:
         if gen != self._gen:
             return
         self._worker_loop = asyncio.get_running_loop()
-        from abcxauto.pacing import (
-            WakeGate,
-            allow_grok_call,
-            compute_pace,
-            facts_from_cycle,
-            wait_for_pace,
-        )
+        from abcxauto.pacing import WakeGate
 
         self._wake_event = asyncio.Event()
         self._wake_gate = WakeGate()
         self._wake_reason = ""
         try:
             self.conn = get_ibkr_connector()
-            await self.conn.connect()
+            while gen == self._gen and not self.stop.is_set():
+                try:
+                    ok = await self.conn.connect()
+                except Exception as e:
+                    ok = False
+                    msg = f"IBKR connect failed: {e}"
+                    self.ui.put(("error", msg))
+                    self.state.last_error = msg
+                    self._note("ERR", msg)
+                if ok and getattr(self.conn, "connected", False):
+                    break
+                self.ui.put(("conn", False))
+                self.state.connected = False
+                self.state.status = "Waiting IBKR"
+                self._note("CONNECT", "TWS not listening — retry 15s")
+                for _ in range(15):
+                    if gen != self._gen or self.stop.is_set():
+                        self._worker_loop = None
+                        self.worker = None
+                        return
+                    await asyncio.sleep(1)
+            if gen != self._gen or self.stop.is_set() or not getattr(self.conn, "connected", False):
+                self.ui.put(("conn", False))
+                self.state.connected = False
+                self._worker_loop = None
+                self.worker = None
+                return
             self.ui.put(("conn", True))
             self.state.connected = True
             self._publish_ibkr_account()
@@ -825,8 +847,23 @@ class ProEngine:
             self.worker = None
             self.conn = None
             return
+        from abcxauto.pacing import wait_for_pace
+        from abcxauto.wake_bus import (
+            BookEvent,
+            book_fingerprint,
+            ensure_next_look,
+            events_from_diff,
+            load_alarm,
+            note_wake,
+            pulse_sleep_s,
+            save_alarm,
+            should_wake_grok,
+        )
+
         g = None
         hist, prev, n = [], 0.0, 0
+        fp: dict | None = None
+        first_boot = True
         try:
             while gen == self._gen and not self.stop.is_set():
                 # Keep monitor alive whenever the broker link is up.
@@ -853,56 +890,70 @@ class ProEngine:
                     g = GrokClient()
 
                 cfg = get_config()
-                from abcxauto.config import effective_grok_min_interval_s
-
-                pending_wake = self._wake_reason
-                # Budget check uses last known pace tier (protect/urgent bypass).
-                last_tier = str((self._last_pace or {}).get("tier") or "")
+                try:
+                    s = await snap(self.conn)
+                except Exception as e:
+                    self.ui.put(("error", f"snap failed: {e}"))
+                    s = {}
+                cur = book_fingerprint({
+                    **(s if isinstance(s, dict) else {}),
+                    "ibkr_connected": bool(getattr(self.conn, "connected", False)),
+                })
+                events = events_from_diff(fp, cur)
+                fp = cur
+                pending_wake = str(self._wake_reason or "").strip().lower()
                 if pending_wake in ("unprotected", "halt"):
-                    last_tier = "protect"
-                grok_min = effective_grok_min_interval_s(cfg)
-                allowed, budget_why = allow_grok_call(
-                    tier=last_tier,
-                    wake_reason=pending_wake,
-                    last_grok_mono=self._last_grok_mono,
-                    grok_min_interval_s=grok_min,
+                    events.append(BookEvent(pending_wake, pending_wake))
+                elif pending_wake == "fill":
+                    events.append(BookEvent("fill", "monitor fill"))
+                alarm = load_alarm()
+                ev = should_wake_grok(
+                    events,
+                    alarm=alarm,
+                    first_boot=first_boot,
+                    operator=pending_wake in ("operator", "flat_confirmed"),
                 )
-                if not allowed:
-                    rem = max(
-                        1.0,
-                        grok_min - (time.monotonic() - self._last_grok_mono),
-                    )
+                if ev is None:
                     pace = {
-                        "tier": last_tier or "idle",
-                        "sleep_s": rem,
-                        "bypass_grok_min": False,
-                        "reason": "pace_budget",
-                        "wake_reason": pending_wake or "",
+                        "tier": "pulse",
+                        "sleep_s": pulse_sleep_s(alarm),
+                        "bypass_grok_min": True,
+                        "reason": "watching",
+                        "wake_reason": "",
                     }
                     self._last_pace = pace
                     self.state.pace = dict(pace)
-                    self._note("PACE", f"skipped_grok: pace_budget ({rem:.0f}s)")
+                    self.state.status = "Watching"
                     self._wake_event.clear()
-                    self._wake_reason = ""
-                    woken = await wait_for_pace(rem, self._wake_event)
-                    if woken == "woken" and self._wake_reason in (
-                        "unprotected",
-                        "halt",
-                    ):
-                        continue
+                    await wait_for_pace(float(pace["sleep_s"]), self._wake_event)
                     continue
 
+                first_boot = False
+                note_wake(ev)
+                if ev.kind == "alarm":
+                    alarm.wake_at = None
+                    save_alarm(alarm)
                 n += 1
-                wake_for_cycle = pending_wake
+                wake_for_cycle = ev.kind
                 self._wake_event.clear()
                 self._wake_reason = ""
                 out: dict = {}
+                prior_alarm = load_alarm().set_at
+                sess = ""
+                hours = s.get("market_hours") if isinstance(s, dict) else None
+                block = hours.get("session") if isinstance(hours, dict) else None
+                if isinstance(block, dict):
+                    sess = str(block.get("status") or "")
+                elif isinstance(block, str):
+                    sess = block
+                pos = (s.get("positions") if isinstance(s, dict) else None) or []
                 try:
                     from abcxauto.think_stream import emit as think_emit
 
                     think_emit(
                         "say",
-                        f"Cycle {n}: book snap, then Grok.\n",
+                        f"Cycle {n}: {ev.kind} {ev.detail} — Grok.\n".strip()
+                        + "\n",
                     )
                     out = await run_cycle(n, self.conn, g, hist, prev)
                     skipped_note = str(out.get("validation") or out.get("rationale") or "")
@@ -928,35 +979,39 @@ class ProEngine:
                         or (rec.get("snapshot") or {}).get("reality_pulse")
                         or {},
                     )
-                    out.setdefault("kahneman", rec.get("kahneman") or {})
-                    out.setdefault("kahneman_trace", rec.get("kahneman_trace") or "")
                     if not out.get("positions"):
-                        snap = rec.get("snapshot") or {}
-                        out["positions"] = snap.get("positions") or []
-                    facts = facts_from_cycle(
-                        out, wake_reason=wake_for_cycle, cfg=cfg
-                    )
-                    decision = compute_pace(facts, cfg)
-                    pace = decision.to_dict()
-                    pace["wake_reason"] = wake_for_cycle or ""
-                    pace["budget"] = budget_why
+                        shot = rec.get("snapshot") or {}
+                        out["positions"] = shot.get("positions") or []
+                    pace = {
+                        "tier": "event",
+                        "sleep_s": pulse_sleep_s(load_alarm()),
+                        "bypass_grok_min": True,
+                        "reason": ev.kind,
+                        "wake_reason": ev.kind,
+                    }
                     out["pace"] = pace
                     self._last_pace = pace
                     self._last_cycle_out = out
                     self.ui.put(("cycle", out))
                 except Exception as e:
                     self.ui.put(("error", str(e)))
-                    facts = facts_from_cycle(
-                        self._last_cycle_out, wake_reason=wake_for_cycle, cfg=cfg
+                    self._last_pace = {
+                        "tier": "pulse",
+                        "sleep_s": pulse_sleep_s(),
+                        "reason": "grok_error",
+                    }
+                finally:
+                    ensure_next_look(
+                        previous_set_at=prior_alarm,
+                        flat=not bool(pos),
+                        session=sess,
                     )
-                    decision = compute_pace(facts, cfg)
-                    pace = decision.to_dict()
-                    pace["wake_reason"] = wake_for_cycle or ""
-                    self._last_pace = pace
 
-                sleep_s = float((self._last_pace or {}).get("sleep_s") or cfg.cycle_sleep_s)
                 self._wake_event.clear()
-                await wait_for_pace(sleep_s, self._wake_event)
+                await wait_for_pace(
+                    float((self._last_pace or {}).get("sleep_s") or pulse_sleep_s()),
+                    self._wake_event,
+                )
         finally:
             self._stop_monitor()
             self._worker_loop = None

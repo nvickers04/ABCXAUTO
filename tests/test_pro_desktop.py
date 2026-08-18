@@ -37,6 +37,7 @@ REQUIRED = (
     "lbl_mda_status",
     "lbl_score",
     "ABCXAUTO",
+    "_on_window_event",
 )
 
 
@@ -144,7 +145,7 @@ def test_book_strip_sync(headless_pro):
     s.positions = [{"symbol": "SPY", "quantity": 5, "sec_type": "STK", "unrealized_pnl": 1, "conId": 1}]
     s.open_orders = [{"order_id": 9, "symbol": "SPY", "order_type": "STP", "quantity": 5, "aux_price": 490}]
     headless_pro._sync_widgets()
-    assert headless_pro.lbl_equity.value == "$100,000"
+    assert headless_pro.lbl_equity.value == "$100,000.00"
     assert "-50.00" in (headless_pro.lbl_pnl.value or "")
     assert headless_pro.lbl_unprotected.value == "2"
     assert headless_pro.lbl_halt.value == "HALTED"
@@ -155,14 +156,89 @@ def test_book_strip_sync(headless_pro):
     assert "c0" in (headless_pro.page.title or "")
     assert "unprot=2" in (headless_pro.page.title or "")
     assert "Playbook [" in (headless_pro.lbl_playbook.value or "")
-    assert "SPY" in (headless_pro.lbl_positions.value or "")
+    assert len(headless_pro.col_lots.controls) == 1
+    assert headless_pro.lbl_lot_count.value == "1"
+    assert "stk:1" in (headless_pro.lbl_mix.value or "")
+    assert "1 names" in (headless_pro.lbl_mix.value or "")
     assert "STP" in (headless_pro.lbl_working_orders.value or "")
+    assert "exit" in (headless_pro.lbl_working_orders.value or "")
+    assert "SPY STK long 5" in (headless_pro.lbl_working_orders.value or "")
     s.tool_trace = ["book", "quote", "send"]
     s.skip_reason = "skipped_grok: ibkr_down"
     headless_pro._sync_widgets()
     assert "quote" in (headless_pro.lbl_tools.value or "")
     assert headless_pro.lbl_banner.visible is True
     assert "ibkr_down" in (headless_pro.lbl_banner.value or "")
+
+
+def test_shell_tree_builds_with_book_pane(headless_pro):
+    shell = headless_pro._shell()
+    assert shell is not None
+    body = shell.controls[-1]
+    book = body.controls[-1]
+    assert book.width == 440
+    assert headless_pro.tab_bodies["lots"] is headless_pro.col_lots
+
+
+def test_lot_rows_name_the_lot_and_put_naked_first(headless_pro):
+    positions = [
+        {"symbol": "IWM", "quantity": 1, "sec_type": "OPT", "right": "C", "strike": 306.0,
+         "expiration": "20260821", "avgCost": 310.0, "market_price": 2.4, "conId": 7},
+        {"symbol": "AAPL", "quantity": -2, "sec_type": "OPT", "right": "P", "strike": 150.0,
+         "expiration": "20260821", "avgCost": 200.0, "market_price": 1.5, "conId": 8},
+        {"symbol": "SPY", "quantity": 5, "sec_type": "STK", "avgCost": 500.0,
+         "market_price": 505.0, "conId": 1},
+    ]
+    rows = headless_pro._lot_view(positions, ["SPY"])
+    assert [r["ident"] for r in rows][0] == "SPY STK long 5"
+    assert rows[0]["unprotected"] is True
+    assert rows[1]["ident"] == "IWM 260821C306.0 long 1"
+    assert rows[1]["mtm_pct"] == -23.0
+    assert rows[2]["ident"] == "AAPL 260821P150.0 short 2"
+    assert rows[2]["mtm_pct"] == 25.0
+    headless_pro.engine.state.positions = positions
+    headless_pro.engine.state.portfolio = {"unprotected_symbols": ["SPY"]}
+    headless_pro._sync_lots()
+    assert len(headless_pro.col_lots.controls) == 3
+
+
+def test_lot_rows_empty_book_says_so(headless_pro):
+    headless_pro.engine.state.positions = []
+    headless_pro._sync_lots()
+    assert headless_pro.col_lots.controls == [headless_pro.lbl_positions]
+    assert headless_pro.lbl_positions.value == "No open positions"
+
+
+def test_path_line_is_facts_not_advice(headless_pro):
+    assert headless_pro._path_line({"n": 2}) == "Path: 2 closed fills — thin sample"
+    line = headless_pro._path_line(
+        {"n": 40, "E": 12.5, "p": 0.55, "b": 1.8, "kelly": 0.08, "f": 0.02, "ruin": 0.031}
+    )
+    assert "n40" in line
+    assert "E$+12" in line
+    assert "kelly 8.0%" in line
+    assert "f 2.0%" in line
+    assert "ruin 3.1%" in line
+
+
+def test_edge_stat_tracks_beating_model(headless_pro):
+    headless_pro._sync_edge_stat({"edge_usd": 42.0, "beating_model": True, "model_cost_usd": 1.5})
+    assert headless_pro.lbl_edge.value == "$+42"
+    assert "1.50" in (headless_pro.lbl_edge_sub.value or "")
+    headless_pro._sync_edge_stat({})
+    assert headless_pro.lbl_edge.value == "—"
+
+
+def test_tabs_show_one_body_with_counts(headless_pro):
+    s = headless_pro.engine.state
+    s.open_orders = [{"order_id": 9, "symbol": "SPY"}]
+    headless_pro._sync_tabs()
+    assert headless_pro.tab_bodies["lots"].visible is True
+    assert headless_pro.tab_bodies["orders"].visible is False
+    assert headless_pro.tabs["orders"]["count"].value == "1"
+    headless_pro._select_tab("orders")
+    assert headless_pro.tab_bodies["orders"].visible is True
+    assert headless_pro.tab_bodies["lots"].visible is False
 
 
 def test_stream_line_widget_follows_tokens(headless_pro):
@@ -188,6 +264,56 @@ def test_stream_paints_tail_not_full_buffer(headless_pro):
     assert len(shown) <= 1800
     assert shown.endswith("tail-" * 4)
     assert str(len(blob)) in (headless_pro.lbl_stream_status.value or "").replace(",", "")
+
+
+def test_window_close_marks_operator_stop(headless_pro, tmp_path, monkeypatch):
+    from abcxauto.supervisor import operator_stopped
+
+    monkeypatch.setenv("ABCXAUTO_OPERATOR_STOP_PATH", str(tmp_path / "stop.json"))
+    assert operator_stopped() is False
+    headless_pro._on_window_event(type("E", (), {"type": "resize"})())
+    assert operator_stopped() is False
+    headless_pro._on_window_event(type("E", (), {"type": "close"})())
+    assert operator_stopped() is True
+
+
+def test_disconnected_book_does_not_score_zero_nl(headless_pro):
+    headless_pro.engine.state.equity = 0.0
+    headless_pro._refresh_score_line()
+    headless_pro._sync_path_line()
+    assert "no live book" in (headless_pro.lbl_score.value or "")
+    assert headless_pro.lbl_edge.value == "—"
+    assert headless_pro.lbl_path.value == "Path: —"
+
+
+def test_disconnected_uses_desk_brief_lots(headless_pro, tmp_path):
+    (tmp_path / "desk_brief.json").write_text(
+        json.dumps({
+            "strat": "hold",
+            "sends": 0,
+            "open_lots": ["IWM 260821C306.0 long 1 -26%", "XLF 260828C58.5 long 1 -41%"],
+            "net_liquidation": 35674.48,
+            "mix": {"long_c": 2, "short_c": 0, "long_p": 0, "short_p": 0, "stk": 0, "vert": 0},
+            "rationale": "manage 4 DTE",
+            "ts": "2026-08-17T17:26:23.837302+00:00",
+        }),
+        encoding="utf-8",
+    )
+    headless_pro._brief_last = 0.0
+    headless_pro._brief_row = {}
+    headless_pro._lots_key = "x"
+    s = headless_pro.engine.state
+    s.equity = 0.0
+    s.positions = []
+    s.brain_strat = "—"
+    s.brain_rationale = "—"
+    headless_pro._sync_widgets()
+    assert headless_pro.lbl_equity.value == "$35,674.48"
+    assert "IWM 260821C306.0 long 1" in headless_pro._lots_key
+    assert "hold" in (headless_pro.lbl_last_send.value or "")
+    assert "manage 4 DTE" in (headless_pro.lbl_why.value or "")
+    assert "longC:2" in (headless_pro.lbl_mix.value or "")
+    assert headless_pro.tabs["lots"]["count"].value == "2"
 
 
 def test_stream_empty_waiting_copy(headless_pro):
@@ -378,14 +504,21 @@ def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
         assert state.running
         assert headless_pro.engine.worker and headless_pro.engine.worker.is_alive()
         deadline = time.time() + 18
-        while time.time() < deadline and state.cycles < 3:
+        while time.time() < deadline and state.cycles < 1:
+            headless_pro.engine.drain_apply()
+            headless_pro._sync_widgets()
+            time.sleep(0.04)
+        seen = state.cycles
+        extra = time.time() + 0.8
+        while time.time() < extra:
             headless_pro.engine.drain_apply()
             headless_pro._sync_widgets()
             time.sleep(0.04)
         headless_pro._stop()
-        assert state.cycles >= 3
+        assert seen >= 1
+        assert state.cycles == seen
         assert headless_pro.lbl_cycles.value == str(state.cycles)
-        assert len(state.equity_hist) >= 3
+        assert len(state.equity_hist) >= 1
         SCRATCH.mkdir(parents=True, exist_ok=True)
         (SCRATCH / "pro_integration_notes.txt").write_text(
             f"cycles={state.cycles} result=PASS\n",

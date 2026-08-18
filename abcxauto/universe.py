@@ -1,6 +1,6 @@
-"""Universe sandbox — operator arenas + IBKR (preferred) legal symbol set.
+"""Universe watchlist — Grok sets arenas/custom via self_tune.
 
-Shell builds the legal box; SCAN TAPE stays unranked; Grok picks inside.
+Scan may seed from this list. send is not limited to it.
 """
 
 from __future__ import annotations
@@ -524,10 +524,10 @@ def is_legal_symbol(symbol: str) -> bool:
 
 
 def filter_to_legal(symbols: list[str] | None) -> list[str]:
-    legal = set(legal_symbols())
+    """Normalize asked tickers. Not a sandbox — Grok may quote any name."""
     out: list[str] = []
     for s in normalize_symbols(symbols or []):
-        if s in legal and s not in out:
+        if s not in out:
             out.append(s)
     return out
 

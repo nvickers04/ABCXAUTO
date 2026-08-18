@@ -27,8 +27,7 @@ def test_build_portfolio_state_core_fields(monkeypatch):
         open_orders=[{"orderId": 9}],
         protection={"unprotected_symbols": []},
     )
-    assert "mandate_summary" in state
-    assert len(state["mandate_summary"]) <= 240
+    assert "mandate_summary" not in state
     assert state["net_liq"] == 50_000
     assert state["daily_pnl"] == -100
     assert state["daily_pnl_pct"] is not None
@@ -46,6 +45,25 @@ def test_build_portfolio_state_core_fields(monkeypatch):
         protection={"unprotected_symbols": []},
     )
     assert via_portfolio["net_liq"] == 50_000
+
+
+def test_build_book_daily_pnl_is_not_unrealized():
+    state = build_book(
+        account={"netliquidation": 50_000, "unrealizedpnl": -800},
+        positions=[],
+        open_orders=[],
+        protection={"unprotected_symbols": []},
+        include_narrative=False,
+    )
+    assert state["daily_pnl"] is None
+    state2 = build_book(
+        account={"netliquidation": 50_000, "dailypnl": 0.0, "unrealizedpnl": -800},
+        positions=[],
+        open_orders=[],
+        protection={"unprotected_symbols": []},
+        include_narrative=False,
+    )
+    assert state2["daily_pnl"] == 0.0
 
 
 def test_portfolio_narrative_flags_unprotected():

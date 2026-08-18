@@ -40,7 +40,7 @@ class ProTerminal:
     def __init__(self, page: ft.Page):
         self.page = page
         self.engine = ProEngine()
-        self._think_sync_key = ""
+        self._think_sync_key: str | None = None  # None = never painted, "" = painted empty
         self._think_need_scroll = False
         self._build_refs()
         self._sync_widgets()
@@ -86,15 +86,29 @@ class ProTerminal:
             border_color=BORDER,
             width=320,
         )
-        self.lbl_cycles = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_cycles = ft.Text("0", size=13, weight=ft.FontWeight.W_600, color=TEXT)
         self.lbl_equity = ft.Text("$0", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_equity_sub = ft.Text("", size=11, color=MUTED)
         self.lbl_pnl = ft.Text("$+0.00", size=16, weight=ft.FontWeight.W_600, color=GREEN)
+        self.lbl_pnl_pct = ft.Text("", size=11, color=MUTED)
         self.lbl_book_netliq = self.lbl_equity
         self.lbl_book_pnl = self.lbl_pnl
         self.lbl_unprotected = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=GREEN)
         self.lbl_book_unprotected = self.lbl_unprotected
         self.lbl_halt = ft.Text("clear", size=16, weight=ft.FontWeight.W_600, color=GREEN)
         self.lbl_book_halt = self.lbl_halt
+        self.lbl_edge = ft.Text("—", size=16, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_edge_sub = ft.Text("vs model", size=11, color=MUTED)
+        self.lbl_lot_count = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_next_look = ft.Text("—", size=16, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_next_look_sub = ft.Text("", size=11, color=MUTED)
+        self.lbl_mix = ft.Text("Mix: —", size=12, color=MUTED, selectable=True)
+        self.lbl_path = ft.Text("Path: —", size=12, color=MUTED, selectable=True)
+        self._path_last = 0.0
+        self._look_last = 0.0
+        self._brief_last = 0.0
+        self._brief_row: dict = {}
+        self._prev_text: str | None = None
         self.lbl_risk = ft.Text("—", size=13, color=MUTED, selectable=True)
         self.lbl_pace = ft.Text("Pace: —", size=12, color=MUTED, selectable=True)
         self.lbl_dash_pace = self.lbl_pace
@@ -107,6 +121,7 @@ class ProTerminal:
         self.lbl_focus = ft.Text("Focus: —", size=12, color=MUTED, selectable=True)
         self.lbl_agent_read = self.lbl_focus
         self.lbl_stream_status = ft.Text("Grok stream", size=12, color=MUTED)
+        self.lbl_wake = ft.Text("", size=12, color=MUTED, selectable=True)
         self.think_live = ft.Text(
             "Grok stream: waiting for tools...",
             size=13,
@@ -139,10 +154,67 @@ class ProTerminal:
         self.lbl_cycle_log = self.lbl_activity
         self.lbl_risk_halt = self.lbl_halt
         self.lbl_risk_status = ft.Text("", size=12, color=MUTED, selectable=True)
+        self.col_lots = ft.Column([self.lbl_positions], spacing=3, scroll=ft.ScrollMode.AUTO)
+        self._lots_key = ""
+        self._tab = "lots"
+        self.tabs: dict[str, dict[str, Any]] = {}
+        for key, label in (
+            ("lots", "Lots"),
+            ("orders", "Working orders"),
+            ("fills", "Session fills"),
+            ("log", "Activity"),
+        ):
+            self.tabs[key] = self._tab_chip(key, label)
+        self.col_lots.expand = True
+        self.tab_bodies: dict[str, ft.Control] = {
+            "lots": self.col_lots,
+            "orders": ft.Column(
+                [self.lbl_working_orders], scroll=ft.ScrollMode.AUTO, expand=True
+            ),
+            "fills": ft.Column(
+                [self.lbl_recent_fills], scroll=ft.ScrollMode.AUTO, expand=True
+            ),
+            "log": ft.Column([self.lbl_activity], scroll=ft.ScrollMode.AUTO, expand=True),
+        }
+        # One line each — a long rationale must not reserve blank rows or squeeze the tabs.
+        for lbl in (
+            self.lbl_banner,
+            self.lbl_mix,
+            self.lbl_score,
+            self.lbl_path,
+            self.lbl_pace,
+            self.lbl_playbook,
+            self.lbl_risk,
+            self.lbl_tools,
+            self.lbl_last_send,
+            self.lbl_result,
+            self.lbl_why,
+            self.lbl_focus,
+        ):
+            lbl.max_lines = 1
+            lbl.overflow = ft.TextOverflow.ELLIPSIS
         self.btn_connect = self._btn("Connect IBKR", outlined=True, on_click=self._toggle_connect)
         self.btn_run = self._btn("Start", filled=True, on_click=self._toggle_run)
         self.btn_halt = self._btn("Halt", outlined=True, on_click=self._toggle_halt)
         self.btn_refresh = self._btn("Refresh book", outlined=True, on_click=self._refresh_book)
+
+    def _tab_chip(self, key: str, label: str) -> dict[str, Any]:
+        text = ft.Text(label, size=12, weight=ft.FontWeight.W_600, color=MUTED)
+        count = ft.Text("", size=11, color=MUTED)
+        chip = ft.Container(
+            content=ft.Row([text, count], spacing=5, tight=True),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=5),
+            border_radius=999,
+            border=ft.Border.all(1, BORDER),
+            ink=True,
+            on_click=lambda _e, k=key: self._select_tab(k),
+        )
+        return {"chip": chip, "text": text, "count": count, "label": label}
+
+    def _select_tab(self, key: str) -> None:
+        self._tab = key
+        self._sync_tabs()
+        self._safe_update()
 
     def _btn(self, text: str, *, on_click, filled: bool = False, outlined: bool = False) -> ft.Button:
         style = ft.ButtonStyle(
@@ -170,6 +242,7 @@ class ProTerminal:
             p.window.height = 820
             p.window.min_width = 960
             p.window.min_height = 640
+            p.window.on_event = self._on_window_event
         except Exception:
             pass
         self.lbl_model.value = f"Grok {getattr(cfg, 'model', '—')}"
@@ -195,6 +268,18 @@ class ProTerminal:
                 ),
                 encoding="utf-8",
             )
+
+    def _on_window_event(self, e: Any = None) -> None:
+        """Closing the window is the operator saying stop — the supervisor must obey."""
+        kind = str(getattr(e, "type", "") or getattr(e, "data", "") or "").lower()
+        if "close" not in kind:
+            return
+        try:
+            from abcxauto.supervisor import mark_operator_stop
+
+            mark_operator_stop()
+        except Exception:
+            logger.debug("operator stop on window close failed", exc_info=True)
 
     def _shell(self) -> ft.Control:
         return ft.Column(
@@ -236,6 +321,8 @@ class ProTerminal:
                     self.lbl_session_badge,
                     self.lbl_clock,
                     self.lbl_link,
+                    ft.Text("wakes", size=11, color=MUTED),
+                    self.lbl_cycles,
                     ft.Container(expand=True),
                     self.btn_connect,
                     self.btn_run,
@@ -257,6 +344,7 @@ class ProTerminal:
                     ft.Row(
                         [
                             ft.Text("Grok stream", size=14, weight=ft.FontWeight.W_600, color=TEXT),
+                            self.lbl_wake,
                             ft.Container(expand=True),
                             self.lbl_stream_status,
                             self.lbl_status,
@@ -271,70 +359,73 @@ class ProTerminal:
             ),
         )
 
-    def _stat(self, label: str, value: ft.Control) -> ft.Container:
+    def _stat(self, label: str, value: ft.Control, sub: ft.Control | None = None) -> ft.Container:
+        rows: list[ft.Control] = [ft.Text(label, size=11, color=MUTED), value]
+        if sub is not None:
+            rows.append(sub)
         return ft.Container(
             bgcolor=SURFACE,
             border=ft.Border.all(1, BORDER),
             border_radius=8,
             padding=10,
-            content=ft.Column(
-                [ft.Text(label, size=11, color=MUTED), value],
-                spacing=2,
-                tight=True,
-            ),
+            expand=True,
+            content=ft.Column(rows, spacing=1, tight=True),
         )
 
     def _book_pane(self) -> ft.Container:
         return ft.Container(
-            width=400,
+            width=440,
             bgcolor=BG,
             padding=12,
             content=ft.Column(
                 [
-                    ft.Text("Book", size=14, weight=ft.FontWeight.W_600, color=TEXT),
+                    ft.Row(
+                        [
+                            self.lbl_account_name,
+                            ft.Container(expand=True),
+                            self.lbl_account_id,
+                        ],
+                        spacing=8,
+                    ),
                     self.lbl_banner,
                     ft.Row(
                         [
-                            self._stat("Cycles", self.lbl_cycles),
-                            self._stat("NetLiq", self.lbl_equity),
-                            self._stat("Day PnL", self.lbl_pnl),
+                            self._stat("NetLiq", self.lbl_equity, self.lbl_equity_sub),
+                            self._stat("Day PnL", self.lbl_pnl, self.lbl_pnl_pct),
+                            self._stat("Edge", self.lbl_edge, self.lbl_edge_sub),
                         ],
                         spacing=8,
                     ),
                     ft.Row(
                         [
-                            self._stat("Unprotected", self.lbl_unprotected),
-                            self._stat("Halt", self.lbl_halt),
+                            self._stat("Lots", self.lbl_lot_count),
+                            self._stat("Unprotected", self.lbl_unprotected, self.lbl_halt),
+                            self._stat("Next look", self.lbl_next_look, self.lbl_next_look_sub),
                         ],
                         spacing=8,
                     ),
-                    self.lbl_account_name,
-                    self.lbl_account_id,
-                    self.lbl_risk,
-                    self.lbl_pace,
+                    self.lbl_mix,
                     self.lbl_score,
-                    self.lbl_tools,
+                    self.lbl_path,
+                    self.lbl_pace,
                     self.lbl_playbook,
+                    self.lbl_risk,
+                    self.lbl_tools,
                     ft.Container(height=1, bgcolor=BORDER),
                     self.lbl_last_send,
                     self.lbl_result,
                     self.lbl_why,
                     self.lbl_focus,
                     ft.Container(height=1, bgcolor=BORDER),
-                    ft.Text("Positions", size=12, weight=ft.FontWeight.W_600, color=TEXT),
-                    self.lbl_positions,
-                    ft.Text("Working orders", size=12, weight=ft.FontWeight.W_600, color=TEXT),
-                    self.lbl_working_orders,
-                    ft.Text("Session fills", size=12, weight=ft.FontWeight.W_600, color=TEXT),
-                    self.lbl_recent_fills,
-                    ft.Container(height=1, bgcolor=BORDER),
-                    ft.Text("Activity", size=12, weight=ft.FontWeight.W_600, color=TEXT),
-                    ft.Container(content=self.lbl_activity, expand=True),
+                    ft.Row(
+                        [self.tabs[k]["chip"] for k in ("lots", "orders", "fills", "log")],
+                        spacing=6,
+                    ),
+                    ft.Column(list(self.tab_bodies.values()), spacing=0, expand=True),
                     self.lbl_risk_status,
                 ],
                 spacing=6,
                 expand=True,
-                scroll=ft.ScrollMode.AUTO,
             ),
         )
 
@@ -456,6 +547,12 @@ class ProTerminal:
         self._safe_update()
 
     def _refresh_score_line(self) -> None:
+        if not self.engine.state.equity:
+            # Scoring a zero book returns -100% and a nonsense edge. Say nothing instead.
+            self.lbl_score.value = "Score: — no live book"
+            self.lbl_score.color = MUTED
+            self._sync_edge_stat({})
+            return
         try:
             from abcxauto.scorecard import compute_scorecard
 
@@ -463,7 +560,9 @@ class ProTerminal:
         except Exception:
             self.lbl_score.value = "Score: —"
             self.lbl_score.color = MUTED
+            self._sync_edge_stat({})
             return
+        self._sync_edge_stat(sc)
         def _bit(tag: str, ret: Any, edge: Any, beat: Any) -> str:
             ret_s = f"{ret:+.2f}%" if ret is not None else "—"
             edge_s = f"{edge:+.2f}" if edge is not None else "—"
@@ -506,6 +605,305 @@ class ProTerminal:
             self.lbl_score.color = AMBER
         else:
             self.lbl_score.color = MUTED
+
+    def _brief(self) -> dict:
+        """Last completed look. Shown only until the live book arrives."""
+        now = time.monotonic()
+        if now - float(getattr(self, "_brief_last", 0) or 0) >= 5.0 or not self._brief_row:
+            self._brief_last = now
+            try:
+                from abcxauto.think_stream import load_desk_brief
+
+                row = load_desk_brief()
+                self._brief_row = row if isinstance(row, dict) else {}
+            except Exception:
+                self._brief_row = {}
+        return self._brief_row
+
+    @staticmethod
+    def _brief_age(row: dict) -> str:
+        ts = str((row or {}).get("ts") or "")
+        if not ts:
+            return "last look"
+        try:
+            when = datetime.fromisoformat(ts)
+        except ValueError:
+            return "last look"
+        try:
+            return f"last look {when.astimezone().strftime('%H:%M')}"
+        except (OSError, OverflowError, ValueError):
+            return "last look"
+
+    @staticmethod
+    def _brief_lot_rows(labels: list | None) -> list[dict]:
+        """``IWM 260821C306.0 long 1 -26%`` from the brief → the same row shape as live lots."""
+        rows: list[dict] = []
+        for raw in labels or []:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            ident, pct = text, None
+            head, _, tail = text.rpartition(" ")
+            if head and tail.endswith("%"):
+                try:
+                    pct = float(tail.rstrip("%"))
+                    ident = head
+                except ValueError:
+                    ident, pct = text, None
+            rows.append({
+                "ident": ident,
+                "symbol": ident.split(" ")[0].upper(),
+                "sec": "OPT",
+                "qty": 0.0,
+                "avg": None,
+                "mkt": None,
+                "mtm_pct": pct,
+                "unprotected": False,
+            })
+        return rows
+
+    def _sync_edge_stat(self, scorecard: dict) -> None:
+        sc = scorecard if isinstance(scorecard, dict) else {}
+        edge = sc.get("edge_usd")
+        beat = sc.get("beating_model")
+        if isinstance(edge, (int, float)):
+            self.lbl_edge.value = f"${edge:+,.0f}"
+            self.lbl_edge.color = GREEN if beat is True else (AMBER if beat is False else TEXT)
+        else:
+            self.lbl_edge.value = "—"
+            self.lbl_edge.color = MUTED
+        cost = sc.get("model_cost_usd")
+        self.lbl_edge_sub.value = (
+            f"model ${cost:,.2f}" if isinstance(cost, (int, float)) else "vs model"
+        )
+
+    @staticmethod
+    def _lot_view(positions: list | None, unprotected: list | None = None) -> list[dict]:
+        """One row per lot: identity, MTM %, protection. Attention first."""
+        from abcxauto.world_state import compact_position, lot_ident
+
+        naked = {str(x).strip().upper() for x in (unprotected or []) if str(x).strip()}
+        rows: list[dict] = []
+        for p in positions or []:
+            if not isinstance(p, dict):
+                continue
+            row = compact_position(p, extra=True)
+            try:
+                qty = float(row.get("qty") or 0)
+            except (TypeError, ValueError):
+                continue
+            if abs(qty) < 1e-9:
+                continue
+            sec = str(row.get("sec") or "STK").upper()
+            sym = str(row.get("symbol") or "").upper()
+            rows.append({
+                "ident": lot_ident(p),
+                "symbol": sym,
+                "sec": sec,
+                "qty": qty,
+                "avg": row.get("avg"),
+                "mkt": row.get("mkt"),
+                "mtm_pct": row.get("mtm_pct"),
+                "unprotected": sec == "STK" and sym in naked,
+            })
+        rows.sort(
+            key=lambda r: (
+                not r["unprotected"],
+                r["mtm_pct"] if isinstance(r["mtm_pct"], (int, float)) else 0.0,
+            )
+        )
+        return rows
+
+    def _lot_control(self, row: dict) -> ft.Control:
+        mtm = row.get("mtm_pct")
+        if isinstance(mtm, (int, float)):
+            mtm_txt, mtm_color = f"{mtm:+.0f}%", (GREEN if mtm >= 0 else RED)
+        else:
+            mtm_txt, mtm_color = "—", MUTED
+        avg, mkt = row.get("avg"), row.get("mkt")
+        basis = (
+            f"{avg:g} → {mkt:g}"
+            if isinstance(avg, (int, float)) and isinstance(mkt, (int, float))
+            else ""
+        )
+        cells: list[ft.Control] = [
+            ft.Container(
+                expand=True,
+                content=ft.Text(
+                    row.get("ident") or "?",
+                    size=12,
+                    color=TEXT,
+                    font_family="Consolas",
+                    no_wrap=True,
+                ),
+            ),
+            ft.Container(
+                width=110,
+                content=ft.Text(basis, size=11, color=MUTED, text_align=ft.TextAlign.RIGHT),
+            ),
+            ft.Container(
+                width=46,
+                content=ft.Text(
+                    mtm_txt,
+                    size=12,
+                    weight=ft.FontWeight.W_600,
+                    color=mtm_color,
+                    text_align=ft.TextAlign.RIGHT,
+                ),
+            ),
+        ]
+        if row.get("unprotected"):
+            cells.append(ft.Text("naked", size=11, weight=ft.FontWeight.W_600, color=RED))
+        return ft.Container(
+            content=ft.Row(cells, spacing=6),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=5),
+            border_radius=6,
+            bgcolor=SURFACE if row.get("unprotected") else BG,
+            border=ft.Border.all(1, RED if row.get("unprotected") else BORDER),
+        )
+
+    def _sync_lots(self) -> None:
+        s = self.engine.state
+        book = getattr(s, "portfolio", None) or {}
+        naked = book.get("unprotected_symbols") if isinstance(book, dict) else None
+        rows = self._lot_view(s.positions, naked)
+        stale = ""
+        if not rows and not s.equity:
+            brief = self._brief()
+            rows = self._brief_lot_rows(brief.get("open_lots"))
+            stale = f"{self._brief_age(brief)} — not live" if rows else ""
+        key = json.dumps([rows, stale], sort_keys=True, default=str)
+        if key == self._lots_key:
+            return
+        self._lots_key = key
+        if not rows:
+            self.lbl_positions.value = "No open positions"
+            self.col_lots.controls = [self.lbl_positions]
+            return
+        controls: list[ft.Control] = [self._lot_control(r) for r in rows]
+        if stale:
+            controls.insert(0, ft.Text(stale, size=11, color=AMBER))
+        self.col_lots.controls = controls
+
+    def _sync_tabs(self) -> None:
+        s = self.engine.state
+        lots_n = len(s.positions or [])
+        if not lots_n and not s.equity:
+            lots_n = len(self._brief().get("open_lots") or [])
+        counts = {
+            "lots": lots_n,
+            "orders": len(s.open_orders or []),
+            "fills": len(getattr(s, "recent_fills", None) or []),
+            "log": len(s.records or []),
+        }
+        for key, tab in self.tabs.items():
+            on = key == self._tab
+            n = int(counts.get(key, 0))
+            tab["text"].color = TEXT if on else MUTED
+            tab["count"].value = str(n) if n else ""
+            tab["count"].color = TEXT if on else MUTED
+            tab["chip"].bgcolor = SURFACE if on else BG
+            tab["chip"].border = ft.Border.all(1, MUTED if on else BORDER)
+            body = self.tab_bodies.get(key)
+            if body is not None:
+                body.visible = on
+
+    def _sync_mix_line(self) -> None:
+        from abcxauto.world_state import concentration, format_mix, structure_mix
+
+        s = self.engine.state
+        positions = list(s.positions or [])
+        if not positions and not s.equity:
+            mix = format_mix(self._brief().get("mix"))
+            self.lbl_mix.value = f"Mix: {mix}" if mix else "Mix: flat"
+            self.lbl_mix.color = MUTED
+            return
+        bits = []
+        mix = format_mix(structure_mix(positions))
+        if mix:
+            bits.append(mix)
+        conc = concentration(positions)
+        if conc.get("names"):
+            bits.append(f"{conc['names']} names")
+        self.lbl_mix.value = f"Mix: {' · '.join(bits)}" if bits else "Mix: flat"
+        self.lbl_mix.color = TEXT if bits else MUTED
+
+    def _sync_next_look(self) -> None:
+        try:
+            from abcxauto.wake_bus import last_wake, load_alarm
+
+            alarm = load_alarm()
+            secs = alarm.seconds_until()
+            wake_if = list(alarm.wake_if or [])
+            event = last_wake()
+        except Exception:
+            secs, wake_if, event = None, [], None
+        if secs is None:
+            self.lbl_next_look.value = "—"
+            self.lbl_next_look.color = MUTED
+        else:
+            self.lbl_next_look.value = f"{int(secs) // 60}:{int(secs) % 60:02d}"
+            self.lbl_next_look.color = AMBER if secs <= 15 else TEXT
+        self.lbl_next_look_sub.value = ",".join(wake_if)[:28] if wake_if else "book events"
+        if event is not None:
+            detail = str(getattr(event, "detail", "") or "")
+            kind = str(getattr(event, "kind", "") or "")
+            self.lbl_wake.value = f"· woke on {kind} {detail}".rstrip()[:70]
+            self.lbl_wake.color = RED if kind in ("unprotected", "halt") else MUTED
+        else:
+            self.lbl_wake.value = ""
+
+    def _sync_path_line(self) -> None:
+        if not self.engine.state.equity:
+            self.lbl_path.value = "Path: —"
+            self.lbl_path.color = MUTED
+            return
+        try:
+            from abcxauto.memory import get_journal
+            from abcxauto.path_math import path_from_journal
+
+            facts = path_from_journal(
+                get_journal(),
+                equity=self.engine.state.equity,
+                risk_pct=getattr(get_config(), "max_risk_per_trade_pct", None),
+            )
+        except Exception:
+            facts = {}
+        self.lbl_path.value = self._path_line(facts)
+        f, kelly = facts.get("f"), facts.get("kelly")
+        over = (
+            isinstance(f, (int, float))
+            and isinstance(kelly, (int, float))
+            and kelly > 0
+            and f > kelly
+        )
+        self.lbl_path.color = AMBER if over else (TEXT if facts.get("n") else MUTED)
+
+    @staticmethod
+    def _path_line(facts: dict | None) -> str:
+        row = facts if isinstance(facts, dict) else {}
+        n = int(row.get("n") or 0)
+        if n < 4:
+            return f"Path: {n} closed fills — thin sample"
+        bits = [f"n{n}"]
+        if isinstance(row.get("E"), (int, float)):
+            bits.append(f"E${row['E']:+,.0f}")
+        if isinstance(row.get("p"), (int, float)):
+            bits.append(f"win {row['p'] * 100:.0f}%")
+        kelly = row.get("kelly")
+        edge = isinstance(kelly, (int, float)) and kelly > 0
+        if edge:
+            bits.append(f"kelly {kelly * 100:.1f}%")
+        else:
+            bits.append("kelly none — no edge yet")
+        if isinstance(row.get("f"), (int, float)):
+            bits.append(f"f {row['f'] * 100:.1f}%")
+        # Ruin only reads as a number once there is an edge to survive.
+        if edge and isinstance(row.get("ruin"), (int, float)):
+            bits.append(f"ruin {row['ruin'] * 100:.1f}%")
+        if n < 20:
+            bits.append("thin")
+        return "Path: " + " · ".join(bits)
 
     def _copy_stream(self, _=None) -> None:
         text = str(getattr(self.engine.state, "think_live", "") or self.think_live.value or "")
@@ -694,23 +1092,58 @@ class ProTerminal:
         self._think_sync_key = key
         body = key.strip()
         if not body:
-            self.think_live.value = "Grok stream: waiting for tools..."
+            prev = self._prev_stream()
+            self.think_live.value = prev or "Grok stream: waiting for tools..."
             self.think_live.color = MUTED
         else:
             self.think_live.value = body[-1800:]
             self.think_live.color = TEXT
         self._think_need_scroll = True
 
+    def _prev_stream(self) -> str:
+        """An idle pane is wasted — show the last look Grok took."""
+        if self._prev_text is None:
+            try:
+                from abcxauto.think_stream import THINK_PREV_PATH
+
+                raw = (
+                    THINK_PREV_PATH.read_text(encoding="utf-8")
+                    if THINK_PREV_PATH.is_file()
+                    else ""
+                )
+            except OSError:
+                raw = ""
+            tail = raw.strip()[-3000:]
+            self._prev_text = f"— previous look —\n\n{tail}" if tail else ""
+        return self._prev_text
+
     def _sync_widgets(self) -> None:
         s = self.engine.state
         self._sync_ibkr_account_label()
         self.lbl_cycles.value = str(s.cycles)
-        self.lbl_equity.value = f"${s.equity:,.0f}"
-        self.lbl_pnl.value = f"${s.pnl:+.2f}"
-        self.lbl_pnl.color = GREEN if s.pnl >= 0 else RED
+        brief = {} if s.equity else self._brief()
+        nl = float(s.equity or 0) or float(brief.get("net_liquidation") or 0)
+        self.lbl_equity.value = f"${nl:,.2f}" if nl else "—"
+        self.lbl_equity.color = TEXT if s.equity else MUTED
+        self.lbl_equity_sub.value = "live" if s.equity else self._brief_age(brief) if nl else ""
+        if s.equity:
+            self.lbl_pnl.value = f"${s.pnl:+.2f}"
+            self.lbl_pnl.color = GREEN if s.pnl >= 0 else RED
+            self.lbl_pnl_pct.value = f"{s.pnl / s.equity * 100:+.2f}% of NL"
+        else:
+            self.lbl_pnl.value = "—"
+            self.lbl_pnl.color = MUTED
+            self.lbl_pnl_pct.value = ""
         unprot = int(getattr(s, "unprotected_count", 0) or 0)
         self.lbl_unprotected.value = str(unprot)
         self.lbl_unprotected.color = RED if unprot else GREEN
+        lots = len(s.positions or []) or len(brief.get("open_lots") or [])
+        try:
+            cap = int(getattr(get_config(), "max_open_positions", 0) or 0)
+        except (TypeError, ValueError):
+            cap = 0
+        self.lbl_lot_count.value = f"{lots}/{cap}" if cap else str(lots)
+        self.lbl_lot_count.color = AMBER if cap and lots >= cap else TEXT
         self.lbl_risk.value = f"Risk: {s.risk}" if s.risk else "Risk: —"
         self.lbl_status.value = s.status
         running = bool(s.running) and getattr(s, "autonomous", False)
@@ -728,6 +1161,13 @@ class ProTerminal:
         elif strat and strat not in ("—",):
             self.lbl_last_send.value = f"Last send: {strat}"
             self.lbl_last_send.color = TEXT
+        elif not s.equity and self._brief().get("strat"):
+            brief = self._brief()
+            self.lbl_last_send.value = (
+                f"Last send: {brief.get('strat')} · {brief.get('sends') or 0} sends "
+                f"({self._brief_age(brief)})"
+            )
+            self.lbl_last_send.color = MUTED
         else:
             self.lbl_last_send.value = "Last send: —"
             self.lbl_last_send.color = MUTED
@@ -737,8 +1177,11 @@ class ProTerminal:
         blocked = status.lower().startswith(("blocked", "rejected", "fail", "error"))
         self.lbl_result.color = RED if blocked else TEXT
         rationale = str(s.brain_rationale or "").strip()
+        if not s.equity:
+            rationale = str(self._brief().get("rationale") or "").strip() or rationale
         self.lbl_why.value = f"Why: {rationale[:240]}" if rationale and rationale != "—" else "Why: —"
         self.lbl_why.color = TEXT if rationale and rationale != "—" else MUTED
+        self.lbl_why.tooltip = rationale[:600] or None
         market_read = str(getattr(s, "market_read", "") or "").strip()
         self.lbl_focus.value = f"Focus: {market_read[:220]}" if market_read else "Focus: —"
         self.lbl_focus.color = TEXT if market_read else MUTED
@@ -778,6 +1221,15 @@ class ProTerminal:
             self._score_last = now
             self._score_eq = eq_k
             self._refresh_score_line()
+        if now - float(self._look_last or 0) >= 1.0 or not self._look_last:
+            self._look_last = now
+            self._sync_next_look()
+        if now - float(self._path_last or 0) >= 20.0 or not self._path_last:
+            self._path_last = now
+            self._sync_path_line()
+        self._sync_mix_line()
+        self._sync_lots()
+        self._sync_tabs()
         try:
             from abcxauto.lab_playbook import load_lab, load_live, is_paper
 
@@ -790,9 +1242,15 @@ class ProTerminal:
                 )
             else:
                 tag = "live" if inst else "no promote"
+            rev = pb.get("revision") or pb.get("promoted_revision") or "—"
+            score = pb.get("paper_score") if isinstance(pb.get("paper_score"), dict) else {}
+            edge = score.get("edge_usd")
+            edge_s = f"{edge:,.2f}" if isinstance(edge, (int, float)) else edge
             self.lbl_playbook.value = (
-                f"Playbook [{tag}]: {inst[:140]}" if inst else f"Playbook [{tag}]: none"
+                f"Playbook [{tag}] rev={rev} edge={edge_s}"
+                if inst else f"Playbook [{tag}]: none"
             )
+            self.lbl_playbook.tooltip = str(pb.get("instructions") or "")[:600] or None
             self.lbl_playbook.color = TEXT if inst else MUTED
         except Exception:
             self.lbl_playbook.value = "Playbook: —"
@@ -803,9 +1261,9 @@ class ProTerminal:
             )
         except Exception:
             pass
-        self.lbl_positions.value = self._positions_summary(s.positions)
-        self.lbl_positions.color = TEXT if s.positions else MUTED
-        self.lbl_working_orders.value = self._format_working_orders(s.open_orders or [])
+        self.lbl_working_orders.value = self._format_working_orders(
+            s.open_orders or [], positions=getattr(s, "positions", None)
+        )
         self.lbl_working_orders.color = TEXT if s.open_orders else MUTED
         fills = getattr(s, "recent_fills", None) or []
         self.lbl_recent_fills.value = self._format_recent_fills(fills)
@@ -834,45 +1292,34 @@ class ProTerminal:
             return combo if len(combo) <= 120 else combo[:117] + "…"
         return status or note or ("fail" if res.get("success") is False else "ok")
 
-    def _positions_summary(self, positions: list) -> str:
-        if not positions:
-            return "No open positions"
-        lines = []
-        for p in positions[:12]:
-            con = p.get("conId") or p.get("con_id") or "?"
-            sym = p.get("symbol") or "?"
-            sec = str(p.get("secType") or p.get("sec_type") or "STK")
-            qty = p.get("quantity", p.get("position", 0))
-            pnl = p.get("unrealized_pnl") or p.get("unrealizedPnl") or 0
-            try:
-                pnl_s = f"{float(pnl):+.2f}"
-            except (TypeError, ValueError):
-                pnl_s = str(pnl)
-            lines.append(f"{con}  {sym} {sec}  qty={qty}  uPnL={pnl_s}")
-        return "\n".join(lines)
+    def _format_working_orders(self, orders: list, positions: list | None = None) -> str:
+        from abcxauto.world_state import compact_working_orders
 
-    def _format_working_orders(self, orders: list) -> str:
-        if not orders:
+        rows = compact_working_orders(orders, positions=positions)
+        if not rows:
             return "No working orders"
         lines = []
-        for o in orders[:12]:
-            oid = o.get("order_id") or o.get("orderId") or "?"
+        for o in rows:
+            oid = o.get("order_id") or "?"
             sym = o.get("symbol") or "?"
-            sec = str(o.get("sec_type") or o.get("secType") or "STK")
-            otype = o.get("order_type") or o.get("orderType") or "?"
-            qty = o.get("quantity") or o.get("totalQuantity") or "?"
-            stop = o.get("aux_price") or o.get("stop_price") or o.get("auxPrice") or ""
-            bit = f" stop={stop}" if stop not in (None, "", 0, 0.0) else ""
-            lmt = o.get("lmt_price") or o.get("lmtPrice") or o.get("limit_price") or ""
-            if lmt not in (None, "", 0, 0.0) and "lmt" not in bit:
-                bit += f" lmt={lmt}"
+            sec = o.get("sec") or "STK"
+            otype = o.get("type") or "?"
+            qty = o.get("qty") if o.get("qty") is not None else "?"
+            action = o.get("action") or ""
+            bit = f" stop={o['stop']}" if o.get("stop") not in (None, "") else ""
+            if o.get("lmt") not in (None, "") and "lmt" not in bit:
+                bit += f" lmt={o['lmt']}"
             leg = ""
-            if sec.upper().startswith("OPT"):
+            if str(sec).upper().startswith("OPT"):
                 right = o.get("right") or ""
                 strike = o.get("strike")
                 exp = o.get("expiration") or ""
                 leg = f" {right}{strike} {exp}".rstrip()
-            lines.append(f"{oid}  {sym} {sec} {otype} x{qty}{leg}{bit}")
+            role = str(o.get("role") or "").strip()
+            covers = str(o.get("covers") or "").strip()
+            tag = f"  {role} {covers}".rstrip() if role else ""
+            act = f"{action} " if action else ""
+            lines.append(f"{oid}  {sym} {sec} {act}{otype} x{qty}{leg}{bit}{tag}")
         return "\n".join(lines)
 
     def _format_recent_fills(self, fills: list) -> str:
@@ -975,6 +1422,12 @@ def write_launch_probe(path: str | Path) -> None:
 
 def run_app() -> None:
     setup_file_logging()
+    try:
+        from abcxauto.headless import _quiet_ibkr_scanner_noise
+
+        _quiet_ibkr_scanner_noise()
+    except Exception:
+        pass
     probe = os.environ.get("ABCXAUTO_LAUNCH_PROBE")
     if probe:
         write_launch_probe(probe)

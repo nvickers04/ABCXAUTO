@@ -37,6 +37,23 @@ from abcxauto.config import get_config
 logger = logging.getLogger(__name__)
 
 
+def port_is_closed(exc: BaseException) -> bool:
+    """True when TWS/Gateway is not listening (not a stale client-id fight)."""
+    if isinstance(exc, ConnectionRefusedError):
+        return True
+    errno = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+    if errno in (10061, 1225, 111, 61):
+        return True
+    text = str(exc).lower()
+    return (
+        "10061" in text
+        or "1225" in text
+        or "connection refused" in text
+        or "refused the network" in text
+        or "connect call failed" in text
+    )
+
+
 # ============================================================
 # ORDER STATE TRACKING
 # ============================================================
@@ -221,6 +238,7 @@ class IBKRQueriesMixin:
                 for av in account_values:
                     if av.tag in target_tags and av.currency == 'USD':
                         result[av.tag.lower()] = float(av.value)
+                self._apply_req_pnl(result)
                 return result
         except Exception as e:
             logger.error(f"Failed to get account summary: {e}")
@@ -486,10 +504,14 @@ class IBKRQueriesMixin:
             logger.warning("IBKR live quote failed for %s: %s", sym, exc)
             return {"error": str(exc), "source": "ibkr", "symbol": sym}
         finally:
-            try:
-                self.ib.cancelMktData(contract)
-            except Exception:
+            con_id = int(getattr(contract, "conId", 0) or 0)
+            if con_id and con_id in getattr(self, "_book_subs", {}):
                 pass
+            else:
+                try:
+                    self.ib.cancelMktData(contract)
+                except Exception:
+                    pass
 
 
 # Import mixins after defining base classes to avoid circular imports
@@ -543,6 +565,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         # Connection state
         self.ib = IB()
         self._connected = False
+        self._connect_block = ""
         self.account_id: Optional[str] = None
         self.account_name: Optional[str] = None
         self.net_liquidation: float = 0.0
@@ -552,6 +575,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
 
         # Active streaming subscriptions: symbol -> ticker (legacy; no public subscribe API)
         self._tickers: Dict[str, Any] = {}
+        self._pnl: Any = None
 
         # Background heartbeat task
         self._heartbeat_task: Optional[asyncio.Task] = None
@@ -568,6 +592,8 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         self._disconnect_since: Optional[float] = None
         self._disconnect_halt_fired: bool = False
         self._reconnect_attempt: int = 0
+        self._ibkr_data_stale: bool = False
+        self._book_subs: Dict[int, Any] = {}
 
         # Execution tracking - stores ALL fills with actual prices
         # Key: symbol, Value: list of execution records
@@ -699,24 +725,25 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         """Handle IBKR error/warning events. Suppress noisy codes to DEBUG."""
         lifecycle = classify_error_code(errorCode)
         if lifecycle == "tws_lost":
-            self._disconnect_cause = DisconnectCause.TWS_RESTART.value
-            self._connected = False
-            self._reconnect_requested = True
+            self._ibkr_data_stale = True
             logger.warning(
-                f"IBKR connectivity lost [{errorCode}]: {errorString} — scheduling reconnect"
+                f"IBKR↔TWS link lost [{errorCode}]: {errorString} — "
+                "keep API socket; no new IB()"
             )
-            self._schedule_reconnect(DisconnectCause.TWS_RESTART.value)
             return
         if lifecycle == "tws_restored":
+            self._ibkr_data_stale = False
             logger.info(
                 f"IBKR connectivity restored [{errorCode}]: {errorString}"
                 + (" (data lost)" if errorCode == 1101 else "")
             )
-            self._reconnect_requested = True
-            self._schedule_reconnect(DisconnectCause.TWS_RESTART.value)
             return
         if lifecycle == "farm_ok":
             logger.debug(f"IBKR data farm OK [{errorCode}]: {errorString}")
+            return
+        if errorCode == 10141 or "disclaimer must first be accepted" in str(errorString or "").lower():
+            self._connect_block = "paper_disclaimer"
+            logger.error("IBKR paper API disclaimer not accepted — stop walking client ids")
             return
 
         msg_l = str(errorString or "").lower()
@@ -1049,6 +1076,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
 
         if self.connected:
             return True
+        self._connect_block = ""
 
         try:
             self._loop = asyncio.get_running_loop()
@@ -1118,6 +1146,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
                             # Fetch account values
                             await self._update_account_values()
                             self._refresh_account_identity()
+                            self._subscribe_account_pnl()
 
                         self._last_heartbeat_ok = time.time()
                         self._heartbeat_failures = 0
@@ -1137,6 +1166,18 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
                     raise
                 except Exception as e:
                     logger.warning(f"Connection attempt {attempt + 1} failed: {e}")
+                    if self._connect_block == "paper_disclaimer":
+                        logger.error(
+                            "IBKR paper disclaimer blocks API — accept it in TWS, then retry"
+                        )
+                        return False
+                    if port_is_closed(e):
+                        logger.error(
+                            "IBKR port %s refused — TWS/Gateway is not listening "
+                            "(not a client-id conflict)",
+                            self.port,
+                        )
+                        return False
 
                 if attempt < max_retries - 1:
                     await _safe_sleep(2)
@@ -1144,6 +1185,41 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
             logger.error(f"Failed to connect after {max_retries} attempts")
             return False
 
+
+    def _subscribe_account_pnl(self) -> None:
+        """TWS Daily P&L comes from reqPnL, not the accountValues DailyPnL tag."""
+        if not self.account_id:
+            return
+        try:
+            self._cancel_account_pnl()
+            self._pnl = self.ib.reqPnL(self.account_id)
+        except Exception:
+            logger.debug("reqPnL subscribe failed", exc_info=True)
+            self._pnl = None
+
+    def _cancel_account_pnl(self) -> None:
+        pnl = getattr(self, "_pnl", None)
+        self._pnl = None
+        if pnl is None or not self.account_id:
+            return
+        try:
+            self.ib.cancelPnL(self.account_id)
+        except Exception:
+            logger.debug("cancelPnL failed", exc_info=True)
+
+    def _apply_req_pnl(self, result: dict[str, Any]) -> dict[str, Any]:
+        pnl = getattr(self, "_pnl", None)
+        if pnl is None:
+            return result
+        raw = getattr(pnl, "dailyPnL", None)
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return result
+        if val != val:
+            return result
+        result["dailypnl"] = val
+        return result
 
     def _refresh_account_identity(self) -> None:
         """Best-effort account display name from IBKR accountValues tags."""
@@ -1193,6 +1269,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
                 except Exception:
                     pass
             self._tickers.clear()
+            self._cancel_account_pnl()
 
             self.ib.disconnect()
             self.connected = False
@@ -1474,6 +1551,42 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         return result
 
     # ========== HEARTBEAT ==========
+
+    async def ensure_book_ticks(self, positions: list | None) -> None:
+        """Keep streaming ticks for open lots. Cancel only when the lot is gone."""
+        if not self.connected or self.ib is None:
+            return
+        want: Dict[int, Any] = {}
+        for p in positions or []:
+            if not isinstance(p, dict):
+                continue
+            try:
+                cid = int(p.get("conId") or p.get("con_id") or 0)
+            except (TypeError, ValueError):
+                cid = 0
+            if cid <= 0:
+                continue
+            want[cid] = p
+        gone = [cid for cid in list(self._book_subs) if cid not in want]
+        for cid in gone:
+            contract = self._book_subs.pop(cid, None)
+            try:
+                if contract is not None:
+                    self.ib.cancelMktData(contract)
+            except Exception:
+                pass
+        for cid, p in want.items():
+            if cid in self._book_subs:
+                continue
+            try:
+                from ib_insync import Contract
+
+                c = Contract(conId=cid, exchange="SMART", currency="USD")
+                await self.ib.qualifyContractsAsync(c)
+                self.ib.reqMktData(c, "", False, False)
+                self._book_subs[cid] = c
+            except Exception:
+                logger.debug("book tick subscribe failed conId=%s", cid, exc_info=True)
 
     def _heartbeat_interval_s(self) -> float:
         """Fast poll when unhealthy; slow when connected."""

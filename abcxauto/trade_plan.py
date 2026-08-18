@@ -866,27 +866,133 @@ def open_position_count(positions: list[dict] | None) -> int:
     return n
 
 
+def _held_conids(positions: list[dict] | None) -> set[str]:
+    out: set[str] = set()
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            qty = float(
+                p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0
+            )
+        except (TypeError, ValueError):
+            continue
+        if qty == 0:
+            continue
+        cid = str(p.get("conId") or p.get("con_id") or "").strip()
+        if cid:
+            out.add(cid)
+    return out
+
+
+def _held_stk_symbols(positions: list[dict] | None) -> set[str]:
+    out: set[str] = set()
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        sec = str(p.get("secType") or p.get("sec_type") or "STK").upper()
+        if not (sec.startswith("STK") or sec == "ETF"):
+            continue
+        try:
+            qty = float(
+                p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0
+            )
+        except (TypeError, ValueError):
+            continue
+        if qty == 0:
+            continue
+        sym = str(p.get("symbol") or "").upper()
+        if sym:
+            out.add(sym)
+    return out
+
+
+def working_entry_slots(
+    orders: list[dict] | None,
+    positions: list[dict] | None = None,
+) -> int:
+    """Slots reserved by working new-risk tickets (fill-lag ≠ free capacity).
+
+    Protective stops and exits on held lots do not reserve. BAG reserves one
+    slot per combo leg (default 2 when legs are missing).
+    """
+    held_con = _held_conids(positions)
+    held_stk = _held_stk_symbols(positions)
+    seen: set[tuple] = set()
+    slots = 0
+    for o in orders or []:
+        if not isinstance(o, dict):
+            continue
+        if _is_protective_stop_type(_order_type(o)):
+            continue
+        cid = str(o.get("conId") or o.get("con_id") or "").strip()
+        if cid and cid in held_con:
+            continue
+        sec = str(o.get("sec_type") or o.get("secType") or "STK").upper()
+        sym = _order_symbol(o)
+        if (sec.startswith("STK") or sec == "ETF") and sym and sym in held_stk:
+            continue
+        if sec == "BAG":
+            oid = _order_id(o)
+            parent = o.get("parent_id") if o.get("parent_id") is not None else o.get("parentId")
+            try:
+                parent_i = int(parent) if parent is not None else None
+            except (TypeError, ValueError):
+                parent_i = None
+            key = ("bag", parent_i if parent_i is not None else oid, sym)
+            if key in seen:
+                continue
+            seen.add(key)
+            legs = o.get("combo_legs") or o.get("comboLegs") or []
+            try:
+                n = int(o.get("reserved_slots") or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n <= 0:
+                n = len(legs) if isinstance(legs, list) and legs else 2
+            slots += max(1, n)
+            continue
+        strike = o.get("strike")
+        right = str(o.get("right") or "").upper()[:1]
+        exp = str(o.get("expiration") or o.get("lastTradeDateOrContractMonth") or "")
+        key = ("lot", sym, sec, strike, right, exp)
+        if key in seen:
+            continue
+        seen.add(key)
+        slots += 1
+    return slots
+
+
 def capacity_fact(
     positions: list[dict] | None,
     *,
     max_open_positions: int = 0,
+    open_orders: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """Fact: slots used vs max_open_positions (0 max = unlimited)."""
+    """Fact: filled lots + working entries vs max_open_positions (0 max = unlimited)."""
     used = open_position_count(positions)
+    pending = working_entry_slots(open_orders, positions)
+    charged = used + pending
     max_n = int(max_open_positions or 0)
     if max_n <= 0:
         return {
             "open_count": used,
+            "pending_entries": pending,
             "max_open_positions": 0,
             "slots_left": None,
             "allows_new_risk": True,
             "note": "max_open_positions disabled (unlimited capacity Fact)",
         }
-    left = max(0, max_n - used)
+    left = max(0, max_n - charged)
+    note = f"{used}/{max_n} open"
+    if pending:
+        note += f" + {pending} working-entry"
+    note += f"; {left} slot(s) for new risk"
     return {
         "open_count": used,
+        "pending_entries": pending,
         "max_open_positions": max_n,
         "slots_left": left,
         "allows_new_risk": left > 0,
-        "note": f"{used}/{max_n} open; {left} slot(s) for new risk",
+        "note": note,
     }

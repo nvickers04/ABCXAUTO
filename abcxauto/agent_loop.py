@@ -52,14 +52,13 @@ _HUNT_OPTION_ENTRIES = frozenset(_OPTION_ENTRY_ACTIONS.split("|"))
 AWARENESS_HEART = (
     "\n=== SHELL ===\n"
     "Orders: ORDER EXAMPLES only. Close STK by conId. "
-    "Hold forbidden while unprotected STK, and while paper+flat+RTH idle (code). "
+    "Hold forbidden while unprotected STK (code). "
     "Risk gates and defined_risk_only cannot be bypassed. "
     "self_tune cannot weaken the immutable floor.\n"
 )
 TWEAKS: Dict[str, Any] = {"max_risk_pct": 0.5}
 RULES = AWARENESS_HEART
 SNAP_S = 25.0
-_GROK_SESSIONS = frozenset({"premarket", "regular", "postmarket"})
 _HIST_KEYS = (
     "cycle", "pnl", "pnl_chg", "reality_pulse",
     "result", "inventory",
@@ -72,13 +71,11 @@ _NEW_RISK = frozenset(_OPTION_ENTRY_ACTIONS.split("|")) | frozenset(
 
 
 def pnl_of(acct: dict) -> float:
-    for k in ("unrealizedpnl", "dailypnl", "netliquidation"):
-        try:
-            if acct.get(k) is not None:
-                return float(acct[k])
-        except (TypeError, ValueError):
-            pass
-    return 0.0
+    """Desktop / cycle Day PnL = IBKR DailyPnL. Not unrealized vs avg cost, not NL."""
+    from abcxauto.world_state import daily_pnl_of
+
+    v = daily_pnl_of(acct)
+    return float(v) if v is not None else 0.0
 
 
 def equity_of(acct: dict) -> float:
@@ -245,24 +242,32 @@ async def snap(c: Any) -> dict:
         vix = {}
     pl = pos if isinstance(pos, list) else []
     ol = orders if isinstance(orders, list) else []
+    acct_d = acct if isinstance(acct, dict) else {}
+    try:
+        acct_nl = float(
+            acct_d.get("netliquidation") or acct_d.get("NetLiquidation") or 0
+        )
+    except (TypeError, ValueError):
+        acct_nl = 0.0
+    acct_ok = acct_nl > 0
     taken = datetime.now(timezone.utc).isoformat()
     protection = build_protection_report(pl, ol)
     base = {
         "taken_at": taken,
-        "account": acct if isinstance(acct, dict) else {},
+        "account": acct_d,
         "positions": pl, "open_orders": ol,
         "market_hours": hours if isinstance(hours, dict) else {},
         "spy_quote": spy if isinstance(spy, dict) else {},
         "vix_quote": vix if isinstance(vix, dict) else {},
         "protection": protection,
-        "book_unreliable": not (pos_ok and ord_ok),
+        "book_unreliable": not (pos_ok and ord_ok and acct_ok),
         "ibkr_live_quotes": _seed_live_quotes(spy, vix),
     }
     base["reality_pulse"] = build_reality_pulse(
         account=base["account"], positions=pl, open_orders=ol,
         market_hours=base["market_hours"], spy_quote=base["spy_quote"],
         vix_quote=base["vix_quote"], protection=protection,
-        ibkr_connected=bool(getattr(c, "connected", True)), taken_at=taken,
+        ibkr_connected=bool(getattr(c, "connected", False)), taken_at=taken,
     )
     fills: list = []
     get_fills = getattr(c, "get_fills", None)
@@ -274,6 +279,27 @@ async def snap(c: Any) -> dict:
         except Exception:
             logger.debug("snap fills failed", exc_info=True)
     base["fills"] = fills
+    if any(
+        str(p.get("secType") or p.get("sec_type") or "").upper() in ("OPT", "FOP")
+        for p in pl
+        if isinstance(p, dict)
+    ):
+        try:
+            from abcxauto.option_facts import fetch_option_facts
+
+            facts = await asyncio.wait_for(
+                fetch_option_facts(pl, connector=c), timeout=8.0
+            )
+            if isinstance(facts, list):
+                base["option_facts"] = facts
+        except Exception:
+            logger.debug("snap option_facts failed", exc_info=True)
+    keep = getattr(c, "ensure_book_ticks", None)
+    if callable(keep) and pl:
+        try:
+            await asyncio.wait_for(keep(pl), timeout=5.0)
+        except Exception:
+            logger.debug("ensure_book_ticks failed", exc_info=True)
     base["portfolio_state"] = build_book_from_snap(base)
     return base
 
@@ -330,19 +356,6 @@ def _prepare_close_params(act: dict, positions: list) -> None:
         act["params"].setdefault("action", "SELL" if signed > 0 else "BUY")
 
 
-def _cfg_is_paper() -> bool:
-    try:
-        cfg = get_config()
-    except Exception:
-        return True
-    if hasattr(cfg, "is_paper"):
-        try:
-            return bool(cfg.is_paper)
-        except Exception:
-            pass
-    return str(getattr(cfg, "trading_mode", "paper") or "paper").lower() != "live"
-
-
 def _new_risk_halted(world: WorldState) -> bool:
     gates = world.gates if isinstance(world.gates, dict) else {}
     if gates.get("halted") or gates.get("is_halted"):
@@ -358,40 +371,18 @@ def _new_risk_halted(world: WorldState) -> bool:
         return False
 
 
-def _wake_grok_for_session(session: str, *, needs_prot: bool) -> bool:
-    """Overnight/weekend closed skips Grok. Premarket and postmarket wake it."""
+def _wake_grok_for_session(
+    session: str,
+    *,
+    needs_prot: bool,
+    countdown_s: float | None = None,
+    countdown_to: str = "",
+) -> bool:
+    """Unprotected always. Regular and premarket if Grok is due. Not overnight closed."""
     if needs_prot:
         return True
-    return str(session or "").lower() in _GROK_SESSIONS
-
-
-def paper_hold_forbidden(world: WorldState) -> bool:
-    """Paper lab, flat, RTH, can take new risk: sitting in cash is not a tactic.
-
-    Hold stays valid on live, with an open protected book, outside regular hours,
-    while halted, while flat-unconfirmed, or while unprotected STK must be covered.
-    """
-    if not _cfg_is_paper():
-        return False
-    if world.needs_protection:
-        return False
-    if not world.flat:
-        return False
-    if str(world.session_status or "").lower() != "regular":
-        return False
-    if _book_unreliable(world):
-        return False
-    if _new_risk_halted(world):
-        return False
-    try:
-        from abcxauto.trade_plan import load_flat_streak
-
-        if load_flat_streak() > 0:
-            return False
-    except Exception:
-        pass
-    return True
-
+    sess = str(session or "").lower()
+    return sess in ("regular", "premarket")
 
 
 def _book_unreliable(world: WorldState | None = None, snap: dict | None = None) -> bool:
@@ -415,6 +406,7 @@ _WORK_TOOLS = frozenset({
     "fills",
     "news",
     "candles",
+    "odds",
     "status",
     "self_tune",
     "write_lab_playbook",
@@ -449,14 +441,6 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
             "status": "blocked",
             "note": "hold_forbidden - unprotected STK needs protection",
         }
-    if strat == "hold" and paper_hold_forbidden(world):
-        return BLOCKED_STRAT, {
-            "status": "blocked",
-            "note": (
-                "hold_forbidden - paper flat RTH: hunt, self_tune, or "
-                "write_lab_playbook — do not idle (live may hold)"
-            ),
-        }
     if is_new_risk(strat):
         if _book_unreliable(world):
             return BLOCKED_STRAT, {
@@ -483,18 +467,18 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
                 "status": "blocked",
                 "note": "capacity full — no new risk (max_open_positions)",
             }
-        from abcxauto.universe import is_legal_symbol
-
         sym = str(((act.get("params") or {}).get("symbol") or "")).upper()
         if not sym:
             return BLOCKED_STRAT, {
                 "status": "blocked",
                 "note": "new risk requires params.symbol",
             }
-        if not is_legal_symbol(sym):
+        cool = getattr(world, "structure_cooldown", None) or {}
+        if isinstance(cool, dict) and sym in cool:
+            why = cool.get(sym) or "scrape/geometry"
             return BLOCKED_STRAT, {
                 "status": "blocked",
-                "note": f"hunt symbol {sym} outside Universe sandbox",
+                "note": f"structure cooldown {sym}: {why}",
             }
         from abcxauto.lab_playbook import live_new_risk_allowed
 
@@ -503,15 +487,6 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
                 "status": "blocked",
                 "note": "live follower — no promoted paper playbook (no new risk)",
             }
-    from abcxauto.structure_complexity import strategy_allowed
-
-    if strat not in ("hold", "set_risk", "self_tune", BLOCKED_STRAT) and not strategy_allowed(strat):
-        from abcxauto.structure_complexity import reject_reason
-
-        return BLOCKED_STRAT, {
-            "status": "blocked",
-            "note": reject_reason(strat) or f"Controls allowlist blocks strategy {strat!r}",
-        }
     return strat, None
 
 
@@ -824,7 +799,7 @@ async def _collapse_stacked_exits_after_snap(c: Any, s: dict) -> None:
                 spy_quote=s.get("spy_quote") or {},
                 vix_quote=s.get("vix_quote") or {},
                 protection=s["protection"],
-                ibkr_connected=bool(getattr(c, "connected", True)),
+                ibkr_connected=bool(getattr(c, "connected", False)),
                 taken_at=str(s.get("taken_at") or ""),
             )
         except Exception:
@@ -870,9 +845,15 @@ async def run_cycle(
     acct = s.get("account") or {}
     pnl, eq = pnl_of(acct), equity_of(acct)
     inventory = format_position_inventory(positions)
-    session = str((pulse.get("session") or {}).get("status") or "").lower()
+    sess_block = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
+    session = str(sess_block.get("status") or "").lower()
+    try:
+        countdown_s = float(sess_block["countdown_s"]) if sess_block.get("countdown_s") is not None else None
+    except (TypeError, ValueError):
+        countdown_s = None
+    countdown_to = str(sess_block.get("countdown_to") or "")
     needs_prot = bool((s.get("protection") or {}).get("unprotected_symbols"))
-    ibkr_up = bool(getattr(c, "connected", True))
+    ibkr_up = bool(getattr(c, "connected", False))
 
     if not ibkr_up:
         act = {
@@ -904,16 +885,25 @@ async def run_cycle(
         _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
         return _persist_cycle(out)
 
-    if not _wake_grok_for_session(session, needs_prot=needs_prot):
+    if not _wake_grok_for_session(
+        session,
+        needs_prot=needs_prot,
+        countdown_s=countdown_s,
+        countdown_to=countdown_to,
+    ):
+        if session in ("", "closed"):
+            why = "session_closed"
+        else:
+            why = "session_extended"
         act = {
             "action": "skipped", "strategy": "skipped",
-            "rationale": "skipped_grok: session_closed",
+            "rationale": f"skipped_grok: {why}",
         }
         out = _result_dict(
             n=n, s=s, act=act, strat="skipped",
-            result={"status": "skipped", "note": "skipped_grok: session_closed"},
+            result={"status": "skipped", "note": f"skipped_grok: {why}"},
             pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-            validation="skipped_grok: session_closed",
+            validation=f"skipped_grok: {why}",
         )
         _journal_stages(out, act, s, None)
         _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
@@ -962,6 +952,22 @@ async def run_cycle(
         day=day,
     )
     think_emit("say", "Wake Grok.\n")
+    try:
+        from abcxauto.think_stream import write_last_turn
+
+        write_last_turn({
+            "cycle": n,
+            "strat": "in_progress",
+            "rationale": "grok_turn",
+            "validation": "",
+            "book_unreliable": bool(s.get("book_unreliable")),
+            "sends": 0,
+            "positions": list(world.positions or []),
+            "reality_pulse": s.get("reality_pulse") or {},
+            "world_state": world_dict,
+        })
+    except Exception:
+        logger.debug("in-progress last_turn write failed", exc_info=True)
 
     try:
         turn = await grok_turn(g, connector=c, world=world, snap=s, wake=wake)
@@ -986,7 +992,12 @@ async def run_cycle(
     result = dict(turn.last_result or {})
     strat = str(turn.last_strat or act.get("strategy") or "hold")
     if not turn.sends and strat not in (BLOCKED_STRAT, "blocked"):
-        if turn_did_work(turn):
+        wrote = bool(getattr(turn, "lab_playbook", None))
+        if wrote:
+            strat = "hold"
+            act = act or {"action": "hold", "strategy": "hold", "rationale": "playbook write"}
+            result = {"status": "hold", "strategy": "hold"}
+        elif turn_did_work(turn):
             strat = "hold"
             act = act or {"action": "hold", "strategy": "hold", "rationale": "no send"}
             result = {"status": "hold", "strategy": "hold"}
@@ -1021,6 +1032,7 @@ async def run_cycle(
         stage_error=tool_note,
     )
     out["tool_trace"] = list(turn.tool_trace or [])
+    out["sends"] = len(turn.sends or [])
     if turn.sends:
         for item in turn.sends:
             _journal_stages(

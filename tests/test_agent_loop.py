@@ -11,7 +11,6 @@ from abcxauto.agent_loop import (
     _wake_grok_for_session,
     gate_ticket,
     normalize_action,
-    paper_hold_forbidden,
     run_cycle,
     snap,
     stance_from_book,
@@ -119,6 +118,7 @@ def _stub_config(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "journal.db"))
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     from abcxauto.memory import reset_journal
 
     reset_journal(path=str(tmp_path / "journal.db"), enabled=True)
@@ -165,8 +165,7 @@ async def test_paper_flat_rth_blocks_hold(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", fake_grok_turn(_hold_act()))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "blocked"
-    assert "hold_forbidden" in str(out["result"].get("note") or "").lower()
+    assert out["strat"] == "hold"
     assert send_calls == []
 
 
@@ -174,6 +173,8 @@ def test_brain_system_has_order_examples():
     text = brain_system_prompt().lower()
     assert "order examples" in text
     assert "clock in" not in text
+    assert "mandate:" not in text
+    assert "the operator gives" not in text
 
 
 def test_normalize_noop_to_hold():
@@ -226,42 +227,21 @@ def test_unprotected_blocks_hold_and_new_risk():
     assert "protect" in str(forced2.get("note") or "").lower()
 
 
-def test_paper_hold_forbidden_flat_rth(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: SimpleNamespace(is_paper=True, trading_mode="paper"),
-    )
-    assert paper_hold_forbidden(_world(flat=True, session_status="regular")) is True
-
-
-def test_live_may_hold_when_flat(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: SimpleNamespace(is_paper=False, trading_mode="live"),
-    )
-    assert paper_hold_forbidden(_world(flat=True, session_status="regular")) is False
-
-
-def test_paper_hold_allowed_open_book_or_closed(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: SimpleNamespace(is_paper=True, trading_mode="paper"),
-    )
-    assert paper_hold_forbidden(_world(flat=False, session_status="regular")) is False
-    assert paper_hold_forbidden(_world(flat=True, session_status="closed")) is False
-    assert paper_hold_forbidden(_world(flat=True, session_status="premarket")) is False
-    assert paper_hold_forbidden(
-        _world(flat=True, session_status="regular", needs_protection=True)
-    ) is False
+def test_paper_may_hold_when_flat_rth(monkeypatch):
+    world = _world(flat=True, session_status="regular")
+    strat, forced = gate_ticket(_hold_act(), world)
+    assert strat == "hold"
+    assert forced is None
 
 
 def test_wake_grok_for_session():
     assert _wake_grok_for_session("premarket", needs_prot=False) is True
     assert _wake_grok_for_session("regular", needs_prot=False) is True
-    assert _wake_grok_for_session("postmarket", needs_prot=False) is True
+    assert _wake_grok_for_session("postmarket", needs_prot=False) is False
     assert _wake_grok_for_session("closed", needs_prot=False) is False
     assert _wake_grok_for_session("", needs_prot=False) is False
     assert _wake_grok_for_session("closed", needs_prot=True) is True
+    assert _wake_grok_for_session("premarket", needs_prot=True) is True
 
 
 @pytest.mark.asyncio
@@ -324,6 +304,41 @@ async def test_run_cycle_skips_when_book_unreliable(monkeypatch):
     assert called == []
 
 
+@pytest.mark.asyncio
+async def test_snap_empty_account_is_unreliable(monkeypatch):
+    async def no_nl(_c, name: str, _a=None):
+        if name == "account_summary":
+            return {}
+        return await _fake_tool(_c, name, _a)
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", no_nl)
+    out = await snap(FakeConnector())
+    assert out["book_unreliable"] is True
+
+
+@pytest.mark.asyncio
+async def test_snap_loads_option_facts_for_open_legs(monkeypatch):
+    async def with_opt(_c, name: str, _a=None):
+        if name == "positions":
+            return [{
+                "symbol": "SPY",
+                "secType": "OPT",
+                "quantity": 1,
+                "strike": 500,
+                "right": "C",
+                "expiration": "20260821",
+            }]
+        return await _fake_tool(_c, name, _a)
+
+    async def fake_facts(_positions, **_k):
+        return [{"symbol": "SPY", "source": "snap"}]
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", with_opt)
+    monkeypatch.setattr("abcxauto.option_facts.fetch_option_facts", fake_facts)
+    out = await snap(FakeConnector())
+    assert out["option_facts"][0]["symbol"] == "SPY"
+
+
 def test_new_risk_blocked_when_book_unreliable():
     world = _world(flat=False, gates={"book_unreliable": True})
     strat, forced = gate_ticket(
@@ -336,7 +351,6 @@ def test_new_risk_blocked_when_book_unreliable():
     )
     assert strat == "blocked"
     assert "unreliable" in str(forced.get("note") or "").lower()
-    assert paper_hold_forbidden(_world(flat=True, gates={"book_unreliable": True})) is False
 
 
 def test_stance_from_book():
@@ -389,7 +403,7 @@ async def test_paper_flat_rth_implicit_hold_after_tools(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_paper_flat_rth_idle_still_forbidden(monkeypatch):
+async def test_paper_flat_rth_hold_is_allowed(monkeypatch):
     from abcxauto.brain import BrainTurn
 
     async def idle(*_a, **_k):
@@ -401,6 +415,59 @@ async def test_paper_flat_rth_idle_still_forbidden(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", idle)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "blocked"
-    assert "hold_forbidden" in str(out["result"].get("note") or "").lower()
-    assert "do not idle" in str(out["result"].get("note") or "").lower()
+    assert out["strat"] == "hold"
+
+
+def test_stale_playbook_is_not_a_hold_gate(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.lab_playbook import save_lab
+
+    save_lab(
+        {
+            "mode": "explore",
+            "instructions": "Debit verticals only.",
+            "do_more": "verticals",
+            "stop_doing": "lottery calls",
+            "ready_to_promote": False,
+        }
+    )
+    lab = __import__("json").loads((tmp_path / "lab.json").read_text(encoding="utf-8"))
+    lab["written_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    (tmp_path / "lab.json").write_text(__import__("json").dumps(lab), encoding="utf-8")
+    strat, forced = gate_ticket(_hold_act(), _world(flat=False, session_status="regular"))
+    assert strat == "hold"
+    assert forced is None
+
+
+@pytest.mark.asyncio
+async def test_stale_playbook_tool_tour_is_not_work(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.brain import BrainTurn
+    from abcxauto.lab_playbook import save_lab
+
+    save_lab(
+        {
+            "mode": "explore",
+            "instructions": "Debit verticals only.",
+            "do_more": "verticals",
+            "stop_doing": "lottery calls",
+            "ready_to_promote": False,
+        }
+    )
+    lab = __import__("json").loads((tmp_path / "lab.json").read_text(encoding="utf-8"))
+    lab["written_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    (tmp_path / "lab.json").write_text(__import__("json").dumps(lab), encoding="utf-8")
+
+    async def worked(*_a, **_k):
+        return BrainTurn(
+            last_act={"action": "hold", "strategy": "hold", "rationale": "no send"},
+            last_strat="hold",
+            last_result={"status": "hold", "strategy": "hold"},
+            tool_trace=["book", "scan", "quote"],
+        )
+
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", worked)
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert out["strat"] == "hold"

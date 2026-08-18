@@ -158,16 +158,8 @@ def build_book(
     open_orders = open_orders if isinstance(open_orders, list) else []
     protection = protection if isinstance(protection, dict) else {}
 
-    mandate_summary = ""
-    try:
-        from abcxauto.config import get_config
-
-        mandate_summary = (get_config().trading_mandate or "")[:240]
-    except Exception:
-        mandate_summary = ""
-
     net_liq = _account_float(account, "netliquidation", "NetLiquidation")
-    daily_pnl = _account_float(account, "dailypnl", "DailyPnL", "unrealizedpnl")
+    daily_pnl = _account_float(account, "dailypnl", "DailyPnL")
     daily_pnl_pct: Optional[float] = None
     if net_liq is not None and net_liq != 0 and daily_pnl is not None:
         try:
@@ -180,7 +172,6 @@ def build_book(
     recent_decisions, working_thesis = _journal_memory_bits()
 
     state: Dict[str, Any] = {
-        "mandate_summary": mandate_summary,
         "net_liq": net_liq,
         "daily_pnl": daily_pnl,
         "daily_pnl_pct": daily_pnl_pct,

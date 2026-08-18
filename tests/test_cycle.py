@@ -59,13 +59,13 @@ async def _fake_tool_closed(_c, name: str, _a=None):
     }.get(name, {})
 
 
-async def _fake_tool_session(session: str):
+async def _fake_tool_session(session: str, minutes_to_open: int = 80):
     async def _tool(_c, name: str, _a=None):
         return {
             "account_summary": {"netliquidation": 1000, "unrealizedpnl": 5},
             "positions": [],
             "open_orders": [],
-            "market_hours": {"session": session, "minutes_to_open": 80},
+            "market_hours": {"session": session, "minutes_to_open": minutes_to_open},
             "quote": {"symbol": "SPY", "last": 500},
         }.get(name, {})
 
@@ -159,6 +159,7 @@ def _reset_cadence(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "review.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "journal.db"))
+    monkeypatch.setenv("ABCXAUTO_PREMARKET_WAKE_PATH", str(tmp_path / "pm.json"))
     from abcxauto.memory import reset_journal
     from abcxauto.world_state import reset_idle_streak
 
@@ -189,8 +190,8 @@ async def test_snap_with_fake_connector(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_paper_flat_rth_blocks_hold(monkeypatch):
-    """Paper lab while flat in RTH cannot sit — hold is live-only / open-book."""
+async def test_run_cycle_paper_flat_rth_may_hold(monkeypatch):
+    """Hold is allowed. Unprotected STK is the only hold block."""
     before = dict(TWEAKS)
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr(
@@ -213,8 +214,7 @@ async def test_run_cycle_paper_flat_rth_blocks_hold(monkeypatch):
     try:
         hist = []
         out = await run_cycle(1, FakeConnector(), None, hist, 0.0)
-        assert out["strat"] == "blocked"
-        assert "hold_forbidden" in str(out["result"].get("note") or "").lower()
+        assert out["strat"] == "hold"
         assert send_calls == []
         assert prompts  # Grok woke
         from abcxauto.brain import brain_system_prompt
@@ -472,14 +472,9 @@ async def test_run_cycle_market_closed_skips_grok(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_premarket_wakes_grok(monkeypatch):
-    """Premarket is prep time — Grok runs; hold is allowed (not RTH hunt)."""
+async def test_run_cycle_premarket_last_hour_wakes_grok(monkeypatch):
     monkeypatch.setattr(
-        "abcxauto.agent_loop._tool", await _fake_tool_session("premarket")
-    )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(signal_only=False, grok_min_interval_s=0),
+        "abcxauto.agent_loop._tool", await _fake_tool_session("premarket", minutes_to_open=40)
     )
     wakes: list[str] = []
     act = {"action": "hold", "strategy": "hold", "rationale": "premarket tape"}
@@ -494,19 +489,38 @@ async def test_run_cycle_premarket_wakes_grok(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_postmarket_wakes_grok(monkeypatch):
+async def test_run_cycle_premarket_wakes_grok(monkeypatch):
     monkeypatch.setattr(
-        "abcxauto.agent_loop._tool", await _fake_tool_session("postmarket")
+        "abcxauto.agent_loop._tool", await _fake_tool_session("premarket")
     )
     wakes: list[str] = []
-    act = {"action": "hold", "strategy": "hold", "rationale": "postmarket book"}
+    act = {"action": "hold", "strategy": "hold", "rationale": "premarket tape"}
     monkeypatch.setattr(
         "abcxauto.agent_loop.grok_turn",
         _pja_grok(act, prompts=wakes),
     )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert wakes
+    assert "session=premarket" in wakes[0]
     assert out["strat"] == "hold"
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_postmarket_skips_grok(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.agent_loop._tool", await _fake_tool_session("postmarket")
+    )
+    called: list[int] = []
+
+    async def boom(*_a, **_k):
+        called.append(1)
+        raise AssertionError("grok must not run in postmarket")
+
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", boom)
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert called == []
+    assert out["strat"] == "skipped"
+    assert "session_extended" in (out.get("validation") or "")
 
 
 @pytest.mark.asyncio
@@ -761,7 +775,9 @@ def test_tweaks_static_safety_defaults():
 
 
 def test_pnl_and_equity():
-    assert pnl_of({"unrealizedpnl": -12.5}) == -12.5
+    assert pnl_of({"dailypnl": -12.5, "unrealizedpnl": 99.0}) == -12.5
+    assert pnl_of({"dailypnl": 0.0, "unrealizedpnl": -99.0}) == 0.0
+    assert pnl_of({"unrealizedpnl": -12.5}) == 0.0
     assert equity_of({"netliquidation": 50000}) == 50000.0
 
 
@@ -782,7 +798,8 @@ def test_config_cadence_defaults(monkeypatch):
     cfg = get_config()
     assert cfg.cycle_sleep_s == 15.0
     assert cfg.grok_min_interval_s == 15.0
-    assert "operator gives no strategy" in cfg.trading_mandate.lower()
+    assert "invent strategy on paper" in cfg.trading_mandate.lower()
     assert "promoted" in cfg.trading_mandate.lower()
+    assert "operator gives" not in cfg.trading_mandate.lower()
     assert "cycle_sleep_s" in Config.__dataclass_fields__
     get_config.cache_clear()

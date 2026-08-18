@@ -53,11 +53,6 @@ def _world(**kwargs) -> WorldState:
     return WorldState(**base)
 
 
-@pytest.fixture(autouse=True)
-def _legal(monkeypatch):
-    monkeypatch.setattr("abcxauto.brain.filter_to_legal", lambda s: list(s or []))
-
-
 def test_agent_tools_cover_ibkr_and_mda():
     names = _tool_names()
     assert {
@@ -66,16 +61,20 @@ def test_agent_tools_cover_ibkr_and_mda():
         "quote",
         "fills",
         "news",
+        "odds",
         "scan",
         "candles",
         "option_chain",
         "option_quote",
         "option_facts",
         "send",
-        "universe",
-        "journal",
+        "playbook",
         "write_lab_playbook",
+        "set_wake",
     } <= names
+    assert "journal" not in names
+    assert "universe" not in names
+    assert "strategies" not in names
 
 
 def test_quote_from_ticker_skips_nan():
@@ -412,42 +411,37 @@ async def test_quote_batch_stashes_each_symbol():
 
 
 @pytest.mark.asyncio
-async def test_universe_tool(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.universe.legal_symbols",
-        lambda **_k: ["SPY", "QQQ", "IWM"],
-    )
-    monkeypatch.setattr(
-        "abcxauto.universe.load_allowlist",
-        lambda: {"enabled_arenas": ["mega_cap"], "custom_symbols": [], "exclude_symbols": []},
+async def test_playbook_tool_returns_current_and_ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    from abcxauto.lab_playbook import save_lab
+
+    save_lab(
+        {
+            "mode": "explore",
+            "instructions": "Standing notes for the lab.",
+            "do_more": "size",
+            "stop_doing": "clones",
+            "ready_to_promote": False,
+        },
+        scorecard={"beating_model": False, "edge_usd": -12.0},
     )
     data = json.loads(
-        await _run_tool("universe", {}, connector=None, world=_world(), snap={}, turn=BrainTurn())
+        await _run_tool("playbook", {}, connector=None, world=_world(), snap={}, turn=BrainTurn())
     )
-    assert data["legal_n"] == 3
-    assert "SPY" in data["legal"]
-    assert "mega_cap" in data["arenas"]
-
-
-@pytest.mark.asyncio
-async def test_journal_tool(monkeypatch):
-    class J:
-        def get_working_thesis(self):
-            return "fade extensions"
-
-        def recent_decisions(self, limit=6):
-            return [{"ts": "t", "cycle": 2, "action": "hold", "strategy": "hold", "rationale": "flat"}]
-
-        def recent_dispatches(self, limit=8):
-            return [{"ts": "t", "ok": True, "result": {"status": "ok", "strategy": "hold"}}]
-
-    monkeypatch.setattr("abcxauto.memory.get_journal", lambda: J())
-    data = json.loads(
-        await _run_tool("journal", {}, connector=None, world=_world(), snap={}, turn=BrainTurn())
+    assert data["scope"] == "lab"
+    assert "Standing notes" in data["current"]["instructions"]
+    assert data["ledger"][0]["revision"] == 1
+    full = json.loads(
+        await _run_tool(
+            "playbook",
+            {"full": True},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
     )
-    assert data["thesis"] == "fade extensions"
-    assert data["decisions"][0]["strategy"] == "hold"
-    assert data["dispatches"][0]["ok"] is True
+    assert "Standing notes" in full["current"]["instructions"]
 
 
 def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
@@ -457,7 +451,12 @@ def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
     blob = _book_payload(_world(ibkr_live_quotes={"SPY": 501.0}))
     assert isinstance(blob["world"], dict)
     assert blob["world"]["session"] == "regular"
-    assert blob["world"]["legal_sample"] == ["SPY", "QQQ"]
+    assert "legal_n" not in blob["world"]
+    assert "legal_sample" not in blob["world"]
+    assert "working_thesis" not in blob["world"]
+    assert "floor" not in blob
+    assert "operator_card" not in blob
+    assert "scorecard" not in blob
     assert blob["ibkr_live_quotes"]["SPY"] == 501.0
     dumped = json.dumps(blob["world"])
     assert "WORLDSTATE" not in dumped
@@ -470,6 +469,12 @@ def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
     assert "edge_usd" in blob["day"]
     assert "cloned" in blob["day"]
     assert list(blob.keys())[0] == "day"
+    assert "do_more" not in (blob.get("playbook") or {})
+    assert "stop_doing" not in (blob.get("playbook") or {})
+    assert "instructions" not in (blob.get("playbook") or {})
+    pb = blob.get("day", {}).get("playbook") or {}
+    assert "do_more" not in pb
+    assert "stop_doing" not in pb
 
 
 def test_book_lists_full_capacity(monkeypatch):
@@ -527,10 +532,8 @@ async def test_quote_fresh_bypasses_cache():
     assert c.calls == 1
 
 
-def test_ensure_chat_rotates():
-    from abcxauto.brain import CHAT_ROTATE_EVERY, _ensure_chat
-
-    created: list[int] = []
+def _stub_chat_client():
+    created: list[object] = []
 
     class Chat:
         def append(self, *_a, **_k):
@@ -539,7 +542,67 @@ def test_ensure_chat_rotates():
     class _ChatNS:
         @staticmethod
         def create(**_k):
-            created.append(1)
+            chat = Chat()
+            created.append(chat)
+            return chat
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+    )
+    return g, created
+
+
+def test_ensure_chat_rotates_non_episode():
+    from abcxauto.brain import _ensure_chat
+
+    g, created = _stub_chat_client()
+    first = _ensure_chat(g, kind="boot")
+    assert _ensure_chat(g, kind="alarm") is not first
+    assert _ensure_chat(g, kind="operator") is not created[1]
+    assert len(created) == 3
+
+
+def test_episode_chat_reuses_on_fill_until_max():
+    from abcxauto.brain import EPISODE_MAX, _ensure_chat, _open_wake
+    from abcxauto.wake_bus import BookEvent, note_wake
+
+    g, created = _stub_chat_client()
+    boot = _ensure_chat(g, kind="boot")
+    fill = _ensure_chat(g, kind="fill")
+    assert fill is boot
+    assert _ensure_chat(g, kind="order_change") is boot
+    assert _ensure_chat(g, kind="book_move") is boot
+    assert len(created) == 1
+    for _ in range(EPISODE_MAX):
+        _ensure_chat(g, kind="fill")
+    assert len(created) == 2
+    note_wake(BookEvent(kind="fill", detail="XLF filled"))
+    try:
+        g2, created2 = _stub_chat_client()
+        first = _open_wake(g2, "look brief")
+        second = _open_wake(g2, "delta brief")
+        assert second is first
+        assert len(created2) == 1
+    finally:
+        note_wake(None)
+
+
+def test_open_wake_is_developer_not_user():
+    from xai_sdk.chat import developer, user
+    from abcxauto.brain import _open_wake
+
+    got: list[object] = []
+
+    class Chat:
+        def append(self, msg, **_k):
+            got.append(msg)
+
+    class _ChatNS:
+        @staticmethod
+        def create(**_k):
             return Chat()
 
     g = SimpleNamespace(
@@ -548,11 +611,14 @@ def test_ensure_chat_rotates():
         temperature=0.3,
         max_tokens=256,
     )
-    first = _ensure_chat(g)
-    for _ in range(CHAT_ROTATE_EVERY - 1):
-        assert _ensure_chat(g) is first
-    assert _ensure_chat(g) is not first
-    assert len(created) == 2
+    _open_wake(g, "Cycle 1. session=regular")
+    assert got
+    assert got[0].role == developer("x").role
+    assert got[0].role != user("x").role
+    text = "".join(c.text for c in got[0].content)
+    assert "Cycle 1." in text
+    assert "CLERK WAKE" not in text
+    assert "no operator" not in text.lower()
 
 
 def test_append_hist_caps_and_drops_old_snapshots():
@@ -574,7 +640,6 @@ async def test_stream_round_breaks_when_stalled(monkeypatch):
 
     monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.02)
     monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 2)
-    monkeypatch.setattr(brain, "STREAM_MAX_S", 1.0)
 
     class Chat:
         async def stream(self):
@@ -593,6 +658,15 @@ def test_stream_is_looping_ready_spam():
     assert not stream_is_looping("I'll hold the three keepers.")
     spam = "I'm ready. " * 20
     assert stream_is_looping(spam)
+    slots = (
+        "3 slots remain open. 3 lots on XLE and QQQ are already at limit, "
+        "so no new entries. "
+    ) * 6
+    assert stream_is_looping(slots)
+    assert not stream_is_looping(
+        "3 slots remain open. 3 lots on XLE and QQQ are already at limit, "
+        "so no new entries."
+    )
 
 
 def test_stream_is_looping_fake_cycle_cadence():
@@ -652,6 +726,29 @@ def test_open_wake_resets_dead_chat():
     assert g._wake_n == 1
 
 
+def test_new_chat_does_not_force_a_tool():
+    from abcxauto.brain import _new_chat
+
+    captured: dict = {}
+
+    class _ChatNS:
+        @staticmethod
+        def create(**k):
+            captured.update(k)
+            return SimpleNamespace()
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=None,
+        _wake_n=0,
+    )
+    _new_chat(g)
+    assert captured.get("tool_choice") != "required"
+
+
 @pytest.mark.asyncio
 async def test_tool_timeout_returns_error(monkeypatch):
     import asyncio
@@ -696,55 +793,6 @@ async def test_tool_timeout_returns_error(monkeypatch):
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
     assert "book" in turn.tool_trace
     assert turn.last_strat == "hold"
-
-
-@pytest.mark.asyncio
-async def test_grok_turn_time_box(monkeypatch):
-    import asyncio
-
-    from abcxauto import brain
-    from abcxauto.brain import grok_turn
-
-    monkeypatch.setattr(brain, "TURN_S", 0.05)
-
-    async def hang(*_a, **_k):
-        await asyncio.sleep(2)
-        return BrainTurn()
-
-    monkeypatch.setattr(brain, "_grok_turn_impl", hang)
-    g = SimpleNamespace(model="grok-4.6")
-    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
-    assert turn.tool_budget_hit is True
-    assert "time_box" in str(turn.last_act.get("rationale") or "")
-
-
-@pytest.mark.asyncio
-async def test_grok_turn_time_box_keeps_trace(monkeypatch):
-    import asyncio
-
-    from abcxauto import brain
-    from abcxauto.brain import grok_turn
-
-    monkeypatch.setattr(brain, "TURN_S", 0.05)
-
-    async def slow(_g, *, turn=None, **_k):
-        t = turn or BrainTurn()
-        t.tool_trace.append("send")
-        t.sends.append({"strat": "vertical_spread"})
-        await asyncio.sleep(2)
-        return t
-
-    monkeypatch.setattr(brain, "_grok_turn_impl", slow)
-    turn = await grok_turn(
-        SimpleNamespace(model="grok-4.6"),
-        connector=None,
-        world=_world(),
-        snap={},
-        wake="hi",
-    )
-    assert turn.tool_trace == ["send"]
-    assert turn.sends
-    assert "time_box" in str(turn.last_act.get("rationale") or "")
 
 
 @pytest.mark.asyncio

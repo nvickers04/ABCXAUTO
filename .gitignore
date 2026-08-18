@@ -27,6 +27,8 @@ playbook_live.json
 data/state/playbook_lab.json
 data/state/playbook_live.json
 data/state/think_tail.txt
+data/state/think_prev.txt
+data/state/premarket_wake.json
 data/state/last_turn.json
 grokfolio_state.json
 data/state/grokfolio_state.json

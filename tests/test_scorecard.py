@@ -1,7 +1,13 @@
 """Book return vs model cost scorecard."""
 
 from abcxauto.memory import get_journal
-from abcxauto.scorecard import compute_scorecard, estimate_cost_usd, estimate_tokens, format_scorecard_block
+from abcxauto.scorecard import (
+    compute_scorecard,
+    estimate_cost_usd,
+    estimate_tokens,
+    format_scorecard_block,
+    usage_from_response,
+)
 
 
 def test_estimate_tokens_and_cost():
@@ -9,6 +15,41 @@ def test_estimate_tokens_and_cost():
     assert n >= 1
     cost = estimate_cost_usd(1_000_000, 1_000_000, in_rate=3.0, out_rate=15.0)
     assert abs(cost - 18.0) < 1e-9
+    short = estimate_cost_usd(1_000, 1_000)
+    assert abs(short - 0.008) < 1e-9
+    long = estimate_cost_usd(1_000_000, 1_000_000)
+    assert abs(long - 16.0) < 1e-9
+
+
+def test_usage_from_response_reads_sdk_and_falls_back():
+    class Usage:
+        prompt_tokens = 1200
+        completion_tokens = 80
+        reasoning_tokens = 400
+        cached_tokens = 100
+
+    class Resp:
+        usage = Usage()
+
+    used = usage_from_response(Resp())
+    assert used["input_tokens"] == 1200
+    assert used["cached_tokens"] == 100
+    assert used["output_tokens"] == 80
+    assert used["reasoning_tokens"] == 400
+    fallback = usage_from_response(None, think_text="abcd" * 20, say_text="efgh" * 10)
+    assert fallback["input_tokens"] == 0
+    assert fallback["output_tokens"] > 0
+    j = get_journal()
+    j.record_model_usage(
+        stage="grok",
+        input_tokens=1200,
+        output_tokens=80,
+        cached_tokens=100,
+        cost_usd=0.01,
+    )
+    tot = j.model_usage_totals()
+    assert tot["cached_tokens"] == 100
+    assert tot["input_tokens"] == 1200
 
 
 def test_scorecard_beating_when_book_ahead():

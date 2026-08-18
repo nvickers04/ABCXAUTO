@@ -51,7 +51,6 @@ PACING_CEILINGS: dict[str, float] = {
 }
 
 SCAN_FETCH_CAP_RANGE = (1, 8)
-PROMPT_EXTRA_MAX = 2000
 CONTROL_KEYS_TUNABLE = frozenset({
     "control_deliberation_pct",
     "control_budget_pct",
@@ -181,7 +180,7 @@ def apply_self_tune(
 
     raw = dict(params or {})
     flat = _flatten_params(raw)
-    if not flat and "prompt_extra" not in raw and "system_prompt_extra" not in raw:
+    if not flat:
         return {
             "status": "blocked",
             "note": "self_tune: no valid knobs in params",
@@ -197,7 +196,6 @@ def apply_self_tune(
     risk_payload: dict[str, Any] = {}
     controls_payload: dict[str, Any] = {}
     pacing_payload: dict[str, Any] = {}
-    prompt_extra: str | None = None
     scan_cap: int | None = None
     universe_payload: dict[str, Any] = {}
     tweaks_payload: dict[str, Any] = {}
@@ -261,10 +259,6 @@ def apply_self_tune(
             if scan_cap != n:
                 clamped[key] = {"raw": n, "clamped": scan_cap}
             continue
-        if key in ("prompt_extra", "system_prompt_extra"):
-            text = str(value or "")[:PROMPT_EXTRA_MAX]
-            prompt_extra = text
-            continue
         if key in ("enabled_arenas", "custom_symbols", "exclude_symbols"):
             universe_payload[key] = value
             continue
@@ -280,9 +274,6 @@ def apply_self_tune(
             k: v for k, v in raw["universe"].items()
             if k in ("enabled_arenas", "custom_symbols", "exclude_symbols")
         })
-    pe = raw.get("prompt_extra") or raw.get("system_prompt_extra")
-    if pe is not None and prompt_extra is None:
-        prompt_extra = str(pe)[:PROMPT_EXTRA_MAX]
 
     persist_kw = {"persist": persist}
 
@@ -293,14 +284,12 @@ def apply_self_tune(
     if controls_payload:
         update_controls_config(**controls_payload, **persist_kw)
         applied.update(controls_payload)
-    if pacing_payload or scan_cap is not None or prompt_extra is not None:
+    if pacing_payload or scan_cap is not None:
         from abcxauto.config import _runtime_overrides, save_risk_settings
 
         extra: dict[str, Any] = dict(pacing_payload)
         if scan_cap is not None:
             extra["scan_fetch_cap"] = scan_cap
-        if prompt_extra is not None:
-            extra["system_prompt_extra"] = prompt_extra
         _runtime_overrides.update(extra)
         if persist:
             try:
@@ -536,7 +525,7 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
 
     overlay = load_agent_state()
     if overlay:
-        allowed = set(PACING_FLOORS) | {"scan_fetch_cap", "system_prompt_extra"}
+        allowed = set(PACING_FLOORS) | {"scan_fetch_cap"}
         cleaned = {k: v for k, v in overlay.items() if k in allowed}
         if cleaned:
             _runtime_overrides.update(cleaned)
@@ -579,36 +568,3 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
         },
         "change": "self_tune",
     }
-
-
-def format_floor_block(cfg: Any = None) -> str:
-    """Prompt fact: what the agent may change vs what code locks."""
-    from abcxauto.config import get_config
-
-    c = cfg if cfg is not None else get_config()
-    lines = [
-        "SELF-TUNE (no human approval). You own non-risk knobs.",
-        "IMMUTABLE FLOOR (code — you cannot weaken): "
-        "risk_gates on, defined_risk_only, cash_only, auto_panic, "
-        "size/loss/scorecard are % of NetLiq (same at any account size), "
-        f"daily_loss≤{RISK_FLOOR['daily_loss_limit_pct'][1]}% of NL, "
-        f"max_position≤{RISK_FLOOR['max_position_pct'][1]}% of NL, "
-        f"risk/trade≤{RISK_FLOOR['max_risk_per_trade_pct'][1]}% of NL, "
-        f"open_positions {MAX_OPEN_POSITIONS_RANGE[0]}–{MAX_OPEN_POSITIONS_RANGE[1]} "
-        "(you set the count; 0 forbidden; write lab_playbook; cannot set a $ sleeve or flip live), "
-        f"cycle_sleep≥{PACING_FLOORS['cycle_sleep_s']:.0f}s, "
-        "exits never blocked, fail-closed, live gated.",
-        "You MAY: tighten risk, shorten or lengthen pacing inside those floors, "
-        "retune Controls dials, change universe arenas/symbols, set prompt_extra, "
-        "set tweaks, "
-        f"scan_fetch_cap {SCAN_FETCH_CAP_RANGE[0]}–{SCAN_FETCH_CAP_RANGE[1]}.",
-        "Action: self_tune (alias set_risk).",
-        f"daily_loss={getattr(c, 'daily_loss_limit_pct', None)}%NL "
-        f"max_pos={getattr(c, 'max_position_pct', None)}%NL "
-        f"risk/trade={getattr(c, 'max_risk_per_trade_pct', None)}%NL "
-        f"open={getattr(c, 'max_open_positions', None)} "
-        f"cycle_s={getattr(c, 'cycle_sleep_s', None)} "
-        f"budget={getattr(c, 'control_budget_pct', None)} "
-        f"scan_cap={getattr(c, 'scan_fetch_cap', None)}.",
-    ]
-    return "\n".join(lines)

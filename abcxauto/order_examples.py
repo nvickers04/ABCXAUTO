@@ -18,13 +18,11 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "cycle_sleep_s": 15,
         "control_budget_pct": 90,
         "enabled_arenas": ["index_etfs", "most_active"],
-        "prompt_extra": "",
     },
     "self_tune": {
         "controls": {"control_budget_pct": 90, "control_frequency_pct": 50},
         "pacing": {"cycle_sleep_s": 15, "pace_idle_s": 120},
         "universe": {"enabled_arenas": ["index_etfs", "most_active"]},
-        "prompt_extra": "",
         "risk": {"max_risk_per_trade_pct": 0.75},
     },
     "market_bracket": {
@@ -352,7 +350,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "self_tune (alias set_risk) retunes agent knobs with no approval. "
         "You may tighten risk and change pacing inside floors; "
         "you cannot weaken the immutable risk floor. "
-        "Nested params: controls, pacing, universe, prompt_extra, tweaks, risk.",
+        "Nested params: controls, pacing, universe, tweaks, risk.",
         "",
     ]
     for name in sorted(ORDER_EXAMPLES):

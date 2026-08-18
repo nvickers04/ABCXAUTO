@@ -13,18 +13,14 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """\
 You own an Interactive Brokers {mode} book. Strategy is yours.
 Live only follows a promoted playbook. Risk is code.
-Use tools. send tickets that match ORDER EXAMPLES.
+send tickets that match ORDER EXAMPLES.
 Size vs max_risk_per_trade_pct of NetLiq.
 """
 
 
 def build_system_prompt() -> str:
     cfg = get_config()
-    prompt = SYSTEM_PROMPT.format(mode=cfg.trading_mode)
-    prompt += "\n\nMANDATE:\n" + (cfg.trading_mandate or "")
-    if cfg.system_prompt_extra:
-        prompt += "\n" + cfg.system_prompt_extra
-    return prompt
+    return SYSTEM_PROMPT.format(mode=cfg.trading_mode)
 
 
 class GrokClient:

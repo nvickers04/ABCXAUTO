@@ -88,6 +88,76 @@ async def test_connect_refuses_paper_mode_live_port(monkeypatch):
     IBKRConnector._instance = None  # leave clean for other tests
 
 
+def test_port_is_closed_detects_refused():
+    from abcxauto.broker.connector import port_is_closed
+
+    assert port_is_closed(ConnectionRefusedError(10061, "refused")) is True
+    assert port_is_closed(OSError(10061, "Connect call failed")) is True
+    assert port_is_closed(OSError(1225, "The remote computer refused the network connection")) is True
+    assert port_is_closed(TimeoutError("timed out")) is False
+
+
+@pytest.mark.asyncio
+async def test_connect_stops_on_port_closed(monkeypatch):
+    from abcxauto.broker import connector as connector_mod
+    from abcxauto.broker.connector import IBKRConnector
+
+    calls: list[int] = []
+
+    class FakeIB:
+        def __init__(self):
+            pass
+
+        async def connectAsync(self, *_a, **_k):
+            calls.append(1)
+            raise ConnectionRefusedError(10061, "Connect call failed")
+
+        def isConnected(self):
+            return False
+
+        def __getattr__(self, name):
+            return MagicMock()
+
+    monkeypatch.setattr(connector_mod, "IB", FakeIB)
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+    ok = await conn.connect(max_retries=12)
+    assert ok is False
+    assert calls == [1]
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_connect_stops_on_paper_disclaimer(monkeypatch):
+    from abcxauto.broker import connector as connector_mod
+    from abcxauto.broker.connector import IBKRConnector
+
+    calls: list[int] = []
+
+    class FakeIB:
+        def __init__(self):
+            pass
+
+        async def connectAsync(self, *_a, **_k):
+            calls.append(1)
+            IBKRConnector._instance._connect_block = "paper_disclaimer"
+            raise TimeoutError()
+
+        def isConnected(self):
+            return False
+
+        def __getattr__(self, name):
+            return MagicMock()
+
+    monkeypatch.setattr(connector_mod, "IB", FakeIB)
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+    ok = await conn.connect(max_retries=12)
+    assert ok is False
+    assert calls == [1]
+    IBKRConnector._instance = None
+
+
 @pytest.mark.asyncio
 async def test_connect_refuses_live_without_confirm(monkeypatch):
     from abcxauto.broker.connector import IBKRConnector

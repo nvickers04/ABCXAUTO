@@ -54,18 +54,86 @@ def test_closed_stretches():
     assert d.sleep_s >= 900.0
 
 
-def test_premarket_paper_uses_prep_cadence():
+def test_premarket_paper_waits_for_rth():
     d = compute_pace(
-        PaceFacts(session_status="premarket", flat=True, open_count=0),
+        PaceFacts(
+            session_status="premarket",
+            flat=True,
+            open_count=0,
+            countdown_s=90 * 60,
+            countdown_to="open",
+        ),
+        _cfg(trading_mode="paper", cycle_sleep_s=300, pace_spinup_s=15),
+    )
+    assert d.tier == "extended"
+    assert d.sleep_s >= 300.0
+    assert d.reason == "extended_wait"
+    assert d.bypass_grok_min is False
+
+
+def test_premarket_last_hour_one_wake_then_waits(tmp_path, monkeypatch):
+    from abcxauto.pacing import (
+        clear_premarket_wake,
+        mark_premarket_wake_done,
+        premarket_research_spent,
+    )
+
+    monkeypatch.setenv("ABCXAUTO_PREMARKET_WAKE_PATH", str(tmp_path / "pm.json"))
+    clear_premarket_wake()
+    facts = PaceFacts(
+        session_status="premarket",
+        flat=True,
+        open_count=0,
+        countdown_s=40 * 60,
+        countdown_to="open",
+    )
+    cfg = _cfg(trading_mode="paper", cycle_sleep_s=300, pace_spinup_s=15)
+    first = compute_pace(facts, cfg)
+    assert first.tier == "spinup"
+    assert first.reason == "premarket_research"
+    mark_premarket_wake_done()
+    assert premarket_research_spent() is True
+    second = compute_pace(facts, cfg)
+    assert second.tier == "extended"
+    assert second.reason == "premarket_research_done"
+    hunt_facts = PaceFacts(
+        session_status="premarket",
+        flat=True,
+        open_count=0,
+        countdown_s=4 * 60,
+        countdown_to="open",
+    )
+    hunt = compute_pace(hunt_facts, cfg)
+    assert hunt.tier == "spinup"
+    assert hunt.reason == "premarket_open_hunt"
+    from abcxauto.pacing import mark_premarket_open_hunt_done
+
+    mark_premarket_open_hunt_done()
+    after = compute_pace(hunt_facts, cfg)
+    assert after.reason == "premarket_open_hunt_done"
+
+
+def test_premarket_last_hour_spins_research(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PREMARKET_WAKE_PATH", str(tmp_path / "pm.json"))
+    from abcxauto.pacing import clear_premarket_wake
+
+    clear_premarket_wake()
+    d = compute_pace(
+        PaceFacts(
+            session_status="premarket",
+            flat=True,
+            open_count=0,
+            countdown_s=40 * 60,
+            countdown_to="open",
+        ),
         _cfg(trading_mode="paper", cycle_sleep_s=300, pace_spinup_s=15),
     )
     assert d.tier == "spinup"
     assert d.sleep_s == 15.0
-    assert d.reason == "extended_prep"
-    assert d.bypass_grok_min is True
+    assert d.reason == "premarket_research"
 
 
-def test_postmarket_open_book_manages():
+def test_postmarket_open_book_waits():
     d = compute_pace(
         PaceFacts(
             session_status="postmarket",
@@ -75,8 +143,8 @@ def test_postmarket_open_book_manages():
         ),
         _cfg(trading_mode="paper", pace_manage_s=60, pace_spinup_s=15),
     )
-    assert d.tier == "manage"
-    assert d.reason == "extended_open_risk"
+    assert d.tier == "extended"
+    assert d.reason == "extended_wait"
 
 
 def test_hunt_uses_cycle_floor():
@@ -356,8 +424,7 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
         fake_grok_turn({"action": "hold", "strategy": "hold", "rationale": "act hold"}),
     )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "blocked"
-    assert "hold_forbidden" in str(out["result"].get("note") or "").lower()
+    assert out["strat"] == "hold"
 
 
 @pytest.mark.asyncio

@@ -467,6 +467,8 @@ class IBKRQueriesMixin:
                     'aux_price': aux,
                     'lmt_price': lmt_price,
                     'status': status,
+                    'con_id': t.contract.conId,
+                    'conId': t.contract.conId,
                 }
                 if sec_type == 'OPT':
                     order_data.update({
@@ -476,6 +478,17 @@ class IBKRQueriesMixin:
                         'multiplier': int(t.contract.multiplier or 100),
                         'local_symbol': t.contract.localSymbol,
                     })
+                if sec_type == 'BAG':
+                    legs = []
+                    for leg in getattr(t.contract, 'comboLegs', None) or []:
+                        legs.append({
+                            'conId': getattr(leg, 'conId', None),
+                            'action': getattr(leg, 'action', None),
+                            'ratio': getattr(leg, 'ratio', None),
+                        })
+                    if legs:
+                        order_data['combo_legs'] = legs
+                        order_data['reserved_slots'] = len(legs)
                 if trail_pct:
                     order_data['trail_percent'] = trail_pct
                 orders.append(order_data)
