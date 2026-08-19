@@ -1009,7 +1009,7 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     open_upnl = open_upnl_of(getattr(world, "positions", None))
     edge_usd = sc.get("edge_usd")
     model_cost = sc.get("model_cost_usd")
-    # Current NL is the denominator for Brain pct_of_nl siblings (keep $ fields).
+    # Current NL is the denominator for clerk pct_of_nl siblings (keep $ fields).
     daily_pct = pct_of_nl(daily, nl)
     # Prefer book.daily_pnl_pct when world already computed it.
     book = getattr(world, "book", None) if isinstance(getattr(world, "book", None), dict) else {}
@@ -1028,6 +1028,7 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         floors = bool(sizing_floors_active())
     except Exception:
         floors = None
+    port = dict(getattr(world, "portfolio_risk", None) or {})
     return {
         "nl": nl,
         "ibkr_daily_pnl": daily,
@@ -1069,6 +1070,10 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "ibkr_day_vs_halt_pct_of_nl": pct_of_nl(day_vs, nl),
         "candle_source": candle_source,
         "sizing_floors": floors,
+        # Soft concentration / liquidity % of NL (from WorldState._portfolio_risk).
+        "portfolio_risk": port,
+        "exposure": port.get("exposure"),
+        "capital_liquidity": port.get("capital_liquidity"),
     }
 
 
@@ -1114,6 +1119,28 @@ def _pnl_wake_bits(day: dict[str, Any]) -> str:
     )
 
 
+def _portfolio_wake_bits(day: dict[str, Any]) -> str:
+    """Cash / deployed / top concentration as % of NL (facts only)."""
+    cap = day.get("capital_liquidity") if isinstance(day.get("capital_liquidity"), dict) else {}
+    exp = day.get("exposure") if isinstance(day.get("exposure"), dict) else {}
+    port = day.get("portfolio_risk") if isinstance(day.get("portfolio_risk"), dict) else {}
+    bits: list[str] = []
+    cash_pct = cap.get("cash_pct_nl")
+    if cash_pct is not None:
+        bits.append(f"cash={cash_pct}% NL")
+    deployed = cap.get("deployed_long_pct_nl")
+    if deployed is not None:
+        bits.append(f"deployed={deployed}% NL")
+    top_pct = exp.get("top_concentration_pct")
+    if top_pct is None:
+        top_pct = port.get("top_concentration_pct")
+    top_sym = exp.get("top_symbol") or port.get("top_symbol") or ""
+    if top_pct is not None:
+        sym = f" {top_sym}" if top_sym else ""
+        bits.append(f"top{sym}={top_pct}% NL")
+    return " ".join(bits)
+
+
 def format_wake(
     *,
     cycle: int,
@@ -1150,6 +1177,7 @@ def format_wake(
     prev_strat = brief.get("strat") or brief.get("previous_strat") or ""
     prev_sends = brief.get("sends") if brief.get("sends") is not None else 0
     pnl_bits = _pnl_wake_bits(day)
+    port_bits = _portfolio_wake_bits(day)
     if kind in ("fill", "order_change", "book_move"):
         detail = (ev.detail or "").strip() if ev is not None else ""
         event_s = f"event={kind} {detail}.".strip() if detail else f"event={kind}."
@@ -1170,6 +1198,8 @@ def format_wake(
         if unprot != "none":
             parts.append(f"unprotected={unprot}.")
         parts.append(f"{pnl_bits}.")
+        if port_bits:
+            parts.append(f"{port_bits}.")
         parts.append("This is a delta. send|set_wake.")
         return " ".join(p for p in parts if p)
     risk = day.get("risk_per_trade_pct")
@@ -1183,6 +1213,8 @@ def format_wake(
             f"{pnl_bits} "
             f"risk/trade={risk}% open={open_n}/{max_n}."
         )
+        if port_bits:
+            parts.append(f"{port_bits}.")
         if lot_s:
             parts.append(f"open_lots={lot_s}.")
         if day.get("lot_lasts"):

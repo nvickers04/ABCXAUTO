@@ -220,10 +220,18 @@ def build_book(
     unprotected = list(protection.get("unprotected_symbols") or [])
     trades_today, halt, halt_reason = _trades_today_and_halt()
     recent_decisions, working_thesis = _journal_memory_bits()
-    from abcxauto.world_state import open_upnl_of, pct_of_nl
+    from abcxauto.world_state import _portfolio_risk, open_upnl_of, pct_of_nl
 
     open_upnl = open_upnl_of(positions)
     halt_facts = clerk_halt_facts(net_liq, daily_pnl)
+    total_cash = _account_float(
+        account, "totalcashvalue", "TotalCashValue", "total_cash", "TotalCash"
+    )
+    port = _portfolio_risk(
+        positions,
+        float(net_liq) if net_liq is not None else 0.0,
+        total_cash=total_cash,
+    )
     state: Dict[str, Any] = {
         "net_liq": net_liq,
         "daily_pnl": daily_pnl,
@@ -236,6 +244,9 @@ def build_book(
         "ibkr_day_vs_halt_pct_of_nl": pct_of_nl(halt_facts.get("ibkr_day_vs_halt"), net_liq),
         "peak_dd_pct": _peak_dd_pct(net_liq),
         "positions": _slim_positions(positions, net_liq=net_liq),
+        "portfolio_risk": port,
+        "exposure": port.get("exposure"),
+        "capital_liquidity": port.get("capital_liquidity"),
         "unprotected_symbols": unprotected,
         "open_orders_count": len(open_orders),
         "trades_today": trades_today,

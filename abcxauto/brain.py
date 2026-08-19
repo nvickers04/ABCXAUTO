@@ -190,10 +190,6 @@ AGENT_TOOLS = [
                 },
                 "symbol": _QUOTE_SCHEMA,
                 "quantity": {"type": "number"},
-                "size_pct_nl": {
-                    "type": "number",
-                    "description": "Optional size as % of NetLiq next to quantity. Qty stays on the wire.",
-                },
                 "direction": {"type": "string", "description": "LONG or SHORT"},
                 "stop_price": {"type": "number"},
                 "target_price": {"type": "number"},
@@ -591,9 +587,6 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         open_upnl_of,
     )
 
-    # WorldState._portfolio_risk already owns exposure / liquidity % of NL.
-    # Surface the object on live book facts (not only prompt_block).
-    port = dict(getattr(world, "portfolio_risk", None) or {})
     return {
         "cycle": world.cycle,
         "session": world.session_status,
@@ -608,9 +601,6 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         "gates": world.gates,
         "envelope": world.envelope,
         "capacity": dict(world.capacity or {}),
-        "portfolio_risk": port,
-        "exposure": port.get("exposure"),
-        "capital_liquidity": port.get("capital_liquidity"),
         "quote_source": "IBKR live",
         "ibkr_live_quotes": dict(world.ibkr_live_quotes or {}),
         "combo": COMBO_FACT,
