@@ -381,11 +381,12 @@ def test_format_wake_prints_dollars_and_pct():
             "open_lots": ["AAPL STK long 10"],
         },
     )
-    assert "ibkrDay=-100.0(-1.0%)" in text
-    assert "openU=-50.0(-0.5%)" in text
-    assert "edgeVsModel=-200.0(-2.0%)" in text
-    assert "cost=5.0(0.05%)" in text
-    assert "haltAt=-250.0(-2.5%)" in text
+    assert "ibkrDay=$-100.0 / -1.0% NL" in text
+    assert "openU=$-50.0 / -0.5% NL" in text
+    assert "edgeVsModel=$-200.0 / -2.0% NL" in text
+    assert "cost=$5.0 / 0.05% NL" in text
+    assert "haltAt=$-250.0 / -2.5% NL" in text
+    assert "vsStart=" in text
 
 
 def test_compact_position_pct_nl():
@@ -405,6 +406,28 @@ def test_compact_position_pct_nl():
     assert row["uPnL_pct_nl"] == -0.2
     assert row["mv_pct_nl"] == 15.0
     assert row["risk_pct_nl"] == 0.5  # |150-145|*10 / 10000 * 100
+
+
+def test_compact_position_opt_avg_usd_pct_nl():
+    row = compact_position(
+        {
+            "symbol": "SPY",
+            "quantity": 1,
+            "secType": "OPT",
+            "avgCost": 126.0,  # contract cash → avg_usd
+            "market_price": 1.20,
+            "unrealizedPNL": -6.0,
+            "marketValue": 120.0,
+            "strike": 500,
+            "right": "C",
+            "expiration": "20260718",
+        },
+        net_liq=10_000.0,
+    )
+    assert row.get("avg_usd") == 126.0
+    assert row["avg_usd_pct_nl"] == 1.26
+    assert row["uPnL_pct_nl"] == -0.06
+    assert row["mv_pct_nl"] == 1.2
 
 
 def test_size_pct_nl_hoisted_not_converted():
@@ -430,3 +453,19 @@ def test_size_pct_nl_hoisted_not_converted():
     out = hoist_send_params({"strategy": "bracket", "size_pct_nl": 2.0, "quantity": 3})
     assert out["params"]["quantity"] == 3
     assert out["params"]["size_pct_nl"] == 2.0
+
+
+def test_brain_send_schema_has_size_pct_nl():
+    from abcxauto.brain import AGENT_TOOLS
+
+    send = None
+    for t in AGENT_TOOLS:
+        fn = getattr(t, "function", None)
+        name = getattr(fn, "name", None) if fn is not None else getattr(t, "name", None)
+        if name == "send":
+            send = t
+            break
+    assert send is not None
+    blob = str(send)
+    assert "size_pct_nl" in blob
+    assert "quantity" in blob

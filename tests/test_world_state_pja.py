@@ -328,10 +328,10 @@ def test_format_wake_includes_day_facts():
     assert "struct=" not in text
     assert "edge=-549.0" not in text
     assert "dayPnL=" not in text
-    assert "edgeVsModel=-549.0" in text
-    assert "ibkrDay=-95.0" in text
-    assert "openU=-88.0" in text
-    assert "vsStart=-500.0(inception)" in text
+    assert "edgeVsModel=$-549.0" in text
+    assert "ibkrDay=$-95.0" in text
+    assert "openU=$-88.0" in text
+    assert "vsStart=$-500.0(inception)" in text
     assert "beating=False" in text
     assert "risk/trade=25.0%" in text
     assert "open=8/15" in text
@@ -400,7 +400,7 @@ def test_format_working_exits_and_wake_lasts():
     assert "AAPL last=310.72" in text
     assert "exits=" in text
     assert "candles=ibkr_rt_5s" in text
-    assert "haltAt=-704.0" in text
+    assert "haltAt=$-704.0" in text
 
 
 def test_format_wake_fill_is_delta_not_discovery():
@@ -454,8 +454,8 @@ def test_format_wake_fill_is_delta_not_discovery():
     assert "names=3" not in text
     assert "open_lots=XLF 260828C58.5 x1 -42%,QQQ 260918C745 x1" in text
     assert "dayPnL=" not in text
-    assert "ibkrDay=-40.0" in text
-    assert "openU=-12.0" in text
+    assert "ibkrDay=$-40.0" in text
+    assert "openU=$-12.0" in text
     assert "edgeVsModel=" in text
 
 

@@ -190,6 +190,10 @@ AGENT_TOOLS = [
                 },
                 "symbol": _QUOTE_SCHEMA,
                 "quantity": {"type": "number"},
+                "size_pct_nl": {
+                    "type": "number",
+                    "description": "Optional size as % of NetLiq next to quantity. Qty stays on the wire.",
+                },
                 "direction": {"type": "string", "description": "LONG or SHORT"},
                 "stop_price": {"type": "number"},
                 "target_price": {"type": "number"},
@@ -585,18 +589,29 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         compact_position,
         compact_working_orders,
         open_upnl_of,
+        pct_of_nl,
     )
 
+    nl = world.net_liquidation
+    daily = world.daily_pnl
+    open_upnl = open_upnl_of(world.positions)
+    book = world.book if isinstance(world.book, dict) else {}
+    daily_pct = book.get("daily_pnl_pct")
+    if daily_pct is None:
+        daily_pct = pct_of_nl(daily, nl)
     return {
         "cycle": world.cycle,
         "session": world.session_status,
         "flat": world.flat,
         "needs_protection": world.needs_protection,
         "unprotected": list(world.unprotected or []),
-        "net_liquidation": world.net_liquidation,
-        "daily_pnl": world.daily_pnl,
-        "ibkr_daily_pnl": world.daily_pnl,
-        "open_upnl": open_upnl_of(world.positions),
+        "net_liquidation": nl,
+        "daily_pnl": daily,
+        "ibkr_daily_pnl": daily,
+        "daily_pnl_pct": daily_pct,
+        "daily_pnl_pct_of_nl": daily_pct,
+        "open_upnl": open_upnl,
+        "open_upnl_pct_of_nl": pct_of_nl(open_upnl, nl),
         "posture": world.effective_posture or world.risk_posture,
         "gates": world.gates,
         "envelope": world.envelope,
@@ -606,7 +621,7 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         "combo": COMBO_FACT,
         "book_reconciled": bool(getattr(world, "book_reconciled", False)),
         "positions": [
-            compact_position(p) for p in (world.positions or [])[:16]
+            compact_position(p, net_liq=nl) for p in (world.positions or [])[:16]
         ],
         "working_orders": compact_working_orders(
             world.open_orders, positions=world.positions

@@ -431,6 +431,8 @@ def playbook_glance(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def playbook_facts(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
     """Forest vs the last write: age and score at write vs now. No lecture."""
+    from abcxauto.world_state import pct_of_nl
+
     lab = load_lab()
     inst = str(lab.get("instructions") or "").strip()
     at_write = lab.get("paper_score") if isinstance(lab.get("paper_score"), dict) else {}
@@ -438,23 +440,34 @@ def playbook_facts(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
     age = playbook_age_hours(lab)
     ledger = [_compact_card(r) for r in ensure_ledger(lab)]
     since = _since_write_score(lab, now_sc)
+    nl = now_sc.get("net_liquidation")
+    at_edge = at_write.get("edge_usd")
+    now_edge = now_sc.get("edge_usd")
+    since_edge = since.get("since_write_edge")
     facts = {
         "revision": lab.get("revision"),
         "mode": lab.get("mode") or None,
         "has_instructions": bool(inst),
         "ready_to_promote": bool(lab.get("ready_to_promote")) if inst else None,
         "age_h": round(age, 1) if age is not None else None,
-        "at_write_edge": at_write.get("edge_usd"),
+        "at_write_edge": at_edge,
+        "at_write_edge_pct_of_nl": pct_of_nl(at_edge, nl),
         "at_write_beating": at_write.get("beating_model"),
-        "now_edge": now_sc.get("edge_usd"),
+        "now_edge": now_edge,
+        "now_edge_pct_of_nl": pct_of_nl(now_edge, nl),
         "now_beating": now_sc.get("beating_model"),
-        "since_write_edge": since.get("since_write_edge"),
+        "since_write_edge": since_edge,
+        "since_write_edge_pct_of_nl": pct_of_nl(since_edge, nl),
         "since_write_pnl": since.get("since_write_pnl"),
         "lots_at_write": [str(x) for x in (lab.get("lots_at_write") or [])][:16],
         "ledger": ledger[-8:],
     }
     facts.update(_window_edges(now_sc))
-    facts.update(_clerk_halt_slice(now_sc))
+    halt = _clerk_halt_slice(now_sc)
+    facts.update(halt)
+    if isinstance(halt, dict):
+        facts["halt_trips_at_pct_of_nl"] = pct_of_nl(halt.get("halt_trips_at_usd"), nl)
+        facts["ibkr_day_vs_halt_pct_of_nl"] = pct_of_nl(halt.get("ibkr_day_vs_halt"), nl)
     return facts
 
 
@@ -601,7 +614,11 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
             "halt_reason": facts.get("halt_reason"),
             "daily_loss_limit_pct": facts.get("daily_loss_limit_pct"),
             "halt_trips_at_usd": facts.get("halt_trips_at_usd"),
+            "halt_trips_at_pct_of_nl": facts.get("halt_trips_at_pct_of_nl"),
             "ibkr_day_vs_halt": facts.get("ibkr_day_vs_halt"),
+            "ibkr_day_vs_halt_pct_of_nl": facts.get("ibkr_day_vs_halt_pct_of_nl"),
+            "now_edge_pct_of_nl": facts.get("now_edge_pct_of_nl"),
+            "since_write_edge_pct_of_nl": facts.get("since_write_edge_pct_of_nl"),
         },
         "current": current,
         "facts": facts,

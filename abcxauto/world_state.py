@@ -133,6 +133,12 @@ def compact_position(
         if nl is not None and nl > 0:
             if upnl is not None:
                 row["uPnL_pct_nl"] = round(100.0 * float(upnl) / float(nl), 4)
+            avg_usd = row.get("avg_usd")
+            if avg_usd is not None:
+                try:
+                    row["avg_usd_pct_nl"] = round(100.0 * float(avg_usd) / float(nl), 4)
+                except (TypeError, ValueError):
+                    pass
             try:
                 mv = abs(float(p.get("marketValue") or p.get("market_value") or 0))
             except (TypeError, ValueError):
@@ -1003,9 +1009,16 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     open_upnl = open_upnl_of(getattr(world, "positions", None))
     edge_usd = sc.get("edge_usd")
     model_cost = sc.get("model_cost_usd")
-    # Edge/cost % of inception start NL when known; else current NL.
-    start_nl = sc.get("startup_cash")
-    edge_base = start_nl if start_nl not in (None, 0) else nl
+    # Current NL is the denominator for Brain pct_of_nl siblings (keep $ fields).
+    daily_pct = pct_of_nl(daily, nl)
+    # Prefer book.daily_pnl_pct when world already computed it.
+    book = getattr(world, "book", None) if isinstance(getattr(world, "book", None), dict) else {}
+    if book.get("daily_pnl_pct") is not None:
+        try:
+            daily_pct = float(book["daily_pnl_pct"])
+        except (TypeError, ValueError):
+            pass
+    vs_start = sc.get("book_pnl")
     halt_at = halt.get("halt_trips_at_usd")
     day_vs = halt.get("ibkr_day_vs_halt")
     floors = None
@@ -1019,18 +1032,25 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "nl": nl,
         "ibkr_daily_pnl": daily,
         "daily_pnl": daily,
-        "daily_pnl_pct_of_nl": pct_of_nl(daily, nl),
+        "daily_pnl_pct": daily_pct,
+        "daily_pnl_pct_of_nl": daily_pct,
+        "ibkr_daily_pnl_pct_of_nl": daily_pct,
         "open_upnl": open_upnl,
         "open_upnl_pct_of_nl": pct_of_nl(open_upnl, nl),
-        "nl_vs_start": sc.get("book_pnl"),
-        "startup_nl": start_nl,
+        "nl_vs_start": vs_start,
+        "nl_vs_start_pct_of_nl": (
+            sc.get("book_return_pct")
+            if sc.get("book_return_pct") is not None
+            else pct_of_nl(vs_start, nl)
+        ),
+        "startup_nl": sc.get("startup_cash"),
         "beating_model": sc.get("beating_model"),
         "edge_usd": edge_usd,
-        "edge_pct_of_nl": pct_of_nl(edge_usd, edge_base),
+        "edge_pct_of_nl": pct_of_nl(edge_usd, nl),
         "edge_meaning": "nl_vs_start_minus_model",
         "book_return_pct": sc.get("book_return_pct"),
         "model_cost_usd": model_cost,
-        "model_cost_pct_of_nl": pct_of_nl(model_cost, edge_base),
+        "model_cost_pct_of_nl": pct_of_nl(model_cost, nl),
         "names": conc["names"],
         "lots": conc["lots"],
         "structures": conc["structures"],
@@ -1062,23 +1082,30 @@ def _playbook_day(scorecard: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _pnl_wake_bits(day: dict[str, Any]) -> str:
-    """IBKR day, open uPnL, NL vs start, edge vs model — dollars and optional % of NL."""
+    """IBKR day, open uPnL, NL vs start, edge vs model — dollars and % of NL."""
 
     def _bit(usd: Any, pct: Any) -> str:
         if usd is None and pct is None:
             return "?"
         if pct is None:
-            return str(usd)
-        return f"{usd}({pct}%)"
+            return f"${usd}"
+        return f"${usd} / {pct}% NL"
 
     dp = day.get("ibkr_daily_pnl")
     if dp is None:
         dp = day.get("daily_pnl")
+    dp_pct = day.get("daily_pnl_pct_of_nl")
+    if dp_pct is None:
+        dp_pct = day.get("daily_pnl_pct")
+    vs = day.get("nl_vs_start")
+    vs_pct = day.get("nl_vs_start_pct_of_nl")
+    if vs_pct is None:
+        vs_pct = day.get("book_return_pct")
     return (
-        f"ibkrDay={_bit(dp, day.get('daily_pnl_pct_of_nl'))} "
+        f"ibkrDay={_bit(dp, dp_pct)} "
         f"haltAt={_bit(day.get('halt_trips_at_usd'), day.get('halt_trips_at_pct_of_nl'))} "
         f"openU={_bit(day.get('open_upnl'), day.get('open_upnl_pct_of_nl'))} "
-        f"vsStart={day.get('nl_vs_start') if day.get('nl_vs_start') is not None else '?'}(inception) "
+        f"vsStart={_bit(vs, vs_pct)}(inception) "
         f"edgeVsModel={_bit(day.get('edge_usd'), day.get('edge_pct_of_nl'))} "
         f"cost={_bit(day.get('model_cost_usd'), day.get('model_cost_pct_of_nl'))} "
         f"beating={day.get('beating_model')}"
