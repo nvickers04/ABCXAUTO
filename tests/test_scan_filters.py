@@ -62,6 +62,44 @@ def test_parse_tagvalue_allowlist():
     assert out["applied"]["usdMarketCapAbove"] == "10000"
 
 
+def test_expanded_screen_keys_resolve_and_unknown_still_rejected():
+    from abcxauto.universe import known_scan_codes, known_screen_keys
+
+    codes = known_scan_codes()
+    assert "HOT_BY_VOLUME" in codes
+    assert "TOP_TRADE_COUNT" in codes
+    assert "HOT_BY_PRICE" in codes
+    assert "TOP_OPEN_PERC_GAIN" in codes
+    # Invented / non-catalog codes stay rejected.
+    bad = resolve_screen(scan_code="FAKE_MOONSHOT_SCAN")
+    assert bad["ok"] is False
+    assert "unknown" in bad["error"].lower()
+
+    for arena, code in (
+        ("hot_by_volume", "HOT_BY_VOLUME"),
+        ("top_trade_count", "TOP_TRADE_COUNT"),
+        ("hot_by_price", "HOT_BY_PRICE"),
+        ("most_active", "MOST_ACTIVE"),
+    ):
+        by_name = resolve_screen(arena=arena)
+        by_code = resolve_screen(scan_code=code)
+        assert by_name["ok"] is True
+        assert by_code["ok"] is True
+        assert by_name["scan_code"] == code
+        assert by_code["ibkr"]["scanCode"] == code
+        # Zero filter args: standing screen still has IBKR spec.
+        assert by_name["ibkr"] is not None
+
+    keys = known_screen_keys()
+    assert "hot_by_volume" in keys
+    assert "HOT_BY_VOLUME" in keys
+    assert "top_trade_count" in keys
+    assert "TOP_TRADE_COUNT" in keys
+    # No sort= knob — screen name is the sort.
+    assert "sort" not in keys
+
+
+
 def test_unknown_keys_rejected():
     out = parse_scan_filters({"arena": "most_active", "volumeAbove": 1})
     assert out["ok"] is False
@@ -126,6 +164,7 @@ def test_merge_filters_into_arena_spec():
 def test_scan_tool_schema_has_no_pe_and_no_tag_catalog():
     from abcxauto.brain import AGENT_TOOLS
     from abcxauto.llm import SYSTEM_PROMPT
+    from abcxauto.universe import known_scan_codes
 
     scan = None
     for t in AGENT_TOOLS:
@@ -143,15 +182,35 @@ def test_scan_tool_schema_has_no_pe_and_no_tag_catalog():
         params = dict(raw_params)
     props = params.get("properties") or {}
     blob = json.dumps(props).lower()
+    desc = str(getattr(fn, "description", "") or "")
     assert "peratio" not in blob
     assert "pe_ratio" not in blob
     assert "market_cap_above" in props
     assert "above_price" in props
-    assert "usdMarketCapAbove" in props
-    # Kill: no SYSTEM catalog of IBKR tags / guessed P/E.
+    assert "above_volume" in props
+    assert "average_option_volume_above" in props
+    # TagValue trio: clerk may still accept; not advertised in tool JSON.
+    assert "usdMarketCapAbove" not in props
+    assert "optVolumeAbove" not in props
+    assert "avgVolumeAbove" not in props
+    assert "tagvalue" not in blob
+    assert "tagvalue" not in desc.lower()
+    assert "sort=" not in desc.lower()
+    # Expanded documented scanCodes listed for Grok.
+    codes = known_scan_codes()
+    assert "MOST_ACTIVE" in codes
+    assert "HOT_BY_VOLUME" in codes
+    assert "TOP_TRADE_COUNT" in codes
+    assert "HOT_BY_PRICE" in codes
+    scan_code_desc = str((props.get("scan_code") or {}).get("description") or "")
+    for code in ("MOST_ACTIVE", "HOT_BY_VOLUME", "TOP_TRADE_COUNT", "HOT_BY_PRICE"):
+        assert code in scan_code_desc
+    # Kill: no SYSTEM catalog of IBKR tags / guessed P/E / XML dump.
     assert "usdMarketCapAbove" not in SYSTEM_PROMPT
     assert "peRatio" not in SYSTEM_PROMPT
     assert "TagValue" not in SYSTEM_PROMPT
+    assert "reqScannerParameters" not in SYSTEM_PROMPT
+    assert "<ScanCode>" not in SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
