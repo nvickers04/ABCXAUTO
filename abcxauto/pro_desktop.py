@@ -221,6 +221,16 @@ class ProTerminal:
         self.btn_run = self._btn("Start", filled=True, on_click=self._toggle_run)
         self.btn_halt = self._btn("Halt", outlined=True, on_click=self._toggle_halt)
         self.btn_refresh = self._btn("Refresh book", outlined=True, on_click=self._refresh_book)
+        self.btn_notebook = self._btn("Notebook", outlined=True, on_click=self._open_notebook)
+        self.lbl_notebook_head = ft.Text("", size=12, color=MUTED, selectable=True)
+        self.lbl_notebook_body = ft.Text(
+            "",
+            size=13,
+            color=TEXT,
+            selectable=True,
+            no_wrap=False,
+            font_family="Consolas",
+        )
         self.lbl_run_state = ft.Text("Grok off", size=12, weight=ft.FontWeight.W_600, color=MUTED)
         self.lbl_alert = ft.Text("", size=12, color=RED, selectable=True, visible=False)
         self._hidden_metrics = ft.Column(
@@ -381,6 +391,7 @@ class ProTerminal:
                     self.btn_run,
                     self.btn_halt,
                     self.btn_refresh,
+                    self.btn_notebook,
                 ],
                 spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -539,6 +550,61 @@ class ProTerminal:
         err = self.engine.connect_broker()
         self._toast(err or "Connecting to IBKR…", color=RED if err else BLUE)
         self._sync_widgets()
+        self._safe_update()
+
+    def _lab_notebook(self) -> tuple[str, str]:
+        """Current lab notebook. Read-only. Notebook, not law."""
+        try:
+            from abcxauto.lab_playbook import load_lab
+
+            pb = load_lab()
+        except Exception:
+            return "Lab notebook — unreadable", "(could not load playbook_lab.json)"
+        pb = pb if isinstance(pb, dict) else {}
+        inst = str(pb.get("instructions") or "").strip()
+        rev = pb.get("revision") if pb.get("revision") not in (None, "") else "—"
+        mode = str(pb.get("mode") or "explore").strip() or "explore"
+        head = f"rev={rev} mode={mode} — notebook, not law"
+        return head, inst or "(empty)"
+
+    def _open_notebook(self, _=None) -> None:
+        """Open a scrollable view of the current lab notebook. Not executable."""
+        head, body = self._lab_notebook()
+        self.lbl_notebook_head.value = head
+        self.lbl_notebook_body.value = body
+
+        def _close(_=None) -> None:
+            dlg.open = False
+            self._safe_update()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            bgcolor=SURFACE,
+            title=ft.Text("Lab notebook", color=TEXT),
+            content=ft.Container(
+                width=560,
+                height=380,
+                content=ft.Column(
+                    [
+                        self.lbl_notebook_head,
+                        ft.Container(
+                            content=ft.Column(
+                                [self.lbl_notebook_body],
+                                scroll=ft.ScrollMode.AUTO,
+                                expand=True,
+                                spacing=0,
+                            ),
+                            expand=True,
+                        ),
+                    ],
+                    spacing=8,
+                    expand=True,
+                ),
+            ),
+            actions=[ft.TextButton("Close", on_click=_close)],
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
         self._safe_update()
 
     def _open_disconnect_confirm_dialog(self) -> None:
