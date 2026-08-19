@@ -1082,14 +1082,16 @@ def _playbook_day(scorecard: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _pnl_wake_bits(day: dict[str, Any]) -> str:
-    """IBKR day, open uPnL, NL vs start, edge vs model — dollars and % of NL."""
+    """Review unit is % of NL; $ kept second only to reconstruct the book."""
 
     def _bit(usd: Any, pct: Any) -> str:
-        if usd is None and pct is None:
+        if pct is not None:
+            if usd is None:
+                return f"{pct}% NL"
+            return f"{pct}% NL (${usd})"
+        if usd is None:
             return "?"
-        if pct is None:
-            return f"${usd}"
-        return f"${usd} / {pct}% NL"
+        return f"${usd}"
 
     dp = day.get("ibkr_daily_pnl")
     if dp is None:

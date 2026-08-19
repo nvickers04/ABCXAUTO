@@ -381,12 +381,14 @@ def test_format_wake_prints_dollars_and_pct():
             "open_lots": ["AAPL STK long 10"],
         },
     )
-    assert "ibkrDay=$-100.0 / -1.0% NL" in text
-    assert "openU=$-50.0 / -0.5% NL" in text
-    assert "edgeVsModel=$-200.0 / -2.0% NL" in text
-    assert "cost=$5.0 / 0.05% NL" in text
-    assert "haltAt=$-250.0 / -2.5% NL" in text
+    assert "ibkrDay=-1.0% NL ($-100.0)" in text
+    assert "openU=-0.5% NL ($-50.0)" in text
+    assert "edgeVsModel=-2.0% NL ($-200.0)" in text
+    assert "cost=0.05% NL ($5.0)" in text
+    assert "haltAt=-2.5% NL ($-250.0)" in text
     assert "vsStart=" in text
+    # Review leads with % NL, not dollars-first.
+    assert text.index("ibkrDay=-1.0% NL") < text.index("$-100.0")
 
 
 def test_compact_position_pct_nl():

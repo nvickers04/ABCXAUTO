@@ -421,10 +421,9 @@ class RiskGate:
         if floors_on and cfg.daily_loss_limit_pct > 0:
             limit = -(cfg.daily_loss_limit_pct / 100.0) * book
             if daily_pnl <= limit:
+                day_pct = _pct_of_nl(daily_pnl, book)
                 reason = (
-                    f"Daily loss circuit breaker: daily PnL {daily_pnl:.2f} <= "
-                    f"limit {limit:.2f} ({cfg.daily_loss_limit_pct}% of NetLiq "
-                    f"{book:.2f})"
+                    f"daily_loss {day_pct} <= -{cfg.daily_loss_limit_pct}"
                 )
                 self.halt(reason, kind="daily_loss")
                 return False, reason
@@ -434,10 +433,9 @@ class RiskGate:
             if peak is not None and peak > 0:
                 floor = peak * (1.0 - cfg.max_peak_drawdown_pct / 100.0)
                 if net_liq <= floor:
+                    dd_pct = round(100.0 * (1.0 - float(net_liq) / float(peak)), 4)
                     return False, (
-                        f"Peak drawdown gate: NetLiq {net_liq:.2f} <= "
-                        f"{cfg.max_peak_drawdown_pct}% below peak {peak:.2f} "
-                        f"(floor {floor:.2f}). Self-clears when equity recovers."
+                        f"peak_drawdown {dd_pct} > {cfg.max_peak_drawdown_pct}"
                     )
 
         # cash_only structural: no short stock (always). % cash check only when floors ON.

@@ -133,7 +133,7 @@ async def test_daily_loss_breach_trips_halt(gate):
     conn = FakeConnector(account={"netliquidation": 100_000.0, "dailypnl": -2500.0})
     ok, reason = await gate.pre_trade_check(_bracket(), conn)
     assert ok is False
-    assert "circuit breaker" in reason.lower() or "daily loss" in reason.lower()
+    assert "daily_loss" in reason.lower() or "daily loss" in reason.lower()
     assert gate.is_halted is True
 
     # Subsequent entry still blocked via latch even if PnL recovers in account
