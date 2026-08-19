@@ -30,6 +30,55 @@ _CACHE: dict[str, Any] = {
 }
 _CACHE_TTL_S = 300.0
 
+def _stk_scan_arena(
+    label: str,
+    scan_code: str,
+    *,
+    above_volume: int = 500_000,
+    rows: int = 30,
+) -> dict[str, Any]:
+    """US major STK screen — scanCode is the sort. Documented IBKR codes only."""
+    return {
+        "label": label,
+        "group": "scans",
+        "ibkr": {
+            "scanCode": scan_code,
+            "locationCode": "STK.US.MAJOR",
+            "stockTypeFilter": "CORP,ETF",
+            "abovePrice": 5.0,
+            "aboveVolume": above_volume,
+            "rows": rows,
+        },
+        "mda_fallback": [],
+    }
+
+
+# Screen name = sort. Codes from IBKR ScanCode / TWS scanner docs (STK.US.MAJOR class).
+_SCAN_ARENA_SPECS: list[tuple[str, str, str, dict[str, int]]] = [
+    ("most_active", "Most active (IBKR)", "MOST_ACTIVE", {"above_volume": 1_000_000, "rows": 40}),
+    ("top_gainers", "Top % gainers (IBKR)", "TOP_PERC_GAIN", {}),
+    ("top_losers", "Top % losers (IBKR)", "TOP_PERC_LOSE", {}),
+    ("hot_by_volume", "Hot by volume (IBKR)", "HOT_BY_VOLUME", {}),
+    ("hot_by_price", "Hot by price (IBKR)", "HOT_BY_PRICE", {}),
+    ("hot_by_price_range", "Hot by price range (IBKR)", "HOT_BY_PRICE_RANGE", {}),
+    ("hot_by_opt_volume", "Hot by option volume (IBKR)", "HOT_BY_OPT_VOLUME", {}),
+    ("top_trade_count", "Top trade count (IBKR)", "TOP_TRADE_COUNT", {}),
+    ("top_trade_rate", "Top trade rate (IBKR)", "TOP_TRADE_RATE", {}),
+    ("top_volume_rate", "Top volume rate (IBKR)", "TOP_VOLUME_RATE", {}),
+    ("top_price_range", "Top price range (IBKR)", "TOP_PRICE_RANGE", {}),
+    ("top_open_perc_gain", "Top open % gainers (IBKR)", "TOP_OPEN_PERC_GAIN", {}),
+    ("top_open_perc_lose", "Top open % losers (IBKR)", "TOP_OPEN_PERC_LOSE", {}),
+    ("high_open_gap", "High open gap (IBKR)", "HIGH_OPEN_GAP", {}),
+    ("low_open_gap", "Low open gap (IBKR)", "LOW_OPEN_GAP", {}),
+    ("most_active_usd", "Most active USD (IBKR)", "MOST_ACTIVE_USD", {}),
+    ("most_active_avg_usd", "Most active avg USD (IBKR)", "MOST_ACTIVE_AVG_USD", {}),
+    ("opt_volume_most_active", "Option volume most active (IBKR)", "OPT_VOLUME_MOST_ACTIVE", {}),
+    ("high_opt_imp_volat", "High option IV (IBKR)", "HIGH_OPT_IMP_VOLAT", {}),
+    ("low_opt_imp_volat", "Low option IV (IBKR)", "LOW_OPT_IMP_VOLAT", {}),
+    ("top_opt_imp_volat_gain", "Top option IV gainers (IBKR)", "TOP_OPT_IMP_VOLAT_GAIN", {}),
+    ("top_opt_imp_volat_lose", "Top option IV losers (IBKR)", "TOP_OPT_IMP_VOLAT_LOSE", {}),
+]
+
 # Arena catalog: IBKR scanner params and/or seed symbols for qualify / MDA fallback.
 # Membership is refreshed dynamically — not a frozen mega prison.
 ARENA_CATALOG: dict[str, dict[str, Any]] = {
@@ -84,44 +133,9 @@ ARENA_CATALOG: dict[str, dict[str, Any]] = {
             "DECK", "FIX", "CASY", "WSM", "TOL", "RCL", "DKNG", "ROKU", "AFRM", "SOFI",
         ],
     },
-    "most_active": {
-        "label": "Most active (IBKR)",
-        "group": "scans",
-        "ibkr": {
-            "scanCode": "MOST_ACTIVE",
-            "locationCode": "STK.US.MAJOR",
-            "stockTypeFilter": "CORP,ETF",
-            "abovePrice": 5.0,
-            "aboveVolume": 1_000_000,
-            "rows": 40,
-        },
-        "mda_fallback": [],
-    },
-    "top_gainers": {
-        "label": "Top % gainers (IBKR)",
-        "group": "scans",
-        "ibkr": {
-            "scanCode": "TOP_PERC_GAIN",
-            "locationCode": "STK.US.MAJOR",
-            "stockTypeFilter": "CORP,ETF",
-            "abovePrice": 5.0,
-            "aboveVolume": 500_000,
-            "rows": 30,
-        },
-        "mda_fallback": [],
-    },
-    "top_losers": {
-        "label": "Top % losers (IBKR)",
-        "group": "scans",
-        "ibkr": {
-            "scanCode": "TOP_PERC_LOSE",
-            "locationCode": "STK.US.MAJOR",
-            "stockTypeFilter": "CORP,ETF",
-            "abovePrice": 5.0,
-            "aboveVolume": 500_000,
-            "rows": 30,
-        },
-        "mda_fallback": [],
+    **{
+        arena_id: _stk_scan_arena(label, code, **kw)
+        for arena_id, label, code, kw in _SCAN_ARENA_SPECS
     },
     "index_etfs": {
         "label": "Index ETFs",
@@ -174,49 +188,46 @@ ARENA_CATALOG: dict[str, dict[str, Any]] = {
 
 _DEFAULT_ENABLED = ("most_active", "index_etfs", "mega_cap")
 
+
+def _build_known_scan_codes() -> dict[str, dict[str, Any]]:
+    """Standing IBKR scanCodes from group=scans arenas (documented TWS ids only)."""
+    out: dict[str, dict[str, Any]] = {}
+    for meta in ARENA_CATALOG.values():
+        if meta.get("group") != "scans":
+            continue
+        ibkr = meta.get("ibkr") or {}
+        code = str(ibkr.get("scanCode") or "").strip().upper()
+        if not code:
+            continue
+        # First catalog row for a code wins (friendly defaults).
+        out.setdefault(code, dict(ibkr))
+    return out
+
+
+def _build_scan_code_to_arena() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for arena_id, meta in ARENA_CATALOG.items():
+        if meta.get("group") != "scans":
+            continue
+        ibkr = meta.get("ibkr") or {}
+        code = str(ibkr.get("scanCode") or "").strip().upper()
+        if code and code not in out:
+            out[code] = arena_id
+    return out
+
+
 # Bare IBKR scanCodes accepted by scan(arena=…) / scan(scan_code=…).
-# Catalog arenas stay separate; these are the standing TWS screen ids.
-KNOWN_SCAN_CODES: dict[str, dict[str, Any]] = {
-    "MOST_ACTIVE": {
-        "scanCode": "MOST_ACTIVE",
-        "locationCode": "STK.US.MAJOR",
-        "stockTypeFilter": "CORP,ETF",
-        "abovePrice": 5.0,
-        "aboveVolume": 1_000_000,
-        "rows": 40,
-    },
-    "TOP_PERC_GAIN": {
-        "scanCode": "TOP_PERC_GAIN",
-        "locationCode": "STK.US.MAJOR",
-        "stockTypeFilter": "CORP,ETF",
-        "abovePrice": 5.0,
-        "aboveVolume": 500_000,
-        "rows": 30,
-    },
-    "TOP_PERC_LOSE": {
-        "scanCode": "TOP_PERC_LOSE",
-        "locationCode": "STK.US.MAJOR",
-        "stockTypeFilter": "CORP,ETF",
-        "abovePrice": 5.0,
-        "aboveVolume": 500_000,
-        "rows": 30,
-    },
-    "HOT_BY_VOLUME": {
-        "scanCode": "HOT_BY_VOLUME",
-        "locationCode": "STK.US.MAJOR",
-        "stockTypeFilter": "CORP,ETF",
-        "abovePrice": 5.0,
-        "aboveVolume": 500_000,
-        "rows": 30,
-    },
-}
+# Sourced from ARENA_CATALOG group=scans — same class as MOST_ACTIVE / TOP_PERC_*.
+KNOWN_SCAN_CODES: dict[str, dict[str, Any]] = _build_known_scan_codes()
 
 # Arena catalog id aliases for the same standing screens.
-_SCAN_CODE_TO_ARENA = {
-    "MOST_ACTIVE": "most_active",
-    "TOP_PERC_GAIN": "top_gainers",
-    "TOP_PERC_LOSE": "top_losers",
-}
+_SCAN_CODE_TO_ARENA: dict[str, str] = _build_scan_code_to_arena()
+
+
+def known_scan_codes() -> list[str]:
+    """Documented IBKR scanCodes the clerk will run (tool JSON scan_code=)."""
+    return list(KNOWN_SCAN_CODES.keys())
+
 
 # Optional clerk filters this look only — native ScannerSubscription fields.
 # Snake tool args → IBKR attribute on ScannerSubscription.

@@ -66,6 +66,21 @@ def _scan_arena_keys() -> list[str]:
             "most_active",
             "top_gainers",
             "top_losers",
+            "hot_by_volume",
+            "MOST_ACTIVE",
+            "TOP_PERC_GAIN",
+            "TOP_PERC_LOSE",
+            "HOT_BY_VOLUME",
+        ]
+
+
+def _scan_code_keys() -> list[str]:
+    try:
+        from abcxauto.universe import known_scan_codes
+
+        return known_scan_codes()
+    except Exception:
+        return [
             "MOST_ACTIVE",
             "TOP_PERC_GAIN",
             "TOP_PERC_LOSE",
@@ -164,8 +179,8 @@ AGENT_TOOLS = [
     tool(
         name="scan",
         description=(
-            "One screen this look (arena|scan_code|symbols[]); optional IBKR filters; "
-            "unranked hits + on_book; no quotes."
+            "One screen this look (arena|scan_code|symbols[]); name is the sort; "
+            "optional native price/cap/volume filters; unranked hits + on_book; no quotes."
         ),
         parameters=_schema(
             {
@@ -175,7 +190,7 @@ AGENT_TOOLS = [
                 },
                 "scan_code": {
                     "type": "string",
-                    "description": "MOST_ACTIVE|TOP_PERC_GAIN|TOP_PERC_LOSE|HOT_BY_VOLUME",
+                    "description": "|".join(_scan_code_keys()),
                 },
                 "symbols": _SYMBOLS_SCHEMA,
                 "market_cap_above": {
@@ -201,18 +216,6 @@ AGENT_TOOLS = [
                 "average_option_volume_above": {
                     "type": "integer",
                     "description": "ScannerSubscription.averageOptionVolumeAbove",
-                },
-                "usdMarketCapAbove": {
-                    "type": "string",
-                    "description": "TagValue usdMarketCapAbove",
-                },
-                "optVolumeAbove": {
-                    "type": "string",
-                    "description": "TagValue optVolumeAbove",
-                },
-                "avgVolumeAbove": {
-                    "type": "string",
-                    "description": "TagValue avgVolumeAbove",
                 },
                 "with": {
                     "type": "array",
