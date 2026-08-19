@@ -93,7 +93,7 @@ def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
 
 
 def _send_tool(strategy_names: list[str] | None = None) -> Any:
-    """Build the send tool. Full catalog by default; agent_tools may omit hold."""
+    """Build the send tool. Hold is never a ticket."""
     names = list(strategy_names) if strategy_names is not None else ticket_strategy_names()
     return tool(
         name="send",
@@ -132,7 +132,7 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
     )
 
 
-# Full catalog (includes hold). Live looks use agent_tools().
+# Catalog for this look. agent_tools() may omit set_wake.
 AGENT_TOOLS = [
     tool(
         name="book",
@@ -369,20 +369,12 @@ AGENT_TOOLS = [
 
 
 def _send_strategy_names_for_look() -> list[str]:
-    """send enum this look. Read clerk ban_hold; Brain does not own the bit."""
-    names = ticket_strategy_names()
-    try:
-        from abcxauto.agent_loop import ban_hold_active
-
-        if ban_hold_active():
-            return [n for n in names if n != "hold"]
-    except Exception:
-        pass
-    return names
+    """send enum this look. Hold is never a ticket."""
+    return [n for n in ticket_strategy_names() if n != "hold"]
 
 
 def agent_tools(*, session: str = "") -> list:
-    """Tools this look. Omit hold when ban_hold; omit set_wake in regular hours."""
+    """Tools this look. Omit set_wake in regular hours."""
     from abcxauto.wake_bus import set_wake_offered
 
     names = _send_strategy_names_for_look()
@@ -401,12 +393,9 @@ def agent_tools(*, session: str = "") -> list:
 
 
 def brain_system_prompt() -> str:
-    from abcxauto.agent_loop import ALLOWED_ACTIONS, AWARENESS_HEART, ban_hold_active
+    from abcxauto.agent_loop import ALLOWED_ACTIONS, AWARENESS_HEART
 
-    # Hide dead strategy from ORDER EXAMPLES when clerk bans it — no extra prose.
-    allowed: frozenset[str] | set[str] = ALLOWED_ACTIONS
-    if ban_hold_active():
-        allowed = frozenset(a for a in ALLOWED_ACTIONS if a != "hold")
+    allowed = frozenset(a for a in ALLOWED_ACTIONS if a != "hold")
     return (
         build_system_prompt()
         + AWARENESS_HEART
@@ -422,7 +411,7 @@ class BrainTurn:
     sends: list[dict[str, Any]] = field(default_factory=list)
     last_act: dict[str, Any] = field(default_factory=dict)
     last_result: dict[str, Any] = field(default_factory=dict)
-    last_strat: str = "hold"
+    last_strat: str = ""
     tool_trace: list[str] = field(default_factory=list)
     lab_playbook: dict[str, Any] | None = None
     tool_budget_hit: bool = False
@@ -1693,8 +1682,8 @@ async def _grok_turn_impl(
 ) -> BrainTurn:
     turn = turn or BrainTurn()
     if g is None:
-        turn.last_act = {"action": "hold", "strategy": "hold", "rationale": "no_grok_client"}
-        turn.last_result = {"status": "hold", "note": "no_grok_client"}
+        turn.last_act = {}
+        turn.last_result = {"status": "error", "note": "no_grok_client"}
         return turn
     session = str(getattr(world, "session_status", "") or "")
     try:
@@ -1704,8 +1693,8 @@ async def _grok_turn_impl(
         try:
             chat = _open_wake(g, wake, reset=True, session=session)
         except Exception as exc:
-            turn.last_act = {"action": "hold", "strategy": "hold", "rationale": f"chat_error: {exc}"}
-            turn.last_result = {"status": "hold", "note": f"chat_error: {exc}"}
+            turn.last_act = {}
+            turn.last_result = {"status": "error", "note": f"chat_error: {exc}"}
             return turn
     exhausted = True
     stream_resets = 0
@@ -1771,11 +1760,9 @@ async def _grok_turn_impl(
     if turn.parked:
         _reset_chat(g)
     if not turn.sends:
-        turn.last_act = turn.last_act or {
-            "action": "hold",
-            "strategy": "hold",
-            "rationale": (turn.text or "no send")[:400],
-        }
-        turn.last_strat = "hold"
-        turn.last_result = {"status": "hold", "strategy": "hold"}
+        if str(turn.last_strat or "").lower() == "hold":
+            turn.last_strat = ""
+        if str((turn.last_act or {}).get("strategy") or "").lower() == "hold":
+            turn.last_act = {}
+            turn.last_result = {}
     return turn

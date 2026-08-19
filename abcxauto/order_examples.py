@@ -1,7 +1,7 @@
 """Agent-facing order API contract: one minimal valid example per sendable type.
 
-``ORDER_EXAMPLES`` mirrors ``abcxauto.proposals.STRATEGIES`` param shapes
-(plus ``hold``). Combo BAG closes are taught as a second printed line in
+``ORDER_EXAMPLES`` mirrors ``abcxauto.proposals.STRATEGIES`` param shapes.
+Combo BAG closes are taught as a second printed line in
 ``format_order_examples`` — same strategy key, not a new dict entry.
 """
 
@@ -13,7 +13,6 @@ from typing import Any
 from abcxauto.proposals import STRATEGIES
 
 ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
-    "hold": {},
     "set_risk": {
         "max_risk_per_trade_pct": 0.75,
         "max_open_positions": 15,
@@ -384,7 +383,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "ORDER EXAMPLES (send tool — strategy + params)",
         "Stock entries: symbol+direction. Clerk fills missing stop/target/qty. "
         "Bare opens become a bracket; exits stay exits.",
-        "Use direction LONG|SHORT for bracket/market_bracket/oca/trailing. hold params are {}.",
+        "Use direction LONG|SHORT for bracket/market_bracket/oca/trailing.",
         "Stock exits: target_conId + quantity (partial trim OK; omit qty = full). After trim check stop_qty_fact.",
         "close_option: prefer conId; quantity may be partial. roll_option for lifecycle.",
         "Option multi-leg / CSP: match param shapes below. "
@@ -411,12 +410,10 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
 
 
 def assert_examples_cover_strategies() -> None:
-    """Every STRATEGIES key has an example; hold/set_risk are allowed extras."""
+    """Every STRATEGIES key has an example; set_risk/self_tune are allowed extras."""
     missing = sorted(set(STRATEGIES) - set(ORDER_EXAMPLES))
     if missing:
         raise AssertionError(f"ORDER_EXAMPLES missing STRATEGIES keys: {missing}")
-    if "hold" not in ORDER_EXAMPLES:
-        raise AssertionError("ORDER_EXAMPLES must include hold")
     if "set_risk" not in ORDER_EXAMPLES:
         raise AssertionError("ORDER_EXAMPLES must include set_risk")
     if "self_tune" not in ORDER_EXAMPLES:

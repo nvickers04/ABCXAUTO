@@ -42,7 +42,6 @@ _GATE_FORBIDDEN: dict[str, str] = {
     "trading_mode": "live remains gated — notebook cannot switch mode",
     "live_confirm": "live remains gated — notebook cannot switch mode",
     "sizing_floors": "operator-only — notebook cannot flip sizing floors",
-    "ban_hold": "operator-only — notebook cannot flip hold ban",
     "trading_budget_usd": "size and risk are % of NetLiq — no dollar sleeve",
     "risk_posture": "risk_posture is locked — notebook cannot retune",
     "daily_loss_limit_pct": "knobs are self_tune — notebook cannot retune risk",

@@ -89,8 +89,6 @@ def equity_of(acct: dict) -> float:
 
 def normalize_action(act: dict) -> tuple[str, dict | None]:
     strat = (act.get("strategy") or act.get("action") or "").strip().lower()
-    if strat in ("noop", "none", ""):
-        strat = "hold"
     if strat not in ALLOWED_ACTIONS:
         return BLOCKED_STRAT, {
             "status": "blocked",
@@ -406,17 +404,6 @@ def _prepare_close_params(act: dict, positions: list) -> None:
         act["params"].setdefault("action", "SELL" if signed > 0 else "BUY")
 
 
-def ban_hold_active(cfg: Any = None) -> bool:
-    """True when hold is not a ticket. Paper default ON; live default OFF; both two-way."""
-    from abcxauto.config import get_config
-
-    c = cfg if cfg is not None else get_config()
-    if not hasattr(c, "ban_hold"):
-        mode = str(getattr(c, "trading_mode", "paper") or "paper").strip().lower()
-        return mode != "live"
-    return bool(getattr(c, "ban_hold"))
-
-
 def _new_risk_halted(world: WorldState) -> bool:
     gates = world.gates if isinstance(world.gates, dict) else {}
     if gates.get("halted") or gates.get("is_halted"):
@@ -497,21 +484,17 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
     from abcxauto.protect import promote_naked_entry
 
     promote_naked_entry(act, list(getattr(world, "positions", None) or []))
-    strat, forced = normalize_action(act)
-    if forced is not None:
-        return BLOCKED_STRAT, forced
+    raw = str(act.get("strategy") or act.get("action") or "").strip().lower()
     needs_prot = bool(getattr(world, "needs_protection", False) or getattr(world, "unprotected", None))
-    if strat == "hold" and needs_prot:
-        # Unprotected STK last-stop is Risk/protect — not the ban_hold chip.
+    if raw == "hold" and needs_prot:
+        # Unprotected STK last-stop is Risk/protect — not a hold ticket.
         return BLOCKED_STRAT, {
             "status": "blocked",
             "note": "hold_forbidden - unprotected STK needs a last-stop",
         }
-    if strat == "hold" and ban_hold_active():
-        return BLOCKED_STRAT, {
-            "status": "blocked",
-            "note": "hold is not a ticket",
-        }
+    strat, forced = normalize_action(act)
+    if forced is not None:
+        return BLOCKED_STRAT, forced
     params = act.get("params") if isinstance(act.get("params"), dict) else {}
     from abcxauto.world_state import single_leg_vertical_block
 
@@ -693,10 +676,7 @@ async def execute_ticket(
             )
             return result
 
-    if strat == "hold":
-        result = {"status": "hold", "strategy": "hold"}
-        act["_structure_grade"] = "hold"
-    elif strat in ALLOWED_ACTIONS:
+    if strat in ALLOWED_ACTIONS:
         result = await send_action(act, connector)
         rc = str((result or {}).get("reason_code") or "")
         st = str((result or {}).get("status") or "").lower()
@@ -1087,36 +1067,12 @@ async def run_cycle(
 
     act = dict(turn.last_act or {})
     result = dict(turn.last_result or {})
-    strat = str(turn.last_strat or act.get("strategy") or "hold")
+    strat = str(turn.last_strat or act.get("strategy") or "")
     if not turn.sends and strat not in (BLOCKED_STRAT, "blocked"):
-        # No send this look. Brain may decorate last_* as hold; that is not a ticket.
-        if ban_hold_active():
-            # Rest is rest — do not invent hold for gate_ticket / journal.
-            act = {}
-            strat = ""
-            result = {}
-        else:
-            # Live / ban_hold off: no-send remains a hold no-op (gate still applies).
-            act = act if act else {
-                "action": "hold", "strategy": "hold", "rationale": "no send",
-            }
-            if not str(act.get("strategy") or act.get("action") or "").strip():
-                act = {
-                    **act,
-                    "action": "hold",
-                    "strategy": "hold",
-                    "rationale": act.get("rationale") or "no send",
-                }
-            strat, forced = gate_ticket(act, world)
-            if forced is not None:
-                result = forced
-                act["strategy"] = act["action"] = BLOCKED_STRAT
-                act["rationale"] = str(forced.get("note") or "")
-            else:
-                strat = "hold"
-                act.setdefault("action", "hold")
-                act.setdefault("strategy", "hold")
-                result = {"status": "hold", "strategy": "hold"}
+        # No send this look is yield, not a ticket.
+        act = {}
+        strat = ""
+        result = {}
 
     s["opportunities"] = list(world.opportunities or [])
     s["news_items"] = list(world.news_items or [])

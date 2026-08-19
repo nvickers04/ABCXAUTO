@@ -20,7 +20,6 @@ RISK_CONFIG_KEYS = frozenset({
     "risk_posture",
     "risk_gates_enabled",
     "sizing_floors",
-    "ban_hold",
     "daily_loss_limit_pct",
     "max_position_pct",
     "auto_panic_on_breach",
@@ -88,9 +87,6 @@ class Config:
     risk_gates_enabled: bool = True
     # Paper default OFF (Grok sizes). Live forced ON in code. Operator chip only.
     sizing_floors: bool = False
-    # Paper default ON (hold is not a ticket). Live default OFF (hold = send no-op).
-    # Both modes two-way via Cockpit chip. Not self_tune-able.
-    ban_hold: bool = True
     daily_loss_limit_pct: float = 25.0
     max_position_pct: float = 25.0
     auto_panic_on_breach: bool = True
@@ -183,10 +179,6 @@ def _load_env_config() -> Config:
         risk_posture=_normalize_posture(_env("ABCXAUTO_RISK_POSTURE", "defensive")),
         risk_gates_enabled=_env_bool("ABCXAUTO_RISK_GATES_ENABLED", True),
         sizing_floors=_env_bool("ABCXAUTO_SIZING_FLOORS", False),
-        ban_hold=_env_bool(
-            "ABCXAUTO_BAN_HOLD",
-            _env("TRADING_MODE", "paper").lower() != "live",
-        ),
         daily_loss_limit_pct=float(_env("ABCXAUTO_DAILY_LOSS_LIMIT_PCT", "25")),
         max_position_pct=float(_env("ABCXAUTO_MAX_POSITION_PCT", "25")),
         max_open_positions=int(_env("ABCXAUTO_MAX_OPEN_POSITIONS", "15")),
@@ -232,7 +224,6 @@ def _coerce_risk_value(key: str, value: Any) -> Any:
     if key in (
         "risk_gates_enabled",
         "sizing_floors",
-        "ban_hold",
         "auto_panic_on_breach",
         "defined_risk_only",
         "cash_only",
