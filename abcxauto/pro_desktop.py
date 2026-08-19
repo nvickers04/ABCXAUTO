@@ -53,6 +53,35 @@ _RISK_LOCKED_KEYS: tuple[str, ...] = (
     "trading_budget_usd",
 )
 
+# Paper preference for walk-away % floors (live always forces on). Cockpit-only flag.
+_FLOORS_STATE_PATH = Path(__file__).resolve().parents[1] / "data" / "state" / "floors.json"
+
+
+def _load_floors_paper_pref() -> bool:
+    """True = Floors on for paper. Default Floors off."""
+    try:
+        if not _FLOORS_STATE_PATH.is_file():
+            return False
+        raw = json.loads(_FLOORS_STATE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return False
+        if "floors_on" in raw:
+            return bool(raw["floors_on"])
+        return False
+    except Exception:
+        return False
+
+
+def _save_floors_paper_pref(floors_on: bool) -> None:
+    try:
+        _FLOORS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _FLOORS_STATE_PATH.write_text(
+            json.dumps({"floors_on": bool(floors_on)}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        logger.exception("floors pref persist failed")
+
 
 class ProTerminal:
     def __init__(self, page: ft.Page):
@@ -94,6 +123,17 @@ class ProTerminal:
             ink=True,
             tooltip="Switch Paper / Live",
             on_click=self._toggle_trading_mode,
+        )
+        self._floors_paper_on = _load_floors_paper_pref()
+        self.lbl_floors = ft.Text("Floors off", size=12, weight=ft.FontWeight.W_600, color=MUTED)
+        self.btn_floors = ft.Container(
+            content=self.lbl_floors,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            border=ft.Border.all(1, BORDER),
+            border_radius=999,
+            ink=True,
+            tooltip="Walk-away % floors (paper)",
+            on_click=self._toggle_floors,
         )
         self.tf_live_confirm = ft.TextField(
             label="Type live confirm phrase",
@@ -547,6 +587,7 @@ class ProTerminal:
                     self.lbl_title,
                     self.lbl_model,
                     self.btn_account_mode,
+                    self.btn_floors,
                     ft.Container(width=12),
                     self.dot_conn,
                     self.lbl_ibkr_status,
@@ -1252,6 +1293,46 @@ class ProTerminal:
         dlg.open = True
         self._safe_update()
 
+    def _floors_effective_on(self) -> bool:
+        """Live forces Floors on; paper uses the persisted operator choice."""
+        try:
+            if not get_config().is_paper:
+                return True
+        except Exception:
+            pass
+        return bool(self._floors_paper_on)
+
+    def _paint_floors_chip(self) -> None:
+        on = self._floors_effective_on()
+        live = False
+        try:
+            live = not bool(get_config().is_paper)
+        except Exception:
+            live = False
+        self.lbl_floors.value = "Floors on" if on else "Floors off"
+        if on:
+            self.lbl_floors.color = GREEN
+            self.btn_floors.border = ft.Border.all(1, GREEN)
+        else:
+            self.lbl_floors.color = MUTED
+            self.btn_floors.border = ft.Border.all(1, BORDER)
+        self.btn_floors.tooltip = (
+            "Walk-away % floors locked on in live"
+            if live
+            else "Walk-away % floors (daily-loss / position / risk/trade / drawdown / premium)"
+        )
+
+    def _toggle_floors(self, _e: Any = None) -> None:
+        try:
+            if not get_config().is_paper:
+                return  # live: paint Floors on, ignore clicks
+        except Exception:
+            return
+        self._floors_paper_on = not bool(self._floors_paper_on)
+        _save_floors_paper_pref(self._floors_paper_on)
+        self._paint_floors_chip()
+        self._safe_update()
+
     def _after_mode_change(self) -> None:
         self._sync_ibkr_account_label()
         self._toast(f"Mode → {self.lbl_account_mode.value}", color=BLUE)
@@ -1266,6 +1347,7 @@ class ProTerminal:
         self.lbl_account_mode.value = "Paper" if paper else "Live"
         self.lbl_account_mode.color = GREEN if paper else RED
         self.btn_account_mode.border = ft.Border.all(1, GREEN if paper else RED)
+        self._paint_floors_chip()
         if s.connected and aid:
             self.lbl_account_name.value = aname or f"IBKR {aid}"
             self.lbl_account_id.value = aid
