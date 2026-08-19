@@ -231,6 +231,16 @@ class ProTerminal:
             no_wrap=False,
             font_family="Consolas",
         )
+        self.btn_risk = self._btn("Risk", outlined=True, on_click=self._open_risk_settings)
+        self.lbl_risk_glance = ft.Text("", size=12, color=MUTED, selectable=True, no_wrap=False)
+        self.tf_risk_trade_pct = ft.TextField(
+            label="max risk / trade %",
+            dense=True,
+            color=TEXT,
+            bgcolor=SURFACE,
+            border_color=BORDER,
+            width=180,
+        )
         self.lbl_run_state = ft.Text("Grok off", size=12, weight=ft.FontWeight.W_600, color=MUTED)
         self.lbl_alert = ft.Text("", size=12, color=RED, selectable=True, visible=False)
         self._hidden_metrics = ft.Column(
@@ -392,6 +402,7 @@ class ProTerminal:
                     self.btn_halt,
                     self.btn_refresh,
                     self.btn_notebook,
+                    self.btn_risk,
                 ],
                 spacing=8,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1051,6 +1062,126 @@ class ProTerminal:
     def _stop(self, _=None) -> None:
         self.engine.stop_engine()
         self._sync_widgets()
+        self._safe_update()
+
+    def _risk_settings_lines(self) -> list[str]:
+        """Persisted knobs from get_config / risk_settings.json. Display only."""
+        from abcxauto.config import get_config, load_risk_settings, resolve_effective_posture
+
+        try:
+            load_risk_settings()
+        except Exception:
+            pass
+        cfg = get_config()
+        stored = str(getattr(cfg, "risk_posture", "") or "")
+        eff = resolve_effective_posture(stored, getattr(cfg, "trading_mode", "paper"))
+        post = f"{stored} → {eff}" if stored and eff and stored != eff else (stored or "—")
+
+        def yn(v: object) -> str:
+            return "on" if bool(v) else "off"
+
+        def pct(v: object) -> str:
+            return f"{v:g}" if isinstance(v, (int, float)) else "—"
+
+        return [
+            f"posture {post}",
+            f"trade {pct(getattr(cfg, 'max_risk_per_trade_pct', None))}%",
+            f"day {pct(getattr(cfg, 'daily_loss_limit_pct', None))}%",
+            f"position {pct(getattr(cfg, 'max_position_pct', None))}%",
+            f"drawdown {pct(getattr(cfg, 'max_peak_drawdown_pct', None))}%",
+            f"option {pct(getattr(cfg, 'max_option_premium_pct', None))}%",
+            f"defined-risk {yn(getattr(cfg, 'defined_risk_only', True))}",
+            f"cash-only {yn(getattr(cfg, 'cash_only', True))}",
+            f"gates {yn(getattr(cfg, 'risk_gates_enabled', True))}",
+        ]
+
+    def _sync_risk_settings_view(self) -> None:
+        from abcxauto.config import get_config
+
+        cfg = get_config()
+        self.lbl_risk_glance.value = "\n".join(self._risk_settings_lines())
+        trade = getattr(cfg, "max_risk_per_trade_pct", None)
+        self.tf_risk_trade_pct.value = (
+            f"{trade:g}" if isinstance(trade, (int, float)) else ""
+        )
+
+    def _set_risk_posture(self, posture: str) -> None:
+        from abcxauto.config import update_risk_config
+
+        try:
+            update_risk_config(risk_posture=str(posture or "").strip().lower(), persist=True)
+            self._sync_risk_settings_view()
+            self._toast(f"Posture → {posture}", color=BLUE)
+            self._safe_update()
+        except Exception as exc:
+            self._toast(f"Posture failed: {exc}", color=RED)
+            self._safe_update()
+
+    def _save_risk_trade_pct(self, _=None) -> None:
+        from abcxauto.config import update_risk_config
+
+        raw = str(self.tf_risk_trade_pct.value or "").strip()
+        try:
+            pct = float(raw)
+        except (TypeError, ValueError):
+            self._toast("Trade % needs a number", color=AMBER)
+            return
+        try:
+            update_risk_config(max_risk_per_trade_pct=pct, persist=True)
+            self._sync_risk_settings_view()
+            self._toast(f"Trade % → {pct:g}", color=BLUE)
+            self._safe_update()
+        except Exception as exc:
+            self._toast(f"Trade % failed: {exc}", color=RED)
+            self._safe_update()
+
+    def _open_risk_settings(self, _=None) -> None:
+        """Glanceable persisted knobs. Posture and trade % are editable. Not a slider farm."""
+        self._sync_risk_settings_view()
+
+        def _close(_=None) -> None:
+            dlg.open = False
+            self._safe_update()
+
+        def _posture(name: str):
+            return ft.TextButton(
+                name,
+                on_click=lambda _e, n=name: self._set_risk_posture(n),
+            )
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            bgcolor=SURFACE,
+            title=ft.Text("Risk settings", color=TEXT),
+            content=ft.Container(
+                width=420,
+                content=ft.Column(
+                    [
+                        self.lbl_risk_glance,
+                        ft.Row(
+                            [
+                                _posture("defensive"),
+                                _posture("balanced"),
+                                _posture("aggressive"),
+                            ],
+                            spacing=6,
+                        ),
+                        ft.Row(
+                            [
+                                self.tf_risk_trade_pct,
+                                ft.TextButton("Save %", on_click=self._save_risk_trade_pct),
+                            ],
+                            spacing=8,
+                        ),
+                    ],
+                    spacing=10,
+                    tight=True,
+                ),
+            ),
+            actions=[ft.TextButton("Close", on_click=_close)],
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
         self._safe_update()
 
     def _toggle_trading_mode(self, _=None) -> None:
