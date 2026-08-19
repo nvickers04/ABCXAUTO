@@ -467,4 +467,51 @@ def test_notebook_viewer_reads_lab_not_think(headless_pro, monkeypatch):
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
     assert "look at options" not in (headless_pro.think_live.value or "")
+def test_risk_settings_surface_hidden_metrics_stay_hidden(headless_pro, monkeypatch):
+    calls = []
+
+    def _fake_update(**kwargs):
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr("abcxauto.config.update_risk_config", _fake_update)
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: type(
+            "C",
+            (),
+            {
+                "risk_posture": "aggressive",
+                "trading_mode": "live",
+                "max_risk_per_trade_pct": 12.5,
+                "daily_loss_limit_pct": 25.0,
+                "max_position_pct": 25.0,
+                "max_peak_drawdown_pct": 25.0,
+                "max_option_premium_pct": 25.0,
+                "defined_risk_only": True,
+                "cash_only": True,
+                "risk_gates_enabled": True,
+            },
+        )(),
+    )
+    monkeypatch.setattr("abcxauto.config.load_risk_settings", lambda: {})
+    monkeypatch.setattr(
+        "abcxauto.config.resolve_effective_posture",
+        lambda p, m="paper": "balanced" if p == "aggressive" and m == "live" else p,
+    )
+    lines = " ".join(headless_pro._risk_settings_lines())
+    assert "aggressive → balanced" in lines
+    assert "trade 12.5%" in lines
+    assert "gates on" in lines
+    assert headless_pro.btn_risk.text == "Risk"
+    assert headless_pro._hidden_metrics.visible is False
+    assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
+    assert headless_pro.lbl_playbook in headless_pro._hidden_metrics.controls
+    assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
+    headless_pro._set_risk_posture("balanced")
+    assert calls and calls[0].get("risk_posture") == "balanced"
+    assert calls[0].get("persist") is True
+    headless_pro.tf_risk_trade_pct.value = "8"
+    headless_pro._save_risk_trade_pct()
+    assert any(c.get("max_risk_per_trade_pct") == 8.0 and c.get("persist") is True for c in calls)
 
