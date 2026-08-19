@@ -183,6 +183,37 @@ def test_ensure_floor_repairs_weak_settings(tmp_path, monkeypatch):
     assert cfg.max_open_positions == 15
 
 
+def test_grok_cannot_self_tune_risk_posture(tmp_path, monkeypatch):
+    from abcxauto.config import update_risk_config
+
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    update_risk_config(risk_posture="aggressive", persist=True)
+    out = apply_self_tune({"risk_posture": "defensive"}, persist=True)
+    assert get_config().risk_posture == "aggressive"
+    assert "risk_posture" in (out.get("rejected") or {})
+    assert out["status"] == "blocked" or not (out.get("applied") or {})
+
+
+def test_ensure_floor_does_not_bounce_operator_posture(tmp_path, monkeypatch):
+    from abcxauto.config import update_risk_config
+
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    update_risk_config(risk_posture="aggressive", persist=True)
+    ensure_immutable_floor(persist=True)
+    cfg = get_config()
+    assert cfg.risk_posture == "aggressive"
+    assert cfg.defined_risk_only is True
+    assert cfg.cash_only is True
+
+
 def test_clamp_risk_helper():
     v, note = clamp_risk_to_floor("max_position_pct", 99)
     assert v == RISK_FLOOR["max_position_pct"][1]
@@ -205,8 +236,18 @@ def test_get_config_clamps_weak_file(tmp_path, monkeypatch):
     assert cfg.max_open_positions == 25
     assert cfg.daily_loss_limit_pct == 25.0
     assert cfg.defined_risk_only is True
-    assert cfg.risk_posture == "defensive"
+    assert cfg.risk_posture == "aggressive"
     assert cfg.trading_budget_usd == 0.0
+
+
+def test_floor_clamp_does_not_force_defensive_posture():
+    from abcxauto.config import update_risk_config
+    from abcxauto.self_tune import floor_clamp_config_fields
+
+    update_risk_config(risk_posture="aggressive", persist=False)
+    cfg = get_config()
+    assert cfg.risk_posture == "aggressive"
+    assert "risk_posture" not in floor_clamp_config_fields(cfg)
 
 
 def test_grok_may_set_open_positions_to_two(tmp_path, monkeypatch):

@@ -156,7 +156,7 @@ def apply_self_tune(
                 rejected[key] = "immutable floor — cannot disable"
             continue
         if key == "risk_posture":
-            rejected[key] = "risk_posture is locked to defensive (walk-away floor)"
+            rejected[key] = "operator-only — agent cannot retune risk_posture"
             continue
         if key == "trading_mode" or key == "live_confirm":
             rejected[key] = "live remains gated — agent cannot switch mode"
@@ -341,8 +341,6 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
     for key in LOCKED_TRUE:
         if not bool(getattr(cfg, key, False)):
             fixes[key] = True
-    if str(getattr(cfg, "risk_posture", "") or "") != "defensive":
-        fixes["risk_posture"] = "defensive"
     cap = _i(getattr(cfg, "scan_fetch_cap", 8))
     lo_c, hi_c = SCAN_FETCH_CAP_RANGE
     if cap is None or cap < lo_c or cap > hi_c:
@@ -372,7 +370,6 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
     risk_fix = {
         k: v for k, v in fixes.items()
         if k in (
-            "risk_posture",
             "risk_gates_enabled",
             "sizing_floors",
             "ban_hold",
@@ -403,7 +400,6 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
                 logger.exception("ensure_floor persist extra failed")
         # Always persist locked floor so a stale risk_settings.json cannot linger.
         update_risk_config(
-            risk_posture="defensive",
             risk_gates_enabled=True,
             auto_panic_on_breach=True,
             defined_risk_only=True,
