@@ -36,6 +36,7 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_
     monkeypatch.setattr("abcxauto.wake_bus.min_look_s", lambda: 0.05)
     monkeypatch.setattr("abcxauto.wake_bus.default_look_s", lambda **_k: 0.05)
     monkeypatch.setattr("abcxauto.wake_bus.pulse_sleep_s", lambda *_a, **_k: 0.05)
+    # Multi-cycle pulse uses a real park clock. Paper RTH no longer seeds one.
     calls = {"grok": 0}
 
     async def fake_grok(_g, prompt: str, *, stage: str = "act") -> str:
@@ -87,7 +88,7 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_
                 {"symbol": "SPY", "quantity": 5, "sec_type": "STK", "unrealized_pnl": 12.3, "con_id": 42}
             ],
             "open_orders": [],
-            "market_hours": {"session": "regular"},
+            "market_hours": {"session": "premarket"},
             "quote": {"symbol": "SPY", "last": 501},
         }.get(name, {})
 
@@ -125,7 +126,7 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_
     assert err is None, f"start err: {err}"
     assert eng.state.running
 
-    # Wake-bus pulse; default look is shortened via env for this test.
+    # Around-open clerk look is shortened so the engine can pulse >=3 cycles.
     deadline = time.time() + 20
     while time.time() < deadline and eng.state.cycles < 3:
         eng.drain_apply()

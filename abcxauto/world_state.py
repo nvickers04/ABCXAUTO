@@ -1399,12 +1399,15 @@ def format_wake(
     open_n = cap.get("open_count", cap.get("open"))
     max_n = cap.get("max_open_positions", cap.get("max"))
     ev = None
+    offer_wake = False
     try:
-        from abcxauto.wake_bus import last_wake
+        from abcxauto.wake_bus import last_wake, set_wake_offered
 
         ev = last_wake()
+        offer_wake = set_wake_offered(session=session)
     except Exception:
         ev = None
+        offer_wake = False
     kind = str(ev.kind or "") if ev is not None else ""
     brief: dict[str, Any] = {}
     try:
@@ -1494,7 +1497,7 @@ def format_wake(
             ledger = format_ledger_line(pb)
             if ledger:
                 parts.append(f"ledger {ledger}.")
-    parts.append("send|set_wake.")
+    parts.append("send|set_wake." if offer_wake else "send.")
     return " ".join(parts)
 
 

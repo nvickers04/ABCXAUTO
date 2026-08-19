@@ -351,10 +351,9 @@ AGENT_TOOLS = [
     tool(
         name="set_wake",
         description=(
-            "Park the desk until wake_at / wake_in_s (or sooner on wake_if). "
-            "Overnight / around-open park starts a new think next session. "
-            "Empty wake_if = any book event. Skipping this in RTH yields in place "
-            "— no clerk sit-clock. Unprotected stock still interrupts."
+            "Park overnight / around-open until wake_at / wake_in_s "
+            "(or sooner on wake_if). Empty wake_if = any book event. "
+            "Unprotected stock still interrupts."
         ),
         parameters=_schema(
             {
@@ -384,13 +383,18 @@ def _send_strategy_names_for_look() -> list[str]:
     return names
 
 
-def agent_tools() -> list:
-    """Tools offered this look. Omit hold from send when clerk ban_hold is on."""
+def agent_tools(*, session: str = "") -> list:
+    """Tools this look. Omit hold when ban_hold; omit set_wake in regular hours."""
+    from abcxauto.wake_bus import set_wake_offered
+
     names = _send_strategy_names_for_look()
+    offer_wake = set_wake_offered(session=session)
     out: list = []
     for t in AGENT_TOOLS:
         fn = getattr(t, "function", None)
         name = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
+        if name == "set_wake" and not offer_wake:
+            continue
         if name == "send":
             out.append(_send_tool(names))
         else:
@@ -668,11 +672,11 @@ def _reset_chat(g: GrokClient) -> None:
     g._wake_n = 0
 
 
-def _new_chat(g: GrokClient) -> Any:
+def _new_chat(g: GrokClient, *, session: str = "") -> Any:
     create_kw: dict[str, Any] = {
         "model": g.model,
         "messages": [system(brain_system_prompt())],
-        "tools": list(agent_tools()),
+        "tools": list(agent_tools(session=session)),
         "temperature": g.temperature,
         "max_tokens": int(g.max_tokens or 8192),
         "include": ["verbose_streaming"],
@@ -687,17 +691,19 @@ def _new_chat(g: GrokClient) -> Any:
     return chat
 
 
-def _ensure_chat(g: GrokClient, *, kind: str = "") -> Any:
+def _ensure_chat(g: GrokClient, *, kind: str = "", session: str = "") -> Any:
     """Reuse the live think in RTH. New chat only on hard-reset kinds or empty."""
     chat = getattr(g, "chat", None)
     key = str(kind or "").strip().lower()
     if chat is not None and key not in HARD_RESET_KINDS:
         g._wake_n = int(getattr(g, "_wake_n", 0) or 0) + 1
         return chat
-    return _new_chat(g)
+    return _new_chat(g, session=session)
 
 
-def _open_wake(g: GrokClient, wake: str, *, reset: bool = False) -> Any:
+def _open_wake(
+    g: GrokClient, wake: str, *, reset: bool = False, session: str = ""
+) -> Any:
     if reset:
         _reset_chat(g)
     kind = ""
@@ -709,7 +715,7 @@ def _open_wake(g: GrokClient, wake: str, *, reset: bool = False) -> Any:
             kind = str(ev.kind or "")
     except Exception:
         kind = ""
-    chat = _ensure_chat(g, kind=kind)
+    chat = _ensure_chat(g, kind=kind, session=session)
     chat.append(developer(wake))
     return chat
 
@@ -1490,19 +1496,30 @@ async def _run_tool(
     if name == "set_wake":
         from abcxauto.wake_bus import set_wake
 
+        session = str(getattr(world, "session_status") or "")
         ifs = args.get("wake_if")
         alarm = set_wake(
             wake_in_s=args.get("wake_in_s"),
             wake_at=args.get("wake_at"),
             wake_if=ifs,
             flat=getattr(world, "flat", None),
-            session=str(getattr(world, "session_status") or ""),
+            session=session,
         )
-        turn.parked = True
+        if alarm.wake_at:
+            turn.parked = True
+            return _clip({
+                "status": "ok",
+                "wake_at": alarm.wake_at,
+                "wake_if": list(alarm.wake_if),
+            })
+        turn.parked = False
         return _clip({
-            "status": "ok",
-            "wake_at": alarm.wake_at,
-            "wake_if": list(alarm.wake_if),
+            "status": "ignored",
+            "reason": "paper_rth",
+            "wake_at": None,
+            "session": session or "regular",
+            "wanted_wake_in_s": args.get("wake_in_s"),
+            "wanted_wake_at": args.get("wake_at"),
         })
     return json.dumps({"error": f"unknown tool {name}"})
 
@@ -1700,12 +1717,13 @@ async def _grok_turn_impl(
         turn.last_act = {"action": "hold", "strategy": "hold", "rationale": "no_grok_client"}
         turn.last_result = {"status": "hold", "note": "no_grok_client"}
         return turn
+    session = str(getattr(world, "session_status", "") or "")
     try:
-        chat = _open_wake(g, wake)
+        chat = _open_wake(g, wake, session=session)
     except Exception:
         logger.exception("chat start failed; reset once")
         try:
-            chat = _open_wake(g, wake, reset=True)
+            chat = _open_wake(g, wake, reset=True, session=session)
         except Exception as exc:
             turn.last_act = {"action": "hold", "strategy": "hold", "rationale": f"chat_error: {exc}"}
             turn.last_result = {"status": "hold", "note": f"chat_error: {exc}"}
@@ -1730,7 +1748,7 @@ async def _grok_turn_impl(
             stream_resets += 1
             think_emit("say", "\n[stream reset]\n")
             try:
-                chat = _open_wake(g, wake, reset=True)
+                chat = _open_wake(g, wake, reset=True, session=session)
             except Exception:
                 break
             continue

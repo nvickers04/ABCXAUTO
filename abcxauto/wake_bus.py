@@ -1,7 +1,7 @@
 """Standing IBKR + on-demand Grok. No clerk decision checklist.
 
-Book events are facts. set_wake parks the desk (overnight / around-open).
-RTH yield without set_wake is not a sit-clock — book events poke the live think.
+Book events are facts. set_wake parks overnight / around-open.
+Paper RTH set_wake writes no clock — yield stays in the same think.
 Hard interrupts are gates.
 """
 
@@ -46,8 +46,8 @@ PULSE_S = 10.0
 DEFAULT_LOOK_S = 90.0
 DEFAULT_LOOK_OPEN_S = 60.0
 MIN_LOOK_S = 30.0
-# Paper RTH park ceiling — only when Grok actually calls set_wake. Premarket/overnight may be longer.
-PAPER_MAX_LOOK_S = 10 * 60.0
+# Sessions that still expose set_wake and honor a park clock.
+PARK_SESSIONS = frozenset({"premarket", "closed", "postmarket"})
 MTM_BUCKET_PCT = 8.0
 _last_wake = None
 _pending_interrupt = None  # BookEvent | None — set after BookEvent is defined
@@ -222,38 +222,36 @@ def min_look_s() -> float:
     return _env_float("ABCXAUTO_MIN_LOOK_S", MIN_LOOK_S, lo=5.0)
 
 
-def paper_max_look_s() -> float:
-    return _env_float("ABCXAUTO_PAPER_MAX_LOOK_S", PAPER_MAX_LOOK_S, lo=min_look_s())
+def set_wake_offered(*, session: str = "") -> bool:
+    """Overnight / around-open expose set_wake. Regular hours do not."""
+    return str(session or "").lower() in PARK_SESSIONS
 
 
-def _paper_sit_ceiling_s(*, session: str) -> float | None:
-    """Paper RTH, clerk not halted: working-look ceiling. Live / halted / non-RTH: none."""
+def paper_rth_park_refused(*, session: str = "") -> bool:
+    """Paper regular hours, clerk not halted: set_wake writes no park clock."""
+    if str(session or "").lower() != "regular":
+        return False
     try:
         from abcxauto.lab_playbook import is_paper
 
         if not is_paper():
-            return None
+            return False
     except Exception:
-        return None
-    if str(session or "").lower() != "regular":
-        return None
+        return True
     try:
         from abcxauto.risk_gates import get_risk_gate
 
         if get_risk_gate().is_halted:
-            return None
+            return False
     except Exception:
         pass
-    return paper_max_look_s()
+    return True
 
 
 def _floor_look_s(sec: float, *, session: str = "") -> float:
-    """Min look floor + paper RTH working-look ceiling (same class as min floor)."""
-    out = max(min_look_s(), float(sec))
-    cap = _paper_sit_ceiling_s(session=session)
-    if cap is not None:
-        out = min(out, cap)
-    return out
+    """Min look floor for a real park."""
+    _ = session
+    return max(min_look_s(), float(sec))
 
 
 def ensure_next_look(
@@ -262,19 +260,14 @@ def ensure_next_look(
     flat: bool | None = None,
     session: str = "",
 ) -> GrokAlarm:
-    """Honor Grok park (set_wake). RTH skip = no clerk sit-clock."""
+    """Honor a real Grok park. Paper RTH no-clock is not re-armed."""
     alarm = load_alarm()
     grok_parked = bool(alarm.set_at and alarm.set_at != previous_set_at)
     if grok_parked:
         if alarm.wake_at:
             return alarm
-        # set_wake ran but left no clock — arm a park from defaults.
-        return set_wake(
-            wake_in_s=default_look_s(flat=flat, session=session),
-            wake_if=list(alarm.wake_if),
-            flat=flat,
-            session=session,
-        )
+        # set_wake ran with no clock (paper RTH no-op). Do not synthesize a park.
+        return alarm
     # Grok skipped set_wake. RTH: yield in place — do not synthesize 60s/90s.
     if str(session or "").lower() == "regular":
         if alarm.wake_at:
@@ -293,6 +286,20 @@ def ensure_next_look(
     )
 
 
+def _clean_wake_if(wake_if: list[str] | str | None) -> list[str]:
+    ifs: list[str] = []
+    if isinstance(wake_if, str):
+        ifs = [wake_if]
+    elif isinstance(wake_if, list):
+        ifs = [str(x) for x in wake_if]
+    clean = []
+    for item in ifs:
+        key = str(item or "").strip().lower()
+        if key in BOOK_EVENTS or key in HARD_INTERRUPTS:
+            clean.append(key)
+    return clean
+
+
 def set_wake(
     *,
     wake_in_s: float | None = None,
@@ -301,7 +308,16 @@ def set_wake(
     flat: bool | None = None,
     session: str = "",
 ) -> GrokAlarm:
-    """Grok-owned park. Book events can come sooner. Not an RTH sit-clock."""
+    """Grok-owned park overnight / around-open. Paper RTH is a no-op clock."""
+    clean = _clean_wake_if(wake_if)
+    if paper_rth_park_refused(session=session):
+        return save_alarm(
+            GrokAlarm(
+                wake_at=None,
+                wake_if=clean,
+                set_at=_utc_now().isoformat(),
+            )
+        )
     at = str(wake_at or "").strip() or None
     sec: float | None = None
     if wake_in_s is not None:
@@ -317,22 +333,13 @@ def set_wake(
         sec = default_look_s(flat=flat, session=session)
     sec = _floor_look_s(sec, session=session)
     at = datetime.fromtimestamp(time.time() + sec, tz=timezone.utc).isoformat()
-    ifs: list[str] = []
-    if isinstance(wake_if, str):
-        ifs = [wake_if]
-    elif isinstance(wake_if, list):
-        ifs = [str(x) for x in wake_if]
-    clean = []
-    for item in ifs:
-        key = str(item or "").strip().lower()
-        if key in BOOK_EVENTS or key in HARD_INTERRUPTS:
-            clean.append(key)
-    alarm = GrokAlarm(
-        wake_at=at,
-        wake_if=clean,
-        set_at=_utc_now().isoformat(),
+    return save_alarm(
+        GrokAlarm(
+            wake_at=at,
+            wake_if=clean,
+            set_at=_utc_now().isoformat(),
+        )
     )
-    return save_alarm(alarm)
 
 
 def _mtm_bucket_pct() -> float:
