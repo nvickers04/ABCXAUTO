@@ -13,7 +13,7 @@ the cost of the model. Same rules at $1k, $100k, or $1M.
 
 | Owner | Job |
 |-------|-----|
-| **Grok** | Tickets (`send`), knobs (`self_tune`), lab notebook (`write_lab_playbook`), overnight park (`set_wake`) |
+| **Grok** | Tickets (`send`), knobs (`self_tune`), lab notebook (`write_lab_playbook`), next look (`set_wake`) |
 | **Clerk** | Live facts, `ORDER EXAMPLES`, hard gates, default look if Grok skips `set_wake` |
 | **Operator** | `.env` + paper TWS, Start, kill switch. UI is status. No strategy card. |
 

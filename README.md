@@ -10,7 +10,7 @@ Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of
 
 | Owner | Job |
 |-------|-----|
-| **Grok** | Tickets (`send`), risk/watchlist knobs (`self_tune`), lab notebook (`write_lab_playbook`), overnight park (`set_wake`) |
+| **Grok** | Tickets (`send`), risk/watchlist knobs (`self_tune`), lab notebook (`write_lab_playbook`), next look (`set_wake`) |
 | **Clerk (code)** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, default look if Grok skips `set_wake` |
 | **Operator** | `.env` + paper TWS, Start, kill switch. UI is status. No approval step. |
 
@@ -32,7 +32,7 @@ Grok may retune knobs immediately. No proposal step.
 ## Loop
 
 ```
-WAKE     set_wake parks overnight / around-open; paper RTH has no park tool
+WAKE     Grok set_wake, or clerk default look (60s open / 90s else)
          fill / order_change / mark move / unprotected can come sooner
          pulse ~10s; closed/postmarket does not call Grok (unprotected still does)
     |

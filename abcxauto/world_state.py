@@ -1265,8 +1265,6 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "open_lots": lot_labels(getattr(world, "positions", None)),
         "mix": structure_mix(getattr(world, "positions", None)),
         "capacity": dict(getattr(world, "capacity", None) or {}),
-        # Ceiling knob — not the working size. Wake prints max_risk=, not risk/trade=.
-        "max_risk_per_trade_pct": risk_pct,
         "risk_per_trade_pct": risk_pct,
         "playbook": _playbook_day(sc),
         "lot_lasts": lot_lasts,
@@ -1401,15 +1399,12 @@ def format_wake(
     open_n = cap.get("open_count", cap.get("open"))
     max_n = cap.get("max_open_positions", cap.get("max"))
     ev = None
-    offer_wake = False
     try:
-        from abcxauto.wake_bus import last_wake, set_wake_offered
+        from abcxauto.wake_bus import last_wake
 
         ev = last_wake()
-        offer_wake = set_wake_offered(session=session)
     except Exception:
         ev = None
-        offer_wake = False
     kind = str(ev.kind or "") if ev is not None else ""
     brief: dict[str, Any] = {}
     try:
@@ -1452,15 +1447,7 @@ def format_wake(
         # Live episode poke — not a park clock. Tickets stay send().
         parts.append("This is a delta. send.")
         return " ".join(p for p in parts if p)
-    risk = day.get("max_risk_per_trade_pct")
-    if risk is None:
-        risk = day.get("risk_per_trade_pct")
-    floors = day.get("sizing_floors")
-    floors_bit = ""
-    if floors is True:
-        floors_bit = " floors=on"
-    elif floors is False:
-        floors_bit = " floors=off"
+    risk = day.get("risk_per_trade_pct")
     parts = [
         f"session={session} flat={flat} "
         f"unprotected={unprot} ibkr={'up' if ibkr_up else 'down'}.",
@@ -1473,11 +1460,10 @@ def format_wake(
     ):
         parts.append(f"minutes_to_open={mins}.")
     if day:
-        # max_risk= is the self_tune ceiling, not the ticket size.
         parts.append(
             f"names={day.get('names')} lots={day.get('lots')} "
             f"{pnl_bits} "
-            f"max_risk={risk}%{floors_bit} open={open_n}/{max_n}."
+            f"risk/trade={risk}% open={open_n}/{max_n}."
         )
         if port_bits:
             parts.append(f"{port_bits}.")
@@ -1508,7 +1494,7 @@ def format_wake(
             ledger = format_ledger_line(pb)
             if ledger:
                 parts.append(f"ledger {ledger}.")
-    parts.append("send|set_wake." if offer_wake else "send.")
+    parts.append("send|set_wake.")
     return " ".join(parts)
 
 
