@@ -1,7 +1,8 @@
 """Agent-facing order API contract: one minimal valid example per sendable type.
 
 ``ORDER_EXAMPLES`` mirrors ``abcxauto.proposals.STRATEGIES`` param shapes
-(plus ``hold``).
+(plus ``hold``). Combo BAG closes are taught as a second printed line in
+``format_order_examples`` — same strategy key, not a new dict entry.
 """
 
 from __future__ import annotations
@@ -322,6 +323,42 @@ SENDABLE_TYPES = frozenset(ORDER_EXAMPLES)
 # Knobs are the self_tune tool. Keep send aliases in the dict for old tickets.
 NOT_TICKETS = frozenset({"self_tune", "set_risk"})
 
+# Defined-risk combo tickets openable as BAG. Teach a close sibling in
+# format_order_examples only — keep ORDER_EXAMPLES 1:1 with STRATEGIES.
+# ratio_spread / jade_lizard stay open-only (defined_risk_only rejects them).
+COMBO_BAG_CLOSE = frozenset({
+    "vertical_spread",
+    "calendar_spread",
+    "diagonal_spread",
+    "iron_condor",
+    "iron_butterfly",
+    "butterfly",
+    "straddle",
+    "strangle",
+})
+
+# Realistic net debit/credit for the OPEN example legs (Grok supplies live mids).
+_COMBO_CLOSE_LIMIT: dict[str, float] = {
+    "vertical_spread": 1.25,
+    "calendar_spread": 1.40,
+    "diagonal_spread": 1.55,
+    "iron_condor": 1.10,
+    "iron_butterfly": 2.00,
+    "butterfly": 0.85,
+    "straddle": 8.50,
+    "strangle": 4.75,
+}
+
+
+def combo_close_example(name: str) -> dict[str, Any]:
+    """Same legs as the OPEN example plus closing_position and Grok limit_price."""
+    if name not in COMBO_BAG_CLOSE:
+        raise KeyError(f"{name} is not a taught combo BAG close")
+    params = dict(ORDER_EXAMPLES[name])
+    params["closing_position"] = True
+    params["limit_price"] = _COMBO_CLOSE_LIMIT[name]
+    return params
+
 
 def ticket_strategy_names() -> list[str]:
     """send strategy enum — tickets only, so knobs are not buried in this list."""
@@ -333,6 +370,9 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
 
     When ``allowed`` is None, uses ``abcxauto.agent_loop.ALLOWED_ACTIONS`` so
     prompts never teach strategies Act will block.
+
+    Combo tickets print an OPEN line (ORDER_EXAMPLES value) then a close sibling
+    with the same legs + closing_position + limit_price — one BAG, not singles.
     """
     if allowed is None:
         try:
@@ -348,7 +388,9 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "Stock exits: target_conId + quantity (partial trim OK; omit qty = full). After trim check stop_qty_fact.",
         "close_option: prefer conId; quantity may be partial. roll_option for lifecycle.",
         "Option multi-leg / CSP: match param shapes below. "
-        "closing_position=true on a multi-leg ticket closes the live combo as one BAG. "
+        "Close a live combo with that SAME strategy + closing_position=true + "
+        "your limit_price (one BAG). Never close_option / oca / trailing a combo leg. "
+        "Clerk will not invent the close price — omit limit only if order_type=MKT. "
         "Algo/auction exits (vwap/twap/iceberg/adaptive/MOC/MOO/...) are sendable "
         "on protect/manage/hunt; closing_position required. "
         "defined_risk_only still rejects unlimited/naked shapes; cash-only still "
@@ -360,6 +402,11 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
             continue
         params = ORDER_EXAMPLES[name]
         lines.append(f"{name}: {json.dumps(params, separators=(',', ':'))}")
+        if name in COMBO_BAG_CLOSE:
+            close = combo_close_example(name)
+            lines.append(
+                f"{name} close: {json.dumps(close, separators=(',', ':'))}"
+            )
     return "\n".join(lines)
 
 
