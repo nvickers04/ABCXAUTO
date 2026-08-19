@@ -1475,11 +1475,12 @@ def _emit_write_lab_playbook_think(args: dict[str, Any]) -> None:
     text = ascii_text(str(raw)).strip()
     if not text:
         return
-    if len(text) > _LAB_PLAYBOOK_THINK_CAP:
-        keep = max(0, _LAB_PLAYBOOK_THINK_CAP - 14)
-        text = text[:keep] + "... [truncated]"
-    if not text.endswith("\n"):
-        text += "\n"
+    marker = "... [truncated]\n"
+    if len(text) + 1 > _LAB_PLAYBOOK_THINK_CAP:
+        keep = max(0, _LAB_PLAYBOOK_THINK_CAP - len(marker))
+        text = text[:keep] + marker
+    else:
+        text = text + "\n"
     think_emit("say", text)
 
 

@@ -1262,7 +1262,8 @@ def test_write_lab_playbook_think_emit_caps_and_ascii():
     body = got[0]
     assert all(ord(c) < 128 for c in body)
     assert "... [truncated]" in body
-    assert len(body) <= _LAB_PLAYBOOK_THINK_CAP + 1  # trailing newline
+    assert len(body) <= _LAB_PLAYBOOK_THINK_CAP
+    assert body.endswith("\n")
 
 
 @pytest.mark.asyncio
