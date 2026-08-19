@@ -82,6 +82,7 @@ _SEND_HOIST = (
     "new_stop_price",
     "new_limit_price",
     "closing_position",
+    "size_pct_nl",
 )
 
 

@@ -195,7 +195,7 @@ async def test_run_cycle_paper_flat_rth_hold_is_blocked(monkeypatch):
     hist = []
     out = await run_cycle(1, FakeConnector(), None, hist, 0.0)
     assert out["strat"] == "blocked"
-    assert "paper hunt" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
+    assert "hold is not a ticket" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
     assert send_calls == []
     assert prompts  # Grok woke
     from abcxauto.brain import brain_system_prompt
@@ -212,7 +212,12 @@ async def test_run_cycle_live_hold_when_flat(monkeypatch):
         lambda: _cfg(
             trading_mode="live",
             is_paper=False,
+            ban_hold=False,
         ),
+    )
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: False,
     )
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     send_calls: list[dict] = []
@@ -453,6 +458,10 @@ async def test_run_cycle_premarket_last_hour_wakes_grok(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.agent_loop._tool", await _fake_tool_session("premarket", minutes_to_open=40)
     )
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: False,
+    )
     wakes: list[str] = []
     act = {"action": "hold", "strategy": "hold", "rationale": "premarket tape"}
     monkeypatch.setattr(
@@ -469,6 +478,10 @@ async def test_run_cycle_premarket_last_hour_wakes_grok(monkeypatch):
 async def test_run_cycle_premarket_wakes_grok(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.agent_loop._tool", await _fake_tool_session("premarket")
+    )
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: False,
     )
     wakes: list[str] = []
     act = {"action": "hold", "strategy": "hold", "rationale": "premarket tape"}

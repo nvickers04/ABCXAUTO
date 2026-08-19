@@ -33,14 +33,14 @@ def _account_float(account: dict, *keys: str) -> Optional[float]:
     return None
 
 
-def _slim_positions(positions: list, limit: int = 12) -> List[dict]:
+def _slim_positions(positions: list, limit: int = 12, net_liq: float | None = None) -> List[dict]:
     from abcxauto.world_state import compact_position
 
     out: List[dict] = []
     for p in positions[:limit]:
         if not isinstance(p, dict):
             continue
-        out.append(compact_position(p))
+        out.append(compact_position(p, net_liq=net_liq))
     return out
 
 
@@ -220,16 +220,22 @@ def build_book(
     unprotected = list(protection.get("unprotected_symbols") or [])
     trades_today, halt, halt_reason = _trades_today_and_halt()
     recent_decisions, working_thesis = _journal_memory_bits()
-    from abcxauto.world_state import open_upnl_of
+    from abcxauto.world_state import open_upnl_of, pct_of_nl
 
+    open_upnl = open_upnl_of(positions)
+    halt_facts = clerk_halt_facts(net_liq, daily_pnl)
     state: Dict[str, Any] = {
         "net_liq": net_liq,
         "daily_pnl": daily_pnl,
         "ibkr_daily_pnl": daily_pnl,
-        "open_upnl": open_upnl_of(positions),
+        "open_upnl": open_upnl,
         "daily_pnl_pct": daily_pnl_pct,
+        "daily_pnl_pct_of_nl": daily_pnl_pct,
+        "open_upnl_pct_of_nl": pct_of_nl(open_upnl, net_liq),
+        "halt_trips_at_pct_of_nl": pct_of_nl(halt_facts.get("halt_trips_at_usd"), net_liq),
+        "ibkr_day_vs_halt_pct_of_nl": pct_of_nl(halt_facts.get("ibkr_day_vs_halt"), net_liq),
         "peak_dd_pct": _peak_dd_pct(net_liq),
-        "positions": _slim_positions(positions),
+        "positions": _slim_positions(positions, net_liq=net_liq),
         "unprotected_symbols": unprotected,
         "open_orders_count": len(open_orders),
         "trades_today": trades_today,
@@ -238,7 +244,7 @@ def build_book(
         "recent_decisions": recent_decisions,
         "working_thesis": working_thesis,
     }
-    state.update(clerk_halt_facts(net_liq, daily_pnl))
+    state.update(halt_facts)
     if halt_reason and not state.get("halt_reason"):
         state["halt_reason"] = halt_reason
     if include_narrative:

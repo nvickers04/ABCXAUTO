@@ -106,14 +106,24 @@ def path_facts(
         mu = e / eq
         s2 = var / (eq * eq)
         g_approx = mu - 0.5 * s2
+
+    def _pct_of_nl(usd: float | None) -> float | None:
+        if usd is None or not eq or eq <= 0:
+            return None
+        return _round(100.0 * float(usd) / float(eq), 4)
+
     out.update({
         "p": _round(p, 4),
         "q": _round(q, 4),
         "A": _round(a, 4),
+        "A_pct_of_nl": _pct_of_nl(a),
         "B": _round(b, 4),
+        "B_pct_of_nl": _pct_of_nl(b),
         "b": _round(net_odds, 4),
         "E": _round(e, 4),
+        "E_pct_of_nl": _pct_of_nl(e),
         "sig": _round(sig, 4),
+        "sig_pct_of_nl": _pct_of_nl(sig),
         "snr": _round(snr, 4),
         "ruin": _round(ruin, 4),
         "kelly": _round(kelly, 4),

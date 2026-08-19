@@ -127,7 +127,12 @@ async def test_hold_path_skips_send(monkeypatch):
             trading_mode="live",
             risk_posture="balanced",
             is_paper=False,
+            ban_hold=False,
         ),
+    )
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: False,
     )
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     send_calls: list = []
@@ -161,17 +166,21 @@ async def test_paper_flat_rth_hold_does_not_send(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "blocked"
-    assert "paper hunt" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
+    assert "hold is not a ticket" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
     assert send_calls == []
 
 
 def test_paper_flat_rth_hold_is_blocked():
     strat, forced = gate_ticket(_hold_act(), _world(flat=True, session_status="regular"))
     assert strat == "blocked"
-    assert "paper hunt" in str((forced or {}).get("note") or "")
+    assert "hold is not a ticket" in str((forced or {}).get("note") or "")
 
 
-def test_paper_open_book_hold_is_allowed():
+def test_paper_open_book_hold_is_allowed(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: False,
+    )
     strat, forced = gate_ticket(
         _hold_act(),
         _world(flat=False, session_status="regular", positions=[{"symbol": "SPY"}]),
@@ -182,6 +191,10 @@ def test_paper_open_book_hold_is_allowed():
 
 def test_live_flat_rth_hold_is_allowed(monkeypatch):
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: False,
+    )
     strat, forced = gate_ticket(_hold_act(), _world(flat=True, session_status="regular"))
     assert strat == "hold"
     assert forced is None
@@ -191,6 +204,10 @@ def test_paper_halted_flat_hold_is_allowed(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.risk_gates.get_risk_gate",
         lambda: type("G", (), {"is_halted": True})(),
+    )
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: False,
     )
     strat, forced = gate_ticket(
         _hold_act(),
@@ -324,7 +341,7 @@ def test_paper_may_not_hold_when_flat_rth(monkeypatch):
     world = _world(flat=True, session_status="regular")
     strat, forced = gate_ticket(_hold_act(), world)
     assert strat == "blocked"
-    assert "paper hunt" in str((forced or {}).get("note") or "")
+    assert "hold is not a ticket" in str((forced or {}).get("note") or "")
 
 
 def test_wake_grok_for_session():
@@ -497,7 +514,7 @@ async def test_paper_flat_rth_implicit_hold_after_tools(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", worked)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "blocked"
-    assert "paper hunt" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
+    assert "hold is not a ticket" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
 
 
 @pytest.mark.asyncio
@@ -545,6 +562,10 @@ def test_stale_playbook_is_not_a_hold_gate(tmp_path, monkeypatch):
 
     from abcxauto.lab_playbook import save_lab
 
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: False,
+    )
     save_lab(
         {
             "mode": "explore",
@@ -593,4 +614,4 @@ async def test_stale_playbook_tool_tour_is_not_work(tmp_path, monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", worked)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "blocked"
-    assert "paper hunt" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
+    assert "hold is not a ticket" in str((out.get("result") or {}).get("note") or out.get("validation") or "")

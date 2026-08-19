@@ -328,10 +328,10 @@ def test_format_wake_includes_day_facts():
     assert "struct=" not in text
     assert "edge=-549.0" not in text
     assert "dayPnL=" not in text
-    assert "edgeVsModel=-549.0" in text
-    assert "ibkrDay=-95.0" in text
-    assert "openU=-88.0" in text
-    assert "vsStart=-500.0(inception)" in text
+    assert "edgeVsModel=$-549.0" in text
+    assert "ibkrDay=$-95.0" in text
+    assert "openU=$-88.0" in text
+    assert "vsStart=$-500.0(inception)" in text
     assert "beating=False" in text
     assert "risk/trade=25.0%" in text
     assert "open=8/15" in text
@@ -400,7 +400,7 @@ def test_format_working_exits_and_wake_lasts():
     assert "AAPL last=310.72" in text
     assert "exits=" in text
     assert "candles=ibkr_rt_5s" in text
-    assert "haltAt=-704.0" in text
+    assert "haltAt=$-704.0" in text
 
 
 def test_format_wake_fill_is_delta_not_discovery():
@@ -454,8 +454,8 @@ def test_format_wake_fill_is_delta_not_discovery():
     assert "names=3" not in text
     assert "open_lots=XLF 260828C58.5 x1 -42%,QQQ 260918C745 x1" in text
     assert "dayPnL=" not in text
-    assert "ibkrDay=-40.0" in text
-    assert "openU=-12.0" in text
+    assert "ibkrDay=$-40.0" in text
+    assert "openU=$-12.0" in text
     assert "edgeVsModel=" in text
 
 
@@ -652,6 +652,12 @@ def test_build_world_state_regime_and_portfolio(tmp_path, monkeypatch):
     assert d["regime"]["trend_bias"] == "bullish"
     assert d["portfolio_risk"]["n_positions"] == 1
     assert d["portfolio_risk"]["top_symbol"] == "QQQ"
+    assert d["portfolio_risk"]["top_concentration_pct"] == round(100.0 * 5000 / 37000, 2)
+    assert d["portfolio_risk"]["exposure"]["symbols"][0]["pct_nl"] == round(
+        100.0 * 5000 / 37000, 2
+    )
+    assert "cash_pct_nl" in d["portfolio_risk"]["capital_liquidity"]
+    assert "deployed_long_pct_nl" in d["portfolio_risk"]["capital_liquidity"]
     assert "WORLDSTATE" in ws.prompt_block()
 
 

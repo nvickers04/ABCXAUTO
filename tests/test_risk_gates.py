@@ -25,6 +25,7 @@ def _cfg(**overrides) -> Config:
     defaults = {
         "risk_posture": "balanced",  # 5% test stops; floor is tested in test_self_tune
         "trading_budget_usd": 0.0,  # full NetLiq; % of portfolio
+        "sizing_floors": True,  # exercise % floors; paper prod default is OFF
         "cash_only": False,
         "max_peak_drawdown_pct": 0.0,
         "max_option_premium_pct": 0.0,
@@ -132,7 +133,7 @@ async def test_daily_loss_breach_trips_halt(gate):
     conn = FakeConnector(account={"netliquidation": 100_000.0, "dailypnl": -2500.0})
     ok, reason = await gate.pre_trade_check(_bracket(), conn)
     assert ok is False
-    assert "circuit breaker" in reason.lower() or "daily loss" in reason.lower()
+    assert "daily_loss" in reason.lower() or "daily loss" in reason.lower()
     assert gate.is_halted is True
 
     # Subsequent entry still blocked via latch even if PnL recovers in account
@@ -147,7 +148,11 @@ async def test_position_sizing_rejection(gate):
     conn = FakeConnector()
     ok, reason = await gate.pre_trade_check(_bracket(qty=200, entry=100.0), conn)
     assert ok is False
-    assert "position size" in reason.lower() or "exceeds max" in reason.lower()
+    assert (
+        "position size" in reason.lower()
+        or "exceeds max" in reason.lower()
+        or "size_max_position" in reason.lower()
+    )
 
     ok, _ = await gate.pre_trade_check(_bracket(qty=10, entry=100.0), conn)
     assert ok is True

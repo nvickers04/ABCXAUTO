@@ -407,21 +407,19 @@ def _prepare_close_params(act: dict, positions: list) -> None:
 
 
 def _paper_hunt_hold_block(world: WorldState) -> str | None:
-    """Paper RTH, flat, clerk open: hold is not a ticket."""
-    if str(getattr(world, "session_status", "") or "").lower() != "regular":
-        return None
-    if not bool(getattr(world, "flat", False)):
-        return None
-    try:
-        from abcxauto.lab_playbook import is_paper
+    """Deprecated stub — hold ban is clerk ``ban_hold``, not a paper-hunt machine."""
+    return None
 
-        if not is_paper():
-            return None
-    except Exception:
-        return None
-    if _new_risk_halted(world):
-        return None
-    return "paper hunt — hold is not a ticket while RTH and the clerk is open"
+
+def ban_hold_active(cfg: Any = None) -> bool:
+    """True when hold is not a ticket. Paper default ON; live default OFF; both two-way."""
+    from abcxauto.config import get_config
+
+    c = cfg if cfg is not None else get_config()
+    if not hasattr(c, "ban_hold"):
+        mode = str(getattr(c, "trading_mode", "paper") or "paper").strip().lower()
+        return mode != "live"
+    return bool(getattr(c, "ban_hold"))
 
 
 def _new_risk_halted(world: WorldState) -> bool:
@@ -509,14 +507,16 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
         return BLOCKED_STRAT, forced
     needs_prot = bool(getattr(world, "needs_protection", False) or getattr(world, "unprotected", None))
     if strat == "hold" and needs_prot:
+        # Unprotected STK last-stop is Risk/protect — not the ban_hold chip.
         return BLOCKED_STRAT, {
             "status": "blocked",
             "note": "hold_forbidden - unprotected STK needs a last-stop",
         }
-    if strat == "hold":
-        hunt_note = _paper_hunt_hold_block(world)
-        if hunt_note:
-            return BLOCKED_STRAT, {"status": "blocked", "note": hunt_note}
+    if strat == "hold" and ban_hold_active():
+        return BLOCKED_STRAT, {
+            "status": "blocked",
+            "note": "hold is not a ticket",
+        }
     params = act.get("params") if isinstance(act.get("params"), dict) else {}
     from abcxauto.world_state import single_leg_vertical_block
 

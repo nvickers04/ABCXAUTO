@@ -69,9 +69,9 @@ def test_scorecard_beating_when_book_ahead():
     assert abs(sc["since_start"]["edge_pct"] - 9.999) < 1e-9
     assert "prefer" not in sc
     text = format_scorecard_block(equity=1100.0, journal=j, sc=sc)
-    # % leads; model bill shows both scale % and real cash $
-    assert "book_return=+10.00% of starting NetLiq (+100.00$)" in text
-    assert "model_cost=0.0010% of starting NetLiq ($0.0100 cash" in text
+    # % leads; model bill shows scale % and REAL $ (paper book vs real xAI)
+    assert "book_return=+10.00% of starting NetLiq (+100.00$ paper)" in text
+    assert "model_cost=0.0010% of starting NetLiq ($0.0100 real xAI" in text
     assert "edge=+9.9990% (+99.99$) → BEATING" in text
 
 
@@ -87,7 +87,7 @@ def test_scorecard_losing_to_model_bill():
     assert abs(sc["edge_pct"] - (-0.6)) < 1e-9
     text = format_scorecard_block(equity=999.0, journal=j)
     assert "LOSING" in text
-    assert "model_cost=0.5000% of starting NetLiq ($5.0000 cash" in text
+    assert "model_cost=0.5000% of starting NetLiq ($5.0000 real xAI" in text
     assert "do not sit" not in text.lower()
     assert "not cash" not in text.lower()
     assert "Do not skip protect" not in text
@@ -228,16 +228,16 @@ def test_scorecard_session_is_not_inception(monkeypatch):
     lines = text.strip().splitlines()
     assert lines[0] == "SCORECARD:"
     assert lines[1].startswith("- session ")
-    # Session leads with %; model_cost shows both pct and real cash $
-    assert "book=+0.29%" in lines[1]
-    assert "model_cost=0.0011% ($0.4000 cash)" in lines[1]
+    # Session leads with %; model_cost shows both pct and REAL xAI $
+    assert "book=+0.29% paper" in lines[1]
+    assert "model_cost=0.0011% ($0.4000 real xAI)" in lines[1]
     assert "edge=+0.2846%" in lines[1]
     assert "fills=1/2" in lines[1]
     assert "model=grok-4.6" in lines[1]
     assert "since=2026-08-19T12:00:00Z" in lines[1]
     assert any(line.startswith("- first_NL=") for line in lines)
     assert "of starting NetLiq" in text
-    assert "$2.0000 cash" in text  # inception real bill visible
+    assert "$2.0000 real xAI" in text  # inception real bill visible
     assert "LOSING to the model bill" in text
     assert "BEATING the model bill" not in text
 
@@ -265,7 +265,7 @@ def test_format_scorecard_omits_session_when_absent():
     assert "- session " not in text
     assert "first_NL=1000.00" in text
     assert "book_return=+10.00%" in text
-    assert "model_cost=0.0010% of starting NetLiq ($0.0100 cash" in text
+    assert "model_cost=0.0010% of starting NetLiq ($0.0100 real xAI" in text
     assert "edge=+9.9990%" in text
     assert "BEATING" in text
 
@@ -282,5 +282,54 @@ def test_beating_model_still_dollar_edge_not_pct():
     assert sc["edge_pct"] is not None
     assert abs(sc["edge_pct"] - 0.00005) < 1e-12
     text = format_scorecard_block(equity=1_000_001.0, journal=j, sc=sc)
-    assert "$0.5000 cash" in text
+    assert "$0.5000 real xAI" in text
     assert "BEATING" in text
+
+
+def test_live_scorecard_does_not_split_paper_vs_real(monkeypatch):
+    """Live: book and model cost are both real — no paper/xAI split labels."""
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: type(
+            "C",
+            (),
+            {"is_paper": False, "trading_mode": "live", "model": "grok-4.6"},
+        )(),
+    )
+    sc = {
+        "startup_cash": 1000.0,
+        "net_liquidation": 1100.0,
+        "book_pnl": 100.0,
+        "book_return_pct": 10.0,
+        "model_calls": 1,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "model_cost_usd": 0.01,
+        "model_cost_pct": 0.001,
+        "edge_usd": 99.99,
+        "edge_pct": 9.999,
+        "beating_model": True,
+        "fastest_beating": None,
+        "best_pace": None,
+        "windows": {},
+        "session": {
+            "model": "grok-4.6",
+            "started_at": "2026-08-19T12:00:00Z",
+            "startup_nl": 1000.0,
+            "book_pnl": 100.0,
+            "model_cost_usd": 0.01,
+            "model_cost_pct": 0.001,
+            "model_calls": 1,
+            "edge_usd": 99.99,
+            "edge_pct": 9.999,
+            "fills": 0,
+            "wins": 0,
+        },
+    }
+    text = format_scorecard_block(sc=sc)
+    assert " paper" not in text
+    assert "real xAI" not in text
+    assert "model_cost=0.0010% of starting NetLiq ($0.0100 cash," in text
+    assert "book_return=+10.00% of starting NetLiq (+100.00$)" in text
+    assert "model_cost=0.0010% ($0.0100)" in text  # session line, both real
+    assert sc["beating_model"] is True

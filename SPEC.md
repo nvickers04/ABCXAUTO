@@ -34,6 +34,7 @@ Switch the brain with `ABCXAUTO_MODEL`; keep the clerk.
 
 Walk-away ceilings: **25%** daily-loss, **25%** max position, **25%** risk/trade,
 defined-risk on, cash-only, full NetLiq (`trading_budget_usd=0`).
+Paper operator may turn % floors off (`sizing_floors`); live cannot (forced ON); 25% walk-away is the live ceiling.
 
 ## Loop
 

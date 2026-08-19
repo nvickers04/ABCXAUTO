@@ -96,6 +96,58 @@ def test_book_facts_have_no_controls_lecture(tmp_path, monkeypatch):
     assert "idle_streak" not in prompt
 
 
+def test_book_facts_surface_portfolio_risk(tmp_path, monkeypatch):
+    from abcxauto.brain import _book_facts
+    from abcxauto.world_state import WorldState
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    get_config.cache_clear()
+
+    port = {
+        "n_positions": 1,
+        "top_symbol": "QQQ",
+        "top_concentration_pct": 13.51,
+        "exposure": {
+            "top_symbol": "QQQ",
+            "top_concentration_pct": 13.51,
+            "symbols": [{"symbol": "QQQ", "pct_nl": 13.51}],
+        },
+        "capital_liquidity": {
+            "total_cash": 32000.0,
+            "cash_pct_nl": 86.49,
+            "deployed_long_pct_nl": 13.51,
+        },
+    }
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=False,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk=port,
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    facts = _book_facts(world)
+    assert facts["portfolio_risk"]["top_concentration_pct"] == 13.51
+    assert facts["exposure"]["top_concentration_pct"] == 13.51
+    assert facts["exposure"]["symbols"][0]["pct_nl"] == 13.51
+    assert facts["capital_liquidity"]["cash_pct_nl"] == 86.49
+    assert facts["capital_liquidity"]["deployed_long_pct_nl"] == 13.51
+
+
 def test_world_prompt_scan_tape_not_opportunities_header():
     from abcxauto.world_state import WorldState
 
