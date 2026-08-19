@@ -106,11 +106,9 @@ def grok_json_as_turn(fake_grok):
         except Exception:
             payload = {}
         if "strategy" not in payload and "action" not in payload:
-            payload = {
-                "action": "hold",
-                "strategy": "hold",
-                "rationale": str(payload.get("thesis") or "no ticket"),
-            }
+            from abcxauto.brain import BrainTurn
+
+            return BrainTurn(text=str(payload.get("thesis") or "no ticket"))
         return await fake_grok_turn(payload)(
             g, connector=connector, world=world, snap=snap, wake=wake
         )

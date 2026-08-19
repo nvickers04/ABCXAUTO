@@ -19,7 +19,6 @@ from abcxauto.agent_loop import (
 )
 from abcxauto.brain import brain_system_prompt
 from abcxauto.world_state import WorldState
-from tests.conftest import fake_grok_turn
 
 
 class FakeConnector:
@@ -50,6 +49,15 @@ async def _fake_tool(_c, name: str, _a=None):
 
 def _hold_act(rationale: str = "flat"):
     return {"action": "hold", "strategy": "hold", "rationale": rationale}
+
+
+def _no_send_turn(**kwargs):
+    from abcxauto.brain import BrainTurn
+
+    async def grok_turn(*_a, **_k):
+        return BrainTurn(**kwargs)
+
+    return grok_turn
 
 
 def _world(**kwargs) -> WorldState:
@@ -119,102 +127,56 @@ def _stub_config(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_hold_path_skips_send(monkeypatch):
-    """Live: hold is valid and does not send."""
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: SimpleNamespace(
-            trading_mode="live",
-            risk_posture="balanced",
-            is_paper=False,
-            ban_hold=False,
-        ),
-    )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: False,
-    )
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
+async def test_no_send_is_yield_not_a_ticket(monkeypatch):
+    """No send() is rest. Clerk does not invent a hold ticket."""
     send_calls: list = []
 
     async def boom_send(*_a, **_k):
         send_calls.append(1)
-        raise AssertionError("send_action must not run on hold")
+        raise AssertionError("send_action must not run on no-send")
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", fake_grok_turn(_hold_act()))
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok_turn",
+        _no_send_turn(tool_trace=["book"], text="watching"),
+    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "hold"
-    assert out["result"]["status"] == "hold"
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
     assert send_calls == []
     assert "world_state" in out
+    assert (out.get("action_obj") or {}).get("strategy") != "hold"
 
 
 @pytest.mark.asyncio
-async def test_paper_flat_rth_hold_does_not_send(monkeypatch):
+async def test_paper_flat_rth_no_send_does_not_send(monkeypatch):
     send_calls: list = []
 
     async def boom_send(*_a, **_k):
         send_calls.append(1)
-        raise AssertionError("send_action must not run on blocked hold")
+        raise AssertionError("send_action must not run on no-send")
 
     monkeypatch.setattr(
         "abcxauto.agent_loop.build_world_state",
         lambda **_k: _world(flat=True, session_status="regular"),
     )
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", fake_grok_turn(_hold_act()))
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok_turn",
+        _no_send_turn(tool_trace=["book"]),
+    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "blocked"
-    assert "hold is not a ticket" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
     assert send_calls == []
 
 
-def test_paper_flat_rth_hold_is_blocked():
+def test_explicit_hold_send_is_not_a_ticket():
     strat, forced = gate_ticket(_hold_act(), _world(flat=True, session_status="regular"))
     assert strat == "blocked"
-    assert "hold is not a ticket" in str((forced or {}).get("note") or "")
-
-
-def test_paper_open_book_hold_is_allowed(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: False,
-    )
-    strat, forced = gate_ticket(
-        _hold_act(),
-        _world(flat=False, session_status="regular", positions=[{"symbol": "SPY"}]),
-    )
-    assert strat == "hold"
-    assert forced is None
-
-
-def test_live_flat_rth_hold_is_allowed(monkeypatch):
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: False,
-    )
-    strat, forced = gate_ticket(_hold_act(), _world(flat=True, session_status="regular"))
-    assert strat == "hold"
-    assert forced is None
-
-
-def test_paper_halted_flat_hold_is_allowed(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.risk_gates.get_risk_gate",
-        lambda: type("G", (), {"is_halted": True})(),
-    )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: False,
-    )
-    strat, forced = gate_ticket(
-        _hold_act(),
-        _world(flat=True, session_status="regular", book={"halted": True}),
-    )
-    assert strat == "hold"
-    assert forced is None
+    note = str((forced or {}).get("note") or "")
+    assert "hold is not a ticket" not in note
+    assert "invalid" in note or "allowlist" in note
 
 
 def test_brain_system_has_order_examples():
@@ -225,11 +187,11 @@ def test_brain_system_has_order_examples():
     assert "the operator gives" not in text
 
 
-def test_normalize_noop_to_hold():
+def test_normalize_noop_is_not_a_ticket():
     strat, forced = normalize_action({"action": "noop"})
-    assert strat == "hold"
-    assert forced is None
-    assert "hold" in ALLOWED_ACTIONS
+    assert strat == "blocked"
+    assert forced is not None
+    assert "hold" not in ALLOWED_ACTIONS
     assert "self_tune" in ALLOWED_ACTIONS
 
 
@@ -337,11 +299,13 @@ def test_vertical_spread_close_is_not_new_risk_when_unprotected():
     assert "combo" in str((note or {}).get("note") or "").lower() or "BAG" in str((note or {}).get("note") or "")
 
 
-def test_paper_may_not_hold_when_flat_rth(monkeypatch):
+def test_paper_may_not_send_hold_when_flat_rth():
     world = _world(flat=True, session_status="regular")
     strat, forced = gate_ticket(_hold_act(), world)
     assert strat == "blocked"
-    assert "hold is not a ticket" in str((forced or {}).get("note") or "")
+    note = str((forced or {}).get("note") or "")
+    assert "hold is not a ticket" not in note
+    assert "invalid" in note or "allowlist" in note
 
 
 def test_wake_grok_for_session():
@@ -497,7 +461,7 @@ def test_turn_did_work_facts_or_tune():
 
 @pytest.mark.asyncio
 async def test_paper_no_send_after_tools_is_rest_not_hold_ticket(monkeypatch):
-    """ban_hold on: no-send must not invent hold → gate_ticket → 'hold is not a ticket'."""
+    """No-send must not invent hold."""
     from abcxauto.brain import BrainTurn
 
     async def worked(*_a, **_k):
@@ -571,15 +535,11 @@ async def test_notes_only_unprotected_no_send_is_rest(monkeypatch):
         (out.get("result") or {}).get("note") or out.get("validation") or ""
     )
 
-def test_stale_playbook_is_not_a_hold_gate(tmp_path, monkeypatch):
+def test_stale_playbook_does_not_make_hold_a_ticket(tmp_path):
     from datetime import datetime, timedelta, timezone
 
     from abcxauto.lab_playbook import save_lab
 
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: False,
-    )
     save_lab(
         {
             "mode": "explore",
@@ -593,8 +553,9 @@ def test_stale_playbook_is_not_a_hold_gate(tmp_path, monkeypatch):
     lab["written_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     (tmp_path / "lab.json").write_text(__import__("json").dumps(lab), encoding="utf-8")
     strat, forced = gate_ticket(_hold_act(), _world(flat=False, session_status="regular"))
-    assert strat == "hold"
-    assert forced is None
+    assert strat == "blocked"
+    note = str((forced or {}).get("note") or "")
+    assert "invalid" in note or "allowlist" in note
 
 
 @pytest.mark.asyncio
@@ -635,102 +596,26 @@ async def test_stale_playbook_tool_tour_is_not_work(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_ban_hold_on_no_send_not_hold_is_not_a_ticket(monkeypatch):
-    """No-send + ban_hold: rest, never the hold-ticket chip."""
-    from abcxauto.brain import BrainTurn
-
-    async def rest(*_a, **_k):
-        return BrainTurn(
-            tool_trace=["book", "status", "playbook", "quote", "scan", "news", "candles", "set_wake", "write_lab_playbook"],
-            last_act={"action": "hold", "strategy": "hold", "rationale": "no send"},
-            last_strat="hold",
-            last_result={"status": "hold", "strategy": "hold"},
-        )
-
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: True,
-    )
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", rest)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out.get("sends") == 0
-    assert out["strat"] != "hold"
-    assert out["strat"] != "blocked"
-    blob = str(
-        (out.get("result") or {}).get("note")
-        or out.get("validation")
-        or out.get("rationale")
-        or ""
-    )
-    assert "hold is not a ticket" not in blob
-
-
-@pytest.mark.asyncio
-async def test_ban_hold_on_explicit_hold_send_still_not_a_ticket(monkeypatch):
-    """Real hold send + ban_hold: gate_ticket chip still fires."""
-    from abcxauto.brain import BrainTurn
-
-    blocked = {
-        "status": "blocked",
-        "note": "hold is not a ticket",
-    }
-
-    async def sent_hold(*_a, **_k):
-        act = {"action": "blocked", "strategy": "blocked", "rationale": "hold is not a ticket"}
-        return BrainTurn(
-            sends=[{"act": dict(act), "result": blocked, "strat": "blocked"}],
-            last_act=act,
-            last_strat="blocked",
-            last_result=blocked,
-            tool_trace=["book", "send"],
-        )
-
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: True,
-    )
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", sent_hold)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "blocked"
-    assert "hold is not a ticket" in str(
-        (out.get("result") or {}).get("note") or out.get("validation") or ""
-    )
-
-
-@pytest.mark.asyncio
-async def test_ban_hold_off_no_send_remains_hold_noop(monkeypatch):
-    """Live / ban_hold off: no-send may still surface as hold no-op."""
-    from abcxauto.brain import BrainTurn
-
-    async def rest(*_a, **_k):
-        return BrainTurn(
-            tool_trace=["book", "set_wake"],
-            last_act={"action": "hold", "strategy": "hold", "rationale": "no send"},
-            last_strat="hold",
-            last_result={"status": "hold", "strategy": "hold"},
-        )
-
+async def test_live_no_send_is_yield(monkeypatch):
+    """Live follower: no send() is yield, not a hold ticket."""
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
             trading_mode="live",
             risk_posture="balanced",
             is_paper=False,
-            ban_hold=False,
         ),
     )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: False,
-    )
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", rest)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "hold"
-    assert out["result"]["status"] == "hold"
-    assert "hold is not a ticket" not in str(
-        (out.get("result") or {}).get("note") or out.get("validation") or ""
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok_turn",
+        _no_send_turn(tool_trace=["book", "set_wake"], text="watching"),
     )
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert out.get("sends") == 0
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
+    assert (out.get("action_obj") or {}).get("strategy") != "hold"
 
 
 @pytest.mark.asyncio

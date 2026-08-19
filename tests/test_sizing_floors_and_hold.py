@@ -1,10 +1,9 @@
-"""sizing_floors + ban_hold clerk flags, size_* % NL reasons, wake/day pct facts."""
+"""sizing_floors clerk flag, size_* % NL reasons, wake/day pct facts."""
 
 from __future__ import annotations
 
 import pytest
 
-from abcxauto.agent_loop import ban_hold_active, gate_ticket
 from abcxauto.config import (
     RISK_CONFIG_KEYS,
     clear_runtime_overrides,
@@ -35,10 +34,6 @@ def teardown_function():
     clear_runtime_overrides()
     get_config.cache_clear()
     reset_risk_gate()
-
-
-def _hold_act():
-    return {"action": "hold", "strategy": "hold", "rationale": "wait"}
 
 
 def _world(**kwargs):
@@ -93,15 +88,13 @@ def test_sizing_floors_default_off_on_paper():
 
 def test_sizing_floors_in_risk_config_keys_not_budget():
     assert "sizing_floors" in RISK_CONFIG_KEYS
-    assert "ban_hold" in RISK_CONFIG_KEYS
     assert "trading_budget_usd" not in RISK_CONFIG_KEYS
 
 
-def test_grok_cannot_self_tune_sizing_floors_or_ban_hold():
-    out = apply_self_tune({"sizing_floors": True, "ban_hold": False}, persist=False)
+def test_grok_cannot_self_tune_sizing_floors():
+    out = apply_self_tune({"sizing_floors": True}, persist=False)
     rejected = out.get("rejected") or {}
     assert "sizing_floors" in rejected
-    assert "ban_hold" in rejected
     assert get_config().sizing_floors is False
 
 
@@ -237,66 +230,8 @@ async def test_floors_on_size_reasons_are_pct_of_nl(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# ban_hold
+# send enum — hold is not a ticket
 # ---------------------------------------------------------------------------
-
-
-def test_ban_hold_default_on_paper():
-    assert get_config().ban_hold is True
-    assert ban_hold_active() is True
-
-
-def test_ban_hold_blocks_hold_as_not_a_ticket(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(ban_hold=True, trading_mode="paper"),
-    )
-    monkeypatch.setattr(
-        "abcxauto.config.get_config",
-        lambda: _cfg(ban_hold=True, trading_mode="paper"),
-    )
-    strat, forced = gate_ticket(_hold_act(), _world(flat=True))
-    assert strat == "blocked"
-    assert forced is not None
-    assert "hold is not a ticket" in str(forced.get("note") or "")
-
-
-def test_ban_hold_off_allows_hold_noop(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(ban_hold=False, trading_mode="paper"),
-    )
-    monkeypatch.setattr(
-        "abcxauto.config.get_config",
-        lambda: _cfg(ban_hold=False, trading_mode="paper"),
-    )
-    strat, forced = gate_ticket(_hold_act(), _world(flat=True, session_status="regular"))
-    assert strat == "hold"
-    assert forced is None
-
-
-def test_ban_hold_live_two_way(monkeypatch):
-    live = _cfg(ban_hold=False, trading_mode="live", ibkr_port=7496)
-    assert ban_hold_active(live) is False
-    live_ban = _cfg(ban_hold=True, trading_mode="live", ibkr_port=7496)
-    assert ban_hold_active(live_ban) is True
-
-
-def test_unprotected_still_blocks_hold_even_when_hold_ok(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(ban_hold=False),
-    )
-    monkeypatch.setattr(
-        "abcxauto.config.get_config",
-        lambda: _cfg(ban_hold=False),
-    )
-    strat, forced = gate_ticket(
-        _hold_act(),
-        _world(needs_protection=True, unprotected=["AAPL"], flat=False),
-    )
-    assert strat == "blocked"
-    assert "last-stop" in str(forced.get("note") or "")
 
 
 def _send_strategy_enum(tools) -> list[str]:
@@ -315,51 +250,16 @@ def _send_strategy_enum(tools) -> list[str]:
     return []
 
 
-def test_ban_hold_on_omits_hold_from_send_enum(monkeypatch):
-    """Paper default: hold is not offered on the send tool."""
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: True,
-    )
+def test_send_enum_never_includes_hold():
     from abcxauto.brain import agent_tools, brain_system_prompt
     from abcxauto.order_examples import ticket_strategy_names
 
     enum = _send_strategy_enum(agent_tools())
     assert "hold" not in enum
     assert "market_bracket" in enum
-    # Catalog still has hold; Brain only hides it for this look.
-    assert "hold" in ticket_strategy_names()
+    assert "hold" not in ticket_strategy_names()
     lines = [ln.strip() for ln in brain_system_prompt().splitlines()]
     assert not any(ln.startswith("hold:") for ln in lines)
-
-
-def test_ban_hold_off_keeps_hold_in_send_enum(monkeypatch):
-    """Live default: hold remains a sendable no-op strategy."""
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: False,
-    )
-    from abcxauto.brain import AGENT_TOOLS, agent_tools, brain_system_prompt
-
-    enum = _send_strategy_enum(agent_tools())
-    assert "hold" in enum
-    # Static catalog always includes hold (live / ban off).
-    assert "hold" in _send_strategy_enum(AGENT_TOOLS)
-    lines = [ln.strip() for ln in brain_system_prompt().splitlines()]
-    assert any(ln.startswith("hold:") for ln in lines)
-
-
-def test_paper_and_live_can_persist_ban_hold(tmp_path, monkeypatch):
-    path = tmp_path / "hold.json"
-    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
-    from abcxauto.config import clear_risk_settings, load_risk_settings
-
-    clear_risk_settings(path=path)
-    load_risk_settings(path)
-    update_risk_config(ban_hold=False, persist=True)
-    assert get_config().ban_hold is False
-    update_risk_config(ban_hold=True, persist=True)
-    assert get_config().ban_hold is True
 
 
 # ---------------------------------------------------------------------------

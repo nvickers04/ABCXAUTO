@@ -164,9 +164,6 @@ def apply_self_tune(
         if key == "sizing_floors":
             rejected[key] = "operator-only — agent cannot flip sizing floors"
             continue
-        if key == "ban_hold":
-            rejected[key] = "operator-only — agent cannot flip hold ban"
-            continue
         if key == "trading_budget_usd":
             rejected[key] = "size and risk are % of NetLiq — no dollar sleeve"
             continue
@@ -372,7 +369,6 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
         if k in (
             "risk_gates_enabled",
             "sizing_floors",
-            "ban_hold",
             "auto_panic_on_breach",
             "defined_risk_only",
             "cash_only",

@@ -125,6 +125,18 @@ def _pja_grok(act: dict, judgment: dict | None = None, prompts: list | None = No
     return fake_grok_turn(act, wakes=prompts)
 
 
+def _no_send_grok(prompts: list | None = None, **kwargs):
+    """Yield: tools/text only, no send()."""
+    from abcxauto.brain import BrainTurn
+
+    async def grok_turn(_g, *, connector, world, snap, wake=""):
+        if prompts is not None:
+            prompts.append(wake)
+        return BrainTurn(**kwargs)
+
+    return grok_turn
+
+
 @pytest.fixture(autouse=True)
 def _reset_cadence(monkeypatch, tmp_path):
     stub = _cfg()
@@ -172,8 +184,8 @@ async def test_snap_with_fake_connector(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_paper_flat_rth_hold_is_blocked(monkeypatch):
-    """Paper RTH flat: hold is not a ticket."""
+async def test_run_cycle_paper_flat_rth_no_send_is_yield(monkeypatch):
+    """Paper RTH flat: no send() is yield, not a hold ticket."""
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
@@ -181,7 +193,6 @@ async def test_run_cycle_paper_flat_rth_hold_is_blocked(monkeypatch):
     )
     send_calls: list[dict] = []
     prompts: list[str] = []
-    act = {"action": "hold", "strategy": "hold", "rationale": "wait"}
 
     async def record_send(action, conn):
         send_calls.append(action)
@@ -189,13 +200,13 @@ async def test_run_cycle_paper_flat_rth_hold_is_blocked(monkeypatch):
 
     monkeypatch.setattr(
         "abcxauto.agent_loop.grok_turn",
-        _pja_grok(act, prompts=prompts),
+        _no_send_grok(prompts, tool_trace=["book"], text="watching"),
     )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     hist = []
     out = await run_cycle(1, FakeConnector(), None, hist, 0.0)
-    assert out["strat"] == "blocked"
-    assert "hold is not a ticket" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
     assert send_calls == []
     assert prompts  # Grok woke
     from abcxauto.brain import brain_system_prompt
@@ -204,34 +215,31 @@ async def test_run_cycle_paper_flat_rth_hold_is_blocked(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_live_hold_when_flat(monkeypatch):
-    """Live follower may hold when flat."""
+async def test_run_cycle_live_no_send_when_flat(monkeypatch):
+    """Live follower: no send() is yield, not a hold ticket."""
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: _cfg(
             trading_mode="live",
             is_paper=False,
-            ban_hold=False,
         ),
-    )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: False,
     )
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     send_calls: list[dict] = []
-    act = {"action": "hold", "strategy": "hold", "rationale": "wait"}
 
     async def record_send(action, conn):
         send_calls.append(action)
         return {"status": "executed"}
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.grok_turn",
+        _no_send_grok(tool_trace=["book"], text="watching"),
+    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "hold"
-    assert out["result"]["status"] == "hold"
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
     assert send_calls == []
 
 
@@ -274,7 +282,7 @@ async def test_run_cycle_rth_always_calls_grok(monkeypatch):
     assert any("session=" in p for p in grok_calls)
     for p in grok_calls:
         assert_no_cycle_counter(p)
-    assert out["strat"] in ("market_bracket", "blocked", "hold")
+    assert out["strat"] in ("market_bracket", "blocked")
 
 
 @pytest.mark.asyncio
@@ -465,20 +473,16 @@ async def test_run_cycle_premarket_last_hour_wakes_grok(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.agent_loop._tool", await _fake_tool_session("premarket", minutes_to_open=40)
     )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: False,
-    )
     wakes: list[str] = []
-    act = {"action": "hold", "strategy": "hold", "rationale": "premarket tape"}
     monkeypatch.setattr(
         "abcxauto.agent_loop.grok_turn",
-        _pja_grok(act, prompts=wakes),
+        _no_send_grok(wakes, tool_trace=["book"], text="premarket tape"),
     )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert wakes
     assert "session=premarket" in wakes[0]
-    assert out["strat"] == "hold"
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
 
 
 @pytest.mark.asyncio
@@ -486,20 +490,16 @@ async def test_run_cycle_premarket_wakes_grok(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.agent_loop._tool", await _fake_tool_session("premarket")
     )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.ban_hold_active",
-        lambda cfg=None: False,
-    )
     wakes: list[str] = []
-    act = {"action": "hold", "strategy": "hold", "rationale": "premarket tape"}
     monkeypatch.setattr(
         "abcxauto.agent_loop.grok_turn",
-        _pja_grok(act, prompts=wakes),
+        _no_send_grok(wakes, tool_trace=["book"], text="premarket tape"),
     )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert wakes
     assert "session=premarket" in wakes[0]
-    assert out["strat"] == "hold"
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
 
 
 @pytest.mark.asyncio
@@ -565,17 +565,17 @@ def test_normalize_action_rejects_unknown():
     assert "invalid" in forced["note"] or "allowlist" in forced["note"]
 
 
-def test_normalize_action_accepts_hold_and_noop():
+def test_normalize_action_rejects_hold_and_noop():
     strat, forced = normalize_action({"action": "hold", "strategy": "hold"})
-    assert strat == "hold"
-    assert forced is None
+    assert strat == "blocked"
+    assert forced is not None
     strat2, forced2 = normalize_action({"action": "noop", "strategy": "noop"})
-    assert strat2 == "hold"
-    assert forced2 is None
+    assert strat2 == "blocked"
+    assert forced2 is not None
 
 
-def test_normalize_action_hold_in_allowlist():
-    assert "hold" in ALLOWED_ACTIONS
+def test_normalize_action_hold_not_in_allowlist():
+    assert "hold" not in ALLOWED_ACTIONS
     assert "trailing_stop" in ALLOWED_ACTIONS  # structure vocab for manage/protect
     strat, forced = normalize_action({"action": "trailing_stop", "strategy": "trailing_stop"})
     assert strat == "trailing_stop"

@@ -87,16 +87,6 @@ class ProTerminal:
             tooltip="Paper: toggle % size floors. Live: always on.",
             on_click=self._toggle_sizing_floors,
         )
-        self.lbl_hold_ban = ft.Text("Hold banned", size=12, weight=ft.FontWeight.W_600, color=AMBER)
-        self.btn_hold_ban = ft.Container(
-            content=self.lbl_hold_ban,
-            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
-            border=ft.Border.all(1, AMBER),
-            border_radius=999,
-            ink=True,
-            tooltip="Toggle hold-as-ticket ban (paper + live).",
-            on_click=self._toggle_ban_hold,
-        )
         self.tf_live_confirm = ft.TextField(
             label="Type live confirm phrase",
             password=True,
@@ -383,7 +373,6 @@ class ProTerminal:
                     self.lbl_model,
                     self.btn_account_mode,
                     self.btn_floors,
-                    self.btn_hold_ban,
                     ft.Container(width=12),
                     self.dot_conn,
                     self.lbl_ibkr_status,
@@ -1219,24 +1208,6 @@ class ProTerminal:
             self._toast(f"Floors toggle failed: {exc}", color=RED)
             self._safe_update()
 
-    def _toggle_ban_hold(self, _=None) -> None:
-        """Paper + live two-way toggle of clerk ``ban_hold``."""
-        try:
-            from abcxauto.config import update_risk_config
-
-            cfg = get_config()
-            next_ban = not bool(getattr(cfg, "ban_hold", True))
-            update_risk_config(ban_hold=next_ban, persist=True)
-            self._sync_hold_ban_chip()
-            self._toast(
-                "Hold banned" if next_ban else "Hold ok",
-                color=AMBER if next_ban else GREEN,
-            )
-            self._safe_update()
-        except Exception as exc:
-            self._toast(f"Hold toggle failed: {exc}", color=RED)
-            self._safe_update()
-
     def _sync_floors_chip(self) -> None:
         from abcxauto.risk_gates import sizing_floors_active
 
@@ -1250,17 +1221,6 @@ class ProTerminal:
             "Live: Floors on (forced)"
             if live
             else "Paper: click to toggle % size floors"
-        )
-
-    def _sync_hold_ban_chip(self) -> None:
-        banned = bool(getattr(get_config(), "ban_hold", True))
-        self.lbl_hold_ban.value = "Hold banned" if banned else "Hold ok"
-        self.lbl_hold_ban.color = AMBER if banned else GREEN
-        self.btn_hold_ban.border = ft.Border.all(1, AMBER if banned else GREEN)
-        self.btn_hold_ban.tooltip = (
-            "Hold is not a ticket — click to allow hold no-op"
-            if banned
-            else "Hold allowed as send no-op — click to ban"
         )
 
     def _open_live_confirm_dialog(self) -> None:
@@ -1318,7 +1278,6 @@ class ProTerminal:
         self.lbl_account_mode.color = GREEN if paper else RED
         self.btn_account_mode.border = ft.Border.all(1, GREEN if paper else RED)
         self._sync_floors_chip()
-        self._sync_hold_ban_chip()
         if s.connected and aid:
             self.lbl_account_name.value = aname or f"IBKR {aid}"
             self.lbl_account_id.value = aid

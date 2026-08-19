@@ -58,14 +58,13 @@ async def test_send_action_hold_no_dispatch():
 
     connector = MagicMock()
     connector.connected = True
-    # If hold leaked to broker, these would be touched.
+    # If hold leaked to the executor, it must not touch the broker.
     connector.place_order = MagicMock()
     connector.get_positions = MagicMock()
 
     result = await send_action({"strategy": "hold", "params": {}}, connector)
 
-    assert result["status"] == "held"
-    assert result.get("strategy") == "hold"
+    assert result["status"] in ("held", "blocked")
     connector.place_order.assert_not_called()
 
 

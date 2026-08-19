@@ -32,10 +32,9 @@ def test_every_strategy_has_an_example():
         assert key in ORDER_EXAMPLES
 
 
-def test_hold_present():
-    assert "hold" in ORDER_EXAMPLES
-    assert "hold" in SENDABLE_TYPES
-    assert ORDER_EXAMPLES["hold"] == {}
+def test_hold_absent_from_catalog():
+    assert "hold" not in ORDER_EXAMPLES
+    assert "hold" not in SENDABLE_TYPES
 
 
 def test_set_risk_present():
@@ -79,11 +78,11 @@ def test_format_order_examples():
     # OPEN dict values stay free of closing_position (assert_examples 1:1).
     for name in COMBO_BAG_CLOSE:
         assert "closing_position" not in ORDER_EXAMPLES[name]
-    text_narrow = format_order_examples(allowed=frozenset({"hold", "market_bracket"}))
+    text_narrow = format_order_examples(allowed=frozenset({"market_bracket"}))
     assert "market_bracket" in text_narrow
     assert "vertical_spread" not in text_narrow
     assert "vertical_spread close:" not in text_narrow
-    assert "hold" in text_narrow
+    assert "hold:" not in text_narrow
 
 
 @pytest.mark.parametrize("strategy", sorted(COMBO_BAG_CLOSE))
