@@ -153,6 +153,7 @@ def test_format_wake_no_tape_keeps_lots_and_minutes():
             "nl": 100_000.0,
             "daily_pnl": 0.0,
             "risk_per_trade_pct": 5.0,
+            "sizing_floors": False,
             "capacity": {"open_count": 1, "max_open_positions": 15},
             "open_lots": ["AAPL STK long 20"],
             "mix": {"stk": 1},
@@ -165,6 +166,8 @@ def test_format_wake_no_tape_keeps_lots_and_minutes():
     assert "tape=" not in text
     assert "options=live" not in text
     assert "open_lots=AAPL STK long 20" in text
+    assert "max_risk=5.0% floors=off" in text
+    assert "risk/trade=" not in text
     assert "mix=" in text
     assert "session_prep" not in text
     assert "estimate" not in text.lower()
@@ -277,14 +280,19 @@ def test_format_wake_open_lots_and_mix_still_print():
             "names": 1,
             "lots": 1,
             "capacity": {"open_count": 1, "max_open_positions": 15},
+            "risk_per_trade_pct": 25.0,
+            "sizing_floors": False,
             "open_lots": ["NVDA STK long 5"],
             "mix": {"stk": 1},
             "tape_seed": ["SPY", "QQQ"],
         },
     )
     assert "open_lots=NVDA STK long 5" in text
+    assert "max_risk=25.0% floors=off" in text
+    assert "risk/trade=" not in text
     assert "mix=" in text
     assert "tape=" not in text
+    assert text.rstrip().endswith("send.")
 
 
 def test_format_wake_non_rth_fill_delta_omits_tape_and_options():
