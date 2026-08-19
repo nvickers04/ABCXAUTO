@@ -248,7 +248,6 @@ class ProEngine:
         self._last_cycle_out: dict = {}
         self._resume_think = False
         self._think_parked = False
-        self._park_session = ""
         from abcxauto.think_stream import bind_engine
 
         bind_engine(self)
@@ -740,27 +739,6 @@ class ProEngine:
         rec = {**d, "ts": _now(), "type": "cycle"}
         s.records.append(rec)
 
-    @staticmethod
-    def _session_of(snap: dict | None) -> str:
-        s = snap if isinstance(snap, dict) else {}
-        pulse = s.get("reality_pulse") or {}
-        block = pulse.get("session") if isinstance(pulse, dict) else None
-        hours = s.get("market_hours") if isinstance(s.get("market_hours"), dict) else None
-        if not isinstance(block, dict) and isinstance(hours, dict):
-            block = hours.get("session")
-        if isinstance(block, dict):
-            return str(block.get("status") or "").lower()
-        if isinstance(block, str):
-            return block.lower()
-        return ""
-
-    def _session_unparks(self, sess: str) -> bool:
-        """Park stays down on overnight pokes. Next premarket/RTH is session_change."""
-        now = str(sess or "").strip().lower()
-        if not now or now == str(getattr(self, "_park_session", "") or "").strip().lower():
-            return False
-        return now in ("regular", "premarket")
-
     async def _host_think(
         self, n: int, g: Any, s: dict, *, resume: bool = False
     ) -> dict:
@@ -973,33 +951,23 @@ class ProEngine:
                 resume = bool(getattr(self, "_resume_think", False))
                 poked = peek_interrupt() is not None
                 if getattr(self, "_think_parked", False) and not resume:
-                    sess_now = ""
+                    # Park is shutdown. Pokes (overnight fill) do not host.
                     if poked:
-                        try:
-                            shot = await snap(self.conn)
-                            sess_now = self._session_of(shot)
-                        except Exception:
-                            sess_now = ""
                         try:
                             take_interrupt()
                         except Exception:
                             pass
-                    if not self._session_unparks(sess_now):
-                        self.state.status = "Parked"
-                        ev = self._wake_event
-                        if ev is not None:
-                            ev.clear()
-                            try:
-                                await asyncio.wait_for(ev.wait(), timeout=1.0)
-                            except asyncio.TimeoutError:
-                                pass
-                        else:
-                            await asyncio.sleep(1.0)
-                        continue
-                    self._think_parked = False
-                    self.state.autonomous = True
-                    self.state.running = True
-                    self._note("PARK", "session_change — Grok up")
+                    self.state.status = "Parked"
+                    ev = self._wake_event
+                    if ev is not None:
+                        ev.clear()
+                        try:
+                            await asyncio.wait_for(ev.wait(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(1.0)
+                    continue
                 if not first_think and not poked and not resume:
                     self.state.status = "On"
                     ev = self._wake_event
@@ -1028,7 +996,6 @@ class ProEngine:
                     out = await self._host_think(n, g, s, resume=resume and not poked)
                     if out.get("_parked"):
                         self._think_parked = True
-                        self._park_session = self._session_of(s)
                         self.state.autonomous = False
                         self.state.running = False
                         self.state.paused = False
