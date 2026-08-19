@@ -131,7 +131,7 @@ def test_set_wake_paper_rth_caps_long_nap(tmp_path, monkeypatch):
 
 
 def test_set_wake_paper_rth_blocks_30_min_nap(tmp_path, monkeypatch):
-    """Noah lock: RTH working look ≤10m — 30-min hunt nap is clerk-capped."""
+    """Noah lock: RTH working look ≤10m — long RTH naps are clerk-capped."""
     from abcxauto.wake_bus import PAPER_MAX_LOOK_S, _parse_iso, _utc_now, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))

@@ -219,20 +219,11 @@ async def test_news_and_candles_are_labeled_delayed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_scan_labels_daily_close_not_15m_last(monkeypatch):
-    async def fake_metrics(syms, cap=None):
-        return [
-            {
-                "symbol": "QQQ",
-                "source": "mda",
-                "freshness": "delayed_daily",
-                "bar": "D",
-                "mda_last": 729.9,
-                "mda_last_is": "daily_bar_close",
-            }
-        ]
+async def test_scan_symbols_returns_hits_not_mda_tape(monkeypatch):
+    async def boom(*_a, **_k):
+        raise AssertionError("scan must not fetch MDA daily metrics")
 
-    monkeypatch.setattr("abcxauto.brain.fetch_scan_metrics", fake_metrics)
+    monkeypatch.setattr("abcxauto.opportunity_scan.fetch_scan_metrics", boom)
     data = json.loads(
         await _run_tool(
             "scan",
@@ -243,11 +234,13 @@ async def test_scan_labels_daily_close_not_15m_last(monkeypatch):
             turn=BrainTurn(),
         )
     )
-    assert data["freshness"] == "delayed_daily"
-    assert data["bar"] == "D"
-    assert data["mda_last_is"] == "daily_bar_close"
-    assert data["tape"][0]["mda_last"] == 729.9
-    assert "last" not in data["tape"][0]
+    assert data["ok"] is True
+    assert data["symbols"] == ["QQQ"]
+    assert data["hits"][0]["symbol"] == "QQQ"
+    assert "on_book" in data["hits"][0]
+    assert "tape" not in data
+    assert "mda_last" not in data["hits"][0]
+    assert "last" not in data["hits"][0]
 
 
 @pytest.mark.asyncio

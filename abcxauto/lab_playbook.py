@@ -350,7 +350,7 @@ def live_has_promoted() -> bool:
 
 
 def live_new_risk_allowed() -> bool:
-    """Paper may hunt. Live may hunt only with a promoted playbook."""
+    """Paper may take new risk. Live needs a promoted playbook."""
     if is_paper():
         return True
     return live_has_promoted()

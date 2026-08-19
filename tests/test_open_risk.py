@@ -184,7 +184,7 @@ def _judgment_world(**kwargs):
     return WorldState(**base)
 
 
-def _hunt_act(symbol: str = "QQQ") -> dict:
+def _new_entry_act(symbol: str = "QQQ") -> dict:
     return {
         "action": "market_bracket",
         "strategy": "market_bracket",
@@ -195,18 +195,18 @@ def _hunt_act(symbol: str = "QQQ") -> dict:
             "stop_price": 90.0,
             "target_price": 110.0,
         },
-        "rationale": "new hunt",
+        "rationale": "new entry",
     }
 
 
-def test_hunt_allowed_when_book_open_and_capacity(monkeypatch):
-    """Open book is not a hunt ban — capacity Fact gates new risk."""
+def test_new_entry_allowed_when_book_open_and_capacity(monkeypatch):
+    """Open book is not a new-entry ban — capacity Fact gates new risk."""
     from abcxauto.agent_loop import gate_ticket
 
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
     monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     strat, forced = gate_ticket(
-        _hunt_act(),
+        _new_entry_act(),
         _judgment_world(
             capacity={
                 "open_count": 1,
@@ -220,13 +220,13 @@ def test_hunt_allowed_when_book_open_and_capacity(monkeypatch):
     assert strat == "market_bracket"
 
 
-def test_hunt_rejected_on_structure_cooldown(monkeypatch):
+def test_new_entry_rejected_on_structure_cooldown(monkeypatch):
     from abcxauto.agent_loop import gate_ticket
 
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
     monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     strat, forced = gate_ticket(
-        _hunt_act("QQQ"),
+        _new_entry_act("QQQ"),
         _judgment_world(
             structure_cooldown={"QQQ": "scrape_suspect"},
             capacity={
@@ -241,11 +241,11 @@ def test_hunt_rejected_on_structure_cooldown(monkeypatch):
     assert "cooldown" in str((forced or {}).get("note") or "").lower()
 
 
-def test_hunt_rejected_when_capacity_full():
+def test_new_entry_rejected_when_capacity_full():
     from abcxauto.agent_loop import gate_ticket
 
     strat, forced = gate_ticket(
-        _hunt_act(),
+        _new_entry_act(),
         _judgment_world(
             capacity={
                 "open_count": 6,
@@ -259,7 +259,7 @@ def test_hunt_rejected_when_capacity_full():
     assert "capacity" in str((forced or {}).get("note") or "").lower()
 
 
-def test_hunt_rejected_while_flat_streak_unconfirmed(tmp_path, monkeypatch):
+def test_new_entry_rejected_while_flat_streak_unconfirmed(tmp_path, monkeypatch):
     from abcxauto.agent_loop import gate_ticket
     from abcxauto.trade_plan import _save_flat_streak_state
 
@@ -270,7 +270,7 @@ def test_hunt_rejected_while_flat_streak_unconfirmed(tmp_path, monkeypatch):
     clear_trade_plan()
     _save_flat_streak_state(1, True)
     strat, forced = gate_ticket(
-        _hunt_act(),
+        _new_entry_act(),
         _judgment_world(flat=True, positions=[], portfolio_risk={"n_positions": 0}),
     )
     assert strat == "blocked"

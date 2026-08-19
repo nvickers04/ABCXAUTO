@@ -36,7 +36,7 @@ sleep until the next wake.
 
 - Unprotected STK → last-stop first; hold forbidden until it rests at IBKR. Paper RTH + flat + clerk open → hold is not a ticket. Combo close (`closing_position`) is one BAG, not new risk
 - Capacity, defined-risk, cash-only, size/loss floors, fail-closed
-- Live hunt without a promoted playbook
+- Live new risk without a promoted playbook
 - IBKR live last for ticket geometry (not MDA)
 - `candles`: IBKR hist, else live 5s stream; error if both miss (not MDA)
 - Two books = two processes, two client ids

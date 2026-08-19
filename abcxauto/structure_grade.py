@@ -224,7 +224,7 @@ def recent_structure_lessons(limit: int = 5) -> list[dict[str, Any]]:
 
 
 def structure_cooldown_symbols(lessons: list[dict] | None = None) -> dict[str, str]:
-    """Symbols with soft hunt cooldown from scrape/geometry reject."""
+    """Symbols with soft new-entry cooldown from scrape/geometry reject."""
     cool: dict[str, str] = {}
     for ev in lessons or recent_structure_lessons(8):
         code = str(ev.get("reason_code") or ev.get("outcome") or "")

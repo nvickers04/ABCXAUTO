@@ -51,7 +51,7 @@ async def test_refresh_legal_offline_fallback():
     assert "legal" in universe_glance_line().lower()
 
 
-def test_hunt_is_not_limited_to_watchlist(tmp_path, monkeypatch):
+def test_new_entry_is_not_limited_to_watchlist(tmp_path, monkeypatch):
     from abcxauto.agent_loop import gate_ticket
 
     monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
@@ -145,3 +145,42 @@ def test_tape_seed_not_alphabetized(monkeypatch):
     assert seed[0] == "NVDA"
     assert seed[1:] == ["ZZZZ", "AAPL", "MSFT"]
     assert seed != sorted(seed)
+
+
+@pytest.mark.asyncio
+async def test_pull_one_screen_ibkr_empty_no_mda_fallback(monkeypatch):
+    """IBKR connected + empty scanner → empty. Do not dump ARENA_CATALOG names."""
+    from abcxauto.universe import ARENA_CATALOG, pull_one_screen
+
+    async def empty_scan(_connector, _spec):
+        return []
+
+    monkeypatch.setattr("abcxauto.universe._ibkr_scan", empty_scan)
+    catalog = list(ARENA_CATALOG["mega_cap"]["mda_fallback"] or [])
+    assert catalog  # fixture: arena has catalog names we must not return
+
+    class Conn:
+        connected = True
+
+    out = await pull_one_screen(Conn(), arena="mega_cap")
+    assert out["ok"] is True
+    assert out["source"] == "empty"
+    assert out["symbols"] == []
+    assert out["persisted"] is False
+    for name in catalog:
+        assert name not in out["symbols"]
+
+
+@pytest.mark.asyncio
+async def test_pull_one_screen_no_ibkr_may_use_mda_seed():
+    """No IBKR connector → MDA industry seed still allowed this look."""
+    from abcxauto.universe import ARENA_CATALOG, pull_one_screen
+
+    out = await pull_one_screen(None, arena="technology")
+    seed = list(ARENA_CATALOG["technology"]["mda_fallback"] or [])
+    assert out["ok"] is True
+    assert out["source"] == "mda_seed"
+    assert out["symbols"]
+    assert out["symbols"][0] == seed[0]
+    assert "AAPL" in out["symbols"]
+    assert out["persisted"] is False

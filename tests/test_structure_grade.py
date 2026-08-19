@@ -64,7 +64,7 @@ def test_validate_proposal_blocks_qqq_geometry():
                 "stop_price": 711.99,
                 "target_price": 729.22,
             },
-            "hunt QQQ",
+            "screen QQQ",
             quote_last=709.83,
             posture="aggressive",
         )
@@ -82,7 +82,7 @@ def test_validate_proposal_accepts_legal_geometry():
             "target_price": 720.0,
             "price_hint": 710.0,
         },
-        "legal hunt",
+        "legal screen",
         quote_last=710.0,
         posture="balanced",
     )
@@ -253,11 +253,11 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
         }.get(name, {"last": 709.83})
 
     judgment = {
-        "stance": "hunt",
+        "stance": "new_entry",
         "thesis": "QQQ pullback",
         "focus": "QQQ #1",
         "dismissed": "",
-        "intent": {"kind": "hunt", "symbol": "QQQ", "direction": "LONG", "urgency": "med"},
+        "intent": {"kind": "new_entry", "symbol": "QQQ", "direction": "LONG", "urgency": "med"},
         "risk_budget_pct": 1.0,
         "regime_fit": True,
         "setup_grade": "A",

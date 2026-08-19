@@ -392,7 +392,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "your limit_price (one BAG). Never close_option / oca / trailing a combo leg. "
         "Clerk will not invent the close price — omit limit only if order_type=MKT. "
         "Algo/auction exits (vwap/twap/iceberg/adaptive/MOC/MOO/...) are sendable "
-        "on protect/manage/hunt; closing_position required. "
+        "on protect/manage/new-entry; closing_position required. "
         "defined_risk_only still rejects unlimited/naked shapes; cash-only still "
         "rejects SHORT stock brackets.",
         "",

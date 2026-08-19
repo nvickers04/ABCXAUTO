@@ -242,7 +242,7 @@ async def test_snap_has_reality_pulse():
 
 
 @pytest.mark.asyncio
-async def test_hunt_quote_ignores_mda_tape():
+async def test_new_entry_quote_ignores_mda_tape():
     from abcxauto.agent_loop import _quote_for_action
 
     act = {
@@ -465,7 +465,7 @@ def test_new_risk_blocked_when_book_unreliable():
 
 def test_stance_from_book():
     assert stance_from_book("hold", {"protection": {"unprotected_symbols": ["SPY"]}}) == "protect"
-    assert stance_from_book("market_bracket", {"positions": []}) == "hunt"
+    assert stance_from_book("market_bracket", {"positions": []}) == "new_entry"
     assert stance_from_book("hold", {"positions": [{"symbol": "SPY"}]}) == "manage"
     assert stance_from_book("hold", {"positions": []}) == "idle"
 
