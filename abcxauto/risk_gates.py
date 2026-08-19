@@ -165,6 +165,21 @@ def risk_base_usd(net_liq: float, cfg: Any = None) -> float:
         return 0.0
 
 
+def sizing_floors_active(cfg: Any = None) -> bool:
+    """True when % size floors apply. Live always ON; paper follows clerk flag."""
+    c = cfg if cfg is not None else get_config()
+    mode = str(getattr(c, "trading_mode", "paper") or "paper").strip().lower()
+    if mode == "live":
+        return True
+    return bool(getattr(c, "sizing_floors", False))
+
+
+def _pct_of_nl(dollars: float, book: float) -> float:
+    if book <= 0:
+        return 0.0
+    return round(100.0 * float(dollars) / float(book), 4)
+
+
 def estimate_notional(proposal: OrderProposal) -> Optional[float]:
     """Estimate order notional for position-sizing. None if not estimable."""
     params = proposal.params
@@ -395,8 +410,15 @@ class RiskGate:
 
         self.update_equity(net_liq)
         book = risk_base_usd(net_liq, cfg)
+        floors_on = sizing_floors_active(cfg)
 
-        if cfg.daily_loss_limit_pct > 0:
+        # Fail-closed: option tickets must carry a price (no sizing on a lie).
+        if proposal.strategy in OPTION_STRATEGIES:
+            opt_notional = estimate_notional(proposal)
+            if opt_notional is None:
+                return False, "size_unknown_notional"
+
+        if floors_on and cfg.daily_loss_limit_pct > 0:
             limit = -(cfg.daily_loss_limit_pct / 100.0) * book
             if daily_pnl <= limit:
                 reason = (
@@ -407,7 +429,7 @@ class RiskGate:
                 self.halt(reason, kind="daily_loss")
                 return False, reason
 
-        if cfg.max_peak_drawdown_pct > 0:
+        if floors_on and cfg.max_peak_drawdown_pct > 0:
             peak = self.peak_equity
             if peak is not None and peak > 0:
                 floor = peak * (1.0 - cfg.max_peak_drawdown_pct / 100.0)
@@ -418,6 +440,7 @@ class RiskGate:
                         f"(floor {floor:.2f}). Self-clears when equity recovers."
                     )
 
+        # cash_only structural: no short stock (always). % cash check only when floors ON.
         if cfg.cash_only:
             direction = getattr(proposal.params, "direction", None)
             if (
@@ -428,62 +451,69 @@ class RiskGate:
                     "Cash-only mode: SHORT stock brackets are rejected "
                     "(no short selling). Set ABCXAUTO_CASH_ONLY=false to allow."
                 )
-            cash = _account_float(
-                account, "TotalCashValue", "totalcashvalue", "AvailableFunds", "availablefunds"
-            )
-            if cash is None:
-                return False, (
-                    "Risk gate fail-closed: cash-only mode requires TotalCashValue "
-                    "(or AvailableFunds) in account summary"
+            if floors_on:
+                cash = _account_float(
+                    account,
+                    "TotalCashValue",
+                    "totalcashvalue",
+                    "AvailableFunds",
+                    "availablefunds",
                 )
-            notional = estimate_notional(proposal)
-            if notional is None:
-                if proposal.strategy in OPTION_STRATEGIES:
-                    # Option premium often unknown without limit; broker enforces margin.
-                    pass
-                else:
+                if cash is None:
                     return False, (
-                        "Risk gate: cannot estimate order notional for cash-only sizing "
-                        "(provide entry_price, limit_price, or price_hint)"
+                        "Risk gate fail-closed: cash-only mode requires TotalCashValue "
+                        "(or AvailableFunds) in account summary"
                     )
-            elif notional > cash:
-                return False, (
-                    f"Cash-only: order notional {notional:.2f} exceeds available cash "
-                    f"{cash:.2f}"
-                )
-
-        if cfg.max_position_pct > 0:
-            notional = estimate_notional(proposal)
-            if notional is None:
-                if proposal.strategy in OPTION_STRATEGIES:
-                    pass
-                else:
+                notional = estimate_notional(proposal)
+                if notional is None:
+                    return False, "size_unknown_notional"
+                if notional > cash:
                     return False, (
-                        "Risk gate: cannot estimate order notional for position sizing "
-                        "(provide entry_price, limit_price, or price_hint)"
-                    )
-            else:
-                max_notional = (cfg.max_position_pct / 100.0) * book
-                if notional > max_notional:
-                    return False, (
-                        f"Position size {notional:.2f} exceeds max "
-                        f"{cfg.max_position_pct}% of NetLiq {book:.2f}"
+                        f"size_cash {_pct_of_nl(notional, book)} > "
+                        f"{_pct_of_nl(cash, book)}"
                     )
 
-        if cfg.max_risk_per_trade_pct > 0 and proposal.strategy in (
-            "bracket",
-            "market_bracket",
-        ):
-            risked = estimate_bracket_risk_dollars(proposal)
-            if risked is None:
+        if floors_on and cfg.max_position_pct > 0:
+            notional = estimate_notional(proposal)
+            if notional is None:
+                return False, "size_unknown_notional"
+            notional_pct = _pct_of_nl(notional, book)
+            if notional_pct > cfg.max_position_pct:
                 return False, (
-                    "Risk gate: cannot estimate dollars risked to stop for risk-per-trade cap"
+                    f"size_max_position {notional_pct} > {cfg.max_position_pct}"
                 )
-            max_risk = (cfg.max_risk_per_trade_pct / 100.0) * book
-            if risked > max_risk:
+
+        if floors_on and cfg.max_risk_per_trade_pct > 0:
+            if proposal.strategy in ("bracket", "market_bracket"):
+                risked = estimate_bracket_risk_dollars(proposal)
+                if risked is None:
+                    return False, "size_unknown_notional"
+                risked_pct = _pct_of_nl(risked, book)
+                if risked_pct > cfg.max_risk_per_trade_pct:
+                    return False, (
+                        f"size_risk_per_trade {risked_pct} > "
+                        f"{cfg.max_risk_per_trade_pct}"
+                    )
+            elif proposal.strategy in OPTION_STRATEGIES:
+                notional = estimate_notional(proposal)
+                if notional is None:
+                    return False, "size_unknown_notional"
+                notional_pct = _pct_of_nl(notional, book)
+                if notional_pct > cfg.max_risk_per_trade_pct:
+                    return False, (
+                        f"size_risk_per_trade {notional_pct} > "
+                        f"{cfg.max_risk_per_trade_pct}"
+                    )
+
+        if floors_on and cfg.max_option_premium_pct > 0 and proposal.strategy in OPTION_STRATEGIES:
+            notional = estimate_notional(proposal)
+            if notional is None:
+                return False, "size_unknown_notional"
+            notional_pct = _pct_of_nl(notional, book)
+            if notional_pct > cfg.max_option_premium_pct:
                 return False, (
-                    f"Risk-per-trade {risked:.2f} exceeds max "
-                    f"{cfg.max_risk_per_trade_pct}% of NetLiq {book:.2f}"
+                    f"size_option_premium {notional_pct} > "
+                    f"{cfg.max_option_premium_pct}"
                 )
 
         if cfg.max_open_positions > 0:

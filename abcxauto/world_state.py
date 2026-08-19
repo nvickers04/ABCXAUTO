@@ -82,7 +82,13 @@ def position_avg_facts(pos: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
-def compact_position(pos: dict[str, Any], *, extra: bool = True) -> dict[str, Any]:
+def compact_position(
+    pos: dict[str, Any],
+    *,
+    extra: bool = True,
+    net_liq: float | None = None,
+    stop: float | None = None,
+) -> dict[str, Any]:
     p = pos if isinstance(pos, dict) else {}
     avg_row = position_avg_facts(p)
     row: dict[str, Any] = {
@@ -118,7 +124,52 @@ def compact_position(pos: dict[str, Any], *, extra: bool = True) -> dict[str, An
         upnl = lot_upnl(p)
         if upnl is not None:
             row["uPnL"] = round(upnl, 2)
+        nl = net_liq
+        if nl is None:
+            try:
+                nl = float(p.get("_net_liq")) if p.get("_net_liq") is not None else None
+            except (TypeError, ValueError):
+                nl = None
+        if nl is not None and nl > 0:
+            if upnl is not None:
+                row["uPnL_pct_nl"] = round(100.0 * float(upnl) / float(nl), 4)
+            try:
+                mv = abs(float(p.get("marketValue") or p.get("market_value") or 0))
+            except (TypeError, ValueError):
+                mv = 0.0
+            if mv > 0:
+                row["mv_pct_nl"] = round(100.0 * mv / float(nl), 4)
+            stop_px = stop
+            if stop_px is None:
+                raw_stop = p.get("stop") or p.get("stop_price") or p.get("aux_price")
+                try:
+                    stop_px = float(raw_stop) if raw_stop is not None else None
+                except (TypeError, ValueError):
+                    stop_px = None
+            if stop_px is not None and qty != 0:
+                mkt = row.get("mkt")
+                try:
+                    mkt_f = float(mkt) if mkt is not None else None
+                except (TypeError, ValueError):
+                    mkt_f = None
+                if mkt_f is not None and mkt_f > 0:
+                    sec = str(row.get("sec") or "STK").upper()
+                    mult = 100.0 if sec.startswith("OPT") else 1.0
+                    risk_usd = abs(float(mkt_f) - float(stop_px)) * abs(qty) * mult
+                    row["risk_pct_nl"] = round(100.0 * risk_usd / float(nl), 4)
     return row
+
+
+def pct_of_nl(usd: Any, net_liq: Any) -> float | None:
+    """Percent of NetLiq for a dollar amount. None when either side is unknown."""
+    try:
+        dollars = float(usd)
+        nl = float(net_liq)
+    except (TypeError, ValueError):
+        return None
+    if nl == 0:
+        return None
+    return round(100.0 * dollars / nl, 4)
 
 
 def reconcile_book_with_fills(
@@ -948,18 +999,38 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         elif match is False:
             working_exits += " stop_qty=mismatch"
     candle_source = str(getattr(world, "candle_source", None) or "") or "none"
+    nl = getattr(world, "net_liquidation", None)
+    open_upnl = open_upnl_of(getattr(world, "positions", None))
+    edge_usd = sc.get("edge_usd")
+    model_cost = sc.get("model_cost_usd")
+    # Edge/cost % of inception start NL when known; else current NL.
+    start_nl = sc.get("startup_cash")
+    edge_base = start_nl if start_nl not in (None, 0) else nl
+    halt_at = halt.get("halt_trips_at_usd")
+    day_vs = halt.get("ibkr_day_vs_halt")
+    floors = None
+    try:
+        from abcxauto.risk_gates import sizing_floors_active
+
+        floors = bool(sizing_floors_active())
+    except Exception:
+        floors = None
     return {
-        "nl": getattr(world, "net_liquidation", None),
+        "nl": nl,
         "ibkr_daily_pnl": daily,
         "daily_pnl": daily,
-        "open_upnl": open_upnl_of(getattr(world, "positions", None)),
+        "daily_pnl_pct_of_nl": pct_of_nl(daily, nl),
+        "open_upnl": open_upnl,
+        "open_upnl_pct_of_nl": pct_of_nl(open_upnl, nl),
         "nl_vs_start": sc.get("book_pnl"),
-        "startup_nl": sc.get("startup_cash"),
+        "startup_nl": start_nl,
         "beating_model": sc.get("beating_model"),
-        "edge_usd": sc.get("edge_usd"),
+        "edge_usd": edge_usd,
+        "edge_pct_of_nl": pct_of_nl(edge_usd, edge_base),
         "edge_meaning": "nl_vs_start_minus_model",
         "book_return_pct": sc.get("book_return_pct"),
-        "model_cost_usd": sc.get("model_cost_usd"),
+        "model_cost_usd": model_cost,
+        "model_cost_pct_of_nl": pct_of_nl(model_cost, edge_base),
         "names": conc["names"],
         "lots": conc["lots"],
         "structures": conc["structures"],
@@ -972,9 +1043,12 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "playbook": _playbook_day(sc),
         "lot_lasts": lot_lasts,
         "working_exits": working_exits,
-        "halt_trips_at_usd": halt.get("halt_trips_at_usd"),
-        "ibkr_day_vs_halt": halt.get("ibkr_day_vs_halt"),
+        "halt_trips_at_usd": halt_at,
+        "halt_trips_at_pct_of_nl": pct_of_nl(halt_at, nl),
+        "ibkr_day_vs_halt": day_vs,
+        "ibkr_day_vs_halt_pct_of_nl": pct_of_nl(day_vs, nl),
         "candle_source": candle_source,
+        "sizing_floors": floors,
     }
 
 
@@ -988,19 +1062,26 @@ def _playbook_day(scorecard: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _pnl_wake_bits(day: dict[str, Any]) -> str:
-    """IBKR day, open uPnL, NL vs start, edge vs model — four different numbers."""
+    """IBKR day, open uPnL, NL vs start, edge vs model — dollars and optional % of NL."""
+
+    def _bit(usd: Any, pct: Any) -> str:
+        if usd is None and pct is None:
+            return "?"
+        if pct is None:
+            return str(usd)
+        return f"{usd}({pct}%)"
+
     dp = day.get("ibkr_daily_pnl")
     if dp is None:
         dp = day.get("daily_pnl")
-    ou = day.get("open_upnl")
-    vs = day.get("nl_vs_start")
-    halt = day.get("halt_trips_at_usd")
     return (
-        f"ibkrDay={dp if dp is not None else '?'} "
-        f"haltAt={halt if halt is not None else '?'} "
-        f"openU={ou if ou is not None else '?'} "
-        f"vsStart={vs if vs is not None else '?'}(inception) "
-        f"edgeVsModel={day.get('edge_usd')} beating={day.get('beating_model')}"
+        f"ibkrDay={_bit(dp, day.get('daily_pnl_pct_of_nl'))} "
+        f"haltAt={_bit(day.get('halt_trips_at_usd'), day.get('halt_trips_at_pct_of_nl'))} "
+        f"openU={_bit(day.get('open_upnl'), day.get('open_upnl_pct_of_nl'))} "
+        f"vsStart={day.get('nl_vs_start') if day.get('nl_vs_start') is not None else '?'}(inception) "
+        f"edgeVsModel={_bit(day.get('edge_usd'), day.get('edge_pct_of_nl'))} "
+        f"cost={_bit(day.get('model_cost_usd'), day.get('model_cost_pct_of_nl'))} "
+        f"beating={day.get('beating_model')}"
     )
 
 
@@ -1407,7 +1488,8 @@ class WorldState:
                 if n.get("headline")
             ],
             "positions": [
-                compact_position(p, extra=True) for p in self.positions[:12]
+                compact_position(p, extra=True, net_liq=self.net_liquidation)
+                for p in self.positions[:12]
             ],
             "working_orders": compact_working_orders(self.open_orders),
             "stop_qty_fact": self.stop_qty_fact,

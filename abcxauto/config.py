@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 RISK_CONFIG_KEYS = frozenset({
     "risk_posture",
     "risk_gates_enabled",
+    "sizing_floors",
+    "ban_hold",
     "daily_loss_limit_pct",
     "max_position_pct",
     "auto_panic_on_breach",
@@ -27,7 +29,6 @@ RISK_CONFIG_KEYS = frozenset({
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
     "max_risk_per_trade_pct",
-    "trading_budget_usd",
 })
 # Knobs Grok may retune via self_tune (clamped to the walk-away floor).
 SET_RISK_KEYS = frozenset({
@@ -85,6 +86,11 @@ class Config:
     # Walk-away floor — ON by default; agent may tighten, never weaken.
     risk_posture: str = "defensive"
     risk_gates_enabled: bool = True
+    # Paper default OFF (Grok sizes). Live forced ON in code. Operator chip only.
+    sizing_floors: bool = False
+    # Paper default ON (hold is not a ticket). Live default OFF (hold = send no-op).
+    # Both modes two-way via Cockpit chip. Not self_tune-able.
+    ban_hold: bool = True
     daily_loss_limit_pct: float = 25.0
     max_position_pct: float = 25.0
     auto_panic_on_breach: bool = True
@@ -176,6 +182,11 @@ def _load_env_config() -> Config:
         monitor_extended_hours=_env_bool("ABCXAUTO_MONITOR_EXTENDED_HOURS", False),
         risk_posture=_normalize_posture(_env("ABCXAUTO_RISK_POSTURE", "defensive")),
         risk_gates_enabled=_env_bool("ABCXAUTO_RISK_GATES_ENABLED", True),
+        sizing_floors=_env_bool("ABCXAUTO_SIZING_FLOORS", False),
+        ban_hold=_env_bool(
+            "ABCXAUTO_BAN_HOLD",
+            _env("TRADING_MODE", "paper").lower() != "live",
+        ),
         daily_loss_limit_pct=float(_env("ABCXAUTO_DAILY_LOSS_LIMIT_PCT", "25")),
         max_position_pct=float(_env("ABCXAUTO_MAX_POSITION_PCT", "25")),
         max_open_positions=int(_env("ABCXAUTO_MAX_OPEN_POSITIONS", "15")),
@@ -220,6 +231,8 @@ def _coerce_risk_value(key: str, value: Any) -> Any:
         return _normalize_posture(value)
     if key in (
         "risk_gates_enabled",
+        "sizing_floors",
+        "ban_hold",
         "auto_panic_on_breach",
         "defined_risk_only",
         "cash_only",

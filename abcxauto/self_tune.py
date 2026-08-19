@@ -161,6 +161,12 @@ def apply_self_tune(
         if key == "trading_mode" or key == "live_confirm":
             rejected[key] = "live remains gated — agent cannot switch mode"
             continue
+        if key == "sizing_floors":
+            rejected[key] = "operator-only — agent cannot flip sizing floors"
+            continue
+        if key == "ban_hold":
+            rejected[key] = "operator-only — agent cannot flip hold ban"
+            continue
         if key == "trading_budget_usd":
             rejected[key] = "size and risk are % of NetLiq — no dollar sleeve"
             continue
@@ -345,6 +351,10 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
     cur_b = _f(getattr(cfg, "trading_budget_usd", 0))
     if cur_b is not None and cur_b != 0:
         fixes["trading_budget_usd"] = 0.0
+    # Live always forces sizing floors ON (paper may stay OFF).
+    mode = str(getattr(cfg, "trading_mode", "paper") or "paper").strip().lower()
+    if mode == "live" and not bool(getattr(cfg, "sizing_floors", False)):
+        fixes["sizing_floors"] = True
     return fixes
 
 
@@ -364,6 +374,8 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
         if k in (
             "risk_posture",
             "risk_gates_enabled",
+            "sizing_floors",
+            "ban_hold",
             "auto_panic_on_breach",
             "defined_risk_only",
             "cash_only",
@@ -401,7 +413,6 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
             max_risk_per_trade_pct=float(getattr(get_config(), "max_risk_per_trade_pct")),
             max_peak_drawdown_pct=float(getattr(get_config(), "max_peak_drawdown_pct")),
             max_option_premium_pct=float(getattr(get_config(), "max_option_premium_pct")),
-            trading_budget_usd=0.0,
             persist=True,
             _skip_clamp=True,
         )
