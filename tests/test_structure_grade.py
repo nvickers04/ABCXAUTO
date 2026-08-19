@@ -185,6 +185,49 @@ async def test_wrong_side_fill_records_scrape(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_successful_bracket_persists_plan_and_structure(monkeypatch, tmp_path):
+    """Regression: inner save_trade_plan import must not shadow bracket success path."""
+    from abcxauto.agent_loop import _post_act_structure_and_plan
+    from abcxauto.structure_grade import recent_structure_lessons
+    from abcxauto.trade_plan import load_trade_plan
+
+    monkeypatch.setenv("ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "ev.jsonl"))
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    await _post_act_structure_and_plan(
+        act={
+            "strategy": "market_bracket",
+            "params": {
+                "symbol": "AAPL",
+                "direction": "LONG",
+                "stop_price": 220.0,
+                "target_price": 240.0,
+                "quantity": 10,
+            },
+        },
+        strat="market_bracket",
+        result={
+            "success": True,
+            "filled": True,
+            "symbol": "AAPL",
+            "entry_price": 230.0,
+        },
+        judgment={"thesis": "aapl bounce"},
+        snap={"positions": []},
+        quote_last=230.0,
+        connector=None,
+    )
+    plan = load_trade_plan()
+    assert plan is not None
+    assert plan.symbol == "AAPL"
+    assert plan.entry_price == pytest.approx(230.0)
+    lessons = recent_structure_lessons(3)
+    assert lessons
+    assert lessons[0]["outcome"] == STRUCTURE_OK
+    assert lessons[0]["symbol"] == "AAPL"
+    assert lessons[0]["message"] == "dispatched"
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
