@@ -90,7 +90,7 @@ def _judgment_for_act(act: dict, **extra) -> dict:
     strat = str(act.get("strategy") or act.get("action") or "hold").lower()
     params = act.get("params") or {}
     if strat in ("bracket", "market_bracket"):
-        stance, kind = "hunt", "hunt"
+        stance, kind = "new_entry", "new_entry"
     elif strat in ("oca", "modify_stop", "modify_target", "market_order", "close_option"):
         stance, kind = "protect", "protect"
     elif strat in ("set_risk", "self_tune"):

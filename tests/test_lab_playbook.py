@@ -45,13 +45,13 @@ def test_clamp_patch_keeps_omitted_fields(tmp_path, monkeypatch):
     save_lab(
         {
             "mode": "explore",
-            "instructions": "Hunt defined-risk debit in legal names.",
+            "instructions": "Screen defined-risk debit in legal names.",
             "ready_to_promote": False,
         }
     )
     patch = clamp_update({"ready_to_promote": True})
     assert patch is not None
-    assert patch["instructions"] == "Hunt defined-risk debit in legal names."
+    assert patch["instructions"] == "Screen defined-risk debit in legal names."
     assert patch["ready_to_promote"] is True
     assert patch["mode"] == "explore"
 
@@ -70,7 +70,7 @@ def test_new_instructions_replace_the_notebook(tmp_path, monkeypatch):
     assert patch["instructions"] == "Defined-risk debit. Size vs the envelope."
 
 
-def test_paper_may_hunt_without_playbook(monkeypatch, tmp_path):
+def test_paper_may_take_new_risk_without_playbook(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
@@ -285,7 +285,7 @@ def test_patch_does_not_require_new_research(tmp_path, monkeypatch):
     save_lab(
         {
             "mode": "explore",
-            "instructions": "Hunt defined-risk debit in legal names.",
+            "instructions": "Screen defined-risk debit in legal names.",
             "do_more": "size",
             "stop_doing": "lottery",
             "ready_to_promote": False,
@@ -390,11 +390,11 @@ def test_write_gate_only_payload_rejected_without_saving(tmp_path, monkeypatch):
     assert not load_lab().get("instructions")
 
 
-def test_hunt_until_prose_stays_notes_not_a_clock(tmp_path, monkeypatch):
-    """Not a hunt-window text parser — prose is notebook, set_wake is the clock."""
+def test_new_risk_until_prose_stays_notes_not_a_clock(tmp_path, monkeypatch):
+    """Not a screen-window text parser — prose is notebook, set_wake is the clock."""
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    prose = "No hunt until 10:30 ET. Park until open."
+    prose = "No new risk until 10:30 ET. Park until open."
     out = apply_from_judgment(
         {"lab_playbook": {"instructions": prose, "mode": "explore"}}
     )

@@ -51,7 +51,7 @@ async def test_refresh_legal_offline_fallback():
     assert "legal" in universe_glance_line().lower()
 
 
-def test_hunt_is_not_limited_to_watchlist(tmp_path, monkeypatch):
+def test_new_entry_is_not_limited_to_watchlist(tmp_path, monkeypatch):
     from abcxauto.agent_loop import gate_ticket
 
     monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))

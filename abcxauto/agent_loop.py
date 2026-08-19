@@ -24,7 +24,7 @@ from abcxauto.send import send_action
 from abcxauto.tools import run_readonly_tool
 from abcxauto.trade_plan import (
     close_trade_plan,
-    plan_from_hunt_action,
+    plan_from_bracket_action,
     save_trade_plan,
     sync_open_risk,
 )
@@ -48,7 +48,6 @@ _OPTION_ENTRY_ACTIONS = (
 ALLOWED_ACTIONS = frozenset(SENDABLE_TYPES)
 VALID_ACTIONS = "|".join(sorted(ALLOWED_ACTIONS))
 BLOCKED_STRAT = "blocked"
-_HUNT_OPTION_ENTRIES = frozenset(_OPTION_ENTRY_ACTIONS.split("|"))
 AWARENESS_HEART = (
     "\n=== SHELL ===\n"
     "Orders: ORDER EXAMPLES only. Close STK by conId. "
@@ -406,11 +405,6 @@ def _prepare_close_params(act: dict, positions: list) -> None:
         act["params"].setdefault("action", "SELL" if signed > 0 else "BUY")
 
 
-def _paper_hunt_hold_block(world: WorldState) -> str | None:
-    """Deprecated stub — hold ban is clerk ``ban_hold``, not a paper-hunt machine."""
-    return None
-
-
 def ban_hold_active(cfg: Any = None) -> bool:
     """True when hold is not a ticket. Paper default ON; live default OFF; both two-way."""
     from abcxauto.config import get_config
@@ -734,7 +728,7 @@ def stance_from_book(strat: str, s: dict) -> str:
         return "protect"
     st = str(strat or "").lower()
     if st in _NEW_RISK:
-        return "hunt"
+        return "new_entry"
     if s.get("positions"):
         return "manage"
     if st in ("hold", "skipped", "blocked", BLOCKED_STRAT):
@@ -1156,13 +1150,13 @@ async def _quote_for_action(act: dict, snap: dict, connector: Any = None) -> flo
     """IBKR live last for geometry — never use MDA SCAN TAPE last as live.
 
     Order: connector quote → snap ibkr_live_* → snap spy (if SPY) →
-    Grok price_hint / entry only when no IBKR live (non-hunt manage paths).
-    Hunt brackets fail closed without IBKR live (returns None → geometry block).
+    Grok price_hint / entry only when no IBKR live (manage / protect paths).
+    New-entry brackets fail closed without IBKR live (returns None → geometry block).
     """
     params = act.get("params") or {}
     sym = str(params.get("symbol") or "").upper()
     strat = str(act.get("strategy") or act.get("action") or "").lower()
-    hunt_like = strat in ("bracket", "market_bracket")
+    needs_live_geometry = strat in ("bracket", "market_bracket")
     live: float | None = None
     if sym and connector is not None:
         try:
@@ -1197,8 +1191,8 @@ async def _quote_for_action(act: dict, snap: dict, connector: Any = None) -> flo
         except (TypeError, ValueError):
             pass
         return live
-    # Hunt entries: do not fall back to MDA tape / hints as "live"
-    if hunt_like:
+    # New-entry brackets: do not fall back to MDA tape / hints as "live"
+    if needs_live_geometry:
         return None
     try:
         hint = float(params["price_hint"]) if params.get("price_hint") is not None else None
@@ -1288,13 +1282,13 @@ async def _post_act_structure_and_plan(
                         "reason_code": SCRAPE_SUSPECT,
                         "message": (
                             f"stop {stop} wrong-side of fill {fill_px} — "
-                            "rebuild stop from live quote next hunt"
+                            "rebuild stop from live quote next look"
                         ),
                     }
                 )
                 close_trade_plan("scrape_wrong_side_stop")
             else:
-                plan = plan_from_hunt_action(act, str(judgment.get("thesis") or ""))
+                plan = plan_from_bracket_action(act, str(judgment.get("thesis") or ""))
                 if plan:
                     if fill_px is not None:
                         plan.entry_price = fill_px

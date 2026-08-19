@@ -236,8 +236,8 @@ def bump_plan_cycle(path: Path | None = None) -> Optional[ActiveTradePlan]:
     return None
 
 
-def plan_from_hunt_action(act: dict, thesis: str = "") -> Optional[ActiveTradePlan]:
-    """Build a plan from a successful hunt bracket params."""
+def plan_from_bracket_action(act: dict, thesis: str = "") -> Optional[ActiveTradePlan]:
+    """Build a plan from a successful new-entry bracket params."""
     params = (act or {}).get("params") or {}
     strat = str((act or {}).get("strategy") or (act or {}).get("action") or "").lower()
     if strat not in ("bracket", "market_bracket"):
@@ -531,7 +531,7 @@ def stop_qty_mismatch_fact(
 
 
 def book_has_risk(positions: list[dict] | None) -> bool:
-    """True if any non-zero position exists (STK/ETF/OPT — blocks false-flat hunt)."""
+    """True if any non-zero position exists (STK/ETF/OPT — blocks false-flat new entry)."""
     for p in positions or []:
         try:
             qty = float(

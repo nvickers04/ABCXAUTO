@@ -1616,19 +1616,6 @@ def _portfolio_risk(
     }
 
 
-def hunt_cooldown_remaining(recent_decisions: list[dict], symbol: str) -> int:
-    """Cycles of hunt cooldown left for symbol (0 = clear)."""
-    if not symbol:
-        return 0
-    sym = symbol.upper()
-    for i, d in enumerate(recent_decisions or []):
-        strat = str(d.get("strategy") or d.get("action") or "").lower()
-        if strat in ("bracket", "market_bracket"):
-            rat = str(d.get("rationale") or "")
-            blob = rat.upper() + json.dumps(d.get("outcome") or {}, default=str).upper()
-            if sym in blob:
-                return max(0, 2 - i)
-    return 0
 
 
 @dataclass

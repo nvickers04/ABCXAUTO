@@ -6,7 +6,7 @@ from abcxauto.trade_plan import (
     ActiveTradePlan,
     clear_trade_plan,
     load_trade_plan,
-    plan_from_hunt_action,
+    plan_from_bracket_action,
     save_trade_plan,
 )
 from abcxauto.world_state import (
@@ -1040,6 +1040,6 @@ def test_trade_plan_round_trip(tmp_path, monkeypatch):
         },
         "rationale": "fade",
     }
-    from_hunt = plan_from_hunt_action(act, "fade thesis")
-    assert from_hunt is not None
-    assert from_hunt.direction == "SHORT"
+    from_bracket = plan_from_bracket_action(act, "fade thesis")
+    assert from_bracket is not None
+    assert from_bracket.direction == "SHORT"

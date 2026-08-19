@@ -33,7 +33,7 @@ PULSE_S = 10.0
 DEFAULT_LOOK_S = 90.0
 DEFAULT_LOOK_OPEN_S = 60.0
 MIN_LOOK_S = 30.0
-# Paper RTH working look ceiling — not a hunt nap. Premarket/overnight may be longer.
+# Paper RTH working look ceiling — not a long nap. Premarket/overnight may be longer.
 PAPER_MAX_LOOK_S = 10 * 60.0
 MTM_BUCKET_PCT = 8.0
 _last_wake = None
