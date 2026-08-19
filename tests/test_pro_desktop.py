@@ -447,3 +447,24 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
         prev = out["pnl"]
         assert out.get("inventory")
     assert calls["grok"] >= 3
+
+
+def test_notebook_viewer_reads_lab_not_think(headless_pro, monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.load_lab",
+        lambda: {
+            "revision": 3,
+            "mode": "explore",
+            "instructions": "look at options, not a nap",
+        },
+    )
+    head, body = headless_pro._lab_notebook()
+    assert "rev=3" in head
+    assert "notebook, not law" in head
+    assert "look at options" in body
+    assert headless_pro.btn_notebook.text == "Notebook"
+    assert headless_pro._hidden_metrics.visible is False
+    assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
+    assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
+    assert "look at options" not in (headless_pro.think_live.value or "")
+
