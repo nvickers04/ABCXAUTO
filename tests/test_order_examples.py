@@ -4,9 +4,11 @@ import pytest
 
 from abcxauto.config import Config, get_config
 from abcxauto.order_examples import (
+    COMBO_BAG_CLOSE,
     ORDER_EXAMPLES,
     SENDABLE_TYPES,
     assert_examples_cover_strategies,
+    combo_close_example,
     format_order_examples,
 )
 from abcxauto.proposals import STRATEGIES, validate_proposal
@@ -67,10 +69,42 @@ def test_format_order_examples():
     assert "set_risk:" not in text
     assert "self_tune" not in ticket_strategy_names()
     assert NOT_TICKETS <= SENDABLE_TYPES
+    # Combo close is a sibling line, not a new strategy key.
+    assert "vertical_spread close:" in text
+    assert '"closing_position":true' in text
+    assert "Never close_option / oca / trailing a combo leg" in text
+    assert "Clerk will not invent the close price" in text
+    assert "ratio_spread close:" not in text
+    assert "jade_lizard close:" not in text
+    # OPEN dict values stay free of closing_position (assert_examples 1:1).
+    for name in COMBO_BAG_CLOSE:
+        assert "closing_position" not in ORDER_EXAMPLES[name]
     text_narrow = format_order_examples(allowed=frozenset({"hold", "market_bracket"}))
     assert "market_bracket" in text_narrow
     assert "vertical_spread" not in text_narrow
+    assert "vertical_spread close:" not in text_narrow
     assert "hold" in text_narrow
+
+
+@pytest.mark.parametrize("strategy", sorted(COMBO_BAG_CLOSE))
+def test_combo_close_example_same_legs_plus_close_fields(strategy):
+    open_params = ORDER_EXAMPLES[strategy]
+    close = combo_close_example(strategy)
+    assert close["closing_position"] is True
+    assert isinstance(close["limit_price"], (int, float))
+    assert close["limit_price"] > 0
+    for key, value in open_params.items():
+        assert close[key] == value
+    proposal = validate_proposal(strategy, close, RATIONALE)
+    assert proposal.strategy == strategy
+    assert proposal.params.closing_position is True
+    assert proposal.params.limit_price == close["limit_price"]
+
+
+def test_combo_bag_close_excludes_unlimited_shapes():
+    assert "ratio_spread" not in COMBO_BAG_CLOSE
+    assert "jade_lizard" not in COMBO_BAG_CLOSE
+    assert COMBO_BAG_CLOSE <= set(ORDER_EXAMPLES)
 
 
 @pytest.mark.parametrize("strategy", sorted(STRATEGIES))
