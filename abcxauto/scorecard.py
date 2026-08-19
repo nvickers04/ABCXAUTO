@@ -511,11 +511,26 @@ def format_scorecard_block(
     cost_pct_s = f"{cost_pct:.4f}%" if cost_pct is not None else "n/a"
     start = sc.get("startup_cash")
     start_s = f"{start:.2f}" if start is not None else "n/a"
+    # Paper: book_pnl is paper; model_cost $ is REAL xAI cash. Live: both real.
+    paper = True
+    try:
+        from abcxauto.config import get_config
+
+        cfg = get_config()
+        paper = bool(getattr(cfg, "is_paper", True)) or (
+            str(getattr(cfg, "trading_mode", "paper") or "paper").lower() != "live"
+        )
+    except Exception:
+        paper = True
+    if paper:
+        book_tag = " paper"
+        cost_tag = " real xAI"
+    else:
+        book_tag = ""
+        cost_tag = ""
     lines = ["SCORECARD:"]
     # Session = marker from first run / ABCXAUTO_MODEL change — not calendar day,
     # not inception. Promote / BEATING-vs-LOSING stay on inception below.
-    # Operator block leads with % of start NL; model_cost also prints real $
-    # (paper: API cash left the account; live: both book and bill are real).
     sess = sc.get("session")
     if isinstance(sess, dict) and sess:
         sret = None
@@ -543,16 +558,18 @@ def format_scorecard_block(
         started = sess.get("started_at") or ""
         started_bit = f" since={started}" if started else ""
         lines.append(
-            f"- session book={sret_s} model_cost={scost_pct_s} ({scost_s} cash) "
+            f"- session book={sret_s}{book_tag} "
+            f"model_cost={scost_pct_s} ({scost_s}{cost_tag}) "
             f"({int(sess.get('model_calls') or 0)} calls) "
             f"edge={sedge_pct_s} ({sedge_s}$) fills={fill_s}{model_bit}{started_bit}"
         )
     lines.extend(
         [
             f"- first_NL={start_s} NL={sc.get('net_liquidation')}",
-            f"- book_return={ret_s} of starting NetLiq ({pnl_s}$)",
+            f"- book_return={ret_s} of starting NetLiq ({pnl_s}${book_tag})",
             f"- model_cost={cost_pct_s} of starting NetLiq "
-            f"(${sc['model_cost_usd']:.4f} cash, {sc['model_calls']} calls, "
+            f"(${sc['model_cost_usd']:.4f}{cost_tag or ' cash'}, "
+            f"{sc['model_calls']} calls, "
             f"{sc['input_tokens']}+{sc['output_tokens']} tok)",
             f"- edge={edge_pct_s} ({edge_s}$) → {verdict}",
             f"- fastest_beating={sc.get('fastest_beating') or 'none'} "
