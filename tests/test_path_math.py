@@ -12,6 +12,12 @@ def test_even_money_coin_matches_post():
     assert out["p"] == 0.55
     assert out["q"] == 0.45
     assert out["E"] == 0.1
+    assert out["A"] == 1.0
+    assert out["B"] == 1.0
+    assert out["E_pct_of_nl"] == 0.1
+    assert out["A_pct_of_nl"] == 1.0
+    assert out["B_pct_of_nl"] == 1.0
+    assert out["sig_pct_of_nl"] == round(100.0 * out["sig"] / 100.0, 4)
     assert out["b"] == 1.0
     assert out["kelly"] == 0.1
     assert out["f"] == 0.1

@@ -652,6 +652,12 @@ def test_build_world_state_regime_and_portfolio(tmp_path, monkeypatch):
     assert d["regime"]["trend_bias"] == "bullish"
     assert d["portfolio_risk"]["n_positions"] == 1
     assert d["portfolio_risk"]["top_symbol"] == "QQQ"
+    assert d["portfolio_risk"]["top_concentration_pct"] == round(100.0 * 5000 / 37000, 2)
+    assert d["portfolio_risk"]["exposure"]["symbols"][0]["pct_nl"] == round(
+        100.0 * 5000 / 37000, 2
+    )
+    assert "cash_pct_nl" in d["portfolio_risk"]["capital_liquidity"]
+    assert "deployed_long_pct_nl" in d["portfolio_risk"]["capital_liquidity"]
     assert "WORLDSTATE" in ws.prompt_block()
 
 
