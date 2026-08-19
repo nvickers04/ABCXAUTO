@@ -106,7 +106,7 @@ AGENT_TOOLS = [
     tool(
         name="scan",
         description="MDA daily-bar tape metrics. mda_last is daily close, not a 15m last.",
-        parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, ["symbols"]),
+        parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, []),
     ),
     tool(
         name="candles",
@@ -909,10 +909,17 @@ async def _run_tool(
         payload["path"] = _path_block(world, get_config())
         return _clip(payload)
     if name == "scan":
-        from abcxauto.opportunity_scan import merge_tape, tape_symbols
+        from abcxauto.opportunity_scan import merge_tape, scan_opportunities, tape_symbols
 
         syms = normalize_tickers(args.get("symbols"))
-        extra = await fetch_scan_metrics(syms) if syms else []
+        if syms:
+            extra = await fetch_scan_metrics(syms)
+        else:
+            # Empty scan = book + legal watchlist seed (unranked). Not open-lot-only.
+            extra = await scan_opportunities(
+                list(world.positions or snap.get("positions") or []),
+            )
+            syms = tape_symbols(extra)
         if extra:
             ideas = merge_tape(list(world.opportunities or []), extra)
             world.opportunities = ideas

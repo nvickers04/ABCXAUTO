@@ -112,6 +112,15 @@ def _universe(positions: list[dict] | None, *, cap: int = TAPE_SEED_CAP) -> list
     return out[: max(1, int(cap))]
 
 
+def tape_seed_symbols(
+    positions: list[dict] | None = None,
+    *,
+    cap: int = TAPE_SEED_CAP,
+) -> list[str]:
+    """Unranked day tape seed: open book first, then legal watchlist. Not a rank."""
+    return _universe(positions, cap=cap)
+
+
 def _closes(candles: list[dict]) -> list[float]:
     out: list[float] = []
     for row in candles or []:
@@ -212,10 +221,8 @@ def format_scan_tape(ideas: list[dict[str, Any]], *, limit: int = 12) -> str:
         "Do not use tape last for send geometry — use IBKR quote.",
         QUOTE_SOURCES_BLOCK,
     ]
-    rows = sorted(
-        ideas[: max(1, limit)],
-        key=lambda x: str(x.get("symbol") or ""),
-    )
+    # Preserve seed / fetch order — never alphabetize (A* tape bias).
+    rows = list(ideas[: max(1, limit)])
     for idea in rows:
         sym = idea.get("symbol")
         src = idea.get("source") or "mda"
@@ -245,13 +252,17 @@ def format_opportunities(ideas: list[dict[str, Any]], *, limit: int = 12) -> str
 def merge_tape(
     base: list[dict[str, Any]], extra: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
+    """Dedupe by symbol; keep first-seen order (book seed before legal set)."""
     by_sym: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
     for row in list(base or []) + list(extra or []):
         sym = str(row.get("symbol") or "").upper()
         if not sym:
             continue
+        if sym not in by_sym:
+            order.append(sym)
         by_sym[sym] = row
-    return [by_sym[k] for k in sorted(by_sym.keys())]
+    return [by_sym[k] for k in order]
 
 
 async def fetch_scan_metrics(

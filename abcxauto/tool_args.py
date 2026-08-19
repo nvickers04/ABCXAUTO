@@ -255,6 +255,9 @@ def normalize_tool_call(
     if canon in ("scan", "news", "odds") and out.get("symbols") in (None, "", []):
         if out.get("symbol"):
             out["symbols"] = _as_symbols(out.get("symbol"))
+        elif canon == "scan":
+            # Leave empty so the scan tool seeds book + legal universe.
+            out["symbols"] = []
 
     if canon in ("candles", "option_chain"):
         if isinstance(out.get("symbol"), list) and not out.get("symbols"):
