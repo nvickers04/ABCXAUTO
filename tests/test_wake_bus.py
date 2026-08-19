@@ -88,9 +88,25 @@ def test_ensure_next_look_if_grok_silent(tmp_path, monkeypatch):
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "30")
-    alarm = ensure_next_look(previous_set_at="")
+    # Non-RTH silent still seeds a look (around-open / overnight park path).
+    alarm = ensure_next_look(previous_set_at="", session="premarket")
     assert alarm.wake_at
     assert load_alarm().wake_at == alarm.wake_at
+
+
+def test_ensure_next_look_rth_silent_no_sit_clock(tmp_path, monkeypatch):
+    """RTH + skipped set_wake must not synthesize a 60s/90s clerk sit-look."""
+    from abcxauto.wake_bus import ensure_next_look, load_alarm
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "30")
+    alarm = ensure_next_look(
+        previous_set_at="",
+        flat=False,
+        session="regular",
+    )
+    assert alarm.wake_at is None
+    assert load_alarm().wake_at is None
 
 
 def test_ensure_next_look_keeps_grok_alarm(tmp_path, monkeypatch):
@@ -99,10 +115,46 @@ def test_ensure_next_look_keeps_grok_alarm(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     set_wake(wake_in_s=120, wake_if=["fill"])
     before = load_alarm()
-    out = ensure_next_look(previous_set_at="")
+    out = ensure_next_look(previous_set_at="", session="regular")
     assert out.wake_if == ["fill"]
     assert out.set_at == before.set_at
     assert out.wake_at
+
+
+def test_set_wake_still_parks_overnight(tmp_path, monkeypatch):
+    """set_wake park outside RTH is a real shutdown clock (new think next session)."""
+    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    alarm = set_wake(wake_in_s=8 * 3600, session="closed", flat=True)
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    remaining = (at - _utc_now()).total_seconds()
+    assert 8 * 3600 - 30 <= remaining <= 8 * 3600 + 30
+
+
+def test_live_interrupt_note_and_take():
+    from abcxauto.wake_bus import (
+        BookEvent,
+        clear_interrupt,
+        note_interrupt,
+        peek_interrupt,
+        take_interrupt,
+    )
+
+    clear_interrupt()
+    note_interrupt(BookEvent("fill", "QQQ filled"))
+    assert peek_interrupt() is not None
+    assert peek_interrupt().kind == "fill"
+    got = take_interrupt()
+    assert got is not None and got.kind == "fill"
+    assert take_interrupt() is None
+    note_interrupt(BookEvent("alarm", "nope"))
+    assert peek_interrupt() is None
+    note_interrupt(BookEvent("unprotected", "SPY"))
+    assert take_interrupt().kind == "unprotected"
+    clear_interrupt()
 
 
 def test_set_wake_always_has_a_clock(tmp_path, monkeypatch):

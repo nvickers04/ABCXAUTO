@@ -765,8 +765,9 @@ def test_ensure_chat_rotates_non_episode():
     assert len(created) == 3
 
 
-def test_episode_chat_reuses_on_fill_until_max():
-    from abcxauto.brain import EPISODE_MAX, _ensure_chat, _open_wake
+def test_episode_chat_reuses_on_fill_without_max_cap():
+    """RTH rides the open think — no EPISODE_MAX compact / residue reset."""
+    from abcxauto.brain import _ensure_chat, _open_wake, _reset_chat
     from abcxauto.wake_bus import BookEvent, note_wake
 
     g, created = _stub_chat_client()
@@ -775,10 +776,11 @@ def test_episode_chat_reuses_on_fill_until_max():
     assert fill is boot
     assert _ensure_chat(g, kind="order_change") is boot
     assert _ensure_chat(g, kind="book_move") is boot
+    assert _ensure_chat(g, kind="unprotected") is boot
     assert len(created) == 1
-    for _ in range(EPISODE_MAX):
+    for _ in range(20):
         _ensure_chat(g, kind="fill")
-    assert len(created) == 2
+    assert len(created) == 1
     note_wake(BookEvent(kind="fill", detail="XLF filled"))
     try:
         g2, created2 = _stub_chat_client()
@@ -788,6 +790,84 @@ def test_episode_chat_reuses_on_fill_until_max():
         assert len(created2) == 1
     finally:
         note_wake(None)
+
+
+def test_rth_yield_keeps_chat_park_resets():
+    """End-of-turn keeps chat unless set_wake parked; park → new think next open."""
+    from abcxauto.brain import BrainTurn, _ensure_chat, _reset_chat
+
+    g, created = _stub_chat_client()
+    chat = _ensure_chat(g, kind="boot")
+    turn = BrainTurn(parked=False)
+    # Simulate RTH yield: no park → chat survives.
+    if turn.parked:
+        _reset_chat(g)
+    assert getattr(g, "chat", None) is chat
+    turn.parked = True
+    if turn.parked:
+        _reset_chat(g)
+    assert getattr(g, "chat", None) is None
+    nxt = _ensure_chat(g, kind="alarm")
+    assert nxt is not chat
+    assert len(created) == 2
+
+
+def test_set_wake_tool_description_is_park_not_next_look():
+    from abcxauto.brain import AGENT_TOOLS
+
+    desc = ""
+    for t in AGENT_TOOLS:
+        fn = getattr(t, "function", None)
+        name = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
+        if name == "set_wake":
+            desc = str(getattr(fn, "description", None) or getattr(t, "description", "") or "")
+            break
+    assert desc
+    assert "park" in desc.lower() or "Park" in desc
+    assert "next look" not in desc.lower()
+    assert "sit-clock" in desc.lower() or "sit clock" in desc.lower() or "yields in place" in desc.lower()
+
+
+def test_live_poke_interrupt_skips_reset_chat():
+    """fill/order_change/unprotected poke the live episode without _reset_chat."""
+    import asyncio
+
+    from abcxauto.brain import BrainTurn, _ensure_chat, _inject_live_poke
+    from abcxauto.wake_bus import BookEvent, clear_interrupt, note_interrupt
+
+    g, _created = _stub_chat_client()
+    _ensure_chat(g, kind="boot")
+    clear_interrupt()
+    note_interrupt(BookEvent("fill", "QQQ"))
+    world = _world(session_status="regular", flat=True, unprotected=[])
+    turn = BrainTurn()
+    appended: list[object] = []
+
+    class Chat:
+        def append(self, msg, **_k):
+            appended.append(msg)
+
+    live = Chat()
+    g.chat = live
+
+    ok = asyncio.run(
+        _inject_live_poke(live, connector=None, world=world, snap={}, turn=turn)
+    )
+    assert ok is True
+    assert turn.interrupted is True
+    assert getattr(g, "chat", None) is live
+    assert appended
+    text = "".join(
+        getattr(c, "text", "") for c in (getattr(appended[0], "content", None) or [])
+    )
+    if not text:
+        text = str(appended[0])
+    assert "event=fill" in text
+    assert "NL=" in text
+    assert "set_wake" not in text
+    assert "ORDER EXAMPLES" not in text
+    assert "AWARENESS" not in text
+    clear_interrupt()
 
 
 def test_open_wake_is_developer_not_user():
@@ -1076,7 +1156,8 @@ def test_playbook_tools_are_a_notebook_not_a_form():
     write = str(getattr(_tool_fn("write_lab_playbook"), "description", "") or "")
     assert "outcome" in playbook.lower()
     assert "WHAT_WORKED" not in write
-    assert "next-look-you" in write
+    assert "wake clock" in write.lower()
+    assert "next-look-you" not in write
 
 
 def test_send_tool_says_one_ticket_per_call():

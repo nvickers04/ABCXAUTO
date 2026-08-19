@@ -391,7 +391,7 @@ def test_write_gate_only_payload_rejected_without_saving(tmp_path, monkeypatch):
 
 
 def test_new_risk_until_prose_stays_notes_not_a_clock(tmp_path, monkeypatch):
-    """Not a screen-window text parser — prose is notebook, set_wake is the clock."""
+    """Not a screen-window text parser — prose is notebook, set_wake parks."""
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     prose = "No new risk until 10:30 ET. Park until open."
@@ -405,6 +405,17 @@ def test_new_risk_until_prose_stays_notes_not_a_clock(tmp_path, monkeypatch):
     block = format_block()
     assert "10:30" not in block
     assert "notebook: playbook tool" in block
+    # Playbook write must not arm a sit-clock.
+    from abcxauto.wake_bus import load_alarm
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    before = load_alarm()
+    apply_from_judgment(
+        {"lab_playbook": {"instructions": prose + " Again.", "mode": "explore"}}
+    )
+    after = load_alarm()
+    assert after.wake_at == before.wake_at
+    assert after.set_at == before.set_at
 
 
 def test_playbook_revision_strips_old_essay_on_disk(tmp_path, monkeypatch):

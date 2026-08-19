@@ -206,7 +206,8 @@ def test_format_wake_rth_fill_delta_no_tape_when_flat():
     assert "Cycle 6." not in text
     assert "you must" not in text.lower()
     assert "chain" not in text.lower()
-    assert text.rstrip().endswith("send|set_wake.")
+    assert text.rstrip().endswith("send.")
+    assert "set_wake" not in text
 
 
 @pytest.mark.parametrize("kind", ["fill", "order_change", "book_move"])

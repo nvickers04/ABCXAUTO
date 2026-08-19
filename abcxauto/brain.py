@@ -333,7 +333,7 @@ AGENT_TOOLS = [
     tool(
         name="write_lab_playbook",
         description=(
-            "Paper only: replace your notes with whatever next-look-you should have. "
+            "Paper only: replace your notes. Not a wake clock. "
             "Optional mode / ready_to_promote. Book, quote, and gates are other tools."
         ),
         parameters=_schema(
@@ -351,10 +351,10 @@ AGENT_TOOLS = [
     tool(
         name="set_wake",
         description=(
-            "Next look. Always set a clock; a fill, order change, or material "
-            "mark move can come sooner. Empty wake_if = any book event. "
-            "If you skip this, the clerk looks again soon. "
-            "Unprotected stock still interrupts."
+            "Park the desk until wake_at / wake_in_s (or sooner on wake_if). "
+            "Overnight / around-open park starts a new think next session. "
+            "Empty wake_if = any book event. Skipping this in RTH yields in place "
+            "— no clerk sit-clock. Unprotected stock still interrupts."
         ),
         parameters=_schema(
             {
@@ -424,6 +424,8 @@ class BrainTurn:
     tool_trace: list[str] = field(default_factory=list)
     lab_playbook: dict[str, Any] | None = None
     tool_budget_hit: bool = False
+    parked: bool = False
+    interrupted: bool = False
 
 
 def _clip(data: Any, max_chars: int = 24_000) -> str:
@@ -552,6 +554,14 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
     reason = "ok"
     while True:
         try:
+            from abcxauto.wake_bus import peek_interrupt
+
+            if peek_interrupt() is not None:
+                reason = "interrupt"
+                break
+        except Exception:
+            pass
+        try:
             resp, ch = await asyncio.wait_for(anext(agen), timeout=STREAM_CHUNK_S)
         except StopAsyncIteration:
             break
@@ -641,9 +651,16 @@ async def grok(g: GrokClient, p: str, *, stage: str = "grok") -> str:
     return text
 
 
-# Boot / alarm / operator: new chat. Fill / order_change / book_move: same episode.
+# Same xAI episode for live book pokes. Hard reset only on park / operator / death.
 EPISODE_KINDS = frozenset({"fill", "order_change", "book_move", "unprotected"})
-EPISODE_MAX = 8
+HARD_RESET_KINDS = frozenset({
+    "boot",
+    "alarm",
+    "operator",
+    "session_change",
+    "socket",
+    "halt",
+})
 
 
 def _reset_chat(g: GrokClient) -> None:
@@ -671,10 +688,11 @@ def _new_chat(g: GrokClient) -> Any:
 
 
 def _ensure_chat(g: GrokClient, *, kind: str = "") -> Any:
+    """Reuse the live think in RTH. New chat only on hard-reset kinds or empty."""
     chat = getattr(g, "chat", None)
-    n = int(getattr(g, "_wake_n", 0) or 0)
-    if kind in EPISODE_KINDS and chat is not None and 0 < n < EPISODE_MAX:
-        g._wake_n = n + 1
+    key = str(kind or "").strip().lower()
+    if chat is not None and key not in HARD_RESET_KINDS:
+        g._wake_n = int(getattr(g, "_wake_n", 0) or 0) + 1
         return chat
     return _new_chat(g)
 
@@ -694,6 +712,75 @@ def _open_wake(g: GrokClient, wake: str, *, reset: bool = False) -> Any:
     chat = _ensure_chat(g, kind=kind)
     chat.append(developer(wake))
     return chat
+
+
+async def _inject_live_poke(
+    chat: Any,
+    *,
+    connector: Any,
+    world: WorldState,
+    snap: dict[str, Any],
+    turn: BrainTurn,
+) -> bool:
+    """Apply clerk fill/order_change/unprotected to the LIVE episode — same chat."""
+    from abcxauto.wake_bus import note_wake, take_interrupt
+    from abcxauto.world_state import day_facts, format_live_poke
+
+    ev = take_interrupt()
+    if ev is None:
+        return False
+    note_wake(ev)
+    turn.interrupted = True
+    think_emit("say", f"\n[live poke: {ev.kind}]\n")
+    # Refresh book facts when we can — thin poke, not a second wake dump.
+    day: dict[str, Any] | None = None
+    try:
+        if connector is not None:
+            from abcxauto.agent_loop import snap as take_snap
+
+            fresh = await take_snap(connector)
+            if isinstance(fresh, dict):
+                snap.clear()
+                snap.update(fresh)
+                world.net_liquidation = (
+                    fresh.get("net_liquidation")
+                    or (fresh.get("account") or {}).get("netliquidation")
+                    or world.net_liquidation
+                )
+                world.positions = list(fresh.get("positions") or world.positions or [])
+                world.flat = not bool(world.positions)
+                prot = fresh.get("protection") if isinstance(fresh.get("protection"), dict) else {}
+                world.unprotected = list(
+                    prot.get("unprotected_symbols") or world.unprotected or []
+                )
+                world.session_status = str(
+                    ((fresh.get("market_hours") or {}).get("session") or {}).get("status")
+                    or world.session_status
+                    or ""
+                )
+    except Exception:
+        logger.debug("live poke snap refresh failed", exc_info=True)
+    try:
+        from abcxauto.scorecard import compute_scorecard
+
+        sc = compute_scorecard(equity=getattr(world, "net_liquidation", None))
+        day = day_facts(world, sc)
+    except Exception:
+        day = day_facts(world, None)
+    poke = format_live_poke(
+        kind=str(ev.kind or ""),
+        detail=str(ev.detail or ""),
+        session=str(getattr(world, "session_status", "") or ""),
+        flat=bool(getattr(world, "flat", False)),
+        unprotected=list(getattr(world, "unprotected", None) or []),
+        day=day,
+    )
+    try:
+        chat.append(developer(poke))
+    except Exception:
+        logger.debug("live poke append failed", exc_info=True)
+        return False
+    return True
 
 
 def _book_facts(world: WorldState) -> dict[str, Any]:
@@ -1412,6 +1499,7 @@ async def _run_tool(
             flat=getattr(world, "flat", None),
             session=str(getattr(world, "session_status") or ""),
         )
+        turn.parked = True
         return _clip({
             "status": "ok",
             "wake_at": alarm.wake_at,
@@ -1499,12 +1587,36 @@ async def _invoke_named_tool(
         _emit_write_lab_playbook_think(args)
     turn.tool_trace.append(name)
     try:
-        return await asyncio.wait_for(
+        from abcxauto.wake_bus import peek_interrupt
+
+        tool_task = asyncio.create_task(
             _run_tool(
                 name, args, connector=connector, world=world, snap=snap, turn=turn
-            ),
-            timeout=timeout,
+            )
         )
+        deadline = time.monotonic() + float(timeout)
+        while True:
+            if peek_interrupt() is not None:
+                tool_task.cancel()
+                try:
+                    await tool_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                return json.dumps({"status": "interrupted", "tool": name})
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                tool_task.cancel()
+                try:
+                    await tool_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise asyncio.TimeoutError()
+            done, _ = await asyncio.wait({tool_task}, timeout=min(0.25, remaining))
+            if tool_task in done:
+                exc = tool_task.exception()
+                if exc is not None:
+                    raise exc
+                return str(tool_task.result())
     except asyncio.TimeoutError:
         logger.warning("tool %s timed out after %.0fs", name, timeout)
         return json.dumps({"error": f"{name} timed out", "timeout_s": timeout})
@@ -1528,8 +1640,13 @@ async def _dispatch_tool_calls(
     world: WorldState,
     snap: dict[str, Any],
     turn: BrainTurn,
-) -> None:
-    """Read tools in parallel; send / playbook stay serial and after facts."""
+) -> bool:
+    """Read tools in parallel; send / playbook stay serial and after facts.
+
+    Returns True when a live poke interrupted mid-tool.
+    """
+    from abcxauto.wake_bus import peek_interrupt
+
     parsed = [_parse_tool_call(tc, world=world, snap=snap) for tc in calls]
     reads = [p for p in parsed if p[0] not in _MUTATING_TOOLS]
     writes = [p for p in parsed if p[0] in _MUTATING_TOOLS]
@@ -1557,10 +1674,17 @@ async def _dispatch_tool_calls(
                 )
             else:
                 _append_tool_result(chat, row[0], row[1])
+        if peek_interrupt() is not None:
+            return True
 
     for item in writes:
+        if peek_interrupt() is not None:
+            return True
         tc, result = await _one(item)
         _append_tool_result(chat, tc, result)
+        if peek_interrupt() is not None:
+            return True
+    return False
 
 
 async def _grok_turn_impl(
@@ -1591,6 +1715,13 @@ async def _grok_turn_impl(
     stream_resets = 0
     for _ in range(MAX_TOOL_ROUNDS):
         try:
+            from abcxauto.wake_bus import peek_interrupt
+
+            if peek_interrupt() is not None:
+                await _inject_live_poke(
+                    chat, connector=connector, world=world, snap=snap, turn=turn
+                )
+                continue
             text, response, stop = await stream_round(chat)
         except Exception as exc:
             logger.exception("stream_round failed")
@@ -1604,8 +1735,13 @@ async def _grok_turn_impl(
             except Exception:
                 break
             continue
+        if stop == "interrupt":
+            await _inject_live_poke(
+                chat, connector=connector, world=world, snap=snap, turn=turn
+            )
+            continue
         if stop == "loop":
-            _reset_chat(g)
+            # Ride the cost in RTH — do not invent a compact / residue reset.
             exhausted = False
             break
         if text:
@@ -1619,7 +1755,7 @@ async def _grok_turn_impl(
         if not calls:
             exhausted = False
             break
-        await _dispatch_tool_calls(
+        interrupted = await _dispatch_tool_calls(
             calls,
             chat=chat,
             connector=connector,
@@ -1627,10 +1763,17 @@ async def _grok_turn_impl(
             snap=snap,
             turn=turn,
         )
+        if interrupted:
+            await _inject_live_poke(
+                chat, connector=connector, world=world, snap=snap, turn=turn
+            )
+            continue
     if exhausted:
         turn.tool_budget_hit = True
         think_emit("say", "\n[tool budget exhausted]\n")
-    _reset_chat(g)
+    # Park (set_wake) ends the episode. RTH yield keeps the same think.
+    if turn.parked:
+        _reset_chat(g)
     if not turn.sends:
         turn.last_act = turn.last_act or {
             "action": "hold",
