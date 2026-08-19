@@ -972,6 +972,41 @@ def open_upnl_of(positions: list[dict] | None) -> float | None:
     return round(total, 2)
 
 
+def _minutes_to_open(world: Any) -> int | None:
+    pulse = getattr(world, "pulse", None) if world is not None else None
+    if not isinstance(pulse, dict):
+        pulse = {}
+    sess = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
+    if sess.get("countdown_to") == "open" and sess.get("countdown_s") is not None:
+        try:
+            return max(0, int(float(sess["countdown_s"]) // 60))
+        except (TypeError, ValueError):
+            pass
+    hours = pulse.get("market_hours") if isinstance(pulse.get("market_hours"), dict) else {}
+    if hours.get("minutes_to_open") is not None:
+        try:
+            return max(0, int(float(hours["minutes_to_open"])))
+        except (TypeError, ValueError):
+            pass
+    status = str(
+        sess.get("status")
+        or getattr(world, "session_status", None)
+        or ""
+    ).lower()
+    if status not in ("premarket", "closed", "postmarket"):
+        return None
+    try:
+        from abcxauto.marketdata.market_hours import get_session_info
+
+        info = get_session_info()
+        mins = info.get("minutes_to_open")
+        if mins is not None:
+            return max(0, int(float(mins)))
+    except Exception:
+        pass
+    return None
+
+
 def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
     """Session forest: IBKR day, open uPnL, NL vs start minus model. Not one number."""
     sc = scorecard if isinstance(scorecard, dict) else {}
@@ -1029,6 +1064,14 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     except Exception:
         floors = None
     port = dict(getattr(world, "portfolio_risk", None) or {})
+    tape_seed: list[str] = []
+    try:
+        from abcxauto.opportunity_scan import tape_seed_symbols
+
+        tape_seed = tape_seed_symbols(getattr(world, "positions", None))
+    except Exception:
+        tape_seed = []
+    mins_open = _minutes_to_open(world)
     return {
         "nl": nl,
         "ibkr_daily_pnl": daily,
@@ -1074,6 +1117,9 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "portfolio_risk": port,
         "exposure": port.get("exposure"),
         "capital_liquidity": port.get("capital_liquidity"),
+        # Unranked day tape (book + legal watchlist). Not open-lot-only.
+        "tape_seed": tape_seed,
+        "minutes_to_open": mins_open,
     }
 
 
@@ -1207,6 +1253,16 @@ def format_wake(
         f"Cycle {cycle}. session={session} flat={flat} "
         f"unprotected={unprot} ibkr={'up' if ibkr_up else 'down'}.",
     ]
+    mins = day.get("minutes_to_open")
+    if mins is not None and str(session or "").lower() in (
+        "premarket",
+        "closed",
+        "postmarket",
+    ):
+        parts.append(f"minutes_to_open={mins}.")
+    tape = day.get("tape_seed") or []
+    if isinstance(tape, list) and tape:
+        parts.append(f"tape={','.join(str(x) for x in tape[:12])}.")
     if day:
         parts.append(
             f"names={day.get('names')} lots={day.get('lots')} "
