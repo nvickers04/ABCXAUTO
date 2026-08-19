@@ -289,22 +289,22 @@ async def pull_one_screen(
     arena: str | None = None,
     scan_code: str | None = None,
 ) -> dict[str, Any]:
-    """One IBKR screen (or MDA industry seed) this look. No persist / no legal refresh."""
+    """One IBKR screen (or MDA industry seed if no IBKR) this look. No persist."""
     resolved = resolve_screen(arena=arena, scan_code=scan_code)
     if not resolved.get("ok"):
         return resolved
     ibkr_spec = resolved.get("ibkr")
     pulled: list[str] = []
     source = ""
+    # MDA industry seed only when there is no IBKR connector (or no IBKR spec).
+    # If _ibkr_scan ran and returned empty — stay empty; do not dump catalog names.
     if ibkr_spec and connector is not None:
         pulled = await _ibkr_scan(connector, ibkr_spec)
-        if pulled:
-            source = "ibkr"
-    if not pulled:
+        source = "ibkr" if pulled else "empty"
+    else:
         pulled = normalize_symbols(resolved.get("mda_fallback") or [])
         if pulled:
             source = "mda_seed"
-    # Empty is fine — never dump SPY/QQQ/IWM as a substitute tape.
     return {
         "ok": True,
         "arena_id": resolved.get("arena_id"),

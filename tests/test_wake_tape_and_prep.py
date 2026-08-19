@@ -542,3 +542,59 @@ async def test_scan_symbols_no_mda_candles_no_quotes(monkeypatch):
     assert data["symbols"] == ["NVDA", "XLE"]
     assert all("last" not in h and "bid" not in h for h in data["hits"])
     assert "mda_last" not in (data.get("hits") or [{}])[0]
+
+
+@pytest.mark.asyncio
+async def test_scan_ibkr_empty_does_not_dump_catalog_names(monkeypatch):
+    """Connected IBKR + empty screen → empty hits, not ARENA_CATALOG mda_fallback."""
+    from abcxauto.brain import BrainTurn, _run_tool
+    from abcxauto.universe import ARENA_CATALOG
+    from abcxauto.world_state import WorldState
+
+    async def empty_scan(_connector, _spec):
+        return []
+
+    monkeypatch.setattr("abcxauto.universe._ibkr_scan", empty_scan)
+    catalog = list(ARENA_CATALOG["mega_cap"]["mda_fallback"] or [])
+
+    class Conn:
+        connected = True
+
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=1.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    data = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "mega_cap"},
+            connector=Conn(),
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["ok"] is True
+    assert data["source"] == "empty"
+    assert data["symbols"] == []
+    assert data["hits"] == []
+    for name in catalog[:5]:
+        assert name not in (data.get("symbols") or [])
