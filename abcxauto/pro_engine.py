@@ -933,8 +933,7 @@ class ProEngine:
 
                     think_emit(
                         "say",
-                        f"Cycle {n}: {ev.kind} {ev.detail} — Grok.\n".strip()
-                        + "\n",
+                        f"{ev.kind} {ev.detail} — Grok.\n".strip() + "\n",
                     )
                     out = await run_cycle(n, self.conn, g, hist, prev)
                     skipped_note = str(out.get("validation") or out.get("rationale") or "")

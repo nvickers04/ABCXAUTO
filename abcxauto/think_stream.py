@@ -186,7 +186,6 @@ def mark_review_stale(*, archive_tail: bool = False) -> None:
     payload = {
         "stale": True,
         "previous_run_id": prev.get("run_id") or run.get("run_id") or "",
-        "previous_cycle": prev.get("cycle"),
         "previous_strat": prev.get("strat") or "",
         "open_lots": list(prev.get("open_lots") or []),
         "net_liquidation": prev.get("net_liquidation"),
@@ -276,7 +275,6 @@ def write_desk_brief(payload: dict[str, Any]) -> None:
     if str(payload.get("strat") or "") == "in_progress":
         return
     row = {
-        "cycle": payload.get("cycle"),
         "strat": payload.get("strat"),
         "sends": payload.get("sends") or 0,
         "open_lots": list(payload.get("open_lots") or [])[:16],
@@ -306,7 +304,10 @@ def _mix_of(out: dict[str, Any], world: dict[str, Any]) -> dict[str, Any]:
 
 
 def write_last_turn(out: dict[str, Any]) -> None:
-    """Clerk snapshot of the last cycle for the Cursor review loop."""
+    """Clerk snapshot of the last Grok turn for the Cursor review loop.
+
+    Operator paint has no sit-loop counter. Journal/logs keep the clerk increment.
+    """
     try:
         LAST_TURN_PATH.parent.mkdir(parents=True, exist_ok=True)
         pulse = out.get("reality_pulse") or {}
@@ -346,7 +347,6 @@ def write_last_turn(out: dict[str, Any]) -> None:
         else:
             skip = ""
         payload = {
-            "cycle": out.get("cycle"),
             "strat": out.get("strat"),
             "rationale": (out.get("rationale") or "")[:400],
             "validation": (out.get("validation") or "")[:400],

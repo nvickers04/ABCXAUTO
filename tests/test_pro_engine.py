@@ -182,6 +182,18 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_
     )
 
 
+def test_think_emit_source_does_not_number_the_think():
+    from pathlib import Path
+    from tests.conftest import assert_no_cycle_counter
+
+    src = (Path(__file__).resolve().parents[1] / "abcxauto" / "pro_engine.py").read_text(
+        encoding="utf-8"
+    )
+    assert "Cycle {n}" not in src
+    assert "Cycle {" not in src
+    assert_no_cycle_counter("boot — Grok.")
+
+
 def test_pro_engine_passes_new_fields_through_records(monkeypatch):
     """Sanity: cycle payload carries inventory/reasoning/validation/tweak_before."""
     # lighter sync style via direct but engine is exercised in above

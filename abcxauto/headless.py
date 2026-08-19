@@ -25,7 +25,6 @@ def _one_line(text: Any, n: int = 240) -> str:
 
 def format_cycle_digest(d: dict[str, Any]) -> str:
     """Human cycle block: send, why, result, next sleep."""
-    n = d.get("cycle")
     j = d.get("judgment") or {}
     strat = str(d.get("strat") or d.get("action") or "-")
     stance = str(d.get("stance") or j.get("stance") or "").strip()
@@ -62,7 +61,7 @@ def format_cycle_digest(d: dict[str, Any]) -> str:
     sleep = pace.get("sleep_s")
     tier = pace.get("tier") or pace.get("reason") or ""
     lead = f"{stance} -> " if stance else ""
-    lines = [f"CYCLE {n}  {lead}{strat}{book}"]
+    lines = [f"{lead}{strat}{book}".strip()]
     if thesis:
         lines.append(f"  thesis: {thesis}")
     if why:

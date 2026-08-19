@@ -319,7 +319,10 @@ def test_format_wake_includes_day_facts():
             },
         },
     )
-    assert "Cycle 3." in text
+    from tests.conftest import assert_no_cycle_counter
+
+    assert_no_cycle_counter(text)
+    assert "Cycle 3." not in text
     assert "session=regular" in text
     assert "names=3" in text
     assert "lots=8" in text
@@ -906,7 +909,12 @@ def test_build_world_state_regime_and_portfolio(tmp_path, monkeypatch):
     )
     assert "cash_pct_nl" in d["portfolio_risk"]["capital_liquidity"]
     assert "deployed_long_pct_nl" in d["portfolio_risk"]["capital_liquidity"]
-    assert "WORLDSTATE" in ws.prompt_block()
+    block = ws.prompt_block()
+    assert "WORLDSTATE" in block
+    from tests.conftest import assert_no_cycle_counter
+
+    assert_no_cycle_counter(block)
+    assert '"cycle"' not in block
 
 
 def test_prompt_block_includes_working_orders_and_avg(tmp_path, monkeypatch):

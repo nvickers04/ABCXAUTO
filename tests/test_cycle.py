@@ -269,7 +269,11 @@ async def test_run_cycle_rth_always_calls_grok(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _ok_send)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert len(grok_calls) >= 1
-    assert any("Cycle" in p for p in grok_calls)
+    from tests.conftest import assert_no_cycle_counter
+
+    assert any("session=" in p for p in grok_calls)
+    for p in grok_calls:
+        assert_no_cycle_counter(p)
     assert out["strat"] in ("market_bracket", "blocked", "hold")
 
 
@@ -363,8 +367,11 @@ async def test_run_cycle_agent_decides_with_journal_memory(monkeypatch):
     joined = "\n".join(grok_calls)
     from abcxauto.brain import brain_system_prompt
 
+    from tests.conftest import assert_no_cycle_counter
+
     assert "ORDER EXAMPLES" in brain_system_prompt()
-    assert "Cycle" in joined
+    assert "session=" in joined
+    assert_no_cycle_counter(joined)
     assert "MARKET HINTS" not in joined
     assert out["strat"] == "market_bracket"
     assert len(calls) == 1

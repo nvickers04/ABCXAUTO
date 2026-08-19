@@ -35,7 +35,11 @@ def test_format_cycle_digest_hold():
             "pace": {"sleep_s": 300, "tier": "idle"},
         }
     )
-    assert "CYCLE 1  idle -> hold" in text
+    from tests.conftest import assert_no_cycle_counter
+
+    assert_no_cycle_counter(text)
+    assert "idle -> hold" in text
+    assert "CYCLE" not in text
     assert "NL=1000000" in text
     assert "thesis:" in text
     assert "why:" in text
