@@ -1076,19 +1076,34 @@ async def run_cycle(
     result = dict(turn.last_result or {})
     strat = str(turn.last_strat or act.get("strategy") or "hold")
     if not turn.sends and strat not in (BLOCKED_STRAT, "blocked"):
-        act = act if act else {
-            "action": "hold", "strategy": "hold", "rationale": "no send",
-        }
-        strat, forced = gate_ticket(act, world)
-        if forced is not None:
-            result = forced
-            act["strategy"] = act["action"] = BLOCKED_STRAT
-            act["rationale"] = str(forced.get("note") or "")
+        # No send this look. Brain may decorate last_* as hold; that is not a ticket.
+        if ban_hold_active():
+            # Rest is rest — do not invent hold for gate_ticket / journal.
+            act = {}
+            strat = ""
+            result = {}
         else:
-            strat = "hold"
-            act.setdefault("action", "hold")
-            act.setdefault("strategy", "hold")
-            result = {"status": "hold", "strategy": "hold"}
+            # Live / ban_hold off: no-send remains a hold no-op (gate still applies).
+            act = act if act else {
+                "action": "hold", "strategy": "hold", "rationale": "no send",
+            }
+            if not str(act.get("strategy") or act.get("action") or "").strip():
+                act = {
+                    **act,
+                    "action": "hold",
+                    "strategy": "hold",
+                    "rationale": act.get("rationale") or "no send",
+                }
+            strat, forced = gate_ticket(act, world)
+            if forced is not None:
+                result = forced
+                act["strategy"] = act["action"] = BLOCKED_STRAT
+                act["rationale"] = str(forced.get("note") or "")
+            else:
+                strat = "hold"
+                act.setdefault("action", "hold")
+                act.setdefault("strategy", "hold")
+                result = {"status": "hold", "strategy": "hold"}
 
     s["opportunities"] = list(world.opportunities or [])
     s["news_items"] = list(world.news_items or [])

@@ -496,7 +496,8 @@ def test_turn_did_work_facts_or_tune():
 
 
 @pytest.mark.asyncio
-async def test_paper_flat_rth_implicit_hold_after_tools(monkeypatch):
+async def test_paper_no_send_after_tools_is_rest_not_hold_ticket(monkeypatch):
+    """ban_hold on: no-send must not invent hold → gate_ticket → 'hold is not a ticket'."""
     from abcxauto.brain import BrainTurn
 
     async def worked(*_a, **_k):
@@ -513,12 +514,16 @@ async def test_paper_flat_rth_implicit_hold_after_tools(monkeypatch):
     )
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", worked)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "blocked"
-    assert "hold is not a ticket" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
+    assert "hold is not a ticket" not in str(
+        (out.get("result") or {}).get("note") or out.get("validation") or out.get("rationale") or ""
+    )
+    assert (out.get("action_obj") or {}).get("strategy") != "hold"
 
 
 @pytest.mark.asyncio
-async def test_paper_flat_rth_idle_hold_is_blocked(monkeypatch):
+async def test_paper_no_send_idle_is_rest_not_blocked(monkeypatch):
     from abcxauto.brain import BrainTurn
 
     async def idle(*_a, **_k):
@@ -534,11 +539,16 @@ async def test_paper_flat_rth_idle_hold_is_blocked(monkeypatch):
     )
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", idle)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "blocked"
+    assert out["strat"] != "blocked"
+    assert out["strat"] != "hold"
+    assert "hold is not a ticket" not in str(
+        (out.get("result") or {}).get("note") or out.get("validation") or ""
+    )
 
 
 @pytest.mark.asyncio
-async def test_notes_only_unprotected_still_forbids_hold(monkeypatch):
+async def test_notes_only_unprotected_no_send_is_rest(monkeypatch):
+    """No-send is not a hold ticket — unprotected last-stop only gates real hold sends."""
     from abcxauto.brain import BrainTurn
 
     async def notes(*_a, **_k):
@@ -553,9 +563,13 @@ async def test_notes_only_unprotected_still_forbids_hold(monkeypatch):
         lambda **_k: _world(needs_protection=True, unprotected=["SPY"], flat=False),
     )
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "blocked"
-    assert "hold_forbidden" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
-
+    assert out["strat"] != "hold"
+    assert "hold_forbidden" not in str(
+        (out.get("result") or {}).get("note") or out.get("validation") or ""
+    )
+    assert "hold is not a ticket" not in str(
+        (out.get("result") or {}).get("note") or out.get("validation") or ""
+    )
 
 def test_stale_playbook_is_not_a_hold_gate(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
@@ -613,5 +627,143 @@ async def test_stale_playbook_tool_tour_is_not_work(tmp_path, monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", worked)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
+    assert "hold is not a ticket" not in str(
+        (out.get("result") or {}).get("note") or out.get("validation") or ""
+    )
+
+
+@pytest.mark.asyncio
+async def test_ban_hold_on_no_send_not_hold_is_not_a_ticket(monkeypatch):
+    """No-send + ban_hold: rest, never the hold-ticket chip."""
+    from abcxauto.brain import BrainTurn
+
+    async def rest(*_a, **_k):
+        return BrainTurn(
+            tool_trace=["book", "status", "playbook", "quote", "scan", "news", "candles", "set_wake", "write_lab_playbook"],
+            last_act={"action": "hold", "strategy": "hold", "rationale": "no send"},
+            last_strat="hold",
+            last_result={"status": "hold", "strategy": "hold"},
+        )
+
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: True,
+    )
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", rest)
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert out.get("sends") == 0
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
+    blob = str(
+        (out.get("result") or {}).get("note")
+        or out.get("validation")
+        or out.get("rationale")
+        or ""
+    )
+    assert "hold is not a ticket" not in blob
+
+
+@pytest.mark.asyncio
+async def test_ban_hold_on_explicit_hold_send_still_not_a_ticket(monkeypatch):
+    """Real hold send + ban_hold: gate_ticket chip still fires."""
+    from abcxauto.brain import BrainTurn
+
+    blocked = {
+        "status": "blocked",
+        "note": "hold is not a ticket",
+    }
+
+    async def sent_hold(*_a, **_k):
+        act = {"action": "blocked", "strategy": "blocked", "rationale": "hold is not a ticket"}
+        return BrainTurn(
+            sends=[{"act": dict(act), "result": blocked, "strat": "blocked"}],
+            last_act=act,
+            last_strat="blocked",
+            last_result=blocked,
+            tool_trace=["book", "send"],
+        )
+
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: True,
+    )
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", sent_hold)
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] == "blocked"
-    assert "hold is not a ticket" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
+    assert "hold is not a ticket" in str(
+        (out.get("result") or {}).get("note") or out.get("validation") or ""
+    )
+
+
+@pytest.mark.asyncio
+async def test_ban_hold_off_no_send_remains_hold_noop(monkeypatch):
+    """Live / ban_hold off: no-send may still surface as hold no-op."""
+    from abcxauto.brain import BrainTurn
+
+    async def rest(*_a, **_k):
+        return BrainTurn(
+            tool_trace=["book", "set_wake"],
+            last_act={"action": "hold", "strategy": "hold", "rationale": "no send"},
+            last_strat="hold",
+            last_result={"status": "hold", "strategy": "hold"},
+        )
+
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: SimpleNamespace(
+            trading_mode="live",
+            risk_posture="balanced",
+            is_paper=False,
+            ban_hold=False,
+        ),
+    )
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: False,
+    )
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", rest)
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert out["strat"] == "hold"
+    assert out["result"]["status"] == "hold"
+    assert "hold is not a ticket" not in str(
+        (out.get("result") or {}).get("note") or out.get("validation") or ""
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_hold_send_unprotected_still_forbidden(monkeypatch):
+    """Unprotected STK last-stop still blocks a real hold send."""
+    from abcxauto.brain import BrainTurn
+
+    blocked = {
+        "status": "blocked",
+        "note": "hold_forbidden - unprotected STK needs a last-stop",
+    }
+
+    async def sent_hold(*_a, **_k):
+        act = {
+            "action": "blocked",
+            "strategy": "blocked",
+            "rationale": blocked["note"],
+        }
+        return BrainTurn(
+            sends=[{"act": dict(act), "result": blocked, "strat": "blocked"}],
+            last_act=act,
+            last_strat="blocked",
+            last_result=blocked,
+            tool_trace=["send"],
+        )
+
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.build_world_state",
+        lambda **_k: _world(needs_protection=True, unprotected=["SPY"], flat=False),
+    )
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", sent_hold)
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert out["strat"] == "blocked"
+    assert "hold_forbidden" in str(
+        (out.get("result") or {}).get("note") or out.get("validation") or ""
+    )
