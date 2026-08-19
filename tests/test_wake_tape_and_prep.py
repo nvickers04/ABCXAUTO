@@ -138,6 +138,91 @@ def test_format_wake_surfaces_tape_and_minutes():
     assert text.rstrip().endswith("send|set_wake.")
 
 
+def test_format_wake_rth_fill_delta_still_carries_tape_when_flat():
+    """After flatten, kind=fill must not leave an empty chair — tape facts stay on."""
+    from abcxauto.wake_bus import BookEvent, note_wake
+
+    note_wake(BookEvent(kind="fill", detail="AAPL target filled"))
+    try:
+        text = format_wake(
+            cycle=6,
+            session="regular",
+            flat=True,
+            unprotected=[],
+            ibkr_up=True,
+            day={
+                "nl": 100_000.0,
+                "daily_pnl": 12.0,
+                "names": 0,
+                "lots": 0,
+                "open_lots": [],
+                "capacity": {"open_count": 0, "max_open_positions": 15},
+                "mix": {},
+                "tape_seed": ["ZZZZ", "MSFT", "NVDA"],
+            },
+        )
+    finally:
+        note_wake(None)
+    assert text.startswith("event=fill AAPL target filled.")
+    assert "session=regular flat=True" in text
+    assert "tape=ZZZZ,MSFT,NVDA" in text
+    assert "This is a delta" in text
+    assert "session_prep" not in text
+    assert "Cycle 6." not in text
+    assert "you must" not in text.lower()
+    assert text.rstrip().endswith("send|set_wake.")
+
+
+@pytest.mark.parametrize("kind", ["fill", "order_change", "book_move"])
+def test_format_wake_rth_delta_kinds_carry_tape(kind):
+    from abcxauto.wake_bus import BookEvent, note_wake
+
+    note_wake(BookEvent(kind=kind, detail="marks"))
+    try:
+        text = format_wake(
+            cycle=2,
+            session="regular",
+            flat=True,
+            unprotected=[],
+            ibkr_up=True,
+            day={
+                "nl": 50_000.0,
+                "capacity": {"open_count": 0, "max_open_positions": 15},
+                "tape_seed": ["SPY", "QQQ", "IWM"],
+            },
+        )
+    finally:
+        note_wake(None)
+    assert f"event={kind}" in text
+    assert "tape=SPY,QQQ,IWM" in text
+
+
+def test_format_wake_non_rth_fill_delta_omits_tape():
+    """Premarket fill delta stays lean; non-delta wake already prints tape=."""
+    from abcxauto.wake_bus import BookEvent, note_wake
+
+    note_wake(BookEvent(kind="fill", detail="AAPL filled"))
+    try:
+        text = format_wake(
+            cycle=2,
+            session="premarket",
+            flat=True,
+            unprotected=[],
+            ibkr_up=True,
+            day={
+                "nl": 50_000.0,
+                "capacity": {"open_count": 0, "max_open_positions": 15},
+                "tape_seed": ["SPY", "QQQ"],
+                "minutes_to_open": 40,
+            },
+        )
+    finally:
+        note_wake(None)
+    assert "event=fill" in text
+    assert "tape=" not in text
+    assert "This is a delta" in text
+
+
 @pytest.mark.asyncio
 async def test_scan_empty_seeds_universe(monkeypatch, legal_tape):
     from abcxauto.brain import BrainTurn, _run_tool

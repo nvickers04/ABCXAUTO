@@ -1196,7 +1196,7 @@ def format_wake(
     ibkr_up: bool,
     day: dict[str, Any] | None = None,
 ) -> str:
-    """Desk brief. Fill/order_change is a delta, not a discovery assignment."""
+    """Desk brief. Fill/order_change is a delta; RTH still carries tape facts."""
     unprot = ",".join(unprotected) if unprotected else "none"
     day = day if isinstance(day, dict) else {}
     lots = day.get("open_lots") or []
@@ -1235,6 +1235,13 @@ def format_wake(
         ]
         if lot_s:
             parts.append(f"open_lots={lot_s}.")
+        # RTH fill/delta: still surface unranked tape (esp. when flat) — facts only.
+        # Non-delta wakes already print tape=; delta wakes used to omit it and leave
+        # an empty chair after flatten.
+        if str(session or "").lower() == "regular":
+            tape = day.get("tape_seed") or []
+            if isinstance(tape, list) and tape:
+                parts.append(f"tape={','.join(str(x) for x in tape[:12])}.")
         if day.get("lot_lasts"):
             parts.append(f"{day.get('lot_lasts')}.")
         if day.get("working_exits"):
