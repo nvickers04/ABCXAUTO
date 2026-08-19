@@ -168,11 +168,13 @@ async def criteria_scan(
     connector: Any = None,
     turn_symbols: list[str] | None = None,
     cap: int | None = None,
+    filters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One screen this look: arena | scan_code | symbols[]. No persist, no MDA daily-120."""
     asked = normalize_tickers(symbols or [], cap=cap)
     has_arena = bool(str(arena or "").strip())
     has_code = bool(str(scan_code or "").strip())
+    filt = filters if isinstance(filters, dict) else None
     if not has_arena and not has_code and not asked:
         return {
             "ok": False,
@@ -183,6 +185,7 @@ async def criteria_scan(
     source = "symbols"
     arena_id = None
     code_out = None
+    applied: dict[str, Any] = dict((filt or {}).get("applied") or {})
     if has_arena or has_code:
         from abcxauto.universe import pull_one_screen
 
@@ -190,17 +193,28 @@ async def criteria_scan(
             connector,
             arena=arena if has_arena else None,
             scan_code=scan_code if has_code else None,
+            filters=filt,
         )
         if not pulled.get("ok"):
-            return {
+            err: dict[str, Any] = {
                 "ok": False,
                 "error": pulled.get("error") or "unknown screen",
                 "arenas": pulled.get("arenas"),
             }
+            if pulled.get("applied") is not None:
+                err["applied"] = pulled.get("applied")
+            return err
         hits_syms = list(pulled.get("symbols") or [])
         source = str(pulled.get("source") or "empty")
         arena_id = pulled.get("arena_id")
         code_out = pulled.get("scan_code")
+        applied = dict(pulled.get("applied") or applied)
+    elif filt and (filt.get("applied") or filt.get("native") or filt.get("tags")):
+        return {
+            "ok": False,
+            "error": "scan filters require arena | scan_code",
+            "applied": applied,
+        }
     else:
         hits_syms = list(asked)
 
@@ -214,6 +228,7 @@ async def criteria_scan(
         "scan_code": code_out,
         "symbols": [r["symbol"] for r in rows],
         "hits": rows,
+        "applied": applied,
         "persisted": False,
         "ranked": False,
     }

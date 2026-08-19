@@ -385,7 +385,7 @@ async def test_scan_arena_most_active_ibkr_order_overlay_no_persist(
     reset_universe_cache()
     before = load_allowlist()
 
-    async def fake_pull(connector=None, *, arena=None, scan_code=None):
+    async def fake_pull(connector=None, *, arena=None, scan_code=None, filters=None):
         assert arena == "most_active"
         assert scan_code is None
         return {
@@ -394,6 +394,7 @@ async def test_scan_arena_most_active_ibkr_order_overlay_no_persist(
             "scan_code": "MOST_ACTIVE",
             "source": "ibkr",
             "symbols": ["TSLA", "AAPL", "AMD"],
+            "applied": {},
             "persisted": False,
         }
 
