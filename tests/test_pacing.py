@@ -84,7 +84,7 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
 
     reset_journal(path=str(tmp_path / "journal.db"), enabled=True)
 
-    from tests.conftest import fake_grok_turn
+    from abcxauto.brain import BrainTurn
 
     class FakeConnector:
         connected = True
@@ -101,12 +101,13 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
         async def get_account_summary(self):
             return {"netliquidation": 1000, "unrealizedpnl": 0}
 
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        fake_grok_turn({"action": "hold", "strategy": "hold", "rationale": "act hold"}),
-    )
+    async def grok_turn(*_a, **_k):
+        return BrainTurn(tool_trace=["book"], text="act yield")
+
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_turn)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "hold"
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"
 
 
 @pytest.mark.asyncio
@@ -260,7 +261,7 @@ async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
 
     calls: list[str] = []
 
-    from tests.conftest import fake_grok_turn
+    from abcxauto.brain import BrainTurn
 
     class FakeConnector:
         connected = True
@@ -277,14 +278,12 @@ async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
         async def get_account_summary(self):
             return {"netliquidation": 10000, "unrealizedpnl": -7}
 
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        fake_grok_turn({
-            "action": "hold",
-            "strategy": "hold",
-            "rationale": "manage book — stop working",
-        }, wakes=calls),
-    )
+    async def grok_turn(_g, *, connector, world, snap, wake=""):
+        calls.append(wake)
+        return BrainTurn(tool_trace=["book"], text="manage book — stop working")
+
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_turn)
     out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert calls
-    assert out["strat"] == "hold"
+    assert out["strat"] != "hold"
+    assert out["strat"] != "blocked"

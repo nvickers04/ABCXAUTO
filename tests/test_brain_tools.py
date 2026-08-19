@@ -1161,7 +1161,8 @@ async def test_tool_timeout_returns_error(monkeypatch):
     )
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
     assert "book" in turn.tool_trace
-    assert turn.last_strat == "hold"
+    assert not turn.sends
+    assert turn.last_strat != "hold"
 
 
 @pytest.mark.asyncio
@@ -1258,6 +1259,7 @@ def test_send_tool_says_one_ticket_per_call():
     props = _tool_props("send")
     strat = props.get("strategy") or {}
     assert "enum" in strat
+    assert "hold" not in strat["enum"]
     assert "self_tune" not in strat["enum"]
     assert "bracket" in strat["enum"]
     assert "symbol" in props
