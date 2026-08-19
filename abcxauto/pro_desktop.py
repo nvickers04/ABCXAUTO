@@ -379,34 +379,59 @@ class ProTerminal:
         self.lbl_risk_locked.value = "Locked · " + " · ".join(bits)
         self.lbl_risk_locked.color = MUTED
 
-    def _read_risk_knob(self, key: str) -> float | int:
-        """Read a slider and clamp to its snapshot min/max before any API call."""
-        slider = self.risk_sliders[key]
-        lo = float(slider.min)
-        hi = float(slider.max)
+    def _read_risk_knob(self, key: str) -> float | int | None:
+        """Read a slider value for Save. Type junk → None (dropped); clamp is Risk's job."""
+        slider = self.risk_sliders.get(key)
+        if slider is None:
+            return None
         try:
-            raw = float(slider.value if slider.value is not None else lo)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{key}: invalid value") from exc
-        if raw < lo or raw > hi:
-            raise ValueError(f"{key}={raw:g} outside [{lo:g}, {hi:g}]")
+            raw = float(slider.value)  # None / non-numeric → drop
+        except (TypeError, ValueError):
+            return None
         if key == "max_open_positions":
             return int(round(raw))
-        return round(raw, 2)
+        return float(raw)
 
     def _save_risk(self, _e: Any = None) -> None:
-        """Persist capital knobs via update_risk_config; capacity via update_capacity_config."""
+        """Persist only SET_RISK_KEYS + max_open_positions; toast ValueError or silent clamps."""
         try:
             from abcxauto.config import update_capacity_config, update_risk_config
+            from abcxauto.self_tune import levers_snapshot
 
-            risk_payload = {
-                key: self._read_risk_knob(key) for key, _ in _RISK_CAPITAL_KNOBS
-            }
+            sent: dict[str, float | int] = {}
+            risk_payload: dict[str, float] = {}
+            for key, _title in _RISK_CAPITAL_KNOBS:
+                val = self._read_risk_knob(key)
+                if val is None:
+                    continue
+                risk_payload[key] = float(val)
+                sent[key] = float(val)
             cap = self._read_risk_knob("max_open_positions")
-            update_risk_config(**risk_payload, persist=True)
-            update_capacity_config(max_open_positions=int(cap), persist=True)
+            if risk_payload:
+                update_risk_config(**risk_payload, persist=True)
+            if cap is not None:
+                update_capacity_config(max_open_positions=int(cap), persist=True)
+                sent["max_open_positions"] = int(cap)
             self._hydrate_risk()
-            self._toast("Risk saved", color=GREEN)
+            levers = levers_snapshot()
+            notes: list[str] = []
+            for key, raw in sent.items():
+                meta = levers.get(key) if isinstance(levers, dict) else None
+                if not isinstance(meta, dict) or meta.get("now") is None:
+                    continue
+                try:
+                    if key == "max_open_positions":
+                        now_v: float | int = int(meta["now"])
+                        raw_v: float | int = int(raw)
+                    else:
+                        now_v = float(meta["now"])
+                        raw_v = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if now_v != raw_v:
+                    notes.append(f"clamped {key} {raw_v:g} → {now_v:g}")
+            if notes:
+                self._toast("; ".join(notes), color=AMBER)
         except ValueError as exc:
             self._toast(str(exc), color=RED)
         except Exception as exc:
