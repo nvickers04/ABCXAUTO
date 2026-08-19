@@ -26,7 +26,7 @@ from abcxauto.opportunity_scan import (
     normalize_tickers,
 )
 from abcxauto.order_examples import format_order_examples, ticket_strategy_names
-from abcxauto.think_stream import emit as think_emit
+from abcxauto.think_stream import ascii_text, emit as think_emit
 from abcxauto.tools import run_readonly_tool
 from abcxauto.tool_args import (
     CANDLE_CAP,
@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 24
 _MUTATING_TOOLS = frozenset({"send", "self_tune", "write_lab_playbook"})
+# Cap notebook dump in the 24k think buffer so one write cannot flood the stream.
+_LAB_PLAYBOOK_THINK_CAP = 1600
 STREAM_CHUNK_S = 8.0
 STREAM_IDLE_LIMIT = 6
 STREAM_LOOP_UNIT = 12
@@ -1465,6 +1467,23 @@ def _parse_tool_call(
     return name, args, tc, timeout
 
 
+def _emit_write_lab_playbook_think(args: dict[str, Any]) -> None:
+    """Show the notebook text Grok just sent next to the [write_lab_playbook] marker."""
+    raw = args.get("instructions")
+    if raw is None:
+        return
+    text = ascii_text(str(raw)).strip()
+    if not text:
+        return
+    marker = "... [truncated]\n"
+    if len(text) + 1 > _LAB_PLAYBOOK_THINK_CAP:
+        keep = max(0, _LAB_PLAYBOOK_THINK_CAP - len(marker))
+        text = text[:keep] + marker
+    else:
+        text = text + "\n"
+    think_emit("say", text)
+
+
 async def _invoke_named_tool(
     name: str,
     args: dict[str, Any],
@@ -1476,6 +1495,8 @@ async def _invoke_named_tool(
     turn: BrainTurn,
 ) -> str:
     think_emit("say", f"\n[{name}]\n")
+    if name == "write_lab_playbook":
+        _emit_write_lab_playbook_think(args)
     turn.tool_trace.append(name)
     try:
         return await asyncio.wait_for(

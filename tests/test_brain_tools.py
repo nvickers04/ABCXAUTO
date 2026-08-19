@@ -1215,3 +1215,120 @@ async def test_book_has_combo_avg_and_sends_count():
     assert pos[0]["expiration"] == "20260821"
     assert pos[0]["strike"] == 306.0
     assert pos[0]["right"] == "C"
+
+
+def test_write_lab_playbook_think_emit_shows_notebook():
+    from abcxauto.brain import _emit_write_lab_playbook_think
+    from abcxauto.think_stream import subscribe, unsubscribe
+
+    got: list[tuple[str, str]] = []
+
+    def cap(kind: str, text: str) -> None:
+        got.append((kind, text))
+
+    subscribe(cap)
+    try:
+        _emit_write_lab_playbook_think(
+            {"instructions": "Defined-risk debit in legal names. Size vs envelope."}
+        )
+    finally:
+        unsubscribe(cap)
+    assert len(got) == 1
+    assert got[0][0] == "say"
+    assert "Defined-risk debit in legal names" in got[0][1]
+    assert got[0][1].endswith("\n")
+
+
+def test_write_lab_playbook_think_emit_caps_and_ascii():
+    from abcxauto.brain import _LAB_PLAYBOOK_THINK_CAP, _emit_write_lab_playbook_think
+    from abcxauto.think_stream import subscribe, unsubscribe
+
+    got: list[str] = []
+
+    def cap(kind: str, text: str) -> None:
+        if kind == "say":
+            got.append(text)
+
+    subscribe(cap)
+    try:
+        _emit_write_lab_playbook_think(
+            {"instructions": ("AAPL — wait. " * 400) + ("x" * 2000)}
+        )
+        _emit_write_lab_playbook_think({"instructions": "   "})
+        _emit_write_lab_playbook_think({})
+    finally:
+        unsubscribe(cap)
+    assert len(got) == 1
+    body = got[0]
+    assert all(ord(c) < 128 for c in body)
+    assert "... [truncated]" in body
+    assert len(body) <= _LAB_PLAYBOOK_THINK_CAP
+    assert body.endswith("\n")
+
+
+@pytest.mark.asyncio
+async def test_invoke_write_lab_playbook_emits_marker_and_text(monkeypatch):
+    from abcxauto import brain
+    from abcxauto.brain import BrainTurn, _invoke_named_tool
+    from abcxauto.think_stream import subscribe, unsubscribe
+
+    async def fake_run(name, args, **_k):
+        return json.dumps({"status": "ok", "instructions": args.get("instructions")})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_run)
+    got: list[str] = []
+
+    def cap(kind: str, text: str) -> None:
+        if kind == "say":
+            got.append(text)
+
+    note = "Paper: prefer debit verticals on index ETFs."
+    subscribe(cap)
+    try:
+        out = await _invoke_named_tool(
+            "write_lab_playbook",
+            {"instructions": note, "mode": "explore"},
+            1.0,
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    finally:
+        unsubscribe(cap)
+    assert json.loads(out)["status"] == "ok"
+    assert any("[write_lab_playbook]" in t for t in got)
+    assert any(note in t for t in got)
+
+
+@pytest.mark.asyncio
+async def test_invoke_other_tool_emits_marker_only(monkeypatch):
+    from abcxauto import brain
+    from abcxauto.brain import BrainTurn, _invoke_named_tool
+    from abcxauto.think_stream import subscribe, unsubscribe
+
+    async def fake_run(name, args, **_k):
+        return json.dumps({"ok": name})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_run)
+    got: list[str] = []
+
+    def cap(kind: str, text: str) -> None:
+        if kind == "say":
+            got.append(text)
+
+    subscribe(cap)
+    try:
+        await _invoke_named_tool(
+            "book",
+            {"instructions": "should not dump"},
+            1.0,
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    finally:
+        unsubscribe(cap)
+    assert any("[book]" in t for t in got)
+    assert not any("should not dump" in t for t in got)
