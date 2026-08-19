@@ -1387,57 +1387,16 @@ async def test_book_has_combo_avg_and_sends_count():
     assert pos[0]["right"] == "C"
 
 
-def test_write_lab_playbook_think_emit_shows_notebook():
-    from abcxauto.brain import _emit_write_lab_playbook_think
-    from abcxauto.think_stream import subscribe, unsubscribe
+def test_write_lab_playbook_has_no_think_essay_dump():
+    """Keep [write_lab_playbook] marker only — no notebook text in the think stream."""
+    import abcxauto.brain as brain
 
-    got: list[tuple[str, str]] = []
-
-    def cap(kind: str, text: str) -> None:
-        got.append((kind, text))
-
-    subscribe(cap)
-    try:
-        _emit_write_lab_playbook_think(
-            {"instructions": "Defined-risk debit in legal names. Size vs envelope."}
-        )
-    finally:
-        unsubscribe(cap)
-    assert len(got) == 1
-    assert got[0][0] == "say"
-    assert "Defined-risk debit in legal names" in got[0][1]
-    assert got[0][1].endswith("\n")
-
-
-def test_write_lab_playbook_think_emit_caps_and_ascii():
-    from abcxauto.brain import _LAB_PLAYBOOK_THINK_CAP, _emit_write_lab_playbook_think
-    from abcxauto.think_stream import subscribe, unsubscribe
-
-    got: list[str] = []
-
-    def cap(kind: str, text: str) -> None:
-        if kind == "say":
-            got.append(text)
-
-    subscribe(cap)
-    try:
-        _emit_write_lab_playbook_think(
-            {"instructions": ("AAPL — wait. " * 400) + ("x" * 2000)}
-        )
-        _emit_write_lab_playbook_think({"instructions": "   "})
-        _emit_write_lab_playbook_think({})
-    finally:
-        unsubscribe(cap)
-    assert len(got) == 1
-    body = got[0]
-    assert all(ord(c) < 128 for c in body)
-    assert "... [truncated]" in body
-    assert len(body) <= _LAB_PLAYBOOK_THINK_CAP
-    assert body.endswith("\n")
+    assert not hasattr(brain, "_emit_write_lab_playbook_think")
+    assert not hasattr(brain, "_LAB_PLAYBOOK_THINK_CAP")
 
 
 @pytest.mark.asyncio
-async def test_invoke_write_lab_playbook_emits_marker_and_text(monkeypatch):
+async def test_invoke_write_lab_playbook_emits_marker_only(monkeypatch):
     from abcxauto import brain
     from abcxauto.brain import BrainTurn, _invoke_named_tool
     from abcxauto.think_stream import subscribe, unsubscribe
@@ -1467,8 +1426,70 @@ async def test_invoke_write_lab_playbook_emits_marker_and_text(monkeypatch):
     finally:
         unsubscribe(cap)
     assert json.loads(out)["status"] == "ok"
-    assert any("[write_lab_playbook]" in t for t in got)
-    assert any(note in t for t in got)
+    assert got == ["\n[write_lab_playbook]\n"]
+    joined = "".join(got)
+    assert note not in joined
+    assert "... [truncated]" not in joined
+
+
+@pytest.mark.asyncio
+async def test_invoke_write_lab_playbook_long_notebook_stays_off_stream(monkeypatch):
+    from abcxauto import brain
+    from abcxauto.brain import BrainTurn, _invoke_named_tool
+    from abcxauto.think_stream import subscribe, unsubscribe
+
+    async def fake_run(name, args, **_k):
+        return json.dumps({"status": "ok"})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_run)
+    got: list[str] = []
+
+    def cap(kind: str, text: str) -> None:
+        if kind == "say":
+            got.append(text)
+
+    note = ("AAPL — wait. " * 400) + ("x" * 2000)
+    subscribe(cap)
+    try:
+        await _invoke_named_tool(
+            "write_lab_playbook",
+            {"instructions": note},
+            1.0,
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+        await _invoke_named_tool(
+            "write_lab_playbook",
+            {"instructions": "   "},
+            1.0,
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+        await _invoke_named_tool(
+            "write_lab_playbook",
+            {},
+            1.0,
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    finally:
+        unsubscribe(cap)
+    assert got == [
+        "\n[write_lab_playbook]\n",
+        "\n[write_lab_playbook]\n",
+        "\n[write_lab_playbook]\n",
+    ]
+    joined = "".join(got)
+    assert "AAPL" not in joined
+    assert "wait" not in joined
+    assert "xxxx" not in joined
+    assert "... [truncated]" not in joined
 
 
 @pytest.mark.asyncio
