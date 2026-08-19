@@ -178,6 +178,163 @@ def pct_of_nl(usd: Any, net_liq: Any) -> float | None:
     return round(100.0 * dollars / nl, 4)
 
 
+def _fill_order_id(fill: dict[str, Any]) -> str:
+    oid = fill.get("order_id") if fill.get("order_id") is not None else fill.get("orderId")
+    return str(oid) if oid is not None and str(oid) else ""
+
+
+def _fill_con_id(fill: dict[str, Any]) -> str:
+    cid = fill.get("conId") if fill.get("conId") not in (None, "", 0, "0") else fill.get("con_id")
+    return str(cid) if cid not in (None, "", 0, "0") else ""
+
+
+def _fill_abs_qty(fill: dict[str, Any]) -> float:
+    try:
+        return abs(
+            float(
+                fill.get("quantity")
+                if fill.get("quantity") is not None
+                else fill.get("shares")
+                or 0
+            )
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fill_side_u(fill: dict[str, Any]) -> str:
+    return str(fill.get("side") or fill.get("action") or "").upper()
+
+
+def _fill_signed_qty(fill: dict[str, Any]) -> float:
+    qty = _fill_abs_qty(fill)
+    if qty <= 0:
+        return 0.0
+    side = _fill_side_u(fill)
+    if side in ("SLD", "SELL"):
+        return -qty
+    if side in ("BOT", "BUY"):
+        return qty
+    return 0.0
+
+
+def _fill_is_opt(fill: dict[str, Any]) -> bool:
+    sec = str(fill.get("sec_type") or fill.get("secType") or fill.get("sec") or "").upper()
+    if sec in ("OPT", "FOP"):
+        return True
+    if sec in ("BAG", "STK", "CASH", "IND"):
+        return False
+    # Leg fills sometimes omit sec_type but carry option identity.
+    return bool(
+        fill.get("strike") is not None
+        or fill.get("right")
+        or fill.get("expiration")
+        or fill.get("lastTradeDateOrContractMonth")
+        or fill.get("local_symbol")
+        or fill.get("localSymbol")
+    )
+
+
+def _position_from_combo_fill(fill: dict[str, Any], signed_qty: float) -> dict[str, Any]:
+    """Desk lot from a BAG/combo leg fill. Qty comes from the fill — never invented."""
+    cid = _fill_con_id(fill)
+    sec = str(fill.get("sec_type") or fill.get("secType") or "OPT").upper() or "OPT"
+    if sec not in ("OPT", "FOP"):
+        sec = "OPT"
+    row: dict[str, Any] = {
+        "symbol": str(fill.get("symbol") or "").upper(),
+        "secType": sec,
+        "sec_type": sec,
+        "quantity": signed_qty,
+        "conId": int(cid) if cid.isdigit() else cid,
+        "con_id": int(cid) if cid.isdigit() else cid,
+        "_from_fill": True,
+    }
+    if fill.get("strike") is not None:
+        row["strike"] = fill.get("strike")
+    exp = fill.get("expiration") or fill.get("lastTradeDateOrContractMonth")
+    if exp:
+        row["expiration"] = exp
+    right = fill.get("right")
+    if right:
+        row["right"] = right
+    local = fill.get("local_symbol") or fill.get("localSymbol")
+    if local:
+        row["local_symbol"] = local
+        row["localSymbol"] = local
+    px = fill.get("price") or fill.get("avg_price") or fill.get("avgPrice")
+    if px is not None:
+        try:
+            row["market_price"] = float(px)
+            row["avg_cost"] = float(px)
+        except (TypeError, ValueError):
+            pass
+    return row
+
+
+def _attach_missing_combo_legs(
+    positions: list[dict],
+    fills: list[dict] | None,
+    *,
+    window_s: float,
+) -> bool:
+    """Paint missing BAG wings when fills already show the live combo.
+
+    Only completes a wing when a same-order mate lot is already on the book
+    (orphan long after debit vertical). Does not re-attach a fully closed
+    combo from closing fills alone.
+    """
+    by_oid: dict[str, list[dict[str, Any]]] = {}
+    for f in fills or []:
+        if not isinstance(f, dict) or not fill_in_window(f, window_s=window_s):
+            continue
+        if not _fill_is_opt(f):
+            continue
+        oid = _fill_order_id(f)
+        cid = _fill_con_id(f)
+        if not oid or not cid or _fill_signed_qty(f) == 0:
+            continue
+        by_oid.setdefault(oid, []).append(f)
+    held: dict[str, float] = {}
+    for p in positions:
+        cid = str(p.get("conId") or p.get("con_id") or "")
+        if not cid:
+            continue
+        held[cid] = _row_signed_qty(p)
+    attached = False
+    for _oid, legs in by_oid.items():
+        net: dict[str, float] = {}
+        meta: dict[str, dict[str, Any]] = {}
+        sides: set[str] = set()
+        for f in legs:
+            cid = _fill_con_id(f)
+            sq = _fill_signed_qty(f)
+            net[cid] = net.get(cid, 0.0) + sq
+            meta[cid] = f
+            side = _fill_side_u(f)
+            if side in ("BOT", "BUY"):
+                sides.add("BUY")
+            elif side in ("SLD", "SELL"):
+                sides.add("SELL")
+        if len(net) < 2 or sides != {"BUY", "SELL"}:
+            continue
+        mate_present = any(
+            cid in held and abs(held[cid]) > 1e-9 and held[cid] * sq > 0
+            for cid, sq in net.items()
+        )
+        if not mate_present:
+            continue
+        for cid, sq in net.items():
+            if abs(sq) < 1e-9:
+                continue
+            if cid in held and abs(held[cid]) > 1e-9:
+                continue
+            positions.append(_position_from_combo_fill(meta[cid], sq))
+            held[cid] = sq
+            attached = True
+    return attached
+
+
 def reconcile_book_with_fills(
     positions: list[dict] | None,
     orders: list[dict] | None,
@@ -185,60 +342,65 @@ def reconcile_book_with_fills(
     *,
     window_s: float = FILL_WINDOW_S,
 ) -> tuple[list[dict], list[dict], bool]:
-    """Drop lots / working tickets that recent fills already closed."""
+    """Align desk book with recent fills.
+
+    Closing: SLD reduces longs; BOT reduces shorts. Opening SLD on a short
+    wing must not erase the live combo. Missing BAG legs are attached from
+    multi-leg fills when a mate lot is already on the book.
+    """
     pos_out = [dict(p) for p in (positions or []) if isinstance(p, dict)]
     ord_out = [dict(o) for o in (orders or []) if isinstance(o, dict)]
-    sold: dict[str, float] = {}
+    close_long: dict[str, float] = {}
+    close_short: dict[str, float] = {}
     filled_ids: set[str] = set()
     for f in fills or []:
         if not isinstance(f, dict) or not fill_in_window(f, window_s=window_s):
             continue
-        oid = f.get("order_id") if f.get("order_id") is not None else f.get("orderId")
-        if oid is not None and str(oid):
-            filled_ids.add(str(oid))
+        oid = _fill_order_id(f)
+        if oid:
+            filled_ids.add(oid)
         pid = f.get("permId") if f.get("permId") is not None else f.get("perm_id")
         if pid is not None and str(pid):
             filled_ids.add(str(pid))
-        side = str(f.get("side") or f.get("action") or "").upper()
-        if side not in ("SLD", "SELL"):
+        cid = _fill_con_id(f)
+        qty = _fill_abs_qty(f)
+        if not cid or qty <= 0:
             continue
-        cid = str(f.get("conId") or f.get("con_id") or "")
-        if not cid:
-            continue
-        try:
-            qty = abs(float(f.get("quantity") if f.get("quantity") is not None else f.get("shares") or 0))
-        except (TypeError, ValueError):
-            qty = 0.0
-        if qty > 0:
-            sold[cid] = sold.get(cid, 0.0) + qty
+        side = _fill_side_u(f)
+        if side in ("SLD", "SELL"):
+            close_long[cid] = close_long.get(cid, 0.0) + qty
+        elif side in ("BOT", "BUY"):
+            close_short[cid] = close_short.get(cid, 0.0) + qty
     reconciled = False
     kept_pos: list[dict] = []
     for p in pos_out:
         cid = str(p.get("conId") or p.get("con_id") or "")
         try:
-            qty = abs(float(
+            raw_q = float(
                 p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0
-            ))
+            )
         except (TypeError, ValueError):
-            qty = 0.0
-        take = sold.get(cid, 0.0) if cid else 0.0
-        if take > 0 and qty > 0:
+            raw_q = 0.0
+        mag = abs(raw_q)
+        if raw_q > 0:
+            take = close_long.get(cid, 0.0) if cid else 0.0
+        elif raw_q < 0:
+            take = close_short.get(cid, 0.0) if cid else 0.0
+        else:
+            take = 0.0
+        if take > 0 and mag > 0:
             reconciled = True
-            left = qty - take
+            left = mag - take
             if left < 1e-9:
                 continue
-            sign = 1.0
-            try:
-                raw_q = float(p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0)
-                if raw_q < 0:
-                    sign = -1.0
-            except (TypeError, ValueError):
-                pass
+            sign = 1.0 if raw_q > 0 else -1.0
             if "quantity" in p:
                 p["quantity"] = sign * left
             if "position" in p:
                 p["position"] = sign * left
         kept_pos.append(p)
+    if _attach_missing_combo_legs(kept_pos, fills, window_s=window_s):
+        reconciled = True
     kept_ord: list[dict] = []
     for o in ord_out:
         oid = str(o.get("order_id") if o.get("order_id") is not None else o.get("orderId") or "")
