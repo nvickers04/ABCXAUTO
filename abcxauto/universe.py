@@ -174,6 +174,146 @@ ARENA_CATALOG: dict[str, dict[str, Any]] = {
 
 _DEFAULT_ENABLED = ("most_active", "index_etfs", "mega_cap")
 
+# Bare IBKR scanCodes accepted by scan(arena=…) / scan(scan_code=…).
+# Catalog arenas stay separate; these are the standing TWS screen ids.
+KNOWN_SCAN_CODES: dict[str, dict[str, Any]] = {
+    "MOST_ACTIVE": {
+        "scanCode": "MOST_ACTIVE",
+        "locationCode": "STK.US.MAJOR",
+        "stockTypeFilter": "CORP,ETF",
+        "abovePrice": 5.0,
+        "aboveVolume": 1_000_000,
+        "rows": 40,
+    },
+    "TOP_PERC_GAIN": {
+        "scanCode": "TOP_PERC_GAIN",
+        "locationCode": "STK.US.MAJOR",
+        "stockTypeFilter": "CORP,ETF",
+        "abovePrice": 5.0,
+        "aboveVolume": 500_000,
+        "rows": 30,
+    },
+    "TOP_PERC_LOSE": {
+        "scanCode": "TOP_PERC_LOSE",
+        "locationCode": "STK.US.MAJOR",
+        "stockTypeFilter": "CORP,ETF",
+        "abovePrice": 5.0,
+        "aboveVolume": 500_000,
+        "rows": 30,
+    },
+    "HOT_BY_VOLUME": {
+        "scanCode": "HOT_BY_VOLUME",
+        "locationCode": "STK.US.MAJOR",
+        "stockTypeFilter": "CORP,ETF",
+        "abovePrice": 5.0,
+        "aboveVolume": 500_000,
+        "rows": 30,
+    },
+}
+
+# Arena catalog id aliases for the same standing screens.
+_SCAN_CODE_TO_ARENA = {
+    "MOST_ACTIVE": "most_active",
+    "TOP_PERC_GAIN": "top_gainers",
+    "TOP_PERC_LOSE": "top_losers",
+}
+
+
+def arena_catalog_ids() -> list[str]:
+    return list(ARENA_CATALOG.keys())
+
+
+def known_screen_keys() -> list[str]:
+    """Tool JSON arenas= keys: catalog ids + standing IBKR scanCodes."""
+    out = list(ARENA_CATALOG.keys())
+    for code in KNOWN_SCAN_CODES:
+        if code not in out:
+            out.append(code)
+    return out
+
+
+def resolve_screen(
+    arena: str | None = None,
+    scan_code: str | None = None,
+) -> dict[str, Any]:
+    """Resolve one screen. Unknown → error. Does not persist."""
+    raw_arena = str(arena or "").strip()
+    raw_code = str(scan_code or "").strip().upper()
+    if raw_arena and raw_code:
+        return {
+            "ok": False,
+            "error": "pass arena or scan_code, not both",
+        }
+    key = raw_arena or raw_code
+    if not key:
+        return {"ok": False, "error": "arena or scan_code required"}
+
+    # Catalog id (case-insensitive).
+    lower = key.lower()
+    if lower in ARENA_CATALOG:
+        meta = ARENA_CATALOG[lower]
+        return {
+            "ok": True,
+            "arena_id": lower,
+            "scan_code": str((meta.get("ibkr") or {}).get("scanCode") or "") or None,
+            "ibkr": dict(meta["ibkr"]) if meta.get("ibkr") else None,
+            "mda_fallback": list(meta.get("mda_fallback") or []),
+        }
+
+    # Standing IBKR scanCode as arena= or scan_code=.
+    code = key.upper()
+    if code in KNOWN_SCAN_CODES:
+        arena_id = _SCAN_CODE_TO_ARENA.get(code)
+        return {
+            "ok": True,
+            "arena_id": arena_id,
+            "scan_code": code,
+            "ibkr": dict(KNOWN_SCAN_CODES[code]),
+            "mda_fallback": list(
+                (ARENA_CATALOG.get(arena_id) or {}).get("mda_fallback") or []
+            )
+            if arena_id
+            else [],
+        }
+
+    return {
+        "ok": False,
+        "error": f"unknown arena/scan_code: {key}",
+        "arenas": known_screen_keys(),
+    }
+
+
+async def pull_one_screen(
+    connector: Any = None,
+    *,
+    arena: str | None = None,
+    scan_code: str | None = None,
+) -> dict[str, Any]:
+    """One IBKR screen (or MDA industry seed) this look. No persist / no legal refresh."""
+    resolved = resolve_screen(arena=arena, scan_code=scan_code)
+    if not resolved.get("ok"):
+        return resolved
+    ibkr_spec = resolved.get("ibkr")
+    pulled: list[str] = []
+    source = ""
+    if ibkr_spec and connector is not None:
+        pulled = await _ibkr_scan(connector, ibkr_spec)
+        if pulled:
+            source = "ibkr"
+    if not pulled:
+        pulled = normalize_symbols(resolved.get("mda_fallback") or [])
+        if pulled:
+            source = "mda_seed"
+    # Empty is fine — never dump SPY/QQQ/IWM as a substitute tape.
+    return {
+        "ok": True,
+        "arena_id": resolved.get("arena_id"),
+        "scan_code": resolved.get("scan_code"),
+        "source": source or "empty",
+        "symbols": list(pulled),
+        "persisted": False,
+    }
+
 
 def _path() -> Path:
     import os

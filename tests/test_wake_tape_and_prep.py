@@ -1,4 +1,4 @@
-"""Wake tape seed + empty scan seed (not a premarket SOP)."""
+"""Wake has no canned tape=; scan requires criteria (not a premarket SOP)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from abcxauto.opportunity_scan import (
     merge_tape,
     tape_seed_symbols,
 )
-from abcxauto.universe import reset_universe_cache, save_allowlist
+from abcxauto.universe import load_allowlist, reset_universe_cache, save_allowlist
 from abcxauto.world_state import day_facts, format_wake
 
 
@@ -105,7 +105,7 @@ def test_day_facts_carry_tape_and_minutes(legal_tape):
 
 
 def test_day_facts_flat_book_still_seeds_legal_tape(legal_tape):
-    """Flattened book still gets unranked legal universe — not an empty tape."""
+    """Flattened book may still compute tape_seed internally — wake must not print it."""
     from abcxauto.world_state import WorldState
 
     world = WorldState(
@@ -137,7 +137,7 @@ def test_day_facts_flat_book_still_seeds_legal_tape(legal_tape):
     assert day["tape_seed"] != sorted(day["tape_seed"])
 
 
-def test_format_wake_surfaces_tape_and_minutes():
+def test_format_wake_no_tape_keeps_lots_and_minutes():
     from abcxauto.wake_bus import note_wake
 
     note_wake(None)
@@ -155,24 +155,25 @@ def test_format_wake_surfaces_tape_and_minutes():
             "risk_per_trade_pct": 5.0,
             "capacity": {"open_count": 1, "max_open_positions": 15},
             "open_lots": ["AAPL STK long 20"],
+            "mix": {"stk": 1},
             "tape_seed": ["AAPL", "ZZZZ", "MSFT"],
             "minutes_to_open": 59,
         },
     )
     assert "session=premarket" in text
     assert "minutes_to_open=59" in text
-    assert "tape=AAPL,ZZZZ,MSFT" in text
+    assert "tape=" not in text
+    assert "options=live" not in text
     assert "open_lots=AAPL STK long 20" in text
+    assert "mix=" in text
     assert "session_prep" not in text
-    # Facts only — no SOP / checklist lecture.
     assert "estimate" not in text.lower()
     assert "you must" not in text.lower()
-    assert "pick" not in text.lower()
     assert text.rstrip().endswith("send|set_wake.")
 
 
-def test_format_wake_rth_fill_delta_still_carries_tape_when_flat():
-    """After flatten, kind=fill must not leave an empty chair — tape facts stay on."""
+def test_format_wake_rth_fill_delta_no_tape_when_flat():
+    """After flatten, kind=fill keeps book facts — no leftover / substitute name dump."""
     from abcxauto.wake_bus import BookEvent, note_wake
 
     note_wake(BookEvent(kind="fill", detail="AAPL target filled"))
@@ -198,7 +199,7 @@ def test_format_wake_rth_fill_delta_still_carries_tape_when_flat():
         note_wake(None)
     assert text.startswith("event=fill AAPL target filled.")
     assert "session=regular flat=True" in text
-    assert "tape=ZZZZ,MSFT,NVDA" in text
+    assert "tape=" not in text
     assert "options=live" in text
     assert "This is a delta" in text
     assert "session_prep" not in text
@@ -209,7 +210,7 @@ def test_format_wake_rth_fill_delta_still_carries_tape_when_flat():
 
 
 @pytest.mark.parametrize("kind", ["fill", "order_change", "book_move"])
-def test_format_wake_rth_delta_kinds_carry_tape(kind):
+def test_format_wake_rth_delta_kinds_no_tape(kind):
     from abcxauto.wake_bus import BookEvent, note_wake
 
     note_wake(BookEvent(kind=kind, detail="marks"))
@@ -229,12 +230,63 @@ def test_format_wake_rth_delta_kinds_carry_tape(kind):
     finally:
         note_wake(None)
     assert f"event={kind}" in text
-    assert "tape=SPY,QQQ,IWM" in text
+    assert "tape=" not in text
     assert "options=live" in text
 
 
-def test_format_wake_non_rth_fill_delta_omits_tape():
-    """Premarket fill delta stays lean; non-delta wake already prints tape=."""
+@pytest.mark.parametrize("kind", ["alarm", "boot", "operator"])
+def test_format_wake_alarm_boot_operator_no_tape_no_options_live(kind):
+    from abcxauto.wake_bus import BookEvent, note_wake
+
+    note_wake(BookEvent(kind=kind, detail="wake"))
+    try:
+        text = format_wake(
+            cycle=3,
+            session="regular",
+            flat=True,
+            unprotected=[],
+            ibkr_up=True,
+            day={
+                "nl": 50_000.0,
+                "names": 0,
+                "lots": 0,
+                "capacity": {"open_count": 0, "max_open_positions": 15},
+                "tape_seed": ["SPY", "QQQ", "IWM", "DIA", "AAPL"],
+            },
+        )
+    finally:
+        note_wake(None)
+    assert "tape=" not in text
+    assert "options=live" not in text
+    assert "SPY,QQQ" not in text
+
+
+def test_format_wake_open_lots_and_mix_still_print():
+    from abcxauto.wake_bus import note_wake
+
+    note_wake(None)
+    text = format_wake(
+        cycle=4,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "nl": 80_000.0,
+            "names": 1,
+            "lots": 1,
+            "capacity": {"open_count": 1, "max_open_positions": 15},
+            "open_lots": ["NVDA STK long 5"],
+            "mix": {"stk": 1},
+            "tape_seed": ["SPY", "QQQ"],
+        },
+    )
+    assert "open_lots=NVDA STK long 5" in text
+    assert "mix=" in text
+    assert "tape=" not in text
+
+
+def test_format_wake_non_rth_fill_delta_omits_tape_and_options():
     from abcxauto.wake_bus import BookEvent, note_wake
 
     note_wake(BookEvent(kind="fill", detail="AAPL filled"))
@@ -261,20 +313,15 @@ def test_format_wake_non_rth_fill_delta_omits_tape():
 
 
 @pytest.mark.asyncio
-async def test_scan_empty_seeds_universe(monkeypatch, legal_tape):
+async def test_scan_empty_is_not_canned_tape(monkeypatch, legal_tape):
     from abcxauto.brain import BrainTurn, _run_tool
     from abcxauto.world_state import WorldState
 
-    async def fake_scan(positions=None, **_k):
-        return [
-            {"symbol": s, "source": "mda", "freshness": "delayed_daily", "mda_last": 1.0}
-            for s in tape_seed_symbols(positions)
-        ]
+    async def boom(*_a, **_k):
+        raise AssertionError("empty scan must not fetch MDA / seed legal_symbols")
 
-    monkeypatch.setattr(
-        "abcxauto.opportunity_scan.scan_opportunities",
-        fake_scan,
-    )
+    monkeypatch.setattr("abcxauto.opportunity_scan.fetch_scan_metrics", boom)
+    monkeypatch.setattr("abcxauto.opportunity_scan.scan_opportunities", boom)
 
     world = WorldState(
         cycle=1,
@@ -308,7 +355,190 @@ async def test_scan_empty_seeds_universe(monkeypatch, legal_tape):
             turn=BrainTurn(),
         )
     )
-    assert data["symbols"][0] == "AAPL"
-    assert "ZZZZ" in data["symbols"]
-    assert data["symbols"] != ["AAPL"]
-    assert world.scan_fetched == data["symbols"]
+    assert data.get("ok") is False
+    assert "arena" in str(data.get("error") or "").lower() or "symbols" in str(
+        data.get("error") or ""
+    ).lower()
+    assert data.get("symbols") in (None, [],)
+    assert "tape" not in data or not data.get("tape")
+    assert "SPY" not in (data.get("symbols") or [])
+    assert "QQQ" not in (data.get("symbols") or [])
+
+
+@pytest.mark.asyncio
+async def test_scan_arena_most_active_ibkr_order_overlay_no_persist(
+    monkeypatch, legal_tape, tmp_path
+):
+    from abcxauto.brain import BrainTurn, _run_tool
+    from abcxauto.world_state import WorldState
+
+    path = tmp_path / "universe.json"
+    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(path))
+    save_allowlist(
+        {
+            "enabled_arenas": ["index_etfs"],
+            "custom_symbols": [],
+            "exclude_symbols": [],
+            "legal_symbols": ["ZZZZ", "MSFT"],
+        }
+    )
+    reset_universe_cache()
+    before = load_allowlist()
+
+    async def fake_pull(connector=None, *, arena=None, scan_code=None):
+        assert arena == "most_active"
+        assert scan_code is None
+        return {
+            "ok": True,
+            "arena_id": "most_active",
+            "scan_code": "MOST_ACTIVE",
+            "source": "ibkr",
+            "symbols": ["TSLA", "AAPL", "AMD"],
+            "persisted": False,
+        }
+
+    monkeypatch.setattr("abcxauto.universe.pull_one_screen", fake_pull)
+
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=False,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=100_000.0,
+        daily_pnl=0.0,
+        positions=[{"symbol": "AAPL", "sec_type": "STK", "position": 10}],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    data = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "most_active"},
+            connector=object(),
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["ok"] is True
+    assert data["symbols"] == ["TSLA", "AAPL", "AMD"]
+    assert data["ranked"] is False
+    assert data["persisted"] is False
+    hits = {h["symbol"]: h for h in data["hits"]}
+    assert hits["AAPL"]["on_book"] is True
+    assert hits["TSLA"]["on_book"] is False
+    # Kill condition: scan must not start quoting.
+    assert "last" not in hits["AAPL"]
+    assert "bid" not in hits["AAPL"]
+    assert "ask" not in hits["AAPL"]
+    assert "tape" not in data
+    after = load_allowlist()
+    assert after["legal_symbols"] == before["legal_symbols"]
+    assert after["enabled_arenas"] == before["enabled_arenas"]
+
+
+@pytest.mark.asyncio
+async def test_scan_unknown_arena_rejected(monkeypatch, legal_tape):
+    from abcxauto.brain import BrainTurn, _run_tool
+    from abcxauto.world_state import WorldState
+
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=1.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    data = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "not_a_real_arena"},
+            connector=None,
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data.get("ok") is False
+    assert "unknown" in str(data.get("error") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_scan_symbols_no_mda_candles_no_quotes(monkeypatch):
+    from abcxauto.brain import BrainTurn, _run_tool
+    from abcxauto.world_state import WorldState
+
+    async def boom(*_a, **_k):
+        raise AssertionError("scan must not fetch MDA daily-120")
+
+    monkeypatch.setattr("abcxauto.opportunity_scan.fetch_scan_metrics", boom)
+
+    class Conn:
+        async def get_live_quotes(self, *_a, **_k):
+            raise AssertionError("scan must not attach live quotes")
+
+        async def get_live_quote(self, *_a, **_k):
+            raise AssertionError("scan must not attach live quotes")
+
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=1.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    data = json.loads(
+        await _run_tool(
+            "scan",
+            {"symbols": ["NVDA", "XLE"]},
+            connector=Conn(),
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["ok"] is True
+    assert data["symbols"] == ["NVDA", "XLE"]
+    assert all("last" not in h and "bid" not in h for h in data["hits"])
+    assert "mda_last" not in (data.get("hits") or [{}])[0]

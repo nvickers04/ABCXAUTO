@@ -1,9 +1,9 @@
 """Grok owns the book via tools. The shell is facts + send clerk.
 
 One wake = one streamed Grok turn with tools. Tickets go through
-``execute_ticket`` → ``send_action``. IBKR tools are live. MDA scan is
-daily-bar structure; candles are IBKR hist or the live 5s stream (error if both miss); news is
-~15 min delayed.
+``execute_ticket`` → ``send_action``. IBKR tools are live. scan() is one
+criteria screen this look (hits + on_book); candles are IBKR hist or the
+live 5s stream (error if both miss); news is ~15 min delayed.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from xai_sdk.chat import developer, system, tool, tool_result, user
 
 from abcxauto.llm import GrokClient, build_system_prompt
 from abcxauto.opportunity_scan import (
-    fetch_scan_metrics,
+    criteria_scan,
     mda_bar_freshness,
     mda_last_kind,
     normalize_tickers,
@@ -35,7 +35,6 @@ from abcxauto.tool_args import (
     fallback_quote_symbols,
     normalize_tool_call,
     option_quote_specs,
-    strip_ambiguous_last,
 )
 from abcxauto.world_state import WorldState
 
@@ -52,8 +51,26 @@ TOOL_S = 20.0
 SEND_S = 45.0
 CHAIN_S = 60.0
 CANDLE_S = 35.0
+SCAN_S = 35.0
 _QUOTE_SCHEMA = {"type": "string", "description": "Ticker, e.g. AAPL"}
 _SYMBOLS_SCHEMA = {"type": "array", "items": {"type": "string"}}
+
+
+def _scan_arena_keys() -> list[str]:
+    try:
+        from abcxauto.universe import known_screen_keys
+
+        return known_screen_keys()
+    except Exception:
+        return [
+            "most_active",
+            "top_gainers",
+            "top_losers",
+            "MOST_ACTIVE",
+            "TOP_PERC_GAIN",
+            "TOP_PERC_LOSE",
+            "HOT_BY_VOLUME",
+        ]
 
 
 def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -146,8 +163,26 @@ AGENT_TOOLS = [
     ),
     tool(
         name="scan",
-        description="MDA daily-bar tape metrics. mda_last is daily close, not a 15m last.",
-        parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, []),
+        description="One screen this look (arena|scan_code|symbols[]); unranked hits + on_book; no quotes.",
+        parameters=_schema(
+            {
+                "arena": {
+                    "type": "string",
+                    "description": "arenas=" + ",".join(_scan_arena_keys()),
+                },
+                "scan_code": {
+                    "type": "string",
+                    "description": "MOST_ACTIVE|TOP_PERC_GAIN|TOP_PERC_LOSE|HOT_BY_VOLUME",
+                },
+                "symbols": _SYMBOLS_SCHEMA,
+                "with": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional: news",
+                },
+            },
+            [],
+        ),
     ),
     tool(
         name="candles",
@@ -947,32 +982,60 @@ async def _run_tool(
         payload["path"] = _path_block(world, get_config())
         return _clip(payload)
     if name == "scan":
-        from abcxauto.opportunity_scan import merge_tape, scan_opportunities, tape_symbols
-
-        syms = normalize_tickers(args.get("symbols"))
-        if syms:
-            extra = await fetch_scan_metrics(syms)
+        with_raw = args.get("with") or []
+        if isinstance(with_raw, str):
+            with_bits = [with_raw.strip().lower()]
+        elif isinstance(with_raw, (list, tuple)):
+            with_bits = [str(x).strip().lower() for x in with_raw if str(x).strip()]
         else:
-            # Empty scan = book + legal watchlist seed (unranked). Not open-lot-only.
-            extra = await scan_opportunities(
-                list(world.positions or snap.get("positions") or []),
-            )
-            syms = tape_symbols(extra)
-        if extra:
-            ideas = merge_tape(list(world.opportunities or []), extra)
+            with_bits = []
+        want_news = "news" in with_bits
+        turn_syms: list[str] = []
+        for s in list(getattr(world, "scan_fetched", None) or []):
+            if s and s not in turn_syms:
+                turn_syms.append(str(s).upper())
+        qmap = dict(getattr(world, "ibkr_live_quotes", None) or {})
+        if isinstance(snap.get("ibkr_live_quotes"), dict):
+            qmap.update(snap["ibkr_live_quotes"])
+        for s in qmap:
+            su = str(s or "").upper().strip()
+            if su and su not in turn_syms:
+                turn_syms.append(su)
+        payload = await criteria_scan(
+            arena=args.get("arena"),
+            scan_code=args.get("scan_code"),
+            symbols=args.get("symbols"),
+            positions=list(world.positions or snap.get("positions") or []),
+            connector=connector,
+            turn_symbols=turn_syms,
+        )
+        if not payload.get("ok"):
+            return _clip(payload)
+        syms = list(payload.get("symbols") or [])
+        world.scan_fetched = list(syms)
+        # Keep opportunities as symbol stubs only (no MDA daily metrics here).
+        stub_ideas = [{"symbol": s, "source": payload.get("source") or "scan"} for s in syms]
+        if stub_ideas:
+            from abcxauto.opportunity_scan import merge_tape
+
+            ideas = merge_tape(list(world.opportunities or []), stub_ideas)
             world.opportunities = ideas
-            world.scan_fetched = tape_symbols(extra)
             snap["opportunities"] = ideas
-        tape = [strip_ambiguous_last(r) if isinstance(r, dict) else r for r in (extra or [])]
-        return _clip({
-            "source": "mda",
-            "freshness": "delayed_daily",
-            "bar": "D",
-            "mda_last_is": "daily_bar_close",
-            "use": "daily_structure_not_live_last",
+        out: dict[str, Any] = {
+            "ok": True,
+            "source": payload.get("source"),
+            "arena": payload.get("arena"),
+            "scan_code": payload.get("scan_code"),
             "symbols": syms,
-            "tape": tape,
-        })
+            "hits": payload.get("hits") or [],
+            "persisted": False,
+            "ranked": False,
+        }
+        if want_news and syms:
+            out["news"] = await _mda_news(syms[:8])
+            out["news_freshness"] = "delayed_15m"
+            out["news_use"] = "context_not_live_last"
+        return _clip(out)
     if name == "candles":
         from abcxauto.broker.bars import ibkr_bar_freshness
         from abcxauto.marketdata.client import get_marketdata_client
@@ -1346,6 +1409,9 @@ def _parse_tool_call(
     if name == "candles":
         n = max(1, len(normalize_tickers(args.get("symbols") or args.get("symbol"), cap=CANDLE_CAP)))
         timeout = min(CANDLE_S, max(28.0, 12.0 + 8.0 * n))
+    if name == "scan":
+        # Criteria IBKR screen — same class as candles (~35s), not TOOL_S=20.
+        timeout = SCAN_S
     return name, args, tc, timeout
 
 

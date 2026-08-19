@@ -47,6 +47,9 @@ TOOL_ALIASES = {
 _ARG_KEYS = {
     "symbol": ("symbol", "ticker", "underlying", "sym"),
     "symbols": ("symbols", "tickers", "tickers_list"),
+    "arena": ("arena", "screen", "scan_arena"),
+    "scan_code": ("scan_code", "scanCode", "code"),
+    "with": ("with", "include"),
     "expiration": ("expiration", "expiry", "exp", "expiration_date", "lastTradeDateOrContractMonth"),
     "strike": ("strike", "strike_price"),
     "right": ("right", "cp", "call_put", "put_call"),
@@ -252,12 +255,20 @@ def normalize_tool_call(
             out["symbols"] = out["symbol"]
             out.pop("symbol", None)
 
-    if canon in ("scan", "news", "odds") and out.get("symbols") in (None, "", []):
+    if canon in ("news", "odds") and out.get("symbols") in (None, "", []):
         if out.get("symbol"):
             out["symbols"] = _as_symbols(out.get("symbol"))
-        elif canon == "scan":
-            # Leave empty so the scan tool seeds book + legal universe.
-            out["symbols"] = []
+
+    if canon == "scan":
+        # Empty scan must stay empty — do not seed legal_symbols / canned tape.
+        if out.get("symbols") in (None, ""):
+            if out.get("symbol"):
+                out["symbols"] = _as_symbols(out.get("symbol"))
+            else:
+                out["symbols"] = []
+        if isinstance(out.get("with"), str):
+            out["with"] = [out["with"]]
+        # Bare scanCode passed as arena=MOST_ACTIVE is fine (universe.resolve_screen).
 
     if canon in ("candles", "option_chain"):
         if isinstance(out.get("symbol"), list) and not out.get("symbols"):

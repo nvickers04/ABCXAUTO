@@ -117,8 +117,106 @@ def tape_seed_symbols(
     *,
     cap: int = TAPE_SEED_CAP,
 ) -> list[str]:
-    """Unranked day tape seed: open book first, then legal watchlist. Not a rank."""
+    """Unranked day tape seed: open book first, then legal watchlist. Not a rank.
+
+    Kept for internal/cache callers. format_wake must not print these names;
+    empty scan() must not seed from this list.
+    """
     return _universe(positions, cap=cap)
+
+
+def _book_symbols(positions: list[dict] | None) -> set[str]:
+    out: set[str] = set()
+    for p in positions or []:
+        sym = str((p or {}).get("symbol") or "").upper().strip()
+        if sym and _TICKER_RE.match(sym):
+            out.add(sym)
+    return out
+
+
+def overlay_hits(
+    symbols: list[str],
+    *,
+    positions: list[dict] | None = None,
+    turn_symbols: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Unranked hit rows: symbol + on_book (+ in_turn when local). No rank / no quotes."""
+    on_book = _book_symbols(positions)
+    in_turn = {
+        str(s or "").upper().strip()
+        for s in (turn_symbols or [])
+        if str(s or "").strip()
+    }
+    rows: list[dict[str, Any]] = []
+    for sym in symbols:
+        s = str(sym or "").upper().strip()
+        if not s:
+            continue
+        row: dict[str, Any] = {"symbol": s, "on_book": s in on_book}
+        if in_turn:
+            row["in_turn"] = s in in_turn
+        rows.append(row)
+    return rows
+
+
+async def criteria_scan(
+    *,
+    arena: str | None = None,
+    scan_code: str | None = None,
+    symbols: list[str] | None = None,
+    positions: list[dict] | None = None,
+    connector: Any = None,
+    turn_symbols: list[str] | None = None,
+    cap: int | None = None,
+) -> dict[str, Any]:
+    """One screen this look: arena | scan_code | symbols[]. No persist, no MDA daily-120."""
+    asked = normalize_tickers(symbols or [], cap=cap)
+    has_arena = bool(str(arena or "").strip())
+    has_code = bool(str(scan_code or "").strip())
+    if not has_arena and not has_code and not asked:
+        return {
+            "ok": False,
+            "error": "scan requires arena | scan_code | symbols[]",
+        }
+
+    hits_syms: list[str] = []
+    source = "symbols"
+    arena_id = None
+    code_out = None
+    if has_arena or has_code:
+        from abcxauto.universe import pull_one_screen
+
+        pulled = await pull_one_screen(
+            connector,
+            arena=arena if has_arena else None,
+            scan_code=scan_code if has_code else None,
+        )
+        if not pulled.get("ok"):
+            return {
+                "ok": False,
+                "error": pulled.get("error") or "unknown screen",
+                "arenas": pulled.get("arenas"),
+            }
+        hits_syms = list(pulled.get("symbols") or [])
+        source = str(pulled.get("source") or "empty")
+        arena_id = pulled.get("arena_id")
+        code_out = pulled.get("scan_code")
+    else:
+        hits_syms = list(asked)
+
+    rows = overlay_hits(
+        hits_syms, positions=positions, turn_symbols=turn_symbols
+    )
+    return {
+        "ok": True,
+        "source": source,
+        "arena": arena_id,
+        "scan_code": code_out,
+        "symbols": [r["symbol"] for r in rows],
+        "hits": rows,
+        "persisted": False,
+        "ranked": False,
+    }
 
 
 def _closes(candles: list[dict]) -> list[float]:

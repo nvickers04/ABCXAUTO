@@ -1279,7 +1279,7 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "portfolio_risk": port,
         "exposure": port.get("exposure"),
         "capital_liquidity": port.get("capital_liquidity"),
-        # Unranked day tape (book + legal watchlist). Not open-lot-only.
+        # Optional seed for tools; format_wake does not print tape=.
         "tape_seed": tape_seed,
         "minutes_to_open": mins_open,
     }
@@ -1358,7 +1358,7 @@ def format_wake(
     ibkr_up: bool,
     day: dict[str, Any] | None = None,
 ) -> str:
-    """Desk brief. Fill/order_change is a delta; RTH still carries tape facts."""
+    """Desk brief. Live book facts; no canned tape= names. Scan is a tool."""
     unprot = ",".join(unprotected) if unprotected else "none"
     day = day if isinstance(day, dict) else {}
     lots = day.get("open_lots") or []
@@ -1397,14 +1397,9 @@ def format_wake(
         ]
         if lot_s:
             parts.append(f"open_lots={lot_s}.")
-        # RTH fill/delta: still surface unranked tape (esp. when flat) — facts only.
-        # Non-delta wakes already print tape=; delta wakes used to omit it and leave
-        # an empty chair after flatten.
+        # Clock/session fact only — options tools are live in RTH. Not a chain SOP.
+        # Alarm / boot / operator use the non-delta path (no options=live).
         if str(session or "").lower() == "regular":
-            tape = day.get("tape_seed") or []
-            if isinstance(tape, list) and tape:
-                parts.append(f"tape={','.join(str(x) for x in tape[:12])}.")
-            # Clock/session fact only — options tools are live in RTH. Not a chain SOP.
             parts.append("options=live.")
         if day.get("lot_lasts"):
             parts.append(f"{day.get('lot_lasts')}.")
@@ -1431,9 +1426,6 @@ def format_wake(
         "postmarket",
     ):
         parts.append(f"minutes_to_open={mins}.")
-    tape = day.get("tape_seed") or []
-    if isinstance(tape, list) and tape:
-        parts.append(f"tape={','.join(str(x) for x in tape[:12])}.")
     if day:
         parts.append(
             f"names={day.get('names')} lots={day.get('lots')} "
