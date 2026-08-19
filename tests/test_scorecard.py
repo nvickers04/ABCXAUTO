@@ -198,3 +198,41 @@ def test_scorecard_session_is_not_inception(monkeypatch):
     assert abs(sc["session"]["edge_usd"] - 99.6) < 1e-9
     assert sc["session"]["fills"] == 2
     assert sc["session"]["wins"] == 1
+    # Promote / top-level beating stays on inception, not session.
+    assert "beating_model" not in sc["session"]
+    assert sc["beating_model"] is False  # inception edge: -1538 - 2 < 0
+    text = format_scorecard_block(equity=35100.0, journal=J(), sc=sc)
+    lines = text.strip().splitlines()
+    assert lines[0] == "SCORECARD:"
+    assert lines[1].startswith("- session ")
+    assert "book_pnl=+100.00" in lines[1]
+    assert "model_cost=$0.4000" in lines[1]
+    assert "fills=1/2" in lines[1]
+    assert "model=grok-4.6" in lines[1]
+    assert "since=2026-08-19T12:00:00Z" in lines[1]
+    assert any(line.startswith("- first_NL=") for line in lines)
+    assert "LOSING to the model bill" in text
+    assert "BEATING the model bill" not in text
+
+
+def test_format_scorecard_omits_session_when_absent():
+    sc = {
+        "startup_cash": 1000.0,
+        "net_liquidation": 1100.0,
+        "book_pnl": 100.0,
+        "book_return_pct": 10.0,
+        "model_calls": 1,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "model_cost_usd": 0.01,
+        "edge_usd": 99.99,
+        "beating_model": True,
+        "fastest_beating": None,
+        "best_pace": None,
+        "windows": {},
+        "session": None,
+    }
+    text = format_scorecard_block(sc=sc)
+    assert "- session " not in text
+    assert "first_NL=1000.00" in text
+    assert "BEATING" in text

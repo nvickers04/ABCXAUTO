@@ -481,16 +481,43 @@ def format_scorecard_block(
     edge_s = f"{edge:+.2f}" if edge is not None else "n/a"
     start = sc.get("startup_cash")
     start_s = f"{start:.2f}" if start is not None else "n/a"
-    lines = [
-        "SCORECARD:",
-        f"- first_NL={start_s} NL={sc.get('net_liquidation')}",
-        f"- book_pnl={pnl_s} ({ret_s} of starting NetLiq)",
-        f"- model_cost=${sc['model_cost_usd']:.4f} "
-        f"({sc['model_calls']} calls, {sc['input_tokens']}+{sc['output_tokens']} tok)",
-        f"- edge(book−model)={edge_s} → {verdict}",
-        f"- fastest_beating={sc.get('fastest_beating') or 'none'} "
-        f"best_pace={sc.get('best_pace') or 'none'}",
-    ]
+    lines = ["SCORECARD:"]
+    # Session = marker from first run / ABCXAUTO_MODEL change — not calendar day,
+    # not inception. Promote / BEATING-vs-LOSING stay on inception below.
+    sess = sc.get("session")
+    if isinstance(sess, dict) and sess:
+        spnl = sess.get("book_pnl")
+        spnl_s = f"{spnl:+.2f}" if spnl is not None else "n/a"
+        scost = sess.get("model_cost_usd")
+        scost_s = f"${float(scost):.4f}" if scost is not None else "n/a"
+        sedge = sess.get("edge_usd")
+        sedge_s = f"{sedge:+.2f}" if sedge is not None else "n/a"
+        fills = sess.get("fills")
+        swins = sess.get("wins")
+        if fills not in (None, 0):
+            fill_s = f"{swins}/{fills}"
+        else:
+            fill_s = str(fills if fills is not None else 0)
+        model = sess.get("model") or ""
+        model_bit = f" model={model}" if model else ""
+        started = sess.get("started_at") or ""
+        started_bit = f" since={started}" if started else ""
+        lines.append(
+            f"- session book_pnl={spnl_s} model_cost={scost_s} "
+            f"({int(sess.get('model_calls') or 0)} calls) "
+            f"edge={sedge_s} fills={fill_s}{model_bit}{started_bit}"
+        )
+    lines.extend(
+        [
+            f"- first_NL={start_s} NL={sc.get('net_liquidation')}",
+            f"- book_pnl={pnl_s} ({ret_s} of starting NetLiq)",
+            f"- model_cost=${sc['model_cost_usd']:.4f} "
+            f"({sc['model_calls']} calls, {sc['input_tokens']}+{sc['output_tokens']} tok)",
+            f"- edge(book−model)={edge_s} → {verdict}",
+            f"- fastest_beating={sc.get('fastest_beating') or 'none'} "
+            f"best_pace={sc.get('best_pace') or 'none'}",
+        ]
+    )
     wins = sc.get("windows") or {}
     bits = []
     for label, _h in HORIZONS:

@@ -45,6 +45,8 @@ def test_schema_creation(journal, tmp_path):
         "decisions",
         "working_thesis",
         "judgments",
+        "model_usage",
+        "session_markers",
     } <= tables
 
 
@@ -618,3 +620,250 @@ def test_working_thesis_round_trip(journal):
     assert "mean-reversion" in journal.get_working_thesis()
     journal.set_working_thesis("updated thesis on QQQ")
     assert journal.get_working_thesis() == "updated thesis on QQQ"
+
+
+def test_model_usage_round_trip_and_since(journal, tmp_path):
+    early = "2026-08-14T10:00:00.000Z"
+    late = "2026-08-14T15:00:00.000Z"
+    rid = journal.record_model_usage(
+        stage="grok",
+        model="grok-4.6",
+        input_tokens=1200,
+        output_tokens=80,
+        cached_tokens=100,
+        cost_usd=0.0123,
+        ts=early,
+    )
+    assert isinstance(rid, int) and rid > 0
+    journal.record_model_usage(
+        stage="grok",
+        model="grok-4.6",
+        input_tokens=500,
+        output_tokens=40,
+        cached_tokens=0,
+        cost_usd=0.0050,
+        ts=late,
+    )
+
+    tot = journal.model_usage_totals()
+    assert tot["calls"] == 2
+    assert tot["input_tokens"] == 1700
+    assert tot["output_tokens"] == 120
+    assert tot["cached_tokens"] == 100
+    assert abs(tot["cost_usd"] - 0.0173) < 1e-9
+
+    since = journal.model_usage_since("2026-08-14T12:00:00.000Z")
+    assert since["calls"] == 1
+    assert since["input_tokens"] == 500
+    assert since["output_tokens"] == 40
+    assert abs(since["cost_usd"] - 0.0050) < 1e-9
+
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        rows = conn.execute(
+            "SELECT stage, model, input_tokens, output_tokens, cached_tokens, cost_usd "
+            "FROM model_usage ORDER BY id"
+        ).fetchall()
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert "model_usage" in tables
+    assert "session_markers" in tables
+    assert rows[0][0] == "grok"
+    assert rows[0][1] == "grok-4.6"
+    assert rows[0][2] == 1200
+    assert rows[0][5] == 0.0123
+
+
+def test_session_markers_ensure_and_last(journal, tmp_path):
+    assert journal.last_session_marker() is None
+
+    first = journal.ensure_model_session(
+        "grok-4.6",
+        net_liquidation=35_000.0,
+        ts="2026-08-19T12:00:00.000Z",
+    )
+    assert first == {
+        "ts": "2026-08-19T12:00:00.000Z",
+        "model": "grok-4.6",
+        "net_liquidation": 35_000.0,
+    }
+    # Same model → no new marker
+    again = journal.ensure_model_session("grok-4.6", net_liquidation=36_000.0)
+    assert again == first
+    assert journal.last_session_marker() == first
+
+    # Model change stamps a new session
+    switched = journal.ensure_model_session(
+        "grok-4",
+        net_liquidation=35_100.0,
+        ts="2026-08-19T18:00:00.000Z",
+    )
+    assert switched["model"] == "grok-4"
+    assert switched["net_liquidation"] == 35_100.0
+    assert journal.last_session_marker() == switched
+
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM session_markers").fetchone()[0]
+        models = [
+            r[0]
+            for r in conn.execute(
+                "SELECT model FROM session_markers ORDER BY id"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    assert n == 2
+    assert models == ["grok-4.6", "grok-4"]
+
+
+def test_closed_fill_stats_since(journal):
+    day = "2026-08-14"
+    journal.record_fills(
+        [
+            {
+                "ts": f"{day}T10:00:00.000Z",
+                "exec_id": "cf-old",
+                "order_id": 1,
+                "symbol": "SPY",
+                "side": "SLD",
+                "quantity": 1,
+                "price": 500.0,
+                "realized_pnl": 5.0,
+            },
+            {
+                "ts": f"{day}T14:00:00.000Z",
+                "exec_id": "cf-win",
+                "order_id": 2,
+                "symbol": "QQQ",
+                "side": "SLD",
+                "quantity": 1,
+                "price": 400.0,
+                "realized_pnl": 12.0,
+            },
+            {
+                "ts": f"{day}T15:00:00.000Z",
+                "exec_id": "cf-loss",
+                "order_id": 3,
+                "symbol": "IWM",
+                "side": "SLD",
+                "quantity": 1,
+                "price": 200.0,
+                "realized_pnl": -3.0,
+            },
+            {
+                "ts": f"{day}T16:00:00.000Z",
+                "exec_id": "cf-flat",
+                "order_id": 4,
+                "symbol": "DIA",
+                "side": "BOT",
+                "quantity": 1,
+                "price": 300.0,
+                "realized_pnl": 0.0,  # ignored (not a closed PnL)
+            },
+        ]
+    )
+    stats = journal.closed_fill_stats_since(f"{day}T12:00:00.000Z")
+    assert stats["n"] == 2
+    assert stats["wins"] == 1
+    assert abs(stats["sum"] - 9.0) < 1e-9
+
+
+def test_legacy_journal_without_session_markers_is_upgraded(tmp_path, monkeypatch):
+    """Live DBs from 2026-08-12..18 lacked session_markers; open must create it."""
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE model_usage (
+                id INTEGER PRIMARY KEY,
+                ts TEXT NOT NULL,
+                stage TEXT,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cost_usd REAL
+            );
+            INSERT INTO model_usage (ts, stage, input_tokens, output_tokens, cost_usd)
+            VALUES ('2026-08-14T12:00:00.000Z', 'grok', 0, 100, 0.18);
+            """
+        )
+        conn.commit()
+        before = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert "session_markers" not in before
+
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(db))
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_ENABLED", "true")
+    j = TradeJournal(path=str(db), enabled=True)
+    # Touch schema path used by session + usage APIs
+    assert j.model_usage_totals()["calls"] == 1
+    assert abs(j.model_usage_totals()["cost_usd"] - 0.18) < 1e-9
+    assert j.last_session_marker() is None
+    stamped = j.ensure_model_session(
+        "grok-4.6", net_liquidation=35_000.0, ts="2026-08-19T12:00:00.000Z"
+    )
+    assert stamped["model"] == "grok-4.6"
+
+    conn = sqlite3.connect(str(db))
+    try:
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        n = conn.execute("SELECT COUNT(*) FROM session_markers").fetchone()[0]
+        # cached_tokens / model columns added by migration
+        cols = {
+            str(r[1]) for r in conn.execute("PRAGMA table_info(model_usage)").fetchall()
+        }
+    finally:
+        conn.close()
+    assert "session_markers" in tables
+    assert n == 1
+    assert "cached_tokens" in cols
+    assert "model" in cols
+    reset_journal(path=str(db), enabled=True)
+
+
+def test_journal_missing_session_markers_table_fails_hard(tmp_path):
+    """A journal that cannot host session_markers must not silently look healthy."""
+    db = tmp_path / "broken.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.execute(
+            "CREATE TABLE model_usage (id INTEGER PRIMARY KEY, ts TEXT, cost_usd REAL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Bypass TradeJournal._ensure_schema by querying a raw connection that
+    # deliberately lacks session_markers — the live anomaly we must catch.
+    conn = sqlite3.connect(str(db))
+    try:
+        tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("SELECT ts, model, net_liquidation FROM session_markers")
+    finally:
+        conn.close()
+    assert "session_markers" not in tables
+    assert "model_usage" in tables
