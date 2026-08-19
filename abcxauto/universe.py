@@ -218,6 +218,33 @@ _SCAN_CODE_TO_ARENA = {
     "TOP_PERC_LOSE": "top_losers",
 }
 
+# Optional clerk filters this look only — native ScannerSubscription fields.
+# Snake tool args → IBKR attribute on ScannerSubscription.
+_SCAN_NATIVE_FILTERS: dict[str, tuple[str, type]] = {
+    "market_cap_above": ("marketCapAbove", float),
+    "market_cap_below": ("marketCapBelow", float),
+    "above_price": ("abovePrice", float),
+    "below_price": ("belowPrice", float),
+    "above_volume": ("aboveVolume", int),
+    "average_option_volume_above": ("averageOptionVolumeAbove", int),
+}
+
+# Bounded TagValue allowlist (clerk, not SYSTEM). Exact IBKR tag names.
+_SCAN_TAG_FILTERS: frozenset[str] = frozenset(
+    {"usdMarketCapAbove", "optVolumeAbove", "avgVolumeAbove"}
+)
+
+# P/E TagValues — accepted only after reqScannerParameters XML verifies the code.
+_PE_TAG_CANDIDATES: frozenset[str] = frozenset({"peRatioAbove", "peRatioBelow"})
+
+# Non-filter keys allowed on scan() after tool_args normalize.
+_SCAN_BASE_KEYS: frozenset[str] = frozenset(
+    {"arena", "scan_code", "symbols", "symbol", "with", "include"}
+)
+
+_PE_TAG_CACHE: dict[str, Any] = {"ts": 0.0, "tags": frozenset()}
+_PE_TAG_CACHE_TTL_S = 3600.0
+
 
 def arena_catalog_ids() -> list[str]:
     return list(ARENA_CATALOG.keys())
@@ -230,6 +257,134 @@ def known_screen_keys() -> list[str]:
         if code not in out:
             out.append(code)
     return out
+
+
+def scan_native_filter_keys() -> list[str]:
+    return list(_SCAN_NATIVE_FILTERS.keys())
+
+
+def scan_tag_filter_keys() -> list[str]:
+    return sorted(_SCAN_TAG_FILTERS)
+
+
+def _xml_has_scanner_code(xml: str, code: str) -> bool:
+    """True when reqScannerParameters XML lists this filter code (not a guess)."""
+    if not xml or not code:
+        return False
+    # IBKR XML uses <code>tagName</code> on AbstractField / RangeFilter rows.
+    needle = f"<code>{code}</code>"
+    if needle in xml:
+        return True
+    # Some dumps quote the code attribute.
+    return f'code="{code}"' in xml or f"code='{code}'" in xml
+
+
+def _pe_tags_from_xml(xml: str) -> frozenset[str]:
+    return frozenset(t for t in _PE_TAG_CANDIDATES if _xml_has_scanner_code(xml, t))
+
+
+def reset_pe_tag_cache() -> None:
+    """Tests."""
+    _PE_TAG_CACHE.update(ts=0.0, tags=frozenset())
+
+
+async def verified_pe_tags(connector: Any = None) -> frozenset[str]:
+    """P/E TagValues present in live reqScannerParameters XML. Empty if unverified."""
+    now = time.monotonic()
+    cached = _PE_TAG_CACHE.get("tags") or frozenset()
+    if cached and (now - float(_PE_TAG_CACHE.get("ts") or 0)) < _PE_TAG_CACHE_TTL_S:
+        return frozenset(cached)
+    if connector is None or not getattr(connector, "connected", False):
+        return frozenset()
+    ib = getattr(connector, "ib", None)
+    if ib is None or not hasattr(ib, "reqScannerParametersAsync"):
+        return frozenset()
+    try:
+        lock = getattr(connector, "async_lock", None)
+        if lock is not None:
+            async with lock:
+                xml = await ib.reqScannerParametersAsync()
+        else:
+            xml = await ib.reqScannerParametersAsync()
+    except Exception:
+        logger.exception("reqScannerParameters failed")
+        return frozenset()
+    found = _pe_tags_from_xml(str(xml or ""))
+    _PE_TAG_CACHE.update(ts=now, tags=found)
+    return found
+
+
+def parse_scan_filters(
+    args: dict[str, Any] | None,
+    *,
+    pe_tags: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Clerk allowlist for optional IBKR filters this look. Unknown keys → error.
+
+    P/E tags are accepted only when ``pe_tags`` contains the verified XML code.
+    No persist. Does not invent TagValue names.
+    """
+    src = dict(args) if isinstance(args, dict) else {}
+    allowed_pe = frozenset(pe_tags or ())
+    allowed_tags = set(_SCAN_TAG_FILTERS) | set(allowed_pe)
+    allowed_keys = set(_SCAN_BASE_KEYS) | set(_SCAN_NATIVE_FILTERS) | allowed_tags
+
+    unknown = sorted(
+        str(k)
+        for k, v in src.items()
+        if str(k) not in allowed_keys and v not in (None, "", [], {})
+    )
+    if unknown:
+        return {
+            "ok": False,
+            "error": f"unknown scan key(s): {', '.join(unknown)}",
+        }
+
+    native: dict[str, Any] = {}
+    tags: dict[str, str] = {}
+    applied: dict[str, Any] = {}
+
+    for snake, (ib_name, caster) in _SCAN_NATIVE_FILTERS.items():
+        if src.get(snake) in (None, ""):
+            continue
+        try:
+            val = caster(src[snake])
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"invalid {snake}"}
+        native[ib_name] = val
+        applied[snake] = val
+
+    for tag in sorted(allowed_tags):
+        if src.get(tag) in (None, ""):
+            continue
+        tags[tag] = str(src[tag])
+        applied[tag] = tags[tag]
+
+    return {
+        "ok": True,
+        "native": native,
+        "tags": tags,
+        "applied": applied,
+    }
+
+
+def merge_scan_filters_into_spec(
+    ibkr_spec: dict[str, Any] | None,
+    filters: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Overlay clerk native + TagValue filters onto one-look IBKR spec. No persist."""
+    applied = dict((filters or {}).get("applied") or {})
+    if not ibkr_spec:
+        return None, applied
+    spec = dict(ibkr_spec)
+    for ib_name, val in ((filters or {}).get("native") or {}).items():
+        spec[ib_name] = val
+    tag_map = dict((filters or {}).get("tags") or {})
+    if tag_map:
+        spec["filterTags"] = dict(tag_map)
+    elif "filterTags" in spec:
+        spec.pop("filterTags", None)
+    return spec, applied
 
 
 def resolve_screen(
@@ -288,18 +443,38 @@ async def pull_one_screen(
     *,
     arena: str | None = None,
     scan_code: str | None = None,
+    filters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One IBKR screen (or MDA industry seed if no IBKR) this look. No persist."""
     resolved = resolve_screen(arena=arena, scan_code=scan_code)
     if not resolved.get("ok"):
         return resolved
-    ibkr_spec = resolved.get("ibkr")
+    ibkr_spec, applied = merge_scan_filters_into_spec(resolved.get("ibkr"), filters)
+    if (filters or {}).get("applied") and ibkr_spec is None:
+        return {
+            "ok": False,
+            "error": "scan filters require an IBKR arena|scan_code",
+            "applied": dict((filters or {}).get("applied") or {}),
+        }
     pulled: list[str] = []
     source = ""
     # MDA industry seed only when there is no IBKR connector (or no IBKR spec).
     # If _ibkr_scan ran and returned empty — stay empty; do not dump catalog names.
     if ibkr_spec and connector is not None:
-        pulled = await _ibkr_scan(connector, ibkr_spec)
+        scan_out = await _ibkr_scan(connector, ibkr_spec)
+        if isinstance(scan_out, dict) and not scan_out.get("ok", True):
+            return {
+                "ok": False,
+                "error": scan_out.get("error") or "IBKR scanner error",
+                "arena_id": resolved.get("arena_id"),
+                "scan_code": resolved.get("scan_code"),
+                "applied": applied,
+                "persisted": False,
+            }
+        if isinstance(scan_out, dict):
+            pulled = list(scan_out.get("symbols") or [])
+        else:
+            pulled = list(scan_out or [])
         source = "ibkr" if pulled else "empty"
     else:
         pulled = normalize_symbols(resolved.get("mda_fallback") or [])
@@ -311,6 +486,7 @@ async def pull_one_screen(
         "scan_code": resolved.get("scan_code"),
         "source": source or "empty",
         "symbols": list(pulled),
+        "applied": applied,
         "persisted": False,
     }
 
@@ -468,17 +644,21 @@ def _stock_type_ok(stock_type: str, allowed: set[str]) -> bool:
     return st in allowed
 
 
-async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> list[str]:
-    """Run one IBKR market scanner subscription; return symbols (scan order)."""
+async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
+    """Run one IBKR market scanner subscription.
+
+    Returns ``{"ok": True, "symbols": [...]}`` or ``{"ok": False, "error": ...}``.
+    Empty successful pull → ok with symbols=[] (caller must not MDA-fallback).
+    """
     if connector is None or not getattr(connector, "connected", False):
-        return []
+        return {"ok": True, "symbols": []}
     ib = getattr(connector, "ib", None)
     if ib is None:
-        return []
+        return {"ok": True, "symbols": []}
     try:
-        from ib_insync import ScannerSubscription
+        from ib_insync import ScannerSubscription, TagValue
     except Exception:
-        return []
+        return {"ok": False, "error": "ib_insync unavailable", "symbols": []}
     sub = ScannerSubscription(
         instrument="STK",
         locationCode=str(spec.get("locationCode") or "STK.US.MAJOR"),
@@ -493,10 +673,17 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> list[str]:
         sub.stockTypeFilter = str(spec["stockTypeFilter"])
     if spec.get("abovePrice") is not None:
         sub.abovePrice = float(spec["abovePrice"])
+    if spec.get("belowPrice") is not None:
+        sub.belowPrice = float(spec["belowPrice"])
     if spec.get("aboveVolume") is not None:
         sub.aboveVolume = int(spec["aboveVolume"])
     if spec.get("averageOptionVolumeAbove") is not None:
         sub.averageOptionVolumeAbove = int(spec["averageOptionVolumeAbove"])
+    filter_opts: list[Any] = []
+    raw_tags = spec.get("filterTags") or {}
+    if isinstance(raw_tags, dict):
+        for tag, val in raw_tags.items():
+            filter_opts.append(TagValue(str(tag), str(val)))
     allowed_types = {
         t.strip().upper()
         for t in str(spec.get("stockTypeFilter") or "CORP,ETF,ADR").split(",")
@@ -506,7 +693,7 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> list[str]:
     try:
         async with connector.async_lock:
             try:
-                data = await ib.reqScannerDataAsync(sub)
+                data = await ib.reqScannerDataAsync(sub, [], filter_opts)
             finally:
                 # IBKR allows one scanner sub at a time; always release it.
                 try:
@@ -523,9 +710,9 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> list[str]:
                 spec.get("scanCode"),
                 exc,
             )
-        else:
-            logger.exception("IBKR scanner failed scanCode=%s", spec.get("scanCode"))
-        return []
+            return {"ok": True, "symbols": []}
+        logger.exception("IBKR scanner failed scanCode=%s", spec.get("scanCode"))
+        return {"ok": False, "error": str(exc), "symbols": []}
     try:
         syms: list[str] = []
         for row in data or []:
@@ -547,10 +734,10 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> list[str]:
             if not _stock_type_ok(st, allowed_types):
                 continue
             syms.append(sym)
-        return syms
-    except Exception:
+        return {"ok": True, "symbols": syms}
+    except Exception as exc:
         logger.exception("IBKR scanner parse failed scanCode=%s", spec.get("scanCode"))
-        return []
+        return {"ok": False, "error": str(exc), "symbols": []}
 
 
 async def refresh_legal_set(
@@ -575,7 +762,11 @@ async def refresh_legal_set(
         pull_src = ""
         ibkr_spec = meta.get("ibkr")
         if ibkr_spec and connector is not None:
-            pulled = await _ibkr_scan(connector, ibkr_spec)
+            scan_out = await _ibkr_scan(connector, ibkr_spec)
+            if isinstance(scan_out, dict):
+                pulled = list(scan_out.get("symbols") or []) if scan_out.get("ok", True) else []
+            else:
+                pulled = list(scan_out or [])
             if pulled:
                 pull_src = "ibkr"
                 sources.append(f"{arena_id}:ibkr")

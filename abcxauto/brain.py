@@ -163,7 +163,10 @@ AGENT_TOOLS = [
     ),
     tool(
         name="scan",
-        description="One screen this look (arena|scan_code|symbols[]); unranked hits + on_book; no quotes.",
+        description=(
+            "One screen this look (arena|scan_code|symbols[]); optional IBKR filters; "
+            "unranked hits + on_book; no quotes."
+        ),
         parameters=_schema(
             {
                 "arena": {
@@ -175,6 +178,42 @@ AGENT_TOOLS = [
                     "description": "MOST_ACTIVE|TOP_PERC_GAIN|TOP_PERC_LOSE|HOT_BY_VOLUME",
                 },
                 "symbols": _SYMBOLS_SCHEMA,
+                "market_cap_above": {
+                    "type": "number",
+                    "description": "ScannerSubscription.marketCapAbove (raw USD)",
+                },
+                "market_cap_below": {
+                    "type": "number",
+                    "description": "ScannerSubscription.marketCapBelow (raw USD)",
+                },
+                "above_price": {
+                    "type": "number",
+                    "description": "ScannerSubscription.abovePrice",
+                },
+                "below_price": {
+                    "type": "number",
+                    "description": "ScannerSubscription.belowPrice",
+                },
+                "above_volume": {
+                    "type": "integer",
+                    "description": "ScannerSubscription.aboveVolume",
+                },
+                "average_option_volume_above": {
+                    "type": "integer",
+                    "description": "ScannerSubscription.averageOptionVolumeAbove",
+                },
+                "usdMarketCapAbove": {
+                    "type": "string",
+                    "description": "TagValue usdMarketCapAbove",
+                },
+                "optVolumeAbove": {
+                    "type": "string",
+                    "description": "TagValue optVolumeAbove",
+                },
+                "avgVolumeAbove": {
+                    "type": "string",
+                    "description": "TagValue avgVolumeAbove",
+                },
                 "with": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1001,6 +1040,12 @@ async def _run_tool(
             su = str(s or "").upper().strip()
             if su and su not in turn_syms:
                 turn_syms.append(su)
+        from abcxauto.universe import parse_scan_filters, verified_pe_tags
+
+        pe_tags = await verified_pe_tags(connector)
+        parsed = parse_scan_filters(args, pe_tags=pe_tags)
+        if not parsed.get("ok"):
+            return _clip({"ok": False, "error": parsed.get("error") or "bad scan filters"})
         payload = await criteria_scan(
             arena=args.get("arena"),
             scan_code=args.get("scan_code"),
@@ -1008,6 +1053,7 @@ async def _run_tool(
             positions=list(world.positions or snap.get("positions") or []),
             connector=connector,
             turn_symbols=turn_syms,
+            filters=parsed,
         )
         if not payload.get("ok"):
             return _clip(payload)
@@ -1028,6 +1074,7 @@ async def _run_tool(
             "scan_code": payload.get("scan_code"),
             "symbols": syms,
             "hits": payload.get("hits") or [],
+            "applied": payload.get("applied") or {},
             "persisted": False,
             "ranked": False,
         }

@@ -50,6 +50,21 @@ _ARG_KEYS = {
     "arena": ("arena", "screen", "scan_arena"),
     "scan_code": ("scan_code", "scanCode", "code"),
     "with": ("with", "include"),
+    "market_cap_above": ("market_cap_above", "marketCapAbove"),
+    "market_cap_below": ("market_cap_below", "marketCapBelow"),
+    "above_price": ("above_price", "abovePrice"),
+    "below_price": ("below_price", "belowPrice"),
+    "above_volume": ("above_volume", "aboveVolume"),
+    "average_option_volume_above": (
+        "average_option_volume_above",
+        "averageOptionVolumeAbove",
+    ),
+    "usdMarketCapAbove": ("usdMarketCapAbove", "usd_market_cap_above"),
+    "optVolumeAbove": ("optVolumeAbove", "opt_volume_above"),
+    "avgVolumeAbove": ("avgVolumeAbove", "avg_volume_above"),
+    # P/E only accepted at runtime after XML verify (not in tool schema).
+    "peRatioAbove": ("peRatioAbove", "pe_ratio_above"),
+    "peRatioBelow": ("peRatioBelow", "pe_ratio_below"),
     "expiration": ("expiration", "expiry", "exp", "expiration_date", "lastTradeDateOrContractMonth"),
     "strike": ("strike", "strike_price"),
     "right": ("right", "cp", "call_put", "put_call"),
@@ -268,6 +283,29 @@ def normalize_tool_call(
                 out["symbols"] = []
         if isinstance(out.get("with"), str):
             out["with"] = [out["with"]]
+        # Drop alias spellings after hoist so filter allowlist sees one key set.
+        for alias in (
+            "marketCapAbove",
+            "marketCapBelow",
+            "abovePrice",
+            "belowPrice",
+            "aboveVolume",
+            "averageOptionVolumeAbove",
+            "usd_market_cap_above",
+            "opt_volume_above",
+            "avg_volume_above",
+            "pe_ratio_above",
+            "pe_ratio_below",
+            "screen",
+            "scan_arena",
+            "scanCode",
+            "code",
+            "include",
+            "tickers",
+            "tickers_list",
+            "ticker",
+        ):
+            out.pop(alias, None)
         # Bare scanCode passed as arena=MOST_ACTIVE is fine (universe.resolve_screen).
 
     if canon in ("candles", "option_chain"):
