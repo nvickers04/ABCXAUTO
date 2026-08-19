@@ -1242,6 +1242,8 @@ def format_wake(
             tape = day.get("tape_seed") or []
             if isinstance(tape, list) and tape:
                 parts.append(f"tape={','.join(str(x) for x in tape[:12])}.")
+            # Clock/session fact only — options tools are live in RTH. Not a chain SOP.
+            parts.append("options=live.")
         if day.get("lot_lasts"):
             parts.append(f"{day.get('lot_lasts')}.")
         if day.get("working_exits"):
