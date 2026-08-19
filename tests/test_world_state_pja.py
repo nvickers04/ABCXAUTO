@@ -278,6 +278,8 @@ def test_day_facts_carry_edge_and_clones():
     assert day["lots"] == 2
     assert day["structures"] == 2
     assert day["open_lots"] == ["XLF STK long 1", "XLF STK long 1"]
+    assert "max_risk_per_trade_pct" in day
+    assert day["max_risk_per_trade_pct"] == day.get("risk_per_trade_pct")
 
 
 def test_format_wake_includes_day_facts():
@@ -299,7 +301,9 @@ def test_format_wake_includes_day_facts():
             "open_upnl": -88.0,
             "nl_vs_start": -500.0,
             "beating_model": False,
+            "max_risk_per_trade_pct": 25.0,
             "risk_per_trade_pct": 25.0,
+            "sizing_floors": True,
             "open_lots": ["IWM 260821C306 x1", "QQQ 260821C735 x1"],
             "capacity": {"open_count": 8, "max_open_positions": 15},
             "mix": {"long_c": 7, "short_c": 1, "vert": 1},
@@ -336,7 +340,9 @@ def test_format_wake_includes_day_facts():
     assert "openU=$-88.0" in text
     assert "vsStart=$-500.0(inception)" in text
     assert "beating=False" in text
-    assert "risk/trade=25.0%" in text
+    assert "max_risk=25.0%" in text
+    assert "floors=on" in text
+    assert "risk/trade=" not in text
     assert "open=8/15" in text
     assert "open_lots=IWM 260821C306 x1,QQQ 260821C735 x1" in text
     assert "haltAt=" in text

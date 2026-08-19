@@ -402,6 +402,8 @@ def test_day_facts_include_pct_of_nl():
     assert day["edge_pct_of_nl"] == -2.0
     assert day["model_cost_usd"] == 5.0
     assert day["model_cost_pct_of_nl"] == 0.05
+    assert "max_risk_per_trade_pct" in day
+    assert day["max_risk_per_trade_pct"] == day["risk_per_trade_pct"]
 
 
 def test_format_wake_prints_dollars_and_pct():
@@ -440,6 +442,9 @@ def test_format_wake_prints_dollars_and_pct():
     assert "vsStart=" in text
     # Review leads with % NL, not dollars-first.
     assert text.index("ibkrDay=-1.0% NL") < text.index("$-100.0")
+    # Ceiling knob — not working size. Older day dicts still fall back.
+    assert "max_risk=25.0%" in text
+    assert "risk/trade=" not in text
 
 
 def test_compact_position_pct_nl():
