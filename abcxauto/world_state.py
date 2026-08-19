@@ -1349,6 +1349,33 @@ def _portfolio_wake_bits(day: dict[str, Any]) -> str:
     return " ".join(bits)
 
 
+def format_live_poke(
+    *,
+    kind: str,
+    detail: str = "",
+    session: str = "",
+    flat: bool | None = None,
+    unprotected: list[str] | None = None,
+    day: dict[str, Any] | None = None,
+) -> str:
+    """Thin live delta into the open think. fill / book / NL only — not a wake dump."""
+    day = day if isinstance(day, dict) else {}
+    unprot = ",".join(unprotected) if unprotected else "none"
+    detail_s = (detail or "").strip()
+    event_s = f"event={kind} {detail_s}.".strip() if detail_s else f"event={kind}."
+    parts = [
+        event_s,
+        f"session={session} flat={flat} NL={day.get('nl')}.",
+    ]
+    lots = day.get("open_lots") or []
+    lot_s = ",".join(str(x) for x in lots[:12]) if lots else ""
+    if lot_s:
+        parts.append(f"open_lots={lot_s}.")
+    if unprot != "none":
+        parts.append(f"unprotected={unprot}.")
+    return " ".join(p for p in parts if p)
+
+
 def format_wake(
     *,
     cycle: int,
@@ -1386,7 +1413,8 @@ def format_wake(
     prev_sends = brief.get("sends") if brief.get("sends") is not None else 0
     pnl_bits = _pnl_wake_bits(day)
     port_bits = _portfolio_wake_bits(day)
-    if kind in ("fill", "order_change", "book_move"):
+    # Fill / order / unprotected / mark: thin delta — not a second wake dump.
+    if kind in ("fill", "order_change", "book_move", "unprotected"):
         detail = (ev.detail or "").strip() if ev is not None else ""
         event_s = f"event={kind} {detail}.".strip() if detail else f"event={kind}."
         parts = [
@@ -1412,7 +1440,8 @@ def format_wake(
         parts.append(f"{pnl_bits}.")
         if port_bits:
             parts.append(f"{port_bits}.")
-        parts.append("This is a delta. send|set_wake.")
+        # Live episode poke — not a park clock. Tickets stay send().
+        parts.append("This is a delta. send.")
         return " ".join(p for p in parts if p)
     risk = day.get("risk_per_trade_pct")
     parts = [

@@ -460,6 +460,7 @@ class ProEngine:
     def request_wake(self, reason: str) -> None:
         """Interrupt cycle sleep for a whitelisted pace wake (monitor → engine)."""
         from abcxauto.pacing import WakeGate
+        from abcxauto.wake_bus import BookEvent, note_interrupt
 
         if not self.state.autonomous or self.pause.is_set() or self.stop.is_set():
             return
@@ -468,6 +469,8 @@ class ProEngine:
         if not self._wake_gate.try_wake(reason):
             return
         self._wake_reason = str(reason or "").strip().lower()
+        # Mid-turn poke into the live xAI episode (fill / unprotected).
+        note_interrupt(BookEvent(self._wake_reason, self._wake_reason))
         ev = self._wake_event
         if ev is not None:
             ev.set()

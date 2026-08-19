@@ -447,7 +447,8 @@ def test_format_wake_fill_is_delta_not_discovery():
     assert text.startswith("event=fill SPY 260821C780 filled.")
     assert "prev=close_option sends=2" in text
     assert "This is a delta" in text
-    assert text.rstrip().endswith("send|set_wake.")
+    assert text.rstrip().endswith("send.")
+    assert "set_wake" not in text
     assert "send or set_wake" not in text
     assert "playbook" not in text
     assert "Cycle 2." not in text

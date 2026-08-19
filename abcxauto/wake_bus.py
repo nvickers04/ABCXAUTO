@@ -1,6 +1,8 @@
 """Standing IBKR + on-demand Grok. No clerk decision checklist.
 
-Book events are facts. Grok sets the next alarm. Hard interrupts are gates.
+Book events are facts. set_wake parks the desk (overnight / around-open).
+RTH yield without set_wake is not a sit-clock — book events poke the live think.
+Hard interrupts are gates.
 """
 
 from __future__ import annotations
@@ -28,15 +30,27 @@ BOOK_EVENTS = frozenset({
     "book_move",
 })
 HARD_INTERRUPTS = frozenset({"unprotected", "halt"})
+# Live poke into the open xAI episode (same chat). Not a sit-clock.
+LIVE_POKE_KINDS = frozenset({"fill", "order_change", "unprotected"})
+# New think only — overnight park return, operator, session/socket death.
+HARD_RESET_KINDS = frozenset({
+    "boot",
+    "alarm",
+    "operator",
+    "session_change",
+    "socket",
+    "halt",
+})
 ALL_WAKES = BOOK_EVENTS | HARD_INTERRUPTS | frozenset({"alarm", "operator", "boot"})
 PULSE_S = 10.0
 DEFAULT_LOOK_S = 90.0
 DEFAULT_LOOK_OPEN_S = 60.0
 MIN_LOOK_S = 30.0
-# Paper RTH working look ceiling — not a long nap. Premarket/overnight may be longer.
+# Paper RTH park ceiling — only when Grok actually calls set_wake. Premarket/overnight may be longer.
 PAPER_MAX_LOOK_S = 10 * 60.0
 MTM_BUCKET_PCT = 8.0
 _last_wake = None
+_pending_interrupt = None  # BookEvent | None — set after BookEvent is defined
 
 
 def _path() -> Path:
@@ -82,6 +96,33 @@ def note_wake(event: BookEvent | None) -> None:
 
 def last_wake() -> BookEvent | None:
     return _last_wake
+
+
+def note_interrupt(event: BookEvent | None) -> None:
+    """Clerk live event → poke the open xAI episode mid-turn when applicable."""
+    global _pending_interrupt
+    if event is None:
+        return
+    kind = str(event.kind or "").strip().lower()
+    if kind not in LIVE_POKE_KINDS:
+        return
+    _pending_interrupt = BookEvent(kind, str(event.detail or ""), ts=event.ts)
+
+
+def peek_interrupt() -> BookEvent | None:
+    return _pending_interrupt
+
+
+def take_interrupt() -> BookEvent | None:
+    global _pending_interrupt
+    ev = _pending_interrupt
+    _pending_interrupt = None
+    return ev
+
+
+def clear_interrupt() -> None:
+    global _pending_interrupt
+    _pending_interrupt = None
 
 
 @dataclass
@@ -221,17 +262,30 @@ def ensure_next_look(
     flat: bool | None = None,
     session: str = "",
 ) -> GrokAlarm:
-    """If Grok did not set a clock this turn, do not park the desk."""
+    """Honor Grok park (set_wake). RTH skip = no clerk sit-clock."""
     alarm = load_alarm()
-    if alarm.set_at and alarm.set_at != previous_set_at:
+    grok_parked = bool(alarm.set_at and alarm.set_at != previous_set_at)
+    if grok_parked:
         if alarm.wake_at:
             return alarm
+        # set_wake ran but left no clock — arm a park from defaults.
         return set_wake(
             wake_in_s=default_look_s(flat=flat, session=session),
             wake_if=list(alarm.wake_if),
             flat=flat,
             session=session,
         )
+    # Grok skipped set_wake. RTH: yield in place — do not synthesize 60s/90s.
+    if str(session or "").lower() == "regular":
+        if alarm.wake_at:
+            cleared = GrokAlarm(
+                wake_at=None,
+                wake_if=list(alarm.wake_if),
+                set_at=alarm.set_at,
+            )
+            return save_alarm(cleared)
+        return alarm
+    # Non-RTH silent: still seed a look so overnight/around-open is not orphaned.
     return set_wake(
         wake_in_s=default_look_s(flat=flat, session=session),
         flat=flat,
@@ -247,7 +301,7 @@ def set_wake(
     flat: bool | None = None,
     session: str = "",
 ) -> GrokAlarm:
-    """Grok-owned next look. Always a clock; book events can come sooner."""
+    """Grok-owned park. Book events can come sooner. Not an RTH sit-clock."""
     at = str(wake_at or "").strip() or None
     sec: float | None = None
     if wake_in_s is not None:
