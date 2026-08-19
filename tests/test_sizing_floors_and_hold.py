@@ -298,6 +298,56 @@ def test_unprotected_still_blocks_hold_even_when_hold_ok(monkeypatch):
     assert "last-stop" in str(forced.get("note") or "")
 
 
+def _send_strategy_enum(tools) -> list[str]:
+    import json
+
+    for t in tools:
+        fn = getattr(t, "function", None)
+        name = getattr(fn, "name", None) if fn is not None else getattr(t, "name", None)
+        if name != "send":
+            continue
+        params = getattr(fn, "parameters", None) if fn is not None else None
+        if isinstance(params, str):
+            params = json.loads(params)
+        props = (params or {}).get("properties") or {}
+        return list((props.get("strategy") or {}).get("enum") or [])
+    return []
+
+
+def test_ban_hold_on_omits_hold_from_send_enum(monkeypatch):
+    """Paper default: hold is not offered on the send tool."""
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: True,
+    )
+    from abcxauto.brain import agent_tools, brain_system_prompt
+    from abcxauto.order_examples import ticket_strategy_names
+
+    enum = _send_strategy_enum(agent_tools())
+    assert "hold" not in enum
+    assert "market_bracket" in enum
+    # Catalog still has hold; Brain only hides it for this look.
+    assert "hold" in ticket_strategy_names()
+    lines = [ln.strip() for ln in brain_system_prompt().splitlines()]
+    assert not any(ln.startswith("hold:") for ln in lines)
+
+
+def test_ban_hold_off_keeps_hold_in_send_enum(monkeypatch):
+    """Live default: hold remains a sendable no-op strategy."""
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.ban_hold_active",
+        lambda cfg=None: False,
+    )
+    from abcxauto.brain import AGENT_TOOLS, agent_tools, brain_system_prompt
+
+    enum = _send_strategy_enum(agent_tools())
+    assert "hold" in enum
+    # Static catalog always includes hold (live / ban off).
+    assert "hold" in _send_strategy_enum(AGENT_TOOLS)
+    lines = [ln.strip() for ln in brain_system_prompt().splitlines()]
+    assert any(ln.startswith("hold:") for ln in lines)
+
+
 def test_paper_and_live_can_persist_ban_hold(tmp_path, monkeypatch):
     path = tmp_path / "hold.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))

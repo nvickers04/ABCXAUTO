@@ -60,6 +60,47 @@ def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required}
 
 
+def _send_tool(strategy_names: list[str] | None = None) -> Any:
+    """Build the send tool. Full catalog by default; agent_tools may omit hold."""
+    names = list(strategy_names) if strategy_names is not None else ticket_strategy_names()
+    return tool(
+        name="send",
+        description=(
+            "One IBKR ticket per call. Call send again this turn for another ticket. "
+            "strategy name + fields match ORDER EXAMPLES. Knobs are self_tune, not a ticket. "
+            "Hard risk is code."
+        ),
+        parameters=_schema(
+            {
+                "strategy": {
+                    "type": "string",
+                    "enum": names,
+                    "description": "Ticket name from ORDER EXAMPLES.",
+                },
+                "symbol": _QUOTE_SCHEMA,
+                "quantity": {"type": "number"},
+                "direction": {"type": "string", "description": "LONG or SHORT"},
+                "stop_price": {"type": "number"},
+                "target_price": {"type": "number"},
+                "entry_price": {"type": "number"},
+                "limit_price": {"type": "number"},
+                "order_id": {"type": "integer"},
+                "expiration": {"type": "string", "description": "YYYYMMDD"},
+                "strike": {"type": "number"},
+                "right": {"type": "string", "description": "C or P"},
+                "params": {
+                    "type": "object",
+                    "description": "Extra ticket fields from ORDER EXAMPLES if not top-level.",
+                },
+                "target_conId": {"type": "string"},
+                "rationale": {"type": "string"},
+            },
+            ["strategy"],
+        ),
+    )
+
+
+# Full catalog (includes hold). Live looks use agent_tools().
 AGENT_TOOLS = [
     tool(
         name="book",
@@ -174,41 +215,7 @@ AGENT_TOOLS = [
         description="Open option legs: identity from IBKR book; MDA greeks delayed if present.",
         parameters=_schema({}, []),
     ),
-    tool(
-        name="send",
-        description=(
-            "One IBKR ticket per call. Call send again this turn for another ticket. "
-            "strategy name + fields match ORDER EXAMPLES. Knobs are self_tune, not a ticket. "
-            "Hard risk is code."
-        ),
-        parameters=_schema(
-            {
-                "strategy": {
-                    "type": "string",
-                    "enum": ticket_strategy_names(),
-                    "description": "Ticket name from ORDER EXAMPLES.",
-                },
-                "symbol": _QUOTE_SCHEMA,
-                "quantity": {"type": "number"},
-                "direction": {"type": "string", "description": "LONG or SHORT"},
-                "stop_price": {"type": "number"},
-                "target_price": {"type": "number"},
-                "entry_price": {"type": "number"},
-                "limit_price": {"type": "number"},
-                "order_id": {"type": "integer"},
-                "expiration": {"type": "string", "description": "YYYYMMDD"},
-                "strike": {"type": "number"},
-                "right": {"type": "string", "description": "C or P"},
-                "params": {
-                    "type": "object",
-                    "description": "Extra ticket fields from ORDER EXAMPLES if not top-level.",
-                },
-                "target_conId": {"type": "string"},
-                "rationale": {"type": "string"},
-            },
-            ["strategy"],
-        ),
-    ),
+    _send_tool(),
     tool(
         name="self_tune",
         description=(
@@ -285,14 +292,45 @@ AGENT_TOOLS = [
 ]
 
 
-def brain_system_prompt() -> str:
-    from abcxauto.agent_loop import AWARENESS_HEART
+def _send_strategy_names_for_look() -> list[str]:
+    """send enum this look. Read clerk ban_hold; Brain does not own the bit."""
+    names = ticket_strategy_names()
+    try:
+        from abcxauto.agent_loop import ban_hold_active
 
+        if ban_hold_active():
+            return [n for n in names if n != "hold"]
+    except Exception:
+        pass
+    return names
+
+
+def agent_tools() -> list:
+    """Tools offered this look. Omit hold from send when clerk ban_hold is on."""
+    names = _send_strategy_names_for_look()
+    out: list = []
+    for t in AGENT_TOOLS:
+        fn = getattr(t, "function", None)
+        name = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
+        if name == "send":
+            out.append(_send_tool(names))
+        else:
+            out.append(t)
+    return out
+
+
+def brain_system_prompt() -> str:
+    from abcxauto.agent_loop import ALLOWED_ACTIONS, AWARENESS_HEART, ban_hold_active
+
+    # Hide dead strategy from ORDER EXAMPLES when clerk bans it — no extra prose.
+    allowed: frozenset[str] | set[str] = ALLOWED_ACTIONS
+    if ban_hold_active():
+        allowed = frozenset(a for a in ALLOWED_ACTIONS if a != "hold")
     return (
         build_system_prompt()
         + AWARENESS_HEART
         + "\n"
-        + format_order_examples()
+        + format_order_examples(allowed=allowed)
         + "\nsend is the only way to change the book."
     )
 
@@ -538,7 +576,7 @@ def _new_chat(g: GrokClient) -> Any:
     create_kw: dict[str, Any] = {
         "model": g.model,
         "messages": [system(brain_system_prompt())],
-        "tools": list(AGENT_TOOLS),
+        "tools": list(agent_tools()),
         "temperature": g.temperature,
         "max_tokens": int(g.max_tokens or 8192),
         "include": ["verbose_streaming"],
