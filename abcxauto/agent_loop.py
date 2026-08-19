@@ -1305,11 +1305,7 @@ async def _post_act_structure_and_plan(
         elif strat in (
             "market_order", "close_option", "limit_order", "stop_order",
         ) and ok_dispatch:
-            from abcxauto.trade_plan import (
-                load_trade_plan,
-                save_trade_plan,
-                stk_qty_for_symbol,
-            )
+            from abcxauto.trade_plan import load_trade_plan, stk_qty_for_symbol
 
             plan = load_trade_plan()
             positions = list(snap.get("positions") or [])
