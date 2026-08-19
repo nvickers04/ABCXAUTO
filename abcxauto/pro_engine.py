@@ -1,4 +1,4 @@
-"""Pro engine — START/pause/panic, cycle loop, view state (stdlib only, no Flet)."""
+"""Pro engine — START/pause/panic, stay-up think host, view state (stdlib only, no Flet)."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from typing import Any
 from abcxauto.broker.connector import get_ibkr_connector
 from abcxauto.config import get_config
 from abcxauto.llm import GrokClient
-from abcxauto.agent_loop import run_cycle, snap
+from abcxauto.agent_loop import equity_of, pnl_of, risk_label, snap
 from abcxauto.cycle import format_position_inventory
 
 logger = logging.getLogger(__name__)
@@ -228,7 +228,7 @@ class ViewState:
 
 
 class ProEngine:
-    """Autonomous cycle loop + thread-safe UI queue. Wired to START via ProTerminal."""
+    """Stay-up Grok host + thread-safe UI queue. Wired to START via ProTerminal."""
 
     def __init__(self) -> None:
         self.ui: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -246,6 +246,9 @@ class ProEngine:
         self._last_grok_mono: float = 0.0
         self._last_pace: dict = {}
         self._last_cycle_out: dict = {}
+        self._resume_think = False
+        self._think_parked = False
+        self._park_session = ""
         from abcxauto.think_stream import bind_engine
 
         bind_engine(self)
@@ -275,7 +278,7 @@ class ProEngine:
         return None
 
     def start(self) -> str | None:
-        """Start autonomous agent cycles (requires xAI; connects IBKR if needed)."""
+        """Host one stay-up Grok think (requires xAI; connects IBKR if needed)."""
         if not get_config().xai_api_key:
             return "XAI_API_KEY missing"
         try:
@@ -293,8 +296,10 @@ class ProEngine:
             self.state.autonomous = True
             self.state.paused = False
             self.state.running = True
-            self.state.status = "Running"
-            self._note("START", "Autonomous agent running")
+            self.state.status = "Thinking"
+            self._think_parked = False
+            self._resume_think = True
+            self._note("START", "Grok running")
             return None
         self._gen += 1
         gen = self._gen
@@ -303,8 +308,10 @@ class ProEngine:
         self.state.autonomous = True
         self.state.running = True
         self.state.paused = False
-        self.state.status = "Running"
-        self._note("START", "Starting autonomous agent…")
+        self.state.status = "Thinking"
+        self._think_parked = False
+        self._resume_think = True
+        self._note("START", "Starting Grok")
         self.worker = threading.Thread(target=lambda: self._worker(gen), daemon=True)
         self.worker.start()
         return None
@@ -733,6 +740,104 @@ class ProEngine:
         rec = {**d, "ts": _now(), "type": "cycle"}
         s.records.append(rec)
 
+    @staticmethod
+    def _session_of(snap: dict | None) -> str:
+        s = snap if isinstance(snap, dict) else {}
+        pulse = s.get("reality_pulse") or {}
+        block = pulse.get("session") if isinstance(pulse, dict) else None
+        hours = s.get("market_hours") if isinstance(s.get("market_hours"), dict) else None
+        if not isinstance(block, dict) and isinstance(hours, dict):
+            block = hours.get("session")
+        if isinstance(block, dict):
+            return str(block.get("status") or "").lower()
+        if isinstance(block, str):
+            return block.lower()
+        return ""
+
+    def _session_unparks(self, sess: str) -> bool:
+        """Park stays down on overnight pokes. Next premarket/RTH is session_change."""
+        now = str(sess or "").strip().lower()
+        if not now or now == str(getattr(self, "_park_session", "") or "").strip().lower():
+            return False
+        return now in ("regular", "premarket")
+
+    async def _host_think(
+        self, n: int, g: Any, s: dict, *, resume: bool = False
+    ) -> dict:
+        """One grok_turn. Pokes enter via note_interrupt → live poke inside the turn."""
+        from abcxauto.brain import EPISODE_KINDS, grok_turn
+        from abcxauto.wake_bus import last_wake
+        from abcxauto.world_state import (
+            build_world_state,
+            day_facts,
+            format_live_poke,
+            format_wake,
+        )
+
+        world = build_world_state(
+            cycle=n, snap=s, opportunities=[], news_items=[],
+        )
+        day = None
+        try:
+            from abcxauto.scorecard import compute_scorecard
+
+            sc = compute_scorecard(equity=getattr(world, "net_liquidation", None))
+            day = day_facts(world, sc)
+        except Exception:
+            day = None
+        ev = last_wake()
+        kind = str(ev.kind or "") if ev is not None else ""
+        if resume and getattr(g, "chat", None) is not None:
+            wake = "yield resume."
+        elif getattr(g, "chat", None) is not None and kind in EPISODE_KINDS:
+            wake = format_live_poke(
+                kind=kind,
+                detail=str(ev.detail or "") if ev is not None else "",
+                session=world.session_status,
+                flat=world.flat,
+                unprotected=world.unprotected,
+                day=day,
+            )
+        else:
+            wake = format_wake(
+                cycle=n,
+                session=world.session_status,
+                flat=world.flat,
+                unprotected=world.unprotected,
+                ibkr_up=bool(getattr(self.conn, "connected", False)),
+                day=day,
+            )
+        self.state.status = "Thinking"
+        turn = await grok_turn(g, connector=self.conn, world=world, snap=s, wake=wake)
+        if getattr(turn, "parked", False):
+            return {"_parked": True, "cycle": n}
+        acct = s.get("account") or {}
+        pnl = pnl_of(acct) if isinstance(acct, dict) else 0.0
+        eq = equity_of(acct) if isinstance(acct, dict) else 0.0
+        act = dict(turn.last_act or {})
+        result = dict(turn.last_result or {})
+        strat = str(turn.last_strat or act.get("strategy") or "")
+        return {
+            "cycle": n,
+            "pnl": pnl,
+            "equity": eq,
+            "pnl_chg": 0,
+            "risk": risk_label(s),
+            "action_obj": act,
+            "result": result,
+            "strat": strat,
+            "rationale": act.get("rationale") or (turn.text or "")[:400],
+            "positions": s.get("positions") or [],
+            "open_orders": s.get("open_orders") or [],
+            "inventory": format_position_inventory(s.get("positions") or []),
+            "reality_pulse": s.get("reality_pulse") or {},
+            "world_state": world.to_dict() if hasattr(world, "to_dict") else {},
+            "tool_trace": list(getattr(turn, "tool_trace", None) or []),
+            "sends": len(getattr(turn, "sends", None) or []),
+            "validation": str(result.get("note") or result.get("status") or "ok"),
+            "pace": {"tier": "stay", "sleep_s": 0, "reason": "yield"},
+        }
+
     async def _do_panic(self) -> None:
         try:
             conn = self.conn or get_ibkr_connector()
@@ -829,26 +934,13 @@ class ProEngine:
             self.worker = None
             self.conn = None
             return
-        from abcxauto.pacing import wait_for_pace
-        from abcxauto.wake_bus import (
-            BookEvent,
-            book_fingerprint,
-            ensure_next_look,
-            events_from_diff,
-            load_alarm,
-            note_wake,
-            pulse_sleep_s,
-            save_alarm,
-            should_wake_grok,
-        )
+        from abcxauto.wake_bus import peek_interrupt, take_interrupt
 
         g = None
-        hist, prev, n = [], 0.0, 0
-        fp: dict | None = None
-        first_boot = True
+        n = 0
+        first_think = True
         try:
             while gen == self._gen and not self.stop.is_set():
-                # Keep monitor alive whenever the broker link is up.
                 if self.monitor is None or not getattr(self.monitor, "running", False):
                     if getattr(get_config(), "monitor_enabled", True):
                         self._start_monitor()
@@ -865,132 +957,90 @@ class ProEngine:
                         )
                     except Exception as ue:
                         self._note("UNIVERSE", f"start refresh skipped: {ue}")
-                if not self.state.autonomous or self.pause.is_set():
+                if self.pause.is_set() and not getattr(self, "_think_parked", False):
+                    await asyncio.sleep(0.25)
+                    continue
+                if (
+                    not self.state.autonomous
+                    and not getattr(self, "_think_parked", False)
+                    and not getattr(self, "_resume_think", False)
+                ):
                     await asyncio.sleep(0.25)
                     continue
                 if g is None:
                     g = GrokClient()
 
-                cfg = get_config()
+                resume = bool(getattr(self, "_resume_think", False))
+                poked = peek_interrupt() is not None
+                if getattr(self, "_think_parked", False) and not resume:
+                    sess_now = ""
+                    if poked:
+                        try:
+                            shot = await snap(self.conn)
+                            sess_now = self._session_of(shot)
+                        except Exception:
+                            sess_now = ""
+                        try:
+                            take_interrupt()
+                        except Exception:
+                            pass
+                    if not self._session_unparks(sess_now):
+                        self.state.status = "Parked"
+                        ev = self._wake_event
+                        if ev is not None:
+                            ev.clear()
+                            try:
+                                await asyncio.wait_for(ev.wait(), timeout=1.0)
+                            except asyncio.TimeoutError:
+                                pass
+                        else:
+                            await asyncio.sleep(1.0)
+                        continue
+                    self._think_parked = False
+                    self.state.autonomous = True
+                    self.state.running = True
+                    self._note("PARK", "session_change — Grok up")
+                if not first_think and not poked and not resume:
+                    self.state.status = "On"
+                    ev = self._wake_event
+                    if ev is not None:
+                        ev.clear()
+                        try:
+                            await asyncio.wait_for(ev.wait(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(1.0)
+                    continue
+
                 try:
                     s = await snap(self.conn)
                 except Exception as e:
                     self.ui.put(("error", f"snap failed: {e}"))
-                    s = {}
-                cur = book_fingerprint({
-                    **(s if isinstance(s, dict) else {}),
-                    "ibkr_connected": bool(getattr(self.conn, "connected", False)),
-                })
-                events = events_from_diff(fp, cur)
-                fp = cur
-                pending_wake = str(self._wake_reason or "").strip().lower()
-                if pending_wake in ("unprotected", "halt"):
-                    events.append(BookEvent(pending_wake, pending_wake))
-                elif pending_wake == "fill":
-                    events.append(BookEvent("fill", "monitor fill"))
-                alarm = load_alarm()
-                ev = should_wake_grok(
-                    events,
-                    alarm=alarm,
-                    first_boot=first_boot,
-                    operator=pending_wake in ("operator", "flat_confirmed"),
-                )
-                if ev is None:
-                    pace = {
-                        "tier": "pulse",
-                        "sleep_s": pulse_sleep_s(alarm),
-                        "reason": "watching",
-                        "wake_reason": "",
-                    }
-                    self._last_pace = pace
-                    self.state.pace = dict(pace)
-                    self.state.status = "Watching"
-                    self._wake_event.clear()
-                    await wait_for_pace(float(pace["sleep_s"]), self._wake_event)
+                    await asyncio.sleep(2.0)
                     continue
 
-                first_boot = False
-                note_wake(ev)
-                if ev.kind == "alarm":
-                    alarm.wake_at = None
-                    save_alarm(alarm)
-                n += 1
-                wake_for_cycle = ev.kind
-                self._wake_event.clear()
+                first_think = False
+                self._resume_think = False
                 self._wake_reason = ""
-                out: dict = {}
-                prior_alarm = load_alarm().set_at
-                sess = ""
-                hours = s.get("market_hours") if isinstance(s, dict) else None
-                block = hours.get("session") if isinstance(hours, dict) else None
-                if isinstance(block, dict):
-                    sess = str(block.get("status") or "")
-                elif isinstance(block, str):
-                    sess = block
-                pos = (s.get("positions") if isinstance(s, dict) else None) or []
+                n += 1
                 try:
-                    from abcxauto.think_stream import emit as think_emit
-
-                    think_emit(
-                        "say",
-                        f"{ev.kind} {ev.detail} — Grok.\n".strip() + "\n",
-                    )
-                    out = await run_cycle(n, self.conn, g, hist, prev)
-                    skipped_note = str(out.get("validation") or out.get("rationale") or "")
-                    skipped = "skipped_grok" in skipped_note
-                    if not skipped:
-                        self._last_grok_mono = time.monotonic()
-                    prev = out["pnl"]
-                    rec = hist[-1] if hist else {}
-                    out.setdefault("action_obj", rec.get("action", {}))
-                    out.setdefault(
-                        "rationale", (rec.get("action") or {}).get("rationale", "")
-                    )
-                    out.setdefault(
-                        "reasoning_chain",
-                        rec.get("reasoning_chain") or out.get("rationale", ""),
-                    )
-                    out.setdefault("inventory", rec.get("inventory", ""))
-                    out.setdefault("validation", rec.get("validation", ""))
-                    out.setdefault("impact", rec.get("impact", {}))
-                    out.setdefault(
-                        "reality_pulse",
-                        rec.get("reality_pulse")
-                        or (rec.get("snapshot") or {}).get("reality_pulse")
-                        or {},
-                    )
-                    if not out.get("positions"):
-                        shot = rec.get("snapshot") or {}
-                        out["positions"] = shot.get("positions") or []
-                    pace = {
-                        "tier": "event",
-                        "sleep_s": pulse_sleep_s(load_alarm()),
-                        "reason": ev.kind,
-                        "wake_reason": ev.kind,
-                    }
-                    out["pace"] = pace
-                    self._last_pace = pace
+                    out = await self._host_think(n, g, s, resume=resume and not poked)
+                    if out.get("_parked"):
+                        self._think_parked = True
+                        self._park_session = self._session_of(s)
+                        self.state.autonomous = False
+                        self.state.running = False
+                        self.state.paused = False
+                        self.state.status = "Parked"
+                        self._note("PARK", "Overnight park — Grok down")
+                        continue
+                    self._last_grok_mono = time.monotonic()
                     self._last_cycle_out = out
+                    self.state.status = "On"
                     self.ui.put(("cycle", out))
                 except Exception as e:
                     self.ui.put(("error", str(e)))
-                    self._last_pace = {
-                        "tier": "pulse",
-                        "sleep_s": pulse_sleep_s(),
-                        "reason": "grok_error",
-                    }
-                finally:
-                    ensure_next_look(
-                        previous_set_at=prior_alarm,
-                        flat=not bool(pos),
-                        session=sess,
-                    )
-
-                self._wake_event.clear()
-                await wait_for_pace(
-                    float((self._last_pace or {}).get("sleep_s") or pulse_sleep_s()),
-                    self._wake_event,
-                )
         finally:
             self._stop_monitor()
             self._worker_loop = None
