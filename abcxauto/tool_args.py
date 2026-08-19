@@ -82,8 +82,13 @@ _SEND_HOIST = (
     "new_stop_price",
     "new_limit_price",
     "closing_position",
+    # Optional % of NL annotation next to quantity. Clerk hoist only —
+    # qty stays on the wire; never invent shares from %.
     "size_pct_nl",
 )
+
+# Clerk-owned send annotation (not brain schema / not ORDER EXAMPLES).
+SEND_SIZE_PCT_NL = "size_pct_nl"
 
 
 def _first(args: dict[str, Any], *keys: str) -> Any:
