@@ -130,6 +130,57 @@ def test_set_wake_paper_rth_caps_long_nap(tmp_path, monkeypatch):
     assert PAPER_MAX_LOOK_S - 10 <= remaining <= PAPER_MAX_LOOK_S + 10
 
 
+def test_set_wake_paper_rth_blocks_30_min_nap(tmp_path, monkeypatch):
+    """Noah lock: RTH working look ≤10m — 30-min hunt nap is clerk-capped."""
+    from abcxauto.wake_bus import PAPER_MAX_LOOK_S, _parse_iso, _utc_now, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
+    assert PAPER_MAX_LOOK_S == 10 * 60.0
+    alarm = set_wake(wake_in_s=30 * 60, session="regular", flat=True)
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    remaining = (at - _utc_now()).total_seconds()
+    assert remaining <= PAPER_MAX_LOOK_S + 10
+    assert remaining < 15 * 60
+
+
+def test_set_wake_paper_rth_allows_up_to_10_min(tmp_path, monkeypatch):
+    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
+    alarm = set_wake(wake_in_s=10 * 60, session="regular", flat=False)
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    remaining = (at - _utc_now()).total_seconds()
+    assert 9 * 60 <= remaining <= 10 * 60 + 10
+
+
+def test_set_wake_premarket_allows_long_park(tmp_path, monkeypatch):
+    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
+    alarm = set_wake(wake_in_s=3600, session="premarket", flat=True)
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    remaining = (at - _utc_now()).total_seconds()
+    assert 3590 <= remaining <= 3610
+
+
 def test_set_wake_live_honors_long_nap(tmp_path, monkeypatch):
     from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
 

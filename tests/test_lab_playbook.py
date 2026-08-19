@@ -339,6 +339,74 @@ def test_clear_lab_drops_standing_essay(tmp_path, monkeypatch):
     assert "none" in format_block()
 
 
+def test_write_rejects_floors_live_sleeve_keeps_notes(tmp_path, monkeypatch):
+    """Architecture: notebook cannot loosen floors, switch live, or set a sleeve."""
+    from abcxauto.config import get_config
+    from abcxauto.lab_playbook import gate_rejects
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    before_mode = get_config().trading_mode
+    before_budget = get_config().trading_budget_usd
+    before_floors = bool(getattr(get_config(), "sizing_floors", False))
+
+    raw = {
+        "instructions": "Prefer debit verticals on index ETFs.",
+        "mode": "explore",
+        "trading_mode": "live",
+        "sizing_floors": False,
+        "trading_budget_usd": 50_000,
+    }
+    rejected = gate_rejects(raw)
+    assert "trading_mode" in rejected
+    assert "sizing_floors" in rejected
+    assert "trading_budget_usd" in rejected
+
+    out = apply_from_judgment({"lab_playbook": raw})
+    assert out is not None
+    assert "Prefer debit verticals" in (out.get("instructions") or "")
+    assert "trading_mode" in (out.get("rejected") or {})
+    assert "sizing_floors" in (out.get("rejected") or {})
+    assert "trading_budget_usd" in (out.get("rejected") or {})
+    lab = load_lab()
+    assert lab["instructions"] == "Prefer debit verticals on index ETFs."
+    assert "trading_mode" not in lab
+    assert "sizing_floors" not in lab
+    assert "trading_budget_usd" not in lab
+    assert get_config().trading_mode == before_mode
+    assert get_config().trading_budget_usd == before_budget
+    assert bool(getattr(get_config(), "sizing_floors", False)) == before_floors
+
+
+def test_write_gate_only_payload_rejected_without_saving(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    out = apply_from_judgment(
+        {"lab_playbook": {"trading_mode": "live", "trading_budget_usd": 1}}
+    )
+    assert out is not None
+    assert out.get("status") == "rejected"
+    assert "trading_mode" in (out.get("rejected") or {})
+    assert not load_lab().get("instructions")
+
+
+def test_hunt_until_prose_stays_notes_not_a_clock(tmp_path, monkeypatch):
+    """Not a hunt-window text parser — prose is notebook, set_wake is the clock."""
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    prose = "No hunt until 10:30 ET. Park until open."
+    out = apply_from_judgment(
+        {"lab_playbook": {"instructions": prose, "mode": "explore"}}
+    )
+    assert out is not None
+    assert load_lab()["instructions"] == prose
+    assert "rejected" not in (out or {})
+    # Wake line still only shows score glance — not the essay as an order.
+    block = format_block()
+    assert "10:30" not in block
+    assert "notebook: playbook tool" in block
+
+
 def test_playbook_revision_strips_old_essay_on_disk(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     (tmp_path / "lab.json").write_text(
