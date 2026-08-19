@@ -457,7 +457,16 @@ def test_size_pct_nl_hoisted_not_converted():
     assert out["params"]["size_pct_nl"] == 2.0
 
 
-def test_brain_send_schema_has_size_pct_nl():
+def test_size_pct_nl_is_clerk_send_annotation():
+    """size_pct_nl lives on send/tool_args — not brain AGENT_TOOLS schema."""
+    from abcxauto.send import SEND_SIZE_PCT_NL
+    from abcxauto.tool_args import SEND_SIZE_PCT_NL as TA_KEY
+    from abcxauto import tool_args as ta
+
+    assert SEND_SIZE_PCT_NL == "size_pct_nl"
+    assert TA_KEY == "size_pct_nl"
+    assert "size_pct_nl" in ta._SEND_HOIST
+
     from abcxauto.brain import AGENT_TOOLS
 
     send = None
@@ -468,6 +477,4 @@ def test_brain_send_schema_has_size_pct_nl():
             send = t
             break
     assert send is not None
-    blob = str(send)
-    assert "size_pct_nl" in blob
-    assert "quantity" in blob
+    assert "size_pct_nl" not in str(send)

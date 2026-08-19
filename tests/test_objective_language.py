@@ -96,12 +96,9 @@ def test_book_facts_have_no_controls_lecture(tmp_path, monkeypatch):
     assert "idle_streak" not in prompt
 
 
-def test_book_facts_surface_portfolio_risk(tmp_path, monkeypatch):
-    from abcxauto.brain import _book_facts
-    from abcxauto.world_state import WorldState
-
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    get_config.cache_clear()
+def test_day_facts_surface_portfolio_risk():
+    """Clerk day_facts ships portfolio_risk % of NL (not brain._book_facts)."""
+    from abcxauto.world_state import WorldState, day_facts
 
     port = {
         "n_positions": 1,
@@ -140,12 +137,44 @@ def test_book_facts_surface_portfolio_risk(tmp_path, monkeypatch):
         recent_decisions=[],
         trade_plan=None,
     )
-    facts = _book_facts(world)
-    assert facts["portfolio_risk"]["top_concentration_pct"] == 13.51
-    assert facts["exposure"]["top_concentration_pct"] == 13.51
-    assert facts["exposure"]["symbols"][0]["pct_nl"] == 13.51
-    assert facts["capital_liquidity"]["cash_pct_nl"] == 86.49
-    assert facts["capital_liquidity"]["deployed_long_pct_nl"] == 13.51
+    day = day_facts(world, {})
+    assert day["portfolio_risk"]["top_concentration_pct"] == 13.51
+    assert day["exposure"]["top_concentration_pct"] == 13.51
+    assert day["exposure"]["symbols"][0]["pct_nl"] == 13.51
+    assert day["capital_liquidity"]["cash_pct_nl"] == 86.49
+    assert day["capital_liquidity"]["deployed_long_pct_nl"] == 13.51
+
+
+def test_format_wake_includes_portfolio_pct_nl():
+    from abcxauto.world_state import format_wake
+
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "names": 1,
+            "lots": 1,
+            "nl": 10_000.0,
+            "daily_pnl": -100.0,
+            "daily_pnl_pct_of_nl": -1.0,
+            "capital_liquidity": {
+                "cash_pct_nl": 80.0,
+                "deployed_long_pct_nl": 20.0,
+            },
+            "exposure": {
+                "top_symbol": "QQQ",
+                "top_concentration_pct": 20.0,
+            },
+            "capacity": {"open_count": 1, "max_open_positions": 15},
+            "open_lots": ["QQQ STK long 10"],
+        },
+    )
+    assert "cash=80.0% NL" in text
+    assert "deployed=20.0% NL" in text
+    assert "top QQQ=20.0% NL" in text
 
 
 def test_world_prompt_scan_tape_not_opportunities_header():

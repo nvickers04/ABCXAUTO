@@ -18,6 +18,41 @@ def test_build_book_returns_net_liq(monkeypatch):
     )
     assert isinstance(state, dict)
     assert state["net_liq"] == 25_000
+    assert "portfolio_risk" in state
+    assert "exposure" in state
+    assert "capital_liquidity" in state
+    assert state["capital_liquidity"]["cash_pct_nl"] == 0.0
+    assert state["capital_liquidity"]["deployed_long_pct_nl"] == 0.0
+
+
+def test_build_book_portfolio_risk_pct_nl(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: type("C", (), {})(),
+    )
+    state = book.build_book(
+        account={
+            "netliquidation": 10_000,
+            "dailypnl": 0,
+            "totalcashvalue": 7_000,
+        },
+        positions=[
+            {
+                "symbol": "QQQ",
+                "quantity": 10,
+                "marketValue": 3_000,
+                "secType": "STK",
+            }
+        ],
+        open_orders=[],
+        protection={"unprotected_symbols": []},
+        include_narrative=False,
+    )
+    assert state["portfolio_risk"]["top_symbol"] == "QQQ"
+    assert state["portfolio_risk"]["top_concentration_pct"] == 30.0
+    assert state["exposure"]["symbols"][0]["pct_nl"] == 30.0
+    assert state["capital_liquidity"]["cash_pct_nl"] == 70.0
+    assert state["capital_liquidity"]["deployed_long_pct_nl"] == 30.0
 
 
 def test_build_portfolio_state_alias(monkeypatch):
