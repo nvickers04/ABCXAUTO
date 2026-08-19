@@ -174,6 +174,19 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
+def _pct_of_start(value: float | None, start_nl: float | None) -> float | None:
+    """``value`` as percent of ``start_nl``. None when base is missing/non-positive."""
+    if value is None or start_nl is None:
+        return None
+    try:
+        base = float(start_nl)
+        if base <= 0:
+            return None
+        return (float(value) / base) * 100.0
+    except (TypeError, ValueError):
+        return None
+
+
 def _window_row(
     *,
     label: str,
@@ -213,18 +226,21 @@ def _window_row(
         coverage = "thin"
     hours = (span_s / 3600.0) if span_s and span_s > 0 else None
     edge_per_hour = (edge / hours) if edge is not None and hours else None
+    base = float(start_nl) if start_nl else None
     return {
         "label": label,
         "horizon_s": horizon_s,
         "span_s": span_s,
         "coverage": coverage,
-        "start_nl": float(start_nl) if start_nl else None,
+        "start_nl": base,
         "start_ts": start_ts,
         "book_pnl": book_pnl,
         "book_return_pct": book_return_pct,
         "model_cost_usd": cost,
+        "model_cost_pct": _pct_of_start(cost, base),
         "model_calls": int(usage.get("calls") or 0),
         "edge_usd": edge,
+        "edge_pct": _pct_of_start(edge, base),
         "edge_per_hour": edge_per_hour,
         "beating_model": beating,
         "snaps": int(snaps or 0),
@@ -293,6 +309,9 @@ def compute_scorecard(
     cost = float(usage.get("cost_usd") or 0.0)
     edge = None if book_pnl is None else (book_pnl - cost)
     beating = None if edge is None else (edge > 0)
+    start_base = float(startup) if startup else None
+    model_cost_pct = _pct_of_start(cost, start_base)
+    edge_pct = _pct_of_start(edge, start_base)
 
     clock = _utc(now)
     windows: dict[str, dict[str, Any]] = {}
@@ -403,14 +422,17 @@ def compute_scorecard(
                     sess_pnl = None
             sess_cost = float(sess_usage.get("cost_usd") or 0.0)
             sess_edge = None if sess_pnl is None else (sess_pnl - sess_cost)
+            sess_base = float(start_nl) if start_nl is not None else None
             session = {
                 "model": marker.get("model") or model_name,
                 "started_at": start_ts,
-                "startup_nl": float(start_nl) if start_nl is not None else None,
+                "startup_nl": sess_base,
                 "book_pnl": sess_pnl,
                 "model_cost_usd": sess_cost,
+                "model_cost_pct": _pct_of_start(sess_cost, sess_base),
                 "model_calls": int(sess_usage.get("calls") or 0),
                 "edge_usd": sess_edge,
+                "edge_pct": _pct_of_start(sess_edge, sess_base),
                 "fills": int(fills.get("n") or 0),
                 "wins": int(fills.get("wins") or 0),
             }
@@ -434,7 +456,7 @@ def compute_scorecard(
             best_pace = label
 
     return {
-        "startup_cash": float(startup) if startup else None,
+        "startup_cash": start_base,
         "net_liquidation": current,
         "book_pnl": book_pnl,
         "book_return_pct": book_return_pct,
@@ -442,7 +464,9 @@ def compute_scorecard(
         "input_tokens": int(usage.get("input_tokens") or 0),
         "output_tokens": int(usage.get("output_tokens") or 0),
         "model_cost_usd": cost,
+        "model_cost_pct": model_cost_pct,
         "edge_usd": edge,
+        "edge_pct": edge_pct,
         "beating_model": beating,
         "goal": "book return % of starting NetLiq > cost of the model",
         "windows": windows,
@@ -451,9 +475,11 @@ def compute_scorecard(
         "since_start": {
             "book_pnl": book_pnl,
             "model_cost_usd": cost,
+            "model_cost_pct": model_cost_pct,
             "edge_usd": edge,
+            "edge_pct": edge_pct,
             "beating_model": beating,
-            "startup_cash": float(startup) if startup else None,
+            "startup_cash": start_base,
         },
         "session": session,
     }
@@ -479,17 +505,31 @@ def format_scorecard_block(
     ret_s = f"{ret:+.2f}%" if ret is not None else "n/a"
     edge = sc.get("edge_usd")
     edge_s = f"{edge:+.2f}" if edge is not None else "n/a"
+    edge_pct = sc.get("edge_pct")
+    edge_pct_s = f"{edge_pct:+.4f}%" if edge_pct is not None else "n/a"
+    cost_pct = sc.get("model_cost_pct")
+    cost_pct_s = f"{cost_pct:.4f}%" if cost_pct is not None else "n/a"
     start = sc.get("startup_cash")
     start_s = f"{start:.2f}" if start is not None else "n/a"
     lines = ["SCORECARD:"]
     # Session = marker from first run / ABCXAUTO_MODEL change — not calendar day,
     # not inception. Promote / BEATING-vs-LOSING stay on inception below.
+    # Operator block leads with % of start NL; model_cost also prints real $
+    # (paper: API cash left the account; live: both book and bill are real).
     sess = sc.get("session")
     if isinstance(sess, dict) and sess:
+        sret = None
+        s_nl = sess.get("startup_nl")
         spnl = sess.get("book_pnl")
-        spnl_s = f"{spnl:+.2f}" if spnl is not None else "n/a"
+        if spnl is not None and s_nl is not None and float(s_nl) > 0:
+            sret = (float(spnl) / float(s_nl)) * 100.0
+        sret_s = f"{sret:+.2f}%" if sret is not None else "n/a"
         scost = sess.get("model_cost_usd")
         scost_s = f"${float(scost):.4f}" if scost is not None else "n/a"
+        scost_pct = sess.get("model_cost_pct")
+        scost_pct_s = f"{scost_pct:.4f}%" if scost_pct is not None else "n/a"
+        sedge_pct = sess.get("edge_pct")
+        sedge_pct_s = f"{sedge_pct:+.4f}%" if sedge_pct is not None else "n/a"
         sedge = sess.get("edge_usd")
         sedge_s = f"{sedge:+.2f}" if sedge is not None else "n/a"
         fills = sess.get("fills")
@@ -503,17 +543,18 @@ def format_scorecard_block(
         started = sess.get("started_at") or ""
         started_bit = f" since={started}" if started else ""
         lines.append(
-            f"- session book_pnl={spnl_s} model_cost={scost_s} "
+            f"- session book={sret_s} model_cost={scost_pct_s} ({scost_s} cash) "
             f"({int(sess.get('model_calls') or 0)} calls) "
-            f"edge={sedge_s} fills={fill_s}{model_bit}{started_bit}"
+            f"edge={sedge_pct_s} ({sedge_s}$) fills={fill_s}{model_bit}{started_bit}"
         )
     lines.extend(
         [
             f"- first_NL={start_s} NL={sc.get('net_liquidation')}",
-            f"- book_pnl={pnl_s} ({ret_s} of starting NetLiq)",
-            f"- model_cost=${sc['model_cost_usd']:.4f} "
-            f"({sc['model_calls']} calls, {sc['input_tokens']}+{sc['output_tokens']} tok)",
-            f"- edge(book−model)={edge_s} → {verdict}",
+            f"- book_return={ret_s} of starting NetLiq ({pnl_s}$)",
+            f"- model_cost={cost_pct_s} of starting NetLiq "
+            f"(${sc['model_cost_usd']:.4f} cash, {sc['model_calls']} calls, "
+            f"{sc['input_tokens']}+{sc['output_tokens']} tok)",
+            f"- edge={edge_pct_s} ({edge_s}$) → {verdict}",
             f"- fastest_beating={sc.get('fastest_beating') or 'none'} "
             f"best_pace={sc.get('best_pace') or 'none'}",
         ]
@@ -529,9 +570,9 @@ def format_scorecard_block(
             bits.append(f"{label}:none")
             continue
         wr = row.get("book_return_pct")
-        we = row.get("edge_usd")
+        we_pct = row.get("edge_pct")
         wr_s = f"{wr:+.2f}%" if wr is not None else "n/a"
-        we_s = f"{we:+.2f}" if we is not None else "n/a"
+        we_s = f"{we_pct:+.4f}%" if we_pct is not None else "n/a"
         mark = "BEAT" if row.get("beating_model") is True else (
             "behind" if row.get("beating_model") is False else cov
         )

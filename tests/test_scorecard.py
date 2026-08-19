@@ -61,9 +61,18 @@ def test_scorecard_beating_when_book_ahead():
     assert sc["startup_cash"] == 1000.0
     assert sc["book_pnl"] == 100.0
     assert sc["model_cost_usd"] == 0.01
+    assert abs(sc["model_cost_pct"] - 0.001) < 1e-9
     assert sc["beating_model"] is True
     assert abs(sc["edge_usd"] - 99.99) < 1e-9
+    assert abs(sc["edge_pct"] - 9.999) < 1e-9
+    assert abs(sc["since_start"]["model_cost_pct"] - 0.001) < 1e-9
+    assert abs(sc["since_start"]["edge_pct"] - 9.999) < 1e-9
     assert "prefer" not in sc
+    text = format_scorecard_block(equity=1100.0, journal=j, sc=sc)
+    # % leads; model bill shows both scale % and real cash $
+    assert "book_return=+10.00% of starting NetLiq (+100.00$)" in text
+    assert "model_cost=0.0010% of starting NetLiq ($0.0100 cash" in text
+    assert "edge=+9.9990% (+99.99$) → BEATING" in text
 
 
 def test_scorecard_losing_to_model_bill():
@@ -74,8 +83,11 @@ def test_scorecard_losing_to_model_bill():
     sc = compute_scorecard(equity=999.0, journal=j)
     assert sc["beating_model"] is False
     assert sc["edge_usd"] < 0
+    assert abs(sc["model_cost_pct"] - 0.5) < 1e-9
+    assert abs(sc["edge_pct"] - (-0.6)) < 1e-9
     text = format_scorecard_block(equity=999.0, journal=j)
     assert "LOSING" in text
+    assert "model_cost=0.5000% of starting NetLiq ($5.0000 cash" in text
     assert "do not sit" not in text.lower()
     assert "not cash" not in text.lower()
     assert "Do not skip protect" not in text
@@ -95,6 +107,8 @@ def test_scorecard_no_history_does_not_invent_pnl():
     sc = compute_scorecard(equity=1_000_000.0, journal=j)
     assert sc["book_pnl"] is None
     assert sc["startup_cash"] is None
+    assert sc["model_cost_pct"] is None
+    assert sc["edge_pct"] is None
 
 
 def test_scorecard_windows_fastest_beating():
@@ -126,6 +140,9 @@ def test_scorecard_windows_fastest_beating():
     assert "1h" in sc["windows"]
     assert sc["windows"]["1h"]["coverage"] == "ok"
     assert sc["windows"]["1h"]["beating_model"] is True
+    # 1h start_nl=1000, cost=1 → 0.1%; edge=29 → 2.9%
+    assert abs(sc["windows"]["1h"]["model_cost_pct"] - 0.1) < 1e-9
+    assert abs(sc["windows"]["1h"]["edge_pct"] - 2.9) < 1e-9
     assert sc["fastest_beating"] in ("15m", "1h", "4h")
     text = format_scorecard_block(equity=1030.0, journal=j, sc=sc)
     assert "fastest_beating" in text
@@ -194,23 +211,33 @@ def test_scorecard_session_is_not_inception(monkeypatch):
     sc = compute_scorecard(equity=35100.0, journal=J())
     assert sc["since_start"]["startup_cash"] == 36638.0
     assert abs(sc["since_start"]["book_pnl"] - (35100.0 - 36638.0)) < 1e-9
+    # Inception pct of startup_cash=36638
+    assert abs(sc["model_cost_pct"] - (2.0 / 36638.0 * 100.0)) < 1e-9
+    assert abs(sc["edge_pct"] - ((35100.0 - 36638.0 - 2.0) / 36638.0 * 100.0)) < 1e-9
     assert sc["session"]["book_pnl"] == 100.0
     assert abs(sc["session"]["edge_usd"] - 99.6) < 1e-9
+    # Session pct of startup_nl=35000
+    assert abs(sc["session"]["model_cost_pct"] - (0.40 / 35000.0 * 100.0)) < 1e-9
+    assert abs(sc["session"]["edge_pct"] - (99.6 / 35000.0 * 100.0)) < 1e-9
     assert sc["session"]["fills"] == 2
     assert sc["session"]["wins"] == 1
-    # Promote / top-level beating stays on inception, not session.
+    # Promote / top-level beating stays on inception dollar edge, not session.
     assert "beating_model" not in sc["session"]
     assert sc["beating_model"] is False  # inception edge: -1538 - 2 < 0
     text = format_scorecard_block(equity=35100.0, journal=J(), sc=sc)
     lines = text.strip().splitlines()
     assert lines[0] == "SCORECARD:"
     assert lines[1].startswith("- session ")
-    assert "book_pnl=+100.00" in lines[1]
-    assert "model_cost=$0.4000" in lines[1]
+    # Session leads with %; model_cost shows both pct and real cash $
+    assert "book=+0.29%" in lines[1]
+    assert "model_cost=0.0011% ($0.4000 cash)" in lines[1]
+    assert "edge=+0.2846%" in lines[1]
     assert "fills=1/2" in lines[1]
     assert "model=grok-4.6" in lines[1]
     assert "since=2026-08-19T12:00:00Z" in lines[1]
     assert any(line.startswith("- first_NL=") for line in lines)
+    assert "of starting NetLiq" in text
+    assert "$2.0000 cash" in text  # inception real bill visible
     assert "LOSING to the model bill" in text
     assert "BEATING the model bill" not in text
 
@@ -225,7 +252,9 @@ def test_format_scorecard_omits_session_when_absent():
         "input_tokens": 10,
         "output_tokens": 5,
         "model_cost_usd": 0.01,
+        "model_cost_pct": 0.001,
         "edge_usd": 99.99,
+        "edge_pct": 9.999,
         "beating_model": True,
         "fastest_beating": None,
         "best_pace": None,
@@ -235,4 +264,23 @@ def test_format_scorecard_omits_session_when_absent():
     text = format_scorecard_block(sc=sc)
     assert "- session " not in text
     assert "first_NL=1000.00" in text
+    assert "book_return=+10.00%" in text
+    assert "model_cost=0.0010% of starting NetLiq ($0.0100 cash" in text
+    assert "edge=+9.9990%" in text
+    assert "BEATING" in text
+
+
+def test_beating_model_still_dollar_edge_not_pct():
+    """Tiny positive dollar edge stays BEATING even when pct of a huge NL is tiny."""
+    j = get_journal()
+    j.record_snapshot(account={"NetLiquidation": 1_000_000.0, "DailyPnL": 0.0})
+    j.record_snapshot(account={"NetLiquidation": 1_000_001.0, "DailyPnL": 1.0})
+    j.record_model_usage(stage="act", input_tokens=1, output_tokens=1, cost_usd=0.5)
+    sc = compute_scorecard(equity=1_000_001.0, journal=j)
+    assert sc["edge_usd"] == 0.5
+    assert sc["beating_model"] is True
+    assert sc["edge_pct"] is not None
+    assert abs(sc["edge_pct"] - 0.00005) < 1e-12
+    text = format_scorecard_block(equity=1_000_001.0, journal=j, sc=sc)
+    assert "$0.5000 cash" in text
     assert "BEATING" in text
