@@ -360,12 +360,13 @@ class IBKRQueriesMixin:
                         except (TypeError, ValueError):
                             realized_pnl = None
 
-                out.append({
+                sec = getattr(contract, "secType", None) or "STK"
+                row = {
                     "ts": ts,
                     "exec_id": getattr(execution, "execId", None),
                     "order_id": getattr(execution, "orderId", None),
                     "symbol": getattr(contract, "symbol", None),
-                    "sec_type": getattr(contract, "secType", None) or "STK",
+                    "sec_type": sec,
                     "conId": getattr(contract, "conId", None),
                     "con_id": getattr(contract, "conId", None),
                     "side": getattr(execution, "side", None),
@@ -373,7 +374,19 @@ class IBKRQueriesMixin:
                     "price": getattr(execution, "price", None),
                     "commission": commission,
                     "realized_pnl": realized_pnl,
-                })
+                }
+                # BAG legs land as OPT fills — keep strike/right/exp for desk attach.
+                if str(sec).upper() in ("OPT", "FOP"):
+                    row["strike"] = getattr(contract, "strike", None)
+                    row["expiration"] = getattr(
+                        contract, "lastTradeDateOrContractMonth", None
+                    )
+                    row["right"] = getattr(contract, "right", None)
+                    local = getattr(contract, "localSymbol", None)
+                    if local:
+                        row["local_symbol"] = local
+                        row["localSymbol"] = local
+                out.append(row)
             return out
         except Exception as e:
             logger.error(f"Failed to get fills: {e}")

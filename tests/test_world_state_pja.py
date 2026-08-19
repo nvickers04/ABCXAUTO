@@ -623,6 +623,253 @@ def test_reconcile_book_drops_sold_lot_and_filled_order():
     assert orders == []
 
 
+def test_reconcile_bot_covers_short_lot():
+    pos, orders, rec = reconcile_book_with_fills(
+        [{"symbol": "SPY", "conId": "11", "quantity": -2, "secType": "OPT"}],
+        [{"order_id": 500, "symbol": "SPY"}],
+        [
+            {
+                "side": "BOT",
+                "conId": "11",
+                "quantity": 2,
+                "order_id": 500,
+                "ts": "2099-01-01T00:00:00+00:00",
+            }
+        ],
+    )
+    assert rec is True
+    assert pos == []
+    assert orders == []
+
+
+def test_reconcile_keeps_short_wing_after_opening_bag_sld():
+    """Opening SLD must not erase the short leg of a live debit vertical."""
+    long_leg = {
+        "symbol": "SPY",
+        "conId": "7701",
+        "quantity": 1,
+        "secType": "OPT",
+        "expiration": "20260828",
+        "strike": 770.0,
+        "right": "C",
+    }
+    short_leg = {
+        "symbol": "SPY",
+        "conId": "7711",
+        "quantity": -1,
+        "secType": "OPT",
+        "expiration": "20260828",
+        "strike": 771.0,
+        "right": "C",
+    }
+    fills = [
+        {
+            "side": "BOT",
+            "conId": "7701",
+            "quantity": 1,
+            "order_id": 3949,
+            "sec_type": "OPT",
+            "symbol": "SPY",
+            "expiration": "20260828",
+            "strike": 770.0,
+            "right": "C",
+            "price": 6.13,
+            "ts": "2099-01-01T00:00:00+00:00",
+        },
+        {
+            "side": "SLD",
+            "conId": "7711",
+            "quantity": 1,
+            "order_id": 3949,
+            "sec_type": "OPT",
+            "symbol": "SPY",
+            "expiration": "20260828",
+            "strike": 771.0,
+            "right": "C",
+            "price": 5.53,
+            "ts": "2099-01-01T00:00:00+00:00",
+        },
+    ]
+    pos, orders, rec = reconcile_book_with_fills(
+        [long_leg, short_leg],
+        [{"order_id": 3949, "symbol": "SPY", "sec_type": "BAG"}],
+        fills,
+    )
+    assert orders == []
+    assert rec is True
+    by_cid = {str(p.get("conId")): p for p in pos}
+    assert by_cid["7701"]["quantity"] == 1
+    assert by_cid["7711"]["quantity"] == -1
+    mix = structure_mix(pos)
+    assert mix["long_c"] == 1
+    assert mix["short_c"] == 1
+    assert mix["vert"] == 1
+
+
+def test_reconcile_attaches_missing_short_wing_from_bag_fills():
+    """Orphan long after BAG fill: paint the short wing from fills on that look."""
+    long_leg = {
+        "symbol": "SPY",
+        "conId": "7701",
+        "quantity": 1,
+        "secType": "OPT",
+        "expiration": "20260828",
+        "strike": 770.0,
+        "right": "C",
+    }
+    fills = [
+        {
+            "side": "BOT",
+            "conId": "7701",
+            "quantity": 1,
+            "order_id": 3949,
+            "sec_type": "OPT",
+            "symbol": "SPY",
+            "expiration": "20260828",
+            "strike": 770.0,
+            "right": "C",
+            "price": 6.13,
+            "ts": "2099-01-01T00:00:00+00:00",
+        },
+        {
+            "side": "SLD",
+            "conId": "7711",
+            "quantity": 1,
+            "order_id": 3949,
+            "sec_type": "OPT",
+            "symbol": "SPY",
+            "expiration": "20260828",
+            "strike": 771.0,
+            "right": "C",
+            "price": 5.53,
+            "ts": "2099-01-01T00:00:00+00:00",
+        },
+    ]
+    pos, _orders, rec = reconcile_book_with_fills([long_leg], [], fills)
+    assert rec is True
+    mix = structure_mix(pos)
+    assert mix["long_c"] == 1
+    assert mix["short_c"] == 1
+    assert mix["vert"] == 1
+    labels = lot_labels(pos)
+    assert any("770" in x and "long" in x for x in labels)
+    assert any("771" in x and "short" in x for x in labels)
+    assert single_leg_vertical_block(
+        "close_option", {"conId": 7701, "symbol": "SPY"}, pos
+    )
+    assert single_leg_vertical_block(
+        "vertical_spread",
+        {
+            "symbol": "SPY",
+            "expiration": "20260828",
+            "long_strike": 770.0,
+            "short_strike": 771.0,
+            "right": "C",
+            "quantity": 1,
+            "closing_position": True,
+            "limit_price": 0.55,
+        },
+        pos,
+    ) is None
+
+
+def test_reconcile_does_not_resurrect_closed_bag_from_fills_alone():
+    """Closing BAG fills must not invent a ghost inverted combo when flat."""
+    fills = [
+        {
+            "side": "SLD",
+            "conId": "7701",
+            "quantity": 1,
+            "order_id": 4001,
+            "sec_type": "OPT",
+            "symbol": "SPY",
+            "expiration": "20260828",
+            "strike": 770.0,
+            "right": "C",
+            "ts": "2099-01-01T00:00:00+00:00",
+        },
+        {
+            "side": "BOT",
+            "conId": "7711",
+            "quantity": 1,
+            "order_id": 4001,
+            "sec_type": "OPT",
+            "symbol": "SPY",
+            "expiration": "20260828",
+            "strike": 771.0,
+            "right": "C",
+            "ts": "2099-01-01T00:00:00+00:00",
+        },
+    ]
+    pos, _orders, rec = reconcile_book_with_fills([], [], fills)
+    assert pos == []
+    assert rec is False
+
+
+def test_build_world_state_bag_fill_shows_vert_same_look(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))
+    from abcxauto.memory import reset_journal
+
+    reset_journal(path=str(tmp_path / "j.db"), enabled=True)
+    snap = {
+        "taken_at": "2026-08-19T15:00:00Z",
+        "account": {"netliquidation": 100000, "dailypnl": 0},
+        "positions": [
+            {
+                "symbol": "SPY",
+                "conId": 7701,
+                "secType": "OPT",
+                "quantity": 1,
+                "expiration": "20260828",
+                "strike": 770.0,
+                "right": "C",
+                "avgCost": 6.13,
+                "market_price": 6.13,
+            }
+        ],
+        "open_orders": [],
+        "fills": [
+            {
+                "side": "BOT",
+                "conId": 7701,
+                "quantity": 1,
+                "order_id": 3949,
+                "sec_type": "OPT",
+                "symbol": "SPY",
+                "expiration": "20260828",
+                "strike": 770.0,
+                "right": "C",
+                "price": 6.13,
+                "ts": "2099-01-01T00:00:00+00:00",
+            },
+            {
+                "side": "SLD",
+                "conId": 7711,
+                "quantity": 1,
+                "order_id": 3949,
+                "sec_type": "OPT",
+                "symbol": "SPY",
+                "expiration": "20260828",
+                "strike": 771.0,
+                "right": "C",
+                "price": 5.53,
+                "ts": "2099-01-01T00:00:00+00:00",
+            },
+        ],
+        "protection": {"unprotected_symbols": []},
+        "reality_pulse": {"session": {"status": "regular"}},
+        "portfolio_state": {},
+    }
+    ws = build_world_state(cycle=4, snap=snap, opportunities=[], news_items=[])
+    d = ws.to_dict()
+    assert d["mix"]["vert"] == 1
+    assert d["mix"]["long_c"] == 1
+    assert d["mix"]["short_c"] == 1
+    assert any("771" in x and "short" in x for x in d["open_lots"])
+    assert ws.book_reconciled is True
+
+
 def test_build_world_state_regime_and_portfolio(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))
