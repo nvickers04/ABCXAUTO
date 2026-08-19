@@ -1,5 +1,7 @@
-"""Paper lab playbook — Grok writes the instructions; live only follows a promote.
+"""Paper lab playbook — Grok's notebook; live only follows a promote.
 
+Notebook is not executable, not a wake clock, not a standing order.
+Clerk validates writes against gates (floors / live / sleeve) like self_tune.
 Paper researches established structures, journals what beat model cost, and does those more.
 Live never copies paper fills. It may take new risk only after a promoted
 snapshot exists (scorecard beating + Grok marked ready). Operator still must
@@ -34,6 +36,26 @@ _DEAD_LAB_KEYS = (
     "evidence",
     "research_tools",
 )
+# Notebook is not self_tune. Same class of knobs self_tune rejects or clamps —
+# write_lab_playbook must not loosen floors, switch live, or set a dollar sleeve.
+_GATE_FORBIDDEN: dict[str, str] = {
+    "trading_mode": "live remains gated — notebook cannot switch mode",
+    "live_confirm": "live remains gated — notebook cannot switch mode",
+    "sizing_floors": "operator-only — notebook cannot flip sizing floors",
+    "ban_hold": "operator-only — notebook cannot flip hold ban",
+    "trading_budget_usd": "size and risk are % of NetLiq — no dollar sleeve",
+    "risk_posture": "risk_posture is locked — notebook cannot retune",
+    "daily_loss_limit_pct": "knobs are self_tune — notebook cannot retune risk",
+    "max_position_pct": "knobs are self_tune — notebook cannot retune risk",
+    "max_risk_per_trade_pct": "knobs are self_tune — notebook cannot retune risk",
+    "max_peak_drawdown_pct": "knobs are self_tune — notebook cannot retune risk",
+    "max_option_premium_pct": "knobs are self_tune — notebook cannot retune risk",
+    "max_open_positions": "knobs are self_tune — notebook cannot retune risk",
+    "risk_gates_enabled": "immutable floor — notebook cannot disable",
+    "auto_panic_on_breach": "immutable floor — notebook cannot disable",
+    "defined_risk_only": "immutable floor — notebook cannot disable",
+    "cash_only": "immutable floor — notebook cannot disable",
+}
 _STALE_H_DEFAULT = 1.0
 _CARD_WINDOWS = ("15m", "1h", "4h")
 
@@ -86,6 +108,11 @@ def _drop_dead_lab_keys(state: dict[str, Any]) -> dict[str, Any]:
     out = dict(state)
     for key in _DEAD_LAB_KEYS:
         out.pop(key, None)
+    for key in _GATE_FORBIDDEN:
+        out.pop(key, None)
+    out.pop("risk", None)
+    out.pop("universe", None)
+    out.pop("rejected", None)
     return out
 
 
@@ -112,8 +139,30 @@ def _field(raw: dict[str, Any], prev: dict[str, Any], key: str, default: str = "
     return str(prev.get(key) or default)
 
 
+def gate_rejects(raw: Any) -> dict[str, str]:
+    """Reject floors / live / sleeve knobs on a notebook write. Notes stay notes."""
+    if not isinstance(raw, dict):
+        return {}
+    rejected: dict[str, str] = {}
+    for key, reason in _GATE_FORBIDDEN.items():
+        if key in raw:
+            rejected[key] = reason
+    # Nested self_tune-shaped blobs are not notebook fields either.
+    for nest in ("risk", "universe"):
+        blob = raw.get(nest)
+        if nest in raw and isinstance(blob, dict):
+            rejected[nest] = "knobs are self_tune — notebook cannot retune"
+            for key, reason in _GATE_FORBIDDEN.items():
+                if key in blob:
+                    rejected[key] = reason
+    return rejected
+
+
 def clamp_update(raw: Any) -> dict[str, Any] | None:
-    """Full rewrite or patch. Omitted fields keep the previous lab text."""
+    """Full rewrite or patch. Omitted fields keep the previous lab text.
+
+    Gate knobs (floors / live / sleeve) are never stored — see gate_rejects.
+    """
     if not isinstance(raw, dict):
         return None
     if not any(k in raw for k in _PATCH_KEYS):
@@ -308,12 +357,22 @@ def live_new_risk_allowed() -> bool:
 
 
 def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Paper: persist Grok's playbook rewrite. Live: ignore writes."""
+    """Paper: persist Grok's notebook. Live: ignore writes.
+
+    Gate knobs in the payload are rejected (not applied). Notes still save.
+    """
     if not judgment or not is_paper():
         return None
     raw = judgment.get("lab_playbook") or judgment.get("playbook")
+    rejected = gate_rejects(raw)
     update = clamp_update(raw)
     if not update:
+        if rejected:
+            return {
+                "status": "rejected",
+                "rejected": rejected,
+                "note": "notebook cannot loosen gates",
+            }
         return None
     score = None
     try:
@@ -324,6 +383,11 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
         score = None
     state = save_lab(update, scorecard=score)
     maybe_promote(scorecard=score)
+    if rejected:
+        out = dict(state)
+        out["rejected"] = rejected
+        out["note"] = "notes saved; gate knobs ignored"
+        return out
     return state
 
 

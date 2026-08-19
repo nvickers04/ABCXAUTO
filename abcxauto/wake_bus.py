@@ -33,7 +33,8 @@ PULSE_S = 10.0
 DEFAULT_LOOK_S = 90.0
 DEFAULT_LOOK_OPEN_S = 60.0
 MIN_LOOK_S = 30.0
-PAPER_MAX_LOOK_S = 15 * 60.0
+# Paper RTH working look ceiling — not a hunt nap. Premarket/overnight may be longer.
+PAPER_MAX_LOOK_S = 10 * 60.0
 MTM_BUCKET_PCT = 8.0
 _last_wake = None
 
@@ -185,7 +186,7 @@ def paper_max_look_s() -> float:
 
 
 def _paper_sit_ceiling_s(*, session: str) -> float | None:
-    """Paper RTH, clerk not halted: cap the nap. Live / halted: none."""
+    """Paper RTH, clerk not halted: working-look ceiling. Live / halted / non-RTH: none."""
     try:
         from abcxauto.lab_playbook import is_paper
 
@@ -206,7 +207,7 @@ def _paper_sit_ceiling_s(*, session: str) -> float | None:
 
 
 def _floor_look_s(sec: float, *, session: str = "") -> float:
-    """Anti-hammer floor. Paper RTH adds a sit ceiling unless the clerk halted."""
+    """Min look floor + paper RTH working-look ceiling (same class as min floor)."""
     out = max(min_look_s(), float(sec))
     cap = _paper_sit_ceiling_s(session=session)
     if cap is not None:
