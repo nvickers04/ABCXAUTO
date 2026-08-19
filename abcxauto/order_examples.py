@@ -348,6 +348,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "Stock exits: target_conId + quantity (partial trim OK; omit qty = full). After trim check stop_qty_fact.",
         "close_option: prefer conId; quantity may be partial. roll_option for lifecycle.",
         "Option multi-leg / CSP: match param shapes below. "
+        "closing_position=true on a multi-leg ticket closes the live combo as one BAG. "
         "Algo/auction exits (vwap/twap/iceberg/adaptive/MOC/MOO/...) are sendable "
         "on protect/manage/hunt; closing_position required. "
         "defined_risk_only still rejects unlimited/naked shapes; cash-only still "

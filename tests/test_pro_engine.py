@@ -19,14 +19,7 @@ GOAL_SCRATCH = SCRATCH
 
 class _Cfg:
     xai_api_key = "test-key"
-    cycle_sleep_s = 0.05
-    grok_min_interval_s = 0.0
-    pace_protect_s = 0.05
-    pace_manage_s = 0.05
-    pace_idle_s = 0.05
-    signal_only = False
     monitor_enabled = True
-    trading_mandate = ""
     trading_mode = "paper"
     risk_posture = "balanced"
 
@@ -295,19 +288,12 @@ async def test_pro_engine_wires_portfolio_monitor(monkeypatch):
 
     class _MonCfg:
         xai_api_key = "test-key"
-        cycle_sleep_s = 0.05
-        grok_min_interval_s = 0.0
-        pace_protect_s = 0.05
-        pace_manage_s = 0.05
-        pace_idle_s = 0.05
-        signal_only = False
         monitor_enabled = True
         monitor_poll_s = 60
         monitor_review_s = 300
         monitor_extended_hours = False
         auto_panic_on_breach = True
         daily_loss_limit_pct = 2.0
-        trading_mandate = ""
 
     class _Conn:
         connected = True
@@ -407,11 +393,7 @@ async def test_connect_broker_no_cycles_without_xai(monkeypatch):
 
     class _NoXaiCfg:
         xai_api_key = ""
-        cycle_sleep_s = 0.05
-        grok_min_interval_s = 0.0
-        signal_only = False
         monitor_enabled = True
-        trading_mandate = ""
 
     class _Conn:
         connected = True

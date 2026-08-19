@@ -33,9 +33,7 @@ PULSE_S = 10.0
 DEFAULT_LOOK_S = 90.0
 DEFAULT_LOOK_OPEN_S = 60.0
 MIN_LOOK_S = 30.0
-MAX_LOOK_OPEN_S = 180.0
-MAX_LOOK_FLAT_S = 300.0
-MAX_LOOK_OFF_S = 900.0
+PAPER_MAX_LOOK_S = 15 * 60.0
 MTM_BUCKET_PCT = 8.0
 _last_wake = None
 
@@ -182,30 +180,38 @@ def min_look_s() -> float:
     return _env_float("ABCXAUTO_MIN_LOOK_S", MIN_LOOK_S, lo=5.0)
 
 
-def max_look_s(*, flat: bool | None = None, session: str = "") -> float:
-    raw = (os.environ.get("ABCXAUTO_MAX_LOOK_S") or "").strip()
-    if raw:
-        try:
-            return max(min_look_s(), float(raw))
-        except ValueError:
-            pass
-    sess = str(session or "").lower()
-    if sess == "regular" and flat is False:
-        return MAX_LOOK_OPEN_S
-    if sess == "regular":
-        return MAX_LOOK_FLAT_S
-    return MAX_LOOK_OFF_S
+def paper_max_look_s() -> float:
+    return _env_float("ABCXAUTO_PAPER_MAX_LOOK_S", PAPER_MAX_LOOK_S, lo=min_look_s())
 
 
-def _clamp_look_s(
-    sec: float,
-    *,
-    flat: bool | None = None,
-    session: str = "",
-) -> float:
-    lo = min_look_s()
-    hi = max(lo, max_look_s(flat=flat, session=session))
-    return max(lo, min(hi, sec))
+def _paper_sit_ceiling_s(*, session: str) -> float | None:
+    """Paper RTH, clerk not halted: cap the nap. Live / halted: none."""
+    try:
+        from abcxauto.lab_playbook import is_paper
+
+        if not is_paper():
+            return None
+    except Exception:
+        return None
+    if str(session or "").lower() != "regular":
+        return None
+    try:
+        from abcxauto.risk_gates import get_risk_gate
+
+        if get_risk_gate().is_halted:
+            return None
+    except Exception:
+        pass
+    return paper_max_look_s()
+
+
+def _floor_look_s(sec: float, *, session: str = "") -> float:
+    """Anti-hammer floor. Paper RTH adds a sit ceiling unless the clerk halted."""
+    out = max(min_look_s(), float(sec))
+    cap = _paper_sit_ceiling_s(session=session)
+    if cap is not None:
+        out = min(out, cap)
+    return out
 
 
 def ensure_next_look(
@@ -254,7 +260,7 @@ def set_wake(
             sec = (dt - _utc_now()).total_seconds()
     if sec is None:
         sec = default_look_s(flat=flat, session=session)
-    sec = _clamp_look_s(sec, flat=flat, session=session)
+    sec = _floor_look_s(sec, session=session)
     at = datetime.fromtimestamp(time.time() + sec, tz=timezone.utc).isoformat()
     ifs: list[str] = []
     if isinstance(wake_if, str):

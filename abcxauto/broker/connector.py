@@ -594,6 +594,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         self._reconnect_attempt: int = 0
         self._ibkr_data_stale: bool = False
         self._book_subs: Dict[int, Any] = {}
+        self._book_sub_live: set[int] = set()
 
         # Execution tracking - stores ALL fills with actual prices
         # Key: symbol, Value: list of execution records
@@ -770,6 +771,13 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         if symbols:
             self._pending_resubscribe.update(s.upper() for s in symbols)
         self._tickers.clear()
+        drop_rt = getattr(self, "abandon_realtime_bars", None)
+        if callable(drop_rt):
+            try:
+                drop_rt()
+            except Exception:
+                pass
+        self._clear_book_subs(cancel=False)
         self._connected = False
         cause = self._disconnect_cause
         if cause == DisconnectCause.USER_DISCONNECT.value:
@@ -1270,6 +1278,13 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
                     pass
             self._tickers.clear()
             self._cancel_account_pnl()
+            drop_rt = getattr(self, "abandon_realtime_bars", None)
+            if callable(drop_rt):
+                try:
+                    drop_rt()
+                except Exception:
+                    pass
+            self._clear_book_subs(cancel=True)
 
             self.ib.disconnect()
             self.connected = False
@@ -1552,10 +1567,31 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
 
     # ========== HEARTBEAT ==========
 
+    def _clear_book_subs(self, *, cancel: bool = False) -> None:
+        live = getattr(self, "_book_sub_live", None)
+        if not isinstance(live, set):
+            live = set()
+            self._book_sub_live = live
+        if cancel:
+            for cid, contract in list(self._book_subs.items()):
+                if cid not in live:
+                    continue
+                try:
+                    if contract is not None:
+                        self.ib.cancelMktData(contract)
+                except Exception:
+                    pass
+        self._book_subs.clear()
+        live.clear()
+
     async def ensure_book_ticks(self, positions: list | None) -> None:
         """Keep streaming ticks for open lots. Cancel only when the lot is gone."""
         if not self.connected or self.ib is None:
             return
+        live = getattr(self, "_book_sub_live", None)
+        if not isinstance(live, set):
+            live = set()
+            self._book_sub_live = live
         want: Dict[int, Any] = {}
         for p in positions or []:
             if not isinstance(p, dict):
@@ -1570,23 +1606,37 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         gone = [cid for cid in list(self._book_subs) if cid not in want]
         for cid in gone:
             contract = self._book_subs.pop(cid, None)
-            try:
-                if contract is not None:
-                    self.ib.cancelMktData(contract)
-            except Exception:
-                pass
+            if cid in live:
+                try:
+                    if contract is not None:
+                        self.ib.cancelMktData(contract)
+                except Exception:
+                    pass
+                live.discard(cid)
         for cid, p in want.items():
-            if cid in self._book_subs:
-                continue
-            try:
-                from ib_insync import Contract
+            c = self._book_subs.get(cid)
+            if c is None:
+                try:
+                    from ib_insync import Contract
 
-                c = Contract(conId=cid, exchange="SMART", currency="USD")
-                await self.ib.qualifyContractsAsync(c)
-                self.ib.reqMktData(c, "", False, False)
-                self._book_subs[cid] = c
-            except Exception:
-                logger.debug("book tick subscribe failed conId=%s", cid, exc_info=True)
+                    c = Contract(conId=cid, exchange="SMART", currency="USD")
+                    await self.ib.qualifyContractsAsync(c)
+                    self.ib.reqMktData(c, "", False, False)
+                    self._book_subs[cid] = c
+                    live.add(cid)
+                except Exception:
+                    logger.debug("book tick subscribe failed conId=%s", cid, exc_info=True)
+                    continue
+            sec = str(p.get("secType") or p.get("sec_type") or "").upper()
+            sym = str(p.get("symbol") or "").strip().upper()
+            start_rt = getattr(self, "start_realtime_bars", None)
+            if callable(start_rt) and sym and sec not in ("OPT", "FOP", "BAG"):
+                try:
+                    prepare = getattr(self, "_prepare_contract", None)
+                    stk = await prepare(sym) if callable(prepare) else None
+                    start_rt(sym, stk if stk is not None else c)
+                except Exception:
+                    logger.debug("book rt bars failed %s", sym, exc_info=True)
 
     def _heartbeat_interval_s(self) -> float:
         """Fast poll when unhealthy; slow when connected."""

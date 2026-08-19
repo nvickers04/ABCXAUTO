@@ -114,14 +114,59 @@ def test_set_wake_always_has_a_clock(tmp_path, monkeypatch):
     assert alarm.wake_if == ["fill"]
 
 
-def test_set_wake_clamps_long_nap_on_open_book(tmp_path, monkeypatch):
+def test_set_wake_paper_rth_caps_long_nap(tmp_path, monkeypatch):
+    from abcxauto.wake_bus import PAPER_MAX_LOOK_S, _parse_iso, _utc_now, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
+    alarm = set_wake(wake_in_s=150 * 60, session="regular", flat=True)
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    remaining = (at - _utc_now()).total_seconds()
+    assert PAPER_MAX_LOOK_S - 10 <= remaining <= PAPER_MAX_LOOK_S + 10
+
+
+def test_set_wake_live_honors_long_nap(tmp_path, monkeypatch):
     from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     alarm = set_wake(wake_in_s=3600, session="regular", flat=False)
     at = _parse_iso(alarm.wake_at or "")
     assert at is not None
-    assert (at - _utc_now()).total_seconds() <= 181
+    remaining = (at - _utc_now()).total_seconds()
+    assert 3590 <= remaining <= 3610
+
+
+def test_set_wake_paper_halted_honors_long_nap(tmp_path, monkeypatch):
+    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": True})(),
+    )
+    alarm = set_wake(wake_in_s=3600, session="regular", flat=True)
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    remaining = (at - _utc_now()).total_seconds()
+    assert 3590 <= remaining <= 3610
+
+
+def test_set_wake_floors_tiny_nap(tmp_path, monkeypatch):
+    from abcxauto.wake_bus import MIN_LOOK_S, _parse_iso, _utc_now, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    alarm = set_wake(wake_in_s=1, session="regular", flat=False)
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    remaining = (at - _utc_now()).total_seconds()
+    assert remaining >= MIN_LOOK_S - 1
 
 
 def test_book_move_wakes_on_mark_bucket(monkeypatch):

@@ -12,15 +12,18 @@ from abcxauto.trade_plan import (
 from abcxauto.world_state import (
     book_is_flat,
     build_world_state,
+    combo_partner,
     concentration,
     day_facts,
     format_wake,
+    format_working_exits,
     lot_ident,
     lot_labels,
     position_avg_facts,
     reconcile_book_with_fills,
-    reset_idle_streak,
+    single_leg_vertical_block,
     structure_mix,
+    vertical_partner,
 )
 
 
@@ -74,6 +77,80 @@ def test_structure_mix_counts_vertical():
     assert mix["long_c"] == 2
     assert mix["short_c"] == 1
     assert mix["vert"] == 1
+
+
+def test_vertical_partner_pairs_closest_opposite_wing():
+    long_leg = {
+        "symbol": "JPM",
+        "secType": "OPT",
+        "quantity": 1,
+        "expiration": "20260918",
+        "right": "C",
+        "strike": 370.0,
+        "conId": 1,
+    }
+    short_leg = {
+        "symbol": "JPM",
+        "secType": "OPT",
+        "quantity": -1,
+        "expiration": "20260918",
+        "right": "C",
+        "strike": 375.0,
+        "conId": 2,
+    }
+    lone = {
+        "symbol": "IWM",
+        "secType": "OPT",
+        "quantity": 1,
+        "expiration": "20260821",
+        "right": "C",
+        "strike": 306.0,
+        "conId": 3,
+    }
+    book = [long_leg, short_leg, lone]
+    assert vertical_partner(long_leg, book)["conId"] == 2
+    assert vertical_partner(short_leg, book)["conId"] == 1
+    assert vertical_partner(lone, book) is None
+    assert single_leg_vertical_block("close_option", {"conId": 1}, book)
+    assert single_leg_vertical_block("close_option", {"conId": 3}, book) is None
+    assert single_leg_vertical_block("vertical_spread", {"conId": 1}, book) is None
+
+
+def test_combo_partner_pairs_calendar_and_short_strangle_not_long_strangle():
+    near = {
+        "symbol": "SPY", "secType": "OPT", "quantity": -1,
+        "expiration": "20260718", "right": "C", "strike": 500.0, "conId": 11,
+    }
+    far = {
+        "symbol": "SPY", "secType": "OPT", "quantity": 1,
+        "expiration": "20260815", "right": "C", "strike": 500.0, "conId": 12,
+    }
+    short_p = {
+        "symbol": "IWM", "secType": "OPT", "quantity": -1,
+        "expiration": "20260821", "right": "P", "strike": 220.0, "conId": 21,
+    }
+    short_c = {
+        "symbol": "IWM", "secType": "OPT", "quantity": -1,
+        "expiration": "20260821", "right": "C", "strike": 230.0, "conId": 22,
+    }
+    long_p = {
+        "symbol": "QQQ", "secType": "OPT", "quantity": 1,
+        "expiration": "20260821", "right": "P", "strike": 560.0, "conId": 31,
+    }
+    long_c = {
+        "symbol": "QQQ", "secType": "OPT", "quantity": 1,
+        "expiration": "20260821", "right": "C", "strike": 580.0, "conId": 32,
+    }
+    cal = [near, far]
+    assert combo_partner(near, cal)["conId"] == 12
+    assert combo_partner(far, cal)["conId"] == 11
+    assert single_leg_vertical_block("close_option", {"conId": 11}, cal)
+    shorts = [short_p, short_c]
+    assert combo_partner(short_p, shorts)["conId"] == 22
+    assert single_leg_vertical_block("close_option", {"conId": 21}, shorts)
+    longs = [long_p, long_c]
+    assert combo_partner(long_p, longs) is None
+    assert single_leg_vertical_block("close_option", {"conId": 31}, longs) is None
 
 
 def test_concentration_flags_cloned_names():
@@ -193,6 +270,9 @@ def test_day_facts_carry_edge_and_clones():
     )
     assert day["beating_model"] is False
     assert day["edge_usd"] == -400.0
+    assert day["edge_meaning"] == "nl_vs_start_minus_model"
+    assert day["ibkr_daily_pnl"] == -80.0
+    assert day["open_upnl"] is None
     assert day["cloned"] == ["XLF"]
     assert day["names"] == 1
     assert day["lots"] == 2
@@ -216,6 +296,8 @@ def test_format_wake_includes_day_facts():
             "cloned": ["IWM", "XLE"],
             "edge_usd": -549.0,
             "daily_pnl": -95.0,
+            "open_upnl": -88.0,
+            "nl_vs_start": -500.0,
             "beating_model": False,
             "risk_per_trade_pct": 25.0,
             "open_lots": ["IWM 260821C306 x1", "QQQ 260821C735 x1"],
@@ -244,12 +326,17 @@ def test_format_wake_includes_day_facts():
     assert "cloned=IWM,XLE" not in text
     assert "cloned=" not in text
     assert "struct=" not in text
-    assert "edge=-549.0" in text
-    assert "dayPnL=-95.0" in text
+    assert "edge=-549.0" not in text
+    assert "dayPnL=" not in text
+    assert "edgeVsModel=-549.0" in text
+    assert "ibkrDay=-95.0" in text
+    assert "openU=-88.0" in text
+    assert "vsStart=-500.0(inception)" in text
     assert "beating=False" in text
     assert "risk/trade=25.0%" in text
     assert "open=8/15" in text
     assert "open_lots=IWM 260821C306 x1,QQQ 260821C735 x1" in text
+    assert "haltAt=" in text
     assert "playbook rev=51" in text
     assert "age=" not in text
     assert "at_write_edge=" not in text
@@ -264,6 +351,56 @@ def test_format_wake_includes_day_facts():
     assert "This is a delta" not in text
     assert "no operator" not in text.lower()
     assert "clerk wake" not in text.lower()
+
+
+def test_format_working_exits_and_wake_lasts():
+    orders = [
+        {
+            "order_id": 3878,
+            "symbol": "AAPL",
+            "secType": "STK",
+            "orderType": "STP",
+            "action": "SELL",
+            "quantity": 20,
+            "auxPrice": 305.5,
+            "conId": 1,
+        },
+        {
+            "order_id": 3879,
+            "symbol": "AAPL",
+            "secType": "STK",
+            "orderType": "LMT",
+            "action": "SELL",
+            "quantity": 20,
+            "lmtPrice": 317.0,
+            "conId": 1,
+        },
+    ]
+    positions = [{"symbol": "AAPL", "secType": "STK", "quantity": 20, "conId": 1}]
+    exits = format_working_exits(orders, positions)
+    assert "AAPL STP 305.5 oid 3878" in exits
+    assert "oid 3879" in exits
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "nl": 35221,
+            "daily_pnl": -370.0,
+            "halt_trips_at_usd": -704.0,
+            "open_lots": ["AAPL STK long 20 +0% pre"],
+            "lot_lasts": "AAPL last=310.72",
+            "working_exits": exits,
+            "candle_source": "ibkr_rt_5s",
+            "capacity": {"open_count": 1, "max_open_positions": 5},
+        },
+    )
+    assert "AAPL last=310.72" in text
+    assert "exits=" in text
+    assert "candles=ibkr_rt_5s" in text
+    assert "haltAt=-704.0" in text
 
 
 def test_format_wake_fill_is_delta_not_discovery():
@@ -290,6 +427,8 @@ def test_format_wake_fill_is_delta_not_discovery():
             day={
                 "nl": 35805,
                 "daily_pnl": -40.0,
+                "open_upnl": -12.0,
+                "nl_vs_start": -200.0,
                 "names": 3,
                 "lots": 11,
                 "open_lots": ["XLF 260828C58.5 x1 -42%", "QQQ 260918C745 x1"],
@@ -314,7 +453,10 @@ def test_format_wake_fill_is_delta_not_discovery():
     assert "Cycle 2." not in text
     assert "names=3" not in text
     assert "open_lots=XLF 260828C58.5 x1 -42%,QQQ 260918C745 x1" in text
-    assert "dayPnL=-40.0" in text
+    assert "dayPnL=" not in text
+    assert "ibkrDay=-40.0" in text
+    assert "openU=-12.0" in text
+    assert "edgeVsModel=" in text
 
 
 def test_daily_pnl_of_ignores_unrealized_and_keeps_zero():
@@ -323,6 +465,51 @@ def test_daily_pnl_of_ignores_unrealized_and_keeps_zero():
     assert daily_pnl_of({"dailypnl": 0.0, "unrealizedpnl": -800.0}) == 0.0
     assert daily_pnl_of({"DailyPnL": -12.5, "unrealizedpnl": 99.0}) == -12.5
     assert daily_pnl_of({"unrealizedpnl": -12.5}) is None
+
+
+def test_open_upnl_of_sums_lot_dollars_not_account_unrealized():
+    from abcxauto.world_state import open_upnl_of
+
+    assert open_upnl_of([]) is None
+    assert (
+        open_upnl_of(
+            [
+                {"symbol": "JPM", "unrealized_pnl": -64.0},
+                {"symbol": "JPM", "unrealizedPNL": 12.0},
+                {"symbol": "QQQ", "uPnL": -40.0},
+                {"symbol": "QQQ"},
+            ]
+        )
+        == -92.0
+    )
+    assert open_upnl_of([{"unrealized_pnl": 0.0}]) == 0.0
+
+
+def test_day_facts_open_upnl_is_not_edge():
+    world = type("W", (), {})()
+    world.positions = [
+        {"symbol": "JPM", "quantity": 1, "unrealized_pnl": -80.0},
+        {"symbol": "QQQ", "quantity": 1, "unrealized_pnl": -70.0},
+    ]
+    world.net_liquidation = 35279.0
+    world.daily_pnl = -315.0
+    world.capacity = {"open": 2, "max": 15}
+    day = day_facts(
+        world,
+        {
+            "beating_model": False,
+            "edge_usd": -1374.0,
+            "book_pnl": -1300.0,
+            "startup_cash": 36579.0,
+            "model_cost_usd": 74.0,
+        },
+    )
+    assert day["ibkr_daily_pnl"] == -315.0
+    assert day["open_upnl"] == -150.0
+    assert day["nl_vs_start"] == -1300.0
+    assert day["edge_usd"] == -1374.0
+    assert day["edge_meaning"] == "nl_vs_start_minus_model"
+    assert day["open_upnl"] != day["edge_usd"]
 
 
 def test_book_is_flat_false_when_working_order_or_pending_fill():
@@ -390,6 +577,20 @@ def test_compact_position_includes_mtm_pct():
     assert row.get("mtm_pct") == 25.0
 
 
+def test_compact_position_includes_upnl():
+    from abcxauto.world_state import compact_position
+
+    row = compact_position({
+        "symbol": "QQQ",
+        "secType": "OPT",
+        "quantity": 1,
+        "avgCost": 4.0,
+        "market_price": 5.0,
+        "unrealized_pnl": -41.5,
+    })
+    assert row.get("uPnL") == -41.5
+
+
 def test_option_avg_is_per_share_when_ibkr_sends_contract_cash():
     row = position_avg_facts({
         "secType": "OPT",
@@ -423,10 +624,8 @@ def test_reconcile_book_drops_sold_lot_and_filled_order():
 
 
 def test_build_world_state_regime_and_portfolio(tmp_path, monkeypatch):
-    monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))
-    reset_idle_streak()
     from abcxauto.memory import reset_journal
 
     reset_journal(path=str(tmp_path / "j.db"), enabled=True)
@@ -457,10 +656,8 @@ def test_build_world_state_regime_and_portfolio(tmp_path, monkeypatch):
 
 
 def test_prompt_block_includes_working_orders_and_avg(tmp_path, monkeypatch):
-    monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))
-    reset_idle_streak()
     from abcxauto.memory import reset_journal
 
     reset_journal(path=str(tmp_path / "j.db"), enabled=True)

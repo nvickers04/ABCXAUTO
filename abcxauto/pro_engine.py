@@ -896,7 +896,6 @@ class ProEngine:
                     pace = {
                         "tier": "pulse",
                         "sleep_s": pulse_sleep_s(alarm),
-                        "bypass_grok_min": True,
                         "reason": "watching",
                         "wake_reason": "",
                     }
@@ -964,7 +963,6 @@ class ProEngine:
                     pace = {
                         "tier": "event",
                         "sleep_s": pulse_sleep_s(load_alarm()),
-                        "bypass_grok_min": True,
                         "reason": ev.kind,
                         "wake_reason": ev.kind,
                     }

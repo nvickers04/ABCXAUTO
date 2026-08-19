@@ -207,7 +207,7 @@ async def test_max_open_positions_rejection(gate, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_max_daily_trades_removed_no_gate(gate, monkeypatch):
-    """Trade frequency is Controls process — no max_daily_trades hard gate."""
+    """Trade frequency is Grok's clock — no max_daily_trades hard gate."""
     monkeypatch.setattr(
         "abcxauto.risk_gates.get_config",
         lambda: _cfg(
@@ -668,6 +668,22 @@ def test_defined_risk_only_rejects_ratio_and_short_straddle(monkeypatch):
     )
     ok4, _ = check_defined_risk_only(vertical)
     assert ok4 is True
+
+    close_short = validate_proposal(
+        "straddle",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "strike": 500.0,
+            "quantity": 1,
+            "action": "SELL",
+            "closing_position": True,
+            "limit_price": 2.5,
+        },
+        RATIONALE,
+    )
+    ok_close, _ = check_defined_risk_only(close_short)
+    assert ok_close is True
 
 
 def test_estimate_notional_csp_and_option_limit():

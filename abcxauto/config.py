@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-# Risk tab only — capital survival. Never overlaps CONTROL_KEYS.
+# Risk capital knobs persisted in risk_settings.json.
 RISK_CONFIG_KEYS = frozenset({
     "risk_posture",
     "risk_gates_enabled",
@@ -29,7 +29,7 @@ RISK_CONFIG_KEYS = frozenset({
     "max_risk_per_trade_pct",
     "trading_budget_usd",
 })
-# Knobs Grok may retune via set_risk (clamped to capital envelope).
+# Knobs Grok may retune via self_tune (clamped to the walk-away floor).
 SET_RISK_KEYS = frozenset({
     "max_risk_per_trade_pct",
     "daily_loss_limit_pct",
@@ -37,63 +37,12 @@ SET_RISK_KEYS = frozenset({
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
 })
-# Book capacity only. Process % dials were unwired from send and are gone.
-CONTROL_KEYS = frozenset({
+# Book capacity. Disjoint from risk capital keys.
+CAPACITY_KEYS = frozenset({
     "max_open_positions",
 })
-# Persisted together in risk_settings.json but saved via disjoint APIs.
-PERSISTED_OPERATOR_KEYS = RISK_CONFIG_KEYS | CONTROL_KEYS
+PERSISTED_OPERATOR_KEYS = RISK_CONFIG_KEYS | CAPACITY_KEYS
 RISK_POSTURES = frozenset({"defensive", "balanced", "aggressive"})
-# Risk-only capital presets (never touch Controls / capacity / universe).
-_POSTURE_SEEDS: dict[str, dict[str, Any]] = {
-    "defensive": {
-        "max_risk_per_trade_pct": 0.75,
-        "daily_loss_limit_pct": 3.0,
-        "max_position_pct": 8.0,
-        "max_peak_drawdown_pct": 8.0,
-    },
-    "balanced": {
-        "max_risk_per_trade_pct": 1.5,
-        "daily_loss_limit_pct": 5.0,
-        "max_position_pct": 12.0,
-        "max_peak_drawdown_pct": 12.0,
-    },
-    "aggressive": {
-        "max_risk_per_trade_pct": 2.5,
-        "daily_loss_limit_pct": 8.0,
-        "max_position_pct": 18.0,
-        "max_peak_drawdown_pct": 20.0,
-    },
-}
-# (floor, ceiling) for agent-tunable capital knobs only.
-_POSTURE_ENVELOPES: dict[str, dict[str, tuple[float, float]]] = {
-    "defensive": {
-        "max_risk_per_trade_pct": (0.25, 25.0),
-        "daily_loss_limit_pct": (0.5, 25.0),
-        "max_position_pct": (2.0, 25.0),
-        "max_peak_drawdown_pct": (2.0, 25.0),
-        "max_option_premium_pct": (0.0, 25.0),
-    },
-    "balanced": {
-        "max_risk_per_trade_pct": (0.25, 25.0),
-        "daily_loss_limit_pct": (0.5, 25.0),
-        "max_position_pct": (2.0, 25.0),
-        "max_peak_drawdown_pct": (2.0, 25.0),
-        "max_option_premium_pct": (0.0, 25.0),
-    },
-    "aggressive": {
-        "max_risk_per_trade_pct": (0.25, 25.0),
-        "daily_loss_limit_pct": (0.5, 25.0),
-        "max_position_pct": (2.0, 25.0),
-        "max_peak_drawdown_pct": (2.0, 25.0),
-        "max_option_premium_pct": (0.0, 25.0),
-    },
-}
-_POSTURE_PROMPT_BIAS: dict[str, str] = {
-    "defensive": "Capital envelope: tight (code).",
-    "balanced": "Capital envelope: mid (code).",
-    "aggressive": "Capital envelope: wide (code).",
-}
 _runtime_overrides: dict[str, Any] = {}
 _file_overrides: dict[str, Any] = {}
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -305,7 +254,7 @@ def _read_risk_file(settings_path: Path) -> dict[str, Any]:
 
 
 def load_risk_settings(path: Path | None = None) -> dict[str, Any]:
-    """Load persisted Risk + Controls knobs from disk into ``_file_overrides``."""
+    """Load persisted risk + capacity knobs from disk into ``_file_overrides``."""
     global _file_overrides
     _file_overrides = _read_risk_file(path or _risk_settings_path())
     return dict(_file_overrides)
@@ -316,7 +265,7 @@ def save_risk_settings(
     *,
     path: Path | None = None,
 ) -> Path:
-    """Merge ``values`` into the on-disk settings file (Risk and/or Controls keys)."""
+    """Merge ``values`` into the on-disk settings file (risk and/or capacity keys)."""
     global _file_overrides
     settings_path = path or _risk_settings_path()
     current = _read_risk_file(settings_path)
@@ -375,10 +324,10 @@ get_config.cache_clear = _load_env_config.cache_clear  # type: ignore[attr-defin
 
 
 def update_risk_config(**kwargs: Any) -> Config:
-    """Apply Risk-tab capital overrides only (never Controls keys).
+    """Apply risk-capital overrides only (never capacity keys).
 
-    Pass ``persist=False`` for session-only. SET_RISK_KEYS clamped to posture
-    envelope when posture is set (unless ``_skip_clamp=True``).
+    Pass ``persist=False`` for session-only. SET_RISK_KEYS clamped to the
+    walk-away floor unless ``_skip_clamp=True``.
     """
     persist = bool(kwargs.pop("persist", True))
     skip_clamp = bool(kwargs.pop("_skip_clamp", False))
@@ -391,10 +340,9 @@ def update_risk_config(**kwargs: Any) -> Config:
         if key not in valid:
             raise ValueError(f"Unknown config field: {key}")
         cleaned[key] = _coerce_risk_value(key, value)
-    posture_for_clamp = cleaned.get("risk_posture")
     if not skip_clamp and SET_RISK_KEYS.intersection(cleaned):
         tunable = {k: cleaned[k] for k in list(cleaned) if k in SET_RISK_KEYS}
-        applied, _notes = clamp_risk_knobs(tunable, posture=posture_for_clamp)
+        applied, _notes = clamp_risk_knobs(tunable)
         cleaned.update(applied)
     _runtime_overrides.update(cleaned)
     if persist:
@@ -406,12 +354,12 @@ def update_risk_config(**kwargs: Any) -> Config:
     return get_config()
 
 
-def update_controls_config(**kwargs: Any) -> Config:
-    """Apply book-capacity overrides only (never Risk capital keys)."""
+def update_capacity_config(**kwargs: Any) -> Config:
+    """Apply book-capacity overrides only (never risk-capital keys)."""
     persist = bool(kwargs.pop("persist", True))
-    unknown = set(kwargs) - CONTROL_KEYS
+    unknown = set(kwargs) - CAPACITY_KEYS
     if unknown:
-        raise ValueError(f"Unknown controls config keys: {sorted(unknown)}")
+        raise ValueError(f"Unknown capacity config keys: {sorted(unknown)}")
     valid = {f.name for f in fields(Config)}
     cleaned: dict[str, Any] = {}
     for key, value in kwargs.items():
@@ -423,30 +371,9 @@ def update_controls_config(**kwargs: Any) -> Config:
         try:
             save_risk_settings(cleaned)
         except Exception:
-            logger.exception("Failed to persist controls settings")
+            logger.exception("Failed to persist capacity settings")
             raise
     return get_config()
-
-
-def posture_envelope(posture: str | None = None) -> dict[str, tuple[float, float]]:
-    """Floor/ceiling map for the effective posture (empty if none)."""
-    cfg = get_config()
-    p = resolve_effective_posture(
-        posture if posture is not None else cfg.risk_posture,
-        cfg.trading_mode,
-    )
-    if not p:
-        return {}
-    return dict(_POSTURE_ENVELOPES[p])
-
-
-def posture_prompt_bias(posture: str | None = None) -> str:
-    cfg = get_config()
-    p = resolve_effective_posture(
-        posture if posture is not None else cfg.risk_posture,
-        cfg.trading_mode,
-    )
-    return _POSTURE_PROMPT_BIAS.get(p, "")
 
 
 def clamp_risk_knobs(
@@ -454,17 +381,10 @@ def clamp_risk_knobs(
     *,
     posture: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Clamp SET_RISK_KEYS to posture envelope.
+    """Clamp SET_RISK_KEYS to the walk-away floor. ``posture`` is ignored."""
+    from abcxauto.self_tune import clamp_risk_to_floor
 
-    Returns ``(applied, notes)`` where notes map key → {raw, clamped}.
-    Without a posture, coerces types only (no envelope).
-    """
-    cfg = get_config()
-    p = resolve_effective_posture(
-        posture if posture is not None else cfg.risk_posture,
-        cfg.trading_mode,
-    )
-    env = _POSTURE_ENVELOPES.get(p, {})
+    _ = posture
     applied: dict[str, Any] = {}
     notes: dict[str, Any] = {}
     for key, value in values.items():
@@ -474,52 +394,13 @@ def clamp_risk_knobs(
             coerced = _coerce_risk_value(key, value)
         except (TypeError, ValueError):
             continue
-        if key in env:
-            lo, hi = env[key]
-            clamped = float(max(lo, min(hi, float(coerced))))
-            if clamped != coerced:
-                notes[key] = {"raw": coerced, "clamped": clamped}
-            applied[key] = clamped
-        else:
-            applied[key] = coerced
+        new_v, note = clamp_risk_to_floor(key, coerced)
+        if new_v is None:
+            continue
+        applied[key] = new_v
+        if note:
+            notes[key] = note
     return applied, notes
-
-
-def apply_risk_posture(
-    posture: str,
-    *,
-    persist: bool = True,
-) -> Config:
-    """Seed capital knobs, then clamp to the walk-away floor.
-
-    Operator UI no longer uses this. Kept for tests / emergency. Cannot weaken
-    daily-loss, size, defined-risk, or other floor gates.
-    """
-    p = _normalize_posture(posture)
-    if not p:
-        raise ValueError(
-            f"Unknown risk_posture {posture!r}; expected one of {sorted(RISK_POSTURES)}"
-        )
-    cfg = get_config()
-    effective = resolve_effective_posture(p, cfg.trading_mode)
-    if effective != p:
-        logger.info("Live clamp: risk_posture %s → %s", p, effective)
-    seed = dict(_POSTURE_SEEDS[effective])
-    from abcxauto.self_tune import clamp_risk_to_floor
-
-    clamped_seed: dict[str, Any] = {}
-    for key, value in seed.items():
-        new_v, _note = clamp_risk_to_floor(key, value)
-        clamped_seed[key] = new_v if new_v is not None else value
-    payload: dict[str, Any] = {
-        "risk_posture": "defensive",  # walk-away floor identity
-        "risk_gates_enabled": True,
-        "auto_panic_on_breach": True,
-        "defined_risk_only": True,
-        "cash_only": True,
-        **clamped_seed,
-    }
-    return update_risk_config(**payload, persist=persist, _skip_clamp=True)
 
 
 def set_risk_knobs(
@@ -534,17 +415,22 @@ def set_risk_knobs(
 
 
 def risk_envelope_snapshot() -> dict[str, Any]:
-    """UI / prompt: posture, effective posture, current knobs, envelope."""
+    """Current knobs + walk-away floor. Facts for book/status — not a lecture."""
+    from abcxauto.self_tune import RISK_FLOOR
+
     cfg = get_config()
     eff = resolve_effective_posture(cfg.risk_posture, cfg.trading_mode)
-    env = posture_envelope()
     current = {k: getattr(cfg, k) for k in sorted(SET_RISK_KEYS)}
+    envelope = {
+        k: {"floor": lo, "ceil": hi}
+        for k, (lo, hi) in RISK_FLOOR.items()
+        if k in SET_RISK_KEYS
+    }
     return {
         "risk_posture": cfg.risk_posture or "",
         "effective_risk_posture": eff,
-        "prompt_bias": posture_prompt_bias(),
         "current": current,
-        "envelope": {k: {"floor": lo, "ceil": hi} for k, (lo, hi) in env.items()},
+        "envelope": envelope,
         "live_clamped": bool(
             cfg.risk_posture == "aggressive" and eff == "balanced"
         ),
@@ -575,7 +461,7 @@ def risk_settings_path() -> Path:
 
 
 def risk_config_snapshot(*, reload: bool = False) -> dict[str, Any]:
-    """Current effective Risk + Controls knobs for Pro UI hydrate.
+    """Current effective risk + capacity knobs.
 
     Pass ``reload=True`` to re-read ``risk_settings.json`` from disk.
     """
@@ -585,11 +471,11 @@ def risk_config_snapshot(*, reload: bool = False) -> dict[str, Any]:
     return {k: getattr(cfg, k) for k in sorted(PERSISTED_OPERATOR_KEYS)}
 
 
-def controls_config_snapshot(*, reload: bool = False) -> dict[str, Any]:
+def capacity_config_snapshot(*, reload: bool = False) -> dict[str, Any]:
     if reload:
         load_risk_settings()
     cfg = get_config()
-    return {k: getattr(cfg, k) for k in sorted(CONTROL_KEYS)}
+    return {k: getattr(cfg, k) for k in sorted(CAPACITY_KEYS)}
 
 
 def set_trading_mode(mode: str, *, live_confirm: str = "") -> Config:

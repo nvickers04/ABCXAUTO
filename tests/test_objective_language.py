@@ -1,36 +1,9 @@
-"""Shell objectivity: banned taste phrases, features header."""
+"""Book/wake text: no Controls lecture, no old scan headers."""
 
 from __future__ import annotations
 
-from abcxauto.config import (
-    _POSTURE_PROMPT_BIAS,
-    get_config,
-    posture_prompt_bias,
-)
-from abcxauto.objective_language import (
-    BANNED_TASTE_PHRASES,
-    assert_no_banned_phrases,
-    find_banned_phrases,
-)
+from abcxauto.config import get_config
 from abcxauto.opportunity_scan import format_scan_tape, metrics_for_symbol
-
-
-def test_banned_list_nonempty():
-    assert len(BANNED_TASTE_PHRASES) >= 5
-
-
-def test_order_examples_have_no_banned_taste():
-    from abcxauto.order_examples import format_order_examples
-
-    text = format_order_examples()
-    assert_no_banned_phrases(text, label="order_examples")
-
-
-def test_posture_bias_has_no_banned_taste():
-    for p, text in _POSTURE_PROMPT_BIAS.items():
-        assert_no_banned_phrases(text, label=f"posture:{p}")
-        assert "envelope" in text.lower() or "code" in text.lower()
-    assert "envelope" in posture_prompt_bias("aggressive").lower()
 
 
 def test_scan_tape_header_and_quote_sources():
@@ -54,7 +27,6 @@ def test_scan_tape_header_and_quote_sources():
     assert "QUOTE SOURCES" in text or "IBKR" in text
     assert "heuristic_rank" not in text
     assert "MARKET FEATURES" not in text
-    assert_no_banned_phrases(text, label="scan_tape")
 
 
 def test_metrics_no_advice_note():
@@ -108,8 +80,6 @@ def test_book_facts_have_no_controls_lecture(tmp_path, monkeypatch):
         working_thesis="",
         recent_decisions=[],
         trade_plan=None,
-        idle_streak=0,
-        idle_top_symbol="",
     )
     blob = _book_payload(world)
     prompt = "\n".join(str(blob.get(k) or "") for k in ("world", "levers", "playbook"))
@@ -123,9 +93,7 @@ def test_book_facts_have_no_controls_lecture(tmp_path, monkeypatch):
     assert "floor" not in blob
     assert "operator_card" not in blob
     assert "QUOTE SOURCES" in prompt or "IBKR" in prompt
-    assert find_banned_phrases(prompt) == [] or all(
-        p not in prompt.lower() for p in ("prefer acting", "harvest", "mild bull")
-    )
+    assert "idle_streak" not in prompt
 
 
 def test_world_prompt_scan_tape_not_opportunities_header():
@@ -161,11 +129,11 @@ def test_world_prompt_scan_tape_not_opportunities_header():
         working_thesis="",
         recent_decisions=[],
         trade_plan=None,
-        idle_streak=0,
-        idle_top_symbol="",
     )
     block = world.prompt_block()
     assert "SCAN TAPE" in block
     assert "MARKET FEATURES" not in block
     assert "OPPORTUNITIES (" not in block
     assert "QUOTE SOURCES" in block
+    assert "daily close" in block.lower()
+    assert "idle_streak" not in block

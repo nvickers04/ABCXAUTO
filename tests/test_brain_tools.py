@@ -211,9 +211,211 @@ async def test_news_and_candles_are_labeled_delayed(monkeypatch):
     )
     assert candles["source"] == "mda"
     assert "delayed" in candles["freshness"]
+    assert candles["freshness"] == "delayed_daily"
+    assert candles["mda_last_is"] == "daily_bar_close"
     assert "backtest" in candles["use"]
     assert candles["symbol"] == "SPY"
     assert candles["bars"]
+
+
+@pytest.mark.asyncio
+async def test_scan_labels_daily_close_not_15m_last(monkeypatch):
+    async def fake_metrics(syms, cap=None):
+        return [
+            {
+                "symbol": "QQQ",
+                "source": "mda",
+                "freshness": "delayed_daily",
+                "bar": "D",
+                "mda_last": 729.9,
+                "mda_last_is": "daily_bar_close",
+            }
+        ]
+
+    monkeypatch.setattr("abcxauto.brain.fetch_scan_metrics", fake_metrics)
+    data = json.loads(
+        await _run_tool(
+            "scan",
+            {"symbols": ["QQQ"]},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["freshness"] == "delayed_daily"
+    assert data["bar"] == "D"
+    assert data["mda_last_is"] == "daily_bar_close"
+    assert data["tape"][0]["mda_last"] == 729.9
+    assert "last" not in data["tape"][0]
+
+
+@pytest.mark.asyncio
+async def test_candles_uses_ibkr_hist_when_connected():
+    class Conn:
+        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
+            return {
+                "symbol": symbol,
+                "bars": [{"t": "2026-08-18", "o": 1, "h": 2, "l": 0.5, "c": 768.5, "v": 1}],
+                "source": "ibkr",
+                "freshness": "ibkr_rth",
+            }
+
+        async def get_realtime_bars(self, symbol, **_k):
+            raise AssertionError("hist answered — do not open the 5s stream")
+
+    data = json.loads(
+        await _run_tool(
+            "candles",
+            {"symbol": "SPY", "resolution": "15", "countback": 20},
+            connector=Conn(),
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["source"] == "ibkr"
+    assert data["freshness"] == "ibkr_rth"
+    assert data["bars"][0]["c"] == 768.5
+
+
+@pytest.mark.asyncio
+async def test_candles_ibkr_error_when_hist_and_rt_miss(monkeypatch):
+    class Conn:
+        connected = True
+
+        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
+            return {"error": "no IBKR bars", "source": "ibkr", "symbol": symbol}
+
+        async def get_realtime_bars(self, symbol, **_k):
+            return {"error": "no IBKR realtime bars", "source": "ibkr", "symbol": symbol}
+
+    class MDA:
+        is_configured = True
+
+        async def get_stock_candles(self, symbol, resolution="D", countback=60, **_k):
+            raise AssertionError("MDA must not run when IBKR is connected")
+
+    monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
+    world = _world()
+    world.ibkr_live_quotes = {"SPY": 310.72}
+    data = json.loads(
+        await _run_tool(
+            "candles",
+            {"symbol": "SPY", "resolution": "D", "countback": 20},
+            connector=Conn(),
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["source"] == "ibkr"
+    assert data.get("error")
+    assert data.get("bars") in (None, [])
+    assert data["last"] == 310.72
+
+
+@pytest.mark.asyncio
+async def test_candles_skips_hist_when_rt_buffer_warm(monkeypatch):
+    class Conn:
+        def realtime_bar_buffer(self, symbol):
+            return [{"t": "2026-08-19T12:00:00", "c": 311.0}]
+
+        async def get_historical_bars(self, symbol, **_k):
+            raise AssertionError("hist must be skipped when the 5s buffer is warm")
+
+        async def get_realtime_bars(self, symbol, **_k):
+            return {
+                "symbol": symbol,
+                "bars": [{"t": "2026-08-19T12:00:00", "c": 311.0}],
+                "source": "ibkr",
+                "freshness": "ibkr_rt_5s",
+                "resolution": "5s",
+            }
+
+    class MDA:
+        async def get_stock_candles(self, *a, **k):
+            raise AssertionError("MDA must not run")
+
+    monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
+    data = json.loads(
+        await _run_tool(
+            "candles",
+            {"symbol": "AAPL", "resolution": "15"},
+            connector=Conn(),
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["source"] == "ibkr"
+    assert data["freshness"] == "ibkr_rt_5s"
+    assert data["bars"][0]["c"] == 311.0
+
+
+@pytest.mark.asyncio
+async def test_candles_uses_ibkr_rt_when_hist_fails(monkeypatch):
+    class Conn:
+        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
+            return {"error": "no IBKR bars", "source": "ibkr", "symbol": symbol}
+
+        async def get_realtime_bars(self, symbol, *, resolution="D", countback=60):
+            return {
+                "symbol": symbol,
+                "bars": [{"t": "2026-08-18T17:45:05", "o": 310.4, "h": 310.8, "l": 310.3, "c": 310.6, "v": 9}],
+                "source": "ibkr",
+                "freshness": "ibkr_rt_5s",
+                "resolution": "5s",
+                "requested_resolution": resolution,
+                "use": "live_5s_not_hist",
+            }
+
+    class MDA:
+        is_configured = True
+
+        async def get_stock_candles(self, symbol, resolution="D", countback=60, **_k):
+            raise AssertionError("MDA must not run when the IBKR 5s stream has bars")
+
+    monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
+    data = json.loads(
+        await _run_tool(
+            "candles",
+            {"symbol": "AAPL", "resolution": "15", "countback": 20},
+            connector=Conn(),
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["source"] == "ibkr"
+    assert data["freshness"] == "ibkr_rt_5s"
+    assert data["resolution"] == "5s"
+    assert data["requested_resolution"] == "15"
+    assert data["bars"][0]["c"] == 310.6
+
+
+@pytest.mark.asyncio
+async def test_candles_15_labeled_intrabar(monkeypatch):
+    class MDA:
+        is_configured = True
+
+        async def get_stock_candles(self, symbol, resolution="D", countback=60, **_k):
+            return [{"t": 1, "c": 717.5}]
+
+    monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
+    data = json.loads(
+        await _run_tool(
+            "candles",
+            {"symbol": "QQQ", "resolution": "15", "countback": 20},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["freshness"] == "delayed_15m"
+    assert data["mda_last_is"] == "intrabar_close"
+    assert data["resolution"] == "15"
 
 
 @pytest.mark.asyncio
@@ -432,6 +634,7 @@ async def test_playbook_tool_returns_current_and_ledger(tmp_path, monkeypatch):
     assert data["scope"] == "lab"
     assert "Standing notes" in data["current"]["instructions"]
     assert data["ledger"][0]["revision"] == 1
+    assert "instructions" not in data["ledger"][0]
     full = json.loads(
         await _run_tool(
             "playbook",
@@ -468,6 +671,9 @@ def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
     assert blob["levers"]["max_open_positions"]["min"] == 1
     assert "day" in blob
     assert "edge_usd" in blob["day"]
+    assert blob["day"]["edge_meaning"] == "nl_vs_start_minus_model"
+    assert "open_upnl" in blob["day"]
+    assert "ibkr_daily_pnl" in blob["day"]
     assert "cloned" in blob["day"]
     assert list(blob.keys())[0] == "day"
     assert "do_more" not in (blob.get("playbook") or {})
@@ -870,6 +1076,14 @@ def _tool_props(name: str) -> dict:
     elif hasattr(params, "model_dump"):
         params = params.model_dump()
     return dict((params or {}).get("properties") or {})
+
+
+def test_playbook_tools_are_a_notebook_not_a_form():
+    playbook = str(getattr(_tool_fn("playbook"), "description", "") or "")
+    write = str(getattr(_tool_fn("write_lab_playbook"), "description", "") or "")
+    assert "outcome" in playbook.lower()
+    assert "WHAT_WORKED" not in write
+    assert "next-look-you" in write
 
 
 def test_send_tool_says_one_ticket_per_call():

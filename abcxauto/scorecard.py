@@ -347,6 +347,74 @@ def compute_scorecard(
                 now=clock,
             )
 
+    session: dict[str, Any] | None = None
+    if journal is not None:
+        model_name = ""
+        try:
+            from abcxauto.config import get_config
+
+            model_name = str(getattr(get_config(), "model", "") or "")
+        except Exception:
+            model_name = ""
+        marker = None
+        try:
+            if hasattr(journal, "last_session_marker"):
+                marker = journal.last_session_marker()
+        except Exception:
+            marker = None
+        if (
+            isinstance(marker, dict)
+            and model_name
+            and str(marker.get("model") or "")
+            and str(marker.get("model") or "") != model_name
+        ):
+            marker = None
+        if isinstance(marker, dict) and marker.get("ts"):
+            start_nl = marker.get("net_liquidation")
+            start_ts = str(marker.get("ts") or "")
+            if start_nl is None:
+                try:
+                    if hasattr(journal, "nav_at_or_before"):
+                        start_nl, _ts = journal.nav_at_or_before(start_ts)
+                except Exception:
+                    start_nl = None
+            sess_usage = {
+                "calls": 0,
+                "cost_usd": 0.0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            }
+            try:
+                if hasattr(journal, "model_usage_since"):
+                    sess_usage = dict(journal.model_usage_since(start_ts) or sess_usage)
+            except Exception:
+                pass
+            fills = {"n": 0, "wins": 0, "sum": 0.0}
+            try:
+                if hasattr(journal, "closed_fill_stats_since"):
+                    fills = dict(journal.closed_fill_stats_since(start_ts) or fills)
+            except Exception:
+                pass
+            sess_pnl = None
+            if current is not None and start_nl is not None:
+                try:
+                    sess_pnl = float(current) - float(start_nl)
+                except (TypeError, ValueError):
+                    sess_pnl = None
+            sess_cost = float(sess_usage.get("cost_usd") or 0.0)
+            sess_edge = None if sess_pnl is None else (sess_pnl - sess_cost)
+            session = {
+                "model": marker.get("model") or model_name,
+                "started_at": start_ts,
+                "startup_nl": float(start_nl) if start_nl is not None else None,
+                "book_pnl": sess_pnl,
+                "model_cost_usd": sess_cost,
+                "model_calls": int(sess_usage.get("calls") or 0),
+                "edge_usd": sess_edge,
+                "fills": int(fills.get("n") or 0),
+                "wins": int(fills.get("wins") or 0),
+            }
+
     fastest_beating = None
     best_pace = None
     best_pace_val = None
@@ -380,6 +448,14 @@ def compute_scorecard(
         "windows": windows,
         "fastest_beating": fastest_beating,
         "best_pace": best_pace,
+        "since_start": {
+            "book_pnl": book_pnl,
+            "model_cost_usd": cost,
+            "edge_usd": edge,
+            "beating_model": beating,
+            "startup_cash": float(startup) if startup else None,
+        },
+        "session": session,
     }
 
 

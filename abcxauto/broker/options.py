@@ -28,6 +28,26 @@ from abcxauto.marketdata.provider import get_data_provider
 logger = logging.getLogger(__name__)
 
 
+def _flip_buy_sell(action: str) -> str:
+    return "SELL" if str(action or "BUY").upper() == "BUY" else "BUY"
+
+
+def _combo_close_limit(
+    closing: bool,
+    limit_price: Optional[float],
+    name: str,
+    order_type: Optional[str] = "LMT",
+) -> Tuple[Optional[float], Optional[Dict[str, Any]]]:
+    """Grok's close price. Do not invent one. MKT close is allowed if asked."""
+    if not closing:
+        return limit_price, None
+    if str(order_type or "LMT").upper() == "MKT":
+        return None, None
+    if limit_price is None:
+        return None, {"error": f"{name} close requires limit_price"}
+    return limit_price, None
+
+
 class IBKROptionsMixin:
     """
     Mixin class providing options chains and spread methods.
@@ -211,6 +231,52 @@ class IBKROptionsMixin:
                 'symbol': symbol,
                 'strategy': strategy_name,
                 'expiration': expiration,
+                'quantity': quantity,
+                'limit_price': limit_price,
+                'note': 'IBKR combo (BAG)',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:
+            logger.exception("%s BAG combo failed", strategy_name)
+            return {'error': f'{strategy_name} combo failed: {exc}', 'symbol': symbol}
+
+    async def _place_combo_bag(
+        self,
+        symbol: str,
+        legs: List[Tuple[str, float, str, str, int]],
+        quantity: int,
+        combo_action: str,
+        limit_price: Optional[float],
+        strategy_name: str,
+    ) -> Dict[str, Any]:
+        """One BAG. Each leg is (expiration, strike, right, action, ratio)."""
+        if not await self._ensure_connected():
+            return {'error': 'Not connected'}
+        try:
+            built = []
+            for exp, strike, right, action, ratio in legs:
+                opts = await self._create_options(symbol, exp, [(strike, right)])
+                built.append((opts[0].conId, ratio, action))
+            combo = self._build_combo(symbol, built)
+            order = Order()
+            order.action = combo_action
+            order.totalQuantity = quantity
+            order.orderType = 'LMT' if limit_price is not None else 'MKT'
+            if limit_price is not None:
+                order.lmtPrice = float(limit_price)
+            order.tif = 'DAY'
+            order.transmit = True
+            trade = self.ib.placeOrder(combo, order)
+            rejection = await self._check_order_rejection(trade, strategy_name, symbol)
+            if rejection:
+                return rejection
+            return {
+                'success': True,
+                'order_id': trade.order.orderId,
+                'order_ids': [trade.order.orderId],
+                'symbol': symbol,
+                'strategy': strategy_name,
+                'expiration': legs[0][0] if legs else None,
                 'quantity': quantity,
                 'limit_price': limit_price,
                 'note': 'IBKR combo (BAG)',
@@ -454,11 +520,13 @@ class IBKROptionsMixin:
 
     async def place_vertical_spread(
         self, symbol: str, expiration: str, long_strike: float, short_strike: float,
-        right: str, quantity: int = 1, order_type: str = 'LMT', limit_price: float = None
+        right: str, quantity: int = 1, order_type: str = 'LMT', limit_price: float = None,
+        closing_position: bool = False,
     ) -> Dict[str, Any]:
         """
         Place a vertical spread (bull/bear call or put spread).
         Bull = long_strike < short_strike, Bear = long_strike > short_strike
+        closing_position flips the combo action so a live debit is sold as BAG.
         """
         # ── Riskless spread guard (fail-closed) ──────────────
         riskless_err = await self._check_riskless_spread(symbol, long_strike, short_strike, right)
@@ -474,15 +542,22 @@ class IBKROptionsMixin:
             (right == 'P' and long_strike < short_strike)
         )
         combo_action = 'SELL' if is_credit else 'BUY'
+        if closing_position:
+            combo_action = _flip_buy_sell(combo_action)
 
-        # Avoid Guaranteed-to-Lose rejections (Error 201) by ensuring reasonable prices
         width = abs(long_strike - short_strike)
-        if limit_price is None:
-            limit_price = round(width * 0.3, 2) if is_credit else round(width * 0.6, 2)
-        elif is_credit and limit_price < 0.05:
-            limit_price = 0.05  # min credit to avoid rejection
-        elif not is_credit and limit_price > width - 0.05:
-            limit_price = round(width * 0.5, 2)
+        limit_price, err = _combo_close_limit(
+            closing_position, limit_price, "vertical_spread", order_type
+        )
+        if err:
+            return err
+        if not closing_position:
+            if limit_price is None:
+                limit_price = round(width * 0.3, 2) if is_credit else round(width * 0.6, 2)
+            elif is_credit and limit_price < 0.05:
+                limit_price = 0.05  # min credit to avoid rejection
+            elif not is_credit and limit_price > width - 0.05:
+                limit_price = round(width * 0.5, 2)
 
         result = await self._place_combo_order(
             symbol, expiration,
@@ -499,11 +574,19 @@ class IBKROptionsMixin:
         self, symbol: str, expiration: str,
         put_long_strike: float, put_short_strike: float,
         call_short_strike: float, call_long_strike: float,
-        quantity: int = 1, limit_price: float = None
+        quantity: int = 1, limit_price: float = None,
+        closing_position: bool = False,
     ) -> Dict[str, Any]:
         """Place an Iron Condor. Profit if underlying stays between short strikes."""
         if not (put_long_strike < put_short_strike < call_short_strike < call_long_strike):
             return {'error': 'Invalid strike order: put_long < put_short < call_short < call_long'}
+
+        combo_action = _flip_buy_sell('SELL') if closing_position else 'SELL'
+        limit_price, err = _combo_close_limit(
+            closing_position, limit_price, "iron_condor"
+        )
+        if err:
+            return err
 
         result = await self._place_combo_order(
             symbol, expiration,
@@ -513,7 +596,7 @@ class IBKROptionsMixin:
                 (call_short_strike, 'C', 'SELL', 1),
                 (call_long_strike, 'C', 'BUY', 1),
             ],
-            quantity, 'SELL', limit_price, 'Iron Condor'
+            quantity, combo_action, limit_price, 'Iron Condor'
         )
         if 'success' in result:
             width = min(put_short_strike - put_long_strike, call_long_strike - call_short_strike)
@@ -530,9 +613,16 @@ class IBKROptionsMixin:
 
     async def place_iron_butterfly(
         self, symbol: str, expiration: str, center_strike: float, wing_width: float,
-        quantity: int = 1, limit_price: float = None
+        quantity: int = 1, limit_price: float = None,
+        closing_position: bool = False,
     ) -> Dict[str, Any]:
         """Place an Iron Butterfly (ATM). Max profit at center strike."""
+        combo_action = _flip_buy_sell('SELL') if closing_position else 'SELL'
+        limit_price, err = _combo_close_limit(
+            closing_position, limit_price, "iron_butterfly"
+        )
+        if err:
+            return err
         result = await self._place_combo_order(
             symbol, expiration,
             [
@@ -541,7 +631,7 @@ class IBKROptionsMixin:
                 (center_strike, 'C', 'SELL', 1),
                 (center_strike + wing_width, 'C', 'BUY', 1),
             ],
-            quantity, 'SELL', limit_price, 'Iron Butterfly'
+            quantity, combo_action, limit_price, 'Iron Butterfly'
         )
         if 'success' in result:
             result.update({'center_strike': center_strike, 'wing_width': wing_width})
@@ -551,14 +641,19 @@ class IBKROptionsMixin:
 
     async def place_straddle(
         self, symbol: str, expiration: str, strike: float,
-        quantity: int = 1, action: str = 'BUY', limit_price: float = None
+        quantity: int = 1, action: str = 'BUY', limit_price: float = None,
+        closing_position: bool = False,
     ) -> Dict[str, Any]:
         """Place a Straddle (ATM call + put at same strike)."""
         strategy = 'Long Straddle' if action == 'BUY' else 'Short Straddle'
+        combo_action = _flip_buy_sell(action) if closing_position else action
+        limit_price, err = _combo_close_limit(closing_position, limit_price, "straddle")
+        if err:
+            return err
         result = await self._place_combo_order(
             symbol, expiration,
             [(strike, 'C', action, 1), (strike, 'P', action, 1)],
-            quantity, 'BUY', limit_price, strategy
+            quantity, combo_action, limit_price, strategy
         )
         if 'success' in result:
             result['strike'] = strike
@@ -568,17 +663,22 @@ class IBKROptionsMixin:
 
     async def place_strangle(
         self, symbol: str, expiration: str, put_strike: float, call_strike: float,
-        quantity: int = 1, action: str = 'BUY', limit_price: float = None
+        quantity: int = 1, action: str = 'BUY', limit_price: float = None,
+        closing_position: bool = False,
     ) -> Dict[str, Any]:
         """Place a Strangle (OTM call + OTM put at different strikes)."""
         if put_strike >= call_strike:
             return {'error': 'Put strike must be below call strike'}
 
         strategy = 'Long Strangle' if action == 'BUY' else 'Short Strangle'
+        combo_action = _flip_buy_sell(action) if closing_position else action
+        limit_price, err = _combo_close_limit(closing_position, limit_price, "strangle")
+        if err:
+            return err
         result = await self._place_combo_order(
             symbol, expiration,
             [(call_strike, 'C', action, 1), (put_strike, 'P', action, 1)],
-            quantity, 'BUY', limit_price, strategy
+            quantity, combo_action, limit_price, strategy
         )
         if 'success' in result:
             result.update({'put_strike': put_strike, 'call_strike': call_strike})
@@ -589,10 +689,17 @@ class IBKROptionsMixin:
     async def place_butterfly(
         self, symbol: str, expiration: str,
         lower_strike: float, middle_strike: float, upper_strike: float,
-        right: str = 'C', quantity: int = 1, limit_price: float = None
+        right: str = 'C', quantity: int = 1, limit_price: float = None,
+        closing_position: bool = False,
     ) -> Dict[str, Any]:
         """Place a Butterfly spread. Max profit at middle strike."""
         strategy = f"{'Call' if right == 'C' else 'Put'} Butterfly"
+        combo_action = _flip_buy_sell('BUY') if closing_position else 'BUY'
+        limit_price, err = _combo_close_limit(
+            closing_position, limit_price, "butterfly"
+        )
+        if err:
+            return err
         result = await self._place_combo_order(
             symbol, expiration,
             [
@@ -600,7 +707,7 @@ class IBKROptionsMixin:
                 (middle_strike, right, 'SELL', 2),
                 (upper_strike, right, 'BUY', 1),
             ],
-            quantity, 'BUY', limit_price, strategy
+            quantity, combo_action, limit_price, strategy
         )
         if 'success' in result:
             result.update({'lower_strike': lower_strike, 'middle_strike': middle_strike, 'upper_strike': upper_strike})
@@ -610,84 +717,66 @@ class IBKROptionsMixin:
 
     async def place_calendar_spread(
         self, symbol: str, strike: float, near_expiration: str, far_expiration: str,
-        right: str = 'C', quantity: int = 1, limit_price: float = None
+        right: str = 'C', quantity: int = 1, limit_price: float = None,
+        closing_position: bool = False,
     ) -> Dict[str, Any]:
-        """Place a Calendar Spread (same strike, different expirations) as individual legs."""
-        if not await self._ensure_connected():
-            return {'error': 'Not connected'}
-
+        """Place a Calendar Spread (same strike, different expirations) as one BAG."""
         strategy = f"{'Call' if right == 'C' else 'Put'} Calendar"
-        order_ids = []
-        errors = []
-
-        # Sell near, buy far
-        for exp, action, label in [(near_expiration, 'SELL', 'near'), (far_expiration, 'BUY', 'far')]:
-            result = await self._place_single_option(
-                symbol, exp, strike, right, action, quantity,
-                strategy_name=f'{strategy} {label} leg',
-            )
-            if result.get('success'):
-                order_ids.append(result['order_id'])
-            else:
-                errors.append(f"{label}: {result.get('error', 'unknown')}")
-
-        if order_ids:
-            logger.info(f"{strategy}: {symbol} {strike} {near_expiration}/{far_expiration} x{quantity}")
-            return {
-                'success': True, 'order_ids': order_ids, 'symbol': symbol,
-                'strategy': f'{strategy} (individual legs)', 'strike': strike,
-                'near_expiration': near_expiration, 'far_expiration': far_expiration,
-                'quantity': quantity, 'errors': errors if errors else None,
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-        return {'error': f'{strategy} failed: {"; ".join(errors)}', 'symbol': symbol}
+        combo_action = _flip_buy_sell('BUY') if closing_position else 'BUY'
+        limit_price, err = _combo_close_limit(
+            closing_position, limit_price, "calendar_spread"
+        )
+        if err:
+            return err
+        result = await self._place_combo_bag(
+            symbol,
+            [
+                (near_expiration, strike, right, 'SELL', 1),
+                (far_expiration, strike, right, 'BUY', 1),
+            ],
+            quantity, combo_action, limit_price, strategy,
+        )
+        if result.get('success'):
+            result.update({
+                'strike': strike,
+                'near_expiration': near_expiration,
+                'far_expiration': far_expiration,
+            })
+        return result
 
     # ========== DIAGONAL SPREAD ==========
 
     async def place_diagonal_spread(
         self, symbol: str, near_strike: float, far_strike: float,
         near_expiration: str, far_expiration: str,
-        right: str = 'C', quantity: int = 1, limit_price: float = None
+        right: str = 'C', quantity: int = 1, limit_price: float = None,
+        closing_position: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Place a Diagonal Spread (different strikes AND expirations).
-        
-        Sells the near-term option and buys the far-term option at a different strike.
-        Bullish diagonal: far_strike > near_strike (calls), Bearish: far_strike < near_strike
-        """
-        if not await self._ensure_connected():
-            return {'error': 'Not connected'}
-
+        """Place a Diagonal Spread (different strikes AND expirations) as one BAG."""
         direction = "Bullish" if (right == 'C' and far_strike > near_strike) or (right == 'P' and far_strike < near_strike) else "Bearish"
         strategy = f"{direction} {'Call' if right == 'C' else 'Put'} Diagonal"
-        order_ids = []
-        errors = []
-
-        # Sell near, buy far
-        for exp, strike, action, label in [
-            (near_expiration, near_strike, 'SELL', 'near'),
-            (far_expiration, far_strike, 'BUY', 'far'),
-        ]:
-            result = await self._place_single_option(
-                symbol, exp, strike, right, action, quantity,
-                strategy_name=f'{strategy} {label} leg',
-            )
-            if result.get('success'):
-                order_ids.append(result['order_id'])
-            else:
-                errors.append(f"{label}: {result.get('error', 'unknown')}")
-
-        if order_ids:
-            logger.info(f"{strategy}: {symbol} {near_strike}/{far_strike} {near_expiration}/{far_expiration} x{quantity}")
-            return {
-                'success': True, 'order_ids': order_ids, 'symbol': symbol,
-                'strategy': f'{strategy} (individual legs)',
-                'near_strike': near_strike, 'far_strike': far_strike,
-                'near_expiration': near_expiration, 'far_expiration': far_expiration,
-                'quantity': quantity, 'errors': errors if errors else None,
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-        return {'error': f'{strategy} failed: {"; ".join(errors)}', 'symbol': symbol}
+        combo_action = _flip_buy_sell('BUY') if closing_position else 'BUY'
+        limit_price, err = _combo_close_limit(
+            closing_position, limit_price, "diagonal_spread"
+        )
+        if err:
+            return err
+        result = await self._place_combo_bag(
+            symbol,
+            [
+                (near_expiration, near_strike, right, 'SELL', 1),
+                (far_expiration, far_strike, right, 'BUY', 1),
+            ],
+            quantity, combo_action, limit_price, strategy,
+        )
+        if result.get('success'):
+            result.update({
+                'near_strike': near_strike,
+                'far_strike': far_strike,
+                'near_expiration': near_expiration,
+                'far_expiration': far_expiration,
+            })
+        return result
 
     # ========== BUY OPTION (Long Call/Put) ==========
 

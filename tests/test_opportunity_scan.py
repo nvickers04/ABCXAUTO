@@ -1,7 +1,6 @@
 """SCAN TAPE metrics + prompt formatting."""
 
 from abcxauto.config import (
-    apply_risk_posture,
     clear_risk_settings,
     clear_runtime_overrides,
     get_config,
@@ -52,7 +51,9 @@ def test_metrics_no_score_no_index_bump():
     assert idea["symbol"] == "SPY"
     assert "score" not in idea
     assert idea["source"] == "mda"
-    assert idea["freshness"] == "delayed"
+    assert idea["freshness"] == "delayed_daily"
+    assert idea["bar"] == "D"
+    assert idea["mda_last_is"] == "daily_bar_close"
     assert "dist20" in idea
     spy = metrics_for_symbol(_uptrend_candles(), "SPY")
     aapl = metrics_for_symbol(_uptrend_candles(), "AAPL")
@@ -99,7 +100,8 @@ def test_format_scan_tape():
     )
     assert "SCAN TAPE" in text
     assert "QQQ" in text
-    assert "delayed" in text.lower()
+    assert "daily close" in text.lower()
+    assert "not 15m" in text.lower() or "not a 15m" in text.lower()
     assert "not live" in text.lower() or "IBKR" in text
     assert "heuristic_rank" not in text
     assert "MARKET FEATURES" not in text
@@ -107,6 +109,24 @@ def test_format_scan_tape():
 
 def test_format_opportunities_alias():
     assert "none" in format_opportunities([]).lower()
+
+
+def test_mda_bar_freshness_daily_vs_intraday():
+    from abcxauto.opportunity_scan import mda_bar_freshness, mda_last_kind
+
+    assert mda_bar_freshness("D") == "delayed_daily"
+    assert mda_last_kind("D") == "daily_bar_close"
+    assert mda_bar_freshness("15") == "delayed_15m"
+    assert mda_last_kind("15") == "intrabar_close"
+
+
+def test_metrics_intraday_not_daily_close():
+    idea = metrics_for_symbol(_uptrend_candles(), "QQQ", resolution="15")
+    assert idea is not None
+    assert idea["freshness"] == "delayed_15m"
+    assert idea["bar"] == "15"
+    assert idea["mda_last_is"] == "intrabar_close"
+    assert idea["mda_last_t"] == 59
 
 
 def test_dismiss_cites_tape():
@@ -122,7 +142,6 @@ def test_prompt_includes_scan_tape_and_quote_sources(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     clear_risk_settings(path=path)
     load_risk_settings(path)
-    apply_risk_posture("balanced", persist=True)
 
     world = WorldState(
         cycle=1,
@@ -157,11 +176,10 @@ def test_prompt_includes_scan_tape_and_quote_sources(tmp_path, monkeypatch):
         working_thesis="",
         recent_decisions=[],
         trade_plan=None,
-        idle_streak=0,
-        idle_top_symbol="",
     )
     prompt = world.prompt_block()
     assert "SCAN TAPE" in prompt
     assert "QUOTE SOURCES" in prompt
     assert "AAPL" in prompt
+    assert "daily close" in prompt.lower()
     assert "MARKET FEATURES" not in prompt

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -190,17 +191,14 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     from abcxauto.agent_loop import run_cycle
 
     monkeypatch.setenv("ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "ev.jsonl"))
-    monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "rev.json"))
 
     from abcxauto.memory import reset_journal
-    from abcxauto.world_state import reset_idle_streak
 
     reset_journal(path=str(tmp_path / "j.db"), enabled=True)
-    reset_idle_streak()
 
     async def _tool(_c, name, _a=None):
         return {
@@ -260,17 +258,14 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
-            trading_mandate="x",
             trading_mode="paper",
             risk_posture="aggressive",
-            grok_min_interval_s=0,
-            signal_only=False,
         ),
     )
     monkeypatch.setattr(
         "abcxauto.world_state.get_config",
         lambda: SimpleNamespace(
-            trading_mandate="x", trading_mode="paper", risk_posture="aggressive",
+            trading_mode="paper", risk_posture="aggressive",
         ),
     )
     monkeypatch.setattr(

@@ -73,6 +73,8 @@ def check_defined_risk_only(proposal: OrderProposal) -> Tuple[bool, str]:
     cfg = get_config()
     if not getattr(cfg, "defined_risk_only", False):
         return True, "defined_risk_off"
+    if getattr(proposal.params, "closing_position", False):
+        return True, "closing"
     strat = str(proposal.strategy or "")
     if strat in _DEFINED_RISK_FORBIDDEN:
         return False, (

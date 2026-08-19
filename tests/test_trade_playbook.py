@@ -34,8 +34,6 @@ def _world(**kwargs) -> WorldState:
         working_thesis="",
         recent_decisions=[],
         trade_plan=None,
-        idle_streak=0,
-        idle_top_symbol="",
     )
     base.update(kwargs)
     return WorldState(**base)

@@ -229,8 +229,6 @@ def test_world_prompt_includes_option_facts():
         working_thesis="",
         recent_decisions=[],
         trade_plan=None,
-        idle_streak=0,
-        idle_top_symbol="",
         option_facts=[
             {
                 "conId": 1,

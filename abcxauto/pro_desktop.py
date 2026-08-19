@@ -63,6 +63,7 @@ class ProTerminal:
         self.lbl_tools = ft.Text("Tools: —", size=12, color=MUTED, selectable=True)
         self.lbl_playbook = ft.Text("Playbook: —", size=12, color=MUTED, selectable=True)
         self.lbl_score = ft.Text("Score: —", size=12, color=MUTED, selectable=True)
+        self.lbl_session_score = ft.Text("sess —", size=12, color=MUTED, selectable=True)
         self._score_last = 0.0
         self.lbl_account_name = ft.Text("IBKR", size=12, weight=ft.FontWeight.W_600, color=TEXT)
         self.lbl_account_id = ft.Text("Not connected", size=11, color=MUTED)
@@ -99,6 +100,10 @@ class ProTerminal:
         self.lbl_book_halt = self.lbl_halt
         self.lbl_edge = ft.Text("—", size=16, weight=ft.FontWeight.W_600, color=MUTED)
         self.lbl_edge_sub = ft.Text("vs model", size=11, color=MUTED)
+        self.lbl_open_upnl = ft.Text("—", size=16, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_open_upnl_sub = ft.Text("open marks", size=11, color=MUTED)
+        self.lbl_desk = ft.Text("Grok off", size=16, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_desk_sub = ft.Text("", size=11, color=MUTED)
         self.lbl_lot_count = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
         self.lbl_next_look = ft.Text("—", size=16, weight=ft.FontWeight.W_600, color=MUTED)
         self.lbl_next_look_sub = ft.Text("", size=11, color=MUTED)
@@ -197,6 +202,27 @@ class ProTerminal:
         self.btn_run = self._btn("Start", filled=True, on_click=self._toggle_run)
         self.btn_halt = self._btn("Halt", outlined=True, on_click=self._toggle_halt)
         self.btn_refresh = self._btn("Refresh book", outlined=True, on_click=self._refresh_book)
+        self.lbl_run_state = ft.Text("Grok off", size=12, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_alert = ft.Text("", size=12, color=RED, selectable=True, visible=False)
+        self._hidden_metrics = ft.Column(
+            [
+                self.lbl_mix,
+                self.lbl_score,
+                self.lbl_path,
+                self.lbl_pace,
+                self.lbl_playbook,
+                self.lbl_risk,
+                self.lbl_tools,
+                self.lbl_result,
+                self.lbl_why,
+                self.lbl_focus,
+                self.lbl_edge,
+                self.lbl_edge_sub,
+                self.lbl_unprotected,
+            ],
+            visible=False,
+            spacing=0,
+        )
 
     def _tab_chip(self, key: str, label: str) -> dict[str, Any]:
         text = ft.Text(label, size=12, weight=ft.FontWeight.W_600, color=MUTED)
@@ -222,13 +248,15 @@ class ProTerminal:
             padding=ft.Padding.symmetric(horizontal=14, vertical=10),
             side=ft.BorderSide(1, BORDER) if outlined or not filled else None,
         )
-        return ft.Button(
-            text,
+        btn = ft.Button(
+            content=text,
             bgcolor=WHITE if filled else BG,
             color="#0f1419" if filled else TEXT,
             style=style,
             on_click=on_click,
         )
+        btn.text = text
+        return btn
 
     def build(self) -> None:
         p, cfg = self.page, get_config()
@@ -246,6 +274,12 @@ class ProTerminal:
         except Exception:
             pass
         self.lbl_model.value = f"Grok {getattr(cfg, 'model', '—')}"
+        try:
+            from abcxauto.memory import get_journal
+
+            get_journal().ensure_model_session(str(getattr(cfg, "model", "") or ""))
+        except Exception:
+            pass
         try:
             p.controls.clear()
         except Exception:
@@ -324,6 +358,7 @@ class ProTerminal:
                     ft.Text("wakes", size=11, color=MUTED),
                     self.lbl_cycles,
                     ft.Container(expand=True),
+                    self.lbl_run_state,
                     self.btn_connect,
                     self.btn_run,
                     self.btn_halt,
@@ -391,37 +426,29 @@ class ProTerminal:
                     ft.Row(
                         [
                             self._stat("NetLiq", self.lbl_equity, self.lbl_equity_sub),
-                            self._stat("Day PnL", self.lbl_pnl, self.lbl_pnl_pct),
-                            self._stat("Edge", self.lbl_edge, self.lbl_edge_sub),
+                            self._stat("IBKR day", self.lbl_pnl, self.lbl_pnl_pct),
+                            self._stat("Open MTM", self.lbl_open_upnl, self.lbl_open_upnl_sub),
                         ],
                         spacing=8,
                     ),
                     ft.Row(
                         [
-                            self._stat("Lots", self.lbl_lot_count),
-                            self._stat("Unprotected", self.lbl_unprotected, self.lbl_halt),
+                            self._stat("Grok", self.lbl_desk, self.lbl_desk_sub),
                             self._stat("Next look", self.lbl_next_look, self.lbl_next_look_sub),
+                            self._stat("Lots", self.lbl_lot_count, self.lbl_halt),
                         ],
                         spacing=8,
                     ),
-                    self.lbl_mix,
-                    self.lbl_score,
-                    self.lbl_path,
-                    self.lbl_pace,
-                    self.lbl_playbook,
-                    self.lbl_risk,
-                    self.lbl_tools,
-                    ft.Container(height=1, bgcolor=BORDER),
+                    self.lbl_alert,
+                    self.lbl_session_score,
                     self.lbl_last_send,
-                    self.lbl_result,
-                    self.lbl_why,
-                    self.lbl_focus,
                     ft.Container(height=1, bgcolor=BORDER),
                     ft.Row(
                         [self.tabs[k]["chip"] for k in ("lots", "orders", "fills", "log")],
                         spacing=6,
                     ),
                     ft.Column(list(self.tab_bodies.values()), spacing=0, expand=True),
+                    self._hidden_metrics,
                     self.lbl_risk_status,
                 ],
                 spacing=6,
@@ -453,6 +480,7 @@ class ProTerminal:
         outlined: bool = False,
     ) -> None:
         btn.text = text
+        btn.content = text
         if danger:
             btn.bgcolor = BG
             btn.color = RED
@@ -551,6 +579,8 @@ class ProTerminal:
             # Scoring a zero book returns -100% and a nonsense edge. Say nothing instead.
             self.lbl_score.value = "Score: — no live book"
             self.lbl_score.color = MUTED
+            self.lbl_session_score.value = "sess —"
+            self.lbl_session_score.color = MUTED
             self._sync_edge_stat({})
             return
         try:
@@ -560,9 +590,12 @@ class ProTerminal:
         except Exception:
             self.lbl_score.value = "Score: —"
             self.lbl_score.color = MUTED
+            self.lbl_session_score.value = "sess —"
+            self.lbl_session_score.color = MUTED
             self._sync_edge_stat({})
             return
         self._sync_edge_stat(sc)
+        self._sync_session_score(sc)
         def _bit(tag: str, ret: Any, edge: Any, beat: Any) -> str:
             ret_s = f"{ret:+.2f}%" if ret is not None else "—"
             edge_s = f"{edge:+.2f}" if edge is not None else "—"
@@ -662,6 +695,31 @@ class ProTerminal:
             })
         return rows
 
+    def _sync_session_score(self, scorecard: dict) -> None:
+        sess = scorecard.get("session") if isinstance(scorecard, dict) else None
+        if not isinstance(sess, dict) or not sess:
+            self.lbl_session_score.value = "sess —"
+            self.lbl_session_score.color = MUTED
+            return
+        pnl = sess.get("book_pnl")
+        cost = sess.get("model_cost_usd")
+        edge = sess.get("edge_usd")
+        fills = sess.get("fills")
+        wins = sess.get("wins")
+        pnl_s = f"{pnl:+.0f}" if isinstance(pnl, (int, float)) else "—"
+        cost_s = f"{cost:.2f}" if isinstance(cost, (int, float)) else "—"
+        edge_s = f"{edge:+.0f}" if isinstance(edge, (int, float)) else "—"
+        fill_s = f"{wins}/{fills}" if fills not in (None, 0) else f"{fills or 0}"
+        self.lbl_session_score.value = (
+            f"sess ΔNL={pnl_s} model$={cost_s} edge={edge_s} fills={fill_s}"
+        )
+        if isinstance(edge, (int, float)) and edge > 0:
+            self.lbl_session_score.color = GREEN
+        elif isinstance(edge, (int, float)):
+            self.lbl_session_score.color = AMBER
+        else:
+            self.lbl_session_score.color = MUTED
+
     def _sync_edge_stat(self, scorecard: dict) -> None:
         sc = scorecard if isinstance(scorecard, dict) else {}
         edge = sc.get("edge_usd")
@@ -696,15 +754,17 @@ class ProTerminal:
                 continue
             sec = str(row.get("sec") or "STK").upper()
             sym = str(row.get("symbol") or "").upper()
+            ident = lot_ident(p)
+            ident_u = ident.upper()
             rows.append({
-                "ident": lot_ident(p),
+                "ident": ident,
                 "symbol": sym,
                 "sec": sec,
                 "qty": qty,
                 "avg": row.get("avg"),
                 "mkt": row.get("mkt"),
                 "mtm_pct": row.get("mtm_pct"),
-                "unprotected": sec == "STK" and sym in naked,
+                "unprotected": ident_u in naked or (sec.startswith("STK") and sym in naked),
             })
         rows.sort(
             key=lambda r: (
@@ -1010,13 +1070,39 @@ class ProTerminal:
             self.lbl_account_name.value = "IBKR"
             self.lbl_account_id.value = "Not connected"
 
+    def _refresh_alert(self, unprot: int) -> None:
+        halted = bool(getattr(self.engine.state, "halted", False))
+        bits: list[str] = []
+        if halted:
+            bits.append("HALTED — click Resume to send")
+        if unprot:
+            bits.append(f"{unprot} stock lot(s) need a last-stop")
+        if bits:
+            self.lbl_alert.value = " · ".join(bits)
+            self.lbl_alert.visible = True
+            self.lbl_alert.color = RED
+        else:
+            self.lbl_alert.value = ""
+            self.lbl_alert.visible = False
+
     def _refresh_run_btn(self) -> None:
         s = self.engine.state
         running = bool(s.running) and getattr(s, "autonomous", False) and not getattr(s, "paused", False)
         if running:
             self._set_btn_text(self.btn_run, "Stop", filled=False)
+            self.lbl_run_state.value = "Grok on"
+            self.lbl_run_state.color = GREEN
+            self.lbl_desk.value = "On"
+            self.lbl_desk.color = GREEN
+            self.lbl_desk_sub.value = f"{s.cycles} wakes" if s.cycles else "running"
         else:
             self._set_btn_text(self.btn_run, "Start", filled=True)
+            paused = bool(getattr(s, "paused", False))
+            self.lbl_run_state.value = "Grok paused" if paused else "Grok off"
+            self.lbl_run_state.color = AMBER if paused else MUTED
+            self.lbl_desk.value = "Paused" if paused else "Off"
+            self.lbl_desk.color = AMBER if paused else MUTED
+            self.lbl_desk_sub.value = "paused" if paused else "idle"
 
     def _refresh_connect_btn(self) -> None:
         s = self.engine.state
@@ -1042,8 +1128,8 @@ class ProTerminal:
             self.lbl_halt.color = RED
         else:
             self._set_btn_text(self.btn_halt, "Halt", outlined=True)
-            self.lbl_halt.value = "clear"
-            self.lbl_halt.color = GREEN
+            self.lbl_halt.value = ""
+            self.lbl_halt.color = MUTED
 
     def _refresh_service_status(self) -> None:
         try:
@@ -1129,11 +1215,25 @@ class ProTerminal:
         if s.equity:
             self.lbl_pnl.value = f"${s.pnl:+.2f}"
             self.lbl_pnl.color = GREEN if s.pnl >= 0 else RED
-            self.lbl_pnl_pct.value = f"{s.pnl / s.equity * 100:+.2f}% of NL"
+            self.lbl_pnl_pct.value = f"{s.pnl / s.equity * 100:+.2f}% vs prior close"
         else:
             self.lbl_pnl.value = "—"
             self.lbl_pnl.color = MUTED
             self.lbl_pnl_pct.value = ""
+        try:
+            from abcxauto.world_state import open_upnl_of
+
+            upnl = open_upnl_of(s.positions)
+        except Exception:
+            upnl = None
+        if isinstance(upnl, (int, float)):
+            self.lbl_open_upnl.value = f"${upnl:+,.2f}"
+            self.lbl_open_upnl.color = GREEN if upnl >= 0 else RED
+            self.lbl_open_upnl_sub.value = "marks now"
+        else:
+            self.lbl_open_upnl.value = "—"
+            self.lbl_open_upnl.color = MUTED
+            self.lbl_open_upnl_sub.value = "no open marks"
         unprot = int(getattr(s, "unprotected_count", 0) or 0)
         self.lbl_unprotected.value = str(unprot)
         self.lbl_unprotected.color = RED if unprot else GREEN
@@ -1151,6 +1251,7 @@ class ProTerminal:
         self._refresh_run_btn()
         self._refresh_connect_btn()
         self._refresh_halt_btn()
+        self._refresh_alert(unprot)
         self._refresh_service_status()
         self._sync_think_stream()
         strat = str(getattr(s, "brain_strat", "") or "").strip()

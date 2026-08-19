@@ -36,6 +36,7 @@ REQUIRED = (
     "lbl_xai_status",
     "lbl_mda_status",
     "lbl_score",
+    "lbl_session_score",
     "ABCXAUTO",
     "_on_window_event",
 )
@@ -126,6 +127,7 @@ def test_run_btn_uses_text_not_content(headless_pro):
     headless_pro.engine.state.paused = False
     headless_pro._refresh_run_btn()
     assert headless_pro.btn_run.text == "Stop"
+    assert headless_pro.btn_run.content == "Stop"
     headless_pro.engine.state.running = False
     headless_pro.engine.state.autonomous = False
     headless_pro._refresh_run_btn()
@@ -149,6 +151,8 @@ def test_book_strip_sync(headless_pro):
     assert "-50.00" in (headless_pro.lbl_pnl.value or "")
     assert headless_pro.lbl_unprotected.value == "2"
     assert headless_pro.lbl_halt.value == "HALTED"
+    assert "last-stop" in (headless_pro.lbl_alert.value or "")
+    assert headless_pro.lbl_open_upnl.value != ""
     assert "oca" in (headless_pro.lbl_last_send.value or "")
     assert headless_pro.lbl_banner.visible is True
     assert "blocked" in (headless_pro.lbl_banner.value or "").lower()
@@ -189,13 +193,15 @@ def test_lot_rows_name_the_lot_and_put_naked_first(headless_pro):
         {"symbol": "SPY", "quantity": 5, "sec_type": "STK", "avgCost": 500.0,
          "market_price": 505.0, "conId": 1},
     ]
-    rows = headless_pro._lot_view(positions, ["SPY"])
-    assert [r["ident"] for r in rows][0] == "SPY STK long 5"
+    rows = headless_pro._lot_view(positions, ["SPY", "IWM 260821C306.0 long 1"])
+    assert [r["ident"] for r in rows][0] in ("SPY STK long 5", "IWM 260821C306.0 long 1")
+    naked = [r for r in rows if r["unprotected"]]
+    assert {r["ident"] for r in naked} == {"SPY STK long 5", "IWM 260821C306.0 long 1"}
     assert rows[0]["unprotected"] is True
-    assert rows[1]["ident"] == "IWM 260821C306.0 long 1"
-    assert rows[1]["mtm_pct"] == -23.0
-    assert rows[2]["ident"] == "AAPL 260821P150.0 short 2"
-    assert rows[2]["mtm_pct"] == 25.0
+    by_ident = {r["ident"]: r for r in rows}
+    assert by_ident["IWM 260821C306.0 long 1"]["mtm_pct"] == -23.0
+    assert by_ident["AAPL 260821P150.0 short 2"]["mtm_pct"] == 25.0
+    assert by_ident["AAPL 260821P150.0 short 2"]["unprotected"] is False
     headless_pro.engine.state.positions = positions
     headless_pro.engine.state.portfolio = {"unprotected_symbols": ["SPY"]}
     headless_pro._sync_lots()
@@ -395,7 +401,7 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
-        lambda: SimpleNamespace(signal_only=False, grok_min_interval_s=0, trading_mandate=""),
+        lambda: SimpleNamespace(trading_mode="paper"),
     )
     hist, prev = [], 0.0
     for n in range(1, 4):
@@ -470,20 +476,8 @@ def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
 
     class _FastCfg:
         xai_api_key = "test-key"
-        cycle_sleep_s = 0.05
-        grok_min_interval_s = 0.01
-        pace_protect_s = 0.05
-        pace_manage_s = 0.05
-        pace_idle_s = 0.05
-        signal_only = False
         monitor_enabled = False
-        trading_mandate = ""
         risk_gates_enabled = False
-        control_deliberation_pct = 50
-        control_budget_pct = 50
-        control_complexity_pct = 50
-        control_frequency_pct = 50
-        control_rotation_pct = 50
         max_open_positions = 0
         risk_posture = ""
         trading_mode = "paper"

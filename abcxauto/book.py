@@ -11,6 +11,7 @@ __all__ = (
     "build_book",
     "build_book_from_snap",
     "build_portfolio_state",
+    "clerk_halt_facts",
     "portfolio_narrative",
 )
 
@@ -39,9 +40,7 @@ def _slim_positions(positions: list, limit: int = 12) -> List[dict]:
     for p in positions[:limit]:
         if not isinstance(p, dict):
             continue
-        row = compact_position(p)
-        row["uPnL"] = p.get("unrealizedPNL") or p.get("unrealized_pnl")
-        out.append(row)
+        out.append(compact_position(p))
     return out
 
 
@@ -63,6 +62,53 @@ def _peak_dd_pct(net_liq: Optional[float]) -> Optional[float]:
         return round(max(0.0, dd), 4)
     except Exception:
         return None
+
+
+def clerk_halt_facts(
+    net_liq: Optional[float] = None,
+    daily_pnl: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Code halt vs the daily-loss trip. Not a notebook rule."""
+    halted = False
+    halt_reason = ""
+    halt_kind = ""
+    try:
+        from abcxauto.risk_gates import get_risk_gate
+
+        gate = get_risk_gate()
+        halted = bool(gate.is_halted)
+        halt_reason = str(gate.halt_reason or "")
+        halt_kind = str(getattr(gate, "halt_kind", "") or "")
+    except Exception:
+        logger.debug("clerk halt gate unavailable", exc_info=True)
+    limit_pct = 25.0
+    try:
+        from abcxauto.config import get_config
+
+        limit_pct = float(getattr(get_config(), "daily_loss_limit_pct", 25.0) or 0.0)
+    except Exception:
+        pass
+    trips_at: Optional[float] = None
+    day_vs: Optional[float] = None
+    try:
+        nl = float(net_liq) if net_liq is not None else None
+    except (TypeError, ValueError):
+        nl = None
+    if nl and nl > 0 and limit_pct > 0:
+        trips_at = round(-(limit_pct / 100.0) * nl, 2)
+        if daily_pnl is not None:
+            try:
+                day_vs = round(float(daily_pnl) - trips_at, 2)
+            except (TypeError, ValueError):
+                day_vs = None
+    return {
+        "clerk_halted": halted,
+        "halt_kind": halt_kind or None,
+        "halt_reason": halt_reason or None,
+        "daily_loss_limit_pct": limit_pct,
+        "halt_trips_at_usd": trips_at,
+        "ibkr_day_vs_halt": day_vs,
+    }
 
 
 def _trades_today_and_halt() -> tuple[Optional[int], Optional[bool], Optional[str]]:
@@ -122,13 +168,17 @@ def _journal_memory_bits() -> tuple[List[dict], str]:
 def portfolio_narrative(state: dict) -> str:
     """One-liner summary of book/portfolio state."""
     nliq = state.get("net_liq")
-    pnl = state.get("daily_pnl")
+    ibkr = state.get("ibkr_daily_pnl")
+    if ibkr is None:
+        ibkr = state.get("daily_pnl")
+    ou = state.get("open_upnl")
     n_pos = len(state.get("positions") or [])
     unprotected = state.get("unprotected_symbols") or []
     halt = state.get("halt")
     bits = [
         f"NL={nliq}" if nliq is not None else "NL=?",
-        f"dayPnL={pnl}" if pnl is not None else "dayPnL=?",
+        f"ibkrDay={ibkr}" if ibkr is not None else "ibkrDay=?",
+        f"openU={ou}" if ou is not None else "openU=?",
         f"{n_pos} pos",
         f"{state.get('open_orders_count', 0)} orders",
     ]
@@ -170,10 +220,13 @@ def build_book(
     unprotected = list(protection.get("unprotected_symbols") or [])
     trades_today, halt, halt_reason = _trades_today_and_halt()
     recent_decisions, working_thesis = _journal_memory_bits()
+    from abcxauto.world_state import open_upnl_of
 
     state: Dict[str, Any] = {
         "net_liq": net_liq,
         "daily_pnl": daily_pnl,
+        "ibkr_daily_pnl": daily_pnl,
+        "open_upnl": open_upnl_of(positions),
         "daily_pnl_pct": daily_pnl_pct,
         "peak_dd_pct": _peak_dd_pct(net_liq),
         "positions": _slim_positions(positions),
@@ -185,6 +238,9 @@ def build_book(
         "recent_decisions": recent_decisions,
         "working_thesis": working_thesis,
     }
+    state.update(clerk_halt_facts(net_liq, daily_pnl))
+    if halt_reason and not state.get("halt_reason"):
+        state["halt_reason"] = halt_reason
     if include_narrative:
         state["narrative"] = portfolio_narrative(state)
     return state

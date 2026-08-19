@@ -69,27 +69,105 @@ def test_short_position_uses_buy_side_orders():
     assert [o["order_id"] for o in entry["stop_orders"]] == [4]
 
 
-def test_option_positions_light_audit():
+def test_option_lots_are_not_unprotected():
     report = build_protection_report(
-        [_pos("SPY", 1, sec_type="OPT", market_value=250.0, expiration="20260731", strike=500.0, right="C")],
+        [_pos("SPY", 1, sec_type="OPT", market_value=250.0, expiration="20260731", strike=500.0, right="C", conId=9)],
         [],
     )
     entry = report["positions"][0]
     assert "protected" not in entry
+    assert entry["covering_exits"] == 0
     assert entry["market_value"] == 250.0
     assert "days_to_expiry" in entry
     assert report["unprotected_symbols"] == []
     assert "short option" not in entry.get("note", "")
 
 
-def test_short_option_flagged_for_review():
+def test_short_option_note_is_not_unprotected():
     report = build_protection_report(
-        [_pos("SPY", -2, sec_type="OPT", market_value=-400.0, expiration="20260731")],
+        [_pos("SPY", -2, sec_type="OPT", market_value=-400.0, expiration="20260731", strike=500.0, right="P", conId=8)],
         [],
     )
     entry = report["positions"][0]
     assert "short option" in entry["note"]
     assert entry.get("flag") == "short option — review risk"
+    assert report["unprotected_symbols"] == []
+
+
+def test_option_stop_and_target_protect():
+    pos = _pos(
+        "QQQ", 1, sec_type="OPT", conId=740683086,
+        expiration="20260918", strike=745.0, right="C",
+    )
+    report = build_protection_report(
+        [pos],
+        [
+            _order("QQQ", "SELL", "STP", order_id=1, sec_type="OPT", quantity=1, conId=740683086, aux_price=0.6),
+            _order("QQQ", "SELL", "LMT", order_id=2, sec_type="OPT", quantity=1, conId=740683086, lmt_price=4.0),
+        ],
+    )
+    entry = report["positions"][0]
+    assert entry["covering_exits"] == 2
+    assert "protected" not in entry
+    assert report["unprotected_symbols"] == []
+
+
+def test_one_option_lmt_is_a_fact_not_unprotected():
+    pos = _pos(
+        "QQQ", 1, sec_type="OPT", conId=740683086,
+        expiration="20260918", strike=745.0, right="C",
+    )
+    report = build_protection_report(
+        [pos],
+        [_order("QQQ", "SELL", "LMT", order_id=2, sec_type="OPT", quantity=1, conId=740683086, lmt_price=0.64)],
+    )
+    assert report["positions"][0]["covering_exits"] == 1
+    assert report["unprotected_symbols"] == []
+
+
+def test_bag_combo_covers_both_vertical_legs():
+    long_leg = _pos(
+        "JPM", 1, sec_type="OPT", conId=787026479,
+        expiration="20260918", strike=370.0, right="C",
+    )
+    short_leg = _pos(
+        "JPM", -1, sec_type="OPT", conId=846417188,
+        expiration="20260918", strike=375.0, right="C",
+    )
+    cut = {
+        "order_id": 10, "symbol": "JPM", "sec_type": "BAG", "action": "SELL",
+        "quantity": 1, "order_type": "LMT", "lmt_price": 0.71,
+        "combo_legs": [
+            {"conId": 787026479, "action": "SELL", "ratio": 1},
+            {"conId": 846417188, "action": "BUY", "ratio": 1},
+        ],
+    }
+    tgt = {
+        "order_id": 11, "symbol": "JPM", "sec_type": "BAG", "action": "SELL",
+        "quantity": 1, "order_type": "LMT", "lmt_price": 4.0,
+        "combo_legs": [
+            {"conId": 787026479, "action": "SELL", "ratio": 1},
+            {"conId": 846417188, "action": "BUY", "ratio": 1},
+        ],
+    }
+    report = build_protection_report([long_leg, short_leg], [cut, tgt])
+    assert report["unprotected_symbols"] == []
+    assert all(e["covering_exits"] == 2 for e in report["positions"])
+
+
+def test_wrong_strike_option_stop_does_not_protect():
+    pos = _pos(
+        "QQQ", 1, sec_type="OPT", conId=1,
+        expiration="20260918", strike=745.0, right="C",
+    )
+    report = build_protection_report(
+        [pos],
+        [
+            _order("QQQ", "SELL", "STP", order_id=1, sec_type="OPT", quantity=1, conId=99, aux_price=0.6),
+            _order("QQQ", "SELL", "LMT", order_id=2, sec_type="OPT", quantity=1, conId=99, lmt_price=4.0),
+        ],
+    )
+    assert report["positions"][0]["covering_exits"] == 0
     assert report["unprotected_symbols"] == []
 
 

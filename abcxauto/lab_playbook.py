@@ -26,6 +26,14 @@ _PATCH_KEYS = (
     "mode",
     "ready_to_promote",
 )
+# Ceremony leftovers. Must not linger via save_lab merging **prev.
+_DEAD_LAB_KEYS = (
+    "do_more",
+    "stop_doing",
+    "basis",
+    "evidence",
+    "research_tools",
+)
 _STALE_H_DEFAULT = 1.0
 _CARD_WINDOWS = ("15m", "1h", "4h")
 
@@ -74,12 +82,19 @@ def _write(path: Path, state: dict[str, Any]) -> None:
         logger.exception("playbook write failed path=%s", path)
 
 
+def _drop_dead_lab_keys(state: dict[str, Any]) -> dict[str, Any]:
+    out = dict(state)
+    for key in _DEAD_LAB_KEYS:
+        out.pop(key, None)
+    return out
+
+
 def load_lab() -> dict[str, Any]:
-    return _read(_lab_path())
+    return _drop_dead_lab_keys(_read(_lab_path()))
 
 
 def load_live() -> dict[str, Any]:
-    return _read(_live_path())
+    return _drop_dead_lab_keys(_read(_live_path()))
 
 
 def is_paper() -> bool:
@@ -139,10 +154,20 @@ def _score_snap(scorecard: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _outcome_card(card: dict[str, Any] | None) -> dict[str, Any]:
+    """Ledger row is the score of a card, not the notes."""
+    out = dict(card) if isinstance(card, dict) else {}
+    out.pop("instructions", None)
+    for key in _DEAD_LAB_KEYS:
+        out.pop(key, None)
+    return out
+
+
 def _ledger_card(state: dict[str, Any], scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
     sc = scorecard if isinstance(scorecard, dict) else (
         state.get("paper_score") if isinstance(state.get("paper_score"), dict) else {}
     )
+    lots = [str(x) for x in (state.get("lots_at_write") or [])][:16]
     return {
         "revision": state.get("revision"),
         "written_at": state.get("written_at"),
@@ -151,7 +176,7 @@ def _ledger_card(state: dict[str, Any], scorecard: dict[str, Any] | None = None)
         "beating_model": sc.get("beating_model"),
         "edge_usd": sc.get("edge_usd"),
         "book_return_pct": sc.get("book_return_pct"),
-        "instructions": str(state.get("instructions") or "")[:_MAX_INSTRUCTIONS],
+        "lots_at_write": lots,
     }
 
 
@@ -177,7 +202,7 @@ def _close_card(
     now: str,
 ) -> dict[str, Any]:
     sc = _score_snap(scorecard)
-    out = dict(card)
+    out = _outcome_card(card)
     out["closed_at"] = now
     out["closed_edge"] = sc.get("edge_usd")
     out["closed_beating"] = sc.get("beating_model")
@@ -188,7 +213,7 @@ def _close_card(
 def ensure_ledger(lab: dict[str, Any] | None) -> list[dict[str, Any]]:
     """In-memory ledger. Seed from the current blob if the file is still flat."""
     state = lab if isinstance(lab, dict) else {}
-    rows = [r for r in (state.get("ledger") or []) if isinstance(r, dict)]
+    rows = [_outcome_card(r) for r in (state.get("ledger") or []) if isinstance(r, dict)]
     if rows:
         return rows[-_LEDGER_CAP:]
     if state.get("instructions") or state.get("revision"):
@@ -202,7 +227,7 @@ def revision_card(revision: int, lab: dict[str, Any] | None = None) -> dict[str,
     for row in reversed(ensure_ledger(state)):
         try:
             if int(row.get("revision") or 0) == want:
-                return dict(row)
+                return _outcome_card(row)
         except (TypeError, ValueError):
             continue
     try:
@@ -228,14 +253,14 @@ def save_lab(update: dict[str, Any], *, scorecard: dict[str, Any] | None = None)
             lots_at = list((_read_json(LAST_TURN_PATH) or {}).get("open_lots") or [])
         except Exception:
             lots_at = list(prev.get("lots_at_write") or [])
-    state = {
+    state = _drop_dead_lab_keys({
         **prev,
         **update,
         "revision": rev,
         "written_at": now,
         "promoted": False,
         "lots_at_write": [str(x) for x in (lots_at or [])][:32],
-    }
+    })
     if scorecard:
         state["paper_score"] = _score_snap(scorecard)
     ledger.append(_ledger_card(state, state.get("paper_score")))
@@ -429,7 +454,32 @@ def playbook_facts(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
         "ledger": ledger[-8:],
     }
     facts.update(_window_edges(now_sc))
+    facts.update(_clerk_halt_slice(now_sc))
     return facts
+
+
+def _clerk_halt_slice(scorecard: dict[str, Any] | None) -> dict[str, Any]:
+    from abcxauto.book import clerk_halt_facts
+
+    nl = None
+    day = None
+    if isinstance(scorecard, dict):
+        nl = scorecard.get("net_liquidation")
+        day = scorecard.get("ibkr_daily_pnl")
+        if day is None:
+            day = scorecard.get("daily_pnl")
+    if nl is None or day is None:
+        try:
+            from abcxauto.memory import get_journal
+
+            perf = get_journal().account_performance() or {}
+            if nl is None:
+                nl = perf.get("net_liquidation")
+            if day is None:
+                day = perf.get("daily_pnl")
+        except Exception:
+            pass
+    return clerk_halt_facts(nl, day)
 
 
 def format_ledger_line(facts: dict[str, Any] | None) -> str:
@@ -546,6 +596,12 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
             "since_write_edge": facts.get("since_write_edge"),
             "since_write_pnl": facts.get("since_write_pnl"),
             "lots_at_write": list(facts.get("lots_at_write") or []),
+            "clerk_halted": facts.get("clerk_halted"),
+            "halt_kind": facts.get("halt_kind"),
+            "halt_reason": facts.get("halt_reason"),
+            "daily_loss_limit_pct": facts.get("daily_loss_limit_pct"),
+            "halt_trips_at_usd": facts.get("halt_trips_at_usd"),
+            "ibkr_day_vs_halt": facts.get("ibkr_day_vs_halt"),
         },
         "current": current,
         "facts": facts,
@@ -562,5 +618,5 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
     if card is None:
         out["error"] = f"revision {want} not in ledger"
         return out
-    out["revision"] = card
+    out["revision"] = _outcome_card(card)
     return out

@@ -53,7 +53,7 @@ UNSUPERVISED_DEFAULTS: dict[str, Any] = {
 }
 
 _SELF_TUNE_ALIASES = frozenset({
-    "self_tune", "set_risk", "set_controls", "set_self",
+    "self_tune", "set_risk",
 })
 
 
@@ -101,7 +101,7 @@ def _flatten_params(params: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if not isinstance(params, dict):
         return out
-    nested_keys = ("risk", "controls", "pacing", "universe", "tweaks")
+    nested_keys = ("risk", "universe")
     for nk in nested_keys:
         blob = params.get(nk)
         if isinstance(blob, dict):
@@ -126,7 +126,7 @@ def apply_self_tune(
     """
     from abcxauto.config import (
         get_config,
-        update_controls_config,
+        update_capacity_config,
         update_risk_config,
     )
 
@@ -206,7 +206,7 @@ def apply_self_tune(
         update_risk_config(**risk_payload, **persist_kw, _skip_clamp=True)
         applied.update(risk_payload)
     if controls_payload:
-        update_controls_config(**controls_payload, **persist_kw)
+        update_capacity_config(**controls_payload, **persist_kw)
         applied.update(controls_payload)
     if scan_cap is not None:
         from abcxauto.config import _runtime_overrides
@@ -352,7 +352,7 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
     """Seed walk-away floor and persist repairs. Call at agent start."""
     from abcxauto.config import (
         get_config,
-        update_controls_config,
+        update_capacity_config,
         update_risk_config,
         _runtime_overrides,
     )
@@ -382,7 +382,7 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
         if risk_fix:
             update_risk_config(**risk_fix, persist=True, _skip_clamp=True)
         if controls_fix:
-            update_controls_config(**controls_fix, persist=True)
+            update_capacity_config(**controls_fix, persist=True)
         if extra_fix:
             _runtime_overrides.update(extra_fix)
             try:
@@ -405,7 +405,7 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
             persist=True,
             _skip_clamp=True,
         )
-        update_controls_config(
+        update_capacity_config(
             max_open_positions=int(getattr(get_config(), "max_open_positions")),
             persist=True,
         )
@@ -420,7 +420,7 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
 
     return {
         "risk": risk_fix,
-        "controls": controls_fix,
+        "capacity": controls_fix,
         "extra": extra_fix,
         "status": "ok",
     }

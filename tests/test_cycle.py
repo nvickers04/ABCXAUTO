@@ -73,22 +73,13 @@ async def _fake_tool_session(session: str, minutes_to_open: int = 80):
 def _cfg(**overrides):
     """Minimal config stub for cycle cadence tests."""
     base = dict(
-        signal_only=True,
-        grok_min_interval_s=300.0,
-        cycle_sleep_s=300.0,
         max_risk_per_trade_pct=1.0,
         max_position_pct=10.0,
         max_open_positions=6,
         marketdata_token="",
-        trading_mandate="RELY ON YOUR INTELLIGENCE. Trade actively with brackets.",
         trading_mode="paper",
         is_paper=True,
         risk_posture="balanced",
-        # S2 lean so Act path runs (tests assert Act prompts / invalid strat).
-        control_deliberation_pct=80,
-        control_budget_pct=50,
-        control_frequency_pct=50,
-        control_complexity_pct=50,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -136,7 +127,7 @@ def _pja_grok(act: dict, judgment: dict | None = None, prompts: list | None = No
 
 @pytest.fixture(autouse=True)
 def _reset_cadence(monkeypatch, tmp_path):
-    stub = _cfg(signal_only=False, grok_min_interval_s=0)
+    stub = _cfg()
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: stub)
     monkeypatch.setattr("abcxauto.world_state.get_config", lambda: stub)
     # Avoid real MDA/connector in connection_status during prompts.
@@ -148,17 +139,14 @@ def _reset_cadence(monkeypatch, tmp_path):
             "trading_mode": "paper",
         },
     )
-    monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "review.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "journal.db"))
     monkeypatch.setenv("ABCXAUTO_PREMARKET_WAKE_PATH", str(tmp_path / "pm.json"))
     from abcxauto.memory import reset_journal
-    from abcxauto.world_state import reset_idle_streak
 
     reset_journal(path=str(tmp_path / "journal.db"), enabled=True)
-    reset_idle_streak()
 
     async def _no_opps(*_a, **_k):
         return []
@@ -184,12 +172,12 @@ async def test_snap_with_fake_connector(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_paper_flat_rth_may_hold(monkeypatch):
-    """Hold is allowed. Unprotected STK is the only hold block."""
+async def test_run_cycle_paper_flat_rth_hold_is_blocked(monkeypatch):
+    """Paper RTH flat: hold is not a ticket."""
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
-        lambda: _cfg(signal_only=False, grok_min_interval_s=0, is_paper=True),
+        lambda: _cfg(is_paper=True),
     )
     send_calls: list[dict] = []
     prompts: list[str] = []
@@ -206,7 +194,8 @@ async def test_run_cycle_paper_flat_rth_may_hold(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
     hist = []
     out = await run_cycle(1, FakeConnector(), None, hist, 0.0)
-    assert out["strat"] == "hold"
+    assert out["strat"] == "blocked"
+    assert "paper hunt" in str((out.get("result") or {}).get("note") or out.get("validation") or "")
     assert send_calls == []
     assert prompts  # Grok woke
     from abcxauto.brain import brain_system_prompt
@@ -221,12 +210,11 @@ async def test_run_cycle_live_hold_when_flat(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: _cfg(
-            signal_only=False,
-            grok_min_interval_s=0,
             trading_mode="live",
             is_paper=False,
         ),
     )
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     send_calls: list[dict] = []
     act = {"action": "hold", "strategy": "hold", "rationale": "wait"}
 
@@ -244,11 +232,11 @@ async def test_run_cycle_live_hold_when_flat(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_cycle_rth_always_calls_grok(monkeypatch):
-    """RTH decision cycles always call Grok (signal_only no longer skips)."""
+    """RTH decision cycles always call Grok."""
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
-        lambda: _cfg(signal_only=True, grok_min_interval_s=300),
+        lambda: _cfg(),
     )
     grok_calls: list[str] = []
     act = {
@@ -304,7 +292,7 @@ async def test_run_cycle_protection_blocks_hold(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_unprotected)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
-        lambda: _cfg(signal_only=False, grok_min_interval_s=0),
+        lambda: _cfg(),
     )
     grok_calls: list[str] = []
     act = {
@@ -336,7 +324,7 @@ async def test_run_cycle_agent_decides_with_journal_memory(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
-        lambda: _cfg(signal_only=False, grok_min_interval_s=0),
+        lambda: _cfg(),
     )
     grok_calls: list[str] = []
     calls: list[dict] = []
@@ -406,7 +394,7 @@ async def test_run_cycle_prompt_flags_naked_stk(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_naked)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
-        lambda: _cfg(signal_only=False, grok_min_interval_s=0),
+        lambda: _cfg(),
     )
     prompts: list[str] = []
     act = {
@@ -445,7 +433,7 @@ async def test_run_cycle_market_closed_skips_grok(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool_closed)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
-        lambda: _cfg(signal_only=False, grok_min_interval_s=0),
+        lambda: _cfg(),
     )
     grok_calls: list[int] = []
 
@@ -766,6 +754,7 @@ def test_risk_label_compliant():
 
 
 def test_config_has_no_metronome_fields(monkeypatch):
+    from abcxauto import wake_bus
     from abcxauto.config import Config, get_config
 
     get_config.cache_clear()
@@ -773,4 +762,10 @@ def test_config_has_no_metronome_fields(monkeypatch):
     assert not hasattr(cfg, "trading_mandate")
     assert "cycle_sleep_s" not in Config.__dataclass_fields__
     assert "control_budget_pct" not in Config.__dataclass_fields__
+    assert not hasattr(wake_bus, "MAX_LOOK_OPEN_S")
+    assert not hasattr(wake_bus, "max_look_s")
+    assert not hasattr(cfg, "idle_streak")
+    from abcxauto.config import CAPACITY_KEYS
+
+    assert CAPACITY_KEYS == frozenset({"max_open_positions"})
     get_config.cache_clear()

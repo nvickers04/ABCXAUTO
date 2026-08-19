@@ -15,7 +15,7 @@ Grok cannot switch to live or set a dollar sleeve.
 ## The loop
 
 ```
-WAKE     Grok set_wake, or clerk default look (60s open / 90s else)
+WAKE     Grok set_wake (honored; min floor only), or clerk default if skipped
          fill / order_change / mark move / unprotected can come sooner
          pulse ~10s; closed/postmarket does not call Grok (unprotected still does)
     |
@@ -29,16 +29,16 @@ LOOK     ensure_next_look so the desk is never parked
 ```
 
 Stall/loop detectors, 24 tool rounds, and per-tool timeouts stay. There is no
-stream time box and no metronome nap ladder. `wait_for_pace` is just the pulse
+stream time box and no max-look ceiling. `wait_for_pace` is just the pulse
 sleep until the next wake.
 
 ## Hard (code)
 
-- Unprotected STK → protect first; hold forbidden only while unprotected
+- Unprotected STK → last-stop first; hold forbidden until it rests at IBKR. Paper RTH + flat + clerk open → hold is not a ticket. Combo close (`closing_position`) is one BAG, not new risk
 - Capacity, defined-risk, cash-only, size/loss floors, fail-closed
 - Live hunt without a promoted playbook
 - IBKR live last for ticket geometry (not MDA)
+- `candles`: IBKR hist, else live 5s stream; error if both miss (not MDA)
 - Two books = two processes, two client ids
 
 Universe is a watchlist. `send` is not a legal-set sandbox.
-Controls sliders are status; they do not shrink the ticket allowlist.

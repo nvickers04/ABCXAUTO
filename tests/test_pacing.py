@@ -76,16 +76,13 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
         return []
 
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
-    monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "review.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "journal.db"))
     from abcxauto.memory import reset_journal
-    from abcxauto.world_state import reset_idle_streak
 
     reset_journal(path=str(tmp_path / "journal.db"), enabled=True)
-    reset_idle_streak()
 
     from tests.conftest import fake_grok_turn
 
@@ -159,16 +156,13 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
         return []
 
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
-    monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "review.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "journal.db"))
     from abcxauto.memory import reset_journal
-    from abcxauto.world_state import reset_idle_streak
 
     reset_journal(path=str(tmp_path / "journal.db"), enabled=True)
-    reset_idle_streak()
 
     calls: list[str] = []
     act = {
@@ -212,15 +206,12 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
 async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
     from abcxauto.agent_loop import run_cycle
     from abcxauto.memory import reset_journal
-    from abcxauto.world_state import reset_idle_streak
 
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "journal.db"))
-    monkeypatch.setenv("ABCXAUTO_IDLE_STREAK_PATH", str(tmp_path / "idle.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "review.json"))
     reset_journal(path=str(tmp_path / "journal.db"), enabled=True)
-    reset_idle_streak()
 
     cfg = SimpleNamespace(
         trading_mode="paper",

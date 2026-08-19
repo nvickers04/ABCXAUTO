@@ -250,6 +250,7 @@ class VerticalSpreadParams(BaseModel):
     quantity: int = Field(default=1, gt=0)
     order_type: Literal["LMT", "MKT"] = "LMT"
     limit_price: Optional[float] = Field(default=None)
+    closing_position: bool = False
 
     @model_validator(mode="after")
     def _exp(self) -> "VerticalSpreadParams":
@@ -266,6 +267,7 @@ class IronCondorParams(BaseModel):
     call_long_strike: float = Field(gt=0)
     quantity: int = Field(default=1, gt=0)
     limit_price: Optional[float] = Field(default=None)
+    closing_position: bool = False
 
     @model_validator(mode="after")
     def _exp(self) -> "IronCondorParams":
@@ -280,6 +282,7 @@ class IronButterflyParams(BaseModel):
     wing_width: float = Field(gt=0)
     quantity: int = Field(default=1, gt=0)
     limit_price: Optional[float] = Field(default=None)
+    closing_position: bool = False
 
     @model_validator(mode="after")
     def _exp(self) -> "IronButterflyParams":
@@ -294,6 +297,7 @@ class StraddleParams(BaseModel):
     quantity: int = Field(default=1, gt=0)
     action: Literal["BUY", "SELL"] = "BUY"
     limit_price: Optional[float] = Field(default=None)
+    closing_position: bool = False
 
     @model_validator(mode="after")
     def _exp(self) -> "StraddleParams":
@@ -309,6 +313,7 @@ class StrangleParams(BaseModel):
     quantity: int = Field(default=1, gt=0)
     action: Literal["BUY", "SELL"] = "BUY"
     limit_price: Optional[float] = Field(default=None)
+    closing_position: bool = False
 
     @model_validator(mode="after")
     def _exp(self) -> "StrangleParams":
@@ -325,6 +330,7 @@ class ButterflyParams(BaseModel):
     right: Literal["C", "P"]
     quantity: int = Field(default=1, gt=0)
     limit_price: Optional[float] = Field(default=None)
+    closing_position: bool = False
 
     @model_validator(mode="after")
     def _exp(self) -> "ButterflyParams":
@@ -340,6 +346,7 @@ class CalendarSpreadParams(BaseModel):
     right: Literal["C", "P"]
     quantity: int = Field(default=1, gt=0)
     limit_price: Optional[float] = Field(default=None)
+    closing_position: bool = False
 
     @model_validator(mode="after")
     def _exp(self) -> "CalendarSpreadParams":
@@ -357,6 +364,7 @@ class DiagonalSpreadParams(BaseModel):
     right: Literal["C", "P"]
     quantity: int = Field(default=1, gt=0)
     limit_price: Optional[float] = Field(default=None)
+    closing_position: bool = False
 
     @model_validator(mode="after")
     def _exp(self) -> "DiagonalSpreadParams":

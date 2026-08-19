@@ -94,10 +94,16 @@ async def test_dispatch_maps_strategy_to_gateway_method(strategy):
     method, kwargs = gateway.calls[0]
     assert method == STRATEGIES[strategy][1]
     # Every explicitly provided param must reach the gateway (symbol upper-cased);
-    # closing_position is an exit-only assertion and never reaches the gateway.
+    # stock exit-only schemas exclude closing_position from IBKR kwargs.
+    # Combo close must send closing_position so the BAG parent action flips.
     # Fields with Field(exclude=True) stay on the model for gates but never hit IBKR.
-    _never_dispatch = frozenset({"closing_position", "price_hint"})
+    from abcxauto.world_state import COMBO_STRATS
+
+    _never_dispatch = frozenset({"price_hint"})
     for key, value in VALID_PAYLOADS[strategy].items():
+        if key == "closing_position" and strategy not in COMBO_STRATS:
+            assert key not in kwargs
+            continue
         if key in _never_dispatch:
             assert key not in kwargs
             continue
@@ -118,6 +124,25 @@ async def test_none_params_are_omitted():
     await execute_proposal(proposal, gateway)
     _, kwargs = gateway.calls[0]
     assert "limit_price" not in kwargs  # was None -> excluded
+
+
+@pytest.mark.asyncio
+async def test_combo_closing_position_reaches_gateway():
+    proposal = validate_proposal(
+        "vertical_spread",
+        {
+            **VALID_PAYLOADS["vertical_spread"],
+            "closing_position": True,
+            "limit_price": 1.25,
+        },
+        RATIONALE,
+    )
+    gateway = FakeGateway()
+    result = await execute_proposal(proposal, gateway)
+    assert result["success"] is True
+    _, kwargs = gateway.calls[0]
+    assert kwargs["closing_position"] is True
+    assert kwargs["limit_price"] == 1.25
 
 
 @pytest.mark.asyncio
@@ -310,6 +335,30 @@ class TestCloseOptionVerification:
         )
         result = await execute_proposal(proposal, gateway)
         assert result["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_close_option_on_vertical_leg_blocked(self):
+        gateway = FakeGateway(positions=[
+            {
+                "symbol": "JPM", "quantity": 1, "sec_type": "OPT",
+                "strike": 370.0, "right": "C", "expiration": "20260918",
+                "conId": 787026479,
+            },
+            {
+                "symbol": "JPM", "quantity": -1, "sec_type": "OPT",
+                "strike": 375.0, "right": "C", "expiration": "20260918",
+                "conId": 846417188,
+            },
+        ])
+        proposal = validate_proposal(
+            "close_option",
+            {"symbol": "JPM", "conId": 787026479, "quantity": 1},
+            RATIONALE,
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert "error" in result
+        assert "combo" in result["error"].lower() or "BAG" in result["error"]
+        assert gateway.calls == []
 
 
 class TestCancelOrderLastStopGuard:

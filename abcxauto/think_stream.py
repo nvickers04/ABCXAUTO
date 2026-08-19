@@ -372,6 +372,13 @@ def write_last_turn(out: dict[str, Any]) -> None:
             "pid": run.get("pid"),
             "ts": datetime.now(timezone.utc).isoformat(),
             "stale": False,
+            "ibkr_live_last": world.get("ibkr_live_last") or out.get("ibkr_live_last"),
+            "ibkr_live_quotes": dict(
+                world.get("ibkr_live_quotes") or out.get("ibkr_live_quotes") or {}
+            ),
+            "candle_source": (
+                world.get("candle_source") or out.get("candle_source") or "none"
+            ),
         }
         if str(payload.get("strat") or "") == "in_progress":
             brief = load_desk_brief()

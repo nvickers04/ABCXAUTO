@@ -116,10 +116,18 @@ CREATE TABLE IF NOT EXISTS model_usage (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,
     stage TEXT,
+    model TEXT,
     input_tokens INTEGER,
     output_tokens INTEGER,
     cached_tokens INTEGER,
     cost_usd REAL
+);
+
+CREATE TABLE IF NOT EXISTS session_markers (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    model TEXT,
+    net_liquidation REAL
 );
 
 CREATE TABLE IF NOT EXISTS self_tunes (
@@ -274,6 +282,18 @@ class TradeJournal:
                     conn.execute(
                         "ALTER TABLE model_usage ADD COLUMN cached_tokens INTEGER DEFAULT 0"
                     )
+                if "model" not in cols:
+                    conn.execute("ALTER TABLE model_usage ADD COLUMN model TEXT")
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS session_markers (
+                        id INTEGER PRIMARY KEY,
+                        ts TEXT NOT NULL,
+                        model TEXT,
+                        net_liquidation REAL
+                    )
+                    """
+                )
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.commit()
             self._initialized = True
@@ -1114,6 +1134,7 @@ class TradeJournal:
         self,
         *,
         stage: str = "",
+        model: str = "",
         input_tokens: int = 0,
         output_tokens: int = 0,
         cached_tokens: int = 0,
@@ -1128,13 +1149,14 @@ class TradeJournal:
                 cur = conn.execute(
                     """
                     INSERT INTO model_usage (
-                        ts, stage, input_tokens, output_tokens, cached_tokens, cost_usd
+                        ts, stage, model, input_tokens, output_tokens, cached_tokens, cost_usd
                     )
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ts or _utc_now_iso(),
                         stage or None,
+                        (model or None),
                         int(input_tokens or 0),
                         int(output_tokens or 0),
                         int(cached_tokens or 0),
@@ -1146,6 +1168,100 @@ class TradeJournal:
         except Exception:
             logger.exception("journal.record_model_usage failed")
             return None
+
+    def last_session_marker(self) -> Optional[dict]:
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT ts, model, net_liquidation FROM session_markers
+                    ORDER BY id DESC LIMIT 1
+                    """
+                ).fetchone()
+            if not row:
+                return None
+            nl = row["net_liquidation"]
+            return {
+                "ts": str(row["ts"] or ""),
+                "model": str(row["model"] or ""),
+                "net_liquidation": float(nl) if nl is not None else None,
+            }
+        except Exception:
+            logger.exception("journal.last_session_marker failed")
+            return None
+
+    def ensure_model_session(
+        self,
+        model: str,
+        *,
+        net_liquidation: Optional[float] = None,
+        ts: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Stamp a session when ABCXAUTO_MODEL changes (or on first run)."""
+        name = str(model or "").strip()
+        if not name or not self.enabled:
+            return self.last_session_marker()
+        last = self.last_session_marker()
+        if last and str(last.get("model") or "") == name:
+            return last
+        try:
+            self._ensure_schema()
+            stamp = ts or _utc_now_iso()
+            nl = None
+            if net_liquidation is not None:
+                try:
+                    nl = float(net_liquidation)
+                except (TypeError, ValueError):
+                    nl = None
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO session_markers (ts, model, net_liquidation)
+                    VALUES (?, ?, ?)
+                    """,
+                    (stamp, name, nl),
+                )
+                conn.commit()
+            return {
+                "ts": stamp,
+                "model": name,
+                "net_liquidation": nl,
+            }
+        except Exception:
+            logger.exception("journal.ensure_model_session failed")
+            return last
+
+    def closed_fill_stats_since(self, since_iso: str) -> dict:
+        empty = {"n": 0, "wins": 0, "sum": 0.0}
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT realized_pnl FROM fills
+                    WHERE realized_pnl IS NOT NULL
+                      AND ABS(realized_pnl) > 1e-9
+                      AND ts >= ?
+                    """,
+                    (str(since_iso),),
+                ).fetchall()
+            n = 0
+            wins = 0
+            total = 0.0
+            for row in rows:
+                try:
+                    pnl = float(row["realized_pnl"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                n += 1
+                total += pnl
+                if pnl > 0:
+                    wins += 1
+            return {"n": n, "wins": wins, "sum": total}
+        except Exception:
+            logger.exception("journal.closed_fill_stats_since failed")
+            return empty
 
     def model_usage_since(self, since_iso: str) -> dict:
         """Model usage with ts >= since_iso. Empty dict-shaped totals on miss."""

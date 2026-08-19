@@ -68,44 +68,182 @@ def _con_id(obj: Dict[str, Any]) -> Optional[str]:
     return str(raw)
 
 
-def _order_matches_position(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
-    """Prefer conId match when both sides expose it; else symbol + secType."""
+def _sec_type(obj: Dict[str, Any] | None) -> str:
+    p = obj if isinstance(obj, dict) else {}
+    return str(p.get("sec_type") or p.get("secType") or p.get("sec") or "STK").upper()
+
+
+def _qty(obj: Dict[str, Any] | None) -> float:
+    p = obj if isinstance(obj, dict) else {}
+    raw = p.get("quantity")
+    if raw is None:
+        raw = p.get("position")
+    try:
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _order_id(order: Dict[str, Any] | None) -> Optional[int]:
+    o = order if isinstance(order, dict) else {}
+    raw = o.get("order_id")
+    if raw is None:
+        raw = o.get("orderId")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_option_lot(position: Dict[str, Any] | None) -> bool:
+    sec = _sec_type(position)
+    return sec.startswith("OPT") or sec in ("FOP", "BAG")
+
+
+def _opt_fp(obj: Dict[str, Any] | None) -> tuple[str, str, str, str]:
+    p = obj if isinstance(obj, dict) else {}
+    sym = str(p.get("symbol") or "").upper()
+    exp = str(p.get("expiration") or p.get("lastTradeDateOrContractMonth") or p.get("expiry") or "")
+    exp = exp[-6:] if len(exp) >= 6 else exp
+    right = str(p.get("right") or "")[:1].upper()
+    strike = p.get("strike")
+    try:
+        strike_s = f"{float(strike):g}"
+    except (TypeError, ValueError):
+        strike_s = str(strike or "")
+    return (sym, exp, right, strike_s)
+
+
+def _combo_legs(order: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    o = order if isinstance(order, dict) else {}
+    legs = o.get("combo_legs") or o.get("comboLegs") or []
+    return [leg for leg in legs if isinstance(leg, dict)]
+
+
+def lot_audit_label(position: Dict[str, Any] | None) -> str:
+    """STK uses ticker; OPT uses lot identity so a stock stop cannot mask a vert."""
+    p = position if isinstance(position, dict) else {}
+    if _is_option_lot(p):
+        from abcxauto.world_state import lot_ident
+
+        return lot_ident(p)
+    return str(p.get("symbol") or "").upper()
+
+
+def _bag_covers_lot(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
+    if _sec_type(order) != "BAG":
+        return False
+    pos_con = _con_id(position)
+    if not pos_con:
+        return False
+    qty = _qty(position)
+    if abs(qty) < 1e-9:
+        return False
+    want = "SELL" if qty > 0 else "BUY"
+    parent = str(order.get("action") or "").upper()
+    legs = _combo_legs(order)
+    if not legs:
+        return False
+    for leg in legs:
+        lid = _con_id(leg)
+        if lid != pos_con:
+            continue
+        act = str(leg.get("action") or "").upper()
+        if act == want or (not act and parent == want):
+            return True
+    return False
+
+
+def _contract_matches(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
+    pos_sec = _sec_type(position)
+    ord_sec = _sec_type(order)
+    pos_opt = pos_sec.startswith("OPT") or pos_sec in ("FOP", "BAG")
+    ord_opt = ord_sec.startswith("OPT") or ord_sec in ("FOP", "BAG")
+    if pos_opt != ord_opt:
+        return False
     pos_con = _con_id(position)
     ord_con = _con_id(order)
     if pos_con is not None and ord_con is not None:
         return pos_con == ord_con
-    pos_sec = position.get("sec_type", "STK")
-    ord_sec = order.get("sec_type", "STK")
+    if pos_opt or ord_opt:
+        fp = _opt_fp(position)
+        return bool(fp[0]) and fp == _opt_fp(order)
     return (
-        order.get("symbol") == position.get("symbol", "")
-        and ord_sec == pos_sec
+        str(order.get("symbol") or "").upper() == str(position.get("symbol") or "").upper()
+        and (pos_sec.startswith("STK") and ord_sec.startswith("STK"))
     )
+
+
+def _covers_lot(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
+    """True when the working order is a closing ticket for this lot (incl. BAG)."""
+    if _bag_covers_lot(position, order):
+        return True
+    if _sec_type(order) == "BAG":
+        return False
+    if not _contract_matches(position, order):
+        return False
+    qty = _qty(position)
+    if abs(qty) < 1e-9:
+        return False
+    exit_action = "SELL" if qty > 0 else "BUY"
+    action = str(order.get("action") or "").upper()
+    return action == exit_action
+
+
+def covering_exits(
+    position: Dict[str, Any],
+    orders: List[Dict[str, Any]] | None,
+) -> List[Dict[str, Any]]:
+    """Working orders that close this lot. Unique by order id."""
+    seen: set[int] = set()
+    out: List[Dict[str, Any]] = []
+    for o in orders or []:
+        if not isinstance(o, dict) or not _covers_lot(position, o):
+            continue
+        oid = _order_id(o)
+        if oid is not None:
+            if oid in seen:
+                continue
+            seen.add(oid)
+        out.append(o)
+    return out
+
+
+def covering_exit_ids(
+    position: Dict[str, Any],
+    orders: List[Dict[str, Any]] | None,
+) -> set[int]:
+    ids: set[int] = set()
+    for o in covering_exits(position, orders):
+        oid = _order_id(o)
+        if oid is not None:
+            ids.add(oid)
+    return ids
+
+
+def _order_matches_position(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
+    """Prefer conId; OPT uses strike fingerprint; STK uses symbol + secType."""
+    return _contract_matches(position, order)
 
 
 def build_protection_report(
     positions: List[Dict[str, Any]],
     orders: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Match each position with its working stop/target orders.
+    """Match each lot with covering stop/target orders at IBKR.
 
-    Stock positions without a working stop order are flagged unprotected.
-    Matching prefers conId when both the position and order expose one;
-    otherwise falls back to symbol + secType (avoids option-leg / stale
-    same-symbol stops masquerading as stock protection).
-    Option positions get a light advisory audit (market value, DTE, short flag)
-    but are not stop-audited — multi-leg structures carry defined risk in the
-    structure itself. Short option legs are flagged for Grok review only.
+    Unprotected is STK without a working last-stop. Option covering exits are
+    facts only — they do not force hold or flatten. Combos close as one BAG.
     """
     report = []
     unprotected = []
 
     for p in positions or []:
-        qty = p.get("quantity") or 0
+        qty = _qty(p)
         if not qty:
             continue
         symbol = p.get("symbol", "")
-        sec_type = p.get("sec_type", "STK")
-        exit_action = "SELL" if qty > 0 else "BUY"
+        sec_type = _sec_type(p)
 
         entry = {
             "symbol": symbol,
@@ -118,17 +256,17 @@ def build_protection_report(
             "realized_pnl": p.get("realized_pnl"),
         }
 
-        if sec_type == "STK":
-            same_side_exits = [
-                o for o in (orders or [])
-                if _order_matches_position(p, o)
-                and o.get("sec_type", "STK") == "STK"
-                and o.get("action") == exit_action
-            ]
-            stops = [o for o in same_side_exits if is_stop_order(o.get("order_type", ""))]
-            targets = [o for o in same_side_exits if o.get("order_type") == "LMT"]
-            entry["stop_orders"] = stops
-            entry["target_orders"] = targets
+        exits = covering_exits(p, orders)
+        stops = [o for o in exits if is_stop_order(str(o.get("order_type") or ""))]
+        targets = [
+            o for o in exits
+            if str(o.get("order_type") or "").upper() in ("LMT", "LOC", "STP LMT", "TRAIL LIMIT")
+        ]
+        entry["stop_orders"] = stops
+        entry["target_orders"] = targets
+        entry["covering_exits"] = len(exits)
+
+        if sec_type.startswith("STK"):
             entry["protected"] = bool(stops)
             missing = []
             if not stops:
@@ -138,9 +276,8 @@ def build_protection_report(
             if missing:
                 entry["missing"] = missing
             if not stops:
-                unprotected.append(symbol)
+                unprotected.append(lot_audit_label(p) or str(symbol))
         else:
-            # Light option audit — advisory only (does not block or auto-panic).
             expiration = (
                 p.get("expiration")
                 or p.get("lastTradeDateOrContractMonth")
@@ -155,15 +292,9 @@ def build_protection_report(
                 entry["strike"] = p.get("strike")
             if p.get("right") is not None:
                 entry["right"] = p.get("right")
-            try:
-                qty_n = float(qty)
-            except (TypeError, ValueError):
-                qty_n = 0.0
-            if qty_n < 0:
+            if qty < 0:
                 entry["note"] = "short option — review risk"
                 entry["flag"] = "short option — review risk"
-            else:
-                entry["note"] = "option position — light audit (no stop matching)"
 
         report.append(entry)
 
@@ -243,7 +374,7 @@ class PortfolioMonitor:
             logger.warning("Monitor wake callback failed: %s", e)
 
     def _detect_pace_wakes(self, snapshot: Dict[str, Any]) -> None:
-        """Whitelist wakes for Pro adaptive pacing (no Grok from monitor)."""
+        """Whitelist wakes (no Grok from monitor)."""
         if self.on_wake is None:
             return
         prot = snapshot.get("protection") or {}

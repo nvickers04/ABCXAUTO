@@ -21,7 +21,7 @@ Do not grow the system prompt. Strategy is Grok’s. Switch the brain with `ABCX
 - `send` is the only broker path
 - Defined-risk and cash-only
 - Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %; capacity `max_open_positions` (default 15)
-- Unprotected stock: last-stop / protect-first; hold is blocked only while unprotected STK
+- Unprotected STK: last-stop at IBKR; hold is blocked until it exists. Combo close (`closing_position` on the matching multi-leg send) is one BAG, not new risk
 - Live new risk needs a promoted playbook
 - Ticket geometry uses **IBKR last**, not MDA
 - Exits are never blocked; fail-closed if the book is unknown
@@ -53,7 +53,7 @@ LOOK     ensure_next_look so the desk is never parked
 |------|-----|
 | TWS paper | API on port **7497** (Gateway 4002). Probe the port before launch. |
 | xAI | `XAI_API_KEY` in `.env` |
-| MarketData.app | optional `MARKETDATA_TOKEN` — `scan` / `news` / `candles` / `option_facts` greeks, ~15m delayed |
+| MarketData.app | optional `MARKETDATA_TOKEN` — `scan` / `news` / `option_facts` greeks, ~15m delayed. `candles` is IBKR hist or the live 5s stream (error if both miss). |
 | Polymarket | `odds` implied probs — context, not send geometry |
 
 ```powershell
@@ -70,7 +70,7 @@ Paper client id is `IBKR_CLIENT_ID` (template default **42**). Live needs a **di
 
 IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 
-MDA delayed: `scan`, `news`, `candles`, `option_facts` (greeks).
+MDA delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
 
 Other: `odds` (Polymarket), `playbook` (notebook + score since last write), `write_lab_playbook` (paper notebook, up to 8000 chars), `set_wake`, `send`, `self_tune` (flat knobs; `send self_tune` still works).
 
@@ -125,7 +125,7 @@ Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** 
 | `ABCXAUTO_MAX_RISK_PER_TRADE_PCT` | `25` | Max risk per ticket vs NetLiq |
 | `ABCXAUTO_DEFINED_RISK_ONLY` | `true` | Locked on |
 | `ABCXAUTO_JOURNAL_PATH` | `journal.db` | Clerk SQLite journal |
-| `ABCXAUTO_DEFAULT_LOOK_S` | `90` (`60` when open and not flat) | Clerk look if Grok skips `set_wake` |
+| `ABCXAUTO_DEFAULT_LOOK_S` | `90` (`60` when open and not flat) | Clerk look if Grok skips `set_wake` (Grok's clock is not max-clamped) |
 
 See `.env.template` for the rest. Live: `TRADING_MODE=live`, port **7496**, `ABCXAUTO_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING_RISK`, and a promoted playbook.
 

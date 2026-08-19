@@ -9,7 +9,7 @@ from abcxauto.portfolio import build_portfolio_state
 def test_build_portfolio_state_core_fields(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.config.get_config",
-        lambda: type("C", (), {"trading_mandate": "Trade SPY with brackets only. " * 20})(),
+        lambda: type("C", (), {})(),
     )
     state = build_book(
         account={"netliquidation": 50_000, "dailypnl": -100},
@@ -30,7 +30,12 @@ def test_build_portfolio_state_core_fields(monkeypatch):
     assert "mandate_summary" not in state
     assert state["net_liq"] == 50_000
     assert state["daily_pnl"] == -100
+    assert state["ibkr_daily_pnl"] == -100
+    assert state["open_upnl"] == 50.0
     assert state["daily_pnl_pct"] is not None
+    assert "ibkrDay=-100" in state["narrative"]
+    assert "openU=50.0" in state["narrative"]
+    assert "dayPnL=" not in state["narrative"]
     assert state["open_orders_count"] == 1
     assert state["unprotected_symbols"] == []
     assert len(state["positions"]) == 1

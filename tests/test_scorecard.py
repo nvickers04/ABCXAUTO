@@ -155,3 +155,46 @@ def test_scorecard_thin_window_not_fastest():
     h1 = sc["windows"]["1h"]
     assert h1["coverage"] in ("thin", "none")
     assert sc["fastest_beating"] != "1h" or h1["coverage"] == "ok"
+
+
+def test_scorecard_session_is_not_inception(monkeypatch):
+    class J:
+        def startup_cash(self):
+            return 36638.0
+
+        def first_snapshot(self):
+            return 36638.0, "2026-07-28T00:00:00Z"
+
+        def model_usage_totals(self):
+            return {"calls": 10, "cost_usd": 2.0, "input_tokens": 0, "output_tokens": 0}
+
+        def last_session_marker(self):
+            return {
+                "ts": "2026-08-19T12:00:00Z",
+                "model": "grok-4.6",
+                "net_liquidation": 35000.0,
+            }
+
+        def model_usage_since(self, _ts):
+            return {"calls": 3, "cost_usd": 0.40, "input_tokens": 0, "output_tokens": 0}
+
+        def closed_fill_stats_since(self, _ts):
+            return {"n": 2, "wins": 1, "sum": 10.0}
+
+        def nav_at_or_before(self, _ts):
+            return 35000.0, "2026-08-19T12:00:00Z"
+
+        def snapshot_count_since(self, _ts):
+            return 4
+
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: type("C", (), {"model": "grok-4.6"})(),
+    )
+    sc = compute_scorecard(equity=35100.0, journal=J())
+    assert sc["since_start"]["startup_cash"] == 36638.0
+    assert abs(sc["since_start"]["book_pnl"] - (35100.0 - 36638.0)) < 1e-9
+    assert sc["session"]["book_pnl"] == 100.0
+    assert abs(sc["session"]["edge_usd"] - 99.6) < 1e-9
+    assert sc["session"]["fills"] == 2
+    assert sc["session"]["wins"] == 1

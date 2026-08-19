@@ -26,7 +26,7 @@ Switch the brain with `ABCXAUTO_MODEL`; keep the clerk.
 - Defined-risk and cash-only
 - Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %;
   capacity `max_open_positions` (default 15)
-- Unprotected stock: last-stop / protect-first; hold blocked only while unprotected STK
+- Unprotected STK: last-stop; hold blocked until it rests at IBKR. Combo close is one BAG (`closing_position`), not new risk
 - Live new risk needs a promoted playbook
 - Ticket geometry uses **IBKR last**, not MDA
 - Exits never blocked; fail-closed if the book is unknown
@@ -52,7 +52,7 @@ Grok (unprotected still does).
 
 IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 
-MDA ~15m delayed: `scan`, `news`, `candles`, `option_facts` (greeks).
+MDA ~15m delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
 
 Other: `odds` (Polymarket, not send geometry), `playbook`, `write_lab_playbook`,
 `set_wake`, `send`, `self_tune` (flat knobs).

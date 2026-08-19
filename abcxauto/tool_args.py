@@ -29,8 +29,6 @@ TOOL_ALIASES = {
     "ticket": "send",
     "place_order": "send",
     "set_risk": "self_tune",
-    "set_controls": "self_tune",
-    "set_self": "self_tune",
     "chain": "option_chain",
     "options": "option_chain",
     "greeks": "option_quote",

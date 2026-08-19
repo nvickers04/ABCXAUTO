@@ -1,8 +1,9 @@
 """Grok owns the book via tools. The shell is facts + send clerk.
 
 One wake = one streamed Grok turn with tools. Tickets go through
-``execute_ticket`` → ``send_action``. IBKR tools are live; MDA tools are
-~15 min delayed (discovery / backtest).
+``execute_ticket`` → ``send_action``. IBKR tools are live. MDA scan is
+daily-bar structure; candles are IBKR hist or the live 5s stream (error if both miss); news is
+~15 min delayed.
 """
 
 from __future__ import annotations
@@ -11,13 +12,19 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from xai_sdk.chat import developer, system, tool, tool_result, user
 
 from abcxauto.llm import GrokClient, build_system_prompt
-from abcxauto.opportunity_scan import fetch_scan_metrics, normalize_tickers
+from abcxauto.opportunity_scan import (
+    fetch_scan_metrics,
+    mda_bar_freshness,
+    mda_last_kind,
+    normalize_tickers,
+)
 from abcxauto.order_examples import format_order_examples, ticket_strategy_names
 from abcxauto.think_stream import emit as think_emit
 from abcxauto.tools import run_readonly_tool
@@ -44,6 +51,7 @@ STREAM_LOOP_SENTENCE_COPIES = 3
 TOOL_S = 20.0
 SEND_S = 45.0
 CHAIN_S = 60.0
+CANDLE_S = 35.0
 _QUOTE_SCHEMA = {"type": "string", "description": "Ticker, e.g. AAPL"}
 _SYMBOLS_SCHEMA = {"type": "array", "items": {"type": "string"}}
 
@@ -97,14 +105,15 @@ AGENT_TOOLS = [
     ),
     tool(
         name="scan",
-        description="MDA tape metrics (~15 min delayed).",
+        description="MDA daily-bar tape metrics. mda_last is daily close, not a 15m last.",
         parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, ["symbols"]),
     ),
     tool(
         name="candles",
         description=(
-            "MDA OHLCV (~15 min delayed). Backtest/context, not live last. "
-            "One symbol or symbols[] (max 8). resolution: D, 60, 15, 5."
+            "IBKR hist or live 5s. Error if both miss. Not MDA. "
+            "One symbol or symbols[] (max 8). "
+            "resolution D = daily; 15/5/60 = hist size (stream is always 5s)."
         ),
         parameters=_schema(
             {
@@ -224,8 +233,8 @@ AGENT_TOOLS = [
     tool(
         name="playbook",
         description=(
-            "Your lab notebook (instructions) plus score since the last write. "
-            "Optional revision= for a prior card. Not a standing order."
+            "Your notes plus how they scored since the write. "
+            "revision= is an old card's outcome (edge, lots), not the old essay."
         ),
         parameters=_schema(
             {
@@ -238,14 +247,14 @@ AGENT_TOOLS = [
     tool(
         name="write_lab_playbook",
         description=(
-            "Paper only: write or replace the lab notebook. instructions is the "
-            "notes. Optional mode / ready_to_promote. send is the book."
+            "Paper only: replace your notes with whatever next-look-you should have. "
+            "Optional mode / ready_to_promote. Book, quote, and gates are other tools."
         ),
         parameters=_schema(
             {
                 "instructions": {
                     "type": "string",
-                    "description": "The notebook. Replaces the previous notes.",
+                    "description": "Your notebook. Replaces the previous notes.",
                 },
                 "mode": {"type": "string", "description": "explore or exploit"},
                 "ready_to_promote": {"type": "boolean"},
@@ -478,8 +487,11 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
         used = usage_from_response(
             last_resp, last_ch, think_text=think_acc, say_text=o
         )
+        from abcxauto.config import get_config
+
         get_journal().record_model_usage(
             stage=stage,
+            model=str(getattr(get_config(), "model", "") or ""),
             input_tokens=int(used.get("input_tokens") or 0),
             output_tokens=int(used.get("output_tokens") or 0),
             cached_tokens=int(used.get("cached_tokens") or 0),
@@ -568,7 +580,12 @@ def _open_wake(g: GrokClient, wake: str, *, reset: bool = False) -> Any:
 
 
 def _book_facts(world: WorldState) -> dict[str, Any]:
-    from abcxauto.world_state import COMBO_FACT, compact_position, compact_working_orders
+    from abcxauto.world_state import (
+        COMBO_FACT,
+        compact_position,
+        compact_working_orders,
+        open_upnl_of,
+    )
 
     return {
         "cycle": world.cycle,
@@ -578,6 +595,8 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         "unprotected": list(world.unprotected or []),
         "net_liquidation": world.net_liquidation,
         "daily_pnl": world.daily_pnl,
+        "ibkr_daily_pnl": world.daily_pnl,
+        "open_upnl": open_upnl_of(world.positions),
         "posture": world.effective_posture or world.risk_posture,
         "gates": world.gates,
         "envelope": world.envelope,
@@ -902,19 +921,22 @@ async def _run_tool(
         tape = [strip_ambiguous_last(r) if isinstance(r, dict) else r for r in (extra or [])]
         return _clip({
             "source": "mda",
-            "freshness": "delayed_15m",
-            "use": "discovery_not_live_last",
+            "freshness": "delayed_daily",
+            "bar": "D",
+            "mda_last_is": "daily_bar_close",
+            "use": "daily_structure_not_live_last",
             "symbols": syms,
             "tape": tape,
         })
     if name == "candles":
+        from abcxauto.broker.bars import ibkr_bar_freshness
         from abcxauto.marketdata.client import get_marketdata_client
 
         syms = normalize_tickers(
             args.get("symbols") or args.get("symbol"), cap=CANDLE_CAP
         )
         if not syms:
-            return json.dumps({"error": "symbol required", "source": "mda"})
+            return json.dumps({"error": "symbol required", "source": "ibkr"})
         try:
             countback = int(args.get("countback") or 60)
         except (TypeError, ValueError):
@@ -923,10 +945,94 @@ async def _run_tool(
         res = str(args.get("resolution") or "D").strip() or "D"
         client = get_marketdata_client()
         bar_cap = 40 if len(syms) > 1 else 80
+        hist = getattr(connector, "get_historical_bars", None)
+        realtime = getattr(connector, "get_realtime_bars", None)
+        peek = getattr(connector, "realtime_bar_buffer", None)
+        ibkr_path = connector is not None and (callable(hist) or callable(realtime))
+        qmap = dict(getattr(world, "ibkr_live_quotes", None) or {})
+        if isinstance(snap.get("ibkr_live_quotes"), dict):
+            qmap.update(snap["ibkr_live_quotes"])
+        t0 = time.monotonic()
+        budget = min(CANDLE_S, max(28.0, 12.0 + 8.0 * len(syms)))
+
+        async def _mda_candles(sym: str) -> dict[str, Any]:
+            bars = await client.get_stock_candles(sym, resolution=res, countback=countback)
+            return {
+                "symbol": sym,
+                "bars": list(bars or [])[-bar_cap:],
+                "source": "mda",
+                "freshness": mda_bar_freshness(res),
+            }
+
+        def _live_last(sym: str) -> Any:
+            return qmap.get(sym)
 
         async def _one_candles(sym: str) -> dict[str, Any]:
-            bars = await client.get_stock_candles(sym, resolution=res, countback=countback)
-            return {"symbol": sym, "bars": list(bars or [])[-bar_cap:]}
+            hist_err = ""
+            rt_err = ""
+            warm = False
+            if callable(peek):
+                try:
+                    warm = bool(peek(sym))
+                except Exception:
+                    warm = False
+            if callable(hist) and not warm:
+                try:
+                    raw = await hist(sym, resolution=res, countback=countback)
+                except Exception as exc:
+                    raw = {"error": str(exc), "source": "ibkr", "symbol": sym}
+                if isinstance(raw, dict) and raw.get("bars"):
+                    out = dict(raw)
+                    out["bars"] = list(out.get("bars") or [])[-bar_cap:]
+                    out.setdefault("source", "ibkr")
+                    out.setdefault("freshness", ibkr_bar_freshness(res))
+                    return out
+                hist_err = str((raw or {}).get("error") or "no IBKR bars")
+            elif warm:
+                hist_err = "skipped_hist_rt_warm"
+            remain = max(0.0, budget - (time.monotonic() - t0) - 2.0)
+            wait_s = min(7.0, remain)
+            if callable(realtime):
+                try:
+                    raw = await realtime(
+                        sym, resolution=res, countback=countback, wait_s=wait_s
+                    )
+                except TypeError:
+                    try:
+                        raw = await realtime(sym, resolution=res, countback=countback)
+                    except Exception as exc:
+                        raw = {"error": str(exc), "source": "ibkr", "symbol": sym}
+                except Exception as exc:
+                    raw = {"error": str(exc), "source": "ibkr", "symbol": sym}
+                if isinstance(raw, dict) and raw.get("bars"):
+                    out = dict(raw)
+                    out["bars"] = list(out.get("bars") or [])[-bar_cap:]
+                    out.setdefault("source", "ibkr")
+                    out.setdefault("freshness", ibkr_bar_freshness("5s"))
+                    out.setdefault("resolution", "5s")
+                    out.setdefault("requested_resolution", res)
+                    return out
+                rt_err = str((raw or {}).get("error") or "no IBKR realtime bars")
+            if ibkr_path:
+                logger.info(
+                    "candles %s hist=%s rt=%s path=ibkr_error",
+                    sym,
+                    hist_err or "n/a",
+                    rt_err or "n/a",
+                )
+                err = {
+                    "symbol": sym,
+                    "source": "ibkr",
+                    "error": rt_err or hist_err or "no IBKR bars",
+                    "freshness": "ibkr_miss",
+                    "hist_error": hist_err or None,
+                    "rt_error": rt_err or None,
+                }
+                last = _live_last(sym)
+                if last is not None:
+                    err["last"] = last
+                return err
+            return await _mda_candles(sym)
 
         rows = await asyncio.gather(
             *[_one_candles(sym) for sym in syms], return_exceptions=True
@@ -937,18 +1043,74 @@ async def _run_tool(
                 series.append({"symbol": sym, "error": str(row)})
             else:
                 series.append(row)
+        kinds: set[str] = set()
+        for row in series:
+            if not isinstance(row, dict):
+                continue
+            src = str(row.get("source") or "")
+            fresh = str(row.get("freshness") or "")
+            if src == "mda":
+                kinds.add("mda")
+            elif fresh == "ibkr_rt_5s":
+                kinds.add("rt")
+            elif src == "ibkr":
+                kinds.add("hist")
+        if kinds == {"hist"}:
+            source, freshness, use, out_res = (
+                "ibkr",
+                ibkr_bar_freshness(res),
+                "ibkr_rth_structure",
+                res,
+            )
+        elif kinds == {"rt"}:
+            source, freshness, use, out_res = (
+                "ibkr",
+                ibkr_bar_freshness("5s"),
+                "live_5s_not_hist",
+                "5s",
+            )
+        elif kinds == {"mda"}:
+            source, freshness, use, out_res = (
+                "mda",
+                mda_bar_freshness(res),
+                "backtest_or_context_not_live_last",
+                res,
+            )
+        elif kinds <= {"hist", "rt"} and kinds:
+            source, freshness, use, out_res = "ibkr", "ibkr_hist_or_rt", "prefer_hist_then_5s", res
+        else:
+            source, freshness, use, out_res = "mixed", "ibkr_or_mda", "prefer_ibkr_bars", res
         payload: dict[str, Any] = {
-            "resolution": res,
-            "source": "mda",
-            "freshness": "delayed_15m",
-            "use": "backtest_or_context_not_live_last",
+            "resolution": out_res,
+            "source": source,
+            "freshness": freshness,
+            "use": use,
         }
+        if out_res != res:
+            payload["requested_resolution"] = res
+        if source == "mda":
+            payload["mda_last_is"] = mda_last_kind(res)
         if len(series) == 1:
             payload["symbol"] = series[0].get("symbol")
-            if series[0].get("error"):
+            if series[0].get("error") and not series[0].get("bars"):
                 payload["error"] = series[0]["error"]
+                if series[0].get("last") is not None:
+                    payload["last"] = series[0]["last"]
+                if series[0].get("hist_error"):
+                    payload["hist_error"] = series[0]["hist_error"]
+                if series[0].get("rt_error"):
+                    payload["rt_error"] = series[0]["rt_error"]
             else:
                 payload["bars"] = series[0].get("bars") or []
+            if series[0].get("source"):
+                payload["source"] = series[0]["source"]
+                payload["freshness"] = series[0].get("freshness") or payload["freshness"]
+                if series[0].get("resolution"):
+                    payload["resolution"] = series[0]["resolution"]
+                if series[0].get("requested_resolution"):
+                    payload["requested_resolution"] = series[0]["requested_resolution"]
+                if series[0].get("use"):
+                    payload["use"] = series[0]["use"]
             return _clip(payload)
         payload["series"] = series
         return _clip(payload)
@@ -1136,6 +1298,9 @@ def _parse_tool_call(
     if name == "option_chain":
         n = max(1, len(normalize_tickers(args.get("symbols") or args.get("symbol"), cap=CHAIN_CAP)))
         timeout = min(90.0, max(CHAIN_S, 22.0 * n))
+    if name == "candles":
+        n = max(1, len(normalize_tickers(args.get("symbols") or args.get("symbol"), cap=CANDLE_CAP)))
+        timeout = min(CANDLE_S, max(28.0, 12.0 + 8.0 * n))
     return name, args, tc, timeout
 
 

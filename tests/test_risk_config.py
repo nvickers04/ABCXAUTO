@@ -1,14 +1,14 @@
 """Runtime + persisted risk/capacity config (disjoint ownership)."""
 
 from abcxauto.config import (
-    CONTROL_KEYS,
+    CAPACITY_KEYS,
     RISK_CONFIG_KEYS,
     clear_risk_settings,
     clear_runtime_overrides,
     get_config,
     load_risk_settings,
     risk_config_snapshot,
-    update_controls_config,
+    update_capacity_config,
     update_risk_config,
 )
 
@@ -33,8 +33,8 @@ def test_defaults_1k_floor():
     assert snap["max_open_positions"] == 15
 
 
-def test_risk_and_controls_keys_disjoint():
-    assert CONTROL_KEYS.isdisjoint(RISK_CONFIG_KEYS)
+def test_risk_and_capacity_keys_disjoint():
+    assert CAPACITY_KEYS.isdisjoint(RISK_CONFIG_KEYS)
 
 
 def test_update_risk_rejects_capacity_keys():
@@ -45,9 +45,9 @@ def test_update_risk_rejects_capacity_keys():
         assert "Unknown" in str(e)
 
 
-def test_update_controls_rejects_risk_keys():
+def test_update_capacity_rejects_risk_keys():
     try:
-        update_controls_config(daily_loss_limit_pct=3.0, persist=False)
+        update_capacity_config(daily_loss_limit_pct=3.0, persist=False)
         assert False, "expected ValueError"
     except ValueError as e:
         assert "Unknown" in str(e)
@@ -62,14 +62,14 @@ def test_update_risk_config_session_override():
     assert get_config().daily_loss_limit_pct == 25.0
 
 
-def test_update_controls_capacity(tmp_path, monkeypatch):
-    path = tmp_path / "persist_controls.json"
+def test_update_capacity(tmp_path, monkeypatch):
+    path = tmp_path / "persist_capacity.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     clear_risk_settings(path=path)
     load_risk_settings(path)
-    update_controls_config(max_open_positions=12)
+    update_capacity_config(max_open_positions=12)
     assert get_config().max_open_positions == 12
-    update_controls_config(max_open_positions=99)
+    update_capacity_config(max_open_positions=99)
     assert get_config().max_open_positions == 25
 
 
@@ -120,11 +120,11 @@ def test_stale_control_dials_are_ignored(tmp_path, monkeypatch):
     assert not hasattr(cfg, "control_budget_pct")
 
 
-def test_controls_not_in_set_risk_keys():
-    from abcxauto.config import CONTROL_KEYS, SET_RISK_KEYS
+def test_capacity_not_in_set_risk_keys():
+    from abcxauto.config import CAPACITY_KEYS, SET_RISK_KEYS
 
-    assert CONTROL_KEYS.isdisjoint(SET_RISK_KEYS)
-    assert CONTROL_KEYS == frozenset({"max_open_positions"})
+    assert CAPACITY_KEYS.isdisjoint(SET_RISK_KEYS)
+    assert CAPACITY_KEYS == frozenset({"max_open_positions"})
 
 
 def test_set_trading_mode_paper_live_roundtrip():

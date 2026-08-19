@@ -153,6 +153,12 @@ def run_headless() -> int:
         return 2
 
     ensure_immutable_floor(persist=True)
+    try:
+        from abcxauto.memory import get_journal
+
+        get_journal().ensure_model_session(str(getattr(cfg, "model", "") or ""))
+    except Exception:
+        pass
     engine = ProEngine()
 
     stopping = {"done": False}

@@ -1,7 +1,6 @@
-"""Risk posture envelopes, set_risk clamp, live clamp."""
+"""Walk-away floor clamp and live posture identity."""
 
 from abcxauto.config import (
-    apply_risk_posture,
     clamp_risk_knobs,
     clear_risk_settings,
     clear_runtime_overrides,
@@ -29,21 +28,12 @@ def test_resolve_effective_posture_live_clamps_aggressive():
     assert resolve_effective_posture("", "paper") == ""
 
 
-def test_apply_risk_posture_seeds(tmp_path, monkeypatch):
-    path = tmp_path / "risk.json"
-    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
-    clear_risk_settings(path=path)
-    load_risk_settings(path)
+def test_no_posture_seed_api():
+    import abcxauto.config as cfg
 
-    cfg = apply_risk_posture("balanced", persist=True)
-    assert cfg.risk_posture == "defensive"  # walk-away floor identity
-    assert cfg.max_risk_per_trade_pct == 1.5  # balanced seed, under 25% ceiling
-    assert cfg.daily_loss_limit_pct == 5.0  # balanced seed, under 25% ceiling
-    assert cfg.max_position_pct == 12.0  # balanced seed already under 25% ceiling
-    # Capital preset must not touch Controls book capacity
-    assert cfg.max_open_positions == 15
-    assert cfg.auto_panic_on_breach is True
-    assert path.is_file()
+    assert not hasattr(cfg, "apply_risk_posture")
+    assert not hasattr(cfg, "_POSTURE_SEEDS")
+    assert not hasattr(cfg, "_POSTURE_PROMPT_BIAS")
 
 
 def test_clamp_risk_knobs_ceiling(tmp_path, monkeypatch):
@@ -51,7 +41,6 @@ def test_clamp_risk_knobs_ceiling(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     clear_risk_settings(path=path)
     load_risk_settings(path)
-    apply_risk_posture("defensive", persist=True)
 
     applied, notes = clamp_risk_knobs({"max_risk_per_trade_pct": 99.0})
     assert applied["max_risk_per_trade_pct"] == 25.0
@@ -70,12 +59,11 @@ def test_set_risk_no_approval_needed(tmp_path, monkeypatch):
     assert get_config().max_risk_per_trade_pct == 0.5
 
 
-def test_set_risk_within_envelope(tmp_path, monkeypatch):
+def test_set_risk_tightens_inside_floor(tmp_path, monkeypatch):
     path = tmp_path / "risk.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     clear_risk_settings(path=path)
     load_risk_settings(path)
-    apply_risk_posture("balanced", persist=True)
 
     out = set_risk_knobs({"max_risk_per_trade_pct": 0.75, "max_peak_drawdown_pct": 5.0})
     assert out["status"] == "ok"
@@ -89,7 +77,6 @@ def test_set_risk_clamps_over_ceiling(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     clear_risk_settings(path=path)
     load_risk_settings(path)
-    apply_risk_posture("balanced", persist=True)
 
     out = set_risk_knobs({"max_risk_per_trade_pct": 50.0})
     assert out["status"] == "ok"
@@ -106,7 +93,6 @@ def test_executor_set_risk(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     clear_risk_settings(path=path)
     load_risk_settings(path)
-    apply_risk_posture("balanced", persist=True)
 
     class _C:
         connected = True
@@ -121,16 +107,13 @@ def test_executor_set_risk(tmp_path, monkeypatch):
     assert get_config().max_risk_per_trade_pct == 0.5
 
 
-def test_live_aggressive_effective_balanced(tmp_path, monkeypatch):
+def test_live_keeps_defensive_identity(tmp_path, monkeypatch):
     path = tmp_path / "risk.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     clear_risk_settings(path=path)
     load_risk_settings(path)
     set_trading_mode("live", live_confirm="I_UNDERSTAND_LIVE_TRADING_RISK")
-    apply_risk_posture("aggressive", persist=True)
     cfg = get_config()
     assert cfg.risk_posture == "defensive"
     assert cfg.effective_risk_posture == "defensive"
-    # Floor clamps aggressive seeds
-    assert cfg.max_risk_per_trade_pct == 1.5
     set_trading_mode("paper")

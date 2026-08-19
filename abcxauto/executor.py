@@ -294,11 +294,11 @@ async def _verify_closes_option(proposal: OrderProposal, connector: Any) -> Opti
 async def _verify_cancel_not_last_stop(
     proposal: OrderProposal, connector: Any
 ) -> Optional[Dict[str, Any]]:
-    """Reject cancel_order when it would remove the only working stop on an open stock position.
+    """Reject cancel that would strip the last STK stop.
 
-    Fail closed if open orders / positions cannot be read. Non-stop cancels,
-    stops on flat symbols, and redundant stops pass. modify_order / modify_stop
-    are unrestricted (not routed here).
+    Fail closed if open orders / positions cannot be read. Non-stop cancels
+    and redundant stops pass. Option covering exits are Grok's to manage.
+    modify_stop is unrestricted (not routed here).
     """
     order_id = int(proposal.params.order_id)
     try:
@@ -342,56 +342,54 @@ async def _verify_cancel_not_last_stop(
         # Order not found among open orders — let the gateway return its own error.
         return None
 
-    if not is_stop_order(str(target.get("order_type") or target.get("orderType") or "")):
-        return None
-
     symbol = str(target.get("symbol") or "").upper()
-    if not symbol:
-        return None
+    target_is_stop = is_stop_order(
+        str(target.get("order_type") or target.get("orderType") or "")
+    )
 
     # Open stock position for this symbol?
     held = 0
-    for p in positions:
-        sec = str(p.get("sec_type") or p.get("secType") or "STK").upper()
-        if not sec.startswith("STK"):
-            continue
-        if str(p.get("symbol", "")).upper() != symbol:
-            continue
-        try:
-            held = int(float(p.get("quantity", 0) or 0))
-        except (TypeError, ValueError):
-            held = 0
-        break
+    if symbol and target_is_stop:
+        for p in positions:
+            sec = str(p.get("sec_type") or p.get("secType") or "STK").upper()
+            if not sec.startswith("STK"):
+                continue
+            if str(p.get("symbol", "")).upper() != symbol:
+                continue
+            try:
+                held = int(float(p.get("quantity", 0) or 0))
+            except (TypeError, ValueError):
+                held = 0
+            break
 
-    if held == 0:
-        return None  # flat — cancelling a stop is fine
+    if held != 0:
+        other_stops = 0
+        for o in orders:
+            try:
+                oid = int(o.get("order_id") if o.get("order_id") is not None else o.get("orderId"))
+            except (TypeError, ValueError):
+                continue
+            if oid == order_id:
+                continue
+            if str(o.get("symbol") or "").upper() != symbol:
+                continue
+            sec = str(o.get("sec_type") or o.get("secType") or "STK").upper()
+            if not sec.startswith("STK"):
+                continue
+            if is_stop_order(str(o.get("order_type") or o.get("orderType") or "")):
+                other_stops += 1
 
-    # Count other working stops on the same symbol (stock side)
-    other_stops = 0
-    for o in orders:
-        try:
-            oid = int(o.get("order_id") if o.get("order_id") is not None else o.get("orderId"))
-        except (TypeError, ValueError):
-            continue
-        if oid == order_id:
-            continue
-        if str(o.get("symbol") or "").upper() != symbol:
-            continue
-        sec = str(o.get("sec_type") or o.get("secType") or "STK").upper()
-        if not sec.startswith("STK"):
-            continue
-        if is_stop_order(str(o.get("order_type") or o.get("orderType") or "")):
-            other_stops += 1
+        if other_stops == 0:
+            return {
+                "error": (
+                    f"cancel_order rejected: order {order_id} is the only working stop "
+                    f"protecting open {symbol} position (qty={held}). "
+                    "First place replacement protection (oca / stop_order) "
+                    "or use modify_stop to move the existing stop."
+                )
+            }
+        return None
 
-    if other_stops == 0:
-        return {
-            "error": (
-                f"cancel_order rejected: order {order_id} is the only working stop "
-                f"protecting open {symbol} position (qty={held}). "
-                "First place replacement protection (oca / stop_order) "
-                "or use modify_stop to move the existing stop."
-            )
-        }
     return None
 
 
@@ -555,6 +553,26 @@ async def execute_proposal(
             journal.record_dispatch(journal_id, False, rejection)
             return rejection
 
+    if proposal.strategy in _EXIT_ONLY_STRATEGIES or proposal.strategy in {
+        "close_option", "oca", "trailing_stop", "trailing_stop_limit",
+    }:
+        try:
+            live = await connector.get_positions()
+        except Exception as e:
+            rejection = {"error": f"defined_risk_only: cannot read positions ({e})"}
+            journal.record_dispatch(journal_id, False, rejection)
+            return rejection
+        from abcxauto.world_state import single_leg_vertical_block
+
+        vert_note = single_leg_vertical_block(
+            proposal.strategy, proposal.params, live
+        )
+        if vert_note:
+            rejection = {"error": vert_note}
+            logger.warning(f"Proposal #{proposal.id} blocked: {vert_note}")
+            journal.record_dispatch(journal_id, False, rejection)
+            return rejection
+
     if proposal.strategy in _PROTECTION_STRATEGIES:
         rejection = await _verify_has_open_position(proposal, connector)
         if rejection:
@@ -645,7 +663,7 @@ async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
             "note": "hold — no broker dispatch",
             "strategy": "hold",
         }
-    if strategy in ("set_risk", "self_tune", "set_controls", "set_self"):
+    if strategy in ("set_risk", "self_tune"):
         from abcxauto.self_tune import apply_self_tune
 
         return apply_self_tune(

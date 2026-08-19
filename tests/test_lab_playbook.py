@@ -158,6 +158,7 @@ def test_save_lab_appends_scored_ledger(tmp_path, monkeypatch):
             "do_more": "try size",
             "stop_doing": "lottery",
             "ready_to_promote": False,
+            "lots_at_write": ["SPY 260918C500 x1"],
         },
         scorecard={"beating_model": False, "edge_usd": -100.0},
     )
@@ -178,7 +179,9 @@ def test_save_lab_appends_scored_ledger(tmp_path, monkeypatch):
     assert lab["ledger"][0]["closed_edge"] == -80.0
     assert lab["ledger"][1]["edge_usd"] == -80.0
     assert lab["ledger"][1].get("closed_edge") is None
-    assert revision_card(1)["instructions"] == "First card."
+    assert "instructions" not in lab["ledger"][0]
+    assert "instructions" not in revision_card(1)
+    assert revision_card(1)["lots_at_write"] == ["SPY 260918C500 x1"]
     facts = playbook_facts({"edge_usd": -90.0, "beating_model": False})
     assert [row["revision"] for row in facts["ledger"]] == [1, 2]
     block = format_block()
@@ -190,8 +193,11 @@ def test_save_lab_appends_scored_ledger(tmp_path, monkeypatch):
     assert "Second card" in payload["current"]["instructions"]
     assert payload["current"]["instructions_n"] == len("Second card sizes to the envelope.")
     assert "Second card" in playbook_payload(full=True)["current"]["instructions"]
-    assert playbook_payload(1)["revision"]["edge_usd"] == -100.0
-    assert playbook_payload(1)["revision"]["closed_edge"] == -80.0
+    old = playbook_payload(1)["revision"]
+    assert old["edge_usd"] == -100.0
+    assert old["closed_edge"] == -80.0
+    assert "instructions" not in old
+    assert "First card" not in json.dumps(old)
 
 
 def test_playbook_payload_score_is_now_not_the_write_stamp(tmp_path, monkeypatch):
@@ -226,6 +232,40 @@ def test_playbook_payload_score_is_now_not_the_write_stamp(tmp_path, monkeypatch
     assert "XLF 260828C58.5" in format_block()
 
 
+def test_playbook_score_includes_clerk_halt_trip(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: type("C", (), {"daily_loss_limit_pct": 25.0, "is_paper": True})(),
+    )
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False, "halt_reason": "", "halt_kind": ""})(),
+    )
+    save_lab(
+        {
+            "mode": "explore",
+            "instructions": "Notes.",
+            "ready_to_promote": False,
+        },
+        scorecard={"beating_model": False, "edge_usd": -1.0},
+    )
+    monkeypatch.setattr(
+        "abcxauto.scorecard.compute_scorecard",
+        lambda **_k: {
+            "net_liquidation": 40_000.0,
+            "ibkr_daily_pnl": -100.0,
+            "edge_usd": -1.0,
+        },
+    )
+    payload = playbook_payload()
+    assert payload["score"]["clerk_halted"] is False
+    assert payload["score"]["daily_loss_limit_pct"] == 25.0
+    assert payload["score"]["halt_trips_at_usd"] == -10000.0
+    assert payload["score"]["ibkr_day_vs_halt"] == 9900.0
+
+
 def test_new_notebook_does_not_need_basis_or_evidence(tmp_path, monkeypatch):
     from abcxauto.lab_playbook import grounding_error
 
@@ -256,6 +296,29 @@ def test_patch_does_not_require_new_research(tmp_path, monkeypatch):
     assert grounding_error({"do_more": "size to envelope"}, tool_trace=[]) == ""
 
 
+def test_save_lab_drops_dead_ceremony_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    save_lab(
+        {
+            "mode": "explore",
+            "instructions": "Defined-risk debit.",
+            "do_more": "harvest QQQ",
+            "stop_doing": "lottery",
+            "basis": ["debit_vertical"],
+            "evidence": "prior card",
+            "research_tools": ["scan"],
+            "ready_to_promote": False,
+        }
+    )
+    lab = load_lab()
+    assert "do_more" not in lab
+    assert "stop_doing" not in lab
+    assert "basis" not in lab
+    assert "evidence" not in lab
+    assert "research_tools" not in lab
+    assert lab["instructions"] == "Defined-risk debit."
+
+
 def test_clear_lab_drops_standing_essay(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     save_lab(
@@ -274,3 +337,38 @@ def test_clear_lab_drops_standing_essay(tmp_path, monkeypatch):
     assert state["instructions"] == ""
     assert load_lab()["instructions"] == ""
     assert "none" in format_block()
+
+
+def test_playbook_revision_strips_old_essay_on_disk(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    (tmp_path / "lab.json").write_text(
+        json.dumps(
+            {
+                "mode": "explore",
+                "instructions": "Live notes.",
+                "revision": 2,
+                "written_at": datetime.now(timezone.utc).isoformat(),
+                "ledger": [
+                    {
+                        "revision": 1,
+                        "edge_usd": -100.0,
+                        "closed_edge": -80.0,
+                        "instructions": "Hold forbidden without resting exit.",
+                        "do_more": "cover short then sell long",
+                    },
+                    {
+                        "revision": 2,
+                        "edge_usd": -80.0,
+                        "instructions": "Live notes.",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    old = playbook_payload(1)["revision"]
+    assert old["closed_edge"] == -80.0
+    assert "instructions" not in old
+    assert "do_more" not in old
+    assert "Hold forbidden" not in json.dumps(old)
+    assert playbook_payload()["current"]["instructions"] == "Live notes."

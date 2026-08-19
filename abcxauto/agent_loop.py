@@ -52,7 +52,7 @@ _HUNT_OPTION_ENTRIES = frozenset(_OPTION_ENTRY_ACTIONS.split("|"))
 AWARENESS_HEART = (
     "\n=== SHELL ===\n"
     "Orders: ORDER EXAMPLES only. Close STK by conId. "
-    "Hold forbidden while unprotected STK (code). "
+    "Hold forbidden while unprotected STK has no last-stop (code). "
     "Risk gates and defined_risk_only cannot be bypassed. "
     "self_tune cannot weaken the immutable floor.\n"
 )
@@ -255,6 +255,7 @@ async def snap(c: Any) -> dict:
         "protection": protection,
         "book_unreliable": not (pos_ok and ord_ok and acct_ok),
         "ibkr_live_quotes": _seed_live_quotes(spy, vix),
+        "candle_source": "none",
     }
     base["reality_pulse"] = build_reality_pulse(
         account=base["account"], positions=pl, open_orders=ol,
@@ -287,12 +288,68 @@ async def snap(c: Any) -> dict:
                 base["option_facts"] = facts
         except Exception:
             logger.debug("snap option_facts failed", exc_info=True)
+    book_syms: list[str] = []
+    seen_q = {"SPY", "VIX"}
+    for p in pl:
+        if not isinstance(p, dict):
+            continue
+        sec = str(p.get("secType") or p.get("sec_type") or "STK").upper()
+        if sec in ("OPT", "FOP", "BAG"):
+            continue
+        sym = str(p.get("symbol") or "").strip().upper()
+        if not sym or sym in seen_q:
+            continue
+        seen_q.add(sym)
+        book_syms.append(sym)
+        if len(book_syms) >= 6:
+            break
+    extra_quotes: list[Any] = []
+    if book_syms:
+        try:
+            extra_quotes = list(
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *[_tool(c, "quote", {"symbol": s}) for s in book_syms],
+                        return_exceptions=True,
+                    ),
+                    timeout=8.0,
+                )
+            )
+        except Exception:
+            extra_quotes = []
+    qmap = _seed_live_quotes(
+        spy,
+        vix,
+        *[q for q in extra_quotes if isinstance(q, dict)],
+    )
+    base["ibkr_live_quotes"] = qmap
     keep = getattr(c, "ensure_book_ticks", None)
     if callable(keep) and pl:
         try:
-            await asyncio.wait_for(keep(pl), timeout=5.0)
+            await asyncio.wait_for(keep(pl), timeout=8.0)
+        except asyncio.TimeoutError:
+            logger.warning("ensure_book_ticks timed out")
         except Exception:
             logger.debug("ensure_book_ticks failed", exc_info=True)
+    candle_source = "none"
+    peek = getattr(c, "realtime_bar_buffer", None)
+    if callable(peek):
+        for p in pl:
+            if not isinstance(p, dict):
+                continue
+            sec = str(p.get("secType") or p.get("sec_type") or "STK").upper()
+            if sec in ("OPT", "FOP", "BAG"):
+                continue
+            sym = str(p.get("symbol") or "").strip().upper()
+            if not sym:
+                continue
+            try:
+                if peek(sym):
+                    candle_source = "ibkr_rt_5s"
+                    break
+            except Exception:
+                continue
+    base["candle_source"] = candle_source
     base["portfolio_state"] = build_book_from_snap(base)
     return base
 
@@ -349,6 +406,24 @@ def _prepare_close_params(act: dict, positions: list) -> None:
         act["params"].setdefault("action", "SELL" if signed > 0 else "BUY")
 
 
+def _paper_hunt_hold_block(world: WorldState) -> str | None:
+    """Paper RTH, flat, clerk open: hold is not a ticket."""
+    if str(getattr(world, "session_status", "") or "").lower() != "regular":
+        return None
+    if not bool(getattr(world, "flat", False)):
+        return None
+    try:
+        from abcxauto.lab_playbook import is_paper
+
+        if not is_paper():
+            return None
+    except Exception:
+        return None
+    if _new_risk_halted(world):
+        return None
+    return "paper hunt — hold is not a ticket while RTH and the clerk is open"
+
+
 def _new_risk_halted(world: WorldState) -> bool:
     gates = world.gates if isinstance(world.gates, dict) else {}
     if gates.get("halted") or gates.get("is_halted"):
@@ -385,8 +460,15 @@ def _book_unreliable(world: WorldState | None = None, snap: dict | None = None) 
     return bool(isinstance(gates, dict) and gates.get("book_unreliable"))
 
 
-def is_new_risk(strat: str) -> bool:
-    return str(strat or "").lower() in _NEW_RISK
+def is_new_risk(strat: str, params: dict | None = None) -> bool:
+    """True for a new structure. A live combo close is not new risk."""
+    st = str(strat or "").lower()
+    if st not in _NEW_RISK:
+        return False
+    p = params if isinstance(params, dict) else {}
+    if p.get("closing_position") is True:
+        return False
+    return True
 
 
 _WORK_TOOLS = frozenset({
@@ -402,20 +484,17 @@ _WORK_TOOLS = frozenset({
     "odds",
     "status",
     "self_tune",
-    "write_lab_playbook",
 })
 
 
 def turn_did_work(turn: Any) -> bool:
-    """True if this turn tuned, wrote the playbook, or fetched live facts."""
-    if getattr(turn, "lab_playbook", None):
-        return True
+    """True if this turn tuned or fetched live facts. Notes-only is not work."""
     for name in getattr(turn, "tool_trace", None) or []:
         if str(name) in _WORK_TOOLS:
             return True
     for item in getattr(turn, "sends", None) or []:
         strat = str((item or {}).get("strat") or "").lower()
-        if strat in ("self_tune", "set_risk", "write_lab_playbook"):
+        if strat in ("self_tune", "set_risk"):
             return True
     return False
 
@@ -432,9 +511,21 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
     if strat == "hold" and needs_prot:
         return BLOCKED_STRAT, {
             "status": "blocked",
-            "note": "hold_forbidden - unprotected STK needs protection",
+            "note": "hold_forbidden - unprotected STK needs a last-stop",
         }
-    if is_new_risk(strat):
+    if strat == "hold":
+        hunt_note = _paper_hunt_hold_block(world)
+        if hunt_note:
+            return BLOCKED_STRAT, {"status": "blocked", "note": hunt_note}
+    params = act.get("params") if isinstance(act.get("params"), dict) else {}
+    from abcxauto.world_state import single_leg_vertical_block
+
+    vert_note = single_leg_vertical_block(
+        strat, params, getattr(world, "positions", None)
+    )
+    if vert_note:
+        return BLOCKED_STRAT, {"status": "blocked", "note": vert_note}
+    if is_new_risk(strat, params):
         if _book_unreliable(world):
             return BLOCKED_STRAT, {
                 "status": "blocked",
@@ -443,7 +534,7 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
         if needs_prot:
             return BLOCKED_STRAT, {
                 "status": "blocked",
-                "note": "unprotected STK — protect first (no new risk)",
+                "note": "unprotected lots — protect first (no new risk)",
             }
         try:
             from abcxauto.trade_plan import load_flat_streak
@@ -985,27 +1076,19 @@ async def run_cycle(
     result = dict(turn.last_result or {})
     strat = str(turn.last_strat or act.get("strategy") or "hold")
     if not turn.sends and strat not in (BLOCKED_STRAT, "blocked"):
-        wrote = bool(getattr(turn, "lab_playbook", None))
-        if wrote:
-            strat = "hold"
-            act = act or {"action": "hold", "strategy": "hold", "rationale": "playbook write"}
-            result = {"status": "hold", "strategy": "hold"}
-        elif turn_did_work(turn):
-            strat = "hold"
-            act = act or {"action": "hold", "strategy": "hold", "rationale": "no send"}
-            result = {"status": "hold", "strategy": "hold"}
+        act = act if act else {
+            "action": "hold", "strategy": "hold", "rationale": "no send",
+        }
+        strat, forced = gate_ticket(act, world)
+        if forced is not None:
+            result = forced
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            act["rationale"] = str(forced.get("note") or "")
         else:
-            strat, forced = gate_ticket(act if act else {
-                "action": "hold", "strategy": "hold", "rationale": "no send",
-            }, world)
-            if forced is not None:
-                result = forced
-                act["strategy"] = act["action"] = BLOCKED_STRAT
-                act["rationale"] = str(forced.get("note") or "")
-            else:
-                strat = "hold"
-                act = act or {"action": "hold", "strategy": "hold", "rationale": "no send"}
-                result = {"status": "hold", "strategy": "hold"}
+            strat = "hold"
+            act.setdefault("action", "hold")
+            act.setdefault("strategy", "hold")
+            result = {"status": "hold", "strategy": "hold"}
 
     s["opportunities"] = list(world.opportunities or [])
     s["news_items"] = list(world.news_items or [])

@@ -31,6 +31,8 @@ def teardown_function():
 def test_is_self_tune_alias():
     assert is_self_tune_strategy("self_tune")
     assert is_self_tune_strategy("set_risk")
+    assert not is_self_tune_strategy("set_controls")
+    assert not is_self_tune_strategy("set_self")
     assert not is_self_tune_strategy("bracket")
 
 
@@ -118,7 +120,8 @@ def test_dead_pacing_and_control_dials_are_rejected():
         {
             "cycle_sleep_s": 480,
             "pace_idle_s": 900,
-            "controls": {"control_budget_pct": 10, "control_frequency_pct": 20},
+            "control_budget_pct": 10,
+            "control_frequency_pct": 20,
         },
         persist=False,
     )
@@ -159,7 +162,7 @@ def test_prompt_extra_is_gone():
 
 
 def test_ensure_floor_repairs_weak_settings(tmp_path, monkeypatch):
-    from abcxauto.config import update_risk_config, update_controls_config
+    from abcxauto.config import update_capacity_config, update_risk_config
 
     path = tmp_path / "risk.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
@@ -172,7 +175,7 @@ def test_ensure_floor_repairs_weak_settings(tmp_path, monkeypatch):
         persist=False,
         _skip_clamp=True,
     )
-    update_controls_config(max_open_positions=0, persist=False)
+    update_capacity_config(max_open_positions=0, persist=False)
     ensure_immutable_floor(persist=False)
     cfg = get_config()
     assert cfg.daily_loss_limit_pct == 25.0
