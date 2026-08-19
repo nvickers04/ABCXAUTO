@@ -972,59 +972,6 @@ def open_upnl_of(positions: list[dict] | None) -> float | None:
     return round(total, 2)
 
 
-def _et_today() -> str:
-    try:
-        from zoneinfo import ZoneInfo
-
-        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-    except Exception:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
-def _session_prep_path():
-    import os
-    from pathlib import Path
-
-    raw = (os.environ.get("ABCXAUTO_SESSION_PREP_PATH") or "").strip()
-    if raw:
-        return Path(raw)
-    return Path(__file__).resolve().parents[1] / "session_prep.json"
-
-
-def session_prep_fact() -> str:
-    """Disk fact only: missing | stale | today. Not a gate; clerk does not script the look."""
-    path = _session_prep_path()
-    try:
-        if not path.is_file():
-            return "missing"
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return "missing"
-    if not isinstance(raw, dict) or not raw:
-        return "missing"
-    today = _et_today()
-    for key in ("as_of", "date", "et_date", "session_date", "day"):
-        val = str(raw.get(key) or "").strip()
-        if len(val) >= 10 and val[:10] == today:
-            return "today"
-        if len(val) >= 10 and val[:10] != today:
-            return "stale"
-    written = str(raw.get("written_at") or raw.get("updated_at") or "").strip()
-    if len(written) >= 10:
-        try:
-            from zoneinfo import ZoneInfo
-
-            dt = datetime.fromisoformat(written.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            et = dt.astimezone(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-            return "today" if et == today else "stale"
-        except Exception:
-            return "stale" if written[:10] != today else "today"
-    # Undated blob on disk cannot pass as today's brief.
-    return "stale"
-
-
 def _minutes_to_open(world: Any) -> int | None:
     pulse = getattr(world, "pulse", None) if world is not None else None
     if not isinstance(pulse, dict):
@@ -1125,10 +1072,6 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     except Exception:
         tape_seed = []
     mins_open = _minutes_to_open(world)
-    try:
-        prep = session_prep_fact()
-    except Exception:
-        prep = "missing"
     return {
         "nl": nl,
         "ibkr_daily_pnl": daily,
@@ -1177,7 +1120,6 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         # Unranked day tape (book + legal watchlist). Not open-lot-only.
         "tape_seed": tape_seed,
         "minutes_to_open": mins_open,
-        "session_prep": prep,
     }
 
 
@@ -1318,9 +1260,6 @@ def format_wake(
         "postmarket",
     ):
         parts.append(f"minutes_to_open={mins}.")
-    prep = day.get("session_prep")
-    if prep:
-        parts.append(f"session_prep={prep}.")
     tape = day.get("tape_seed") or []
     if isinstance(tape, list) and tape:
         parts.append(f"tape={','.join(str(x) for x in tape[:12])}.")

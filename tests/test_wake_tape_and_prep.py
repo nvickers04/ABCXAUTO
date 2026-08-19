@@ -1,4 +1,4 @@
-"""Wake tape seed + stale session_prep facts (not a premarket SOP)."""
+"""Wake tape seed + empty scan seed (not a premarket SOP)."""
 
 from __future__ import annotations
 
@@ -12,11 +12,7 @@ from abcxauto.opportunity_scan import (
     tape_seed_symbols,
 )
 from abcxauto.universe import reset_universe_cache, save_allowlist
-from abcxauto.world_state import (
-    day_facts,
-    format_wake,
-    session_prep_fact,
-)
+from abcxauto.world_state import day_facts, format_wake
 
 
 @pytest.fixture
@@ -68,29 +64,8 @@ def test_format_scan_tape_does_not_alphabetize():
     assert text.index("ZZZZ") < text.index("AAPL")
 
 
-def test_session_prep_missing_stale_today(tmp_path, monkeypatch):
-    path = tmp_path / "session_prep.json"
-    monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(path))
-    assert session_prep_fact() == "missing"
-
-    path.write_text(json.dumps({"note": "july leftover"}), encoding="utf-8")
-    assert session_prep_fact() == "stale"
-
-    path.write_text(json.dumps({"as_of": "2026-07-28", "note": "old"}), encoding="utf-8")
-    assert session_prep_fact() == "stale"
-
-    from abcxauto.world_state import _et_today
-
-    path.write_text(json.dumps({"as_of": _et_today(), "note": "ok"}), encoding="utf-8")
-    assert session_prep_fact() == "today"
-
-
-def test_day_facts_carry_tape_and_prep(legal_tape, tmp_path, monkeypatch):
+def test_day_facts_carry_tape_and_minutes(legal_tape):
     from abcxauto.world_state import WorldState
-
-    prep = tmp_path / "session_prep.json"
-    monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(prep))
-    prep.write_text(json.dumps({"as_of": "2026-07-28"}), encoding="utf-8")
 
     world = WorldState(
         cycle=1,
@@ -122,14 +97,14 @@ def test_day_facts_carry_tape_and_prep(legal_tape, tmp_path, monkeypatch):
         },
     )
     day = day_facts(world, {})
-    assert day["session_prep"] == "stale"
+    assert "session_prep" not in day
     assert day["minutes_to_open"] == 45
     assert day["tape_seed"][0] == "AAPL"
     assert "ZZZZ" in day["tape_seed"]
     assert day["tape_seed"] != ["AAPL"]
 
 
-def test_format_wake_surfaces_tape_prep_minutes():
+def test_format_wake_surfaces_tape_and_minutes():
     from abcxauto.wake_bus import note_wake
 
     note_wake(None)
@@ -149,14 +124,13 @@ def test_format_wake_surfaces_tape_prep_minutes():
             "open_lots": ["AAPL STK long 20"],
             "tape_seed": ["AAPL", "ZZZZ", "MSFT"],
             "minutes_to_open": 59,
-            "session_prep": "stale",
         },
     )
     assert "session=premarket" in text
     assert "minutes_to_open=59" in text
-    assert "session_prep=stale" in text
     assert "tape=AAPL,ZZZZ,MSFT" in text
     assert "open_lots=AAPL STK long 20" in text
+    assert "session_prep" not in text
     # Facts only — no SOP / checklist lecture.
     assert "estimate" not in text.lower()
     assert "you must" not in text.lower()
