@@ -35,6 +35,53 @@ ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 TITLE = "ABCXAUTO Pro"
 PRO_TITLE = TITLE
 
+# Adjustable Risk chip knobs — ranges come from levers_snapshot(), never invented here.
+_RISK_CAPITAL_KNOBS: tuple[tuple[str, str], ...] = (
+    ("max_risk_per_trade_pct", "Max risk / trade"),
+    ("daily_loss_limit_pct", "Daily loss limit"),
+    ("max_position_pct", "Max position"),
+    ("max_peak_drawdown_pct", "Peak drawdown"),
+    ("max_option_premium_pct", "Option premium"),
+)
+_RISK_CAPACITY_KNOB = ("max_open_positions", "Max open positions")
+_RISK_LOCKED_KEYS: tuple[str, ...] = (
+    "defined_risk_only",
+    "cash_only",
+    "risk_gates_enabled",
+    "auto_panic_on_breach",
+    "risk_posture",
+    "trading_budget_usd",
+)
+
+# Paper preference for walk-away % floors (live always forces on). Cockpit-only flag.
+_FLOORS_STATE_PATH = Path(__file__).resolve().parents[1] / "data" / "state" / "floors.json"
+
+
+def _load_floors_paper_pref() -> bool:
+    """True = Floors on for paper. Default Floors off."""
+    try:
+        if not _FLOORS_STATE_PATH.is_file():
+            return False
+        raw = json.loads(_FLOORS_STATE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return False
+        if "floors_on" in raw:
+            return bool(raw["floors_on"])
+        return False
+    except Exception:
+        return False
+
+
+def _save_floors_paper_pref(floors_on: bool) -> None:
+    try:
+        _FLOORS_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _FLOORS_STATE_PATH.write_text(
+            json.dumps({"floors_on": bool(floors_on)}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        logger.exception("floors pref persist failed")
+
 
 class ProTerminal:
     def __init__(self, page: ft.Page):
@@ -76,6 +123,17 @@ class ProTerminal:
             ink=True,
             tooltip="Switch Paper / Live",
             on_click=self._toggle_trading_mode,
+        )
+        self._floors_paper_on = _load_floors_paper_pref()
+        self.lbl_floors = ft.Text("Floors off", size=12, weight=ft.FontWeight.W_600, color=MUTED)
+        self.btn_floors = ft.Container(
+            content=self.lbl_floors,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            border=ft.Border.all(1, BORDER),
+            border_radius=999,
+            ink=True,
+            tooltip="Walk-away % floors (paper)",
+            on_click=self._toggle_floors,
         )
         self.tf_live_confirm = ft.TextField(
             label="Type live confirm phrase",
@@ -168,9 +226,11 @@ class ProTerminal:
             ("orders", "Working orders"),
             ("fills", "Session fills"),
             ("log", "Activity"),
+            ("risk", "Risk"),
         ):
             self.tabs[key] = self._tab_chip(key, label)
         self.col_lots.expand = True
+        self.col_risk = self._build_risk_surface()
         self.tab_bodies: dict[str, ft.Control] = {
             "lots": self.col_lots,
             "orders": ft.Column(
@@ -180,6 +240,7 @@ class ProTerminal:
                 [self.lbl_recent_fills], scroll=ft.ScrollMode.AUTO, expand=True
             ),
             "log": ft.Column([self.lbl_activity], scroll=ft.ScrollMode.AUTO, expand=True),
+            "risk": self.col_risk,
         }
         # One line each — a long rationale must not reserve blank rows or squeeze the tabs.
         for lbl in (
@@ -237,8 +298,190 @@ class ProTerminal:
         )
         return {"chip": chip, "text": text, "count": count, "label": label}
 
+    def _build_risk_surface(self) -> ft.Column:
+        """Thin Risk chip body — adjustable knobs + locked status; no posture cards."""
+        self.risk_labels: dict[str, ft.Text] = {}
+        self.risk_sliders: dict[str, ft.Slider] = {}
+        self.risk_range_labels: dict[str, ft.Text] = {}
+        self.lbl_risk_locked = ft.Text(
+            "Locked · —",
+            size=11,
+            color=MUTED,
+            selectable=True,
+            no_wrap=False,
+        )
+        rows: list[ft.Control] = []
+        for key, title in (*_RISK_CAPITAL_KNOBS, _RISK_CAPACITY_KNOB):
+            val_lbl = ft.Text("—", size=12, weight=ft.FontWeight.W_600, color=TEXT, width=44)
+            range_lbl = ft.Text("", size=10, color=MUTED)
+            self.risk_labels[key] = val_lbl
+            self.risk_range_labels[key] = range_lbl
+            integer = key == "max_open_positions"
+
+            def _on_change(e: Any, k: str = key, lbl: ft.Text = val_lbl, as_int: bool = integer) -> None:
+                raw = float(getattr(e.control, "value", 0) or 0)
+                lbl.value = str(int(round(raw))) if as_int else f"{round(raw, 2):g}"
+                try:
+                    self._safe_update()
+                except Exception:
+                    pass
+
+            slider = ft.Slider(
+                min=0,
+                max=1,
+                divisions=100,
+                value=0,
+                active_color=BLUE,
+                inactive_color=BORDER,
+                on_change=_on_change,
+                expand=True,
+            )
+            self.risk_sliders[key] = slider
+            rows.append(
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Text(title, size=11, color=MUTED, expand=True),
+                                val_lbl,
+                            ],
+                            spacing=6,
+                        ),
+                        ft.Row([slider], spacing=0),
+                        range_lbl,
+                    ],
+                    spacing=0,
+                    tight=True,
+                )
+            )
+        self.btn_risk_save = self._btn("Save", filled=True, on_click=self._save_risk)
+        return ft.Column(
+            [*rows, self.lbl_risk_locked, ft.Row([self.btn_risk_save], spacing=8)],
+            spacing=8,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+        )
+
+    def _hydrate_risk(self) -> None:
+        """Paint knob now/min/max from levers_snapshot; locked flags from risk snapshot."""
+        try:
+            from abcxauto.config import risk_config_snapshot
+            from abcxauto.self_tune import levers_snapshot
+
+            levers = levers_snapshot()
+            locked = risk_config_snapshot()
+        except Exception as exc:
+            self.lbl_risk_locked.value = f"Risk unavailable: {exc}"
+            self.lbl_risk_locked.color = AMBER
+            return
+        for key, slider in self.risk_sliders.items():
+            meta = levers.get(key) if isinstance(levers, dict) else None
+            if not isinstance(meta, dict):
+                continue
+            try:
+                lo = float(meta["min"])
+                hi = float(meta["max"])
+                now_raw = meta.get("now")
+                now = float(now_raw if now_raw is not None else lo)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if hi < lo:
+                lo, hi = hi, lo
+            if hi <= lo:
+                hi = lo + 1e-6
+            now = max(lo, min(hi, now))
+            slider.min = lo
+            slider.max = hi
+            if key == "max_open_positions":
+                slider.divisions = max(1, int(round(hi - lo)))
+                now_i = int(round(now))
+                slider.value = float(now_i)
+                self.risk_labels[key].value = str(now_i)
+            else:
+                slider.divisions = max(1, int(round((hi - lo) * 4)))
+                now_f = round(now, 2)
+                slider.value = float(now_f)
+                self.risk_labels[key].value = f"{now_f:g}"
+            unit = str(meta.get("unit") or "").strip()
+            span = f"{lo:g}–{hi:g}"
+            self.risk_range_labels[key].value = f"{span} {unit}".strip()
+        bits: list[str] = []
+        for key in _RISK_LOCKED_KEYS:
+            if key == "trading_budget_usd":
+                try:
+                    bits.append(f"trading_budget_usd={float(locked.get(key, 0) or 0):g}")
+                except (TypeError, ValueError):
+                    bits.append("trading_budget_usd=0")
+            elif key == "risk_posture":
+                bits.append(f"risk_posture={locked.get(key) or 'defensive'}")
+            else:
+                bits.append(f"{key}={'on' if locked.get(key) else 'off'}")
+        self.lbl_risk_locked.value = "Locked · " + " · ".join(bits)
+        self.lbl_risk_locked.color = MUTED
+
+    def _read_risk_knob(self, key: str) -> float | int | None:
+        """Read a slider value for Save. Type junk → None (dropped); clamp is Risk's job."""
+        slider = self.risk_sliders.get(key)
+        if slider is None:
+            return None
+        try:
+            raw = float(slider.value)  # None / non-numeric → drop
+        except (TypeError, ValueError):
+            return None
+        if key == "max_open_positions":
+            return int(round(raw))
+        return float(raw)
+
+    def _save_risk(self, _e: Any = None) -> None:
+        """Persist only SET_RISK_KEYS + max_open_positions; toast ValueError or silent clamps."""
+        try:
+            from abcxauto.config import update_capacity_config, update_risk_config
+            from abcxauto.self_tune import levers_snapshot
+
+            sent: dict[str, float | int] = {}
+            risk_payload: dict[str, float] = {}
+            for key, _title in _RISK_CAPITAL_KNOBS:
+                val = self._read_risk_knob(key)
+                if val is None:
+                    continue
+                risk_payload[key] = float(val)
+                sent[key] = float(val)
+            cap = self._read_risk_knob("max_open_positions")
+            if risk_payload:
+                update_risk_config(**risk_payload, persist=True)
+            if cap is not None:
+                update_capacity_config(max_open_positions=int(cap), persist=True)
+                sent["max_open_positions"] = int(cap)
+            self._hydrate_risk()
+            levers = levers_snapshot()
+            notes: list[str] = []
+            for key, raw in sent.items():
+                meta = levers.get(key) if isinstance(levers, dict) else None
+                if not isinstance(meta, dict) or meta.get("now") is None:
+                    continue
+                try:
+                    if key == "max_open_positions":
+                        now_v: float | int = int(meta["now"])
+                        raw_v: float | int = int(raw)
+                    else:
+                        now_v = float(meta["now"])
+                        raw_v = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if now_v != raw_v:
+                    notes.append(f"clamped {key} {raw_v:g} → {now_v:g}")
+            if notes:
+                self._toast("; ".join(notes), color=AMBER)
+        except ValueError as exc:
+            self._toast(str(exc), color=RED)
+        except Exception as exc:
+            self._toast(f"Save failed: {exc}", color=RED)
+        self._safe_update()
+
     def _select_tab(self, key: str) -> None:
         self._tab = key
+        if key == "risk":
+            self._hydrate_risk()
         self._sync_tabs()
         self._safe_update()
 
@@ -344,6 +587,7 @@ class ProTerminal:
                     self.lbl_title,
                     self.lbl_model,
                     self.btn_account_mode,
+                    self.btn_floors,
                     ft.Container(width=12),
                     self.dot_conn,
                     self.lbl_ibkr_status,
@@ -444,7 +688,10 @@ class ProTerminal:
                     self.lbl_last_send,
                     ft.Container(height=1, bgcolor=BORDER),
                     ft.Row(
-                        [self.tabs[k]["chip"] for k in ("lots", "orders", "fills", "log")],
+                        [
+                            self.tabs[k]["chip"]
+                            for k in ("lots", "orders", "fills", "log", "risk")
+                        ],
                         spacing=6,
                     ),
                     ft.Column(list(self.tab_bodies.values()), spacing=0, expand=True),
@@ -1046,6 +1293,46 @@ class ProTerminal:
         dlg.open = True
         self._safe_update()
 
+    def _floors_effective_on(self) -> bool:
+        """Live forces Floors on; paper uses the persisted operator choice."""
+        try:
+            if not get_config().is_paper:
+                return True
+        except Exception:
+            pass
+        return bool(self._floors_paper_on)
+
+    def _paint_floors_chip(self) -> None:
+        on = self._floors_effective_on()
+        live = False
+        try:
+            live = not bool(get_config().is_paper)
+        except Exception:
+            live = False
+        self.lbl_floors.value = "Floors on" if on else "Floors off"
+        if on:
+            self.lbl_floors.color = GREEN
+            self.btn_floors.border = ft.Border.all(1, GREEN)
+        else:
+            self.lbl_floors.color = MUTED
+            self.btn_floors.border = ft.Border.all(1, BORDER)
+        self.btn_floors.tooltip = (
+            "Walk-away % floors locked on in live"
+            if live
+            else "Walk-away % floors (daily-loss / position / risk/trade / drawdown / premium)"
+        )
+
+    def _toggle_floors(self, _e: Any = None) -> None:
+        try:
+            if not get_config().is_paper:
+                return  # live: paint Floors on, ignore clicks
+        except Exception:
+            return
+        self._floors_paper_on = not bool(self._floors_paper_on)
+        _save_floors_paper_pref(self._floors_paper_on)
+        self._paint_floors_chip()
+        self._safe_update()
+
     def _after_mode_change(self) -> None:
         self._sync_ibkr_account_label()
         self._toast(f"Mode → {self.lbl_account_mode.value}", color=BLUE)
@@ -1060,6 +1347,7 @@ class ProTerminal:
         self.lbl_account_mode.value = "Paper" if paper else "Live"
         self.lbl_account_mode.color = GREEN if paper else RED
         self.btn_account_mode.border = ft.Border.all(1, GREEN if paper else RED)
+        self._paint_floors_chip()
         if s.connected and aid:
             self.lbl_account_name.value = aname or f"IBKR {aid}"
             self.lbl_account_id.value = aid

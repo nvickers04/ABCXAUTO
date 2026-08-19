@@ -28,5 +28,6 @@ data/state/think_tail.txt
 data/state/think_prev.txt
 data/state/premarket_wake.json
 data/state/last_turn.json
+data/state/floors.json
 grokfolio_state.json
 data/state/grokfolio_state.json
