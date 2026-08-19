@@ -35,6 +35,24 @@ ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 TITLE = "ABCXAUTO Pro"
 PRO_TITLE = TITLE
 
+# Adjustable Risk chip knobs — ranges come from levers_snapshot(), never invented here.
+_RISK_CAPITAL_KNOBS: tuple[tuple[str, str], ...] = (
+    ("max_risk_per_trade_pct", "Max risk / trade"),
+    ("daily_loss_limit_pct", "Daily loss limit"),
+    ("max_position_pct", "Max position"),
+    ("max_peak_drawdown_pct", "Peak drawdown"),
+    ("max_option_premium_pct", "Option premium"),
+)
+_RISK_CAPACITY_KNOB = ("max_open_positions", "Max open positions")
+_RISK_LOCKED_KEYS: tuple[str, ...] = (
+    "defined_risk_only",
+    "cash_only",
+    "risk_gates_enabled",
+    "auto_panic_on_breach",
+    "risk_posture",
+    "trading_budget_usd",
+)
+
 
 class ProTerminal:
     def __init__(self, page: ft.Page):
@@ -168,9 +186,11 @@ class ProTerminal:
             ("orders", "Working orders"),
             ("fills", "Session fills"),
             ("log", "Activity"),
+            ("risk", "Risk"),
         ):
             self.tabs[key] = self._tab_chip(key, label)
         self.col_lots.expand = True
+        self.col_risk = self._build_risk_surface()
         self.tab_bodies: dict[str, ft.Control] = {
             "lots": self.col_lots,
             "orders": ft.Column(
@@ -180,6 +200,7 @@ class ProTerminal:
                 [self.lbl_recent_fills], scroll=ft.ScrollMode.AUTO, expand=True
             ),
             "log": ft.Column([self.lbl_activity], scroll=ft.ScrollMode.AUTO, expand=True),
+            "risk": self.col_risk,
         }
         # One line each — a long rationale must not reserve blank rows or squeeze the tabs.
         for lbl in (
@@ -237,8 +258,165 @@ class ProTerminal:
         )
         return {"chip": chip, "text": text, "count": count, "label": label}
 
+    def _build_risk_surface(self) -> ft.Column:
+        """Thin Risk chip body — adjustable knobs + locked status; no posture cards."""
+        self.risk_labels: dict[str, ft.Text] = {}
+        self.risk_sliders: dict[str, ft.Slider] = {}
+        self.risk_range_labels: dict[str, ft.Text] = {}
+        self.lbl_risk_locked = ft.Text(
+            "Locked · —",
+            size=11,
+            color=MUTED,
+            selectable=True,
+            no_wrap=False,
+        )
+        rows: list[ft.Control] = []
+        for key, title in (*_RISK_CAPITAL_KNOBS, _RISK_CAPACITY_KNOB):
+            val_lbl = ft.Text("—", size=12, weight=ft.FontWeight.W_600, color=TEXT, width=44)
+            range_lbl = ft.Text("", size=10, color=MUTED)
+            self.risk_labels[key] = val_lbl
+            self.risk_range_labels[key] = range_lbl
+            integer = key == "max_open_positions"
+
+            def _on_change(e: Any, k: str = key, lbl: ft.Text = val_lbl, as_int: bool = integer) -> None:
+                raw = float(getattr(e.control, "value", 0) or 0)
+                lbl.value = str(int(round(raw))) if as_int else f"{round(raw, 2):g}"
+                try:
+                    self._safe_update()
+                except Exception:
+                    pass
+
+            slider = ft.Slider(
+                min=0,
+                max=1,
+                divisions=100,
+                value=0,
+                active_color=BLUE,
+                inactive_color=BORDER,
+                on_change=_on_change,
+                expand=True,
+            )
+            self.risk_sliders[key] = slider
+            rows.append(
+                ft.Column(
+                    [
+                        ft.Row(
+                            [
+                                ft.Text(title, size=11, color=MUTED, expand=True),
+                                val_lbl,
+                            ],
+                            spacing=6,
+                        ),
+                        ft.Row([slider], spacing=0),
+                        range_lbl,
+                    ],
+                    spacing=0,
+                    tight=True,
+                )
+            )
+        self.btn_risk_save = self._btn("Save", filled=True, on_click=self._save_risk)
+        return ft.Column(
+            [*rows, self.lbl_risk_locked, ft.Row([self.btn_risk_save], spacing=8)],
+            spacing=8,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+        )
+
+    def _hydrate_risk(self) -> None:
+        """Paint knob now/min/max from levers_snapshot; locked flags from risk snapshot."""
+        try:
+            from abcxauto.config import risk_config_snapshot
+            from abcxauto.self_tune import levers_snapshot
+
+            levers = levers_snapshot()
+            locked = risk_config_snapshot()
+        except Exception as exc:
+            self.lbl_risk_locked.value = f"Risk unavailable: {exc}"
+            self.lbl_risk_locked.color = AMBER
+            return
+        for key, slider in self.risk_sliders.items():
+            meta = levers.get(key) if isinstance(levers, dict) else None
+            if not isinstance(meta, dict):
+                continue
+            try:
+                lo = float(meta["min"])
+                hi = float(meta["max"])
+                now_raw = meta.get("now")
+                now = float(now_raw if now_raw is not None else lo)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if hi < lo:
+                lo, hi = hi, lo
+            if hi <= lo:
+                hi = lo + 1e-6
+            now = max(lo, min(hi, now))
+            slider.min = lo
+            slider.max = hi
+            if key == "max_open_positions":
+                slider.divisions = max(1, int(round(hi - lo)))
+                now_i = int(round(now))
+                slider.value = float(now_i)
+                self.risk_labels[key].value = str(now_i)
+            else:
+                slider.divisions = max(1, int(round((hi - lo) * 4)))
+                now_f = round(now, 2)
+                slider.value = float(now_f)
+                self.risk_labels[key].value = f"{now_f:g}"
+            unit = str(meta.get("unit") or "").strip()
+            span = f"{lo:g}–{hi:g}"
+            self.risk_range_labels[key].value = f"{span} {unit}".strip()
+        bits: list[str] = []
+        for key in _RISK_LOCKED_KEYS:
+            if key == "trading_budget_usd":
+                try:
+                    bits.append(f"trading_budget_usd={float(locked.get(key, 0) or 0):g}")
+                except (TypeError, ValueError):
+                    bits.append("trading_budget_usd=0")
+            elif key == "risk_posture":
+                bits.append(f"risk_posture={locked.get(key) or 'defensive'}")
+            else:
+                bits.append(f"{key}={'on' if locked.get(key) else 'off'}")
+        self.lbl_risk_locked.value = "Locked · " + " · ".join(bits)
+        self.lbl_risk_locked.color = MUTED
+
+    def _read_risk_knob(self, key: str) -> float | int:
+        """Read a slider and clamp to its snapshot min/max before any API call."""
+        slider = self.risk_sliders[key]
+        lo = float(slider.min)
+        hi = float(slider.max)
+        try:
+            raw = float(slider.value if slider.value is not None else lo)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key}: invalid value") from exc
+        if raw < lo or raw > hi:
+            raise ValueError(f"{key}={raw:g} outside [{lo:g}, {hi:g}]")
+        if key == "max_open_positions":
+            return int(round(raw))
+        return round(raw, 2)
+
+    def _save_risk(self, _e: Any = None) -> None:
+        """Persist capital knobs via update_risk_config; capacity via update_capacity_config."""
+        try:
+            from abcxauto.config import update_capacity_config, update_risk_config
+
+            risk_payload = {
+                key: self._read_risk_knob(key) for key, _ in _RISK_CAPITAL_KNOBS
+            }
+            cap = self._read_risk_knob("max_open_positions")
+            update_risk_config(**risk_payload, persist=True)
+            update_capacity_config(max_open_positions=int(cap), persist=True)
+            self._hydrate_risk()
+            self._toast("Risk saved", color=GREEN)
+        except ValueError as exc:
+            self._toast(str(exc), color=RED)
+        except Exception as exc:
+            self._toast(f"Save failed: {exc}", color=RED)
+        self._safe_update()
+
     def _select_tab(self, key: str) -> None:
         self._tab = key
+        if key == "risk":
+            self._hydrate_risk()
         self._sync_tabs()
         self._safe_update()
 
@@ -444,7 +622,10 @@ class ProTerminal:
                     self.lbl_last_send,
                     ft.Container(height=1, bgcolor=BORDER),
                     ft.Row(
-                        [self.tabs[k]["chip"] for k in ("lots", "orders", "fills", "log")],
+                        [
+                            self.tabs[k]["chip"]
+                            for k in ("lots", "orders", "fills", "log", "risk")
+                        ],
                         spacing=6,
                     ),
                     ft.Column(list(self.tab_bodies.values()), spacing=0, expand=True),
