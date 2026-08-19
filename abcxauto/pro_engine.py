@@ -468,7 +468,12 @@ class ProEngine:
         from abcxauto.pacing import WakeGate
         from abcxauto.wake_bus import BookEvent, note_interrupt
 
-        if not self.state.autonomous or self.pause.is_set() or self.stop.is_set():
+        if (
+            not self.state.autonomous
+            or self.pause.is_set()
+            or self.stop.is_set()
+            or getattr(self, "_think_parked", False)
+        ):
             return
         if self._wake_gate is None:
             self._wake_gate = WakeGate()
@@ -951,22 +956,9 @@ class ProEngine:
                 resume = bool(getattr(self, "_resume_think", False))
                 poked = peek_interrupt() is not None
                 if getattr(self, "_think_parked", False) and not resume:
-                    # Park is shutdown. Pokes (overnight fill) do not host.
-                    if poked:
-                        try:
-                            take_interrupt()
-                        except Exception:
-                            pass
+                    # Park is shutdown. Do not wait on pokes. Start is the only resume.
                     self.state.status = "Parked"
-                    ev = self._wake_event
-                    if ev is not None:
-                        ev.clear()
-                        try:
-                            await asyncio.wait_for(ev.wait(), timeout=1.0)
-                        except asyncio.TimeoutError:
-                            pass
-                    else:
-                        await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.25)
                     continue
                 if not first_think and not poked and not resume:
                     self.state.status = "On"
@@ -1000,6 +992,10 @@ class ProEngine:
                         self.state.running = False
                         self.state.paused = False
                         self.state.status = "Parked"
+                        try:
+                            take_interrupt()
+                        except Exception:
+                            pass
                         self._note("PARK", "Overnight park — Grok down")
                         continue
                     self._last_grok_mono = time.monotonic()
