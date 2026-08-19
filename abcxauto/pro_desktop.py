@@ -170,7 +170,7 @@ class ProTerminal:
             "No fills this session", size=12, color=MUTED, selectable=True
         )
         self.lbl_activity = ft.Text(
-            "Connect IBKR, then Start.",
+            "Connect IBKR.",
             size=12,
             color=MUTED,
             selectable=True,
@@ -237,7 +237,6 @@ class ProTerminal:
                 self.lbl_focus,
                 self.lbl_edge,
                 self.lbl_edge_sub,
-                self.lbl_unprotected,
             ],
             visible=False,
             spacing=0,
@@ -398,7 +397,6 @@ class ProTerminal:
                     ft.Row(
                         [
                             ft.Text("Grok stream", size=14, weight=ft.FontWeight.W_600, color=TEXT),
-                            self.lbl_wake,
                             ft.Container(expand=True),
                             self.lbl_stream_status,
                             self.lbl_status,
@@ -453,7 +451,7 @@ class ProTerminal:
                     ft.Row(
                         [
                             self._stat("Grok", self.lbl_desk, self.lbl_desk_sub),
-                            self._stat("Next look", self.lbl_next_look, self.lbl_next_look_sub),
+                            self._stat("Unprotected", self.lbl_unprotected),
                             self._stat("Lots", self.lbl_lot_count, self.lbl_halt),
                         ],
                         spacing=8,
@@ -525,7 +523,7 @@ class ProTerminal:
             self._toast("Agent stopped — IBKR stays connected", color=AMBER)
         else:
             err = self.engine.start()
-            self._toast(err or "Starting agent…", color=RED if err else BLUE)
+            self._toast(err or "Starting Grok", color=RED if err else BLUE)
         self._sync_widgets()
         self._safe_update()
 
@@ -907,31 +905,6 @@ class ProTerminal:
         self.lbl_mix.value = f"Mix: {' · '.join(bits)}" if bits else "Mix: flat"
         self.lbl_mix.color = TEXT if bits else MUTED
 
-    def _sync_next_look(self) -> None:
-        try:
-            from abcxauto.wake_bus import last_wake, load_alarm
-
-            alarm = load_alarm()
-            secs = alarm.seconds_until()
-            wake_if = list(alarm.wake_if or [])
-            event = last_wake()
-        except Exception:
-            secs, wake_if, event = None, [], None
-        if secs is None:
-            self.lbl_next_look.value = "—"
-            self.lbl_next_look.color = MUTED
-        else:
-            self.lbl_next_look.value = f"{int(secs) // 60}:{int(secs) % 60:02d}"
-            self.lbl_next_look.color = AMBER if secs <= 15 else TEXT
-        self.lbl_next_look_sub.value = ",".join(wake_if)[:28] if wake_if else "book events"
-        if event is not None:
-            detail = str(getattr(event, "detail", "") or "")
-            kind = str(getattr(event, "kind", "") or "")
-            self.lbl_wake.value = f"· woke on {kind} {detail}".rstrip()[:70]
-            self.lbl_wake.color = RED if kind in ("unprotected", "halt") else MUTED
-        else:
-            self.lbl_wake.value = ""
-
     def _sync_path_line(self) -> None:
         if not self.engine.state.equity:
             self.lbl_path.value = "Path: —"
@@ -1183,7 +1156,7 @@ class ProTerminal:
             self.lbl_run_state.color = GREEN
             self.lbl_desk.value = "On"
             self.lbl_desk.color = GREEN
-            self.lbl_desk_sub.value = "running"
+            self.lbl_desk_sub.value = ""
         else:
             self._set_btn_text(self.btn_run, "Start", filled=True)
             paused = bool(getattr(s, "paused", False))
@@ -1191,7 +1164,7 @@ class ProTerminal:
             self.lbl_run_state.color = AMBER if paused else MUTED
             self.lbl_desk.value = "Paused" if paused else "Off"
             self.lbl_desk.color = AMBER if paused else MUTED
-            self.lbl_desk_sub.value = "paused" if paused else "idle"
+            self.lbl_desk_sub.value = ""
 
     def _refresh_connect_btn(self) -> None:
         s = self.engine.state
@@ -1410,9 +1383,6 @@ class ProTerminal:
             self._score_last = now
             self._score_eq = eq_k
             self._refresh_score_line()
-        if now - float(self._look_last or 0) >= 1.0 or not self._look_last:
-            self._look_last = now
-            self._sync_next_look()
         if now - float(self._path_last or 0) >= 20.0 or not self._path_last:
             self._path_last = now
             self._sync_path_line()
@@ -1443,13 +1413,7 @@ class ProTerminal:
             self.lbl_playbook.color = TEXT if inst else MUTED
         except Exception:
             self.lbl_playbook.value = "Playbook: —"
-        try:
-            unprot_n = int(getattr(s, "unprotected_count", 0) or 0)
-            self.page.title = (
-                f"ABCXAUTO · {s.status} · unprot={unprot_n}"
-            )
-        except Exception:
-            pass
+        self.page.title = "ABCXAUTO"
         self.lbl_working_orders.value = self._format_working_orders(
             s.open_orders or [], positions=getattr(s, "positions", None)
         )
@@ -1525,7 +1489,7 @@ class ProTerminal:
 
     def _cycle_log_text(self, records: list[dict]) -> str:
         if not records:
-            return "Connect IBKR, then Start."
+            return "Connect IBKR."
         lines: list[str] = []
         for r in reversed(list(records or [])[-20:]):
             kind = str(r.get("type") or "cycle").lower()
@@ -1540,7 +1504,7 @@ class ProTerminal:
             strat = r.get("strat") or (r.get("action_obj") or {}).get("strategy") or "—"
             status = self._format_result_status(r.get("result") or {})
             lines.append(f"{ts}  {strat}  {status}")
-        return "\n".join(lines) or "Connect IBKR, then Start."
+        return "\n".join(lines) or "Connect IBKR."
 
     def _apply_clock(self, pulse: dict) -> None:
         view = pulse_clock_view(pulse)

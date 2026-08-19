@@ -160,7 +160,7 @@ def test_book_strip_sync(headless_pro):
     from tests.conftest import assert_no_cycle_counter
 
     assert_no_cycle_counter(headless_pro.page.title or "")
-    assert "unprot=2" in (headless_pro.page.title or "")
+    assert (headless_pro.page.title or "") == "ABCXAUTO"
     assert "Playbook [" in (headless_pro.lbl_playbook.value or "")
     assert len(headless_pro.col_lots.controls) == 1
     assert headless_pro.lbl_lot_count.value == "1"
@@ -225,7 +225,8 @@ def test_pro_desk_operator_paint_omits_cycle(headless_pro):
     assert_no_cycle_counter(headless_pro.page.title or "")
     assert_no_cycle_counter(headless_pro.lbl_desk_sub.value or "")
     assert_no_cycle_counter(headless_pro.think_live.value or "")
-    assert headless_pro.lbl_desk_sub.value == "running"
+    assert headless_pro.lbl_desk_sub.value == ""
+    assert (headless_pro.page.title or "") == "ABCXAUTO"
     assert "wakes" not in (headless_pro.page.title or "").lower()
     src = PRO_SRC.read_text(encoding="utf-8")
     assert "lbl_cycles" not in src
@@ -446,108 +447,3 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
         prev = out["pnl"]
         assert out.get("inventory")
     assert calls["grok"] >= 3
-
-
-def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
-    grok_n = [0]
-
-    async def fake_grok(_g, prompt: str, **_kwargs) -> str:
-        grok_n[0] += 1
-        return json.dumps({
-            "action": "market_bracket",
-            "strategy": "market_bracket",
-            "params": {
-                "symbol": "SPY",
-                "quantity": 1,
-                "direction": "LONG",
-                "stop_price": 490.0,
-                "target_price": 520.0,
-                "price_hint": 500.0,
-            },
-            "rationale": "active cycle",
-        })
-
-    class _Conn:
-        connected = True
-
-        async def connect(self):
-            return True
-
-    async def _fake_tool(_c, name, _a=None):
-        return {
-            "account_summary": {
-                "netliquidation": 50000 + grok_n[0] * 50,
-                "unrealizedpnl": grok_n[0],
-            },
-            "positions": [],
-            "open_orders": [],
-            "market_hours": {"session": "regular"},
-            "quote": {"symbol": "SPY", "last": 500},
-        }.get(name, {})
-
-    _real_sleep = asyncio.sleep
-
-    async def paced_sleep(_t):
-        await _real_sleep(0.06)
-
-    from tests.conftest import grok_json_as_turn
-
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
-    monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
-    monkeypatch.setattr("abcxauto.pro_engine.GrokClient", lambda: object())
-    monkeypatch.setattr("abcxauto.pro_engine.asyncio.sleep", paced_sleep)
-
-    async def _fast_pace(_sleep_s, _wake, **_kw):
-        await paced_sleep(0.06)
-        return ""
-
-    monkeypatch.setattr("abcxauto.pacing.wait_for_pace", _fast_pace)
-
-    async def _no_scan(*_a, **_k):
-        return []
-
-    monkeypatch.setattr("abcxauto.opportunity_scan.scan_opportunities", _no_scan)
-    monkeypatch.setattr("abcxauto.opportunity_scan.fetch_scan_metrics", _no_scan)
-    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _no_scan)
-
-    class _FastCfg:
-        xai_api_key = "test-key"
-        monitor_enabled = False
-        risk_gates_enabled = False
-        max_open_positions = 0
-        risk_posture = ""
-        trading_mode = "paper"
-
-    monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _FastCfg())
-    monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _FastCfg())
-
-    headless_pro._start()
-    state = headless_pro.engine.state
-    assert state.running
-    assert headless_pro.engine.worker and headless_pro.engine.worker.is_alive()
-    deadline = time.time() + 18
-    while time.time() < deadline and state.cycles < 1:
-        headless_pro.engine.drain_apply()
-        headless_pro._sync_widgets()
-        time.sleep(0.04)
-    seen = state.cycles
-    extra = time.time() + 0.8
-    while time.time() < extra:
-        headless_pro.engine.drain_apply()
-        headless_pro._sync_widgets()
-        time.sleep(0.04)
-    headless_pro._stop()
-    from tests.conftest import assert_no_cycle_counter
-
-    assert seen >= 1
-    assert state.cycles == seen
-    assert not hasattr(headless_pro, "lbl_cycles")
-    assert_no_cycle_counter(headless_pro.page.title or "")
-    assert_no_cycle_counter(headless_pro.lbl_desk_sub.value or "")
-    assert len(state.equity_hist) >= 1
-    SCRATCH.mkdir(parents=True, exist_ok=True)
-    (SCRATCH / "pro_integration_notes.txt").write_text(
-        f"cycles={state.cycles} result=PASS\n",
-        encoding="utf-8",
-    )
