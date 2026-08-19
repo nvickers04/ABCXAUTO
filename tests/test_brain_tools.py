@@ -891,12 +891,12 @@ def test_open_wake_is_developer_not_user():
         temperature=0.3,
         max_tokens=256,
     )
-    _open_wake(g, "Cycle 1. session=regular")
+    _open_wake(g, "session=regular")
     assert got
     assert got[0].role == developer("x").role
     assert got[0].role != user("x").role
     text = "".join(c.text for c in got[0].content)
-    assert "Cycle 1." in text
+    assert "session=regular" in text
     assert "CLERK WAKE" not in text
     assert "no operator" not in text.lower()
 

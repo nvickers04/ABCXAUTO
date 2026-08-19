@@ -107,7 +107,6 @@ class ProTerminal:
             border_color=BORDER,
             width=320,
         )
-        self.lbl_cycles = ft.Text("0", size=13, weight=ft.FontWeight.W_600, color=TEXT)
         self.lbl_equity = ft.Text("$0", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
         self.lbl_equity_sub = ft.Text("", size=11, color=MUTED)
         self.lbl_pnl = ft.Text("$+0.00", size=16, weight=ft.FontWeight.W_600, color=GREEN)
@@ -377,8 +376,6 @@ class ProTerminal:
                     self.lbl_session_badge,
                     self.lbl_clock,
                     self.lbl_link,
-                    ft.Text("wakes", size=11, color=MUTED),
-                    self.lbl_cycles,
                     ft.Container(expand=True),
                     self.lbl_run_state,
                     self.btn_connect,
@@ -1186,7 +1183,7 @@ class ProTerminal:
             self.lbl_run_state.color = GREEN
             self.lbl_desk.value = "On"
             self.lbl_desk.color = GREEN
-            self.lbl_desk_sub.value = f"{s.cycles} wakes" if s.cycles else "running"
+            self.lbl_desk_sub.value = "running"
         else:
             self._set_btn_text(self.btn_run, "Start", filled=True)
             paused = bool(getattr(s, "paused", False))
@@ -1298,7 +1295,6 @@ class ProTerminal:
     def _sync_widgets(self) -> None:
         s = self.engine.state
         self._sync_ibkr_account_label()
-        self.lbl_cycles.value = str(s.cycles)
         brief = {} if s.equity else self._brief()
         nl = float(s.equity or 0) or float(brief.get("net_liquidation") or 0)
         self.lbl_equity.value = f"${nl:,.2f}" if nl else "—"
@@ -1450,7 +1446,7 @@ class ProTerminal:
         try:
             unprot_n = int(getattr(s, "unprotected_count", 0) or 0)
             self.page.title = (
-                f"ABCXAUTO · c{s.cycles} · {s.status} · unprot={unprot_n}"
+                f"ABCXAUTO · {s.status} · unprot={unprot_n}"
             )
         except Exception:
             pass

@@ -612,6 +612,8 @@ def test_record_decision_and_recent(journal):
     assert rows[0]["outcome"]["status"] == "executed"
     assert rows[1]["strategy"] == "hold"
     assert rows[1]["portfolio_snapshot"]["net_liq"] == 1000
+    assert rows[0].get("cycle") == 4
+    assert rows[1].get("cycle") == 3
 
 
 def test_working_thesis_round_trip(journal):

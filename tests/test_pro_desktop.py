@@ -157,7 +157,9 @@ def test_book_strip_sync(headless_pro):
     assert headless_pro.lbl_banner.visible is True
     assert "blocked" in (headless_pro.lbl_banner.value or "").lower()
     assert (headless_pro.lbl_score.value or "").startswith("Score:")
-    assert "c0" in (headless_pro.page.title or "")
+    from tests.conftest import assert_no_cycle_counter
+
+    assert_no_cycle_counter(headless_pro.page.title or "")
     assert "unprot=2" in (headless_pro.page.title or "")
     assert "Playbook [" in (headless_pro.lbl_playbook.value or "")
     assert len(headless_pro.col_lots.controls) == 1
@@ -206,6 +208,41 @@ def test_lot_rows_name_the_lot_and_put_naked_first(headless_pro):
     headless_pro.engine.state.portfolio = {"unprotected_symbols": ["SPY"]}
     headless_pro._sync_lots()
     assert len(headless_pro.col_lots.controls) == 3
+
+
+def test_pro_desk_operator_paint_omits_cycle(headless_pro):
+    from tests.conftest import assert_no_cycle_counter
+
+    s = headless_pro.engine.state
+    s.cycles = 7
+    s.running = True
+    s.autonomous = True
+    s.paused = False
+    s.status = "Grok"
+    s.unprotected_count = 0
+    s.think_live = "boot — Grok.\nWake Grok.\n"
+    headless_pro._sync_widgets()
+    assert_no_cycle_counter(headless_pro.page.title or "")
+    assert_no_cycle_counter(headless_pro.lbl_desk_sub.value or "")
+    assert_no_cycle_counter(headless_pro.think_live.value or "")
+    assert headless_pro.lbl_desk_sub.value == "running"
+    assert "wakes" not in (headless_pro.page.title or "").lower()
+    src = PRO_SRC.read_text(encoding="utf-8")
+    assert "lbl_cycles" not in src
+    assert 'ft.Text("wakes"' not in src
+    assert "c{s.cycles}" not in src
+    s.records = [
+        {
+            "type": "cycle",
+            "cycle": 7,
+            "ts": "2026-08-19T14:00:00",
+            "strat": "hold",
+            "result": {"status": "ok"},
+        }
+    ]
+    headless_pro.lbl_activity.value = headless_pro._cycle_log_text(s.records)
+    assert_no_cycle_counter(headless_pro.lbl_activity.value or "")
+    assert "hold" in (headless_pro.lbl_activity.value or "")
 
 
 def test_lot_rows_empty_book_says_so(headless_pro):
@@ -501,9 +538,13 @@ def test_pro_start_click_three_visible_cycles(headless_pro, monkeypatch):
         headless_pro._sync_widgets()
         time.sleep(0.04)
     headless_pro._stop()
+    from tests.conftest import assert_no_cycle_counter
+
     assert seen >= 1
     assert state.cycles == seen
-    assert headless_pro.lbl_cycles.value == str(state.cycles)
+    assert not hasattr(headless_pro, "lbl_cycles")
+    assert_no_cycle_counter(headless_pro.page.title or "")
+    assert_no_cycle_counter(headless_pro.lbl_desk_sub.value or "")
     assert len(state.equity_hist) >= 1
     SCRATCH.mkdir(parents=True, exist_ok=True)
     (SCRATCH / "pro_integration_notes.txt").write_text(

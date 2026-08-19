@@ -792,7 +792,6 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
     )
 
     return {
-        "cycle": world.cycle,
         "session": world.session_status,
         "flat": world.flat,
         "needs_protection": world.needs_protection,

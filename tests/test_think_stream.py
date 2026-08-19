@@ -88,6 +88,10 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
         "world_state": {"flat": True, "net_liquidation": 0, "gates": {"book_unreliable": True}},
     })
     last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    from tests.conftest import assert_no_cycle_counter, assert_no_cycle_keys
+
+    assert_no_cycle_keys(last)
+    assert_no_cycle_counter(json.dumps(last))
     assert last["tool_trace"] == ["book", "quote"]
     assert last["session"]["status"] == "premarket"
     assert last["ibkr_connected"] is False
@@ -113,6 +117,7 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
         "world_state": {"flat": False, "net_liquidation": 36000},
     })
     live = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert_no_cycle_keys(live)
     assert live["strat"] == "in_progress"
     assert live["stale"] is False
     assert live["ibkr_connected"] is True
@@ -120,8 +125,32 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     assert live["mix"].get("long_c") == 1
     assert live.get("previous_strat") == "skipped"
     brief = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+    from tests.conftest import assert_no_cycle_keys
+
+    assert_no_cycle_keys(brief)
     assert brief["strat"] == "skipped"
     assert brief["open_lots"] == ["IWM 260821C306 long 1"]
+
+
+def test_last_turn_operator_paint_omits_cycle(tmp_path, monkeypatch):
+    from tests.conftest import assert_no_cycle_keys
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
+    ts._run = {"run_id": "r1", "pid": 1}
+    ts.write_last_turn({
+        "cycle": 12,
+        "strat": "hold",
+        "rationale": "flat",
+        "tool_trace": ["book"],
+        "world_state": {"flat": True, "net_liquidation": 1},
+    })
+    last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    brief = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+    assert_no_cycle_keys(last)
+    assert_no_cycle_keys(brief)
+    assert last["strat"] == "hold"
 
 
 def test_run_identity_stale_last_turn(tmp_path, monkeypatch):
@@ -134,12 +163,16 @@ def test_run_identity_stale_last_turn(tmp_path, monkeypatch):
     first = ts.begin_run()
     ts.write_last_turn({"cycle": 7, "strat": "hold", "tool_trace": ["book"]})
     live = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    from tests.conftest import assert_no_cycle_keys
+
+    assert_no_cycle_keys(live)
     assert live["run_id"] == first["run_id"]
     assert live["stale"] is False
     assert ts.last_turn_is_live(live) is True
     second = ts.begin_run()
     assert second["run_id"] != first["run_id"]
     stale = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert_no_cycle_keys(stale)
     assert stale["stale"] is True
     assert ts.last_turn_is_live(stale) is False
     assert ts.last_turn_is_live(live) is False
@@ -168,15 +201,15 @@ def test_stop_keeps_think_tail_new_run_archives(tmp_path, monkeypatch):
         ts.bind_engine(None)
 
 
-def test_bind_engine_keeps_prior_cycle_on_new_wake():
-    st = SimpleNamespace(think_live="Cycle 1: snapping book, then Grok...\n")
+def test_bind_engine_keeps_prior_think_on_new_wake():
+    st = SimpleNamespace(think_live="snapping book, then Grok...\n")
     bind_engine(SimpleNamespace(state=st))
     try:
         emit("stage", "grok")
         emit("say", "weigh tape")
     finally:
         bind_engine(None)
-    assert "Cycle 1" in st.think_live
+    assert "snapping book" in st.think_live
     assert "--- GROK ---" in st.think_live
     assert "weigh tape" in st.think_live
 

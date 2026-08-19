@@ -148,7 +148,6 @@ def _journal_memory_bits() -> tuple[List[dict], str]:
             recent.append(
                 {
                     "ts": d.get("ts"),
-                    "cycle": d.get("cycle"),
                     "action": d.get("action"),
                     "strategy": d.get("strategy"),
                     "rationale": (d.get("rationale") or "")[:160],

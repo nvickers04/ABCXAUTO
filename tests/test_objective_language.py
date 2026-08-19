@@ -82,6 +82,9 @@ def test_book_facts_have_no_controls_lecture(tmp_path, monkeypatch):
         trade_plan=None,
     )
     blob = _book_payload(world)
+    from tests.conftest import assert_no_cycle_keys
+
+    assert_no_cycle_keys(blob.get("world") if isinstance(blob.get("world"), dict) else {})
     prompt = "\n".join(str(blob.get(k) or "") for k in ("world", "levers", "playbook"))
     assert "controls" not in blob
     assert "CONTROLS" not in prompt

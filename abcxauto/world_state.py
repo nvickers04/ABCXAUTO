@@ -1385,7 +1385,11 @@ def format_wake(
     ibkr_up: bool,
     day: dict[str, Any] | None = None,
 ) -> str:
-    """Desk brief. Live book facts; no canned tape= names. Scan is a tool."""
+    """Desk brief. Live book facts; no canned tape= names. Scan is a tool.
+
+    ``cycle`` is clerk-internal (journal/logs). Not painted on the brief.
+    """
+    _ = cycle
     unprot = ",".join(unprotected) if unprotected else "none"
     day = day if isinstance(day, dict) else {}
     lots = day.get("open_lots") or []
@@ -1445,7 +1449,7 @@ def format_wake(
         return " ".join(p for p in parts if p)
     risk = day.get("risk_per_trade_pct")
     parts = [
-        f"Cycle {cycle}. session={session} flat={flat} "
+        f"session={session} flat={flat} "
         f"unprotected={unprot} ibkr={'up' if ibkr_up else 'down'}.",
     ]
     mins = day.get("minutes_to_open")
@@ -1743,7 +1747,6 @@ class WorldState:
             "note": "heuristic from feature biases — not regime truth",
         }
         body = {
-            "cycle": self.cycle,
             "session": self.session_status,
             "regime": regime_prompt,
             "flat": self.flat,

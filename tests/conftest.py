@@ -1,8 +1,27 @@
 """Shared test helpers."""
 
+import json
+import re
 from pathlib import Path
 
 import pytest
+
+# Operator paint: leftover sit-loop counter. Not the word "recycle" / "lifecycle".
+_CYCLE_COUNTER_RE = re.compile(
+    r"(?i)(?:\bcycle\s+\d+\b|\bCYCLE\s+\d+\b|·\s*c\d+\s*·|\b\d+\s+wakes\b)"
+)
+
+
+def assert_no_cycle_counter(text: str) -> None:
+    """UI / last_turn / brief / think stream must not number the think."""
+    blob = text or ""
+    assert not _CYCLE_COUNTER_RE.search(blob), blob
+
+
+def assert_no_cycle_keys(payload: dict) -> None:
+    assert "cycle" not in payload
+    assert "previous_cycle" not in payload
+    assert_no_cycle_counter(json.dumps(payload, default=str))
 
 SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-eafc232c6c32\implementer")
 
