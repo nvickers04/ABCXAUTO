@@ -362,6 +362,36 @@ def test_format_wake_includes_day_facts():
     assert "clerk wake" not in text.lower()
 
 
+def test_format_wake_floors_on_still_paints_max_risk():
+    from abcxauto.wake_bus import note_wake
+
+    note_wake(None)
+    text = format_wake(
+        cycle=3,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "names": 1,
+            "lots": 1,
+            "nl": 80_000.0,
+            "daily_pnl": -10.0,
+            "risk_per_trade_pct": 0.75,
+            "sizing_floors": True,
+            "open_lots": ["NVDA STK long 5"],
+            "capacity": {"open_count": 1, "max_open_positions": 15},
+        },
+    )
+    assert "max_risk=0.75%" in text
+    assert "floors=on" in text
+    assert "floors=off" not in text
+    assert "risk/trade=" not in text
+    assert "open_lots=NVDA STK long 5" in text
+    assert "qty=" not in text
+    assert text.rstrip().endswith("send.")
+
+
 def test_format_working_exits_and_wake_lasts():
     orders = [
         {
