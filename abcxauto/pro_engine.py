@@ -247,6 +247,8 @@ class ProEngine:
         self._last_pace: dict = {}
         self._last_cycle_out: dict = {}
         self._resume_think = False
+        self._think_parked = False
+        self._park_session = ""
         from abcxauto.think_stream import bind_engine
 
         bind_engine(self)
@@ -295,6 +297,7 @@ class ProEngine:
             self.state.paused = False
             self.state.running = True
             self.state.status = "Thinking"
+            self._think_parked = False
             self._resume_think = True
             self._note("START", "Grok running")
             return None
@@ -306,6 +309,7 @@ class ProEngine:
         self.state.running = True
         self.state.paused = False
         self.state.status = "Thinking"
+        self._think_parked = False
         self._resume_think = True
         self._note("START", "Starting Grok")
         self.worker = threading.Thread(target=lambda: self._worker(gen), daemon=True)
@@ -736,6 +740,27 @@ class ProEngine:
         rec = {**d, "ts": _now(), "type": "cycle"}
         s.records.append(rec)
 
+    @staticmethod
+    def _session_of(snap: dict | None) -> str:
+        s = snap if isinstance(snap, dict) else {}
+        pulse = s.get("reality_pulse") or {}
+        block = pulse.get("session") if isinstance(pulse, dict) else None
+        hours = s.get("market_hours") if isinstance(s.get("market_hours"), dict) else None
+        if not isinstance(block, dict) and isinstance(hours, dict):
+            block = hours.get("session")
+        if isinstance(block, dict):
+            return str(block.get("status") or "").lower()
+        if isinstance(block, str):
+            return block.lower()
+        return ""
+
+    def _session_unparks(self, sess: str) -> bool:
+        """Park stays down on overnight pokes. Next premarket/RTH is session_change."""
+        now = str(sess or "").strip().lower()
+        if not now or now == str(getattr(self, "_park_session", "") or "").strip().lower():
+            return False
+        return now in ("regular", "premarket")
+
     async def _host_think(
         self, n: int, g: Any, s: dict, *, resume: bool = False
     ) -> dict:
@@ -909,7 +934,7 @@ class ProEngine:
             self.worker = None
             self.conn = None
             return
-        from abcxauto.wake_bus import peek_interrupt
+        from abcxauto.wake_bus import peek_interrupt, take_interrupt
 
         g = None
         n = 0
@@ -932,7 +957,14 @@ class ProEngine:
                         )
                     except Exception as ue:
                         self._note("UNIVERSE", f"start refresh skipped: {ue}")
-                if not self.state.autonomous or self.pause.is_set():
+                if self.pause.is_set() and not getattr(self, "_think_parked", False):
+                    await asyncio.sleep(0.25)
+                    continue
+                if (
+                    not self.state.autonomous
+                    and not getattr(self, "_think_parked", False)
+                    and not getattr(self, "_resume_think", False)
+                ):
                     await asyncio.sleep(0.25)
                     continue
                 if g is None:
@@ -940,6 +972,34 @@ class ProEngine:
 
                 resume = bool(getattr(self, "_resume_think", False))
                 poked = peek_interrupt() is not None
+                if getattr(self, "_think_parked", False) and not resume:
+                    sess_now = ""
+                    if poked:
+                        try:
+                            shot = await snap(self.conn)
+                            sess_now = self._session_of(shot)
+                        except Exception:
+                            sess_now = ""
+                        try:
+                            take_interrupt()
+                        except Exception:
+                            pass
+                    if not self._session_unparks(sess_now):
+                        self.state.status = "Parked"
+                        ev = self._wake_event
+                        if ev is not None:
+                            ev.clear()
+                            try:
+                                await asyncio.wait_for(ev.wait(), timeout=1.0)
+                            except asyncio.TimeoutError:
+                                pass
+                        else:
+                            await asyncio.sleep(1.0)
+                        continue
+                    self._think_parked = False
+                    self.state.autonomous = True
+                    self.state.running = True
+                    self._note("PARK", "session_change — Grok up")
                 if not first_think and not poked and not resume:
                     self.state.status = "On"
                     ev = self._wake_event
@@ -967,6 +1027,8 @@ class ProEngine:
                 try:
                     out = await self._host_think(n, g, s, resume=resume and not poked)
                     if out.get("_parked"):
+                        self._think_parked = True
+                        self._park_session = self._session_of(s)
                         self.state.autonomous = False
                         self.state.running = False
                         self.state.paused = False
