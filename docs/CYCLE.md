@@ -15,7 +15,7 @@ Grok cannot switch to live or set a dollar sleeve.
 ## The loop
 
 ```
-WAKE     Grok set_wake (honored; min floor only), or clerk default if skipped
+WAKE     set_wake parks overnight / around-open; paper RTH has no park tool
          fill / order_change / mark move / unprotected can come sooner
          pulse ~10s; closed/postmarket does not call Grok (unprotected still does)
     |

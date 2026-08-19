@@ -18,12 +18,16 @@ from abcxauto.broker.util import quote_from_ticker
 from abcxauto.world_state import WorldState
 
 
-def _tool_names() -> set[str]:
+def _names_of(tools) -> set[str]:
     names = set()
-    for t in AGENT_TOOLS:
+    for t in tools:
         fn = getattr(t, "function", None)
         names.add(str(getattr(fn, "name", None) or getattr(t, "name", "") or ""))
     return names
+
+
+def _tool_names() -> set[str]:
+    return _names_of(AGENT_TOOLS)
 
 
 def _world(**kwargs) -> WorldState:
@@ -823,9 +827,70 @@ def test_set_wake_tool_description_is_park_not_next_look():
             desc = str(getattr(fn, "description", None) or getattr(t, "description", "") or "")
             break
     assert desc
-    assert "park" in desc.lower() or "Park" in desc
+    assert "park" in desc.lower()
     assert "next look" not in desc.lower()
-    assert "sit-clock" in desc.lower() or "sit clock" in desc.lower() or "yields in place" in desc.lower()
+    assert "don't park" not in desc.lower()
+    assert "do not park" not in desc.lower()
+
+
+def test_agent_tools_omits_set_wake_in_rth():
+    from abcxauto.brain import AGENT_TOOLS, agent_tools
+
+    assert "set_wake" in _names_of(AGENT_TOOLS)
+    assert "set_wake" not in _names_of(agent_tools(session="regular"))
+    assert "send" in _names_of(agent_tools(session="regular"))
+
+
+def test_agent_tools_keeps_set_wake_overnight():
+    from abcxauto.brain import agent_tools
+
+    for sess in ("premarket", "closed", "postmarket"):
+        assert "set_wake" in _names_of(agent_tools(session=sess))
+
+
+@pytest.mark.asyncio
+async def test_paper_rth_set_wake_tool_is_ignored_same_think(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
+    turn = BrainTurn()
+    raw = await _run_tool(
+        "set_wake",
+        {"wake_in_s": 3000, "wake_if": ["fill"]},
+        connector=None,
+        world=_world(session_status="regular", flat=True),
+        snap={},
+        turn=turn,
+    )
+    data = json.loads(raw)
+    assert data["status"] == "ignored"
+    assert data["reason"] == "paper_rth"
+    assert data["wake_at"] is None
+    assert data["session"] == "regular"
+    assert data.get("wanted_wake_in_s") == 3000
+    assert turn.parked is False
+
+
+@pytest.mark.asyncio
+async def test_overnight_set_wake_tool_parks(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    turn = BrainTurn()
+    raw = await _run_tool(
+        "set_wake",
+        {"wake_in_s": 8 * 3600, "wake_if": ["fill"]},
+        connector=None,
+        world=_world(session_status="closed", flat=True),
+        snap={},
+        turn=turn,
+    )
+    data = json.loads(raw)
+    assert data["status"] == "ok"
+    assert data["wake_at"]
+    assert turn.parked is True
 
 
 def test_live_poke_interrupt_skips_reset_chat():
@@ -1025,8 +1090,32 @@ def test_new_chat_does_not_force_a_tool():
         chat=None,
         _wake_n=0,
     )
-    _new_chat(g)
+    _new_chat(g, session="regular")
     assert captured.get("tool_choice") != "required"
+    assert "set_wake" not in _names_of(captured.get("tools") or [])
+
+
+def test_new_chat_premarket_keeps_set_wake():
+    from abcxauto.brain import _new_chat
+
+    captured: dict = {}
+
+    class _ChatNS:
+        @staticmethod
+        def create(**k):
+            captured.update(k)
+            return SimpleNamespace()
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=None,
+        _wake_n=0,
+    )
+    _new_chat(g, session="premarket")
+    assert "set_wake" in _names_of(captured.get("tools") or [])
 
 
 @pytest.mark.asyncio

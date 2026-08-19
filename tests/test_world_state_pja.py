@@ -336,7 +336,8 @@ def test_format_wake_includes_day_facts():
     assert "openU=$-88.0" in text
     assert "vsStart=$-500.0(inception)" in text
     assert "beating=False" in text
-    assert "risk/trade=25.0%" in text
+    assert "max_risk=25.0%" in text
+    assert "risk/trade=" not in text
     assert "open=8/15" in text
     assert "open_lots=IWM 260821C306 x1,QQQ 260821C735 x1" in text
     assert "haltAt=" in text
@@ -349,7 +350,8 @@ def test_format_wake_includes_day_facts():
     assert "stale=" not in text
     assert "mix=longC:7,shortC:1,vert:1" in text
     assert "ledger r50:-400.0 r51:-549.0" in text
-    assert text.rstrip().endswith("send|set_wake.")
+    assert text.rstrip().endswith("send.")
+    assert "set_wake" not in text
     assert "set_wake owns the next look" not in text
     assert "This is a delta" not in text
     assert "no operator" not in text.lower()
