@@ -109,6 +109,7 @@ def test_live_forces_sizing_floors_on():
     cfg = _cfg(trading_mode="live", sizing_floors=False, ibkr_port=7496)
     fixes = floor_clamp_config_fields(cfg)
     assert fixes.get("sizing_floors") is True
+    assert "risk_posture" not in fixes
     assert sizing_floors_active(cfg) is True
 
 

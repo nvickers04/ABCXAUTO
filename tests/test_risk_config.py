@@ -125,6 +125,7 @@ def test_capacity_not_in_set_risk_keys():
 
     assert CAPACITY_KEYS.isdisjoint(SET_RISK_KEYS)
     assert CAPACITY_KEYS == frozenset({"max_open_positions"})
+    assert "risk_posture" not in SET_RISK_KEYS
 
 
 def test_set_trading_mode_paper_live_roundtrip():

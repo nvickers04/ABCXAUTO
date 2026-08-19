@@ -117,3 +117,38 @@ def test_live_keeps_defensive_identity(tmp_path, monkeypatch):
     assert cfg.risk_posture == "defensive"
     assert cfg.effective_risk_posture == "defensive"
     set_trading_mode("paper")
+
+
+def test_operator_may_persist_aggressive_posture_on_paper(tmp_path, monkeypatch):
+    from abcxauto.config import update_risk_config
+
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    cfg = update_risk_config(risk_posture="aggressive", persist=True)
+    assert cfg.trading_mode == "paper" or cfg.is_paper
+    assert cfg.risk_posture == "aggressive"
+    assert get_config().risk_posture == "aggressive"
+    assert get_config().effective_risk_posture == "aggressive"
+    clear_runtime_overrides()
+    load_risk_settings(path)
+    assert get_config().risk_posture == "aggressive"
+    for posture in ("defensive", "balanced", "aggressive"):
+        update_risk_config(risk_posture=posture, persist=True)
+        assert get_config().risk_posture == posture
+
+
+def test_live_maps_stored_aggressive_to_balanced(tmp_path, monkeypatch):
+    from abcxauto.config import update_risk_config
+
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    update_risk_config(risk_posture="aggressive", persist=True)
+    set_trading_mode("live", live_confirm="I_UNDERSTAND_LIVE_TRADING_RISK")
+    cfg = get_config()
+    assert cfg.risk_posture == "aggressive"
+    assert cfg.effective_risk_posture == "balanced"
+    set_trading_mode("paper")
