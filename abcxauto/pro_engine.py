@@ -248,6 +248,7 @@ class ProEngine:
         self._last_cycle_out: dict = {}
         self._resume_think = False
         self._think_parked = False
+        self._last_session = ""
         from abcxauto.think_stream import bind_engine
 
         bind_engine(self)
@@ -744,6 +745,51 @@ class ProEngine:
         rec = {**d, "ts": _now(), "type": "cycle"}
         s.records.append(rec)
 
+    @staticmethod
+    def _session_of_snap(snap: dict | None) -> str:
+        s = snap if isinstance(snap, dict) else {}
+        pulse = s.get("reality_pulse") if isinstance(s.get("reality_pulse"), dict) else {}
+        sess = pulse.get("session")
+        if isinstance(sess, dict):
+            status = str(sess.get("status") or "").strip().lower()
+            if status:
+                return status
+        hours = s.get("market_hours") if isinstance(s.get("market_hours"), dict) else {}
+        block = hours.get("session")
+        if isinstance(block, dict):
+            return str(block.get("status") or "").strip().lower()
+        return str(block or "").strip().lower()
+
+    def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
+        """Stay-up: re-arm the next look. Return backoff seconds (0 = now)."""
+        self._last_session = str(session or "")
+        payload = out if isinstance(out, dict) else {}
+        if payload.get("_parked"):
+            return 0.0
+        from abcxauto.wake_bus import paper_stay_up, stay_up_retry_s
+
+        if not paper_stay_up(session=session):
+            return 0.0
+        self._resume_think = True
+        if payload.get("_failed"):
+            return float(stay_up_retry_s())
+        return 0.0
+
+    async def _wait_stay_up_retry(self, sec: float) -> None:
+        """Backoff after a failed stay-up look. Not a park clock."""
+        wait = max(0.0, float(sec))
+        if wait <= 0:
+            return
+        self.state.status = "On"
+        ev = self._wake_event
+        if ev is None:
+            await asyncio.sleep(wait)
+            return
+        ev.clear()
+        from abcxauto.pacing import wait_for_pace
+
+        await wait_for_pace(wait, ev, chunk_s=min(1.0, max(0.05, wait)))
+
     async def _host_think(
         self, n: int, g: Any, s: dict, *, resume: bool = False
     ) -> dict:
@@ -794,6 +840,12 @@ class ProEngine:
         turn = await grok_turn(g, connector=self.conn, world=world, snap=s, wake=wake)
         if getattr(turn, "parked", False):
             return {"_parked": True, "cycle": n}
+        failed = False
+        look_fn = getattr(turn, "look_failed", None)
+        if callable(look_fn):
+            failed = bool(look_fn())
+        else:
+            failed = bool(getattr(turn, "failed", False))
         acct = s.get("account") or {}
         pnl = pnl_of(acct) if isinstance(acct, dict) else 0.0
         eq = equity_of(acct) if isinstance(acct, dict) else 0.0
@@ -819,6 +871,7 @@ class ProEngine:
             "sends": len(getattr(turn, "sends", None) or []),
             "validation": str(result.get("note") or result.get("status") or "ok"),
             "pace": {"tier": "stay", "sleep_s": 0, "reason": "yield"},
+            "_failed": failed,
         }
 
     async def _do_panic(self) -> None:
@@ -917,7 +970,7 @@ class ProEngine:
             self.worker = None
             self.conn = None
             return
-        from abcxauto.wake_bus import peek_interrupt, take_interrupt
+        from abcxauto.wake_bus import paper_stay_up, peek_interrupt, take_interrupt
 
         g = None
         n = 0
@@ -961,6 +1014,10 @@ class ProEngine:
                     await asyncio.sleep(0.25)
                     continue
                 if not first_think and not poked and not resume:
+                    if paper_stay_up(session=getattr(self, "_last_session", "") or ""):
+                        # Paper RTH / premarket: do not sit. Re-arm the same think.
+                        self._resume_think = True
+                        continue
                     self.state.status = "On"
                     ev = self._wake_event
                     if ev is not None:
@@ -984,6 +1041,8 @@ class ProEngine:
                 self._resume_think = False
                 self._wake_reason = ""
                 n += 1
+                session = self._session_of_snap(s)
+                self._last_session = session
                 try:
                     out = await self._host_think(n, g, s, resume=resume and not poked)
                     if out.get("_parked"):
@@ -1002,8 +1061,18 @@ class ProEngine:
                     self._last_cycle_out = out
                     self.state.status = "On"
                     self.ui.put(("cycle", out))
+                    wait_s = self._rearm_after_think(out, session=session)
+                    if wait_s > 0:
+                        self._note("RETRY", f"look failed — next look {wait_s:.0f}s")
+                        await self._wait_stay_up_retry(wait_s)
                 except Exception as e:
                     self.ui.put(("error", str(e)))
+                    wait_s = self._rearm_after_think(
+                        {"_failed": True}, session=session
+                    )
+                    if wait_s > 0:
+                        self._note("RETRY", f"look failed — next look {wait_s:.0f}s")
+                        await self._wait_stay_up_retry(wait_s)
         finally:
             self._stop_monitor()
             self._worker_loop = None

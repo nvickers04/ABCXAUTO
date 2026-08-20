@@ -417,6 +417,21 @@ class BrainTurn:
     tool_budget_hit: bool = False
     parked: bool = False
     interrupted: bool = False
+    failed: bool = False
+
+    def look_failed(self) -> bool:
+        """Empty / '?' / stream error — clerk should backoff, not park."""
+        if self.parked:
+            return False
+        if self.failed:
+            return True
+        if self.sends:
+            return False
+        status = str((self.last_result or {}).get("status") or "").lower()
+        if status == "error":
+            return True
+        text = (self.text or "").strip()
+        return (not text) or text == "?"
 
 
 def _send_succeeded(result: dict[str, Any] | None) -> bool:
@@ -1767,6 +1782,7 @@ async def _grok_turn_impl(
     if g is None:
         turn.last_act = {}
         turn.last_result = {"status": "error", "note": "no_grok_client"}
+        turn.failed = True
         return turn
     session = str(getattr(world, "session_status", "") or "")
     try:
@@ -1778,6 +1794,7 @@ async def _grok_turn_impl(
         except Exception as exc:
             turn.last_act = {}
             turn.last_result = {"status": "error", "note": f"chat_error: {exc}"}
+            turn.failed = True
             return turn
     exhausted = True
     stream_resets = 0
@@ -1795,12 +1812,14 @@ async def _grok_turn_impl(
             logger.exception("stream_round failed")
             if stream_resets >= 1:
                 think_emit("say", f"\n[stream failed: {exc}]\n")
+                turn.failed = True
                 break
             stream_resets += 1
             think_emit("say", "\n[stream reset]\n")
             try:
                 chat = _open_wake(g, wake, reset=True, session=session)
             except Exception:
+                turn.failed = True
                 break
             continue
         if stop == "interrupt":
@@ -1839,6 +1858,10 @@ async def _grok_turn_impl(
     if exhausted:
         turn.tool_budget_hit = True
         think_emit("say", "\n[tool budget exhausted]\n")
+    if not turn.parked and not turn.failed:
+        text = (turn.text or "").strip()
+        if not turn.sends and (not text or text == "?"):
+            turn.failed = True
     # Park (set_wake) ends the episode. RTH yield keeps the same think.
     if turn.parked:
         _reset_chat(g)

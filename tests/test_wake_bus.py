@@ -295,3 +295,55 @@ def test_first_snap_is_not_a_flood():
         "ibkr_connected": True,
     })
     assert events_from_diff(None, b) == []
+
+
+def test_paper_stay_up_regular_and_premarket(monkeypatch):
+    from abcxauto.wake_bus import PAPER_STAY_UP_SESSIONS, paper_stay_up
+
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    assert PAPER_STAY_UP_SESSIONS == frozenset({"regular", "premarket"})
+    assert paper_stay_up(session="regular") is True
+    assert paper_stay_up(session="premarket") is True
+    assert paper_stay_up(session="closed") is False
+    assert paper_stay_up(session="postmarket") is False
+    assert paper_stay_up(session="") is False
+
+
+def test_paper_stay_up_live_is_false(monkeypatch):
+    from abcxauto.wake_bus import paper_stay_up
+
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
+    assert paper_stay_up(session="regular") is False
+    assert paper_stay_up(session="premarket") is False
+
+
+def test_paper_rth_park_refused_still_regular_only(monkeypatch):
+    from abcxauto.wake_bus import paper_rth_park_refused
+
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
+    assert paper_rth_park_refused(session="regular") is True
+    assert paper_rth_park_refused(session="premarket") is False
+    assert paper_rth_park_refused(session="closed") is False
+
+
+def test_stay_up_retry_s_is_tens_of_seconds(monkeypatch):
+    from abcxauto.wake_bus import (
+        STAY_UP_RETRY_MAX_S,
+        STAY_UP_RETRY_MIN_S,
+        stay_up_retry_s,
+    )
+
+    monkeypatch.delenv("ABCXAUTO_STAY_UP_RETRY_S", raising=False)
+    samples = [stay_up_retry_s() for _ in range(24)]
+    assert all(STAY_UP_RETRY_MIN_S <= v <= STAY_UP_RETRY_MAX_S for v in samples)
+
+
+def test_stay_up_retry_s_env_override(monkeypatch):
+    from abcxauto.wake_bus import stay_up_retry_s
+
+    monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.25")
+    assert stay_up_retry_s() == 0.25

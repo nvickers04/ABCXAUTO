@@ -7,6 +7,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,6 +110,7 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_
 
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _no_news)
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
@@ -369,6 +371,7 @@ async def test_pro_engine_wires_portfolio_monitor(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _MonCfg())
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
 
     reset_risk_gate()
@@ -496,6 +499,7 @@ async def test_start_after_connect_enables_autonomous(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _Cfg())
@@ -528,5 +532,252 @@ async def test_start_after_connect_enables_autonomous(monkeypatch):
     assert eng.state.running is False
     assert eng.monitor is not None  # pause keeps monitor
 
+    eng.stop_engine()
+    eng.drain_apply()
+
+
+def _stay_up_snap(session: str) -> dict:
+    return {
+        "account": {"netliquidation": 100000, "unrealizedpnl": 0},
+        "positions": [],
+        "open_orders": [],
+        "market_hours": {"session": session},
+        "protection": {"unprotected_symbols": []},
+        "reality_pulse": {"session": {"status": session}},
+        "fills": [],
+    }
+
+
+def _wire_stay_up_engine(monkeypatch, *, session: str, think, paper: bool = True):
+    class _Conn:
+        connected = True
+
+        async def connect(self):
+            return True
+
+    async def fake_snap(_c):
+        return _stay_up_snap(session)
+
+    async def _al(*_a, **_k):
+        return {"legal_symbols": [], "source": "test"}
+
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: paper)
+    monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
+    monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.GrokClient",
+        lambda: SimpleNamespace(chat=object()),
+    )
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.ProEngine._start_monitor",
+        lambda self: setattr(self, "monitor", type("M", (), {"running": True})()),
+    )
+    monkeypatch.setattr("abcxauto.universe.refresh_legal_set", _al)
+    monkeypatch.setattr("abcxauto.pro_engine.ProEngine._host_think", think)
+
+
+def test_session_of_snap_reads_pulse_and_hours():
+    eng = ProEngine()
+    assert eng._session_of_snap(_stay_up_snap("regular")) == "regular"
+    assert eng._session_of_snap({"market_hours": {"session": "premarket"}}) == "premarket"
+    assert (
+        eng._session_of_snap({"market_hours": {"session": {"status": "closed"}}})
+        == "closed"
+    )
+
+
+def test_rearm_paper_regular_and_premarket(monkeypatch):
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    for sess in ("regular", "premarket"):
+        eng = ProEngine()
+        wait = eng._rearm_after_think({"_failed": False}, session=sess)
+        assert eng._resume_think is True
+        assert wait == 0.0
+
+
+def test_rearm_failed_look_backs_off(monkeypatch):
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "30")
+    eng = ProEngine()
+    wait = eng._rearm_after_think({"_failed": True}, session="regular")
+    assert eng._resume_think is True
+    assert wait == 30.0
+
+
+def test_rearm_closed_and_live_do_not(monkeypatch):
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    eng = ProEngine()
+    wait = eng._rearm_after_think({"_failed": False}, session="closed")
+    assert eng._resume_think is False
+    assert wait == 0.0
+    wait = eng._rearm_after_think({"_parked": True}, session="regular")
+    assert eng._resume_think is False
+    assert wait == 0.0
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
+    eng = ProEngine()
+    wait = eng._rearm_after_think({"_failed": False}, session="regular")
+    assert eng._resume_think is False
+    assert wait == 0.0
+
+
+@pytest.mark.asyncio
+async def test_host_think_surfaces_question_failed(monkeypatch):
+    from abcxauto.brain import BrainTurn
+
+    async def grok_turn(*_a, **_k):
+        return BrainTurn(text="?", tool_trace=["book", "status", "playbook"])
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    out = await eng._host_think(1, SimpleNamespace(chat=None), _stay_up_snap("regular"))
+    assert out.get("_failed") is True
+    assert not out.get("_parked")
+
+
+@pytest.mark.asyncio
+async def test_paper_regular_rearms_looks(monkeypatch, tmp_path):
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    calls = {"n": 0, "resume": []}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        calls["resume"].append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "looking",
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 6
+    while time.time() < deadline and calls["n"] < 3:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert calls["n"] >= 3
+    assert eng._resume_think is True or calls["n"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_paper_premarket_rearms_looks(monkeypatch, tmp_path):
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    calls = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "premarket looking",
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="premarket", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 6
+    while time.time() < deadline and calls["n"] < 3:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert calls["n"] >= 3
+
+
+@pytest.mark.asyncio
+async def test_failed_look_backs_off_without_set_wake_clock(monkeypatch, tmp_path):
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.4")
+    times: list[float] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        times.append(time.monotonic())
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": True,
+            "rationale": "?",
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 6
+    while time.time() < deadline and len(times) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(times) >= 2
+    assert times[1] - times[0] >= 0.3
+    from abcxauto.wake_bus import load_alarm
+
+    assert load_alarm().wake_at is None
+    assert eng._resume_think is True
+
+
+@pytest.mark.asyncio
+async def test_parked_overnight_stays_parked_until_start(monkeypatch, tmp_path):
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    calls = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        return {"_parked": True, "cycle": n}
+
+    _wire_stay_up_engine(monkeypatch, session="closed", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 6
+    while time.time() < deadline and calls["n"] < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert calls["n"] == 1
+    await asyncio.sleep(0.5)
+    eng.drain_apply()
+    assert calls["n"] == 1
+    assert eng._think_parked is True
+    assert eng._resume_think is False
+    assert eng.state.status == "Parked"
+    assert eng.state.autonomous is False
+    eng.stop_engine()
+    eng.drain_apply()
+
+
+@pytest.mark.asyncio
+async def test_live_regular_does_not_rearm(monkeypatch, tmp_path):
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    calls = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "live look",
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think, paper=False)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 6
+    while time.time() < deadline and calls["n"] < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert calls["n"] == 1
+    await asyncio.sleep(0.45)
+    eng.drain_apply()
+    assert calls["n"] == 1
+    assert eng._resume_think is False
     eng.stop_engine()
     eng.drain_apply()
