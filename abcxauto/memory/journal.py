@@ -1130,6 +1130,38 @@ class TradeJournal:
             logger.exception("journal.strategy_performance failed")
             return []
 
+    def realized_by_order_id(self, limit: int = 2000) -> dict:
+        """order_id -> summed realized P&L from stored fills.
+
+        Lets a caller attribute P&L to whatever placed the order (setup card,
+        strategy) without duplicating the fills join.
+        """
+        out: dict = {}
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT order_id, realized_pnl
+                    FROM fills
+                    WHERE order_id IS NOT NULL AND realized_pnl IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            for row in rows:
+                oid = _coerce_order_id(row["order_id"])
+                if oid is None:
+                    continue
+                try:
+                    out[oid] = out.get(oid, 0.0) + float(row["realized_pnl"])
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            logger.exception("journal.realized_by_order_id failed")
+        return out
+
     def record_model_usage(
         self,
         *,

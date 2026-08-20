@@ -29,6 +29,7 @@ _MAX_INSTRUCTIONS = 16000
 _LEDGER_CAP = 12
 _PATCH_KEYS = (
     "instructions",
+    "cards",
     "types",
     "catalog",
     "mode",
@@ -36,6 +37,20 @@ _PATCH_KEYS = (
 )
 _MAX_STRATEGIES_PER_TYPE = 12
 _STRATEGY_FIELDS = ("name", "when_on", "tool_order", "ticket_shape", "invalidation", "note")
+# Setup cards are the book. A card is indexed by the edge it claims, not by the
+# IBKR order type — the order type is one field on the card.
+_MAX_CARDS = 24
+_CARD_FIELDS = (
+    "name",
+    "when_on",
+    "scan",
+    "ticket",
+    "shape",
+    "invalidation",
+    "status",
+    "note",
+)
+CARD_STATUSES = ("testing", "working", "retired")
 # Not catalog trunks: knobs, plus defined_risk_only rejects.
 _SKIP_PLAYBOOK_TYPES = frozenset({
     "set_risk",
@@ -78,7 +93,9 @@ _TYPE_META_KEYS = frozenset({
     "close_tp_sl",
     "default_tool_recipe",
 })
-_HARD_SHAPE = frozenset({"unknown_type", "ticker_list", "diary", "shape"})
+# Only an unsendable ticket kills a write now. Notes, regime reads, and
+# per-name observations are the point of the book.
+_HARD_SHAPE = frozenset({"unknown_type"})
 # Ceremony leftovers. Must not linger via save_lab merging **prev.
 _DEAD_LAB_KEYS = (
     "do_more",
@@ -126,12 +143,6 @@ _FIELD_LINE = re.compile(
     r"tool_order|ticket_shape|invalidation|note)\s*[:=]\s*(.*)$",
     re.IGNORECASE,
 )
-_DIARY_OR_CLOCK = re.compile(
-    r"\b(nap|naps|napping|diary|wake_at|wake_in_s|wake_in\b|set_wake|"
-    r"park until|no new risk until)\b",
-    re.IGNORECASE,
-)
-_TICKER_TOKEN = re.compile(r"^[A-Z]{1,5}$")
 _STALE_H_DEFAULT = 1.0
 _CARD_WINDOWS = ("15m", "1h", "4h")
 
@@ -476,6 +487,93 @@ def _strip_gates_from_types(types: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _norm_card(raw: Any) -> dict[str, str] | None:
+    """One setup card. ``ticket`` must name a real sendable type when given."""
+    if isinstance(raw, str):
+        name = raw.strip()
+        raw = {"name": name} if name else {}
+    if not isinstance(raw, dict):
+        return None
+    name = str(raw.get("name") or raw.get("setup") or "").strip()
+    if not name:
+        return None
+    ticket = str(raw.get("ticket") or raw.get("strategy") or "").strip().lower()
+    scan = raw.get("scan")
+    if isinstance(scan, (list, tuple)):
+        scan = ", ".join(str(x).strip() for x in scan if str(x).strip())
+    status = str(raw.get("status") or "testing").strip().lower()
+    if status not in CARD_STATUSES:
+        status = "testing"
+    return {
+        "name": name[:120],
+        "when_on": str(raw.get("when_on") or "").strip()[:800],
+        "scan": str(scan or "").strip()[:400],
+        "ticket": ticket[:60],
+        "shape": str(raw.get("shape") or raw.get("ticket_shape") or "").strip()[:800],
+        "invalidation": str(raw.get("invalidation") or "").strip()[:800],
+        "status": status,
+        "note": str(raw.get("note") or raw.get("notes") or "").strip()[:800],
+    }
+
+
+def unknown_card_tickets(cards: Any) -> list[str]:
+    """Card ``ticket`` values that are not sendable ORDER_EXAMPLES keys."""
+    if not isinstance(cards, list):
+        return []
+    allowed = set(playbook_type_keys())
+    bad: list[str] = []
+    for raw in cards:
+        row = _norm_card(raw)
+        if row is None:
+            continue
+        ticket = row.get("ticket") or ""
+        if ticket and ticket not in allowed and ticket not in bad:
+            bad.append(ticket)
+    return bad
+
+
+def _norm_cards(raw: Any) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw:
+        row = _norm_card(item)
+        if not row:
+            continue
+        key = row["name"].lower()
+        if key in seen:
+            out = [r for r in out if r["name"].lower() != key]
+        else:
+            seen.add(key)
+        out.append(row)
+        if len(out) >= _MAX_CARDS:
+            break
+    return out
+
+
+def render_cards(cards: list[dict[str, str]] | None) -> str:
+    """Readable setup book. One stanza per card."""
+    rows = [c for c in (cards or []) if isinstance(c, dict) and c.get("name")]
+    if not rows:
+        return ""
+    lines: list[str] = []
+    for card in rows:
+        head = f"SETUP {card.get('name')}"
+        status = str(card.get("status") or "").strip()
+        if status:
+            head += f"  [{status}]"
+        ticket = str(card.get("ticket") or "").strip()
+        if ticket:
+            head += f"  ticket={ticket}"
+        lines.append(head)
+        for key in ("when_on", "scan", "shape", "invalidation", "note"):
+            val = str(card.get(key) or "").strip()
+            if val:
+                lines.append(f"  {key}: {val}")
+    return "\n".join(lines)
+
+
 def render_playbook_tree(types: dict[str, Any] | None) -> str:
     """Readable tree: TYPE trunks, then child strategies."""
     if not isinstance(types, dict) or not types:
@@ -522,8 +620,13 @@ def render_playbook_tree(types: dict[str, Any] | None) -> str:
 
 
 def notebook_text(state: dict[str, Any] | None) -> str:
-    """Rendered TYPE tree when types exist; else leftover instructions."""
+    """Setup cards are the book. Legacy TYPE tree, then prose, are fallbacks."""
     blob = state if isinstance(state, dict) else {}
+    cards = blob.get("cards")
+    if isinstance(cards, list) and cards:
+        rendered = render_cards(_norm_cards(cards))
+        if rendered:
+            return rendered
     types = blob.get("types")
     if isinstance(types, dict) and types:
         tree = render_playbook_tree(types)
@@ -685,56 +788,28 @@ def _extract_types(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     return None, ""
 
 
-def _is_ticker_list(text: str) -> bool:
-    """Whole book is a ticker list, not mixed English (NO/NEW/UNTIL are not names)."""
-    if re.search(r"\bTYPE\b", text, re.IGNORECASE):
-        return False
-    if _DIARY_OR_CLOCK.search(text):
-        return False
-    cleaned = re.sub(r"[.]+", " ", text).strip()
-    tokens = [t for t in re.split(r"[\s,;|/]+", cleaned.upper()) if t]
-    if len(tokens) < 2:
-        return False
-    if not all(_TICKER_TOKEN.match(t) for t in tokens):
-        return False
-    if "," in text or ";" in text:
-        return True
-    letters = [c for c in text if c.isalpha()]
-    return bool(letters) and all(c.isupper() for c in letters)
-
-
 def book_shape_rejects(raw: Any) -> dict[str, str]:
-    """Reject diary / ticker lists / unknown send keys as the whole book."""
+    """Reject only unknown send keys. Prose observations are the point of the book.
+
+    A card may not claim a ticket the clerk cannot send. Everything else — notes,
+    regime reads, per-name observations — saves. The notebook is never a clock:
+    ``set_wake`` parks, and ``format_block`` never paints notes as orders.
+    """
     if not isinstance(raw, dict):
         return {}
-    incoming, err = _extract_types(raw)
+    if "cards" in raw:
+        bad = unknown_card_tickets(raw.get("cards"))
+        if bad:
+            return {
+                "unknown_type": f"card ticket must be a sendable type ({', '.join(bad)})"
+            }
+    _incoming, err = _extract_types(raw)
     if err == "unknown_type":
         blob = raw.get("types") if "types" in raw else raw.get("catalog")
-        if blob is None:
-            blob = raw.get("instructions")
         parsed = blob if isinstance(blob, dict) else _coerce_types_blob(blob)
-        bad = _unknown_type_keys(parsed) if isinstance(parsed, dict) else []
-        if not bad and isinstance(blob, str):
-            parsed_text = _parse_structured_text(blob)
-            bad = _unknown_type_keys(parsed_text) if parsed_text else []
-        label = ", ".join(bad) if bad else "unknown"
+        bad_types = _unknown_type_keys(parsed) if isinstance(parsed, dict) else []
+        label = ", ".join(bad_types) if bad_types else "unknown"
         return {"unknown_type": f"do not add unknown types ({label})"}
-    if incoming is not None:
-        return {}
-    inst = str(raw.get("instructions") or "").strip()
-    if not inst:
-        return {}
-    if _has_invented_pct_gate(inst) and not [
-        ln for ln in inst.splitlines()
-        if ln.strip() and not _invented_pct_gate_line(ln, *_floors_and_knob())
-    ]:
-        return {}
-    if _DIARY_OR_CLOCK.search(inst):
-        return {"diary": "notebook is a TYPE tree, not a diary/nap/wake clock"}
-    if _is_ticker_list(inst):
-        return {"ticker_list": "tickers are picked in the look, not stored as the book"}
-    if err == "unstructured":
-        return {"shape": "notebook is a TYPE tree, not a diary"}
     return {}
 
 
@@ -813,26 +888,34 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
     if _HARD_SHAPE.intersection(book_shape_rejects(raw)):
         return None
     prev = load_lab()
-    incoming, err = _extract_types(raw)
-    if err:
-        return None
-    types: dict[str, Any] | None
-    if incoming is not None:
-        types = _merge_type_catalog(prev, incoming)
-        if types is None:
-            return None
-        instructions = render_playbook_tree(types)
-        instructions = _strip_invented_pct_gate_lines(instructions)
+
+    if "cards" in raw:
+        cards = _norm_cards(raw.get("cards"))
     else:
-        types = prev.get("types") if isinstance(prev.get("types"), dict) else {}
-        if types:
-            instructions = render_playbook_tree(types)
-        else:
-            instructions = _field(raw, prev, "instructions")
-            if "instructions" in raw:
-                instructions = _strip_invented_pct_gate_lines(instructions)
+        cards = _norm_cards(prev.get("cards"))
+
+    incoming, err = _extract_types(raw)
+    types: dict[str, Any] = {}
+    if incoming is not None:
+        merged = _merge_type_catalog(prev, incoming)
+        types = merged if merged is not None else {}
+    elif isinstance(prev.get("types"), dict):
+        types = dict(prev["types"])
+    _ = err
+
+    if "instructions" in raw:
+        instructions = _strip_invented_pct_gate_lines(
+            str(raw.get("instructions") or "")
+        )
+    elif cards:
+        instructions = render_cards(cards)
+    elif types:
+        instructions = _strip_invented_pct_gate_lines(render_playbook_tree(types))
+    else:
+        instructions = str(prev.get("instructions") or "")
     instructions = instructions.strip()[:_MAX_INSTRUCTIONS]
-    if not instructions and not types:
+
+    if not instructions and not cards and not types:
         return None
     mode = _field(raw, prev, "mode", "explore").strip().lower()
     if mode not in ("explore", "exploit"):
@@ -843,6 +926,8 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
         "instructions": instructions,
         "ready_to_promote": bool(ready),
     }
+    if cards:
+        out["cards"] = cards
     if types:
         out["types"] = types
     return out
@@ -857,6 +942,150 @@ def grounding_error(
     if not isinstance(raw, dict):
         return "write_lab_playbook needs a notebook object"
     return ""
+
+
+def _card_log_path() -> Path:
+    import os
+
+    raw = (os.environ.get("ABCXAUTO_CARD_LOG_PATH") or "").strip()
+    if raw:
+        return Path(raw)
+    return _REPO_ROOT / "data" / "state" / "card_sends.jsonl"
+
+
+def record_card_send(
+    *,
+    card: str,
+    strategy: str,
+    symbol: str = "",
+    result: dict[str, Any] | None = None,
+) -> None:
+    """Tie a dispatched ticket to the setup card that called for it.
+
+    Without this the only feedback a card gets is whole-book drift, which is
+    the same number for every card.
+    """
+    name = str(card or "").strip()
+    if not name:
+        return
+    from abcxauto.memory.journal import _order_ids_from_result_json
+
+    try:
+        oids = sorted(_order_ids_from_result_json(json.dumps(result or {}, default=str)))
+    except Exception:
+        oids = []
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "card": name[:120],
+        "strategy": str(strategy or "")[:60],
+        "symbol": str(symbol or "").upper()[:12],
+        "order_ids": oids[:12],
+    }
+    path = _card_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except OSError:
+        logger.debug("card send log write failed", exc_info=True)
+
+
+def _card_sends(limit: int = 400) -> list[dict[str, Any]]:
+    path = _card_log_path()
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines()[-limit:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                blob = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(blob, dict) and blob.get("card"):
+                rows.append(blob)
+    except OSError:
+        return []
+    return rows
+
+
+def card_scores(cards: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
+    """Per-card sends and realized P&L, joined through order ids to fills."""
+    sends = _card_sends()
+    if not sends:
+        return []
+    realized: dict[int, float] = {}
+    try:
+        from abcxauto.memory import get_journal
+
+        journal = get_journal()
+        fn = getattr(journal, "realized_by_order_id", None)
+        if callable(fn):
+            realized = dict(fn() or {})
+    except Exception:
+        realized = {}
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in sends:
+        name = str(row.get("card") or "")
+        bucket = buckets.setdefault(
+            name,
+            {
+                "card": name,
+                "sends": 0,
+                "realized_pnl": 0.0,
+                "attributed_fills": 0,
+                "last_send": None,
+                "symbols": [],
+            },
+        )
+        bucket["sends"] += 1
+        bucket["last_send"] = row.get("ts") or bucket["last_send"]
+        sym = str(row.get("symbol") or "")
+        if sym and sym not in bucket["symbols"]:
+            bucket["symbols"].append(sym)
+        for oid in row.get("order_ids") or []:
+            try:
+                key = int(oid)
+            except (TypeError, ValueError):
+                continue
+            if key in realized:
+                bucket["realized_pnl"] += float(realized[key])
+                bucket["attributed_fills"] += 1
+    known = {str(c.get("name") or "").lower() for c in (cards or [])}
+    out = []
+    for name, bucket in buckets.items():
+        bucket["realized_pnl"] = round(float(bucket["realized_pnl"]), 4)
+        bucket["symbols"] = bucket["symbols"][:8]
+        if known:
+            bucket["on_current_book"] = name.lower() in known
+        out.append(bucket)
+    return sorted(out, key=lambda b: (-int(b.get("sends") or 0), str(b.get("card"))))
+
+
+def strategy_scores() -> list[dict[str, Any]]:
+    """Realized P&L per sendable strategy, from the journal's fills join."""
+    try:
+        from abcxauto.memory import get_journal
+
+        rows = get_journal().strategy_performance() or []
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        out.append(
+            {
+                "strategy": row.get("strategy"),
+                "n_fills": row.get("n_fills"),
+                "realized_pnl": round(float(row.get("realized_pnl_sum") or 0.0), 4),
+                "commissions": round(float(row.get("commissions_sum") or 0.0), 4),
+                "last_fill_ts": row.get("last_fill_ts"),
+            }
+        )
+    return sorted(out, key=lambda r: float(r.get("realized_pnl") or 0.0), reverse=True)
 
 
 def _score_snap(scorecard: dict[str, Any] | None) -> dict[str, Any]:
@@ -874,6 +1103,7 @@ def _outcome_card(card: dict[str, Any] | None) -> dict[str, Any]:
     out = dict(card) if isinstance(card, dict) else {}
     out.pop("instructions", None)
     out.pop("types", None)
+    out.pop("cards", None)
     for key in _DEAD_LAB_KEYS:
         out.pop(key, None)
     return out
@@ -993,7 +1223,7 @@ def maybe_promote(*, scorecard: dict[str, Any] | None = None) -> dict[str, Any] 
     if not lab.get("ready_to_promote"):
         return None
     sc = scorecard or lab.get("paper_score") or {}
-    if sc.get("beating_model") is not True:
+    if promote_beating(sc) is not True:
         return None
     now = datetime.now(timezone.utc).isoformat()
     live = {
@@ -1009,6 +1239,35 @@ def maybe_promote(*, scorecard: dict[str, Any] | None = None) -> dict[str, Any] 
     lab["promoted_at"] = now
     _write(_lab_path(), lab)
     return live
+
+
+def promote_window() -> str:
+    """Scorecard window the promote gate reads. Inception never recovers."""
+    import os
+
+    raw = (os.environ.get("ABCXAUTO_PROMOTE_WINDOW") or "").strip()
+    return raw or "1d"
+
+
+def promote_beating(scorecard: dict[str, Any] | None) -> bool | None:
+    """Beating on the promote window, falling back to the full-book flag.
+
+    Lifetime ``beating_model`` folds in every past experiment plus the whole
+    cumulative model bill, so once it is behind it stays behind. A window is a
+    question the lab can actually answer.
+    """
+    sc = scorecard if isinstance(scorecard, dict) else {}
+    wins = sc.get("windows") if isinstance(sc.get("windows"), dict) else {}
+    row = wins.get(promote_window()) if isinstance(wins, dict) else None
+    if isinstance(row, dict) and row.get("coverage") == "ok":
+        return row.get("beating_model")
+    return sc.get("beating_model")
+
+
+def playbook_mode() -> str:
+    """explore = widen the search, keep size small. exploit = trade the winners."""
+    mode = str((load_lab() or {}).get("mode") or "explore").strip().lower()
+    return mode if mode in ("explore", "exploit") else "explore"
 
 
 def live_has_promoted() -> bool:
@@ -1328,6 +1587,7 @@ def clear_lab(*, reason: str = "") -> dict[str, Any]:
     state = {
         "mode": "explore",
         "instructions": "",
+        "cards": [],
         "types": {},
         "ready_to_promote": False,
         "promoted": False,
@@ -1363,8 +1623,12 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
         "instructions": inst,
         "instructions_n": len(inst),
     }
+    cards = _norm_cards(lab.get("cards"))
     out: dict[str, Any] = {
         "scope": "lab" if paper else "live",
+        "cards": cards,
+        "card_scores": card_scores(cards),
+        "strategy_scores": strategy_scores(),
         "score": {
             "revision": facts.get("revision"),
             "age_h": facts.get("age_h"),
