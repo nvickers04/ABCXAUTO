@@ -62,7 +62,6 @@ def main() -> None:
         force = (os.environ.get("ABCXAUTO_FORCE_HEADLESS") or "").strip().lower()
         if force in ("1", "true", "yes", "on"):
             if not os.environ.get("ABCXAUTO_LAUNCH_PROBE"):
-                _cleanup(aggressive=False, flet_cache=False, kill_only=True)
                 from abcxauto.think_stream import begin_run
 
                 begin_run()
@@ -80,12 +79,9 @@ def main() -> None:
         from abcxauto.supervisor import clear_operator_stop, supervise
 
         clear_operator_stop()
-        _cleanup(aggressive=False, flet_cache=False, kill_only=True)
         print("supervisor: launching Pro child", flush=True)
         raise SystemExit(supervise())
-    # Kill leftover ABCXAUTO Python/Flet — never this brand-new process.
     if not probe:
-        _cleanup(aggressive=False, flet_cache=False, kill_only=True)
         from abcxauto.think_stream import begin_run
 
         begin_run()
