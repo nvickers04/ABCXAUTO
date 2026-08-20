@@ -177,8 +177,10 @@ def test_format_wake_no_tape_keeps_lots_and_minutes():
 
 def test_format_wake_rth_fill_delta_no_tape_when_flat():
     """After flatten, kind=fill keeps book facts — no leftover / substitute name dump."""
+    from abcxauto.think_stream import write_desk_brief
     from abcxauto.wake_bus import BookEvent, note_wake
 
+    write_desk_brief({"strat": "market_bracket", "sends": 2})
     note_wake(BookEvent(kind="fill", detail="AAPL target filled"))
     try:
         text = format_wake(
@@ -205,6 +207,7 @@ def test_format_wake_rth_fill_delta_no_tape_when_flat():
     assert "tape=" not in text
     assert "options=live" in text
     assert "This is a delta" in text
+    assert "prev=" not in text
     assert "session_prep" not in text
     assert "Cycle 6." not in text
     assert "you must" not in text.lower()
@@ -236,6 +239,7 @@ def test_format_wake_rth_delta_kinds_no_tape(kind):
     assert f"event={kind}" in text
     assert "tape=" not in text
     assert "options=live" in text
+    assert "prev=" not in text
 
 
 @pytest.mark.parametrize("kind", ["alarm", "boot", "operator"])
