@@ -1,7 +1,7 @@
 """Standing IBKR + on-demand Grok. No clerk decision checklist.
 
-Book events are facts. set_wake parks overnight / around-open.
-Paper RTH set_wake writes no clock — yield stays in the same think.
+Book events are facts. set_wake parks overnight / postmarket into overnight.
+Paper premarket and RTH set_wake write no clock — yield stays in the same think.
 Hard interrupts are gates.
 """
 
@@ -224,17 +224,15 @@ def min_look_s() -> float:
 
 
 def set_wake_offered(*, session: str = "") -> bool:
-    """Overnight / postmarket expose set_wake. Paper premarket and RTH do not."""
+    """Overnight / postmarket expose set_wake. Paper premarket and regular do not."""
     sess = str(session or "").lower()
     if sess not in PARK_SESSIONS:
         return False
-    if sess == "premarket" and paper_rth_park_refused(session="premarket"):
-        return False
-    return True
+    return not paper_rth_park_refused(session=sess)
 
 
 def paper_rth_park_refused(*, session: str = "") -> bool:
-    """Paper stay-up: RTH and premarket write no park clock. Overnight still parks."""
+    """Paper premarket/regular, clerk not halted: set_wake writes no park clock."""
     if str(session or "").lower() not in PAPER_STAY_UP_SESSIONS:
         return False
     try:
@@ -266,15 +264,16 @@ def ensure_next_look(
     flat: bool | None = None,
     session: str = "",
 ) -> GrokAlarm:
-    """Honor a real Grok park. Paper RTH no-clock is not re-armed."""
+    """Honor a real Grok park. Paper premarket/RTH no-clock is not re-armed."""
     alarm = load_alarm()
     grok_parked = bool(alarm.set_at and alarm.set_at != previous_set_at)
     if grok_parked:
         if alarm.wake_at:
             return alarm
-        # set_wake ran with no clock (paper RTH no-op). Do not synthesize a park.
+        # set_wake ran with no clock (paper stay-up no-op). Do not synthesize a park.
         return alarm
-    # Grok skipped set_wake. Paper stay-up / RTH: yield in place — no 9:33 nap.
+    # Grok skipped set_wake. Paper premarket/RTH: yield in place — do not
+    # synthesize a park until the open.
     if paper_rth_park_refused(session=session) or str(session or "").lower() == "regular":
         if alarm.wake_at:
             cleared = GrokAlarm(
@@ -284,7 +283,7 @@ def ensure_next_look(
             )
             return save_alarm(cleared)
         return alarm
-    # Non-RTH silent: still seed a look so overnight/around-open is not orphaned.
+    # Overnight / postmarket silent: still seed a look so the desk is not orphaned.
     return set_wake(
         wake_in_s=default_look_s(flat=flat, session=session),
         flat=flat,
@@ -314,7 +313,7 @@ def set_wake(
     flat: bool | None = None,
     session: str = "",
 ) -> GrokAlarm:
-    """Grok-owned park overnight / around-open. Paper RTH is a no-op clock."""
+    """Grok-owned park overnight / postmarket. Paper premarket and RTH are a no-op clock."""
     clean = _clean_wake_if(wake_if)
     if paper_rth_park_refused(session=session):
         return save_alarm(
