@@ -1360,6 +1360,92 @@ async def test_send_counts_tickets_and_combo_fact(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_writes_last_turn_from_live_book(monkeypatch, tmp_path):
+    """Successful send() stamps last_turn from the live book before cycle persist."""
+    from abcxauto import think_stream as ts
+    from abcxauto.world_state import lot_labels
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
+
+    live_pos = [{"symbol": "SPY", "secType": "STK", "quantity": 11}]
+    live_ord = [
+        {
+            "symbol": "SPY",
+            "sec_type": "STK",
+            "action": "SELL",
+            "order_type": "STP",
+            "aux_price": 766.7,
+        },
+        {
+            "symbol": "SPY",
+            "sec_type": "STK",
+            "action": "SELL",
+            "order_type": "LMT",
+            "lmt_price": 773.8,
+        },
+    ]
+
+    persist_calls: list[int] = []
+
+    def _boom(out):
+        persist_calls.append(1)
+        raise AssertionError("cycle persist must not be required")
+
+    monkeypatch.setattr("abcxauto.agent_loop._persist_cycle", _boom)
+
+    async def fake_exec(act, *_a, **_k):
+        return {
+            "success": True,
+            "status": "submitted",
+            "symbol": "SPY",
+            "strategy": act.get("strategy"),
+        }
+
+    class Conn:
+        async def get_positions(self):
+            return live_pos
+
+        async def get_open_orders(self):
+            return live_ord
+
+    monkeypatch.setattr("abcxauto.agent_loop.execute_ticket", fake_exec)
+    world = _world(flat=True, positions=[], net_liquidation=37000.0)
+    turn = BrainTurn()
+    await _run_tool(
+        "send",
+        {
+            "strategy": "market_bracket",
+            "params": {
+                "symbol": "SPY",
+                "quantity": 11,
+                "direction": "LONG",
+                "stop_price": 766.7,
+                "target_price": 773.8,
+            },
+            "rationale": "spy long",
+        },
+        connector=Conn(),
+        world=world,
+        snap={
+            "positions": [],
+            "open_orders": [],
+            "reality_pulse": {"ibkr_connected": True},
+        },
+        turn=turn,
+    )
+    last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert persist_calls == []
+    assert last["stale"] is False
+    assert last["flat"] is False
+    assert last["sends"] == 1
+    assert last["strat"] == "market_bracket"
+    assert last["open_lots"] == lot_labels(live_pos)
+    assert world.flat is False
+    assert world.positions == live_pos
+
+
+@pytest.mark.asyncio
 async def test_book_has_combo_avg_and_sends_count():
     world = _world(
         positions=[{

@@ -1353,10 +1353,24 @@ async def _post_act_structure_and_plan(
 
         # Secondary scrape detection from fills (BOT+SLD within seconds)
         if symbol and ok_dispatch and strat in ("bracket", "market_bracket"):
+            from abcxauto.trade_plan import stk_qty_for_symbol
+
+            positions = list(snap.get("positions") or [])
+            if connector is not None:
+                try:
+                    live_pos = await connector.get_positions()
+                    if isinstance(live_pos, list):
+                        positions = live_pos
+                except Exception:
+                    pass
             fills: list = []
             try:
-                if connector is not None and hasattr(connector, "get_recent_executions"):
-                    fills = await connector.get_recent_executions() or []
+                if connector is not None:
+                    fn = getattr(connector, "get_fills", None)
+                    if not callable(fn):
+                        fn = getattr(connector, "get_recent_executions", None)
+                    if callable(fn):
+                        fills = await fn() or []
             except Exception:
                 fills = []
             if not fills:
@@ -1368,7 +1382,7 @@ async def _post_act_structure_and_plan(
                     conn = sqlite3.connect(jpath)
                     conn.row_factory = sqlite3.Row
                     rows = conn.execute(
-                        "SELECT ts,symbol,side,quantity,price FROM fills "
+                        "SELECT ts,symbol,side,quantity,price,sec_type FROM fills "
                         "ORDER BY id DESC LIMIT 20"
                     ).fetchall()
                     conn.close()
@@ -1388,6 +1402,8 @@ async def _post_act_structure_and_plan(
                         "message": "round-trip fill within scrape window",
                     }
                 )
-                close_trade_plan("scrape_suspect")
+                # Broker STK qty is source of truth — OPT/BAG noise must not kill a live plan.
+                if abs(stk_qty_for_symbol(positions, symbol)) < 1e-9:
+                    close_trade_plan("scrape_suspect")
     except Exception:
         logger.exception("post_act structure/plan failed")

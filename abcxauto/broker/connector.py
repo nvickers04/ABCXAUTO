@@ -401,17 +401,31 @@ class IBKRQueriesMixin:
             fills = self.ib.fills()
             executions = []
             for fill in fills:
-                executions.append({
-                    'symbol': fill.contract.symbol,
+                contract = fill.contract
+                sec = getattr(contract, "secType", None) or "STK"
+                ts = fill.execution.time.isoformat() if fill.execution.time else None
+                row = {
+                    'symbol': contract.symbol,
                     'side': fill.execution.side,
                     'shares': fill.execution.shares,
+                    'quantity': fill.execution.shares,
                     'price': fill.execution.price,
                     'avg_price': fill.execution.avgPrice,
-                    'time': fill.execution.time.isoformat() if fill.execution.time else None,
+                    'time': ts,
+                    'ts': ts,
                     'order_id': fill.execution.orderId,
                     'exec_id': fill.execution.execId,
                     'commission': fill.commissionReport.commission if fill.commissionReport else 0,
-                })
+                    'sec_type': sec,
+                    'secType': sec,
+                }
+                if str(sec).upper() in ("OPT", "FOP"):
+                    row["strike"] = getattr(contract, "strike", None)
+                    row["expiration"] = getattr(
+                        contract, "lastTradeDateOrContractMonth", None
+                    )
+                    row["right"] = getattr(contract, "right", None)
+                executions.append(row)
             return executions
         except Exception as e:
             logger.error(f"Failed to get executions: {e}")

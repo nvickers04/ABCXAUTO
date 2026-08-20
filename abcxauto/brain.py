@@ -419,6 +419,77 @@ class BrainTurn:
     interrupted: bool = False
 
 
+def _send_succeeded(result: dict[str, Any] | None) -> bool:
+    """True when send() actually dispatched — not a clerk block/reject."""
+    if not isinstance(result, dict):
+        return False
+    status = str(result.get("status") or "").lower()
+    if status in (
+        "blocked", "rejected", "error", "failed", "held", "hold", "validated_block",
+    ):
+        return False
+    if result.get("success") is False:
+        return False
+    return (
+        result.get("success") is True
+        or result.get("filled") is True
+        or status in ("executed", "submitted", "ok", "filled", "success")
+    )
+
+
+async def _write_last_turn_after_send(
+    *,
+    connector: Any,
+    world: WorldState,
+    snap: dict[str, Any],
+    turn: "BrainTurn",
+    act: dict[str, Any],
+    strat: str,
+) -> None:
+    """Refresh last_turn from the live book immediately after a successful send."""
+    positions = list(world.positions or snap.get("positions") or [])
+    orders = list(world.open_orders or snap.get("open_orders") or [])
+    if connector is not None:
+        get_pos = getattr(connector, "get_positions", None)
+        if callable(get_pos):
+            try:
+                live = await get_pos()
+                if isinstance(live, list):
+                    positions = live
+                    world.positions = live
+            except Exception:
+                logger.debug("post-send position refresh failed", exc_info=True)
+        get_ord = getattr(connector, "get_open_orders", None)
+        if callable(get_ord):
+            try:
+                live_o = await get_ord()
+                if isinstance(live_o, list):
+                    orders = live_o
+                    world.open_orders = live_o
+            except Exception:
+                logger.debug("post-send order refresh failed", exc_info=True)
+    try:
+        from abcxauto.world_state import book_is_flat
+
+        world.flat = book_is_flat(positions, orders)
+    except Exception:
+        world.flat = not bool(positions)
+    from abcxauto.think_stream import write_last_turn_after_send
+
+    write_last_turn_after_send(
+        strat=strat,
+        sends=len(turn.sends),
+        positions=positions,
+        orders=orders,
+        rationale=str(act.get("rationale") or ""),
+        tool_trace=list(turn.tool_trace or []),
+        net_liquidation=getattr(world, "net_liquidation", None),
+        reality_pulse=snap.get("reality_pulse") or {},
+        ibkr_live_last=getattr(world, "ibkr_live_last", None),
+        ibkr_live_quotes=dict(getattr(world, "ibkr_live_quotes", None) or {}),
+    )
+
+
 def _clip(data: Any, max_chars: int = 24_000) -> str:
     text = json.dumps(data, default=str)
     if len(text) > max_chars:
@@ -1440,6 +1511,18 @@ async def _run_tool(
         turn.last_act = dict(act)
         turn.last_result = result
         turn.last_strat = strat
+        if _send_succeeded(result):
+            try:
+                await _write_last_turn_after_send(
+                    connector=connector,
+                    world=world,
+                    snap=snap,
+                    turn=turn,
+                    act=act,
+                    strat=strat,
+                )
+            except Exception:
+                logger.debug("post-send last_turn write failed", exc_info=True)
         return _clip(result)
     if name == "self_tune":
         from abcxauto.self_tune import apply_self_tune

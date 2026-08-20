@@ -303,6 +303,46 @@ def _mix_of(out: dict[str, Any], world: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
+def write_last_turn_after_send(
+    *,
+    strat: str,
+    sends: int,
+    positions: list[dict[str, Any]] | None,
+    orders: list[dict[str, Any]] | None = None,
+    rationale: str = "",
+    tool_trace: list[str] | None = None,
+    net_liquidation: float | None = None,
+    reality_pulse: dict[str, Any] | None = None,
+    ibkr_live_last: Any = None,
+    ibkr_live_quotes: dict[str, Any] | None = None,
+) -> None:
+    """Stamp last_turn from the live book right after a successful send.
+
+    Do not wait for cycle persist — bounce must not see the pre-send snap.
+    """
+    from abcxauto.world_state import book_is_flat, lot_labels
+
+    pos = list(positions or [])
+    lots = lot_labels(pos)
+    write_last_turn({
+        "strat": strat,
+        "sends": int(sends),
+        "positions": pos,
+        "open_lots": lots,
+        "rationale": rationale,
+        "tool_trace": list(tool_trace or []),
+        "reality_pulse": reality_pulse or {},
+        "ibkr_live_last": ibkr_live_last,
+        "ibkr_live_quotes": dict(ibkr_live_quotes or {}),
+        "world_state": {
+            "flat": book_is_flat(pos, orders),
+            "open_lots": lots,
+            "positions": pos,
+            "net_liquidation": net_liquidation,
+        },
+    })
+
+
 def write_last_turn(out: dict[str, Any]) -> None:
     """Clerk snapshot of the last Grok turn for the Cursor review loop.
 

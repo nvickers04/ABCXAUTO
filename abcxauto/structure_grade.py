@@ -251,17 +251,43 @@ def structure_cooldown_symbols(lessons: list[dict] | None = None) -> dict[str, s
     return cool
 
 
+def _fill_sec(fill: dict) -> str:
+    return str(
+        fill.get("secType") or fill.get("sec_type") or fill.get("sec") or ""
+    ).upper()
+
+
+def _fill_is_stk(fill: dict) -> bool:
+    """Stock scrape uses STK/ETF fills only — OPT/BAG on the same symbol is not a scrape."""
+    sec = _fill_sec(fill)
+    if sec in ("OPT", "FOP", "BAG", "CASH", "IND", "FUT"):
+        return False
+    if sec in ("STK", "ETF"):
+        return True
+    # Journal / historic fills may omit sec. Option identity is still not stock.
+    if (
+        fill.get("strike") is not None
+        or fill.get("right")
+        or fill.get("expiration")
+        or fill.get("lastTradeDateOrContractMonth")
+        or fill.get("local_symbol")
+        or fill.get("localSymbol")
+    ):
+        return False
+    return True
+
+
 def detect_scrape_from_fills(
     fills: list[dict],
     *,
     symbol: str,
     window_s: float = _SCRAPE_SECONDS,
 ) -> bool:
-    """True if BOT+SLD (or reverse) for symbol within window_s."""
+    """True if BOT+SLD (or reverse) for symbol STK fills within window_s."""
     sym = symbol.upper()
     relevant = [
         f for f in fills or []
-        if str(f.get("symbol") or "").upper() == sym
+        if str(f.get("symbol") or "").upper() == sym and _fill_is_stk(f)
     ]
     if len(relevant) < 2:
         return False
