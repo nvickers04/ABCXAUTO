@@ -6,6 +6,9 @@ Paper researches established structures, journals what beat model cost, and does
 Live never copies paper fills. It may take new risk only after a promoted
 snapshot exists (scorecard beating + Grok marked ready). Operator still must
 connect live TWS (7496) with the confirm phrase. Two processes, two client ids.
+
+The saved book is a TYPE tree: trunk = sendable ORDER_EXAMPLES keys, branches =
+strategies under a type. Tool order on a card is a recipe, not a clerk gate.
 """
 
 from __future__ import annotations
@@ -22,13 +25,60 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_LAB = _REPO_ROOT / "playbook_lab.json"
 _DEFAULT_LIVE = _REPO_ROOT / "playbook_live.json"
-_MAX_INSTRUCTIONS = 8000
+_MAX_INSTRUCTIONS = 16000
 _LEDGER_CAP = 12
 _PATCH_KEYS = (
     "instructions",
+    "types",
+    "catalog",
     "mode",
     "ready_to_promote",
 )
+_MAX_STRATEGIES_PER_TYPE = 12
+_STRATEGY_FIELDS = ("name", "when_on", "tool_order", "ticket_shape", "invalidation", "note")
+# Not catalog trunks: knobs, plus defined_risk_only rejects.
+_SKIP_PLAYBOOK_TYPES = frozenset({
+    "set_risk",
+    "self_tune",
+    "ratio_spread",
+    "jade_lizard",
+})
+# Trunk = these sendable ORDER_EXAMPLES keys. Never invert.
+PLAYBOOK_TYPE_KEYS = (
+    "market_bracket",
+    "bracket",
+    "trailing_stop",
+    "modify_stop",
+    "modify_target",
+    "cancel_order",
+    "close_option",
+    "buy_option",
+    "vertical_spread",
+    "calendar_spread",
+    "diagonal_spread",
+    "butterfly",
+    "iron_butterfly",
+    "iron_condor",
+    "straddle",
+    "strangle",
+    "protective_put",
+    "collar",
+    "covered_call",
+    "cash_secured_put",
+)
+_TYPE_META_KEYS = frozenset({
+    "mode",
+    "ready_to_promote",
+    "instructions",
+    "types",
+    "catalog",
+    "strategies",
+    "defined_risk",
+    "open_shape",
+    "close_tp_sl",
+    "default_tool_recipe",
+})
+_HARD_SHAPE = frozenset({"unknown_type", "ticker_list", "diary", "shape"})
 # Ceremony leftovers. Must not linger via save_lab merging **prev.
 _DEAD_LAB_KEYS = (
     "do_more",
@@ -36,6 +86,14 @@ _DEAD_LAB_KEYS = (
     "basis",
     "evidence",
     "research_tools",
+    "diary",
+    "nap",
+    "naps",
+    "wake_at",
+    "wake_in_s",
+    "wake_if",
+    "ticker_list",
+    "tickers",
 )
 # Notebook is not self_tune. Same class of knobs self_tune rejects or clamps —
 # write_lab_playbook must not loosen floors, switch live, or set a dollar sleeve.
@@ -61,6 +119,22 @@ _GATE_FORBIDDEN: dict[str, str] = {
 _GATES_HDR = re.compile(r"\bGATES\b[^:\n]{0,48}:", re.IGNORECASE)
 _FLOOR_NL = re.compile(r"\bfloor\s+(\d+(?:\.\d+)?)\s*%\s*NL\b", re.IGNORECASE)
 _PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+<<<<<<< HEAD
+=======
+_TYPE_HDR = re.compile(r"^TYPE\s+(\S+)", re.IGNORECASE)
+_STRATEGY_HDR = re.compile(r"^STRATEGY\s+(.+)$", re.IGNORECASE)
+_FIELD_LINE = re.compile(
+    r"^(defined_risk|open_shape|close_tp_sl|default_tool_recipe|name|when_on|"
+    r"tool_order|ticket_shape|invalidation|note)\s*[:=]\s*(.*)$",
+    re.IGNORECASE,
+)
+_DIARY_OR_CLOCK = re.compile(
+    r"\b(nap|naps|napping|diary|wake_at|wake_in_s|wake_in\b|set_wake|"
+    r"park until|no new risk until)\b",
+    re.IGNORECASE,
+)
+_TICKER_TOKEN = re.compile(r"^[A-Z]{1,5}$")
+>>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
 _STALE_H_DEFAULT = 1.0
 _CARD_WINDOWS = ("15m", "1h", "4h")
 
@@ -144,6 +218,151 @@ def _field(raw: dict[str, Any], prev: dict[str, Any], key: str, default: str = "
     return str(prev.get(key) or default)
 
 
+<<<<<<< HEAD
+=======
+def playbook_type_keys() -> tuple[str, ...]:
+    """Sendable ORDER_EXAMPLES keys the notebook may use as trunks."""
+    from abcxauto.order_examples import NOT_TICKETS, ORDER_EXAMPLES
+
+    skip = _SKIP_PLAYBOOK_TYPES | NOT_TICKETS
+    allowed = [k for k in ORDER_EXAMPLES if k not in skip]
+    front = [k for k in PLAYBOOK_TYPE_KEYS if k in allowed]
+    rest = [k for k in allowed if k not in PLAYBOOK_TYPE_KEYS]
+    return tuple(front + rest)
+
+
+def _close_tp_sl(name: str) -> str:
+    from abcxauto.order_examples import COMBO_BAG_CLOSE
+
+    if name in COMBO_BAG_CLOSE:
+        return "same strategy + closing_position + limit_price (one BAG)"
+    if name == "buy_option":
+        return "close_option (prefer conId)"
+    if name in ("market_bracket", "bracket"):
+        return "child stop + target; modify_stop / modify_target / cancel_order"
+    if name in ("trailing_stop", "trailing_stop_limit"):
+        return "trail is the stop; cancel_order or market/limit/stop close"
+    if name == "oca":
+        return "protection legs; modify_stop / modify_target / cancel_order"
+    if name in ("modify_stop", "modify_target", "cancel_order", "close_option"):
+        return "this type is the close"
+    if name in ("market_order", "limit_order", "stop_order", "stop_limit"):
+        return "stock close (closing_position)"
+    if name in ("protective_put", "collar", "covered_call", "cash_secured_put"):
+        return "close stock+option legs; cancel_order / close_option as needed"
+    if name == "roll_option":
+        return "roll of an existing option"
+    return "cancel_order or market/limit/stop close (closing_position)"
+
+
+def _empty_stanza(name: str = "") -> dict[str, Any]:
+    from abcxauto.order_examples import ORDER_EXAMPLES
+
+    params = ORDER_EXAMPLES.get(name) or {}
+    return {
+        "defined_risk": True,
+        "open_shape": ", ".join(str(k) for k in params.keys()),
+        "close_tp_sl": _close_tp_sl(name) if name else "",
+        "strategies": [],
+    }
+
+
+def empty_type_catalog() -> dict[str, Any]:
+    """One stanza per allowed sendable type, strategies=[]. No tickers."""
+    return {name: _empty_stanza(name) for name in playbook_type_keys()}
+
+
+def _as_bool(val: Any, default: bool | None = None) -> bool | None:
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    s = str(val).strip().lower()
+    if s in ("1", "true", "yes", "y"):
+        return True
+    if s in ("0", "false", "no", "n", ""):
+        return False
+    return default
+
+
+def _norm_recipe(raw: Any) -> list[str]:
+    """Optional tool recipe. Stored, never gated."""
+    if isinstance(raw, str):
+        parts = [p.strip() for p in re.split(r"[,;]+", raw) if p.strip()]
+        return parts[:16]
+    if isinstance(raw, (list, tuple)):
+        return [str(x).strip() for x in raw if str(x).strip()][:16]
+    return []
+
+
+def _norm_strategy(raw: Any) -> dict[str, str] | None:
+    if isinstance(raw, str):
+        name = raw.strip()
+        if not name:
+            return None
+        raw = {"name": name}
+    if not isinstance(raw, dict):
+        return None
+    name = str(raw.get("name") or "").strip()
+    if not name:
+        return None
+    tool_order = raw.get("tool_order") or raw.get("tool_recipe") or raw.get("default_tool_recipe")
+    if isinstance(tool_order, (list, tuple)):
+        tool_order = ", ".join(str(x).strip() for x in tool_order if str(x).strip())
+    else:
+        tool_order = str(tool_order or "").strip()
+    return {
+        "name": name[:120],
+        "when_on": str(raw.get("when_on") or "").strip()[:800],
+        "tool_order": tool_order[:400],
+        "ticket_shape": str(raw.get("ticket_shape") or "").strip()[:800],
+        "invalidation": str(raw.get("invalidation") or "").strip()[:800],
+        "note": str(raw.get("note") or raw.get("notes") or "").strip()[:800],
+    }
+
+
+def _norm_strategies(raw: Any) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw:
+        row = _norm_strategy(item)
+        if not row:
+            continue
+        key = row["name"].lower()
+        if key in seen:
+            out = [r for r in out if r["name"].lower() != key]
+        else:
+            seen.add(key)
+        out.append(row)
+        if len(out) >= _MAX_STRATEGIES_PER_TYPE:
+            break
+    return out
+
+
+def _merge_strategies(
+    prev: list[dict[str, str]],
+    incoming: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    by_name: dict[str, dict[str, str]] = {}
+    order: list[str] = []
+    for row in prev:
+        key = row["name"].lower()
+        by_name[key] = row
+        order.append(key)
+    for row in incoming:
+        key = row["name"].lower()
+        by_name[key] = row
+        if key not in order:
+            order.append(key)
+    merged = [by_name[k] for k in order if k in by_name]
+    return merged[:_MAX_STRATEGIES_PER_TYPE]
+
+
+>>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
 def _floors_and_knob() -> tuple[bool, float]:
     """Live clerk flag + max_risk_per_trade_pct. Fail closed: floors off."""
     try:
@@ -192,6 +411,377 @@ def _strip_invented_pct_gate_lines(text: str) -> str:
     return "\n".join(kept)
 
 
+<<<<<<< HEAD
+=======
+def _walk_text(obj: Any) -> str:
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, dict):
+        return "\n".join(_walk_text(v) for v in obj.values())
+    if isinstance(obj, (list, tuple)):
+        return "\n".join(_walk_text(v) for v in obj)
+    return ""
+
+
+def _norm_type_row(row: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any]:
+    prev = prev if isinstance(prev, dict) else {}
+    src = row if isinstance(row, dict) else {}
+    out: dict[str, Any] = {}
+    if "defined_risk" in src:
+        dr = _as_bool(src.get("defined_risk"))
+        if dr is not None:
+            out["defined_risk"] = dr
+    elif "defined_risk" in prev:
+        out["defined_risk"] = bool(prev.get("defined_risk"))
+    open_s = src["open_shape"] if "open_shape" in src else prev.get("open_shape")
+    close_s = src["close_tp_sl"] if "close_tp_sl" in src else prev.get("close_tp_sl")
+    out["open_shape"] = str(open_s or "")[:800]
+    out["close_tp_sl"] = str(close_s or "")[:800]
+    if "default_tool_recipe" in src:
+        rec = _norm_recipe(src.get("default_tool_recipe"))
+        if rec:
+            out["default_tool_recipe"] = rec
+    elif prev.get("default_tool_recipe"):
+        rec = _norm_recipe(prev.get("default_tool_recipe"))
+        if rec:
+            out["default_tool_recipe"] = rec
+    if "strategies" in src:
+        if src.get("strategies") == []:
+            out["strategies"] = []
+        else:
+            incoming_s = _norm_strategies(src.get("strategies"))
+            out["strategies"] = _merge_strategies(
+                _norm_strategies(prev.get("strategies")), incoming_s
+            )
+    else:
+        out["strategies"] = _norm_strategies(prev.get("strategies"))
+    return out
+
+
+def _strip_gates_from_types(types: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for name, row in types.items():
+        if not isinstance(row, dict):
+            continue
+        stanza = dict(row)
+        for key in ("open_shape", "close_tp_sl"):
+            stanza[key] = _strip_invented_pct_gate_lines(str(stanza.get(key) or ""))
+        rec = stanza.get("default_tool_recipe")
+        if isinstance(rec, str):
+            cleaned = _norm_recipe(_strip_invented_pct_gate_lines(rec))
+            if cleaned:
+                stanza["default_tool_recipe"] = cleaned
+            else:
+                stanza.pop("default_tool_recipe", None)
+        cleaned: list[dict[str, str]] = []
+        for strat in stanza.get("strategies") or []:
+            if not isinstance(strat, dict):
+                continue
+            item = dict(strat)
+            for key in _STRATEGY_FIELDS:
+                item[key] = _strip_invented_pct_gate_lines(str(item.get(key) or ""))
+            if item.get("name"):
+                cleaned.append(item)
+        stanza["strategies"] = cleaned
+        out[name] = stanza
+    return out
+
+
+def render_playbook_tree(types: dict[str, Any] | None) -> str:
+    """Readable tree: TYPE trunks, then child strategies."""
+    if not isinstance(types, dict) or not types:
+        return ""
+    lines: list[str] = []
+    for name in playbook_type_keys():
+        row = types.get(name)
+        if not isinstance(row, dict):
+            continue
+        if "defined_risk" in row:
+            dr = "yes" if row.get("defined_risk") else "no"
+            lines.append(f"TYPE {name}  defined_risk={dr}")
+        else:
+            lines.append(f"TYPE {name}")
+        open_s = str(row.get("open_shape") or "").strip()
+        close_s = str(row.get("close_tp_sl") or "").strip()
+        recipe = row.get("default_tool_recipe")
+        if open_s:
+            lines.append(f"  open: {open_s}")
+        if close_s:
+            lines.append(f"  close: {close_s}")
+        if recipe:
+            if isinstance(recipe, (list, tuple)):
+                rec_s = ", ".join(str(x) for x in recipe if str(x).strip())
+            else:
+                rec_s = str(recipe).strip()
+            if rec_s:
+                lines.append(f"  recipe: {rec_s}")
+        strats = [
+            s for s in (row.get("strategies") or [])
+            if isinstance(s, dict) and str(s.get("name") or "").strip()
+        ]
+        if not strats:
+            lines.append("  strategies: []")
+        else:
+            for strat in strats:
+                nm = str(strat.get("name") or "").strip()
+                lines.append(f"  - {nm}")
+                for key in ("when_on", "tool_order", "ticket_shape", "invalidation", "note"):
+                    val = str(strat.get(key) or "").strip()
+                    if val:
+                        lines.append(f"      {key}: {val}")
+    return "\n".join(lines)
+
+
+def notebook_text(state: dict[str, Any] | None) -> str:
+    """Rendered TYPE tree when types exist; else leftover instructions."""
+    blob = state if isinstance(state, dict) else {}
+    types = blob.get("types")
+    if isinstance(types, dict) and types:
+        tree = render_playbook_tree(types)
+        if tree:
+            return tree
+    return str(blob.get("instructions") or "").strip()
+
+
+def _has_book(state: dict[str, Any] | None) -> bool:
+    return bool(notebook_text(state))
+
+
+def _unknown_type_keys(blob: dict[str, Any]) -> list[str]:
+    allowed = set(playbook_type_keys())
+    return sorted(
+        k for k in blob
+        if k not in allowed and k not in _TYPE_META_KEYS
+    )
+
+
+def _parse_structured_text(text: str) -> dict[str, Any] | None:
+    types: dict[str, Any] = {}
+    cur_type: str | None = None
+    cur_strat: dict[str, str] | None = None
+
+    def _flush_strat() -> None:
+        nonlocal cur_strat
+        if cur_type and cur_strat and cur_strat.get("name"):
+            types.setdefault(cur_type, {"strategies": []})
+            types[cur_type].setdefault("strategies", []).append(dict(cur_strat))
+        cur_strat = None
+
+    found_type = False
+    for raw_line in text.splitlines():
+        s = raw_line.strip()
+        if not s:
+            continue
+        m = _TYPE_HDR.match(s)
+        if m:
+            _flush_strat()
+            cur_type = m.group(1).strip().rstrip(":").strip()
+            types.setdefault(cur_type, {"strategies": []})
+            cur_strat = None
+            found_type = True
+            continue
+        m = _STRATEGY_HDR.match(s)
+        if m:
+            _flush_strat()
+            cur_strat = {
+                "name": m.group(1).strip().rstrip(":").strip(),
+                "when_on": "",
+                "tool_order": "",
+                "ticket_shape": "",
+                "invalidation": "",
+                "note": "",
+            }
+            continue
+        m = _FIELD_LINE.match(s)
+        if not m:
+            continue
+        field = m.group(1).lower()
+        val = m.group(2).strip()
+        if field in ("defined_risk", "open_shape", "close_tp_sl", "default_tool_recipe"):
+            if cur_type and cur_strat is None:
+                types.setdefault(cur_type, {"strategies": []})
+                if field == "defined_risk":
+                    types[cur_type][field] = val.lower() in ("1", "true", "yes", "y")
+                elif field == "default_tool_recipe":
+                    types[cur_type][field] = _norm_recipe(val)
+                else:
+                    types[cur_type][field] = val
+            continue
+        if cur_strat is not None:
+            cur_strat[field] = val
+    _flush_strat()
+    if not found_type:
+        return None
+    return types
+
+
+def _coerce_types_blob(blob: Any) -> dict[str, Any] | None:
+    if blob is True:
+        return {}
+    if isinstance(blob, str):
+        text = blob.strip()
+        if not text:
+            return None
+        if text.lower() in ("catalog", "type catalog", "types"):
+            return {}
+        if text[:1] in "{[":
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                inner = parsed.get("types")
+                if isinstance(inner, dict):
+                    return inner
+                if (
+                    parsed == {}
+                    or any(k in playbook_type_keys() for k in parsed)
+                    or _looks_like_type_map(parsed)
+                ):
+                    return parsed
+                return None
+        return _parse_structured_text(text)
+    if isinstance(blob, dict):
+        inner = blob.get("types")
+        if isinstance(inner, dict) and (
+            inner == {}
+            or any(k in playbook_type_keys() for k in inner)
+            or _looks_like_type_map(inner)
+        ):
+            return inner
+        if any(k in playbook_type_keys() for k in blob) or blob == {} or _looks_like_type_map(blob):
+            return blob
+    return None
+
+
+def _looks_like_type_map(blob: dict[str, Any]) -> bool:
+    if not blob:
+        return False
+    stanza = {"strategies", "defined_risk", "open_shape", "close_tp_sl"}
+    values = list(blob.values())
+    if not all(isinstance(v, dict) for v in values):
+        return False
+    return any(stanza & set(v) for v in values)
+
+
+def _extract_types(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """Incoming types dict, or None if omitted. Error is unknown_type / unstructured."""
+    for key in ("types", "catalog"):
+        if key not in raw:
+            continue
+        blob = raw.get(key)
+        if blob is None or blob == "":
+            continue
+        parsed = _coerce_types_blob(blob)
+        if parsed is not None:
+            if _unknown_type_keys(parsed):
+                return None, "unknown_type"
+            return parsed, ""
+        return None, "unstructured"
+    inst = raw.get("instructions")
+    if isinstance(inst, dict):
+        parsed = _coerce_types_blob(inst)
+        if parsed is not None:
+            if _unknown_type_keys(parsed):
+                return None, "unknown_type"
+            return parsed, ""
+        return None, "unstructured"
+    if isinstance(inst, str) and inst.strip():
+        parsed = _coerce_types_blob(inst)
+        if parsed is not None:
+            if _unknown_type_keys(parsed):
+                return None, "unknown_type"
+            return parsed, ""
+        return None, "unstructured"
+    return None, ""
+
+
+def _is_ticker_list(text: str) -> bool:
+    """Whole book is a ticker list, not mixed English (NO/NEW/UNTIL are not names)."""
+    if re.search(r"\bTYPE\b", text, re.IGNORECASE):
+        return False
+    if _DIARY_OR_CLOCK.search(text):
+        return False
+    cleaned = re.sub(r"[.]+", " ", text).strip()
+    tokens = [t for t in re.split(r"[\s,;|/]+", cleaned.upper()) if t]
+    if len(tokens) < 2:
+        return False
+    if not all(_TICKER_TOKEN.match(t) for t in tokens):
+        return False
+    if "," in text or ";" in text:
+        return True
+    letters = [c for c in text if c.isalpha()]
+    return bool(letters) and all(c.isupper() for c in letters)
+
+
+def book_shape_rejects(raw: Any) -> dict[str, str]:
+    """Reject diary / ticker lists / unknown send keys as the whole book."""
+    if not isinstance(raw, dict):
+        return {}
+    incoming, err = _extract_types(raw)
+    if err == "unknown_type":
+        blob = raw.get("types") if "types" in raw else raw.get("catalog")
+        if blob is None:
+            blob = raw.get("instructions")
+        parsed = blob if isinstance(blob, dict) else _coerce_types_blob(blob)
+        bad = _unknown_type_keys(parsed) if isinstance(parsed, dict) else []
+        if not bad and isinstance(blob, str):
+            parsed_text = _parse_structured_text(blob)
+            bad = _unknown_type_keys(parsed_text) if parsed_text else []
+        label = ", ".join(bad) if bad else "unknown"
+        return {"unknown_type": f"do not add unknown types ({label})"}
+    if incoming is not None:
+        return {}
+    inst = str(raw.get("instructions") or "").strip()
+    if not inst:
+        return {}
+    if _has_invented_pct_gate(inst) and not [
+        ln for ln in inst.splitlines()
+        if ln.strip() and not _invented_pct_gate_line(ln, *_floors_and_knob())
+    ]:
+        return {}
+    if _DIARY_OR_CLOCK.search(inst):
+        return {"diary": "notebook is a TYPE tree, not a diary/nap/wake clock"}
+    if _is_ticker_list(inst):
+        return {"ticker_list": "tickers are picked in the look, not stored as the book"}
+    if err == "unstructured":
+        return {"shape": "notebook is a TYPE tree, not a diary"}
+    return {}
+
+
+def _merge_type_catalog(
+    prev: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any] | None:
+    allowed = playbook_type_keys()
+    allowed_set = set(allowed)
+    if _unknown_type_keys(incoming):
+        return None
+    out = empty_type_catalog()
+    prev_types = prev.get("types") if isinstance(prev.get("types"), dict) else {}
+    for name in allowed:
+        clerk = out[name]
+        prev_row = prev_types.get(name) if isinstance(prev_types.get(name), dict) else {}
+        merged = _norm_type_row(prev_row, prev=clerk)
+        merged["defined_risk"] = clerk["defined_risk"]
+        merged["open_shape"] = clerk["open_shape"]
+        merged["close_tp_sl"] = clerk["close_tp_sl"]
+        out[name] = merged
+    if incoming == {}:
+        return _strip_gates_from_types(out)
+    for name, row in incoming.items():
+        if name not in allowed_set:
+            continue
+        clerk = out[name]
+        merged = _norm_type_row(row, prev=out.get(name))
+        merged["defined_risk"] = clerk["defined_risk"]
+        merged["open_shape"] = clerk["open_shape"]
+        merged["close_tp_sl"] = clerk["close_tp_sl"]
+        out[name] = merged
+    return _strip_gates_from_types(out)
+
+
+>>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
 def gate_rejects(raw: Any) -> dict[str, str]:
     """Reject floors / live / sleeve knobs on a notebook write. Notes stay notes."""
     if not isinstance(raw, dict):
@@ -209,7 +799,17 @@ def gate_rejects(raw: Any) -> dict[str, str]:
                 if key in blob:
                     rejected[key] = reason
     inst = str(raw.get("instructions") or "")
+<<<<<<< HEAD
     if inst and _has_invented_pct_gate(inst):
+=======
+    types_text = _walk_text(raw.get("types")) if isinstance(raw.get("types"), dict) else ""
+    catalog_text = _walk_text(raw.get("catalog")) if isinstance(raw.get("catalog"), dict) else ""
+    if (
+        (inst and _has_invented_pct_gate(inst))
+        or (types_text and _has_invented_pct_gate(types_text))
+        or (catalog_text and _has_invented_pct_gate(catalog_text))
+    ):
+>>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
         rejected["invented_pct_gate"] = "notebook cannot invent a % gate"
     return rejected
 
@@ -220,27 +820,59 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
     Gate knobs (floors / live / sleeve) are never stored — see gate_rejects.
     Invented GATES: N% / floor N% NL lines are stripped unless floors are ON
     and N equals the live max_risk_per_trade_pct knob.
+<<<<<<< HEAD
+=======
+    The book is a TYPE tree (sendable keys), not a diary.
+>>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
     """
     if not isinstance(raw, dict):
         return None
     if not any(k in raw for k in _PATCH_KEYS):
         return None
+    if _HARD_SHAPE.intersection(book_shape_rejects(raw)):
+        return None
     prev = load_lab()
+<<<<<<< HEAD
     instructions = _field(raw, prev, "instructions")
     if "instructions" in raw:
         instructions = _strip_invented_pct_gate_lines(instructions)
     instructions = instructions.strip()[:_MAX_INSTRUCTIONS]
     if not instructions:
+=======
+    incoming, err = _extract_types(raw)
+    if err:
+        return None
+    types: dict[str, Any] | None
+    if incoming is not None:
+        types = _merge_type_catalog(prev, incoming)
+        if types is None:
+            return None
+        instructions = render_playbook_tree(types)
+        instructions = _strip_invented_pct_gate_lines(instructions)
+    else:
+        types = prev.get("types") if isinstance(prev.get("types"), dict) else {}
+        if types:
+            instructions = render_playbook_tree(types)
+        else:
+            instructions = _field(raw, prev, "instructions")
+            if "instructions" in raw:
+                instructions = _strip_invented_pct_gate_lines(instructions)
+    instructions = instructions.strip()[:_MAX_INSTRUCTIONS]
+    if not instructions and not types:
+>>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
         return None
     mode = _field(raw, prev, "mode", "explore").strip().lower()
     if mode not in ("explore", "exploit"):
         mode = "explore"
     ready = raw["ready_to_promote"] if "ready_to_promote" in raw else prev.get("ready_to_promote")
-    return {
+    out: dict[str, Any] = {
         "mode": mode,
         "instructions": instructions,
         "ready_to_promote": bool(ready),
     }
+    if types:
+        out["types"] = types
+    return out
 
 
 def grounding_error(
@@ -268,6 +900,7 @@ def _outcome_card(card: dict[str, Any] | None) -> dict[str, Any]:
     """Ledger row is the score of a card, not the notes."""
     out = dict(card) if isinstance(card, dict) else {}
     out.pop("instructions", None)
+    out.pop("types", None)
     for key in _DEAD_LAB_KEYS:
         out.pop(key, None)
     return out
@@ -326,7 +959,7 @@ def ensure_ledger(lab: dict[str, Any] | None) -> list[dict[str, Any]]:
     rows = [_outcome_card(r) for r in (state.get("ledger") or []) if isinstance(r, dict)]
     if rows:
         return rows[-_LEDGER_CAP:]
-    if state.get("instructions") or state.get("revision"):
+    if state.get("instructions") or state.get("revision") or state.get("types"):
         return [_ledger_card(state, state.get("paper_score"))]
     return []
 
@@ -382,7 +1015,7 @@ def save_lab(update: dict[str, Any], *, scorecard: dict[str, Any] | None = None)
 def maybe_promote(*, scorecard: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Copy lab → live snapshot only when paper is beating the model bill."""
     lab = load_lab()
-    if not lab.get("instructions"):
+    if not _has_book(lab):
         return None
     if not lab.get("ready_to_promote"):
         return None
@@ -407,7 +1040,7 @@ def maybe_promote(*, scorecard: dict[str, Any] | None = None) -> dict[str, Any] 
 
 def live_has_promoted() -> bool:
     live = load_live()
-    return bool(live.get("promoted") and str(live.get("instructions") or "").strip())
+    return bool(live.get("promoted") and _has_book(live))
 
 
 def live_new_risk_allowed() -> bool:
@@ -417,15 +1050,39 @@ def live_new_risk_allowed() -> bool:
     return live_has_promoted()
 
 
+def _reject_note(rejected: dict[str, str]) -> str:
+    if "unknown_type" in rejected:
+        return rejected["unknown_type"]
+    if "invented_pct_gate" in rejected and set(rejected) <= {"invented_pct_gate"}:
+        return "notebook cannot invent a % gate"
+    if "ticker_list" in rejected:
+        return rejected["ticker_list"]
+    if "diary" in rejected:
+        return rejected["diary"]
+    if "shape" in rejected:
+        return rejected["shape"]
+    if "invented_pct_gate" in rejected:
+        return "notebook cannot invent a % gate"
+    return "notebook cannot loosen gates"
+
+
 def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | None:
     """Paper: persist Grok's notebook. Live: ignore writes.
 
     Gate knobs in the payload are rejected (not applied). Notes still save.
+    Diary / ticker-list / unknown-type writes do not save.
     """
     if not judgment or not is_paper():
         return None
     raw = judgment.get("lab_playbook") or judgment.get("playbook")
-    rejected = gate_rejects(raw)
+    rejected = dict(gate_rejects(raw))
+    rejected.update(book_shape_rejects(raw))
+    if _HARD_SHAPE.intersection(rejected):
+        return {
+            "status": "rejected",
+            "rejected": rejected,
+            "note": _reject_note(rejected),
+        }
     update = clamp_update(raw)
     if not update:
         if rejected:
@@ -435,7 +1092,11 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
             return {
                 "status": "rejected",
                 "rejected": rejected,
+<<<<<<< HEAD
                 "note": note,
+=======
+                "note": _reject_note(rejected),
+>>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
             }
         return None
     score = None
@@ -465,7 +1126,7 @@ def playbook_is_stale(
 ) -> bool:
     """True when a standing card is older than the lab rewrite cadence."""
     state = lab if isinstance(lab, dict) else load_lab()
-    if not str(state.get("instructions") or "").strip():
+    if not _has_book(state):
         return False
     age = playbook_age_hours(state, now=now)
     return age is not None and age >= stale_hours()
@@ -565,7 +1226,7 @@ def playbook_facts(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
     from abcxauto.world_state import pct_of_nl
 
     lab = load_lab()
-    inst = str(lab.get("instructions") or "").strip()
+    inst = notebook_text(lab)
     at_write = lab.get("paper_score") if isinstance(lab.get("paper_score"), dict) else {}
     now_sc = scorecard if isinstance(scorecard, dict) else {}
     age = playbook_age_hours(lab)
@@ -662,7 +1323,7 @@ def format_block() -> str:
     lab = load_lab()
     live = load_live()
     if paper:
-        inst = str(lab.get("instructions") or "").strip()
+        inst = notebook_text(lab)
         if not inst:
             return "LAB PLAYBOOK: none. write_lab_playbook to set; playbook tool for full text.\n"
         live_sc = _live_scorecard(lab)
@@ -681,7 +1342,7 @@ def format_block() -> str:
             f"- ledger: {ledger or 'none'}\n"
             "- notebook: playbook tool; send is the book\n"
         )
-    inst = str(live.get("instructions") or "").strip()
+    inst = notebook_text(live)
     if not inst:
         return "LIVE: no promoted paper playbook. New risk blocked until promote (code).\n"
     return (
@@ -698,6 +1359,7 @@ def clear_lab(*, reason: str = "") -> dict[str, Any]:
     state = {
         "mode": "explore",
         "instructions": "",
+        "types": {},
         "ready_to_promote": False,
         "promoted": False,
         "revision": 0,
@@ -719,7 +1381,8 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
         lab.get("paper_score") if isinstance(lab.get("paper_score"), dict) else {}
     )
     facts = playbook_facts(live_sc)
-    inst = str(lab.get("instructions") or "")
+    inst = notebook_text(lab)
+    types = lab.get("types") if isinstance(lab.get("types"), dict) else {}
     current: dict[str, Any] = {
         "revision": lab.get("revision") or lab.get("promoted_revision"),
         "mode": lab.get("mode"),
@@ -727,6 +1390,7 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
         "promoted": bool(lab.get("promoted")),
         "written_at": lab.get("written_at") or lab.get("promoted_at"),
         "paper_score": lab.get("paper_score") or {},
+        "types": types,
         "instructions": inst,
         "instructions_n": len(inst),
     }

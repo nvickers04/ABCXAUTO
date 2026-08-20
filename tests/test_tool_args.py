@@ -79,6 +79,15 @@ def test_send_hoists_flat_fields():
     assert out["params"]["quantity"] == 4
 
 
+def test_write_lab_playbook_hoists_catalog_to_types():
+    name, args = normalize_tool_call(
+        "write_lab_playbook",
+        {"catalog": {"bracket": {"strategies": []}}},
+    )
+    assert name == "write_lab_playbook"
+    assert args["types"]["bracket"]["strategies"] == []
+
+
 def test_candles_keeps_symbols_batch():
     name, args = normalize_tool_call("candles", {"symbols": ["SPY", "QQQ"]})
     assert name == "candles"

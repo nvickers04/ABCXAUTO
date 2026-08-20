@@ -317,7 +317,9 @@ AGENT_TOOLS = [
     tool(
         name="playbook",
         description=(
-            "Your notes plus how they scored since the write. "
+            "The lab book as TYPE then child strategies, plus how the card scored "
+            "since the write. Empty book: write_lab_playbook the TYPE CATALOG "
+            "(strategies=[]) this look. Tickers are picked in the look, not stored. "
             "revision= is an old card's outcome (edge, lots), not the old essay."
         ),
         parameters=_schema(
@@ -331,14 +333,39 @@ AGENT_TOOLS = [
     tool(
         name="write_lab_playbook",
         description=(
-            "Paper only: replace your notes. Not a wake clock. "
-            "Optional mode / ready_to_promote. Book, quote, and gates are other tools."
+            "Paper only. ONE book (Pro Notebook). Persist the TYPE tree. "
+            "Not a diary, nap, wake clock, ticker list, or invented GATES/%. "
+            "Trunk = sendable types: market_bracket, bracket, trailing_stop, "
+            "modify_stop, modify_target, cancel_order, close_option, buy_option, "
+            "vertical_spread, calendar_spread, diagonal_spread, butterfly, "
+            "iron_butterfly, iron_condor, straddle, strangle, protective_put, "
+            "collar, covered_call, cash_secured_put. Skip set_risk, self_tune, "
+            "ratio_spread, jade_lizard. Branches = strategies under a type. "
+            "Never invert. Empty book: TYPE CATALOG with strategies=[]. Later "
+            "looks add or refine a strategy UNDER an existing type key. "
+            "Do not add unknown types. default_tool_recipe is "
+            "optional and a RECIPE not a clerk gate — full tools every look; do "
+            "not freeze paths; do not rank by PnL. Tickers are picked in the look, "
+            "not stored as the book. Other thoughts stay in the think stream. "
+            "Optional mode / ready_to_promote."
         ),
         parameters=_schema(
             {
+                "types": {
+                    "type": "object",
+                    "description": (
+                        "Trunk keyed by sendable type: defined_risk, open_shape, "
+                        "close_tp_sl, optional default_tool_recipe (not gated), "
+                        "strategies[]. Empty book: catalog with strategies=[]. "
+                        "Later: add a strategy under an existing type."
+                    ),
+                },
                 "instructions": {
                     "type": "string",
-                    "description": "Your notebook. Replaces the previous notes.",
+                    "description": (
+                        "Structured TYPE then child strategies text. Not a diary, "
+                        "nap, wake clock, or ticker list."
+                    ),
                 },
                 "mode": {"type": "string", "description": "explore or exploit"},
                 "ready_to_promote": {"type": "boolean"},

@@ -467,6 +467,36 @@ def test_notebook_viewer_reads_lab_not_think(headless_pro, monkeypatch):
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
     assert "look at options" not in (headless_pro.think_live.value or "")
+
+
+def test_notebook_viewer_renders_type_tree(headless_pro, monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.load_lab",
+        lambda: {
+            "revision": 1,
+            "mode": "explore",
+            "types": {
+                "vertical_spread": {
+                    "defined_risk": True,
+                    "open_shape": "symbol, expiration, long_strike, short_strike",
+                    "close_tp_sl": "same strategy + closing_position",
+                    "strategies": [
+                        {
+                            "name": "debit_call",
+                            "when_on": "defined-risk debit",
+                            "tool_order": "quote, send",
+                            "ticket_shape": "vertical_spread debit",
+                            "invalidation": "thesis gone",
+                        }
+                    ],
+                }
+            },
+        },
+    )
+    head, body = headless_pro._lab_notebook()
+    assert "rev=1" in head
+    assert "TYPE vertical_spread" in body
+    assert body.index("TYPE vertical_spread") < body.index("debit_call")
 def test_risk_settings_surface_hidden_metrics_stay_hidden(headless_pro, monkeypatch):
     calls = []
 
