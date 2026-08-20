@@ -28,9 +28,11 @@ CLERK    send → gates → IBKR. Journal write is clerk, not a Grok tool.
 LOOK     ensure_next_look so the desk is never parked
 ```
 
-Stall/loop detectors, 24 tool rounds, and per-tool timeouts stay. There is no
-stream time box and no max-look ceiling. `wait_for_pace` is just the pulse
-sleep until the next wake.
+One wake is one think: it runs until Grok stops calling tools, then the chat is
+dropped. Repeat reads inside a think are served from cache, cleared on any
+mutating tool or live poke. Stall/loop detectors, a 64-step runaway ceiling, and
+per-tool timeouts stay. There is no stream time box and no max-look ceiling.
+`wait_for_pace` is just the pulse sleep until the next wake.
 
 ## Hard (code)
 

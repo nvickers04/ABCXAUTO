@@ -1456,22 +1456,16 @@ def format_live_poke(
     unprotected: list[str] | None = None,
     day: dict[str, Any] | None = None,
 ) -> str:
-    """Thin live delta into the open think. fill / book / NL only — not a wake dump."""
-    day = day if isinstance(day, dict) else {}
-    unprot = ",".join(unprotected) if unprotected else "none"
-    detail_s = (detail or "").strip()
-    event_s = f"event={kind} {detail_s}.".strip() if detail_s else f"event={kind}."
-    parts = [
-        event_s,
-        f"session={session} flat={flat} NL={day.get('nl')}.",
-    ]
-    lots = day.get("open_lots") or []
-    lot_s = ",".join(str(x) for x in lots[:12]) if lots else ""
-    if lot_s:
-        parts.append(f"open_lots={lot_s}.")
-    if unprot != "none":
-        parts.append(f"unprotected={unprot}.")
-    return " ".join(p for p in parts if p)
+    """Same desk brief as format_wake. kind/detail must already be last_wake."""
+    _ = kind, detail
+    return format_wake(
+        cycle=0,
+        session=session,
+        flat=bool(flat),
+        unprotected=unprotected,
+        ibkr_up=True,
+        day=day,
+    )
 
 
 def format_wake(
@@ -1506,7 +1500,6 @@ def format_wake(
     except Exception:
         ev = None
         offer_wake = False
-    kind = str(ev.kind or "") if ev is not None else ""
     brief: dict[str, Any] = {}
     try:
         from abcxauto.think_stream import load_desk_brief
@@ -1521,37 +1514,6 @@ def format_wake(
     live_lots = _wake_has_live_lots(day)
     # Lots are the book. last_turn.flat / leftover prev= are not.
     paint_flat = False if live_lots else bool(flat)
-    # Fill / order / unprotected / mark: thin delta — not a second wake dump.
-    if kind in ("fill", "order_change", "book_move", "unprotected"):
-        detail = (ev.detail or "").strip() if ev is not None else ""
-        event_s = f"event={kind} {detail}.".strip() if detail else f"event={kind}."
-        parts = [event_s]
-        if live_lots:
-            parts.append(f"prev={prev_strat or '—'} sends={prev_sends}.")
-        parts.append(
-            f"session={session} flat={paint_flat} NL={day.get('nl')} "
-            f"open={open_n}/{max_n} mix={mix_s or 'none'}."
-        )
-        if lot_s:
-            parts.append(f"open_lots={lot_s}.")
-        # Clock/session fact only — options tools are live in RTH. Not a chain SOP.
-        # Alarm / boot / operator use the non-delta path (no options=live).
-        if str(session or "").lower() == "regular":
-            parts.append("options=live.")
-        if day.get("lot_lasts"):
-            parts.append(f"{day.get('lot_lasts')}.")
-        if day.get("working_exits"):
-            parts.append(f"exits={day.get('working_exits')}.")
-        if day.get("candle_source"):
-            parts.append(f"candles={day.get('candle_source')}.")
-        if unprot != "none":
-            parts.append(f"unprotected={unprot}.")
-        parts.append(f"{pnl_bits}.")
-        if port_bits:
-            parts.append(f"{port_bits}.")
-        # Live episode poke — not a park clock. Tickets stay send().
-        parts.append("This is a delta. send.")
-        return " ".join(p for p in parts if p)
     risk = day.get("max_risk_per_trade_pct")
     if risk is None:
         risk = day.get("risk_per_trade_pct")

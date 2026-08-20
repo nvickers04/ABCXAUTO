@@ -26,7 +26,7 @@ from abcxauto.opportunity_scan import (
     normalize_tickers,
 )
 from abcxauto.order_examples import format_order_examples, ticket_strategy_names
-from abcxauto.think_stream import emit as think_emit
+from abcxauto.think_stream import ascii_text, emit as think_emit
 from abcxauto.tools import run_readonly_tool
 from abcxauto.tool_args import (
     CANDLE_CAP,
@@ -40,7 +40,11 @@ from abcxauto.world_state import WorldState
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 24
+# One wake = one linear think. This ceiling is a runaway-spend guard, not a
+# budget the model should feel — repeated reads are answered from the ledger
+# below, so an honest think finishes long before it.
+MAX_TOOL_STEPS = 64
+MAX_TOOL_ROUNDS = MAX_TOOL_STEPS  # back-compat alias
 _MUTATING_TOOLS = frozenset({"send", "self_tune", "write_lab_playbook"})
 STREAM_CHUNK_S = 8.0
 STREAM_IDLE_LIMIT = 6
@@ -125,6 +129,13 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
                     "description": "Extra ticket fields from ORDER EXAMPLES if not top-level.",
                 },
                 "target_conId": {"type": "string"},
+                "card": {
+                    "type": "string",
+                    "description": (
+                        "Playbook card name this ticket comes from. Tags the fill so "
+                        "the card gets its own P&L instead of whole-book drift."
+                    ),
+                },
                 "rationale": {"type": "string"},
             },
             ["strategy"],
@@ -180,7 +191,9 @@ AGENT_TOOLS = [
         name="scan",
         description=(
             "One screen this look (arena|scan_code|symbols[]); name is the sort; "
-            "optional native price/cap/volume filters; unranked hits + on_book; no quotes."
+            "optional native price/cap/volume filters. Hits come back in IBKR rank "
+            "order with that scanCode's own metric (distance/benchmark) and an "
+            "IBKR live last on the top names — triage from these, do not re-quote."
         ),
         parameters=_schema(
             {
@@ -331,14 +344,50 @@ AGENT_TOOLS = [
     tool(
         name="write_lab_playbook",
         description=(
-            "Paper only: replace your notes. Not a wake clock. "
-            "Optional mode / ready_to_promote. Book, quote, and gates are other tools."
+            "Paper only: your setup book. cards[] is the book — one card per edge "
+            "you are testing, keyed by the setup, not the order type. instructions "
+            "is free notes (regime reads, per-name observations). Not a wake clock."
         ),
         parameters=_schema(
             {
+                "cards": {
+                    "type": "array",
+                    "description": (
+                        "Setup cards. Replaces the previous cards. Keep what works, "
+                        "retire what does not."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "The setup, e.g. 'gap fade after 10:00'",
+                            },
+                            "when_on": {
+                                "type": "string",
+                                "description": "Conditions that turn this card on.",
+                            },
+                            "scan": {
+                                "type": "string",
+                                "description": "Screen that finds it (arena + filters).",
+                            },
+                            "ticket": {
+                                "type": "string",
+                                "description": "Sendable strategy this expresses through.",
+                            },
+                            "shape": {"type": "string"},
+                            "invalidation": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "description": "testing | working | retired",
+                            },
+                            "note": {"type": "string"},
+                        },
+                    },
+                },
                 "instructions": {
                     "type": "string",
-                    "description": "Your notebook. Replaces the previous notes.",
+                    "description": "Free notes: regime, observations, what to watch.",
                 },
                 "mode": {"type": "string", "description": "explore or exploit"},
                 "ready_to_promote": {"type": "boolean"},
@@ -418,6 +467,11 @@ class BrainTurn:
     parked: bool = False
     interrupted: bool = False
     failed: bool = False
+    stream_error: str = ""
+    steps: int = 0
+    # Read results already fetched this think, keyed by tool + args. A repeat
+    # ask is answered from here so the think moves forward instead of spinning.
+    tool_cache: dict[str, str] = field(default_factory=dict)
 
     def look_failed(self) -> bool:
         """Empty / '?' / stream error — clerk should backoff, not park."""
@@ -430,8 +484,48 @@ class BrainTurn:
         status = str((self.last_result or {}).get("status") or "").lower()
         if status == "error":
             return True
-        text = (self.text or "").strip()
-        return (not text) or text == "?"
+        return _look_text_is_junk(self.text)
+
+
+_OVERLOAD_MARKERS = (
+    "resource_exhausted",
+    "at capacity",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "overloaded",
+    "unavailable",
+    "429",
+    "503",
+)
+
+
+def provider_overloaded(err: Any) -> bool:
+    """True when xAI refused for capacity — back off long, do not re-ask."""
+    blob = str(err or "").lower()
+    if not blob:
+        return False
+    return any(m in blob for m in _OVERLOAD_MARKERS)
+
+
+def _look_text_is_junk(text: str) -> bool:
+    """True when the look's last say is empty, '?', or ASCII-smashed to '?'."""
+    raw = (text or "").strip()
+    if not raw:
+        return True
+    if raw == "?":
+        return True
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return True
+    last = lines[-1]
+    if last == "?":
+        return True
+    smashed = ascii_text(last).strip()
+    if not smashed:
+        return True
+    # encode(ascii, replace) turns each non-ASCII glyph into '?'.
+    return smashed.strip("?") == ""
 
 
 def _send_succeeded(result: dict[str, Any] | None) -> bool:
@@ -644,7 +738,6 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
             break
         except asyncio.TimeoutError:
             idle += 1
-            think_emit("say", "…")
             if idle >= STREAM_IDLE_LIMIT:
                 think_emit("say", "\n[stream stalled]\n")
                 reason = "stalled"
@@ -728,18 +821,6 @@ async def grok(g: GrokClient, p: str, *, stage: str = "grok") -> str:
     return text
 
 
-# Same xAI episode for live book pokes. Hard reset only on park / operator / death.
-EPISODE_KINDS = frozenset({"fill", "order_change", "book_move", "unprotected"})
-HARD_RESET_KINDS = frozenset({
-    "boot",
-    "alarm",
-    "operator",
-    "session_change",
-    "socket",
-    "halt",
-})
-
-
 def _reset_chat(g: GrokClient) -> None:
     g.chat = None
     g._wake_n = 0
@@ -765,30 +846,17 @@ def _new_chat(g: GrokClient, *, session: str = "") -> Any:
 
 
 def _ensure_chat(g: GrokClient, *, kind: str = "", session: str = "") -> Any:
-    """Reuse the live think in RTH. New chat only on hard-reset kinds or empty."""
-    chat = getattr(g, "chat", None)
-    key = str(kind or "").strip().lower()
-    if chat is not None and key not in HARD_RESET_KINDS:
-        g._wake_n = int(getattr(g, "_wake_n", 0) or 0) + 1
-        return chat
+    """One wake = one fresh think. Continuity lives in the playbook, not a chat."""
+    _ = kind
     return _new_chat(g, session=session)
 
 
 def _open_wake(
     g: GrokClient, wake: str, *, reset: bool = False, session: str = ""
 ) -> Any:
-    if reset:
-        _reset_chat(g)
-    kind = ""
-    try:
-        from abcxauto.wake_bus import last_wake
-
-        ev = last_wake()
-        if ev is not None:
-            kind = str(ev.kind or "")
-    except Exception:
-        kind = ""
-    chat = _ensure_chat(g, kind=kind, session=session)
+    """Start this look's think. The wake line is the only developer turn."""
+    _ = reset
+    chat = _new_chat(g, session=session)
     chat.append(developer(wake))
     return chat
 
@@ -801,16 +869,18 @@ async def _inject_live_poke(
     snap: dict[str, Any],
     turn: BrainTurn,
 ) -> bool:
-    """Apply clerk fill/order_change/unprotected to the LIVE episode — same chat."""
+    """Apply fill/order_change/unprotected to the open think — same chat, same wake."""
     from abcxauto.wake_bus import note_wake, take_interrupt
-    from abcxauto.world_state import day_facts, format_live_poke
+    from abcxauto.world_state import day_facts, format_wake
 
     ev = take_interrupt()
     if ev is None:
         return False
     note_wake(ev)
     turn.interrupted = True
-    think_emit("say", f"\n[live poke: {ev.kind}]\n")
+    # A fill / order change / unprotected lot means the book moved under us.
+    turn.tool_cache.clear()
+    think_emit("say", f"\n[{ev.kind}]\n")
     # Refresh book facts when we can — thin poke, not a second wake dump.
     day: dict[str, Any] | None = None
     try:
@@ -846,12 +916,12 @@ async def _inject_live_poke(
         day = day_facts(world, sc)
     except Exception:
         day = day_facts(world, None)
-    poke = format_live_poke(
-        kind=str(ev.kind or ""),
-        detail=str(ev.detail or ""),
+    poke = format_wake(
+        cycle=0,
         session=str(getattr(world, "session_status", "") or ""),
         flat=bool(getattr(world, "flat", False)),
         unprotected=list(getattr(world, "unprotected", None) or []),
+        ibkr_up=bool(getattr(connector, "connected", False)),
         day=day,
     )
     try:
@@ -923,12 +993,31 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         "trade_plan": world.trade_plan,
         "book_unreliable": bool((world.gates or {}).get("book_unreliable")),
         "structure_cooldown": dict(getattr(world, "structure_cooldown", None) or {}),
+        # Why the last tickets were rejected — a cooldown without its reason
+        # teaches nothing, so the same geometry gets rebuilt next session.
+        "structure_lessons": [
+            {
+                "strategy": ev.get("strategy"),
+                "symbol": ev.get("symbol"),
+                "reason_code": ev.get("reason_code") or ev.get("outcome"),
+                "message": str(ev.get("message") or "")[:200],
+            }
+            for ev in (getattr(world, "structure_lessons", None) or [])[:5]
+            if isinstance(ev, dict)
+        ],
     }
 
 
 def _book_payload(world: WorldState) -> dict[str, Any]:
     from abcxauto.config import get_config
-    from abcxauto.lab_playbook import playbook_glance
+    from abcxauto.lab_playbook import (
+        card_scores,
+        load_lab,
+        notebook_text,
+        playbook_glance,
+        playbook_mode,
+        _norm_cards,
+    )
     from abcxauto.self_tune import levers_snapshot
     from abcxauto.world_state import day_facts
 
@@ -940,6 +1029,19 @@ def _book_payload(world: WorldState) -> dict[str, Any]:
     except Exception:
         sc = {}
     facts = _book_facts(world)
+    glance = playbook_glance(sc)
+    # The book Grok wrote travels with the book it trades — it should not have
+    # to spend a tool call to remember its own setups.
+    try:
+        lab = load_lab()
+        cards = _norm_cards(lab.get("cards"))
+        glance = dict(glance)
+        glance["mode"] = playbook_mode()
+        glance["cards"] = cards
+        glance["card_scores"] = card_scores(cards)
+        glance["notes"] = notebook_text(lab)[:4000]
+    except Exception:
+        logger.debug("playbook block for book payload failed", exc_info=True)
     return {
         "day": day_facts(world, sc),
         "world": facts,
@@ -950,7 +1052,7 @@ def _book_payload(world: WorldState) -> dict[str, Any]:
             "windows": (sc or {}).get("windows") or {},
         },
         "levers": levers_snapshot(cfg),
-        "playbook": playbook_glance(sc),
+        "playbook": glance,
         "path": _path_block(world, cfg),
     }
 
@@ -1237,21 +1339,47 @@ async def _run_tool(
             ideas = merge_tape(list(world.opportunities or []), stub_ideas)
             world.opportunities = ideas
             snap["opportunities"] = ideas
+        hits = payload.get("hits") or []
+        for row in hits:
+            if isinstance(row, dict) and row.get("last") is not None:
+                _stash_live(
+                    world,
+                    snap,
+                    {"symbol": row.get("symbol"), "last": row.get("last"), "source": "ibkr"},
+                )
+        # Keep the triageable rows on the snap so the clerk surfaces can show the
+        # screen Grok actually pulled. Not a prompt block.
+        snap["scan_hits"] = {
+            "source": str(payload.get("source") or ""),
+            "arena": payload.get("arena"),
+            "scan_code": payload.get("scan_code"),
+            "ranked": bool(payload.get("ranked")),
+            "rank_meaning": str(payload.get("rank_meaning") or ""),
+            "quoted": int(payload.get("quoted") or 0),
+            "rows": [r for r in hits if isinstance(r, dict)][:24],
+        }
         out: dict[str, Any] = {
             "ok": True,
             "source": payload.get("source"),
             "arena": payload.get("arena"),
             "scan_code": payload.get("scan_code"),
             "symbols": syms,
-            "hits": payload.get("hits") or [],
+            "hits": hits,
             "applied": payload.get("applied") or {},
             "persisted": False,
-            "ranked": False,
+            "ranked": bool(payload.get("ranked")),
+            "rank_meaning": payload.get("rank_meaning"),
+            "quoted": payload.get("quoted") or 0,
         }
         if want_news and syms:
             out["news"] = await _mda_news(syms[:8])
             out["news_freshness"] = "delayed_15m"
             out["news_use"] = "context_not_live_last"
+        think_emit(
+            "say",
+            f"hits={len(syms)} quoted={out.get('quoted')} "
+            f"src={out.get('source') or 'empty'}\n",
+        )
         return _clip(out)
     if name == "candles":
         from abcxauto.broker.bars import ibkr_bar_freshness
@@ -1528,6 +1656,17 @@ async def _run_tool(
         turn.last_strat = strat
         if _send_succeeded(result):
             try:
+                from abcxauto.lab_playbook import record_card_send
+
+                record_card_send(
+                    card=str(args.get("card") or ""),
+                    strategy=strat,
+                    symbol=str((act.get("params") or {}).get("symbol") or ""),
+                    result=result,
+                )
+            except Exception:
+                logger.debug("card send log failed", exc_info=True)
+            try:
                 await _write_last_turn_after_send(
                     connector=connector,
                     world=world,
@@ -1714,6 +1853,30 @@ def _append_tool_result(chat: Any, tc: Any, result: str) -> None:
         chat.append(tool_result(result))
 
 
+def _tool_key(name: str, args: dict[str, Any]) -> str:
+    try:
+        return f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+    except (TypeError, ValueError):
+        return f"{name}:?"
+
+
+def _cached_read(turn: BrainTurn, name: str, args: dict[str, Any]) -> str | None:
+    """Same read, same args, same think — hand back what we already fetched."""
+    if name in _MUTATING_TOOLS:
+        return None
+    hit = turn.tool_cache.get(_tool_key(name, args))
+    if hit is None:
+        return None
+    try:
+        data = json.loads(hit)
+    except (TypeError, json.JSONDecodeError, ValueError):
+        return hit
+    if isinstance(data, dict):
+        data["repeat_of_this_think"] = True
+        return _clip(data)
+    return hit
+
+
 async def _dispatch_tool_calls(
     calls: list[Any],
     *,
@@ -1735,6 +1898,11 @@ async def _dispatch_tool_calls(
 
     async def _one(item: tuple[str, dict[str, Any], Any, float]) -> tuple[Any, str]:
         name, args, tc, timeout = item
+        cached = _cached_read(turn, name, args)
+        if cached is not None:
+            think_emit("say", f"\n[{name} = already have it]\n")
+            turn.tool_trace.append(name)
+            return tc, cached
         result = await _invoke_named_tool(
             name,
             args,
@@ -1744,6 +1912,8 @@ async def _dispatch_tool_calls(
             snap=snap,
             turn=turn,
         )
+        if name not in _MUTATING_TOOLS:
+            turn.tool_cache[_tool_key(name, args)] = result
         return tc, result
 
     if reads:
@@ -1764,6 +1934,8 @@ async def _dispatch_tool_calls(
             return True
         tc, result = await _one(item)
         _append_tool_result(chat, tc, result)
+        # The book just moved. Every cached read is now a pre-trade fact.
+        turn.tool_cache.clear()
         if peek_interrupt() is not None:
             return True
     return False
@@ -1787,18 +1959,16 @@ async def _grok_turn_impl(
     session = str(getattr(world, "session_status", "") or "")
     try:
         chat = _open_wake(g, wake, session=session)
-    except Exception:
-        logger.exception("chat start failed; reset once")
-        try:
-            chat = _open_wake(g, wake, reset=True, session=session)
-        except Exception as exc:
-            turn.last_act = {}
-            turn.last_result = {"status": "error", "note": f"chat_error: {exc}"}
-            turn.failed = True
-            return turn
-    exhausted = True
-    stream_resets = 0
-    for _ in range(MAX_TOOL_ROUNDS):
+    except Exception as exc:
+        logger.exception("chat start failed")
+        turn.last_act = {}
+        turn.last_result = {"status": "error", "note": f"chat_error: {exc}"}
+        turn.failed = True
+        turn.stream_error = str(exc)
+        return turn
+    ran_out = True
+    while turn.steps < MAX_TOOL_STEPS:
+        turn.steps += 1
         try:
             from abcxauto.wake_bus import peek_interrupt
 
@@ -1809,27 +1979,21 @@ async def _grok_turn_impl(
                 continue
             text, response, stop = await stream_round(chat)
         except Exception as exc:
+            # A dead stream ends the look. The clerk backs off; it does not
+            # restart the same think and pay for the context twice.
             logger.exception("stream_round failed")
-            if stream_resets >= 1:
-                think_emit("say", f"\n[stream failed: {exc}]\n")
-                turn.failed = True
-                break
-            stream_resets += 1
-            think_emit("say", "\n[stream reset]\n")
-            try:
-                chat = _open_wake(g, wake, reset=True, session=session)
-            except Exception:
-                turn.failed = True
-                break
-            continue
+            think_emit("say", f"\n[stream failed: {exc}]\n")
+            turn.failed = True
+            turn.stream_error = str(exc)
+            ran_out = False
+            break
         if stop == "interrupt":
             await _inject_live_poke(
                 chat, connector=connector, world=world, snap=snap, turn=turn
             )
             continue
         if stop == "loop":
-            # Ride the cost in RTH — do not invent a compact / residue reset.
-            exhausted = False
+            ran_out = False
             break
         if text:
             turn.text = (turn.text + "\n" + text).strip()
@@ -1840,7 +2004,8 @@ async def _grok_turn_impl(
                 logger.debug("chat.append(response) failed", exc_info=True)
         calls = list(getattr(response, "tool_calls", None) or []) if response is not None else []
         if not calls:
-            exhausted = False
+            # Grok stopped asking for facts — the think is done.
+            ran_out = False
             break
         interrupted = await _dispatch_tool_calls(
             calls,
@@ -1854,17 +2019,14 @@ async def _grok_turn_impl(
             await _inject_live_poke(
                 chat, connector=connector, world=world, snap=snap, turn=turn
             )
-            continue
-    if exhausted:
+    if ran_out:
         turn.tool_budget_hit = True
-        think_emit("say", "\n[tool budget exhausted]\n")
-    if not turn.parked and not turn.failed:
-        text = (turn.text or "").strip()
-        if not turn.sends and (not text or text == "?"):
+        think_emit("say", "\n[think stopped: step ceiling]\n")
+    if not turn.parked and not turn.failed and not turn.sends:
+        if _look_text_is_junk(turn.text):
             turn.failed = True
-    # Park (set_wake) ends the episode. RTH yield keeps the same think.
-    if turn.parked:
-        _reset_chat(g)
+            logger.warning("look failed: empty or junk assistant text")
+    _reset_chat(g)
     if not turn.sends:
         if str(turn.last_strat or "").lower() == "hold":
             turn.last_strat = ""

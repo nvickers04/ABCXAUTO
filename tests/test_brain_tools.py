@@ -769,29 +769,23 @@ def test_ensure_chat_rotates_non_episode():
     assert len(created) == 3
 
 
-def test_episode_chat_reuses_on_fill_without_max_cap():
-    """RTH rides the open think — no EPISODE_MAX compact / residue reset."""
-    from abcxauto.brain import _ensure_chat, _open_wake, _reset_chat
+def test_every_wake_opens_a_fresh_linear_think():
+    """One wake = one think. Continuity is the playbook, not a recycled chat."""
+    from abcxauto.brain import _ensure_chat, _open_wake
     from abcxauto.wake_bus import BookEvent, note_wake
 
     g, created = _stub_chat_client()
     boot = _ensure_chat(g, kind="boot")
-    fill = _ensure_chat(g, kind="fill")
-    assert fill is boot
-    assert _ensure_chat(g, kind="order_change") is boot
-    assert _ensure_chat(g, kind="book_move") is boot
-    assert _ensure_chat(g, kind="unprotected") is boot
-    assert len(created) == 1
-    for _ in range(20):
-        _ensure_chat(g, kind="fill")
-    assert len(created) == 1
+    for kind in ("fill", "order_change", "book_move", "unprotected"):
+        assert _ensure_chat(g, kind=kind) is not boot
+    assert len(created) == 5
     note_wake(BookEvent(kind="fill", detail="XLF filled"))
     try:
         g2, created2 = _stub_chat_client()
         first = _open_wake(g2, "look brief")
         second = _open_wake(g2, "delta brief")
-        assert second is first
-        assert len(created2) == 1
+        assert second is not first
+        assert len(created2) == 2
     finally:
         note_wake(None)
 
@@ -929,7 +923,9 @@ def test_live_poke_interrupt_skips_reset_chat():
     if not text:
         text = str(appended[0])
     assert "event=fill" in text
-    assert "NL=" in text
+    assert "session=" in text
+    assert "This is a delta" not in text
+    assert "yield resume" not in text
     assert "set_wake" not in text
     assert "ORDER EXAMPLES" not in text
     assert "AWARENESS" not in text
@@ -983,9 +979,14 @@ async def test_stream_round_breaks_when_stalled(monkeypatch):
     import asyncio
 
     from abcxauto import brain
+    from abcxauto.think_stream import subscribe, unsubscribe
 
     monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.02)
     monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 2)
+    painted: list[str] = []
+
+    def cap(kind: str, text: str) -> None:
+        painted.append(f"{kind}:{text}")
 
     class Chat:
         async def stream(self):
@@ -993,9 +994,17 @@ async def test_stream_round_breaks_when_stalled(monkeypatch):
                 await asyncio.sleep(10)
                 yield None, SimpleNamespace(content="", reasoning_content="")
 
-    text, resp, _reason = await brain.stream_round(Chat())
+    subscribe(cap)
+    try:
+        text, resp, reason = await brain.stream_round(Chat())
+    finally:
+        unsubscribe(cap)
     assert resp is None
     assert text == ""
+    blob = "".join(painted)
+    assert "?" not in blob
+    assert "…" not in blob
+    assert reason in ("stalled", "ok")
 
 
 def test_stream_is_looping_ready_spam():
@@ -1168,24 +1177,50 @@ async def test_tool_timeout_returns_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_read_tools_run_in_parallel(monkeypatch):
+    """Overlap, not wall clock — a busy CPU must not decide this.
+
+    Every read stub parks on a gate that only opens once all of them are in
+    flight, so a serial dispatch cannot get past the first one and fails on the
+    gate timeout instead of passing on a fast machine.
+    """
     import asyncio
-    import time
 
     from abcxauto import brain
     from abcxauto.brain import grok_turn
 
-    running = 0
-    max_running = 0
+    reads = ("quote", "news", "scan")
+    writes = ("send", "self_tune", "write_lab_playbook")
+    gate_s = 2.0
 
-    async def slow_read(name, args, **_k):
-        nonlocal running, max_running
-        running += 1
-        max_running = max(max_running, running)
-        await asyncio.sleep(0.12)
-        running -= 1
+    reads_in_flight = 0
+    peak_reads = 0
+    writes_in_flight = 0
+    peak_writes = 0
+    entered: list[str] = []
+    all_reads_in = asyncio.Event()
+
+    async def gated(name, args, **_k):
+        nonlocal reads_in_flight, peak_reads, writes_in_flight, peak_writes
+        entered.append(name)
+        if name in reads:
+            reads_in_flight += 1
+            peak_reads = max(peak_reads, reads_in_flight)
+            if reads_in_flight == len(reads):
+                all_reads_in.set()
+            try:
+                await asyncio.wait_for(all_reads_in.wait(), gate_s)
+            finally:
+                reads_in_flight -= 1
+        else:
+            writes_in_flight += 1
+            peak_writes = max(peak_writes, writes_in_flight)
+            # Yield: gathered writes would show up as overlap here.
+            for _ in range(3):
+                await asyncio.sleep(0)
+            writes_in_flight -= 1
         return json.dumps({"ok": name})
 
-    monkeypatch.setattr(brain, "_run_tool", slow_read)
+    monkeypatch.setattr(brain, "_run_tool", gated)
 
     class TC:
         def __init__(self, name, cid):
@@ -1193,7 +1228,9 @@ async def test_read_tools_run_in_parallel(monkeypatch):
             self.function = SimpleNamespace(name=name, arguments="{}")
 
     class Resp:
-        tool_calls = [TC("quote", "1"), TC("news", "2"), TC("scan", "3")]
+        tool_calls = [
+            TC(name, str(i)) for i, name in enumerate((*reads, *writes), start=1)
+        ]
 
     class Chat:
         n = 0
@@ -1215,12 +1252,14 @@ async def test_read_tools_run_in_parallel(monkeypatch):
         chat=Chat(),
         _wake_n=1,
     )
-    t0 = time.monotonic()
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
-    elapsed = time.monotonic() - t0
-    assert set(turn.tool_trace) == {"quote", "news", "scan"}
-    assert max_running >= 2
-    assert elapsed < 0.30
+    assert set(turn.tool_trace) == {*reads, *writes}
+    # The gate only opens when all three reads are inside it at once.
+    assert peak_reads == len(reads)
+    # Tickets and knobs stay one at a time, and only after the facts are in.
+    assert peak_writes == 1
+    assert set(entered[: len(reads)]) == set(reads)
+    assert entered[len(reads):] == list(writes)
 
 
 def _tool_fn(name: str):
@@ -1623,6 +1662,18 @@ def test_look_failed_question_empty_and_stream_error():
     assert BrainTurn(text="?", parked=True).look_failed() is False
     assert BrainTurn(failed=True, text="ok").look_failed() is True
     assert BrainTurn(last_result={"status": "error"}).look_failed() is True
+    # First round said something; second round died as '?' — still a failed look.
+    assert BrainTurn(
+        text="I'll inspect the book, status, and playbook first.\n?",
+        tool_trace=["book", "status", "playbook"],
+    ).look_failed() is True
+    assert BrainTurn(
+        text="I'll inspect the book, status, and playbook first.",
+        tool_trace=["book", "status", "playbook"],
+    ).look_failed() is False
+    # Unknown glyphs still smash to '?' and count as a dead last round.
+    assert BrainTurn(text="\u2603").look_failed() is True
+    assert BrainTurn(text="watching IWM \u2014 wait").look_failed() is False
 
 
 @pytest.mark.asyncio
@@ -1647,6 +1698,53 @@ async def test_question_mark_turn_is_failed():
         _wake_n=1,
     )
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert turn.failed is True
+    assert turn.look_failed() is True
+    assert turn.parked is False
+
+
+@pytest.mark.asyncio
+async def test_trailing_question_after_tools_is_failed(monkeypatch):
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="book", arguments="{}")
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                    content="I'll inspect the book first.",
+                    reasoning_content="",
+                )
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="?", reasoning_content=""
+                )
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: Chat())),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=Chat(),
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert "book" in turn.tool_trace
     assert turn.failed is True
     assert turn.look_failed() is True
     assert turn.parked is False

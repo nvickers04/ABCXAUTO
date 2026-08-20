@@ -483,15 +483,14 @@ def test_format_wake_fill_is_delta_not_discovery():
         )
     finally:
         note_wake(None)
-    assert text.startswith("event=fill SPY 260821C780 filled.")
+    assert "event=fill SPY 260821C780 filled." in text
     assert "prev=close_option sends=2" in text
-    assert "This is a delta" in text
+    assert "This is a delta" not in text
+    assert "yield resume" not in text
     assert text.rstrip().endswith("send.")
     assert "set_wake" not in text
     assert "send or set_wake" not in text
-    assert "playbook" not in text
     assert "Cycle 2." not in text
-    assert "names=3" not in text
     assert "open_lots=XLF 260828C58.5 x1 -42%,QQQ 260918C745 x1" in text
     assert "dayPnL=" not in text
     assert "ibkrDay=$-40.0" in text

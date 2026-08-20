@@ -52,6 +52,11 @@ PARK_SESSIONS = frozenset({"premarket", "closed", "postmarket"})
 PAPER_STAY_UP_SESSIONS = frozenset({"regular", "premarket"})
 STAY_UP_RETRY_MIN_S = 20.0
 STAY_UP_RETRY_MAX_S = 45.0
+# Consecutive failed looks escalate. A provider capacity error is not a
+# 20-second problem — retrying it just re-bills the prompt for nothing.
+FAILED_LOOK_BACKOFF_CAP_S = 600.0
+PROVIDER_BACKOFF_MIN_S = 90.0
+PROVIDER_BACKOFF_CAP_S = 900.0
 MTM_BUCKET_PCT = 8.0
 _last_wake = None
 _pending_interrupt = None  # BookEvent | None — set after BookEvent is defined
@@ -283,6 +288,40 @@ def stay_up_retry_s() -> float:
     if span <= 0:
         return float(STAY_UP_RETRY_MIN_S)
     return STAY_UP_RETRY_MIN_S + random.random() * span
+
+
+def _retry_base_s() -> tuple[float, bool]:
+    """Floor the escalation doubles from, and whether the operator pinned it.
+
+    A pinned cadence is honored exactly — no jitter on top of an explicit ask.
+    """
+    raw = (os.environ.get("ABCXAUTO_STAY_UP_RETRY_S") or "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw)), True
+        except ValueError:
+            pass
+    return float(STAY_UP_RETRY_MIN_S), False
+
+
+def failed_look_backoff_s(streak: int, *, overloaded: bool = False) -> float:
+    """Backoff for the Nth consecutive failed look. Doubles, then caps.
+
+    ``overloaded`` is an xAI capacity/rate refusal — start high, cap higher.
+    Jitter rides on top of the step so two desks do not retry in lockstep, and
+    never enough to make a later strike come back sooner than an earlier one.
+    """
+    n = max(1, int(streak or 1))
+    pinned = False
+    if overloaded:
+        base, cap = float(PROVIDER_BACKOFF_MIN_S), float(PROVIDER_BACKOFF_CAP_S)
+    else:
+        base, pinned = _retry_base_s()
+        cap = float(FAILED_LOOK_BACKOFF_CAP_S)
+    step = min(cap, base * (2 ** min(n - 1, 16)))
+    if pinned:
+        return float(step)
+    return float(min(cap, step + random.random() * step * 0.25))
 
 
 def _floor_look_s(sec: float, *, session: str = "") -> float:

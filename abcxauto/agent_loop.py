@@ -33,7 +33,6 @@ from abcxauto.world_state import (
     build_world_state,
     capacity_allows_new_risk,
     day_facts,
-    format_live_poke,
     format_wake,
 )
 from abcxauto.brain import grok, grok_turn
@@ -1010,24 +1009,6 @@ async def run_cycle(
         ibkr_up=ibkr_up,
         day=day,
     )
-    # Live episode continue: thin poke, not a second wake dump / system prompt.
-    try:
-        from abcxauto.brain import EPISODE_KINDS
-        from abcxauto.wake_bus import last_wake
-
-        ev = last_wake()
-        kind = str(ev.kind or "") if ev is not None else ""
-        if getattr(g, "chat", None) is not None and kind in EPISODE_KINDS:
-            wake = format_live_poke(
-                kind=kind,
-                detail=str(ev.detail or "") if ev is not None else "",
-                session=world.session_status,
-                flat=world.flat,
-                unprotected=world.unprotected,
-                day=day,
-            )
-    except Exception:
-        pass
     think_emit("say", "Wake Grok.\n")
     try:
         from abcxauto.think_stream import write_last_turn
@@ -1081,7 +1062,7 @@ async def run_cycle(
         act["market_read"] = turn.text[:400]
     tool_note = ""
     if getattr(turn, "tool_budget_hit", False):
-        tool_note = "tool_rounds_exhausted"
+        tool_note = "think_hit_step_ceiling"
     impact = act.get("_impact") or simulate_close_impact(act, positions)
     out = _result_dict(
         n=n, s=s, act=act, strat=strat, result=result,
