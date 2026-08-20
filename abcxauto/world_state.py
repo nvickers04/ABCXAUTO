@@ -14,7 +14,7 @@ from abcxauto.structure_grade import (
     recent_structure_lessons,
     structure_cooldown_symbols,
 )
-from abcxauto.trade_plan import capacity_fact, load_trade_plan, load_trade_plans
+from abcxauto.trade_plan import capacity_fact, load_trade_plans
 
 logger = logging.getLogger(__name__)
 
@@ -1288,12 +1288,108 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
 
 
 def _playbook_day(scorecard: dict[str, Any] | None) -> dict[str, Any]:
+    """Glance only when the notebook has instructions. Revision alone is not law."""
     try:
-        from abcxauto.lab_playbook import playbook_glance
+        from abcxauto.lab_playbook import load_lab, playbook_glance
 
-        return playbook_glance(scorecard)
+        lab = load_lab()
+        if not str(lab.get("instructions") or "").strip():
+            return {}
+        glance = playbook_glance(scorecard)
+        glance["has_instructions"] = True
+        return glance
     except Exception:
         return {}
+
+
+def _playbook_is_law(pb: dict[str, Any] | None) -> bool:
+    """Wake glance needs notes. A leftover revision / wipe is not a playbook."""
+    if not isinstance(pb, dict) or not pb:
+        return False
+    if pb.get("has_instructions") is False or pb.get("wiped") is True:
+        return False
+    inst = pb.get("instructions")
+    if inst is not None and not str(inst).strip():
+        return False
+    rev = pb.get("revision")
+    if pb.get("has_instructions") is True:
+        return rev is not None
+    if rev in (None, 0, "0"):
+        return False
+    return True
+
+
+def _wake_has_live_lots(day: dict[str, Any] | None) -> bool:
+    """Journal/IBKR lots with nonzero qty. Residue JSON and last_turn.flat are not the book."""
+    d = day if isinstance(day, dict) else {}
+    for ident in d.get("open_lots") or []:
+        if str(ident).strip():
+            return True
+    try:
+        if int(d.get("lots") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    mix = d.get("mix") if isinstance(d.get("mix"), dict) else {}
+    for v in mix.values():
+        try:
+            if int(v or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def trade_plan_matches_stk(plan: Any, positions: list[dict] | None) -> bool:
+    """Think gets a plan only when STK qty for that symbol is live and same-side."""
+    from abcxauto.trade_plan import stk_qty_for_symbol
+
+    if plan is None:
+        return False
+    if isinstance(plan, dict):
+        sym = str(plan.get("symbol") or "")
+        direction = str(plan.get("direction") or "LONG").upper()
+    else:
+        sym = str(getattr(plan, "symbol", "") or "")
+        direction = str(getattr(plan, "direction", "LONG") or "LONG").upper()
+    qty = stk_qty_for_symbol(positions, sym)
+    if abs(qty) < 1e-9:
+        return False
+    if direction == "SHORT":
+        return qty < 0
+    return qty > 0
+
+
+def _ibkr_live_mark(
+    snap: dict[str, Any],
+    positions: list[dict],
+) -> tuple[str, Any]:
+    """Live mark from this snap. Empty book does not default to SPY."""
+    from abcxauto.trade_plan import book_has_risk
+
+    quotes = snap.get("ibkr_live_quotes") or {}
+    if not isinstance(quotes, dict):
+        quotes = {}
+    explicit = str(snap.get("ibkr_live_symbol") or "").strip()
+    last_raw = snap.get("ibkr_live_last")
+    empty = not book_has_risk(positions)
+    if explicit:
+        sym = explicit
+    elif empty:
+        sym = ""
+    elif "SPY" in quotes:
+        sym = "SPY"
+    else:
+        sym = ""
+    if last_raw is not None:
+        last = last_raw
+    elif empty and not explicit:
+        last = None
+    elif sym and sym in quotes:
+        last = quotes.get(sym)
+    else:
+        last = None if empty else quotes.get("SPY")
+    return str(sym), last
 
 
 def _pnl_wake_bits(day: dict[str, Any]) -> str:
@@ -1422,16 +1518,20 @@ def format_wake(
     prev_sends = brief.get("sends") if brief.get("sends") is not None else 0
     pnl_bits = _pnl_wake_bits(day)
     port_bits = _portfolio_wake_bits(day)
+    live_lots = _wake_has_live_lots(day)
+    # Lots are the book. last_turn.flat / leftover prev= are not.
+    paint_flat = False if live_lots else bool(flat)
     # Fill / order / unprotected / mark: thin delta — not a second wake dump.
     if kind in ("fill", "order_change", "book_move", "unprotected"):
         detail = (ev.detail or "").strip() if ev is not None else ""
         event_s = f"event={kind} {detail}.".strip() if detail else f"event={kind}."
-        parts = [
-            event_s,
-            f"prev={prev_strat or '—'} sends={prev_sends}.",
-            f"session={session} flat={flat} NL={day.get('nl')} "
-            f"open={open_n}/{max_n} mix={mix_s or 'none'}.",
-        ]
+        parts = [event_s]
+        if live_lots:
+            parts.append(f"prev={prev_strat or '—'} sends={prev_sends}.")
+        parts.append(
+            f"session={session} flat={paint_flat} NL={day.get('nl')} "
+            f"open={open_n}/{max_n} mix={mix_s or 'none'}."
+        )
         if lot_s:
             parts.append(f"open_lots={lot_s}.")
         # Clock/session fact only — options tools are live in RTH. Not a chain SOP.
@@ -1462,7 +1562,7 @@ def format_wake(
     elif floors is False:
         floors_bit = " floors=off"
     parts = [
-        f"session={session} flat={flat} "
+        f"session={session} flat={paint_flat} "
         f"unprotected={unprot} ibkr={'up' if ibkr_up else 'down'}.",
     ]
     mins = day.get("minutes_to_open")
@@ -1493,10 +1593,10 @@ def format_wake(
             parts.append(f"mix={mix_s}.")
         if ev is not None:
             parts.append(f"event={ev.kind} {ev.detail}.".strip())
-        if prev_strat:
+        if live_lots and prev_strat:
             parts.append(f"prev={prev_strat} sends={prev_sends}.")
         pb = day.get("playbook") if isinstance(day.get("playbook"), dict) else {}
-        if pb.get("revision") is not None:
+        if _playbook_is_law(pb):
             parts.append(
                 f"playbook rev={pb.get('revision')} "
                 f"since_write={pb.get('since_write_edge')} "
@@ -1773,8 +1873,16 @@ class WorldState:
             "gates": self.gates,
             "envelope": self.envelope,
             "working_thesis": self.working_thesis[:300],
-            "trade_plan": self.trade_plan,
-            "trade_plans": list(self.trade_plans[:8]),
+            "trade_plan": (
+                self.trade_plan
+                if trade_plan_matches_stk(self.trade_plan, self.positions)
+                else None
+            ),
+            "trade_plans": [
+                p
+                for p in list(self.trade_plans or [])
+                if trade_plan_matches_stk(p, self.positions)
+            ][:8],
             "capacity": dict(self.capacity or {}),
             "exposure": (self.portfolio_risk or {}).get("exposure"),
             "capital_liquidity": (self.portfolio_risk or {}).get("capital_liquidity"),
@@ -1886,8 +1994,10 @@ def build_world_state(
     except Exception:
         pass
 
-    plans = load_trade_plans()
-    plan = plans[0] if plans else load_trade_plan()
+    plans = [
+        p for p in load_trade_plans() if trade_plan_matches_stk(p, positions)
+    ]
+    plan = plans[0] if plans else None
     plan_dict = plan.to_dict() if plan else None
     plans_dicts = [p.to_dict() for p in plans]
     regime = _regime_from_opps(opportunities, pulse)
@@ -1913,6 +2023,7 @@ def build_world_state(
     if unreliable:
         gates = dict(gates) if isinstance(gates, dict) else {}
         gates["book_unreliable"] = True
+    live_sym, live_last = _ibkr_live_mark(snap, positions)
     ws = WorldState(
         cycle=cycle,
         session_status=session or "unknown",
@@ -1954,15 +2065,8 @@ def build_world_state(
         book_reconciled=book_reconciled,
         ibkr_live_quotes=dict(snap.get("ibkr_live_quotes") or {}),
         candle_source=str(snap.get("candle_source") or "") or "none",
-        ibkr_live_symbol=str(
-            snap.get("ibkr_live_symbol")
-            or ("SPY" if "SPY" in (snap.get("ibkr_live_quotes") or {}) else "")
-        ),
-        ibkr_live_last=(
-            snap.get("ibkr_live_last")
-            if snap.get("ibkr_live_last") is not None
-            else (snap.get("ibkr_live_quotes") or {}).get("SPY")
-        ),
+        ibkr_live_symbol=live_sym,
+        ibkr_live_last=live_last,
     )
     return ws
 

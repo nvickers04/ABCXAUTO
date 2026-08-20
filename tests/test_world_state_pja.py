@@ -499,6 +499,206 @@ def test_format_wake_fill_is_delta_not_discovery():
     assert "edgeVsModel=" in text
 
 
+def test_format_wake_spy_stk11_overrides_stale_last_turn_flat():
+    """Aug 19: last_turn.flat is not the book. SPY STK 11 / NL 35339.16 stays live."""
+    from abcxauto.wake_bus import note_wake
+
+    note_wake(None)
+    world = type("W", (), {})()
+    world.positions = [
+        {
+            "symbol": "SPY",
+            "secType": "STK",
+            "quantity": 11,
+            "avgCost": 769.5,
+            "conId": 136,
+        }
+    ]
+    world.net_liquidation = 35339.16
+    world.daily_pnl = 0.0
+    world.capacity = {"open_count": 1, "max_open_positions": 15}
+    day = day_facts(world, {})
+    text = format_wake(
+        cycle=9,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day=day,
+    )
+    assert "flat=False" in text
+    assert "flat=True" not in text
+    assert "SPY STK long 11" in text
+    assert "max_risk=" in text
+    assert "floors=" in text
+    assert "risk/trade=" not in text
+
+
+def test_format_wake_wiped_playbook_omits_glance_and_ledger():
+    from abcxauto.wake_bus import note_wake
+
+    note_wake(None)
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "nl": 35339.16,
+            "names": 0,
+            "lots": 0,
+            "open_lots": [],
+            "capacity": {"open_count": 0, "max_open_positions": 15},
+            "max_risk_per_trade_pct": 25.0,
+            "sizing_floors": False,
+            "playbook": {
+                "revision": 51,
+                "has_instructions": False,
+                "instructions": "",
+                "since_write_edge": -91.0,
+                "now_edge": -640.0,
+                "win_4h": -12.0,
+                "ledger": [
+                    {"revision": 50, "edge_usd": -400.0},
+                    {"revision": 51, "edge_usd": -549.0},
+                ],
+            },
+        },
+    )
+    assert "playbook" not in text
+    assert "ledger" not in text
+    assert "max_risk=25.0% floors=off" in text
+    assert "risk/trade=" not in text
+    assert "prev=" not in text
+
+
+def test_format_wake_flat_empty_omits_leftover_prev():
+    from abcxauto.think_stream import write_desk_brief
+    from abcxauto.wake_bus import note_wake
+
+    write_desk_brief({"strat": "market_bracket", "sends": 3, "open_lots": []})
+    note_wake(None)
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "nl": 35339.16,
+            "names": 0,
+            "lots": 0,
+            "open_lots": [],
+            "capacity": {"open_count": 0, "max_open_positions": 15},
+            "risk_per_trade_pct": 25.0,
+            "sizing_floors": True,
+        },
+    )
+    assert "flat=True" in text
+    assert "prev=" not in text
+    assert "open_lots=" not in text
+    assert "max_risk=25.0% floors=on" in text
+    assert "risk/trade=" not in text
+
+
+def test_day_facts_wiped_instructions_drop_playbook_glance():
+    import json
+    import os
+    from pathlib import Path
+
+    path = Path(os.environ["ABCXAUTO_PLAYBOOK_LAB_PATH"])
+    path.write_text(
+        json.dumps(
+            {
+                "revision": 51,
+                "instructions": "   ",
+                "ledger": [{"revision": 51, "edge_usd": -12.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    world = type("W", (), {})()
+    world.positions = []
+    world.net_liquidation = 35339.16
+    world.daily_pnl = 0.0
+    world.capacity = {}
+    day = day_facts(world, {"edge_usd": -12.0})
+    assert day.get("playbook") == {}
+
+
+def _empty_book_snap(**extra: object) -> dict:
+    snap: dict = {
+        "taken_at": "2026-08-19T18:54:00Z",
+        "account": {"netliquidation": 35339.16, "dailypnl": 0},
+        "positions": [],
+        "open_orders": [],
+        "protection": {"unprotected_symbols": []},
+        "reality_pulse": {"session": {"status": "regular"}},
+        "portfolio_state": {},
+        "ibkr_live_quotes": {"SPY": 769.5},
+    }
+    snap.update(extra)
+    return snap
+
+
+def test_build_world_state_empty_book_no_spy_default_or_leftover_plan():
+    save_trade_plan(
+        ActiveTradePlan(
+            symbol="SPY",
+            direction="LONG",
+            quantity=11,
+            stop_price=760.0,
+            thesis="leftover residue",
+        )
+    )
+    assert load_trade_plan() is not None
+    ws = build_world_state(
+        cycle=1,
+        snap=_empty_book_snap(),
+        opportunities=[],
+        news_items=[],
+    )
+    assert ws.flat is True
+    assert ws.trade_plan is None
+    assert ws.trade_plans == []
+    assert ws.ibkr_live_symbol == ""
+    assert ws.ibkr_live_last is None
+    assert load_trade_plan() is not None
+    assert ws.to_dict()["open_lots"] == []
+    block = ws.prompt_block()
+    assert '"trade_plan": null' in block
+
+
+def test_build_world_state_spy_stk11_keeps_matching_plan_not_stale_flat():
+    save_trade_plan(
+        ActiveTradePlan(
+            symbol="SPY",
+            direction="LONG",
+            quantity=11,
+            stop_price=760.0,
+            thesis="live lot",
+        )
+    )
+    snap = _empty_book_snap(
+        positions=[
+            {
+                "symbol": "SPY",
+                "secType": "STK",
+                "quantity": 11,
+                "avgCost": 769.5,
+                "conId": 136,
+            }
+        ]
+    )
+    ws = build_world_state(cycle=2, snap=snap, opportunities=[], news_items=[])
+    assert ws.flat is False
+    assert ws.trade_plan is not None
+    assert ws.trade_plan["symbol"] == "SPY"
+    assert any("SPY STK long 11" in x for x in ws.to_dict()["open_lots"])
+    assert load_trade_plan() is not None
+
+
 def test_daily_pnl_of_ignores_unrealized_and_keeps_zero():
     from abcxauto.world_state import daily_pnl_of
 
