@@ -262,9 +262,9 @@ def paper_stay_up(*, session: str = "") -> bool:
     if str(session or "").lower() not in PAPER_STAY_UP_SESSIONS:
         return False
     try:
-        from abcxauto.lab_playbook import is_paper
+        from abcxauto.config import get_config
 
-        if not is_paper():
+        if not get_config().is_paper:
             return False
     except Exception:
         pass

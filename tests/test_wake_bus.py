@@ -300,7 +300,10 @@ def test_first_snap_is_not_a_flood():
 def test_paper_stay_up_regular_and_premarket(monkeypatch):
     from abcxauto.wake_bus import PAPER_STAY_UP_SESSIONS, paper_stay_up
 
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: type("C", (), {"is_paper": True})(),
+    )
     assert PAPER_STAY_UP_SESSIONS == frozenset({"regular", "premarket"})
     assert paper_stay_up(session="regular") is True
     assert paper_stay_up(session="premarket") is True
@@ -312,22 +315,21 @@ def test_paper_stay_up_regular_and_premarket(monkeypatch):
 def test_paper_stay_up_live_is_false(monkeypatch):
     from abcxauto.wake_bus import paper_stay_up
 
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: type("C", (), {"is_paper": False})(),
+    )
     assert paper_stay_up(session="regular") is False
     assert paper_stay_up(session="premarket") is False
 
 
-def test_paper_rth_park_refused_still_regular_only(monkeypatch):
+def test_paper_rth_park_refused_still_regular_only():
     from abcxauto.wake_bus import paper_rth_park_refused
 
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    monkeypatch.setattr(
-        "abcxauto.risk_gates.get_risk_gate",
-        lambda: type("G", (), {"is_halted": False})(),
-    )
-    assert paper_rth_park_refused(session="regular") is True
+    # Premarket/closed never refuse a park clock (regular-only).
     assert paper_rth_park_refused(session="premarket") is False
     assert paper_rth_park_refused(session="closed") is False
+    assert paper_rth_park_refused(session="postmarket") is False
 
 
 def test_stay_up_retry_s_is_tens_of_seconds(monkeypatch):

@@ -111,6 +111,10 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(fake_grok))
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.GrokClient",
+        lambda: SimpleNamespace(chat=object()),
+    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _no_news)
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
@@ -372,6 +376,10 @@ async def test_pro_engine_wires_portfolio_monitor(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(fake_grok))
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.GrokClient",
+        lambda: SimpleNamespace(chat=object()),
+    )
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
 
     reset_risk_gate()
@@ -500,6 +508,10 @@ async def test_start_after_connect_enables_autonomous(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
     monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(fake_grok))
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.GrokClient",
+        lambda: SimpleNamespace(chat=object()),
+    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _Cfg())
@@ -561,7 +573,10 @@ def _wire_stay_up_engine(monkeypatch, *, session: str, think, paper: bool = True
     async def _al(*_a, **_k):
         return {"legal_symbols": [], "source": "test"}
 
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: paper)
+    monkeypatch.setattr(
+        "abcxauto.config.Config.is_paper",
+        property(lambda self: paper),
+    )
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
     monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)
     monkeypatch.setattr(
@@ -586,8 +601,7 @@ def test_session_of_snap_reads_pulse_and_hours():
     )
 
 
-def test_rearm_paper_regular_and_premarket(monkeypatch):
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+def test_rearm_paper_regular_and_premarket():
     for sess in ("regular", "premarket"):
         eng = ProEngine()
         wait = eng._rearm_after_think({"_failed": False}, session=sess)
@@ -596,7 +610,6 @@ def test_rearm_paper_regular_and_premarket(monkeypatch):
 
 
 def test_rearm_failed_look_backs_off(monkeypatch):
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "30")
     eng = ProEngine()
     wait = eng._rearm_after_think({"_failed": True}, session="regular")
@@ -605,7 +618,6 @@ def test_rearm_failed_look_backs_off(monkeypatch):
 
 
 def test_rearm_closed_and_live_do_not(monkeypatch):
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     eng = ProEngine()
     wait = eng._rearm_after_think({"_failed": False}, session="closed")
     assert eng._resume_think is False
@@ -613,7 +625,10 @@ def test_rearm_closed_and_live_do_not(monkeypatch):
     wait = eng._rearm_after_think({"_parked": True}, session="regular")
     assert eng._resume_think is False
     assert wait == 0.0
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
+    monkeypatch.setattr(
+        "abcxauto.config.Config.is_paper",
+        property(lambda self: False),
+    )
     eng = ProEngine()
     wait = eng._rearm_after_think({"_failed": False}, session="regular")
     assert eng._resume_think is False
