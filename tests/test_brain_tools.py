@@ -844,8 +844,9 @@ def test_agent_tools_omits_set_wake_in_rth():
 def test_agent_tools_keeps_set_wake_overnight():
     from abcxauto.brain import agent_tools
 
-    for sess in ("premarket", "closed", "postmarket"):
+    for sess in ("closed", "postmarket"):
         assert "set_wake" in _names_of(agent_tools(session=sess))
+    assert "set_wake" not in _names_of(agent_tools(session="premarket"))
 
 
 @pytest.mark.asyncio
@@ -867,7 +868,7 @@ async def test_paper_rth_set_wake_tool_is_ignored_same_think(tmp_path, monkeypat
     )
     data = json.loads(raw)
     assert data["status"] == "ignored"
-    assert data["reason"] == "paper_rth"
+    assert data["reason"] == "paper_stay_up"
     assert data["wake_at"] is None
     assert data["session"] == "regular"
     assert data.get("wanted_wake_in_s") == 3000
@@ -1095,7 +1096,7 @@ def test_new_chat_does_not_force_a_tool():
     assert "set_wake" not in _names_of(captured.get("tools") or [])
 
 
-def test_new_chat_premarket_keeps_set_wake():
+def test_new_chat_premarket_omits_set_wake():
     from abcxauto.brain import _new_chat
 
     captured: dict = {}
@@ -1115,7 +1116,7 @@ def test_new_chat_premarket_keeps_set_wake():
         _wake_n=0,
     )
     _new_chat(g, session="premarket")
-    assert "set_wake" in _names_of(captured.get("tools") or [])
+    assert "set_wake" not in _names_of(captured.get("tools") or [])
 
 
 @pytest.mark.asyncio
