@@ -2,7 +2,7 @@
 
 **Grok owns a paper IBKR book. The clerk is facts, hard gates, and a wake clock.**
 
-Grok (`ABCXAUTO_MODEL`, default grok-4.6) invents tickets and standing notes. Live (TWS **7496**, confirm phrase, a different client id) only follows a **promoted paper playbook**. It never copies paper fills.
+Grok (the `model` knob, default grok-4.6) invents tickets and standing notes. Live (TWS **7496**, confirm phrase, a different client id) only follows a **promoted paper playbook**. It never copies paper fills.
 
 Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of NetLiq**. Book return % must beat the cost of the model.
 
@@ -12,9 +12,9 @@ Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of
 |-------|-----|
 | **Grok** | Tickets (`send`), risk/watchlist knobs (`self_tune`), lab notebook (`write_lab_playbook`), next look (`set_wake`) |
 | **Clerk (code)** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, default look if Grok skips `set_wake` |
-| **Operator** | `.env` + paper TWS, Start, kill switch. UI is status. No approval step. |
+| **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No approval step. |
 
-Do not grow the system prompt. Strategy is Grok’s. Switch the brain with `ABCXAUTO_MODEL`; keep the clerk.
+Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` persists to `risk_settings.json`, which beats the `ABCXAUTO_MODEL` env form. Keep the clerk.
 
 ## Hard gates (code)
 
@@ -64,7 +64,7 @@ pip install -r requirements.txt
 copy .env.template .env   # fill XAI_API_KEY; optional MARKETDATA_TOKEN
 ```
 
-Paper client id is `IBKR_CLIENT_ID` (template default **42**). Live needs a **different** id on **7496**. Two books = two processes.
+Paper client id is `IBKR_CLIENT_ID` (template default **42**). Live needs a **different** id on **7496**. Two books = two processes. Settings may change host and client id only while the desk is disconnected.
 
 ## 2. Grok tools
 
@@ -72,7 +72,7 @@ IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 
 MDA delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
 
-Other: `odds` (Polymarket), `playbook` (notebook + score since last write), `write_lab_playbook` (paper notebook, up to 8000 chars), `set_wake`, `send`, `self_tune` (flat knobs; `send self_tune` still works).
+Other: `odds` (Polymarket), `playbook` (notebook + score since last write), `write_lab_playbook` (paper notebook, up to 16000 chars, plus setup `cards` — trigger, ticket shape, invalidation, testing/working/retired), `set_wake`, `send`, `self_tune` (flat knobs; `send self_tune` still works).
 
 Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limited to it. Clerk still writes `journal.db`; there is no `journal` tool.
 
@@ -116,7 +116,7 @@ Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** 
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ABCXAUTO_MODEL` | `grok-4.6` | Brain |
+| `ABCXAUTO_MODEL` | `grok-4.6` | Brain — Pro Settings `model` wins over this |
 | `IBKR_PORT` | `7497` | Paper TWS |
 | `IBKR_CLIENT_ID` | `42` | One id per process |
 | `ABCXAUTO_MAX_OPEN_POSITIONS` | `15` | Capacity (Grok may set 1–25) |

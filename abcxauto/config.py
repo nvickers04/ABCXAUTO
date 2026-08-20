@@ -42,6 +42,52 @@ CAPACITY_KEYS = frozenset({
     "max_open_positions",
 })
 PERSISTED_OPERATOR_KEYS = RISK_CONFIG_KEYS | CAPACITY_KEYS
+# Brain / pacing / link knobs the operator sets from Pro Settings.
+# scan_fetch_cap is deliberately absent: self_tune is its only writer.
+AGENT_CONFIG_KEYS = frozenset({
+    "model",
+    "temperature",
+    "max_tokens",
+    "monitor_enabled",
+    "monitor_poll_s",
+    "monitor_review_s",
+    "monitor_extended_hours",
+    "disconnect_halt_s",
+    "ibkr_host",
+    "ibkr_client_id",
+})
+# Two books = two processes, two client ids: a live socket keeps the host and
+# id it dialled, so these may only move while the IBKR link is down.
+AGENT_DISCONNECTED_ONLY_KEYS = frozenset({"ibkr_host", "ibkr_client_id"})
+# Never writable from a settings form: the mode/port pair is set_trading_mode's
+# (it validates the confirm phrase) and secrets belong to .env.
+AGENT_LOCKED_KEYS = frozenset({
+    "trading_mode",
+    "ibkr_port",
+    "live_confirm",
+    "xai_api_key",
+    "marketdata_token",
+})
+# Everything risk_settings.json may hold.
+PERSISTED_SETTINGS_KEYS = PERSISTED_OPERATOR_KEYS | AGENT_CONFIG_KEYS
+# lo, hi for the numeric agent knobs. Narrower than the field type on purpose:
+# a 0 poll or a 0 disconnect halt turns a safety loop off silently.
+AGENT_BOUNDS: dict[str, tuple[float, float]] = {
+    "temperature": (0.0, 2.0),
+    "max_tokens": (1024, 131_072),
+    "monitor_poll_s": (5, 900),
+    "monitor_review_s": (30, 21_600),
+    "disconnect_halt_s": (1.0, 900.0),
+    "ibkr_client_id": (1, 999),
+}
+_AGENT_BOOL_KEYS = frozenset({"monitor_enabled", "monitor_extended_hours"})
+_AGENT_INT_KEYS = frozenset({
+    "max_tokens",
+    "monitor_poll_s",
+    "monitor_review_s",
+    "ibkr_client_id",
+})
+_AGENT_TEXT_KEYS = frozenset({"model", "ibkr_host"})
 RISK_POSTURES = frozenset({"defensive", "balanced", "aggressive"})
 _runtime_overrides: dict[str, Any] = {}
 _file_overrides: dict[str, Any] = {}
@@ -53,7 +99,7 @@ _DEFAULT_RISK_SETTINGS_PATH = _REPO_ROOT / "risk_settings.json"
 class Config:
     # xAI / Grok
     xai_api_key: str = ""
-    model: str = "grok-4.6"  # ABCXAUTO_MODEL
+    model: str = "grok-4.6"  # ABCXAUTO_MODEL is the env form; see get_config()
     temperature: float = 0.3
     max_tokens: int = 8192
 
@@ -124,7 +170,13 @@ def setup_file_logging(
     max_bytes: int = 1_000_000,
     backup_count: int = 2,
 ) -> None:
-    """Attach a WARNING+ RotatingFileHandler to the abcxauto logger (once)."""
+    """Attach a WARNING+ RotatingFileHandler to the abcxauto logger (once).
+
+    ``ABCXAUTO_LOG_PATH`` redirects it. The operator reads ``logs/app.log`` as
+    evidence of what the desk did, so tests must never land in it.
+    """
+    if path is None:
+        path = os.environ.get("ABCXAUTO_LOG_PATH") or None
     log_path = Path(path) if path is not None else Path("logs") / "app.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger("abcxauto")
@@ -236,6 +288,81 @@ def _coerce_risk_value(key: str, value: Any) -> Any:
     return float(value)
 
 
+def broker_link_connected() -> bool:
+    """True when this process already holds a live IBKR socket.
+
+    Reads the connector singleton only if the broker module is already imported:
+    importing it from here would be a cycle, and no connector means no link.
+    """
+    import sys
+
+    connector_mod = sys.modules.get("abcxauto.broker.connector")
+    conn = getattr(getattr(connector_mod, "IBKRConnector", None), "_instance", None)
+    if conn is None:
+        return False
+    try:
+        return bool(conn.connected)
+    except Exception:
+        return False
+
+
+def _coerce_agent_value(key: str, value: Any) -> Any:
+    """Normalize one agent knob to its Config field type. Raises on garbage."""
+    if key in _AGENT_BOOL_KEYS:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+    if key in _AGENT_TEXT_KEYS:
+        text = str(value or "").strip()
+        if not text or any(c.isspace() for c in text):
+            raise ValueError(f"{key} must be a single non-empty token")
+        return text
+    if key in _AGENT_INT_KEYS:
+        return int(float(value))
+    return float(value)
+
+
+def clamp_agent_knobs(
+    values: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+    """Coerce + bound agent knobs. Returns (applied, clamp notes, rejected)."""
+    applied: dict[str, Any] = {}
+    notes: dict[str, Any] = {}
+    rejected: dict[str, str] = {}
+    for key, value in (values or {}).items():
+        if key in AGENT_LOCKED_KEYS:
+            rejected[key] = "locked — set_trading_mode / .env owns this"
+            continue
+        if key not in AGENT_CONFIG_KEYS:
+            rejected[key] = "not an agent setting"
+            continue
+        if key in AGENT_DISCONNECTED_ONLY_KEYS and broker_link_connected():
+            rejected[key] = "IBKR is connected — disconnect the desk to change this"
+            continue
+        try:
+            coerced = _coerce_agent_value(key, value)
+        except (TypeError, ValueError) as exc:
+            rejected[key] = str(exc) or "invalid value"
+            continue
+        bounds = AGENT_BOUNDS.get(key)
+        if bounds is not None:
+            lo, hi = bounds
+            bounded = max(lo, min(hi, coerced))
+            if key in _AGENT_INT_KEYS:
+                bounded = int(bounded)
+            if bounded != coerced:
+                notes[key] = {"raw": coerced, "clamped": bounded}
+            coerced = bounded
+        applied[key] = coerced
+    return applied, notes, rejected
+
+
+def _coerce_persisted_value(key: str, value: Any) -> Any:
+    if key in AGENT_CONFIG_KEYS:
+        return _coerce_agent_value(key, value)
+    return _coerce_risk_value(key, value)
+
+
 def _read_risk_file(settings_path: Path) -> dict[str, Any]:
     if not settings_path.is_file():
         return {}
@@ -248,17 +375,17 @@ def _read_risk_file(settings_path: Path) -> dict[str, Any]:
         return {}
     cleaned: dict[str, Any] = {}
     for key, value in raw.items():
-        if key not in PERSISTED_OPERATOR_KEYS:
+        if key not in PERSISTED_SETTINGS_KEYS:
             continue
         try:
-            cleaned[key] = _coerce_risk_value(key, value)
+            cleaned[key] = _coerce_persisted_value(key, value)
         except (TypeError, ValueError):
             logger.warning("Ignoring invalid risk setting %s=%r", key, value)
     return cleaned
 
 
 def load_risk_settings(path: Path | None = None) -> dict[str, Any]:
-    """Load persisted risk + capacity knobs from disk into ``_file_overrides``."""
+    """Load persisted risk, capacity and agent knobs from disk into ``_file_overrides``."""
     global _file_overrides
     _file_overrides = _read_risk_file(path or _risk_settings_path())
     return dict(_file_overrides)
@@ -269,14 +396,14 @@ def save_risk_settings(
     *,
     path: Path | None = None,
 ) -> Path:
-    """Merge ``values`` into the on-disk settings file (risk and/or capacity keys)."""
+    """Merge ``values`` into the on-disk settings file (risk, capacity or agent keys)."""
     global _file_overrides
     settings_path = path or _risk_settings_path()
     current = _read_risk_file(settings_path)
     for key, value in values.items():
-        if key not in PERSISTED_OPERATOR_KEYS:
+        if key not in PERSISTED_SETTINGS_KEYS:
             continue
-        current[key] = _coerce_risk_value(key, value)
+        current[key] = _coerce_persisted_value(key, value)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(
         json.dumps(current, indent=2, sort_keys=True) + "\n",
@@ -294,7 +421,8 @@ def get_config() -> Config:
     """Env-backed config plus file-persisted risk knobs, agent_state, session overrides.
 
     Precedence: ``.env`` defaults < ``risk_settings.json`` < ``agent_state.json``
-    < session overrides.
+    < session overrides. So the ``model`` the operator applies from Pro Settings
+    beats ``ABCXAUTO_MODEL``, and ``scan_fetch_cap`` from ``self_tune`` beats both.
     """
     base = _load_env_config()
     agent_extra: dict[str, Any] = {}
@@ -378,6 +506,69 @@ def update_capacity_config(**kwargs: Any) -> Config:
             logger.exception("Failed to persist capacity settings")
             raise
     return get_config()
+
+
+def update_agent_config(**kwargs: Any) -> Config:
+    """Apply brain / pacing / link overrides (never risk, mode, port or secrets).
+
+    Pass ``persist=False`` for session-only. Values are clamped to
+    ``AGENT_BOUNDS``; invalid values raise. Clears the env cache so a knob the
+    operator changes is live on the next ``get_config()`` without a restart.
+    """
+    persist = bool(kwargs.pop("persist", True))
+    locked = set(kwargs) & AGENT_LOCKED_KEYS
+    if locked:
+        raise ValueError(
+            f"update_agent_config refuses {sorted(locked)}: "
+            "trading_mode/ibkr_port/live_confirm go through set_trading_mode, "
+            "API keys stay in .env"
+        )
+    unknown = set(kwargs) - AGENT_CONFIG_KEYS
+    if unknown:
+        raise ValueError(f"Unknown agent config keys: {sorted(unknown)}")
+    cleaned, _notes, rejected = clamp_agent_knobs(kwargs)
+    if rejected:
+        raise ValueError(f"Invalid agent config: {rejected}")
+    _runtime_overrides.update(cleaned)
+    if persist:
+        try:
+            save_risk_settings(cleaned)
+        except Exception:
+            logger.exception("Failed to persist agent settings")
+            raise
+    _load_env_config.cache_clear()
+    return get_config()
+
+
+def set_agent_knobs(
+    values: dict[str, Any],
+    *,
+    persist: bool = True,
+) -> dict[str, Any]:
+    """Operator path from Pro Settings. Clamps instead of raising.
+
+    Returns ``{"applied", "clamped", "rejected"}`` so the caller can say what it
+    refused rather than silently accepting it.
+    """
+    applied, notes, rejected = clamp_agent_knobs(values or {})
+    if applied:
+        _runtime_overrides.update(applied)
+        if persist:
+            try:
+                save_risk_settings(applied)
+            except Exception:
+                logger.exception("Failed to persist agent settings")
+                raise
+        _load_env_config.cache_clear()
+    return {"applied": applied, "clamped": notes, "rejected": rejected}
+
+
+def agent_config_snapshot(*, reload: bool = False) -> dict[str, Any]:
+    """Current effective agent knobs (brain, pacing, link)."""
+    if reload:
+        load_risk_settings()
+    cfg = get_config()
+    return {k: getattr(cfg, k) for k in sorted(AGENT_CONFIG_KEYS)}
 
 
 def clamp_risk_knobs(

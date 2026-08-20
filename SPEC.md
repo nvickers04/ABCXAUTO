@@ -1,7 +1,7 @@
 # ABCXAUTO spec
 
 Grok owns a paper IBKR book. The clerk is facts, hard gates, and a wake clock.
-Brain is `ABCXAUTO_MODEL` (default grok-4.6). Mainline is `master`.
+Brain is the `model` knob (default grok-4.6). Mainline is `master`.
 
 Paper (TWS **7497**) is the lab. Live (TWS **7496**, confirm phrase, a different
 client id) only follows a **promoted paper playbook**. It never copies paper fills.
@@ -15,10 +15,11 @@ the cost of the model. Same rules at $1k, $100k, or $1M.
 |-------|-----|
 | **Grok** | Tickets (`send`), knobs (`self_tune`), lab notebook (`write_lab_playbook`), next look (`set_wake`) |
 | **Clerk** | Live facts, `ORDER EXAMPLES`, hard gates, default look if Grok skips `set_wake` |
-| **Operator** | `.env` + paper TWS, Start, kill switch. UI is status. No strategy card. |
+| **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No strategy card. |
 
 Do not grow the system prompt. Do not inject strategy menus or a Judge/Act form.
-Switch the brain with `ABCXAUTO_MODEL`; keep the clerk.
+Switch the brain from Pro Settings — `model` persists to `risk_settings.json`,
+which beats the `ABCXAUTO_MODEL` env form. Keep the clerk.
 
 ## Hard gates (code)
 
@@ -67,7 +68,8 @@ to it. Clerk writes `journal.db`; there is no `journal` tool.
 **8:30–16:00 ET**. Probe TWS **7497** before launch. `--cleanup` marks operator
 stop. Headless paper only (`ABCXAUTO_FORCE_HEADLESS=1`).
 
-Two books = two processes, two client ids.
+Two books = two processes, two client ids. Settings moves `ibkr_host` and
+`ibkr_client_id` only while the IBKR link is down.
 
 ## Tech
 
