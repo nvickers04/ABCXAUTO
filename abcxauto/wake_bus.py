@@ -46,8 +46,9 @@ PULSE_S = 10.0
 DEFAULT_LOOK_S = 90.0
 DEFAULT_LOOK_OPEN_S = 60.0
 MIN_LOOK_S = 30.0
-# Sessions that still expose set_wake and honor a park clock.
+# Overnight / postmarket still expose set_wake. Paper premarket stays up.
 PARK_SESSIONS = frozenset({"premarket", "closed", "postmarket"})
+PAPER_STAY_UP_SESSIONS = frozenset({"regular", "premarket"})
 MTM_BUCKET_PCT = 8.0
 _last_wake = None
 _pending_interrupt = None  # BookEvent | None — set after BookEvent is defined
@@ -223,13 +224,18 @@ def min_look_s() -> float:
 
 
 def set_wake_offered(*, session: str = "") -> bool:
-    """Overnight / around-open expose set_wake. Regular hours do not."""
-    return str(session or "").lower() in PARK_SESSIONS
+    """Overnight / postmarket expose set_wake. Paper premarket and RTH do not."""
+    sess = str(session or "").lower()
+    if sess not in PARK_SESSIONS:
+        return False
+    if sess == "premarket" and paper_rth_park_refused(session="premarket"):
+        return False
+    return True
 
 
 def paper_rth_park_refused(*, session: str = "") -> bool:
-    """Paper regular hours, clerk not halted: set_wake writes no park clock."""
-    if str(session or "").lower() != "regular":
+    """Paper stay-up: RTH and premarket write no park clock. Overnight still parks."""
+    if str(session or "").lower() not in PAPER_STAY_UP_SESSIONS:
         return False
     try:
         from abcxauto.lab_playbook import is_paper
@@ -268,8 +274,8 @@ def ensure_next_look(
             return alarm
         # set_wake ran with no clock (paper RTH no-op). Do not synthesize a park.
         return alarm
-    # Grok skipped set_wake. RTH: yield in place — do not synthesize 60s/90s.
-    if str(session or "").lower() == "regular":
+    # Grok skipped set_wake. Paper stay-up / RTH: yield in place — no 9:33 nap.
+    if paper_rth_park_refused(session=session) or str(session or "").lower() == "regular":
         if alarm.wake_at:
             cleared = GrokAlarm(
                 wake_at=None,

@@ -374,7 +374,7 @@ def _send_strategy_names_for_look() -> list[str]:
 
 
 def agent_tools(*, session: str = "") -> list:
-    """Tools this look. Omit set_wake in regular hours."""
+    """Tools this look. Omit set_wake in RTH and paper premarket."""
     from abcxauto.wake_bus import set_wake_offered
 
     names = _send_strategy_names_for_look()
@@ -1585,7 +1585,7 @@ async def _run_tool(
         turn.parked = False
         return _clip({
             "status": "ignored",
-            "reason": "paper_rth",
+            "reason": "paper_stay_up",
             "wake_at": None,
             "session": session or "regular",
             "wanted_wake_in_s": args.get("wake_in_s"),
