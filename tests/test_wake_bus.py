@@ -323,11 +323,16 @@ def test_paper_stay_up_live_is_false(monkeypatch):
     assert paper_stay_up(session="premarket") is False
 
 
-def test_paper_rth_park_refused_still_regular_only():
+def test_paper_rth_park_refused_covers_regular_and_premarket(monkeypatch):
     from abcxauto.wake_bus import paper_rth_park_refused
 
-    # Premarket/closed never refuse a park clock (regular-only).
-    assert paper_rth_park_refused(session="premarket") is False
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
+    assert paper_rth_park_refused(session="regular") is True
+    assert paper_rth_park_refused(session="premarket") is True
     assert paper_rth_park_refused(session="closed") is False
     assert paper_rth_park_refused(session="postmarket") is False
 
