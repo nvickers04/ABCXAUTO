@@ -555,13 +555,13 @@ class ProTerminal:
     def _lab_notebook(self) -> tuple[str, str]:
         """Current lab notebook. Read-only. Notebook, not law."""
         try:
-            from abcxauto.lab_playbook import load_lab
+            from abcxauto.lab_playbook import load_lab, notebook_text
 
             pb = load_lab()
         except Exception:
             return "Lab notebook — unreadable", "(could not load playbook_lab.json)"
         pb = pb if isinstance(pb, dict) else {}
-        inst = str(pb.get("instructions") or "").strip()
+        inst = notebook_text(pb)
         rev = pb.get("revision") if pb.get("revision") not in (None, "") else "—"
         mode = str(pb.get("mode") or "explore").strip() or "explore"
         head = f"rev={rev} mode={mode} — notebook, not law"
@@ -1546,11 +1546,11 @@ class ProTerminal:
         self._sync_lots()
         self._sync_tabs()
         try:
-            from abcxauto.lab_playbook import load_lab, load_live, is_paper
+            from abcxauto.lab_playbook import load_lab, load_live, is_paper, notebook_text
 
             pb = load_lab() if is_paper() else load_live()
             pb = pb if isinstance(pb, dict) else {}
-            inst = str(pb.get("instructions") or "").strip()
+            inst = notebook_text(pb)
             if is_paper():
                 tag = "promoted" if pb.get("promoted") else (
                     "ready" if pb.get("ready_to_promote") else "lab"
@@ -1565,7 +1565,7 @@ class ProTerminal:
                 f"Playbook [{tag}] rev={rev} edge={edge_s}"
                 if inst else f"Playbook [{tag}]: none"
             )
-            self.lbl_playbook.tooltip = str(pb.get("instructions") or "")[:600] or None
+            self.lbl_playbook.tooltip = inst[:600] or None
             self.lbl_playbook.color = TEXT if inst else MUTED
         except Exception:
             self.lbl_playbook.value = "Playbook: —"

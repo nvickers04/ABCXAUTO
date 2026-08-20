@@ -327,6 +327,15 @@ def normalize_tool_call(
     if canon == "send":
         out = hoist_send_params(out)
 
+    if canon == "write_lab_playbook":
+        if out.get("types") in (None, ""):
+            for alt in ("catalog", "notebook", "tree"):
+                if isinstance(out.get(alt), (dict, str, bool)):
+                    out["types"] = out[alt]
+                    break
+        if out.get("instructions") in (None, "") and isinstance(out.get("text"), str):
+            out["instructions"] = out["text"]
+
     return canon, out
 
 
