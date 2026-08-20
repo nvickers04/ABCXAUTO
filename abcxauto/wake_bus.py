@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -49,6 +50,8 @@ MIN_LOOK_S = 30.0
 # Overnight / postmarket still expose set_wake. Paper premarket stays up.
 PARK_SESSIONS = frozenset({"premarket", "closed", "postmarket"})
 PAPER_STAY_UP_SESSIONS = frozenset({"regular", "premarket"})
+STAY_UP_RETRY_MIN_S = 20.0
+STAY_UP_RETRY_MAX_S = 45.0
 MTM_BUCKET_PCT = 8.0
 _last_wake = None
 _pending_interrupt = None  # BookEvent | None — set after BookEvent is defined
@@ -252,6 +255,34 @@ def paper_rth_park_refused(*, session: str = "") -> bool:
     except Exception:
         pass
     return True
+
+
+def paper_stay_up(*, session: str = "") -> bool:
+    """Paper regular + premarket: re-arm the next look; do not sit forever."""
+    if str(session or "").lower() not in PAPER_STAY_UP_SESSIONS:
+        return False
+    try:
+        from abcxauto.config import get_config
+
+        if not get_config().is_paper:
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def stay_up_retry_s() -> float:
+    """Backoff after a failed stay-up look. Not a park clock and not set_wake."""
+    raw = (os.environ.get("ABCXAUTO_STAY_UP_RETRY_S") or "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    span = max(0.0, STAY_UP_RETRY_MAX_S - STAY_UP_RETRY_MIN_S)
+    if span <= 0:
+        return float(STAY_UP_RETRY_MIN_S)
+    return STAY_UP_RETRY_MIN_S + random.random() * span
 
 
 def _floor_look_s(sec: float, *, session: str = "") -> float:

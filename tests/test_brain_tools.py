@@ -1612,3 +1612,67 @@ async def test_invoke_other_tool_emits_marker_only(monkeypatch):
         unsubscribe(cap)
     assert any("[book]" in t for t in got)
     assert not any("should not dump" in t for t in got)
+
+
+def test_look_failed_question_empty_and_stream_error():
+    assert BrainTurn(text="?").look_failed() is True
+    assert BrainTurn(text="").look_failed() is True
+    assert BrainTurn(text="  ").look_failed() is True
+    assert BrainTurn(text="watching IWM").look_failed() is False
+    assert BrainTurn(text="?", sends=[{"strat": "buy_option"}]).look_failed() is False
+    assert BrainTurn(text="?", parked=True).look_failed() is False
+    assert BrainTurn(failed=True, text="ok").look_failed() is True
+    assert BrainTurn(last_result={"status": "error"}).look_failed() is True
+
+
+@pytest.mark.asyncio
+async def test_question_mark_turn_is_failed():
+    from abcxauto.brain import grok_turn
+
+    class Chat:
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="?", reasoning_content=""
+            )
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: Chat())),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=Chat(),
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert turn.failed is True
+    assert turn.look_failed() is True
+    assert turn.parked is False
+
+
+@pytest.mark.asyncio
+async def test_resource_exhausted_turn_is_failed():
+    from abcxauto.brain import grok_turn
+
+    class Chat:
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            raise RuntimeError("StatusCode.RESOURCE_EXHAUSTED")
+            yield  # makes this an async generator
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: Chat())),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=Chat(),
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert turn.failed is True
+    assert turn.look_failed() is True
+    assert turn.parked is False
