@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,11 @@ _GATE_FORBIDDEN: dict[str, str] = {
     "defined_risk_only": "immutable floor — notebook cannot disable",
     "cash_only": "immutable floor — notebook cannot disable",
 }
+# GATES: N% / floor N% NL is clerk law. Notebook may restate it only when
+# sizing_floors is ON and N is the live max_risk_per_trade_pct knob.
+_GATES_HDR = re.compile(r"\bGATES\b[^:\n]{0,48}:", re.IGNORECASE)
+_FLOOR_NL = re.compile(r"\bfloor\s+(\d+(?:\.\d+)?)\s*%\s*NL\b", re.IGNORECASE)
+_PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _STALE_H_DEFAULT = 1.0
 _CARD_WINDOWS = ("15m", "1h", "4h")
 
@@ -138,6 +144,54 @@ def _field(raw: dict[str, Any], prev: dict[str, Any], key: str, default: str = "
     return str(prev.get(key) or default)
 
 
+def _floors_and_knob() -> tuple[bool, float]:
+    """Live clerk flag + max_risk_per_trade_pct. Fail closed: floors off."""
+    try:
+        from abcxauto.config import get_config
+        from abcxauto.risk_gates import sizing_floors_active
+
+        cfg = get_config()
+        knob = float(getattr(cfg, "max_risk_per_trade_pct", 0) or 0)
+        return bool(sizing_floors_active(cfg)), knob
+    except Exception:
+        return False, 0.0
+
+
+def _gate_pcts_on_line(line: str) -> list[float]:
+    """Percents claimed as GATES: N% or floor N% NL on one line."""
+    pcts: list[float] = []
+    if _GATES_HDR.search(line):
+        pcts.extend(float(m.group(1)) for m in _PCT.finditer(line))
+    pcts.extend(float(m.group(1)) for m in _FLOOR_NL.finditer(line))
+    return pcts
+
+
+def _invented_pct_gate_line(line: str, floors_on: bool, knob: float) -> bool:
+    """True when this line invents a % gate the clerk is not enforcing."""
+    pcts = _gate_pcts_on_line(line)
+    if not pcts:
+        return False
+    if floors_on and knob > 0 and all(abs(n - knob) < 1e-6 for n in pcts):
+        return False
+    return True
+
+
+def _has_invented_pct_gate(text: str) -> bool:
+    floors_on, knob = _floors_and_knob()
+    return any(_invented_pct_gate_line(line, floors_on, knob) for line in text.splitlines())
+
+
+def _strip_invented_pct_gate_lines(text: str) -> str:
+    """Drop GATES: N% / floor N% NL lines unless floors ON and N is the live knob."""
+    floors_on, knob = _floors_and_knob()
+    kept = [
+        line
+        for line in text.splitlines()
+        if not _invented_pct_gate_line(line, floors_on, knob)
+    ]
+    return "\n".join(kept)
+
+
 def gate_rejects(raw: Any) -> dict[str, str]:
     """Reject floors / live / sleeve knobs on a notebook write. Notes stay notes."""
     if not isinstance(raw, dict):
@@ -154,6 +208,9 @@ def gate_rejects(raw: Any) -> dict[str, str]:
             for key, reason in _GATE_FORBIDDEN.items():
                 if key in blob:
                     rejected[key] = reason
+    inst = str(raw.get("instructions") or "")
+    if inst and _has_invented_pct_gate(inst):
+        rejected["invented_pct_gate"] = "notebook cannot invent a % gate"
     return rejected
 
 
@@ -161,13 +218,18 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
     """Full rewrite or patch. Omitted fields keep the previous lab text.
 
     Gate knobs (floors / live / sleeve) are never stored — see gate_rejects.
+    Invented GATES: N% / floor N% NL lines are stripped unless floors are ON
+    and N equals the live max_risk_per_trade_pct knob.
     """
     if not isinstance(raw, dict):
         return None
     if not any(k in raw for k in _PATCH_KEYS):
         return None
     prev = load_lab()
-    instructions = _field(raw, prev, "instructions").strip()[:_MAX_INSTRUCTIONS]
+    instructions = _field(raw, prev, "instructions")
+    if "instructions" in raw:
+        instructions = _strip_invented_pct_gate_lines(instructions)
+    instructions = instructions.strip()[:_MAX_INSTRUCTIONS]
     if not instructions:
         return None
     mode = _field(raw, prev, "mode", "explore").strip().lower()
@@ -367,10 +429,13 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
     update = clamp_update(raw)
     if not update:
         if rejected:
+            note = "notebook cannot loosen gates"
+            if "invented_pct_gate" in rejected:
+                note = "notebook cannot invent a % gate"
             return {
                 "status": "rejected",
                 "rejected": rejected,
-                "note": "notebook cannot loosen gates",
+                "note": note,
             }
         return None
     score = None
@@ -385,7 +450,10 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
     if rejected:
         out = dict(state)
         out["rejected"] = rejected
-        out["note"] = "notes saved; gate knobs ignored"
+        if "invented_pct_gate" in rejected:
+            out["note"] = "notes saved; invented % gate lines stripped"
+        else:
+            out["note"] = "notes saved; gate knobs ignored"
         return out
     return state
 

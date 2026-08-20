@@ -390,6 +390,81 @@ def test_write_gate_only_payload_rejected_without_saving(tmp_path, monkeypatch):
     assert not load_lab().get("instructions")
 
 
+def test_write_strips_half_pct_gate_when_floors_off(tmp_path, monkeypatch):
+    """0.5% was never a send gate. Notebook cannot persist it as GATES/floor law."""
+    from abcxauto.config import get_config
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    assert bool(getattr(get_config(), "sizing_floors", False)) is False
+
+    prose = (
+        "Prefer debit verticals on index ETFs.\n"
+        "GATES: 0.5% / floor 0.5% NL\n"
+        "A 0.5% bounce is notes, not a gate.\n"
+        "floor 0.5% NL\n"
+        "Size vs the envelope."
+    )
+    out = apply_from_judgment(
+        {"lab_playbook": {"instructions": prose, "mode": "explore"}}
+    )
+    assert out is not None
+    inst = load_lab()["instructions"]
+    assert "Prefer debit verticals" in inst
+    assert "Size vs the envelope." in inst
+    assert "0.5% bounce" in inst
+    assert "GATES: 0.5%" not in inst
+    assert "floor 0.5% NL" not in inst
+    assert "invented_pct_gate" in (out.get("rejected") or {})
+
+    only_fake = apply_from_judgment(
+        {
+            "lab_playbook": {
+                "instructions": "GATES: 0.5%\nfloor 0.5% NL",
+                "mode": "explore",
+            }
+        }
+    )
+    assert only_fake is not None
+    assert only_fake.get("status") == "rejected"
+    assert "invented_pct_gate" in (only_fake.get("rejected") or {})
+    assert "GATES: 0.5%" not in (load_lab().get("instructions") or "")
+    assert "floor 0.5% NL" not in (load_lab().get("instructions") or "")
+
+
+def test_write_keeps_pct_gate_only_when_floors_on_and_n_is_knob(tmp_path, monkeypatch):
+    """Same GATES/floor lines are law only when floors are ON and N is the live knob."""
+    from abcxauto.config import get_config, update_risk_config
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    update_risk_config(sizing_floors=True, max_risk_per_trade_pct=0.5, persist=False)
+    cfg = get_config()
+    assert cfg.sizing_floors is True
+    assert abs(float(cfg.max_risk_per_trade_pct) - 0.5) < 1e-6
+
+    prose = "Prefer debit verticals.\nGATES: 0.5%\nfloor 0.5% NL"
+    out = apply_from_judgment(
+        {"lab_playbook": {"instructions": prose, "mode": "explore"}}
+    )
+    assert out is not None
+    inst = load_lab()["instructions"]
+    assert "GATES: 0.5%" in inst
+    assert "floor 0.5% NL" in inst
+    assert "invented_pct_gate" not in (out.get("rejected") or {})
+
+    update_risk_config(max_risk_per_trade_pct=25.0, persist=False)
+    stale = apply_from_judgment(
+        {"lab_playbook": {"instructions": prose, "mode": "explore"}}
+    )
+    assert stale is not None
+    inst = load_lab()["instructions"]
+    assert "Prefer debit verticals." in inst
+    assert "GATES: 0.5%" not in inst
+    assert "floor 0.5% NL" not in inst
+    assert "invented_pct_gate" in (stale.get("rejected") or {})
+
+
 def test_new_risk_until_prose_stays_notes_not_a_clock(tmp_path, monkeypatch):
     """Not a screen-window text parser — prose is notebook, set_wake parks."""
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
