@@ -412,6 +412,7 @@ def test_write_gate_only_payload_rejected_without_saving(tmp_path, monkeypatch):
     assert not load_lab().get("instructions")
 
 
+<<<<<<< HEAD
 def test_write_strips_half_pct_gate_when_floors_off(tmp_path, monkeypatch):
     """0.5% was never a send gate. Notebook cannot persist it as GATES/floor law."""
     from abcxauto.config import get_config
@@ -489,6 +490,10 @@ def test_write_keeps_pct_gate_only_when_floors_on_and_n_is_knob(tmp_path, monkey
 
 def test_new_risk_until_prose_stays_notes_not_a_clock(tmp_path, monkeypatch):
     """Not a screen-window text parser — prose is notebook, set_wake parks."""
+=======
+def test_new_risk_until_prose_is_not_the_book(tmp_path, monkeypatch):
+    """Wake clocks / diary are not the notebook; set_wake parks."""
+>>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     prose = "No new risk until 10:30 ET. Park until open."
