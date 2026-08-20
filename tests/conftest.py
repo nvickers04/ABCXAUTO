@@ -1,6 +1,7 @@
 """Shared test helpers."""
 
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -29,6 +30,45 @@ SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-eafc232c6c32\implem
 class _Cfg:
     xai_api_key = "test-key"
     monitor_enabled = False
+
+
+REPO_LOGS = (Path(__file__).resolve().parents[1] / "logs").resolve()
+
+
+def _drop_repo_log_handlers() -> list[str]:
+    """Detach any file handler writing into the repo's logs/ directory.
+
+    ``run_headless()`` calls ``setup_file_logging()``, so a test that exercises it
+    attaches a handler on the real logs/app.log for the rest of the session and
+    every later WARNING+ record — fake halts, fake AUTO-PANIC — lands in the file
+    the operator reads as evidence.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    dropped: list[str] = []
+    for name in ("abcxauto", ""):
+        lg = logging.getLogger(name)
+        for handler in list(lg.handlers):
+            if not isinstance(handler, RotatingFileHandler):
+                continue
+            try:
+                target = Path(getattr(handler, "baseFilename", "")).resolve()
+            except OSError:
+                continue
+            if target.parent == REPO_LOGS:
+                lg.removeHandler(handler)
+                handler.close()
+                dropped.append(str(target))
+    return dropped
+
+
+@pytest.fixture(autouse=True)
+def _isolate_app_log(tmp_path, monkeypatch):
+    """logs/app.log is operator evidence — a test run must never write into it."""
+    monkeypatch.setenv("ABCXAUTO_LOG_PATH", str(tmp_path / "app.log"))
+    _drop_repo_log_handlers()
+    yield
+    _drop_repo_log_handlers()
 
 
 @pytest.fixture(autouse=True)
