@@ -1,4 +1,4 @@
-"""Paper lab playbook — Grok's notebook; live only follows a promote.
+﻿"""Paper lab playbook â€” Grok's notebook; live only follows a promote.
 
 Notebook is not executable, not a wake clock, not a standing order.
 Clerk validates writes against gates (floors / live / sleeve) like self_tune.
@@ -95,32 +95,30 @@ _DEAD_LAB_KEYS = (
     "ticker_list",
     "tickers",
 )
-# Notebook is not self_tune. Same class of knobs self_tune rejects or clamps —
+# Notebook is not self_tune. Same class of knobs self_tune rejects or clamps â€”
 # write_lab_playbook must not loosen floors, switch live, or set a dollar sleeve.
 _GATE_FORBIDDEN: dict[str, str] = {
-    "trading_mode": "live remains gated — notebook cannot switch mode",
-    "live_confirm": "live remains gated — notebook cannot switch mode",
-    "sizing_floors": "operator-only — notebook cannot flip sizing floors",
-    "trading_budget_usd": "size and risk are % of NetLiq — no dollar sleeve",
-    "risk_posture": "risk_posture is locked — notebook cannot retune",
-    "daily_loss_limit_pct": "knobs are self_tune — notebook cannot retune risk",
-    "max_position_pct": "knobs are self_tune — notebook cannot retune risk",
-    "max_risk_per_trade_pct": "knobs are self_tune — notebook cannot retune risk",
-    "max_peak_drawdown_pct": "knobs are self_tune — notebook cannot retune risk",
-    "max_option_premium_pct": "knobs are self_tune — notebook cannot retune risk",
-    "max_open_positions": "knobs are self_tune — notebook cannot retune risk",
-    "risk_gates_enabled": "immutable floor — notebook cannot disable",
-    "auto_panic_on_breach": "immutable floor — notebook cannot disable",
-    "defined_risk_only": "immutable floor — notebook cannot disable",
-    "cash_only": "immutable floor — notebook cannot disable",
+    "trading_mode": "live remains gated â€” notebook cannot switch mode",
+    "live_confirm": "live remains gated â€” notebook cannot switch mode",
+    "sizing_floors": "operator-only â€” notebook cannot flip sizing floors",
+    "trading_budget_usd": "size and risk are % of NetLiq â€” no dollar sleeve",
+    "risk_posture": "risk_posture is locked â€” notebook cannot retune",
+    "daily_loss_limit_pct": "knobs are self_tune â€” notebook cannot retune risk",
+    "max_position_pct": "knobs are self_tune â€” notebook cannot retune risk",
+    "max_risk_per_trade_pct": "knobs are self_tune â€” notebook cannot retune risk",
+    "max_peak_drawdown_pct": "knobs are self_tune â€” notebook cannot retune risk",
+    "max_option_premium_pct": "knobs are self_tune â€” notebook cannot retune risk",
+    "max_open_positions": "knobs are self_tune â€” notebook cannot retune risk",
+    "risk_gates_enabled": "immutable floor â€” notebook cannot disable",
+    "auto_panic_on_breach": "immutable floor â€” notebook cannot disable",
+    "defined_risk_only": "immutable floor â€” notebook cannot disable",
+    "cash_only": "immutable floor â€” notebook cannot disable",
 }
 # GATES: N% / floor N% NL is clerk law. Notebook may restate it only when
 # sizing_floors is ON and N is the live max_risk_per_trade_pct knob.
 _GATES_HDR = re.compile(r"\bGATES\b[^:\n]{0,48}:", re.IGNORECASE)
 _FLOOR_NL = re.compile(r"\bfloor\s+(\d+(?:\.\d+)?)\s*%\s*NL\b", re.IGNORECASE)
 _PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
-<<<<<<< HEAD
-=======
 _TYPE_HDR = re.compile(r"^TYPE\s+(\S+)", re.IGNORECASE)
 _STRATEGY_HDR = re.compile(r"^STRATEGY\s+(.+)$", re.IGNORECASE)
 _FIELD_LINE = re.compile(
@@ -134,7 +132,6 @@ _DIARY_OR_CLOCK = re.compile(
     re.IGNORECASE,
 )
 _TICKER_TOKEN = re.compile(r"^[A-Z]{1,5}$")
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
 _STALE_H_DEFAULT = 1.0
 _CARD_WINDOWS = ("15m", "1h", "4h")
 
@@ -218,17 +215,12 @@ def _field(raw: dict[str, Any], prev: dict[str, Any], key: str, default: str = "
     return str(prev.get(key) or default)
 
 
-<<<<<<< HEAD
-=======
 def playbook_type_keys() -> tuple[str, ...]:
     """Sendable ORDER_EXAMPLES keys the notebook may use as trunks."""
     from abcxauto.order_examples import NOT_TICKETS, ORDER_EXAMPLES
 
     skip = _SKIP_PLAYBOOK_TYPES | NOT_TICKETS
-    allowed = [k for k in ORDER_EXAMPLES if k not in skip]
-    front = [k for k in PLAYBOOK_TYPE_KEYS if k in allowed]
-    rest = [k for k in allowed if k not in PLAYBOOK_TYPE_KEYS]
-    return tuple(front + rest)
+    return tuple(k for k in PLAYBOOK_TYPE_KEYS if k in ORDER_EXAMPLES and k not in skip)
 
 
 def _close_tp_sl(name: str) -> str:
@@ -362,7 +354,6 @@ def _merge_strategies(
     return merged[:_MAX_STRATEGIES_PER_TYPE]
 
 
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
 def _floors_and_knob() -> tuple[bool, float]:
     """Live clerk flag + max_risk_per_trade_pct. Fail closed: floors off."""
     try:
@@ -411,8 +402,6 @@ def _strip_invented_pct_gate_lines(text: str) -> str:
     return "\n".join(kept)
 
 
-<<<<<<< HEAD
-=======
 def _walk_text(obj: Any) -> str:
     if isinstance(obj, str):
         return obj
@@ -781,7 +770,6 @@ def _merge_type_catalog(
     return _strip_gates_from_types(out)
 
 
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
 def gate_rejects(raw: Any) -> dict[str, str]:
     """Reject floors / live / sleeve knobs on a notebook write. Notes stay notes."""
     if not isinstance(raw, dict):
@@ -794,14 +782,11 @@ def gate_rejects(raw: Any) -> dict[str, str]:
     for nest in ("risk", "universe"):
         blob = raw.get(nest)
         if nest in raw and isinstance(blob, dict):
-            rejected[nest] = "knobs are self_tune — notebook cannot retune"
+            rejected[nest] = "knobs are self_tune â€” notebook cannot retune"
             for key, reason in _GATE_FORBIDDEN.items():
                 if key in blob:
                     rejected[key] = reason
     inst = str(raw.get("instructions") or "")
-<<<<<<< HEAD
-    if inst and _has_invented_pct_gate(inst):
-=======
     types_text = _walk_text(raw.get("types")) if isinstance(raw.get("types"), dict) else ""
     catalog_text = _walk_text(raw.get("catalog")) if isinstance(raw.get("catalog"), dict) else ""
     if (
@@ -809,7 +794,6 @@ def gate_rejects(raw: Any) -> dict[str, str]:
         or (types_text and _has_invented_pct_gate(types_text))
         or (catalog_text and _has_invented_pct_gate(catalog_text))
     ):
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
         rejected["invented_pct_gate"] = "notebook cannot invent a % gate"
     return rejected
 
@@ -817,13 +801,10 @@ def gate_rejects(raw: Any) -> dict[str, str]:
 def clamp_update(raw: Any) -> dict[str, Any] | None:
     """Full rewrite or patch. Omitted fields keep the previous lab text.
 
-    Gate knobs (floors / live / sleeve) are never stored — see gate_rejects.
+    Gate knobs (floors / live / sleeve) are never stored â€” see gate_rejects.
     Invented GATES: N% / floor N% NL lines are stripped unless floors are ON
     and N equals the live max_risk_per_trade_pct knob.
-<<<<<<< HEAD
-=======
     The book is a TYPE tree (sendable keys), not a diary.
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
     """
     if not isinstance(raw, dict):
         return None
@@ -832,13 +813,6 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
     if _HARD_SHAPE.intersection(book_shape_rejects(raw)):
         return None
     prev = load_lab()
-<<<<<<< HEAD
-    instructions = _field(raw, prev, "instructions")
-    if "instructions" in raw:
-        instructions = _strip_invented_pct_gate_lines(instructions)
-    instructions = instructions.strip()[:_MAX_INSTRUCTIONS]
-    if not instructions:
-=======
     incoming, err = _extract_types(raw)
     if err:
         return None
@@ -859,7 +833,6 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
                 instructions = _strip_invented_pct_gate_lines(instructions)
     instructions = instructions.strip()[:_MAX_INSTRUCTIONS]
     if not instructions and not types:
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
         return None
     mode = _field(raw, prev, "mode", "explore").strip().lower()
     if mode not in ("explore", "exploit"):
@@ -1013,7 +986,7 @@ def save_lab(update: dict[str, Any], *, scorecard: dict[str, Any] | None = None)
 
 
 def maybe_promote(*, scorecard: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Copy lab → live snapshot only when paper is beating the model bill."""
+    """Copy lab â†’ live snapshot only when paper is beating the model bill."""
     lab = load_lab()
     if not _has_book(lab):
         return None
@@ -1092,11 +1065,7 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
             return {
                 "status": "rejected",
                 "rejected": rejected,
-<<<<<<< HEAD
-                "note": note,
-=======
                 "note": _reject_note(rejected),
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
             }
         return None
     score = None
@@ -1209,7 +1178,7 @@ def playbook_age_hours(
 
 
 def playbook_glance(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Score since the last write. Not the notebook text — Grok asks playbook() for that."""
+    """Score since the last write. Not the notebook text â€” Grok asks playbook() for that."""
     facts = playbook_facts(scorecard)
     return {
         "revision": facts.get("revision"),
@@ -1374,7 +1343,7 @@ def clear_lab(*, reason: str = "") -> dict[str, Any]:
 
 
 def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, Any]:
-    """Notebook plus score since write. full is accepted and ignored — the notes are the tool."""
+    """Notebook plus score since write. full is accepted and ignored â€” the notes are the tool."""
     paper = is_paper()
     lab = load_lab() if paper else load_live()
     live_sc = _live_scorecard(lab) if paper else (
