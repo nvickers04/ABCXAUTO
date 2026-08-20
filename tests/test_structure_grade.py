@@ -118,6 +118,22 @@ def test_detect_scrape_from_fills():
     assert detect_scrape_from_fills(fills, symbol="SPY") is False
 
 
+def test_detect_scrape_from_fills_stk_only():
+    """2026-08-19: same-second SPY OPT/BAG fills are not a stock scrape."""
+    ts = "2026-08-19T18:13:00Z"
+    mixed = [
+        {"ts": ts, "symbol": "SPY", "side": "BOT", "sec_type": "STK", "quantity": 11},
+        {"ts": ts, "symbol": "SPY", "side": "SLD", "sec_type": "OPT", "quantity": 1},
+        {"ts": ts, "symbol": "SPY", "side": "BOT", "secType": "BAG", "quantity": 1},
+    ]
+    assert detect_scrape_from_fills(mixed, symbol="SPY") is False
+    stk_round_trip = [
+        {"ts": ts, "symbol": "SPY", "side": "BOT", "sec_type": "STK", "quantity": 11},
+        {"ts": "2026-08-19T18:13:01Z", "symbol": "SPY", "side": "SLD", "sec_type": "STK", "quantity": 11},
+    ]
+    assert detect_scrape_from_fills(stk_round_trip, symbol="SPY") is True
+
+
 @pytest.mark.asyncio
 async def test_quote_prefers_live_over_stale_opp(monkeypatch):
     from abcxauto.agent_loop import _quote_for_action
@@ -225,6 +241,176 @@ async def test_successful_bracket_persists_plan_and_structure(monkeypatch, tmp_p
     assert lessons[0]["outcome"] == STRUCTURE_OK
     assert lessons[0]["symbol"] == "AAPL"
     assert lessons[0]["message"] == "dispatched"
+
+
+def _spy_bracket_act():
+    return {
+        "strategy": "market_bracket",
+        "params": {
+            "symbol": "SPY",
+            "direction": "LONG",
+            "stop_price": 766.7,
+            "target_price": 773.8,
+            "quantity": 11,
+        },
+    }
+
+
+def _spy_bracket_result():
+    return {
+        "success": True,
+        "filled": True,
+        "symbol": "SPY",
+        "entry_price": 769.5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_post_act_opt_bag_fills_keep_live_stk_plan(monkeypatch, tmp_path):
+    """OPT/BAG fills in the 15s window must not scrape-close a live SPY STK 11."""
+    from abcxauto.agent_loop import _post_act_structure_and_plan
+    from abcxauto.trade_plan import load_trade_plan
+
+    monkeypatch.setenv("ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "ev.jsonl"))
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+
+    ts = "2026-08-19T18:13:00Z"
+
+    class Conn:
+        async def get_positions(self):
+            return [{"symbol": "SPY", "secType": "STK", "quantity": 11}]
+
+        async def get_recent_executions(self):
+            return [
+                {"ts": ts, "symbol": "SPY", "side": "BOT", "sec_type": "STK", "quantity": 11},
+                {"ts": ts, "symbol": "SPY", "side": "SLD", "sec_type": "OPT", "quantity": 1},
+                {"ts": ts, "symbol": "SPY", "side": "BOT", "sec_type": "BAG", "quantity": 1},
+            ]
+
+    await _post_act_structure_and_plan(
+        act=_spy_bracket_act(),
+        strat="market_bracket",
+        result=_spy_bracket_result(),
+        judgment={"thesis": "spy long"},
+        snap={"positions": []},
+        quote_last=769.5,
+        connector=Conn(),
+    )
+    plan = load_trade_plan()
+    assert plan is not None
+    assert plan.symbol == "SPY"
+    assert plan.quantity == pytest.approx(11)
+    assert plan.close_reason == ""
+    lessons = recent_structure_lessons(3)
+    assert lessons
+    assert lessons[0]["outcome"] == STRUCTURE_OK
+
+
+@pytest.mark.asyncio
+async def test_post_act_stk_scrape_keeps_plan_when_qty_live(monkeypatch, tmp_path):
+    """close_trade_plan(scrape_suspect) must not run while stk_qty_for_symbol > 0."""
+    from abcxauto.agent_loop import _post_act_structure_and_plan
+    from abcxauto.trade_plan import load_trade_plan
+
+    monkeypatch.setenv("ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "ev.jsonl"))
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+
+    class Conn:
+        async def get_positions(self):
+            return [{"symbol": "SPY", "secType": "STK", "quantity": 11}]
+
+        async def get_recent_executions(self):
+            return [
+                {
+                    "ts": "2026-08-19T18:13:00Z",
+                    "symbol": "SPY",
+                    "side": "BOT",
+                    "sec_type": "STK",
+                    "quantity": 11,
+                },
+                {
+                    "ts": "2026-08-19T18:13:01Z",
+                    "symbol": "SPY",
+                    "side": "SLD",
+                    "sec_type": "STK",
+                    "quantity": 11,
+                },
+            ]
+
+    closed: list[str] = []
+
+    def _record(reason="", *_a, **_k):
+        closed.append(reason)
+
+    monkeypatch.setattr("abcxauto.agent_loop.close_trade_plan", _record)
+    await _post_act_structure_and_plan(
+        act=_spy_bracket_act(),
+        strat="market_bracket",
+        result=_spy_bracket_result(),
+        judgment={"thesis": "spy long"},
+        snap={"positions": []},
+        quote_last=769.5,
+        connector=Conn(),
+    )
+    assert "scrape_suspect" not in closed
+    plan = load_trade_plan()
+    assert plan is not None
+    assert abs(plan.quantity or 0) == pytest.approx(11)
+
+
+@pytest.mark.asyncio
+async def test_post_act_stk_scrape_closes_when_flat(monkeypatch, tmp_path):
+    """A real STK round-trip with no leftover qty still scrape-closes the plan."""
+    from abcxauto.agent_loop import _post_act_structure_and_plan
+    from abcxauto.trade_plan import load_trade_plan
+
+    monkeypatch.setenv("ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "ev.jsonl"))
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+
+    class Conn:
+        async def get_positions(self):
+            return []
+
+        async def get_recent_executions(self):
+            return [
+                {
+                    "ts": "2026-07-16T20:45:59Z",
+                    "symbol": "QQQ",
+                    "side": "BOT",
+                    "sec_type": "STK",
+                    "quantity": 9,
+                },
+                {
+                    "ts": "2026-07-16T20:46:01Z",
+                    "symbol": "QQQ",
+                    "side": "SLD",
+                    "sec_type": "STK",
+                    "quantity": 9,
+                },
+            ]
+
+    await _post_act_structure_and_plan(
+        act={
+            "strategy": "market_bracket",
+            "params": {
+                "symbol": "QQQ",
+                "direction": "LONG",
+                "stop_price": 700.0,
+                "target_price": 720.0,
+                "quantity": 9,
+            },
+        },
+        strat="market_bracket",
+        result={"success": True, "filled": True, "symbol": "QQQ", "entry_price": 710.0},
+        judgment={"thesis": "x"},
+        snap={"positions": []},
+        quote_last=710.0,
+        connector=Conn(),
+    )
+    assert load_trade_plan() is None
+    lessons = recent_structure_lessons(3)
+    assert lessons
+    assert lessons[0]["outcome"] == SCRAPE_SUSPECT
 
 
 @pytest.mark.asyncio
