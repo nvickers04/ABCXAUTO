@@ -1,4 +1,4 @@
-﻿"""Paper lab playbook â€” Grok's notebook; live only follows a promote.
+"""Paper lab playbook â€” Grok's notebook; live only follows a promote.
 
 Notebook is not executable, not a wake clock, not a standing order.
 Clerk validates writes against gates (floors / live / sleeve) like self_tune.
