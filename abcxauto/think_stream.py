@@ -34,10 +34,28 @@ _run: dict[str, Any] = {}
 
 logger = logging.getLogger(__name__)
 
+_ASCII_PUNCT = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2026": "...",
+        "\u00a0": " ",
+    }
+)
+
 
 def ascii_text(text: str) -> str:
-    """Windows consoles are often cp1252 — never emit non-ASCII to stdout."""
-    return (text or "").encode("ascii", "replace").decode("ascii")
+    """Windows consoles are often cp1252 — never emit non-ASCII to stdout.
+
+    Common punctuation is mapped to ASCII so a curly apostrophe does not
+    paint as '?' (that looked like Grok answering a question mark).
+    """
+    t = (text or "").translate(_ASCII_PUNCT)
+    return t.encode("ascii", "replace").decode("ascii")
 
 
 def subscribe(fn: Listener) -> None:

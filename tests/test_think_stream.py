@@ -17,6 +17,10 @@ from abcxauto.think_stream import (
 def test_ascii_text_is_cp1252_safe():
     out = ascii_text("idle -> hold  thesis: AAPL — wait")
     assert all(ord(c) < 128 for c in out)
+    assert "—" not in out
+    assert ascii_text("I'll inspect") == "I'll inspect"
+    assert "?" not in ascii_text("I'll inspect")
+    assert ascii_text("wait \u2014 crash") == "wait - crash"
 
 
 def test_emit_reaches_subscriber():
