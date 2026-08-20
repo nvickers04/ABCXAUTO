@@ -119,8 +119,6 @@ _GATE_FORBIDDEN: dict[str, str] = {
 _GATES_HDR = re.compile(r"\bGATES\b[^:\n]{0,48}:", re.IGNORECASE)
 _FLOOR_NL = re.compile(r"\bfloor\s+(\d+(?:\.\d+)?)\s*%\s*NL\b", re.IGNORECASE)
 _PCT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
-<<<<<<< HEAD
-=======
 _TYPE_HDR = re.compile(r"^TYPE\s+(\S+)", re.IGNORECASE)
 _STRATEGY_HDR = re.compile(r"^STRATEGY\s+(.+)$", re.IGNORECASE)
 _FIELD_LINE = re.compile(
@@ -134,7 +132,6 @@ _DIARY_OR_CLOCK = re.compile(
     re.IGNORECASE,
 )
 _TICKER_TOKEN = re.compile(r"^[A-Z]{1,5}$")
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
 _STALE_H_DEFAULT = 1.0
 _CARD_WINDOWS = ("15m", "1h", "4h")
 
@@ -218,8 +215,6 @@ def _field(raw: dict[str, Any], prev: dict[str, Any], key: str, default: str = "
     return str(prev.get(key) or default)
 
 
-<<<<<<< HEAD
-=======
 def playbook_type_keys() -> tuple[str, ...]:
     """Sendable ORDER_EXAMPLES keys the notebook may use as trunks."""
     from abcxauto.order_examples import NOT_TICKETS, ORDER_EXAMPLES
@@ -362,7 +357,6 @@ def _merge_strategies(
     return merged[:_MAX_STRATEGIES_PER_TYPE]
 
 
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
 def _floors_and_knob() -> tuple[bool, float]:
     """Live clerk flag + max_risk_per_trade_pct. Fail closed: floors off."""
     try:
@@ -411,8 +405,6 @@ def _strip_invented_pct_gate_lines(text: str) -> str:
     return "\n".join(kept)
 
 
-<<<<<<< HEAD
-=======
 def _walk_text(obj: Any) -> str:
     if isinstance(obj, str):
         return obj
@@ -781,7 +773,6 @@ def _merge_type_catalog(
     return _strip_gates_from_types(out)
 
 
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
 def gate_rejects(raw: Any) -> dict[str, str]:
     """Reject floors / live / sleeve knobs on a notebook write. Notes stay notes."""
     if not isinstance(raw, dict):
@@ -799,9 +790,6 @@ def gate_rejects(raw: Any) -> dict[str, str]:
                 if key in blob:
                     rejected[key] = reason
     inst = str(raw.get("instructions") or "")
-<<<<<<< HEAD
-    if inst and _has_invented_pct_gate(inst):
-=======
     types_text = _walk_text(raw.get("types")) if isinstance(raw.get("types"), dict) else ""
     catalog_text = _walk_text(raw.get("catalog")) if isinstance(raw.get("catalog"), dict) else ""
     if (
@@ -809,7 +797,6 @@ def gate_rejects(raw: Any) -> dict[str, str]:
         or (types_text and _has_invented_pct_gate(types_text))
         or (catalog_text and _has_invented_pct_gate(catalog_text))
     ):
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
         rejected["invented_pct_gate"] = "notebook cannot invent a % gate"
     return rejected
 
@@ -820,10 +807,7 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
     Gate knobs (floors / live / sleeve) are never stored — see gate_rejects.
     Invented GATES: N% / floor N% NL lines are stripped unless floors are ON
     and N equals the live max_risk_per_trade_pct knob.
-<<<<<<< HEAD
-=======
     The book is a TYPE tree (sendable keys), not a diary.
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
     """
     if not isinstance(raw, dict):
         return None
@@ -832,13 +816,6 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
     if _HARD_SHAPE.intersection(book_shape_rejects(raw)):
         return None
     prev = load_lab()
-<<<<<<< HEAD
-    instructions = _field(raw, prev, "instructions")
-    if "instructions" in raw:
-        instructions = _strip_invented_pct_gate_lines(instructions)
-    instructions = instructions.strip()[:_MAX_INSTRUCTIONS]
-    if not instructions:
-=======
     incoming, err = _extract_types(raw)
     if err:
         return None
@@ -859,7 +836,6 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
                 instructions = _strip_invented_pct_gate_lines(instructions)
     instructions = instructions.strip()[:_MAX_INSTRUCTIONS]
     if not instructions and not types:
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
         return None
     mode = _field(raw, prev, "mode", "explore").strip().lower()
     if mode not in ("explore", "exploit"):
@@ -1092,11 +1068,7 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
             return {
                 "status": "rejected",
                 "rejected": rejected,
-<<<<<<< HEAD
-                "note": note,
-=======
                 "note": _reject_note(rejected),
->>>>>>> 209a5d0 (Persist the lab playbook as a TYPE tree Grok can fill.)
             }
         return None
     score = None
