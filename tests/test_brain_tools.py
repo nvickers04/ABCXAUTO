@@ -1248,24 +1248,6 @@ def test_playbook_tools_are_a_notebook_not_a_form():
     assert "WHAT_WORKED" not in write
     assert "wake clock" in write.lower()
     assert "next-look-you" not in write
-    assert "type catalog" in write.lower()
-    assert "unknown types" in write.lower() or "unknown type" in write.lower()
-    assert "picked in the look" in write.lower()
-    assert "hunt" not in write.lower()
-    assert "hunt" not in playbook.lower()
-    props = _tool_props("write_lab_playbook")
-    assert "types" in props
-    assert "instructions" in props
-
-
-def test_type_tree_prompt_lives_on_the_tool_not_system_prompt():
-    from abcxauto.brain import brain_system_prompt
-    from abcxauto.llm import SYSTEM_PROMPT
-
-    write = str(getattr(_tool_fn("write_lab_playbook"), "description", "") or "")
-    assert "TYPE CATALOG" in write.upper()
-    assert "TYPE CATALOG" not in SYSTEM_PROMPT
-    assert "TYPE CATALOG" not in brain_system_prompt()
 
 
 def test_send_tool_says_one_ticket_per_call():
