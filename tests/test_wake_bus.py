@@ -203,6 +203,23 @@ def test_set_wake_paper_premarket_is_noop_clock(tmp_path, monkeypatch):
     assert load_alarm().wake_at is None
     out = ensure_next_look(previous_set_at="", session="premarket", flat=True)
     assert out.wake_at is None
+    assert load_alarm().wake_at is None
+
+
+def test_ensure_next_look_paper_premarket_silent_no_sit_clock(tmp_path, monkeypatch):
+    """Paper premarket + skipped set_wake must not synthesize a park until the open."""
+    from abcxauto.wake_bus import ensure_next_look, load_alarm
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "30")
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
+    alarm = ensure_next_look(previous_set_at="", session="premarket", flat=True)
+    assert alarm.wake_at is None
+    assert load_alarm().wake_at is None
 
 
 def test_set_wake_live_premarket_allows_long_park(tmp_path, monkeypatch):
@@ -269,6 +286,31 @@ def test_set_wake_offered_only_outside_rth(monkeypatch):
     assert set_wake_offered(session="premarket") is False
     assert set_wake_offered(session="closed") is True
     assert set_wake_offered(session="postmarket") is True
+
+
+def test_set_wake_offered_live_premarket(monkeypatch):
+    from abcxauto.wake_bus import set_wake_offered
+
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
+    assert set_wake_offered(session="premarket") is True
+    assert set_wake_offered(session="regular") is False
+    assert set_wake_offered(session="closed") is True
+
+
+def test_set_wake_paper_postmarket_still_parks(tmp_path, monkeypatch):
+    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
+    alarm = set_wake(wake_in_s=3600, session="postmarket", flat=True)
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    remaining = (at - _utc_now()).total_seconds()
+    assert 3590 <= remaining <= 3610
 
 
 def test_book_move_wakes_on_mark_bucket(monkeypatch):

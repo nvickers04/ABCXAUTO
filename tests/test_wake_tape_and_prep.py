@@ -137,9 +137,14 @@ def test_day_facts_flat_book_still_seeds_legal_tape(legal_tape):
     assert day["tape_seed"] != sorted(day["tape_seed"])
 
 
-def test_format_wake_no_tape_keeps_lots_and_minutes():
+def test_format_wake_no_tape_keeps_lots_and_minutes(monkeypatch):
     from abcxauto.wake_bus import note_wake
 
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
     note_wake(None)
     text = format_wake(
         cycle=1,
@@ -172,7 +177,8 @@ def test_format_wake_no_tape_keeps_lots_and_minutes():
     assert "session_prep" not in text
     assert "estimate" not in text.lower()
     assert "you must" not in text.lower()
-    assert text.rstrip().endswith("send|set_wake.")
+    assert text.rstrip().endswith("send.")
+    assert "set_wake" not in text
 
 
 def test_format_wake_rth_fill_delta_no_tape_when_flat():

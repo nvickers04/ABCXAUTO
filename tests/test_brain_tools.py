@@ -841,11 +841,22 @@ def test_agent_tools_omits_set_wake_in_rth():
     assert "send" in _names_of(agent_tools(session="regular"))
 
 
-def test_agent_tools_keeps_set_wake_overnight():
+def test_agent_tools_keeps_set_wake_overnight(monkeypatch):
     from abcxauto.brain import agent_tools
 
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     for sess in ("closed", "postmarket"):
         assert "set_wake" in _names_of(agent_tools(session=sess))
+
+
+def test_agent_tools_omits_set_wake_paper_premarket(monkeypatch):
+    from abcxauto.brain import agent_tools
+
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
     assert "set_wake" not in _names_of(agent_tools(session="premarket"))
 
 
@@ -1096,9 +1107,14 @@ def test_new_chat_does_not_force_a_tool():
     assert "set_wake" not in _names_of(captured.get("tools") or [])
 
 
-def test_new_chat_premarket_omits_set_wake():
+def test_new_chat_premarket_omits_set_wake(monkeypatch):
     from abcxauto.brain import _new_chat
 
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_risk_gate",
+        lambda: type("G", (), {"is_halted": False})(),
+    )
     captured: dict = {}
 
     class _ChatNS:
