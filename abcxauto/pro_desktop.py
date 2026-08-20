@@ -1,4 +1,10 @@
-"""ABCXAUTO Pro — one-screen developer console over ProEngine."""
+"""ABCXAUTO Pro — three-column Flet cockpit over ProEngine.
+
+One surface per thing the project actually has: the live look (Dashboard),
+Grok's think stream (Stream), the screen Grok pulled (Scan), the broker book
+(Positions), Grok's setup cards (Playbook), how that book is scoring against
+the model bill (Scorecard), and the walk-away floor (Risk).
+"""
 
 from __future__ import annotations
 
@@ -20,8 +26,10 @@ from abcxauto.reality_pulse import build_reality_pulse, pulse_clock_view
 
 logger = logging.getLogger(__name__)
 
+# X Lights Out palette — look only; nav/controls are product labels
 BG = "#000000"
 SURFACE = "#16181c"
+HOVER = "#181818"
 BORDER = "#2f3336"
 TEXT = "#e7e9ea"
 MUTED = "#71767b"
@@ -32,41 +40,167 @@ AMBER = "#ffd400"
 WHITE = "#ffffff"
 
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+LOGO_SRC = "abcxauto_logo.png"
 TITLE = "ABCXAUTO Pro"
 PRO_TITLE = TITLE
+
+RAIL_W = 260
+ASIDE_W = 320
+CENTER_MIN_W = 520
+
+# key, label, outlined icon, filled icon
+NAV = [
+    ("overview", "Dashboard", ft.Icons.DASHBOARD_OUTLINED, ft.Icons.DASHBOARD),
+    (
+        "positions",
+        "Positions",
+        ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED,
+        ft.Icons.ACCOUNT_BALANCE_WALLET,
+    ),
+    ("notebook", "Playbook", ft.Icons.MENU_BOOK_OUTLINED, ft.Icons.MENU_BOOK),
+    ("scorecard", "Scorecard", ft.Icons.BAR_CHART_OUTLINED, ft.Icons.BAR_CHART),
+    ("risk", "Risk", ft.Icons.SHIELD_OUTLINED, ft.Icons.SHIELD),
+    ("settings", "Settings", ft.Icons.TUNE_OUTLINED, ft.Icons.TUNE),
+]
+NAV_TITLES = {
+    "overview": "Dashboard",
+    "positions": "Positions",
+    "notebook": "Playbook",
+    "scorecard": "Scorecard",
+    "risk": "Risk",
+    "settings": "Settings",
+}
+NAV_SUBTITLES = {
+    "overview": "Grok thinking, live. Looks, tools, tickets as they happen.",
+    "positions": "Broker book — lots, working orders, fills, activity.",
+    "notebook": "Grok's setup cards. Playbook, not law.",
+    "scorecard": "Are the setups beating the model bill?",
+    "risk": "The walk-away floor. Grok self_tunes inside it.",
+    "settings": "Brain, pacing and link. Applies without a restart.",
+}
+CARD_STATUS_COLOR = {"working": GREEN, "testing": AMBER, "retired": MUTED}
+# Settings fields, grouped the way the page shows them. label, hint.
+BRAIN_FIELDS = (
+    ("model", "Model", "beats ABCXAUTO_MODEL — next look rebuilds"),
+    ("temperature", "Temperature", "0.0 – 2.0"),
+    ("max_tokens", "Max tokens", "1024 – 131072 per turn"),
+)
+PACING_FIELDS = (
+    ("monitor_poll_s", "Monitor poll", "seconds, 5 – 900"),
+    ("monitor_review_s", "Monitor review", "seconds, 30 – 21600"),
+    ("disconnect_halt_s", "Disconnect halt", "seconds down before halt, 1 – 900"),
+)
+LINK_FIELDS = (
+    ("ibkr_host", "IBKR host", "TWS host — disconnected only"),
+    ("ibkr_client_id", "IBKR client id", "one per process — disconnected only"),
+)
+AGENT_FIELD_KEYS = frozenset(
+    k for k, _l, _h in (*BRAIN_FIELDS, *PACING_FIELDS, *LINK_FIELDS)
+)
+# The walk-away floor. Operator may re-arm; nothing in the UI may disarm.
+FLOOR_GATES = (
+    ("defined_risk_only", "Defined-risk only"),
+    ("cash_only", "Cash only"),
+    ("risk_gates_enabled", "Pre-trade gates"),
+    ("auto_panic_on_breach", "Auto-panic on breach"),
+)
+RISK_FIELDS = (
+    ("max_risk_per_trade_pct", "Max risk / trade", "% of NetLiq, 0.25 – 25"),
+    ("daily_loss_limit_pct", "Daily loss limit", "% of NetLiq, 0.5 – 25"),
+    ("max_position_pct", "Max position", "% of NetLiq, 5 – 25"),
+    ("max_peak_drawdown_pct", "Peak drawdown", "% of NetLiq, 2 – 25"),
+    ("max_option_premium_pct", "Max option premium", "% of NetLiq, 1 – 25"),
+    ("max_open_positions", "Max open lots", "slots, 1 – 25"),
+)
+# ProEngine._note kinds. Anything not listed still paints its message in MUTED,
+# so a new note kind is visible the day it is added.
+NOTE_COLOR = {"err": RED, "error": RED, "retry": AMBER, "park": AMBER, "pause": AMBER}
+PAGE_REFRESH_S = 3.0
+# The spine paints the readable tail — same size as the think_tail.txt mirror.
+# The raw fallback label stays short so an off-screen buffer is a small diff.
+STREAM_TAIL_CHARS = 8000
+STREAM_RAW_TAIL_CHARS = 1800
+STREAM_MAX_LINES = 180
+# Markers think_stream/brain emit. The text is Grok's — we colour it, never
+# rewrite it. Anything unlisted paints as prose, so a new marker still shows.
+STREAM_ALARM = (
+    "[stream failed",
+    "[stream stalled]",
+    "[stream loop]",
+    "timed out",
+)
+STREAM_WARN = ("[think stopped:", "[truncated: max_tokens]")
+STREAM_POKE = ("[fill]", "[order_change]", "[unprotected]")
+
+
+def stream_line_kind(line: str) -> str:
+    """Marker class for one raw stream line. Reads the text, never edits it."""
+    s = (line or "").strip()
+    if not s:
+        return "blank"
+    if s.startswith("--- GROK"):
+        return "banner"
+    if s == "[think]":
+        return "think"
+    if s == "[say]":
+        return "say"
+    if s in STREAM_POKE:
+        return "poke"
+    if any(frag in s for frag in STREAM_ALARM):
+        return "alarm"
+    if any(frag in s for frag in STREAM_WARN):
+        return "warn"
+    if s.startswith("[") and s.endswith("]"):
+        if "= already have it" in s:
+            return "cached"
+        return "send" if s == "[send]" else "tool"
+    if s.startswith("hits=") and " src=" in s:
+        return "scan"
+    return "prose"
 
 
 class ProTerminal:
     def __init__(self, page: ft.Page):
         self.page = page
         self.engine = ProEngine()
+        self.tab = "overview"
         self._think_sync_key: str | None = None  # None = never painted, "" = painted empty
-        self._think_need_scroll = False
         self._build_refs()
         self._sync_widgets()
 
     def _build_refs(self) -> None:
         self.lbl_title = ft.Text("ABCXAUTO", size=18, weight=ft.FontWeight.BOLD, color=TEXT)
-        self.lbl_model = ft.Text("Grok —", size=12, color=MUTED)
-        self.lbl_status = ft.Text("Safe", size=13, weight=ft.FontWeight.W_600, color=MUTED)
-        self.lbl_mode = self.lbl_status
-        self.lbl_clock = ft.Text("—", size=13, weight=ft.FontWeight.W_600, color=TEXT)
-        self.lbl_session_badge = ft.Text("—", size=12, weight=ft.FontWeight.W_600, color=AMBER)
-        self.dot_conn = ft.Container(width=8, height=8, border_radius=4, bgcolor=RED)
-        self.dot_xai = ft.Container(width=8, height=8, border_radius=4, bgcolor=RED)
-        self.dot_mda = ft.Container(width=8, height=8, border_radius=4, bgcolor=RED)
-        self.lbl_ibkr_status = ft.Text("IBKR down", size=12, color=MUTED)
-        self.lbl_xai_status = ft.Text("xAI", size=12, color=MUTED)
-        self.lbl_mda_status = ft.Text("MDA", size=12, color=MUTED)
+        self.lbl_model = ft.Text("Grok —", size=11, color=MUTED)
+        self.lbl_status = ft.Text("Safe", size=18, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_clock = ft.Text("—", size=14, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_session_badge = ft.Text("—", size=11, weight=ft.FontWeight.W_600, color=AMBER)
+        self.lbl_countdown_title = ft.Text("Close time", size=11, color=MUTED)
+        self.lbl_countdown = ft.Text("—", size=11, color=TEXT)
+        self.lbl_data_age = ft.Text("n/a", size=11, color=TEXT)
+        self.lbl_mandate_health = ft.Text(
+            "green — protected", size=11, weight=ft.FontWeight.W_600, color=GREEN
+        )
+        self.lbl_pulse_narrative = ft.Text(
+            "Reality Pulse idle — Start for live awareness.",
+            size=12,
+            color=MUTED,
+            selectable=True,
+        )
+        self.dot_conn = ft.Container(width=10, height=10, border_radius=5, bgcolor=RED)
+        self.dot_xai = ft.Container(width=10, height=10, border_radius=5, bgcolor=RED)
+        self.dot_mda = ft.Container(width=10, height=10, border_radius=5, bgcolor=RED)
+        self.lbl_ibkr_status = ft.Text("Disconnected", size=12, color=MUTED)
+        self.lbl_xai_status = ft.Text("Missing key", size=12, color=MUTED)
+        self.lbl_mda_status = ft.Text("Not configured", size=12, color=MUTED)
         self.lbl_link = ft.Text("", size=11, color=MUTED, selectable=True)
         self.lbl_banner = ft.Text("", size=12, color=AMBER, selectable=True, visible=False)
         self.lbl_tools = ft.Text("Tools: —", size=12, color=MUTED, selectable=True)
         self.lbl_playbook = ft.Text("Playbook: —", size=12, color=MUTED, selectable=True)
-        self.lbl_score = ft.Text("Score: —", size=12, color=MUTED, selectable=True)
+        self.lbl_score = ft.Text("Score: —", size=13, color=MUTED, selectable=True)
         self.lbl_session_score = ft.Text("sess —", size=12, color=MUTED, selectable=True)
         self._score_last = 0.0
-        self.lbl_account_name = ft.Text("IBKR", size=12, weight=ft.FontWeight.W_600, color=TEXT)
-        self.lbl_account_id = ft.Text("Not connected", size=11, color=MUTED)
+        self.lbl_account_name = ft.Text("IBKR", size=14, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_account_id = ft.Text("Not connected", size=12, color=MUTED)
         self.lbl_account_mode = ft.Text("Paper", size=12, weight=ft.FontWeight.W_600, color=GREEN)
         self.btn_account_mode = ft.Container(
             content=self.lbl_account_mode,
@@ -95,47 +229,70 @@ class ProTerminal:
             color=TEXT,
             bgcolor=SURFACE,
             border_color=BORDER,
+            focused_border_color=BLUE,
             width=320,
         )
-        self.lbl_equity = ft.Text("$0", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_equity = ft.Text("$0", size=28, weight=ft.FontWeight.BOLD, color=TEXT)
         self.lbl_equity_sub = ft.Text("", size=11, color=MUTED)
-        self.lbl_pnl = ft.Text("$+0.00", size=16, weight=ft.FontWeight.W_600, color=GREEN)
+        self.lbl_pnl = ft.Text("$+0.00", size=14, weight=ft.FontWeight.W_600, color=GREEN)
         self.lbl_pnl_pct = ft.Text("", size=11, color=MUTED)
-        self.lbl_book_netliq = self.lbl_equity
-        self.lbl_book_pnl = self.lbl_pnl
-        self.lbl_unprotected = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=GREEN)
-        self.lbl_book_unprotected = self.lbl_unprotected
-        self.lbl_halt = ft.Text("clear", size=16, weight=ft.FontWeight.W_600, color=GREEN)
-        self.lbl_book_halt = self.lbl_halt
-        self.lbl_edge = ft.Text("—", size=16, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_ret_1w = ft.Text("—", size=14, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_ret_3m = ft.Text("—", size=14, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_ret_1y = ft.Text("—", size=14, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_ret_source = ft.Text("IBKR NAV — building history…", size=10, color=MUTED)
+        self._ret_cache: dict | None = None
+        self._ret_last_fetch = 0.0
+        self.news_list = ft.Column(spacing=0, tight=True)
+        self._news_last_fetch = 0.0
+        self._news_cache: list[dict] = []
+        self.lbl_unprotected = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=GREEN)
+        self.lbl_halt = ft.Text("clear", size=18, weight=ft.FontWeight.W_600, color=GREEN)
+        self.lbl_edge = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=MUTED)
         self.lbl_edge_sub = ft.Text("vs model", size=11, color=MUTED)
-        self.lbl_open_upnl = ft.Text("—", size=16, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_open_upnl = ft.Text("—", size=18, weight=ft.FontWeight.W_600, color=MUTED)
         self.lbl_open_upnl_sub = ft.Text("open marks", size=11, color=MUTED)
-        self.lbl_desk = ft.Text("Grok off", size=16, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_desk = ft.Text("Grok off", size=18, weight=ft.FontWeight.W_600, color=MUTED)
         self.lbl_desk_sub = ft.Text("", size=11, color=MUTED)
-        self.lbl_lot_count = ft.Text("0", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
-        self.lbl_next_look = ft.Text("—", size=16, weight=ft.FontWeight.W_600, color=MUTED)
-        self.lbl_next_look_sub = ft.Text("", size=11, color=MUTED)
+        self.lbl_lot_count = ft.Text("0", size=18, weight=ft.FontWeight.BOLD, color=TEXT)
         self.lbl_mix = ft.Text("Mix: —", size=12, color=MUTED, selectable=True)
         self.lbl_path = ft.Text("Path: —", size=12, color=MUTED, selectable=True)
         self._path_last = 0.0
-        self._look_last = 0.0
+        self._page_last = 0.0
         self._brief_last = 0.0
         self._brief_row: dict = {}
         self._prev_text: str | None = None
-        self.lbl_risk = ft.Text("—", size=13, color=MUTED, selectable=True)
+        self.lbl_risk = ft.Text("—", size=12, color=MUTED, selectable=True)
         self.lbl_pace = ft.Text("Pace: —", size=12, color=MUTED, selectable=True)
-        self.lbl_dash_pace = self.lbl_pace
         self.lbl_last_send = ft.Text("Last send: —", size=13, color=MUTED, selectable=True)
-        self.lbl_agent_judgment = self.lbl_last_send
         self.lbl_result = ft.Text("Result: —", size=13, color=MUTED, selectable=True)
-        self.brain_action = self.lbl_result
         self.lbl_why = ft.Text("Why: —", size=12, color=MUTED, selectable=True)
-        self.brain_rationale = self.lbl_why
         self.lbl_focus = ft.Text("Focus: —", size=12, color=MUTED, selectable=True)
-        self.lbl_agent_read = self.lbl_focus
+        self.lbl_lessons = ft.Text("", size=11, color=AMBER, selectable=True, visible=False)
+        # ---- Scan tape: the screen Grok pulled, in IBKR's own order.
+        self.lbl_scan_head = ft.Text(
+            "No screen this session — Grok runs the scanner.",
+            size=11,
+            color=MUTED,
+            selectable=True,
+        )
+        self.col_scan = ft.Column(spacing=3, tight=True)
+        self._scan_key = ""
+        # ---- Health strip: the three things that make the operator step in —
+        # silence, burn, and a link that explains a quiet desk. Not risk numbers.
+        self.lbl_hs_state = ft.Text("off", size=12, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_hs_age = ft.Text("no look yet", size=11, color=MUTED, selectable=True)
+        self.lbl_hs_next = ft.Text("", size=11, color=MUTED, selectable=True)
+        self.lbl_hs_burn = ft.Text("no looks yet", size=12, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_hs_look = ft.Text("this look: —", size=11, color=MUTED, selectable=True)
+        self.lbl_hs_cost = ft.Text("model —", size=11, color=MUTED, selectable=True)
+        self.lbl_hs_link = ft.Text("link —", size=11, color=MUTED, selectable=True)
+        self.health_box = ft.Container(padding=0)
+        self._sc_last: dict = {}
+        # ---- Book strip: context for reading the stream, not a risk panel.
+        self.lbl_book_strip = ft.Text("No open lots", size=12, color=MUTED, selectable=True)
+        self.col_book_strip = ft.Column(spacing=2, tight=True)
+        self._book_strip_key = ""
         self.lbl_stream_status = ft.Text("Grok stream", size=12, color=MUTED)
-        self.lbl_wake = ft.Text("", size=12, color=MUTED, selectable=True)
         self.think_live = ft.Text(
             "Grok stream: waiting for tools...",
             size=13,
@@ -145,31 +302,56 @@ class ProTerminal:
             font_family="Consolas",
         )
         self.btn_copy_stream = self._btn("Copy stream", outlined=True, on_click=self._copy_stream)
+        # The spine: one control per stream line so markers can be styled. The
+        # raw label above stays the plain-text fallback and the empty state.
+        self.col_stream = ft.Column(spacing=0, tight=True)
+        self._stream_lines_key = ""
+        self._stream_follow = True
+        self.lbl_stream_follow = ft.Text("live", size=11, weight=ft.FontWeight.W_600, color=GREEN)
+        self.btn_stream_follow = ft.Container(
+            content=self.lbl_stream_follow,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+            border=ft.Border.all(1, GREEN),
+            border_radius=999,
+            ink=True,
+            tooltip="Following the tail. Click to hold position / jump back to live.",
+            on_click=self._toggle_stream_follow,
+        )
+        # auto_scroll pins the tail on the client. A server-side scroll_to here is
+        # an invoke_method, and its result can land after a tab swap has already
+        # unregistered this control — which kills flet's receive loop.
         self.think_scroll = ft.Column(
-            [self.think_live],
+            [self.col_stream, self.think_live],
             scroll=ft.ScrollMode.AUTO,
+            auto_scroll=True,
             expand=True,
             spacing=0,
         )
+        # ---- Positions blotter: one row control per record, text form kept as fallback.
         self.lbl_positions = ft.Text("No open positions", size=12, color=MUTED, selectable=True)
-        self.lbl_pos_summary = self.lbl_positions
         self.lbl_working_orders = ft.Text(
             "No working orders", size=12, color=MUTED, selectable=True
         )
         self.lbl_recent_fills = ft.Text(
             "No fills this session", size=12, color=MUTED, selectable=True
         )
-        self.lbl_activity = ft.Text(
-            "Connect IBKR.",
-            size=12,
-            color=MUTED,
-            selectable=True,
+        self.lbl_activity = ft.Text("Connect IBKR.", size=12, color=MUTED, selectable=True)
+        self.col_lots = ft.Column(
+            [self.lbl_positions], spacing=3, scroll=ft.ScrollMode.AUTO, expand=True
         )
-        self.lbl_cycle_log = self.lbl_activity
-        self.lbl_risk_halt = self.lbl_halt
-        self.lbl_risk_status = ft.Text("", size=12, color=MUTED, selectable=True)
-        self.col_lots = ft.Column([self.lbl_positions], spacing=3, scroll=ft.ScrollMode.AUTO)
+        self.col_orders = ft.Column(
+            [self.lbl_working_orders], spacing=3, scroll=ft.ScrollMode.AUTO, expand=True
+        )
+        self.col_fills = ft.Column(
+            [self.lbl_recent_fills], spacing=3, scroll=ft.ScrollMode.AUTO, expand=True
+        )
+        self.col_activity = ft.Column(
+            [self.lbl_activity], spacing=3, scroll=ft.ScrollMode.AUTO, expand=True
+        )
         self._lots_key = ""
+        self._orders_key = ""
+        self._fills_key = ""
+        self._activity_key = ""
         self._tab = "lots"
         self.tabs: dict[str, dict[str, Any]] = {}
         for key, label in (
@@ -179,18 +361,14 @@ class ProTerminal:
             ("log", "Activity"),
         ):
             self.tabs[key] = self._tab_chip(key, label)
-        self.col_lots.expand = True
         self.tab_bodies: dict[str, ft.Control] = {
             "lots": self.col_lots,
-            "orders": ft.Column(
-                [self.lbl_working_orders], scroll=ft.ScrollMode.AUTO, expand=True
-            ),
-            "fills": ft.Column(
-                [self.lbl_recent_fills], scroll=ft.ScrollMode.AUTO, expand=True
-            ),
-            "log": ft.Column([self.lbl_activity], scroll=ft.ScrollMode.AUTO, expand=True),
+            "orders": self.col_orders,
+            "fills": self.col_fills,
+            "log": self.col_activity,
         }
-        # One line each — a long rationale must not reserve blank rows or squeeze the tabs.
+        self.lbl_risk_status = ft.Text("", size=12, color=MUTED, selectable=True)
+        # One line each — a long rationale must not reserve blank rows.
         for lbl in (
             self.lbl_banner,
             self.lbl_mix,
@@ -204,53 +382,199 @@ class ProTerminal:
             self.lbl_result,
             self.lbl_why,
             self.lbl_focus,
+            self.lbl_lessons,
+            self.lbl_scan_head,
         ):
             lbl.max_lines = 1
             lbl.overflow = ft.TextOverflow.ELLIPSIS
-        self.btn_connect = self._btn("Connect IBKR", outlined=True, on_click=self._toggle_connect)
-        self.btn_run = self._btn("Start", filled=True, on_click=self._toggle_run)
-        self.btn_halt = self._btn("Halt", outlined=True, on_click=self._toggle_halt)
-        self.btn_refresh = self._btn("Refresh book", outlined=True, on_click=self._refresh_book)
-        self.btn_notebook = self._btn("Notebook", outlined=True, on_click=self._open_notebook)
-        self.lbl_notebook_head = ft.Text("", size=12, color=MUTED, selectable=True)
+        self.btn_connect = self._btn(
+            "Connect IBKR", outlined=True, on_click=self._toggle_connect, width=228
+        )
+        self.btn_run = self._btn("Start", filled=True, on_click=self._toggle_run, width=228)
+        self.btn_halt = self._btn("Halt", outlined=True, on_click=self._toggle_halt, width=228)
+        self.btn_refresh = self._btn(
+            "Refresh book", outlined=True, on_click=self._refresh_book, width=228
+        )
+        self.lbl_run_state = ft.Text("Grok off", size=12, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_alert = ft.Text("", size=12, color=RED, selectable=True, visible=False)
+        # Facts the Cockpit computes; the Dashboard stays a live look, not a report.
+        self._hidden_metrics = ft.Column(
+            [
+                self.lbl_session_score,
+                self.lbl_path,
+                self.lbl_playbook,
+                self.lbl_tools,
+            ],
+            visible=False,
+            spacing=0,
+        )
+        # ---- Notebook page
+        self.lbl_notebook_head = ft.Text("", size=13, color=TEXT, selectable=True)
+        self.lbl_notebook_meta = ft.Text("", size=12, color=MUTED, selectable=True)
+        self.lbl_notebook_lots = ft.Text("", size=11, color=MUTED, selectable=True)
         self.lbl_notebook_body = ft.Text(
             "",
-            size=13,
+            size=12,
             color=TEXT,
             selectable=True,
             no_wrap=False,
             font_family="Consolas",
         )
-        self.btn_risk = self._btn("Risk", outlined=True, on_click=self._open_risk_settings)
+        self.col_notebook_cards = ft.Column(spacing=8, tight=True)
+        self.notebook_raw_panel = ft.Container(visible=False)
+        self._notebook_key = ""
+        # ---- Scorecard page
+        self.lbl_sc_netliq = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_sc_verdict = ft.Text("—", size=13, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_sc_score = ft.Text("Score: —", size=12, color=MUTED, selectable=True)
+        self.lbl_sc_session = ft.Text("sess —", size=12, color=MUTED, selectable=True)
+        self.lbl_sc_path = ft.Text("Path: —", size=12, color=MUTED, selectable=True)
+        self.lbl_sc_mix = ft.Text("Mix: —", size=12, color=MUTED, selectable=True)
+        self.lbl_sc_strats = ft.Text("", size=12, color=MUTED, selectable=True)
+        self.col_sc_windows = ft.Column(spacing=3, tight=True)
+        self.col_sc_cards = ft.Column(spacing=3, tight=True)
+        self.col_sc_ledger = ft.Column(spacing=3, tight=True)
+        # ---- Risk page
         self.lbl_risk_glance = ft.Text("", size=12, color=MUTED, selectable=True, no_wrap=False)
-        self.tf_risk_trade_pct = ft.TextField(
-            label="max risk / trade %",
+        self.col_risk_knobs = ft.Column(spacing=3, tight=True)
+        self.lbl_risk_posture = ft.Text("—", size=13, weight=ft.FontWeight.W_600, color=TEXT)
+        self.lbl_risk_floors = ft.Text("", size=12, color=MUTED, selectable=True)
+        self.sw_size_floors = ft.Switch(
+            value=False,
+            active_color=GREEN,
+            on_change=self._toggle_sizing_floors,
+        )
+        self.lbl_risk_halt_state = ft.Text("", size=13, weight=ft.FontWeight.W_600, color=GREEN)
+        self.lbl_risk_halt_math = ft.Text("", size=12, color=MUTED, selectable=True)
+        # An open edit must survive the 3s page repaint, so a touched field is
+        # dirty until it is applied or the page is refreshed.
+        self.fields: dict[str, ft.TextField] = {}
+        self.gates: dict[str, ft.Switch] = {}
+        self._dirty: set[str] = set()
+        for key in (
+            "max_risk_per_trade_pct",
+            "daily_loss_limit_pct",
+            "max_position_pct",
+            "max_peak_drawdown_pct",
+            "max_option_premium_pct",
+            "max_open_positions",
+        ):
+            self._num_field(key)
+        for key in (
+            "defined_risk_only",
+            "cash_only",
+            "risk_gates_enabled",
+            "auto_panic_on_breach",
+        ):
+            self.gates[key] = ft.Switch(
+                value=True,
+                active_color=GREEN,
+                on_change=lambda e, k=key: self._toggle_floor_gate(k),
+            )
+        self._risk_key = ""
+        # ---- Settings page
+        for key in (
+            "model",
+            "temperature",
+            "max_tokens",
+            "monitor_poll_s",
+            "monitor_review_s",
+            "disconnect_halt_s",
+            "ibkr_host",
+            "ibkr_client_id",
+        ):
+            self._num_field(key, width=150 if key in ("model", "ibkr_host") else 110)
+        for key in ("monitor_enabled", "monitor_extended_hours"):
+            self.gates[key] = ft.Switch(
+                value=True,
+                active_color=BLUE,
+                on_change=lambda e, k=key: self._apply_agent_switch(k),
+            )
+        self.lbl_settings_status = ft.Text("", size=12, color=MUTED, selectable=True)
+        self.lbl_settings_link = ft.Text("", size=12, color=TEXT, selectable=True)
+        self.lbl_settings_mode = ft.Text("Paper", size=13, weight=ft.FontWeight.W_600, color=GREEN)
+        self.lbl_settings_brain = ft.Text("", size=11, color=MUTED, selectable=True)
+        self.lbl_settings_path = ft.Text("", size=11, color=MUTED, selectable=True)
+        self.lbl_dash_tools = ft.Text("Tools: —", size=12, color=MUTED, selectable=True)
+        self.lbl_nb_playbook = ft.Text("Playbook: —", size=12, color=MUTED, selectable=True)
+        for lbl in (self.lbl_dash_tools, self.lbl_nb_playbook):
+            lbl.max_lines = 1
+            lbl.overflow = ft.TextOverflow.ELLIPSIS
+        self.content = ft.Container(expand=True, padding=0)
+        self.sidebar_btns: dict[str, ft.Container] = {}
+        self.sidebar_icons: dict[str, ft.Icon] = {}
+        self.sidebar_labels: dict[str, ft.Text] = {}
+        self.sidebar_icon_pair: dict[str, tuple] = {}
+        self.lbl_center_title = ft.Text("Dashboard", size=20, weight=ft.FontWeight.BOLD, color=TEXT)
+        self.lbl_center_subtitle = ft.Text(NAV_SUBTITLES["overview"], size=12, color=MUTED)
+
+    # ---------------------------------------------------------------- widgets
+
+    def _num_field(self, key: str, *, width: int = 120) -> ft.TextField:
+        """One editable config field. Enter applies it; typing marks it dirty."""
+        tf = ft.TextField(
             dense=True,
+            width=width,
             color=TEXT,
             bgcolor=SURFACE,
             border_color=BORDER,
-            width=180,
+            focused_border_color=BLUE,
+            text_size=12,
+            content_padding=8,
+            on_change=lambda _e, k=key: self._dirty.add(k),
+            on_submit=lambda _e, k=key: self._apply_field(k),
         )
-        self.lbl_run_state = ft.Text("Grok off", size=12, weight=ft.FontWeight.W_600, color=MUTED)
-        self.lbl_alert = ft.Text("", size=12, color=RED, selectable=True, visible=False)
-        self._hidden_metrics = ft.Column(
-            [
-                self.lbl_mix,
-                self.lbl_score,
-                self.lbl_session_score,
-                self.lbl_path,
-                self.lbl_pace,
-                self.lbl_playbook,
-                self.lbl_risk,
-                self.lbl_tools,
-                self.lbl_result,
-                self.lbl_why,
-                self.lbl_focus,
-                self.lbl_edge,
-                self.lbl_edge_sub,
-            ],
-            visible=False,
-            spacing=0,
+        self.fields[key] = tf
+        return tf
+
+    def _set_field(self, key: str, value: Any) -> None:
+        tf = self.fields.get(key)
+        if tf is None or key in self._dirty:
+            return
+        if isinstance(value, bool) or value is None:
+            tf.value = ""
+        elif isinstance(value, float):
+            tf.value = f"{value:g}"
+        else:
+            tf.value = str(value)
+
+    def _field_row(
+        self, key: str, label: str, hint: str, *, control: ft.Control | None = None
+    ) -> ft.Control:
+        body: list[ft.Control] = [
+            ft.Container(expand=True, content=ft.Text(label, size=12, color=TEXT)),
+            ft.Container(
+                width=232,
+                tooltip=hint,
+                content=ft.Text(
+                    hint,
+                    size=11,
+                    color=MUTED,
+                    no_wrap=True,
+                    overflow=ft.TextOverflow.ELLIPSIS,
+                ),
+            ),
+            control if control is not None else self.fields[key],
+        ]
+        if control is None:
+            body.append(
+                ft.Container(
+                    width=30,
+                    height=30,
+                    border_radius=15,
+                    border=ft.Border.all(1, BORDER),
+                    alignment=ft.Alignment.CENTER,
+                    ink=True,
+                    tooltip="Apply",
+                    on_click=lambda _e, k=key: self._apply_field(k),
+                    content=ft.Icon(ft.Icons.CHECK, size=15, color=TEXT),
+                )
+            )
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+            border_radius=6,
+            border=ft.Border.all(1, BORDER),
+            content=ft.Row(body, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         )
 
     def _tab_chip(self, key: str, label: str) -> dict[str, Any]:
@@ -271,10 +595,18 @@ class ProTerminal:
         self._sync_tabs()
         self._safe_update()
 
-    def _btn(self, text: str, *, on_click, filled: bool = False, outlined: bool = False) -> ft.Button:
+    def _btn(
+        self,
+        text: str,
+        *,
+        on_click,
+        filled: bool = False,
+        outlined: bool = False,
+        width: int | None = None,
+    ) -> ft.Button:
         style = ft.ButtonStyle(
-            shape=ft.RoundedRectangleBorder(radius=8),
-            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+            shape=ft.RoundedRectangleBorder(radius=999),
+            padding=ft.Padding.symmetric(horizontal=18, vertical=11),
             side=ft.BorderSide(1, BORDER) if outlined or not filled else None,
         )
         btn = ft.Button(
@@ -285,7 +617,82 @@ class ProTerminal:
             on_click=on_click,
         )
         btn.text = text
+        if width:
+            btn.width = width
         return btn
+
+    def _avatar(self, letter: str = "A", size: int = 40) -> ft.Container:
+        return ft.Container(
+            width=size,
+            height=size,
+            border_radius=size // 2,
+            bgcolor=SURFACE,
+            alignment=ft.Alignment.CENTER,
+            content=ft.Text(letter, size=size // 2, weight=ft.FontWeight.BOLD, color=TEXT),
+        )
+
+    @staticmethod
+    def _chip(text: str, color: str) -> ft.Container:
+        return ft.Container(
+            content=ft.Text(text, size=11, weight=ft.FontWeight.W_600, color=color),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+            border=ft.Border.all(1, color),
+            border_radius=999,
+        )
+
+    @staticmethod
+    def _cell(
+        text: str,
+        *,
+        width: int | None = None,
+        expand: bool = False,
+        color: str = TEXT,
+        size: int = 12,
+        mono: bool = False,
+        right: bool = False,
+        weight: Any = None,
+    ) -> ft.Control:
+        label = ft.Text(
+            text,
+            size=size,
+            color=color,
+            no_wrap=True,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            font_family="Consolas" if mono else None,
+            text_align=ft.TextAlign.RIGHT if right else None,
+            weight=weight,
+        )
+        if expand:
+            return ft.Container(expand=True, content=label)
+        return ft.Container(width=width, content=label)
+
+    def _blotter_row(self, cells: list[ft.Control], *, alert: bool = False) -> ft.Container:
+        return ft.Container(
+            content=ft.Row(cells, spacing=6),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=5),
+            border_radius=6,
+            bgcolor=SURFACE if alert else BG,
+            border=ft.Border.all(1, RED if alert else BORDER),
+        )
+
+    def _head_row(self, cols: list[tuple[str, int | None]]) -> ft.Container:
+        cells = [
+            self._cell(
+                name,
+                width=w,
+                expand=w is None,
+                color=MUTED,
+                size=11,
+                weight=ft.FontWeight.W_600,
+            )
+            for name, w in cols
+        ]
+        return ft.Container(
+            content=ft.Row(cells, spacing=6),
+            padding=ft.Padding.only(left=8, right=8, top=2, bottom=2),
+        )
+
+    # ------------------------------------------------------------------ build
 
     def build(self) -> None:
         p, cfg = self.page, get_config()
@@ -296,9 +703,12 @@ class ProTerminal:
         try:
             p.window.visible = True
             p.window.width = 1280
-            p.window.height = 820
-            p.window.min_width = 960
-            p.window.min_height = 640
+            p.window.height = 860
+            p.window.min_width = RAIL_W + CENTER_MIN_W + ASIDE_W
+            p.window.min_height = 720
+            # Without prevent_close flet never delivers the "close" event, so the
+            # stop-on-close below was dead. We latch, then destroy the window.
+            p.window.prevent_close = True
             p.window.on_event = self._on_window_event
         except Exception:
             pass
@@ -314,6 +724,7 @@ class ProTerminal:
         except Exception:
             pass
         p.add(self._shell())
+        self._show_tab("overview")
         self._sync_widgets()
         p.update()
         p.run_task(self._poll_loop)
@@ -326,7 +737,12 @@ class ProTerminal:
         if probe := os.environ.get("ABCXAUTO_UI_PROBE"):
             Path(probe).write_text(
                 json.dumps(
-                    {"title": p.title, "ui_built": True, "engine": "ProEngine"},
+                    {
+                        "title": p.title,
+                        "tab": self.tab,
+                        "ui_built": True,
+                        "engine": "ProEngine",
+                    },
                     indent=2,
                 ),
                 encoding="utf-8",
@@ -338,83 +754,470 @@ class ProTerminal:
         if "close" not in kind:
             return
         try:
-            from abcxauto.supervisor import mark_operator_stop
+            if os.environ.get("ABCXAUTO_UI_PROBE"):
+                # A preview window is not the desk. Latching here silently blocks
+                # the supervisor's next launch of the real Pro.
+                logger.info("probe window closed — operator stop not latched")
+            else:
+                from abcxauto.supervisor import mark_operator_stop
 
-            mark_operator_stop()
+                mark_operator_stop()
         except Exception:
             logger.debug("operator stop on window close failed", exc_info=True)
+        finally:
+            # prevent_close holds the window open, so the operator only gets out
+            # if this runs no matter what happened above.
+            self._destroy_window()
+
+    def _destroy_window(self) -> None:
+        """flet's window destroy/close are coroutines — they need the page loop."""
+        win = getattr(self.page, "window", None)
+        for step in ("destroy", "close"):
+            fn = getattr(win, step, None)
+            if fn is None:
+                continue
+            try:
+                self.page.run_task(fn)
+                return
+            except Exception:
+                logger.debug("window %s failed", step, exc_info=True)
 
     def _shell(self) -> ft.Control:
-        return ft.Column(
-            [
-                self._top_bar(),
-                ft.Container(height=1, bgcolor=BORDER),
-                ft.Row(
-                    [
-                        self._stream_pane(),
-                        ft.Container(width=1, bgcolor=BORDER),
-                        self._book_pane(),
-                    ],
-                    expand=True,
-                    spacing=0,
-                    vertical_alignment=ft.CrossAxisAlignment.STRETCH,
-                ),
-            ],
+        """Left rail · center column · right rail. Rails are fixed; the feed absorbs width."""
+        return ft.Row(
+            [self._left_rail(), self._center_column(), self._right_rail()],
             expand=True,
             spacing=0,
+            vertical_alignment=ft.CrossAxisAlignment.STRETCH,
         )
 
-    def _top_bar(self) -> ft.Container:
-        return ft.Container(
-            bgcolor=BG,
-            padding=ft.Padding.symmetric(horizontal=16, vertical=10),
+    def _left_rail(self) -> ft.Container:
+        nav_items = [
+            self._nav_btn(key, label, outlined, filled)
+            for key, label, outlined, filled in NAV
+        ]
+        logo = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
             content=ft.Row(
                 [
-                    self.lbl_title,
-                    self.lbl_model,
-                    self.btn_account_mode,
-                    self.btn_floors,
-                    ft.Container(width=12),
-                    self.dot_conn,
-                    self.lbl_ibkr_status,
-                    self.dot_xai,
-                    self.lbl_xai_status,
-                    self.dot_mda,
-                    self.lbl_mda_status,
-                    ft.Container(width=8),
-                    self.lbl_session_badge,
-                    self.lbl_clock,
-                    self.lbl_link,
-                    ft.Container(expand=True),
-                    self.lbl_run_state,
-                    self.btn_connect,
-                    self.btn_run,
-                    self.btn_halt,
-                    self.btn_refresh,
-                    self.btn_notebook,
-                    self.btn_risk,
+                    ft.Image(
+                        src=LOGO_SRC,
+                        width=36,
+                        height=36,
+                        fit=ft.BoxFit.CONTAIN,
+                        error_content=ft.Text(
+                            "A", size=22, weight=ft.FontWeight.BOLD, color=BLUE
+                        ),
+                    ),
+                    ft.Column([self.lbl_title, self.lbl_model], spacing=0, tight=True),
                 ],
-                spacing=8,
+                spacing=10,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
+        )
+        self._sync_ibkr_account_label()
+        self.account_bar = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+            border=ft.Border(top=ft.BorderSide(1, BORDER)),
+            content=ft.Column(
+                [
+                    ft.Row(
+                        [
+                            self._avatar("I", 36),
+                            ft.Column(
+                                [self.lbl_account_name, self.lbl_account_id],
+                                spacing=1,
+                                tight=True,
+                                expand=True,
+                            ),
+                        ],
+                        spacing=10,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    ft.Row([self.btn_account_mode, self.btn_floors], spacing=6, wrap=True),
+                    self.lbl_link,
+                ],
+                spacing=6,
+                tight=True,
+            ),
+        )
+        rail_body = ft.Column(
+            [
+                logo,
+                *nav_items,
+                ft.Container(height=10),
+                self.btn_connect,
+                ft.Container(height=6),
+                self.btn_run,
+                ft.Container(height=6),
+                self.btn_halt,
+                ft.Container(height=6),
+                self.btn_refresh,
+                ft.Container(height=6),
+                ft.Row([self.lbl_run_state], spacing=6),
+                ft.Container(expand=True),
+                self.account_bar,
+            ],
+            spacing=2,
+            expand=True,
+        )
+        return ft.Container(
+            width=RAIL_W,
+            bgcolor=BG,
+            padding=ft.Padding.only(left=8, right=12, top=4, bottom=8),
+            content=rail_body,
+        )
+
+    def _nav_btn(self, key: str, label: str, outlined, filled) -> ft.Container:
+        ic = ft.Icon(outlined, size=22, color=TEXT)
+        lab = ft.Text(label, size=17, color=TEXT, weight=ft.FontWeight.W_400)
+        self.sidebar_icons[key] = ic
+        self.sidebar_labels[key] = lab
+        self.sidebar_icon_pair[key] = (outlined, filled)
+        c = ft.Container(
+            content=ft.Row([ic, lab], spacing=16),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=9),
+            border_radius=999,
+            ink=True,
+            on_click=lambda _e, k=key: self._show_tab(k),
+        )
+        self.sidebar_btns[key] = c
+        return c
+
+    def _center_column(self) -> ft.Container:
+        header = ft.Container(
+            bgcolor=BG,
+            padding=ft.Padding.only(left=16, right=16, top=12, bottom=10),
+            border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+            content=ft.Column(
+                [self.lbl_center_title, self.lbl_center_subtitle], spacing=3, tight=True
+            ),
+        )
+        return ft.Container(
+            expand=True,
+            width=None,
+            bgcolor=BG,
+            border=ft.Border(
+                left=ft.BorderSide(1, BORDER),
+                right=ft.BorderSide(1, BORDER),
+            ),
+            content=ft.Column(
+                [header, self._health_strip(), self.content, self._book_strip()],
+                spacing=0,
+                expand=True,
+            ),
+        )
+
+    def _health_strip(self) -> ft.Control:
+        """Pinned band: is it alive, is it burning, is the link up. Every surface."""
+        cards = ft.Row(
+            [
+                self._card("Mode", self.lbl_status),
+                self._card("Grok", self.lbl_desk, self.lbl_desk_sub),
+                self._card("Halt", self.lbl_halt),
+            ],
+            spacing=8,
+            wrap=True,
+        )
+        self.health_box.content = ft.Column(
+            [
+                ft.Row(
+                    [self.lbl_hs_state, self.lbl_hs_age, self.lbl_hs_next, self.lbl_hs_link],
+                    spacing=12,
+                    wrap=True,
+                ),
+                ft.Row(
+                    [self.lbl_hs_burn, self.lbl_hs_look, self.lbl_hs_cost, self.lbl_pace],
+                    spacing=12,
+                    wrap=True,
+                ),
+            ],
+            spacing=3,
+            tight=True,
+        )
+        self.health_box.padding = ft.Padding.symmetric(horizontal=10, vertical=6)
+        self.health_box.border_radius = 8
+        self.health_box.border = ft.Border.all(1, BORDER)
+        return self._section_refresh(
+            "Desk",
+            self._refresh_agent_tab,
+            cards,
+            self.health_box,
+            self.lbl_pulse_narrative,
+            self.lbl_alert,
+            self.lbl_banner,
+        )
+
+    def _book_strip(self) -> ft.Control:
+        """Small and dense: when Grok talks about WMT, WMT is on screen."""
+        cards = ft.Row(
+            [
+                self._card("Lots", self.lbl_lot_count),
+                self._card("Unprotected", self.lbl_unprotected),
+                self._card("Open MTM", self.lbl_open_upnl, self.lbl_open_upnl_sub),
+            ],
+            spacing=8,
+            wrap=True,
+        )
+        return self._section("Book now", cards, self.col_book_strip, self.lbl_risk)
+
+    def _right_rail(self) -> ft.Container:
+        def _ret_col(label: str, value: ft.Text, *, visible: bool = True) -> ft.Column:
+            return ft.Column(
+                [ft.Text(label, size=11, color=MUTED), value],
+                spacing=2,
+                tight=True,
+                visible=visible,
+            )
+
+        self.col_ret_1w = _ret_col("1W", self.lbl_ret_1w, visible=False)
+        self.col_ret_3m = _ret_col("3M", self.lbl_ret_3m, visible=False)
+        self.col_ret_1y = _ret_col("1Y", self.lbl_ret_1y, visible=False)
+        account_card = self._aside_card(
+            "Account",
+            ft.Column(
+                [
+                    ft.Text("Total value", size=12, color=MUTED),
+                    self.lbl_equity,
+                    self.lbl_equity_sub,
+                    ft.Row(
+                        [
+                            _ret_col("Today", self.lbl_pnl),
+                            self.col_ret_1w,
+                            self.col_ret_3m,
+                            self.col_ret_1y,
+                        ],
+                        spacing=16,
+                        wrap=True,
+                    ),
+                    self.lbl_pnl_pct,
+                    self.lbl_ret_source,
+                    ft.Container(height=4),
+                    ft.Row(
+                        [
+                            self.lbl_clock,
+                            ft.Container(
+                                bgcolor=BG,
+                                border_radius=999,
+                                padding=ft.Padding.symmetric(horizontal=8, vertical=2),
+                                content=self.lbl_session_badge,
+                            ),
+                        ],
+                        spacing=8,
+                        wrap=True,
+                    ),
+                    ft.Row(
+                        [
+                            self.dot_conn,
+                            ft.Text("IBKR", size=12, color=TEXT, weight=ft.FontWeight.W_600),
+                            self.lbl_ibkr_status,
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Row(
+                        [
+                            self.dot_xai,
+                            ft.Text("xAI", size=12, color=TEXT, weight=ft.FontWeight.W_600),
+                            self.lbl_xai_status,
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Row(
+                        [
+                            self.dot_mda,
+                            ft.Text("MDA", size=12, color=TEXT, weight=ft.FontWeight.W_600),
+                            self.lbl_mda_status,
+                        ],
+                        spacing=8,
+                    ),
+                    ft.Row([self.lbl_countdown_title, self.lbl_countdown], spacing=8),
+                    ft.Row(
+                        [ft.Text("IBKR refresh", size=11, color=MUTED), self.lbl_data_age],
+                        spacing=8,
+                    ),
+                    ft.Row(
+                        [ft.Text("Risk posture", size=11, color=MUTED), self.lbl_mandate_health],
+                        spacing=8,
+                    ),
+                ],
+                spacing=6,
+                tight=True,
+            ),
+        )
+        news_card = self._aside_card(
+            "What's happening",
+            ft.Column(
+                [
+                    ft.Text(
+                        "Headlines for your book and the broader market.",
+                        size=11,
+                        color=MUTED,
+                    ),
+                    self.news_list,
+                ],
+                spacing=8,
+                tight=True,
+            ),
+        )
+        return ft.Container(
+            width=ASIDE_W,
+            bgcolor=BG,
+            padding=ft.Padding.only(left=16, right=8, top=8, bottom=12),
+            content=ft.Column(
+                [account_card, ft.Container(height=12), news_card],
+                spacing=0,
+                scroll=ft.ScrollMode.AUTO,
+                expand=True,
+            ),
+        )
+
+    def _aside_card(self, title: str, body: ft.Control) -> ft.Container:
+        return ft.Container(
+            bgcolor=SURFACE,
+            border_radius=16,
+            padding=16,
+            content=ft.Column(
+                [ft.Text(title, size=15, weight=ft.FontWeight.BOLD, color=TEXT), body],
+                spacing=10,
+            ),
+        )
+
+    # -------------------------------------------------------------- nav / pages
+
+    def _show_tab(self, key: str) -> None:
+        self.tab = key if key in NAV_TITLES else "overview"
+        key = self.tab
+        for k, btn in self.sidebar_btns.items():
+            active = k == key
+            btn.bgcolor = HOVER if active else None
+            pair = self.sidebar_icon_pair.get(k)
+            if k in self.sidebar_icons and pair:
+                outlined, filled = pair
+                self.sidebar_icons[k].icon = filled if active else outlined
+            if k in self.sidebar_labels:
+                self.sidebar_labels[k].weight = (
+                    ft.FontWeight.BOLD if active else ft.FontWeight.W_400
+                )
+        self.lbl_center_title.value = NAV_TITLES.get(key, "Dashboard")
+        self.lbl_center_subtitle.value = NAV_SUBTITLES.get(key, "")
+        builders = {
+            "overview": self._page_overview,
+            "positions": self._page_positions,
+            "notebook": self._page_notebook,
+            "scorecard": self._page_scorecard,
+            "risk": self._page_risk,
+            "settings": self._page_settings,
+        }
+        # Leaving a page abandons whatever was half-typed on it.
+        self._dirty.clear()
+        self._sync_active_page(force=True)
+        self.content.content = builders.get(key, self._page_overview)()
+        self._safe_update()
+
+    def _section(self, title: str, *body: ft.Control) -> ft.Container:
+        """Clean center panel — hairline separator, no social-post chrome."""
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+            border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+            content=ft.Column(
+                [ft.Text(title, size=15, weight=ft.FontWeight.BOLD, color=TEXT), *body],
+                spacing=8,
+                tight=True,
+            ),
+        )
+
+    def _section_header(self, title: str, on_refresh) -> ft.Row:
+        return ft.Row(
+            [
+                ft.Text(title, size=15, weight=ft.FontWeight.BOLD, color=TEXT, expand=True),
+                ft.Container(
+                    width=32,
+                    height=32,
+                    border_radius=16,
+                    border=ft.Border.all(1, BORDER),
+                    bgcolor=SURFACE,
+                    alignment=ft.Alignment.CENTER,
+                    ink=True,
+                    tooltip="Refresh",
+                    on_click=on_refresh,
+                    content=ft.Icon(ft.Icons.REFRESH, size=16, color=TEXT),
+                ),
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _section_refresh(self, title: str, on_refresh, *body: ft.Control) -> ft.Container:
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+            border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+            content=ft.Column(
+                [self._section_header(title, on_refresh), *body],
+                spacing=8,
+                tight=True,
+            ),
+        )
+
+    def _card(
+        self, title: str, value: ft.Control, sub: ft.Control | None = None
+    ) -> ft.Container:
+        # Fixed height + a reserved sub row so the strip reads as one even band.
+        return ft.Container(
+            bgcolor=BG,
+            border=ft.Border.all(1, BORDER),
+            border_radius=8,
+            height=74,
+            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            content=ft.Column(
+                [
+                    ft.Text(title, size=12, color=MUTED, weight=ft.FontWeight.W_500),
+                    value,
+                    sub if sub is not None else ft.Text("", size=11, color=MUTED),
+                ],
+                spacing=1,
+                tight=True,
+            ),
+        )
+
+    def _page_overview(self) -> ft.Control:
+        """The watch surface: the stream is the spine, everything else is tight."""
+        return ft.Column(
+            [
+                self._stream_pane(),
+                self._section(
+                    "Last look",
+                    self.lbl_last_send,
+                    self.lbl_result,
+                    self.lbl_why,
+                    self.lbl_focus,
+                    self.lbl_lessons,
+                    self.lbl_dash_tools,
+                ),
+                self._hidden_metrics,
+            ],
+            spacing=0,
+            expand=True,
         )
 
     def _stream_pane(self) -> ft.Container:
         return ft.Container(
             expand=True,
             bgcolor="#0a0a0a",
-            padding=12,
+            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
             content=ft.Column(
                 [
                     ft.Row(
                         [
-                            ft.Text("Grok stream", size=14, weight=ft.FontWeight.W_600, color=TEXT),
+                            ft.Text(
+                                "Grok stream", size=15, weight=ft.FontWeight.BOLD, color=TEXT
+                            ),
                             ft.Container(expand=True),
                             self.lbl_stream_status,
-                            self.lbl_status,
+                            self.btn_stream_follow,
                             self.btn_copy_stream,
                         ],
-                        spacing=10,
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     ft.Container(content=self.think_scroll, expand=True),
                 ],
@@ -423,66 +1226,347 @@ class ProTerminal:
             ),
         )
 
-    def _stat(self, label: str, value: ft.Control, sub: ft.Control | None = None) -> ft.Container:
-        rows: list[ft.Control] = [ft.Text(label, size=11, color=MUTED), value]
-        if sub is not None:
-            rows.append(sub)
-        return ft.Container(
+    def _page_positions(self) -> ft.Control:
+        heads = {
+            "lots": [("lot", None), ("basis", 110), ("mtm", 58)],
+            "orders": [
+                ("oid", 46),
+                ("name", None),
+                ("side / type", 104),
+                ("qty", 38),
+                ("price", 104),
+                ("role", 58),
+            ],
+            "fills": [("name", None), ("side", 56), ("qty", 44), ("price", 76)],
+            "log": [("time", 60), ("what", 116), ("result", None)],
+        }
+        self.tab_heads = {k: self._head_row(v) for k, v in heads.items()}
+        bodies: list[ft.Control] = []
+        for key in ("lots", "orders", "fills", "log"):
+            bodies.append(
+                ft.Column(
+                    [self.tab_heads[key], self.tab_bodies[key]],
+                    spacing=4,
+                    expand=True,
+                )
+            )
+        self.tab_panes = dict(zip(("lots", "orders", "fills", "log"), bodies))
+        return ft.Column(
+            [
+                ft.Container(
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                    border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+                    content=ft.Column(
+                        [
+                            self._section_header("Book", self._refresh_book_tab),
+                            ft.Row(
+                                [
+                                    self.tabs[k]["chip"]
+                                    for k in ("lots", "orders", "fills", "log")
+                                ],
+                                spacing=6,
+                                wrap=True,
+                            ),
+                        ],
+                        spacing=10,
+                        tight=True,
+                    ),
+                ),
+                ft.Container(
+                    expand=True,
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=10),
+                    content=ft.Column(bodies, spacing=0, expand=True),
+                ),
+            ],
+            spacing=0,
+            expand=True,
+        )
+
+    def _page_notebook(self) -> ft.Control:
+        self.notebook_raw_panel = ft.Container(
+            visible=False,
             bgcolor=SURFACE,
             border=ft.Border.all(1, BORDER),
             border_radius=8,
             padding=10,
+            content=self.lbl_notebook_body,
+        )
+        self._sync_notebook_page(force=True)
+        return ft.Column(
+            [
+                self._section_refresh(
+                    "Lab playbook",
+                    self._refresh_notebook_tab,
+                    self.lbl_notebook_head,
+                    self.lbl_notebook_meta,
+                    self.lbl_notebook_lots,
+                    self.lbl_nb_playbook,
+                ),
+                ft.Container(
+                    expand=True,
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=12),
+                    content=ft.Column(
+                        [
+                            ft.Text(
+                                "Setup cards", size=15, weight=ft.FontWeight.BOLD, color=TEXT
+                            ),
+                            self.col_notebook_cards,
+                            self.notebook_raw_panel,
+                        ],
+                        spacing=10,
+                        scroll=ft.ScrollMode.AUTO,
+                        expand=True,
+                    ),
+                ),
+            ],
+            spacing=0,
             expand=True,
-            content=ft.Column(rows, spacing=1, tight=True),
         )
 
-    def _book_pane(self) -> ft.Container:
-        return ft.Container(
-            width=440,
-            bgcolor=BG,
-            padding=12,
-            content=ft.Column(
-                [
+    def _page_scorecard(self) -> ft.Control:
+        self._sync_scorecard_page(force=True)
+        return ft.Column(
+            [
+                self._section_refresh(
+                    "Book vs model",
+                    self._refresh_scorecard_tab,
                     ft.Row(
                         [
-                            self.lbl_account_name,
-                            ft.Container(expand=True),
-                            self.lbl_account_id,
+                            ft.Column(
+                                [ft.Text("NetLiq", size=12, color=MUTED), self.lbl_sc_netliq],
+                                spacing=2,
+                                tight=True,
+                            ),
+                            ft.Container(width=28),
+                            ft.Column(
+                                [
+                                    ft.Text("Edge", size=12, color=MUTED),
+                                    self.lbl_edge,
+                                    self.lbl_edge_sub,
+                                ],
+                                spacing=2,
+                                tight=True,
+                            ),
                         ],
-                        spacing=8,
+                        spacing=12,
+                        wrap=True,
+                        vertical_alignment=ft.CrossAxisAlignment.END,
                     ),
-                    self.lbl_banner,
-                    ft.Row(
+                    self.lbl_sc_verdict,
+                    self.lbl_sc_score,
+                    self.lbl_sc_session,
+                ),
+                ft.Container(
+                    expand=True,
+                    padding=ft.Padding.only(bottom=12),
+                    content=ft.Column(
                         [
-                            self._stat("NetLiq", self.lbl_equity, self.lbl_equity_sub),
-                            self._stat("IBKR day", self.lbl_pnl, self.lbl_pnl_pct),
-                            self._stat("Open MTM", self.lbl_open_upnl, self.lbl_open_upnl_sub),
+                            self._section("Windows", self.col_sc_windows),
+                            self._section(
+                                "Setup card scores",
+                                ft.Text(
+                                    "Sends tied to the card that called them, "
+                                    "with realized P&L from fills.",
+                                    size=11,
+                                    color=MUTED,
+                                ),
+                                self.col_sc_cards,
+                            ),
+                            self._section(
+                                "Playbook revisions",
+                                ft.Text(
+                                    "Edge stamped when the card was written → edge when "
+                                    "it was replaced.",
+                                    size=11,
+                                    color=MUTED,
+                                ),
+                                self.col_sc_ledger,
+                            ),
+                            self._section(
+                                "Path",
+                                self.lbl_sc_path,
+                                self.lbl_sc_mix,
+                                self.lbl_sc_strats,
+                            ),
                         ],
-                        spacing=8,
+                        spacing=0,
+                        scroll=ft.ScrollMode.AUTO,
+                        expand=True,
                     ),
-                    ft.Row(
-                        [
-                            self._stat("Grok", self.lbl_desk, self.lbl_desk_sub),
-                            self._stat("Unprotected", self.lbl_unprotected),
-                            self._stat("Lots", self.lbl_lot_count, self.lbl_halt),
-                        ],
-                        spacing=8,
-                    ),
-                    self.lbl_alert,
-                    self.lbl_last_send,
-                    ft.Container(height=1, bgcolor=BORDER),
-                    ft.Row(
-                        [self.tabs[k]["chip"] for k in ("lots", "orders", "fills", "log")],
-                        spacing=6,
-                    ),
-                    ft.Column(list(self.tab_bodies.values()), spacing=0, expand=True),
-                    self._hidden_metrics,
-                    self.lbl_risk_status,
-                ],
-                spacing=6,
-                expand=True,
-            ),
+                ),
+            ],
+            spacing=0,
+            expand=True,
         )
+
+    def _page_risk(self) -> ft.Control:
+        self._sync_risk_page(force=True)
+
+        def _posture(name: str) -> ft.Control:
+            return ft.Container(
+                content=ft.Text(name, size=12, weight=ft.FontWeight.W_600, color=TEXT),
+                padding=ft.Padding.symmetric(horizontal=12, vertical=6),
+                border=ft.Border.all(1, BORDER),
+                border_radius=999,
+                ink=True,
+                on_click=lambda _e, n=name: self._set_risk_posture(n),
+            )
+
+        return ft.Column(
+            [
+                self._section_refresh(
+                    "Posture",
+                    self._refresh_risk_tab,
+                    self.lbl_risk_posture,
+                    ft.Row(
+                        [_posture("defensive"), _posture("balanced"), _posture("aggressive")],
+                        spacing=6,
+                        wrap=True,
+                    ),
+                    self.lbl_risk_status,
+                ),
+                ft.Container(
+                    expand=True,
+                    padding=ft.Padding.only(bottom=12),
+                    content=ft.Column(
+                        [
+                            self._section(
+                                "Floor",
+                                ft.Text(
+                                    "Editable and persisted to risk_settings.json. Enter or the "
+                                    "check applies. Tighten only — a value that would weaken the "
+                                    "walk-away floor is clamped and reported.",
+                                    size=11,
+                                    color=MUTED,
+                                ),
+                                self.col_risk_knobs,
+                            ),
+                            self._section(
+                                "Size floors",
+                                self._field_row(
+                                    "sizing_floors",
+                                    "Percent size floors",
+                                    "paper may size freely — live forces on",
+                                    control=self.sw_size_floors,
+                                ),
+                                self.lbl_risk_floors,
+                            ),
+                            self._section(
+                                "Halt",
+                                self.lbl_risk_halt_state,
+                                self.lbl_risk_halt_math,
+                                ft.Text(
+                                    "Halt / Resume is the rail button. Exits always bypass it.",
+                                    size=11,
+                                    color=MUTED,
+                                ),
+                            ),
+                            self._section(
+                                "As persisted",
+                                ft.Text(
+                                    "What the floor accepted after clamping.",
+                                    size=11,
+                                    color=MUTED,
+                                ),
+                                self.lbl_risk_glance,
+                            ),
+                        ],
+                        spacing=0,
+                        scroll=ft.ScrollMode.AUTO,
+                        expand=True,
+                    ),
+                ),
+            ],
+            spacing=0,
+            expand=True,
+        )
+
+    def _page_settings(self) -> ft.Control:
+        """Agent settings the operator owns. Mode/port stay on the gated path."""
+        self._sync_settings_page(force=True)
+        return ft.Column(
+            [
+                self._section_refresh(
+                    "Brain",
+                    self._refresh_settings_tab,
+                    ft.Text(
+                        "Which Grok takes the look. Strategy stays Grok's — this does "
+                        "not touch the prompt or the playbook.",
+                        size=11,
+                        color=MUTED,
+                    ),
+                    *[self._field_row(k, label, hint) for k, label, hint in BRAIN_FIELDS],
+                    self.lbl_settings_brain,
+                    self.lbl_settings_status,
+                ),
+                ft.Container(
+                    expand=True,
+                    padding=ft.Padding.only(bottom=12),
+                    content=ft.Column(
+                        [
+                            self._section(
+                                "Data and pacing",
+                                ft.Text(
+                                    "How often the background monitor polls, reviews "
+                                    "and halts on a dead broker link. Scan depth is "
+                                    "self_tune; Grok's own wake stays set_wake.",
+                                    size=11,
+                                    color=MUTED,
+                                ),
+                                self._field_row(
+                                    "monitor_enabled",
+                                    "Portfolio monitor",
+                                    "off stops the background poll loop",
+                                    control=self.gates["monitor_enabled"],
+                                ),
+                                *[
+                                    self._field_row(k, label, hint)
+                                    for k, label, hint in PACING_FIELDS
+                                ],
+                                self._field_row(
+                                    "monitor_extended_hours",
+                                    "Review premarket / postmarket",
+                                    "monitor reviews outside RTH",
+                                    control=self.gates["monitor_extended_hours"],
+                                ),
+                            ),
+                            self._section(
+                                "Connection",
+                                ft.Text(
+                                    "Paper / live and the port are one decision behind the "
+                                    "confirm phrase — they are not fields here.",
+                                    size=11,
+                                    color=MUTED,
+                                ),
+                                ft.Row(
+                                    [
+                                        ft.Text("Mode", size=12, color=TEXT, expand=True),
+                                        self.lbl_settings_mode,
+                                        self._btn(
+                                            "Switch paper / live",
+                                            outlined=True,
+                                            on_click=self._toggle_trading_mode,
+                                        ),
+                                    ],
+                                    spacing=8,
+                                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                ),
+                                self.lbl_settings_link,
+                                *[self._field_row(k, label, hint) for k, label, hint in LINK_FIELDS],
+                            ),
+                            self._section("Persisted to", self.lbl_settings_path),
+                        ],
+                        spacing=0,
+                        scroll=ft.ScrollMode.AUTO,
+                        expand=True,
+                    ),
+                ),
+            ],
+            spacing=0,
+            expand=True,
+        )
+
+    # ----------------------------------------------------------------- helpers
 
     def _safe_update(self) -> None:
         try:
@@ -513,16 +1597,16 @@ class ProTerminal:
             btn.bgcolor = BG
             btn.color = RED
             btn.style = ft.ButtonStyle(
-                shape=ft.RoundedRectangleBorder(radius=8),
-                padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+                shape=ft.RoundedRectangleBorder(radius=999),
+                padding=ft.Padding.symmetric(horizontal=18, vertical=11),
                 side=ft.BorderSide(1, RED),
             )
             return
         btn.bgcolor = WHITE if filled else BG
         btn.color = "#0f1419" if filled else TEXT
         btn.style = ft.ButtonStyle(
-            shape=ft.RoundedRectangleBorder(radius=8),
-            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+            shape=ft.RoundedRectangleBorder(radius=999),
+            padding=ft.Padding.symmetric(horizontal=18, vertical=11),
             side=None if filled else ft.BorderSide(1, BORDER),
         )
 
@@ -567,46 +1651,6 @@ class ProTerminal:
         head = f"rev={rev} mode={mode} — notebook, not law"
         return head, inst or "(empty)"
 
-    def _open_notebook(self, _=None) -> None:
-        """Open a scrollable view of the current lab notebook. Not executable."""
-        head, body = self._lab_notebook()
-        self.lbl_notebook_head.value = head
-        self.lbl_notebook_body.value = body
-
-        def _close(_=None) -> None:
-            dlg.open = False
-            self._safe_update()
-
-        dlg = ft.AlertDialog(
-            modal=True,
-            bgcolor=SURFACE,
-            title=ft.Text("Lab notebook", color=TEXT),
-            content=ft.Container(
-                width=560,
-                height=380,
-                content=ft.Column(
-                    [
-                        self.lbl_notebook_head,
-                        ft.Container(
-                            content=ft.Column(
-                                [self.lbl_notebook_body],
-                                scroll=ft.ScrollMode.AUTO,
-                                expand=True,
-                                spacing=0,
-                            ),
-                            expand=True,
-                        ),
-                    ],
-                    spacing=8,
-                    expand=True,
-                ),
-            ),
-            actions=[ft.TextButton("Close", on_click=_close)],
-        )
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self._safe_update()
-
     def _open_disconnect_confirm_dialog(self) -> None:
         s = self.engine.state
 
@@ -636,6 +1680,7 @@ class ProTerminal:
                 ft.TextButton("Cancel", on_click=_cancel),
                 ft.TextButton("Disconnect", on_click=_confirm, style=ft.ButtonStyle(color=RED)),
             ],
+            shape=ft.RoundedRectangleBorder(radius=16),
         )
         self.page.overlay.append(dlg)
         dlg.open = True
@@ -655,6 +1700,7 @@ class ProTerminal:
         except Exception as exc:
             self._toast(f"Halt failed: {exc}", color=RED)
         self._sync_widgets()
+        self._sync_risk_page(force=True)
         self._safe_update()
 
     def _refresh_score_line(self) -> None:
@@ -664,6 +1710,7 @@ class ProTerminal:
             self.lbl_score.color = MUTED
             self.lbl_session_score.value = "sess —"
             self.lbl_session_score.color = MUTED
+            self._sc_last = {}
             self._sync_edge_stat({})
             return
         try:
@@ -675,10 +1722,14 @@ class ProTerminal:
             self.lbl_score.color = MUTED
             self.lbl_session_score.value = "sess —"
             self.lbl_session_score.color = MUTED
+            self._sc_last = {}
             self._sync_edge_stat({})
             return
+        # The health strip reads this instead of scoring again every tick.
+        self._sc_last = sc if isinstance(sc, dict) else {}
         self._sync_edge_stat(sc)
         self._sync_session_score(sc)
+
         def _bit(tag: str, ret: Any, edge: Any, beat: Any) -> str:
             ret_s = f"{ret:+.2f}%" if ret is not None else "—"
             edge_s = f"{edge:+.2f}" if edge is not None else "—"
@@ -954,6 +2005,237 @@ class ProTerminal:
             controls.insert(0, ft.Text(stale, size=11, color=AMBER))
         self.col_lots.controls = controls
 
+    def _sync_orders(self) -> None:
+        """One row per working order — role/covers is why it exists."""
+        from abcxauto.world_state import compact_working_orders
+
+        s = self.engine.state
+        try:
+            rows = compact_working_orders(s.open_orders or [], positions=s.positions)
+        except Exception:
+            rows = []
+        key = json.dumps(rows, sort_keys=True, default=str)
+        if key == self._orders_key:
+            return
+        self._orders_key = key
+        if not rows:
+            self.col_orders.controls = [self.lbl_working_orders]
+            return
+        controls: list[ft.Control] = []
+        for o in rows:
+            sec = str(o.get("sec") or "STK").upper()
+            name = str(o.get("symbol") or "?")
+            if sec.startswith("OPT"):
+                bits = [str(o.get("right") or ""), str(o.get("strike") or "")]
+                exp = str(o.get("expiration") or "")
+                name = f"{name} {''.join(bits)} {exp}".strip()
+            else:
+                name = f"{name} {sec}"
+            px = ""
+            if o.get("stop") not in (None, ""):
+                px = f"stop {o['stop']}"
+            if o.get("lmt") not in (None, ""):
+                px = f"{px}  lmt {o['lmt']}".strip()
+            role = str(o.get("role") or "")
+            covers = str(o.get("covers") or "")
+            controls.append(
+                self._blotter_row([
+                    self._cell(str(o.get("order_id") or "?"), width=46, color=MUTED, mono=True),
+                    self._cell(name, expand=True, mono=True),
+                    self._cell(
+                        f"{o.get('action') or ''} {o.get('type') or ''}".strip(),
+                        width=104,
+                        color=TEXT,
+                    ),
+                    self._cell(
+                        str(o.get("qty") if o.get("qty") is not None else "?"),
+                        width=38,
+                        right=True,
+                    ),
+                    self._cell(px or "—", width=104, color=MUTED, right=True),
+                    self._cell(
+                        role or "—",
+                        width=58,
+                        color=GREEN if role == "exit" else MUTED,
+                        right=True,
+                    ),
+                ])
+            )
+            if covers:
+                controls.append(
+                    ft.Container(
+                        padding=ft.Padding.only(left=14, bottom=2),
+                        content=ft.Text(f"covers {covers}", size=11, color=MUTED),
+                    )
+                )
+        self.col_orders.controls = controls
+
+    def _sync_fills(self) -> None:
+        s = self.engine.state
+        fills = list(getattr(s, "recent_fills", None) or [])[:20]
+        key = json.dumps(fills, sort_keys=True, default=str)
+        if key == self._fills_key:
+            return
+        self._fills_key = key
+        if not fills:
+            self.col_fills.controls = [self.lbl_recent_fills]
+            return
+        controls: list[ft.Control] = []
+        for f in reversed(fills):
+            side = str(f.get("side") or f.get("action") or "")
+            controls.append(
+                self._blotter_row([
+                    self._cell(str(f.get("symbol") or "?"), expand=True, mono=True),
+                    self._cell(
+                        side,
+                        width=56,
+                        color=GREEN if side.upper().startswith("B") else RED,
+                        weight=ft.FontWeight.W_600,
+                    ),
+                    self._cell(
+                        str(f.get("quantity") or f.get("shares") or ""), width=44, right=True
+                    ),
+                    self._cell(
+                        str(f.get("price") or f.get("avg_price") or ""),
+                        width=76,
+                        right=True,
+                        color=MUTED,
+                    ),
+                ])
+            )
+        self.col_fills.controls = controls
+
+    def _sync_scan_tape(self) -> None:
+        """The screen Grok pulled: IBKR rank order plus whatever got a live last."""
+        hits = getattr(self.engine.state, "scan_hits", None) or {}
+        rows = [r for r in (hits.get("rows") or []) if isinstance(r, dict)]
+        key = json.dumps([hits.get("source"), hits.get("quoted"), rows], sort_keys=True, default=str)
+        if key == self._scan_key:
+            return
+        self._scan_key = key
+        if not rows:
+            self.lbl_scan_head.value = "No screen this session — Grok runs the scanner."
+            self.lbl_scan_head.color = MUTED
+            self.col_scan.controls = []
+            return
+        ranked = bool(hits.get("ranked"))
+        code = str(hits.get("scan_code") or hits.get("arena") or "").strip()
+        bits = [f"{len(rows)} hits", f"{int(hits.get('quoted') or 0)} quoted"]
+        if code:
+            bits.append(code)
+        bits.append(str(hits.get("source") or "?"))
+        bits.append(str(hits.get("rank_meaning") or ("ranked" if ranked else "not ranked")))
+        self.lbl_scan_head.value = " · ".join(bits)
+        self.lbl_scan_head.color = TEXT
+        controls: list[ft.Control] = [
+            self._head_row([("#", 30), ("symbol", 78), ("last", 84), ("metric", None)])
+        ]
+        for i, row in enumerate(rows[:12], start=1):
+            rank = row.get("rank") if ranked else None
+            last = row.get("last")
+            metric = row.get("distance") or row.get("benchmark") or row.get("projection") or ""
+            tags = []
+            if row.get("on_book"):
+                tags.append("on book")
+            if row.get("in_turn"):
+                tags.append("quoted this look")
+            note = " · ".join(str(x) for x in ([metric] if metric else []) + tags)
+            controls.append(
+                self._blotter_row([
+                    self._cell(
+                        str(rank if rank not in (None, "") else i),
+                        width=30,
+                        color=MUTED,
+                        mono=True,
+                    ),
+                    self._cell(
+                        str(row.get("symbol") or "?"),
+                        width=78,
+                        mono=True,
+                        weight=ft.FontWeight.W_600,
+                        color=GREEN if row.get("on_book") else TEXT,
+                    ),
+                    self._cell(
+                        f"{last:,.2f}" if isinstance(last, (int, float)) else "—",
+                        width=84,
+                        right=True,
+                        color=TEXT if isinstance(last, (int, float)) else MUTED,
+                        mono=True,
+                    ),
+                    self._cell(note or "—", expand=True, color=MUTED),
+                ])
+            )
+        self.col_scan.controls = controls
+
+    def _sync_lessons_line(self) -> None:
+        """Structures the clerk refused recently. One line, newest first."""
+        lessons = [x for x in (getattr(self.engine.state, "structure_lessons", None) or [])
+                   if isinstance(x, dict)]
+        if not lessons:
+            self.lbl_lessons.visible = False
+            self.lbl_lessons.value = ""
+            return
+        bits: list[str] = []
+        for ev in lessons[:3]:
+            head = " ".join(
+                str(ev.get(k) or "").strip()
+                for k in ("strategy", "symbol")
+                if str(ev.get(k) or "").strip()
+            )
+            why = str(ev.get("reason_code") or ev.get("message") or "").strip()
+            bits.append(f"{head} {why}".strip() or "—")
+        self.lbl_lessons.value = "Lessons: " + " · ".join(bits)
+        self.lbl_lessons.visible = True
+
+    @staticmethod
+    def _is_note(rec: dict) -> bool:
+        """Lifecycle line from ProEngine._note — the message is the whole row.
+
+        Keyed on shape, not a kind whitelist: RETRY / PARK / UNIVERSE notes were
+        silently blanked when the list did not name them.
+        """
+        return bool(rec.get("msg")) and not rec.get("result") and not rec.get("action_obj")
+
+    def _sync_activity(self) -> None:
+        s = self.engine.state
+        records = list(s.records or [])[-40:]
+        key = str(len(s.records or [])) + json.dumps(
+            [r.get("ts") for r in records[-3:]], default=str
+        )
+        if key == self._activity_key:
+            return
+        self._activity_key = key
+        if not records:
+            self.col_activity.controls = [self.lbl_activity]
+            return
+        controls: list[ft.Control] = []
+        for r in reversed(records):
+            kind = str(r.get("type") or "cycle").lower()
+            ts = str(r.get("ts") or "")
+            ts = ts.split("T", 1)[-1][:8] if "T" in ts else ts[-8:]
+            if self._is_note(r):
+                what = kind.upper()
+                result = str(r.get("msg") or "—")
+                color = NOTE_COLOR.get(kind, MUTED)
+            else:
+                what = str(
+                    r.get("strat") or (r.get("action_obj") or {}).get("strategy") or "—"
+                )
+                result = self._format_result_status(r.get("result") or {})
+                color = (
+                    RED
+                    if result.lower().startswith(("blocked", "rejected", "fail", "error"))
+                    else TEXT
+                )
+            controls.append(
+                self._blotter_row([
+                    self._cell(ts, width=60, color=MUTED, mono=True),
+                    self._cell(what, width=116, color=color, weight=ft.FontWeight.W_600),
+                    self._cell(result, expand=True, color=MUTED),
+                ])
+            )
+        self.col_activity.controls = controls
+
     def _sync_tabs(self) -> None:
         s = self.engine.state
         lots_n = len(s.positions or [])
@@ -965,6 +2247,7 @@ class ProTerminal:
             "fills": len(getattr(s, "recent_fills", None) or []),
             "log": len(s.records or []),
         }
+        panes = getattr(self, "tab_panes", None) or {}
         for key, tab in self.tabs.items():
             on = key == self._tab
             n = int(counts.get(key, 0))
@@ -976,6 +2259,9 @@ class ProTerminal:
             body = self.tab_bodies.get(key)
             if body is not None:
                 body.visible = on
+            pane = panes.get(key)
+            if pane is not None:
+                pane.visible = on
 
     def _sync_mix_line(self) -> None:
         from abcxauto.world_state import concentration, format_mix, structure_mix
@@ -1067,6 +2353,41 @@ class ProTerminal:
     def _refresh_book_tab(self, _=None) -> None:
         self._refresh_book()
 
+    def _refresh_agent_tab(self, _=None) -> None:
+        try:
+            pulse = self.engine.state.reality_pulse or build_reality_pulse(
+                ibkr_connected=self.engine.state.connected,
+                positions=self.engine.state.positions,
+                account=None,
+            )
+            self._apply_clock(pulse)
+        except Exception:
+            pass
+        self.engine.drain_apply()
+        err = self.engine.request_snapshot()
+        self._toast(
+            "Dashboard refreshed (broker snapshot unavailable)" if err else "Refreshing…",
+            color=AMBER if err else BLUE,
+        )
+        self._sync_widgets()
+        self._safe_update()
+
+    def _refresh_scorecard_tab(self, _=None) -> None:
+        self._score_last = 0.0
+        self._path_last = 0.0
+        self._refresh_score_line()
+        self._sync_path_line()
+        self._sync_scorecard_page(force=True)
+        self._safe_update()
+
+    def _refresh_notebook_tab(self, _=None) -> None:
+        self._sync_notebook_page(force=True)
+        self._safe_update()
+
+    def _refresh_risk_tab(self, _=None) -> None:
+        self._sync_risk_page(force=True)
+        self._safe_update()
+
     def _start(self, _=None) -> None:
         err = self.engine.start()
         if err:
@@ -1074,10 +2395,368 @@ class ProTerminal:
         self._sync_widgets()
         self._safe_update()
 
-    def _stop(self, _=None) -> None:
-        self.engine.stop_engine()
-        self._sync_widgets()
-        self._safe_update()
+    # ------------------------------------------------------------- notebook
+
+    def _sync_notebook_page(self, *, force: bool = False) -> None:
+        """Setup cards are the book. Fall back to the TYPE tree / prose."""
+        try:
+            from abcxauto.lab_playbook import (
+                load_lab,
+                notebook_text,
+                playbook_age_hours,
+                unknown_card_tickets,
+            )
+        except Exception:
+            return
+        try:
+            lab = load_lab()
+        except Exception:
+            lab = {}
+        lab = lab if isinstance(lab, dict) else {}
+        cards = [c for c in (lab.get("cards") or []) if isinstance(c, dict) and c.get("name")]
+        body = ""
+        try:
+            body = notebook_text(lab) or ""
+        except Exception:
+            body = self._lab_notebook()[1]
+        key = json.dumps([lab.get("revision"), lab.get("written_at"), len(body)], default=str)
+        if not force and key == self._notebook_key:
+            return
+        self._notebook_key = key
+        rev = lab.get("revision") if lab.get("revision") not in (None, "") else "—"
+        mode = str(lab.get("mode") or "explore").strip() or "explore"
+        if lab.get("promoted"):
+            state, state_color = "promoted", GREEN
+        elif lab.get("ready_to_promote"):
+            state, state_color = "ready to promote", AMBER
+        else:
+            state, state_color = "lab", MUTED
+        self.lbl_notebook_head.value = f"rev {rev} · {mode} · {state}"
+        self.lbl_notebook_head.color = state_color
+        try:
+            age = playbook_age_hours(lab)
+        except Exception:
+            age = None
+        age_s = f"{age:.1f}h old" if isinstance(age, (int, float)) else "age —"
+        try:
+            unsendable = unknown_card_tickets(cards)
+        except Exception:
+            unsendable = []
+        self.lbl_notebook_meta.value = (
+            f"{age_s} · {len(cards)} setup card(s) · {len(body):,} chars · playbook, not law"
+            + (f" · UNSENDABLE ticket: {', '.join(unsendable)}" if unsendable else "")
+        )
+        self.lbl_notebook_meta.color = RED if unsendable else MUTED
+        lots = [str(x) for x in (lab.get("lots_at_write") or [])][:8]
+        self.lbl_notebook_lots.value = (
+            f"lots at write: {', '.join(lots)}" if lots else "lots at write: none"
+        )
+        try:
+            from abcxauto.lab_playbook import card_scores
+
+            attrib = {
+                str(r.get("card") or "").lower(): r
+                for r in (card_scores(cards) or [])
+                if isinstance(r, dict)
+            }
+        except Exception:
+            attrib = {}
+        if cards:
+            self.col_notebook_cards.controls = [
+                self._notebook_card(c, attrib) for c in cards
+            ]
+            self.notebook_raw_panel.visible = False
+            self.lbl_notebook_body.value = ""
+        else:
+            self.col_notebook_cards.controls = [
+                ft.Text(
+                    "No setup cards yet — Grok writes them with write_lab_playbook.",
+                    size=12,
+                    color=MUTED,
+                )
+            ]
+            self.lbl_notebook_body.value = body or "(empty)"
+            self.notebook_raw_panel.visible = True
+        self.lbl_nb_playbook.value = self.lbl_playbook.value
+        self.lbl_nb_playbook.color = self.lbl_playbook.color
+        self.lbl_nb_playbook.tooltip = self.lbl_playbook.tooltip
+
+    def _notebook_card(self, card: dict, attrib: dict | None = None) -> ft.Control:
+        status = str(card.get("status") or "testing").strip().lower()
+        color = CARD_STATUS_COLOR.get(status, MUTED)
+        head: list[ft.Control] = [
+            ft.Text(
+                str(card.get("name") or "?"),
+                size=13,
+                weight=ft.FontWeight.BOLD,
+                color=TEXT,
+                expand=True,
+            ),
+            self._chip(status, color),
+        ]
+        ticket = str(card.get("ticket") or "").strip()
+        if ticket:
+            head.append(self._chip(ticket, BLUE))
+        # A card nothing was attributed to has not traded flat — say which it is.
+        score = (attrib or {}).get(str(card.get("name") or "").lower()) or {}
+        sends = int(score.get("sends") or 0)
+        fills = int(score.get("attributed_fills") or 0)
+        pnl = score.get("realized_pnl")
+        if not sends:
+            head.append(self._chip("no sends yet", MUTED))
+        elif not fills or not isinstance(pnl, (int, float)):
+            head.append(self._chip(f"{sends} send(s) · no fills yet", MUTED))
+        else:
+            head.append(
+                self._chip(
+                    f"{sends} send(s) · ${pnl:+,.2f}", GREEN if pnl > 0 else RED if pnl else MUTED
+                )
+            )
+        rows: list[ft.Control] = [ft.Row(head, spacing=6)]
+        for field, label in (
+            ("when_on", "when"),
+            ("scan", "scan"),
+            ("shape", "shape"),
+            ("invalidation", "invalid"),
+            ("note", "note"),
+        ):
+            val = str(card.get(field) or "").strip()
+            if not val:
+                continue
+            rows.append(
+                ft.Row(
+                    [
+                        ft.Container(
+                            width=56,
+                            content=ft.Text(label, size=11, color=MUTED),
+                        ),
+                        ft.Text(val, size=12, color=TEXT, expand=True, selectable=True),
+                    ],
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
+                )
+            )
+        return ft.Container(
+            bgcolor=SURFACE,
+            border=ft.Border.all(1, color if status == "working" else BORDER),
+            border_radius=10,
+            padding=12,
+            content=ft.Column(rows, spacing=6, tight=True),
+        )
+
+    # ------------------------------------------------------------ scorecard
+
+    def _sync_scorecard_page(self, *, force: bool = False) -> None:
+        """Windows, per-card scores, revision ledger. The strategy tracker.
+
+        Throttled by ``_sync_active_page`` — ``force`` is accepted so the page
+        builder and the refresh control can paint immediately.
+        """
+        _ = force
+        self.lbl_sc_netliq.value = self.lbl_equity.value
+        self.lbl_sc_netliq.color = self.lbl_equity.color
+        for src, dst in (
+            (self.lbl_score, self.lbl_sc_score),
+            (self.lbl_session_score, self.lbl_sc_session),
+            (self.lbl_path, self.lbl_sc_path),
+            (self.lbl_mix, self.lbl_sc_mix),
+        ):
+            dst.value = src.value
+            dst.color = src.color
+        sc: dict = {}
+        if self.engine.state.equity:
+            try:
+                from abcxauto.scorecard import compute_scorecard
+
+                sc = compute_scorecard(equity=self.engine.state.equity) or {}
+            except Exception:
+                sc = {}
+        beat = sc.get("beating_model")
+        if beat is True:
+            self.lbl_sc_verdict.value = "BEATING the model bill"
+            self.lbl_sc_verdict.color = GREEN
+        elif beat is False:
+            self.lbl_sc_verdict.value = "behind the model bill"
+            self.lbl_sc_verdict.color = AMBER
+        else:
+            self.lbl_sc_verdict.value = "no live book — connect IBKR to score"
+            self.lbl_sc_verdict.color = MUTED
+        self._sync_sc_windows(sc)
+        self._sync_sc_cards()
+        self._sync_sc_ledger(sc)
+        try:
+            from abcxauto.memory import get_journal
+
+            div = get_journal().strategy_diversity(limit=40) or {}
+        except Exception:
+            div = {}
+        if div.get("n_distinct"):
+            strats = ", ".join(str(x) for x in (div.get("strategies") or []))[:160]
+            self.lbl_sc_strats.value = f"Types used: {div['n_distinct']} — {strats}"
+            self.lbl_sc_strats.color = TEXT
+        else:
+            self.lbl_sc_strats.value = "Types used: none yet"
+            self.lbl_sc_strats.color = MUTED
+
+    def _sync_sc_windows(self, sc: dict) -> None:
+        windows = sc.get("windows") if isinstance(sc, dict) else None
+        windows = windows if isinstance(windows, dict) else {}
+        rows: list[ft.Control] = [
+            self._head_row([("window", 78), ("return", 84), ("edge", 90), ("verdict", None)])
+        ]
+        order = ["15m", "1h", "4h", "inception"]
+        seen = [k for k in order if k in windows] + [k for k in windows if k not in order]
+        if not seen:
+            self.col_sc_windows.controls = [
+                ft.Text("No journal history yet.", size=12, color=MUTED)
+            ]
+            return
+        for label in seen:
+            row = windows.get(label) or {}
+            ret = row.get("book_return_pct")
+            edge = row.get("edge_usd")
+            beat = row.get("beating_model")
+            cov = str(row.get("coverage") or "")
+            if beat is True:
+                verdict, color = "BEAT", GREEN
+            elif beat is False:
+                verdict, color = "behind", AMBER
+            else:
+                verdict, color = cov or "—", MUTED
+            rows.append(
+                self._blotter_row([
+                    self._cell(label, width=78, weight=ft.FontWeight.W_600),
+                    self._cell(
+                        f"{ret:+.2f}%" if isinstance(ret, (int, float)) else "—",
+                        width=84,
+                        right=True,
+                        color=MUTED,
+                    ),
+                    self._cell(
+                        f"${edge:+,.2f}" if isinstance(edge, (int, float)) else "—",
+                        width=90,
+                        right=True,
+                        color=color,
+                    ),
+                    self._cell(verdict, expand=True, color=color, weight=ft.FontWeight.W_600),
+                ])
+            )
+        self.col_sc_windows.controls = rows
+
+    def _sync_sc_cards(self) -> None:
+        try:
+            from abcxauto.lab_playbook import card_scores, load_lab
+
+            lab = load_lab()
+            cards = [c for c in (lab.get("cards") or []) if isinstance(c, dict)]
+            scores = card_scores(cards) or []
+        except Exception:
+            scores = []
+        if not scores:
+            self.col_sc_cards.controls = [
+                ft.Text(
+                    "No card-attributed sends yet. A send records the card that called it.",
+                    size=12,
+                    color=MUTED,
+                )
+            ]
+            return
+        rows: list[ft.Control] = [
+            self._head_row([("card", None), ("sends", 52), ("fills", 46), ("realized", 88)])
+        ]
+        for row in scores[:20]:
+            pnl = row.get("realized_pnl")
+            fills = int(row.get("attributed_fills") or 0)
+            color = MUTED
+            if fills and isinstance(pnl, (int, float)) and pnl:
+                color = GREEN if pnl > 0 else RED
+            # No joined fill is not a flat trade — $0.00 would read as one.
+            if not fills:
+                realized = "no fills yet"
+            elif isinstance(pnl, (int, float)):
+                realized = f"${pnl:+,.2f}"
+            else:
+                realized = "—"
+            name = str(row.get("card") or "?")
+            on_book = row.get("on_current_book")
+            rows.append(
+                self._blotter_row([
+                    self._cell(
+                        name if on_book is not False else f"{name} (retired)",
+                        expand=True,
+                        color=TEXT if on_book is not False else MUTED,
+                    ),
+                    self._cell(str(row.get("sends") or 0), width=52, right=True),
+                    self._cell(
+                        str(row.get("attributed_fills") or 0),
+                        width=46,
+                        right=True,
+                        color=MUTED,
+                    ),
+                    self._cell(
+                        realized,
+                        width=88,
+                        right=True,
+                        color=color,
+                        weight=ft.FontWeight.W_600,
+                    ),
+                ])
+            )
+        self.col_sc_cards.controls = rows
+
+    def _sync_sc_ledger(self, sc: dict) -> None:
+        try:
+            from abcxauto.lab_playbook import playbook_facts
+
+            facts = playbook_facts(sc) or {}
+            ledger = [r for r in (facts.get("ledger") or []) if isinstance(r, dict)]
+        except Exception:
+            ledger = []
+        if not ledger:
+            self.col_sc_ledger.controls = [
+                ft.Text("No notebook revisions yet.", size=12, color=MUTED)
+            ]
+            return
+        rows: list[ft.Control] = [
+            self._head_row([("rev", 46), ("mode", 70), ("at write", 88), ("closed", 88), ("", None)])
+        ]
+        for row in reversed(ledger[-8:]):
+            at_edge = row.get("edge_usd")
+            closed = row.get("closed_edge")
+            beat = row.get("closed_beating")
+            if beat is None:
+                beat = row.get("beating_model")
+            if beat is True:
+                tag, color = "beat", GREEN
+            elif beat is False:
+                tag, color = "behind", AMBER
+            else:
+                tag, color = "open", MUTED
+            rows.append(
+                self._blotter_row([
+                    self._cell(
+                        f"r{row.get('revision')}", width=46, mono=True,
+                        weight=ft.FontWeight.W_600,
+                    ),
+                    self._cell(str(row.get("mode") or "—"), width=70, color=MUTED),
+                    self._cell(
+                        f"${at_edge:+,.2f}" if isinstance(at_edge, (int, float)) else "—",
+                        width=88,
+                        right=True,
+                        color=MUTED,
+                    ),
+                    self._cell(
+                        f"${closed:+,.2f}" if isinstance(closed, (int, float)) else "—",
+                        width=88,
+                        right=True,
+                        color=color,
+                    ),
+                    self._cell(tag, expand=True, color=color, right=True),
+                ])
+            )
+        self.col_sc_ledger.controls = rows
+
+    # ----------------------------------------------------------------- risk
 
     def _risk_settings_lines(self) -> list[str]:
         """Persisted knobs from get_config / risk_settings.json. Display only."""
@@ -1115,10 +2794,131 @@ class ProTerminal:
 
         cfg = get_config()
         self.lbl_risk_glance.value = "\n".join(self._risk_settings_lines())
-        trade = getattr(cfg, "max_risk_per_trade_pct", None)
-        self.tf_risk_trade_pct.value = (
-            f"{trade:g}" if isinstance(trade, (int, float)) else ""
+        for key, _label, _hint in RISK_FIELDS:
+            self._set_field(key, getattr(cfg, key, None))
+        for key, _label in FLOOR_GATES:
+            sw = self.gates.get(key)
+            if sw is not None:
+                sw.value = bool(getattr(cfg, key, True))
+
+    def _sync_risk_page(self, *, force: bool = False) -> None:
+        from abcxauto.config import get_config, resolve_effective_posture
+
+        self._sync_risk_settings_view()
+        cfg = get_config()
+        stored = str(getattr(cfg, "risk_posture", "") or "") or "—"
+        eff = resolve_effective_posture(stored, getattr(cfg, "trading_mode", "paper"))
+        self.lbl_risk_posture.value = (
+            f"{stored} → {eff} (live clamp)" if eff and eff != stored else stored
         )
+        self.lbl_risk_posture.color = TEXT
+        rows: list[ft.Control] = [
+            self._field_row(key, label, hint) for key, label, hint in RISK_FIELDS
+        ]
+        for key, label in FLOOR_GATES:
+            rows.append(
+                self._field_row(
+                    key,
+                    label,
+                    "floor — operator may re-arm, never disarm",
+                    control=self.gates[key],
+                )
+            )
+        self.col_risk_knobs.controls = rows
+        try:
+            from abcxauto.risk_gates import sizing_floors_active
+
+            live = (not cfg.is_paper) or str(cfg.trading_mode or "").lower() == "live"
+            on = True if live else sizing_floors_active(cfg)
+        except Exception:
+            live, on = False, False
+        self.sw_size_floors.value = on
+        self.sw_size_floors.disabled = live
+        self.lbl_risk_floors.value = (
+            "Floors ON — forced on live." if live and on
+            else "Floors ON — % size floors apply." if on
+            else "Floors OFF — Grok sizes freely (paper)."
+        )
+        self.lbl_risk_floors.color = GREEN if on else AMBER
+        nl = float(self.engine.state.equity or 0) or None
+        day = float(self.engine.state.pnl or 0) if self.engine.state.equity else None
+        try:
+            from abcxauto.book import clerk_halt_facts
+
+            halt = clerk_halt_facts(nl, day) or {}
+        except Exception:
+            halt = {}
+        if halt.get("clerk_halted"):
+            kind = str(halt.get("halt_kind") or "halt")
+            reason = str(halt.get("halt_reason") or "")[:120]
+            self.lbl_risk_halt_state.value = f"HALTED ({kind}) — {reason}"
+            self.lbl_risk_halt_state.color = RED
+        else:
+            self.lbl_risk_halt_state.value = "Clear — new risk allowed"
+            self.lbl_risk_halt_state.color = GREEN
+        trips = halt.get("halt_trips_at_usd")
+        room = halt.get("ibkr_day_vs_halt")
+        limit = halt.get("daily_loss_limit_pct")
+        bits = []
+        if isinstance(limit, (int, float)):
+            bits.append(f"daily limit {limit:g}% NL")
+        if isinstance(trips, (int, float)):
+            bits.append(f"trips at ${trips:,.2f}")
+        if isinstance(room, (int, float)):
+            bits.append(f"room ${room:,.2f}")
+        self.lbl_risk_halt_math.value = " · ".join(bits) or "connect IBKR for the halt math"
+        self.lbl_risk_halt_math.color = MUTED
+
+    def _sync_settings_page(self, *, force: bool = False) -> None:
+        _ = force
+        from abcxauto.config import (
+            AGENT_DISCONNECTED_ONLY_KEYS,
+            broker_link_connected,
+            risk_settings_path,
+        )
+
+        cfg = get_config()
+        for key in AGENT_FIELD_KEYS:
+            self._set_field(key, getattr(cfg, key, None))
+        link_locked = broker_link_connected()
+        for key in AGENT_DISCONNECTED_ONLY_KEYS:
+            tf = self.fields.get(key)
+            if tf is not None:
+                tf.disabled = link_locked
+        for key in ("monitor_enabled", "monitor_extended_hours"):
+            sw = self.gates.get(key)
+            if sw is not None:
+                sw.value = bool(getattr(cfg, key, False))
+        live = self.engine.state.running and getattr(self.engine.state, "autonomous", False)
+        self.lbl_settings_brain.value = (
+            f"{getattr(cfg, 'model', '—')} · temp {getattr(cfg, 'temperature', '—')} · "
+            f"{getattr(cfg, 'max_tokens', '—')} tokens"
+            + (" · applies on the next look" if live else "")
+        )
+        paper = bool(getattr(cfg, "is_paper", True))
+        self.lbl_settings_mode.value = "Paper" if paper else "Live"
+        self.lbl_settings_mode.color = GREEN if paper else RED
+        self.lbl_settings_link.value = (
+            f"{getattr(cfg, 'ibkr_host', '')}:{getattr(cfg, 'ibkr_port', '')} "
+            f"cid={getattr(cfg, 'ibkr_client_id', '')} · "
+            f"{'connected' if self.engine.state.connected else 'not connected'}"
+        )
+        try:
+            self.lbl_settings_path.value = str(risk_settings_path())
+        except Exception:
+            self.lbl_settings_path.value = "risk_settings.json"
+
+    def _refresh_settings_tab(self, _=None) -> None:
+        """Drop pending edits and re-read the file so the page shows what stuck."""
+        from abcxauto.config import load_risk_settings
+
+        self._dirty.clear()
+        try:
+            load_risk_settings()
+        except Exception:
+            logger.debug("settings reload failed", exc_info=True)
+        self._sync_settings_page(force=True)
+        self._safe_update()
 
     def _set_risk_posture(self, posture: str) -> None:
         from abcxauto.config import update_risk_config
@@ -1132,71 +2932,117 @@ class ProTerminal:
             self._toast(f"Posture failed: {exc}", color=RED)
             self._safe_update()
 
-    def _save_risk_trade_pct(self, _=None) -> None:
-        from abcxauto.config import update_risk_config
+    def _note_setting(self, msg: str, *, color: str = BLUE) -> None:
+        """One line the operator can read after an Apply, plus a toast."""
+        for lbl in (self.lbl_risk_status, self.lbl_settings_status):
+            lbl.value = msg
+            lbl.color = color
+        self._toast(msg, color=color)
 
-        raw = str(self.tf_risk_trade_pct.value or "").strip()
+    def _apply_field(self, key: str) -> None:
+        if key in AGENT_FIELD_KEYS:
+            self._apply_agent_field(key)
+        else:
+            self._apply_risk_field(key)
+
+    def _apply_risk_field(self, key: str) -> None:
+        """Tighten-only: the writers clamp to the floor and we report what stuck."""
+        from abcxauto.config import update_capacity_config, update_risk_config
+
+        raw = str((self.fields.get(key) or ft.TextField()).value or "").strip()
         try:
-            pct = float(raw)
+            typed = float(raw)
         except (TypeError, ValueError):
-            self._toast("Trade % needs a number", color=AMBER)
+            self._note_setting(f"{key} needs a number", color=AMBER)
+            self._safe_update()
             return
         try:
-            update_risk_config(max_risk_per_trade_pct=pct, persist=True)
-            self._sync_risk_settings_view()
-            self._toast(f"Trade % → {pct:g}", color=BLUE)
-            self._safe_update()
+            if key == "max_open_positions":
+                update_capacity_config(max_open_positions=int(typed), persist=True)
+            else:
+                update_risk_config(**{key: typed}, persist=True)
         except Exception as exc:
-            self._toast(f"Trade % failed: {exc}", color=RED)
+            self._note_setting(f"{key} failed: {exc}", color=RED)
             self._safe_update()
-
-    def _open_risk_settings(self, _=None) -> None:
-        """Glanceable persisted knobs. Posture and trade % are editable. Not a slider farm."""
-        self._sync_risk_settings_view()
-
-        def _close(_=None) -> None:
-            dlg.open = False
-            self._safe_update()
-
-        def _posture(name: str):
-            return ft.TextButton(
-                name,
-                on_click=lambda _e, n=name: self._set_risk_posture(n),
+            return
+        self._dirty.discard(key)
+        now = getattr(get_config(), key, None)
+        if isinstance(now, (int, float)) and abs(float(now) - typed) > 1e-9:
+            self._note_setting(
+                f"{key} clamped to {now:g} — walk-away floor", color=AMBER
             )
+        else:
+            self._note_setting(f"{key} → {typed:g}")
+        self._sync_risk_page(force=True)
+        self._safe_update()
 
-        dlg = ft.AlertDialog(
-            modal=True,
-            bgcolor=SURFACE,
-            title=ft.Text("Risk settings", color=TEXT),
-            content=ft.Container(
-                width=420,
-                content=ft.Column(
-                    [
-                        self.lbl_risk_glance,
-                        ft.Row(
-                            [
-                                _posture("defensive"),
-                                _posture("balanced"),
-                                _posture("aggressive"),
-                            ],
-                            spacing=6,
-                        ),
-                        ft.Row(
-                            [
-                                self.tf_risk_trade_pct,
-                                ft.TextButton("Save %", on_click=self._save_risk_trade_pct),
-                            ],
-                            spacing=8,
-                        ),
-                    ],
-                    spacing=10,
-                    tight=True,
-                ),
-            ),
-            actions=[ft.TextButton("Close", on_click=_close)],
-        )
-        self.page.overlay.append(dlg)
-        dlg.open = True
+    def _apply_agent_field(self, key: str) -> None:
+        from abcxauto.config import set_agent_knobs
+
+        raw = str((self.fields.get(key) or ft.TextField()).value or "").strip()
+        try:
+            res = set_agent_knobs({key: raw}, persist=True)
+        except Exception as exc:
+            self._note_setting(f"{key} failed: {exc}", color=RED)
+            self._safe_update()
+            return
+        self._dirty.discard(key)
+        self._report_agent_result(key, res)
+        self._sync_settings_page(force=True)
+        self._safe_update()
+
+    def _apply_agent_switch(self, key: str) -> None:
+        from abcxauto.config import set_agent_knobs
+
+        sw = self.gates.get(key)
+        want = bool(getattr(sw, "value", True))
+        try:
+            res = set_agent_knobs({key: want}, persist=True)
+        except Exception as exc:
+            self._note_setting(f"{key} failed: {exc}", color=RED)
+            self._safe_update()
+            return
+        self._report_agent_result(key, res)
+        self._sync_settings_page(force=True)
+        self._safe_update()
+
+    def _report_agent_result(self, key: str, res: dict) -> None:
+        res = res if isinstance(res, dict) else {}
+        why = (res.get("rejected") or {}).get(key)
+        if why:
+            self._note_setting(f"{key} refused: {why}", color=RED)
+            return
+        note = (res.get("clamped") or {}).get(key)
+        if isinstance(note, dict):
+            self._note_setting(
+                f"{key} clamped to {note.get('clamped')} (asked {note.get('raw')})",
+                color=AMBER,
+            )
+            return
+        value = (res.get("applied") or {}).get(key)
+        tail = " — next look" if key in ("model", "temperature", "max_tokens") else ""
+        self._note_setting(f"{key} → {value}{tail}")
+
+    def _toggle_floor_gate(self, key: str) -> None:
+        """Operator may re-arm a gate. Nothing here may disarm one."""
+        from abcxauto.config import update_risk_config
+
+        sw = self.gates.get(key)
+        if sw is None:
+            return
+        if not bool(sw.value):
+            sw.value = True
+            self._note_setting(
+                f"{key} is the walk-away floor — Pro cannot turn it off", color=AMBER
+            )
+            self._safe_update()
+            return
+        try:
+            update_risk_config(**{key: True}, persist=True)
+            self._note_setting(f"{key} armed")
+        except Exception as exc:
+            self._note_setting(f"{key} failed: {exc}", color=RED)
+        self._sync_risk_page(force=True)
         self._safe_update()
 
     def _toggle_trading_mode(self, _=None) -> None:
@@ -1231,6 +3077,7 @@ class ProTerminal:
             )
             self._safe_update()
         except Exception as exc:
+            self._sync_floors_chip()
             self._toast(f"Floors toggle failed: {exc}", color=RED)
             self._safe_update()
 
@@ -1242,6 +3089,10 @@ class ProTerminal:
         on = True if live else sizing_floors_active(cfg)
         self.lbl_floors.value = "Floors on" if on else "Floors off"
         self.lbl_floors.color = GREEN if on else AMBER
+        # A refused or failed toggle has to snap the Risk page switch back now,
+        # not on the next repaint.
+        self.sw_size_floors.value = on
+        self.sw_size_floors.disabled = live
         self.btn_floors.border = ft.Border.all(1, GREEN if on else AMBER)
         self.btn_floors.tooltip = (
             "Live: Floors on (forced)"
@@ -1284,6 +3135,7 @@ class ProTerminal:
                 ft.TextButton("Cancel", on_click=_cancel),
                 ft.TextButton("Switch to Live", on_click=_confirm),
             ],
+            shape=ft.RoundedRectangleBorder(radius=16),
         )
         self.page.overlay.append(dlg)
         dlg.open = True
@@ -1372,8 +3224,8 @@ class ProTerminal:
             self.lbl_halt.color = RED
         else:
             self._set_btn_text(self.btn_halt, "Halt", outlined=True)
-            self.lbl_halt.value = ""
-            self.lbl_halt.color = MUTED
+            self.lbl_halt.value = "clear"
+            self.lbl_halt.color = GREEN
 
     def _refresh_service_status(self) -> None:
         try:
@@ -1389,17 +3241,17 @@ class ProTerminal:
         mode = str(st.get("trading_mode") or get_config().trading_mode or "paper")
         if s.status == "Connecting" and not ibkr_ok:
             self.dot_conn.bgcolor = AMBER
-            self.lbl_ibkr_status.value = "IBKR connecting"
+            self.lbl_ibkr_status.value = "Connecting…"
             self.lbl_ibkr_status.color = AMBER
         else:
             self.dot_conn.bgcolor = GREEN if ibkr_ok else RED
-            self.lbl_ibkr_status.value = f"IBKR {mode}" if ibkr_ok else "IBKR down"
+            self.lbl_ibkr_status.value = f"Connected ({mode})" if ibkr_ok else "Disconnected"
             self.lbl_ibkr_status.color = GREEN if ibkr_ok else MUTED
         self.dot_xai.bgcolor = GREEN if xai_ok else RED
-        self.lbl_xai_status.value = "xAI" if xai_ok else "xAI key"
+        self.lbl_xai_status.value = "Ready" if xai_ok else "Missing key"
         self.lbl_xai_status.color = GREEN if xai_ok else MUTED
         self.dot_mda.bgcolor = GREEN if mda_ok else RED
-        self.lbl_mda_status.value = "MDA" if mda_ok else "MDA off"
+        self.lbl_mda_status.value = "Ready" if mda_ok else "Not configured"
         self.lbl_mda_status.color = GREEN if mda_ok else MUTED
         cfg = get_config()
         host = st.get("ibkr_host") or getattr(cfg, "ibkr_host", "") or "127.0.0.1"
@@ -1425,10 +3277,293 @@ class ProTerminal:
             prev = self._prev_stream()
             self.think_live.value = prev or "Grok stream: waiting for tools..."
             self.think_live.color = MUTED
+            self.think_live.visible = True
+            self.col_stream.controls = []
+            self._stream_lines_key = ""
         else:
-            self.think_live.value = body[-1800:]
+            # Plain-text fallback + what Copy stream and the tests read.
+            self.think_live.value = body[-STREAM_RAW_TAIL_CHARS:]
             self.think_live.color = TEXT
-        self._think_need_scroll = True
+            self.think_live.visible = False
+            self._sync_stream_lines(body)
+
+    def _sync_stream_lines(self, body: str) -> None:
+        """One control per stream line so markers read at a glance.
+
+        Every line is painted with its own text — no marker is rewritten,
+        stripped or reordered. Only whitespace-only lines become spacing.
+        """
+        lines = body[-STREAM_TAIL_CHARS:].splitlines()[-STREAM_MAX_LINES:]
+        key = "\n".join(lines)
+        if key == self._stream_lines_key:
+            return
+        self._stream_lines_key = key
+        scan_at = -1
+        for i, raw in enumerate(lines):
+            if stream_line_kind(raw) == "scan":
+                scan_at = i
+        controls: list[ft.Control] = []
+        mode = "say"
+        for i, raw in enumerate(lines):
+            kind = stream_line_kind(raw)
+            if kind == "blank":
+                continue
+            if kind == "think":
+                mode = "think"
+            elif kind in ("say", "banner"):
+                mode = "say"
+            controls.append(self._stream_line(raw, kind, mode))
+            if i == scan_at:
+                controls.append(self._scan_inline())
+        self.col_stream.controls = controls
+
+    def _stream_line(self, raw: str, kind: str, mode: str) -> ft.Control:
+        color: str = TEXT
+        weight: Any = None
+        if kind == "banner":
+            color, weight = BLUE, ft.FontWeight.BOLD
+        elif kind == "send":
+            color, weight = GREEN, ft.FontWeight.BOLD
+        elif kind == "tool":
+            color, weight = BLUE, ft.FontWeight.W_600
+        elif kind == "alarm":
+            color, weight = RED, ft.FontWeight.BOLD
+        elif kind in ("warn", "poke"):
+            color, weight = AMBER, ft.FontWeight.W_600
+        elif kind == "think":
+            color, weight = MUTED, ft.FontWeight.W_600
+        elif kind == "say":
+            color, weight = BLUE, ft.FontWeight.W_600
+        elif kind in ("cached", "scan"):
+            color = MUTED
+        elif mode == "think":
+            color = MUTED
+        line = ft.Text(
+            raw,
+            size=13,
+            color=color,
+            weight=weight,
+            selectable=True,
+            no_wrap=False,
+            font_family="Consolas",
+        )
+        if kind != "banner":
+            return line
+        # A look boundary is the thing the operator scans for — rule it off.
+        return ft.Container(
+            content=line,
+            padding=ft.Padding.only(top=10, bottom=4),
+            border=ft.Border(top=ft.BorderSide(1, BORDER)),
+        )
+
+    def _scan_inline(self) -> ft.Control:
+        """The screen that scan pulled, at the look where it was pulled."""
+        return ft.Container(
+            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+            border=ft.Border.all(1, BORDER),
+            border_radius=8,
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=self.lbl_scan_head,
+                        ink=True,
+                        tooltip="Show / hide the screen this scan pulled",
+                        on_click=self._toggle_scan_inline,
+                    ),
+                    self.col_scan,
+                ],
+                spacing=6,
+                tight=True,
+            ),
+        )
+
+    def _toggle_scan_inline(self, _=None) -> None:
+        self._scan_inline_open = not getattr(self, "_scan_inline_open", True)
+        self.col_scan.visible = self._scan_inline_open
+        self._safe_update()
+
+    def _toggle_stream_follow(self, _=None) -> None:
+        """Reading back must not be yanked to the tail. The chip is the way home."""
+        follow = not getattr(self, "_stream_follow", True)
+        self._stream_follow = follow
+        self.think_scroll.auto_scroll = follow
+        self.lbl_stream_follow.value = "live" if follow else "jump to live"
+        self.lbl_stream_follow.color = GREEN if follow else AMBER
+        self.btn_stream_follow.border = ft.Border.all(1, GREEN if follow else AMBER)
+        self._safe_update()
+
+    @staticmethod
+    def _age_s(sec: float) -> str:
+        if sec < 90:
+            return f"{sec:.0f}s"
+        if sec < 5400:
+            return f"{sec / 60:.0f}m"
+        return f"{sec / 3600:.1f}h"
+
+    def _sync_health_strip(self) -> None:
+        """Silence, burn, link — the three things that make the operator step in.
+
+        Monotonic math and small dict reads only; this paints every tick.
+        """
+        s, eng = self.engine.state, self.engine
+        running = bool(s.running) and bool(getattr(s, "autonomous", False))
+        streak = int(getattr(eng, "_fail_streak", 0) or 0)
+        last = float(getattr(eng, "_last_grok_mono", 0.0) or 0.0)
+        status = str(getattr(s, "status", "") or "")
+        if not running:
+            state, color = "off", MUTED
+        elif streak:
+            state, color = "backing off", AMBER
+        elif getattr(eng, "_think_parked", False):
+            state, color = "parked", AMBER
+        elif status.lower().startswith("grok"):
+            state, color = "thinking now", GREEN
+        else:
+            state, color = "waiting", TEXT
+        self.lbl_hs_state.value = state
+        self.lbl_hs_state.color = color
+        age = (time.monotonic() - last) if last else None
+        if age is None:
+            self.lbl_hs_age.value = "no look yet"
+            self.lbl_hs_age.color = AMBER if running else MUTED
+        else:
+            self.lbl_hs_age.value = f"last look {self._age_s(age)} ago"
+            self.lbl_hs_age.color = (
+                RED if running and age > 1800 else (AMBER if running and age > 900 else MUTED)
+            )
+        if streak:
+            wait = float(getattr(s, "backoff_wait_s", 0) or 0)
+            if wait <= 0:
+                try:
+                    from abcxauto.wake_bus import failed_look_backoff_s
+
+                    wait = float(failed_look_backoff_s(streak))
+                except Exception:
+                    wait = 0.0
+            self.lbl_hs_next.value = f"look failed (x{streak}) — next look {wait:.0f}s"
+            self.lbl_hs_next.color = AMBER
+        else:
+            self.lbl_hs_next.value = ""
+            self.lbl_hs_next.color = MUTED
+        looks = int(getattr(s, "looks_since_send", 0) or 0)
+        sends = int(getattr(s, "sends_last_look", 0) or 0)
+        tools = len(getattr(s, "tool_trace", None) or [])
+        cost = self._sc_last.get("model_cost_usd")
+        edge = self._sc_last.get("edge_usd")
+        beat = self._sc_last.get("beating_model")
+        burning = looks >= 6 and isinstance(cost, (int, float)) and cost > 0
+        if sends:
+            self.lbl_hs_burn.value = f"{sends} ticket(s) this look"
+            self.lbl_hs_burn.color = GREEN
+        elif not looks:
+            self.lbl_hs_burn.value = "no looks yet"
+            self.lbl_hs_burn.color = MUTED
+        else:
+            self.lbl_hs_burn.value = f"{looks} look(s) since a ticket"
+            self.lbl_hs_burn.color = RED if looks >= 6 else (AMBER if looks >= 3 else MUTED)
+        self.lbl_hs_look.value = f"this look: {tools} tool(s) · {sends} send(s)"
+        self.lbl_hs_look.color = TEXT if tools else MUTED
+        cost_s = f"${cost:,.2f}" if isinstance(cost, (int, float)) else "—"
+        edge_s = f"${edge:+,.2f}" if isinstance(edge, (int, float)) else "—"
+        mark = "BEAT" if beat is True else ("behind" if beat is False else "…")
+        self.lbl_hs_cost.value = f"model {cost_s} · edge {edge_s} {mark}"
+        if burning:
+            self.lbl_hs_cost.color = RED
+        elif beat is True:
+            self.lbl_hs_cost.color = GREEN
+        elif beat is False:
+            self.lbl_hs_cost.color = AMBER
+        else:
+            self.lbl_hs_cost.color = MUTED
+        self.health_box.border = ft.Border.all(1, RED if burning else BORDER)
+        pulse = getattr(s, "reality_pulse", None) or {}
+        block = pulse.get("session") if isinstance(pulse, dict) else None
+        sess = str(block.get("status") or "") if isinstance(block, dict) else str(block or "")
+        link = str(self.lbl_ibkr_status.value or "")
+        self.lbl_hs_link.value = f"{link} · {sess}" if sess else link
+        self.lbl_hs_link.color = GREEN if bool(getattr(s, "connected", False)) else RED
+
+    def _sync_book_strip(self) -> None:
+        """Three lots and three working orders — context for reading the stream."""
+        s = self.engine.state
+        book = getattr(s, "portfolio", None) or {}
+        naked = book.get("unprotected_symbols") if isinstance(book, dict) else None
+        lots = self._lot_view(s.positions, naked)[:3]
+        try:
+            from abcxauto.world_state import compact_working_orders
+
+            orders = compact_working_orders(s.open_orders or [], positions=s.positions)[:3]
+        except Exception:
+            orders = []
+        key = json.dumps([lots, orders], sort_keys=True, default=str)
+        if key == self._book_strip_key:
+            return
+        self._book_strip_key = key
+        if not lots and not orders:
+            self.lbl_book_strip.value = "No open lots"
+            self.col_book_strip.controls = [self.lbl_book_strip]
+            return
+        controls: list[ft.Control] = []
+        for r in lots:
+            mkt, pct = r.get("mkt"), r.get("mtm_pct")
+            protected = not bool(r.get("unprotected"))
+            controls.append(
+                self._blotter_row(
+                    [
+                        self._cell(str(r.get("ident") or "?"), expand=True, mono=True),
+                        self._cell(
+                            f"{mkt:,.2f}" if isinstance(mkt, (int, float)) else "—",
+                            width=76,
+                            right=True,
+                            mono=True,
+                            color=TEXT if isinstance(mkt, (int, float)) else MUTED,
+                        ),
+                        self._cell(
+                            f"{pct:+.0f}%" if isinstance(pct, (int, float)) else "—",
+                            width=52,
+                            right=True,
+                            color=(
+                                MUTED
+                                if not isinstance(pct, (int, float))
+                                else (GREEN if pct >= 0 else RED)
+                            ),
+                        ),
+                        self._cell(
+                            "protected" if protected else "naked",
+                            width=72,
+                            right=True,
+                            color=MUTED if protected else RED,
+                            weight=ft.FontWeight.W_600,
+                        ),
+                    ],
+                    alert=not protected,
+                )
+            )
+        for o in orders:
+            px = []
+            if o.get("stop") not in (None, ""):
+                px.append(f"stop {o['stop']}")
+            if o.get("lmt") not in (None, ""):
+                px.append(f"lmt {o['lmt']}")
+            controls.append(
+                ft.Text(
+                    " ".join(
+                        str(x)
+                        for x in (
+                            o.get("order_id") or "?",
+                            o.get("symbol") or "?",
+                            o.get("action") or "",
+                            o.get("type") or "",
+                            " · ".join(px),
+                        )
+                        if str(x).strip()
+                    ),
+                    size=11,
+                    color=MUTED,
+                    selectable=True,
+                )
+            )
+        self.col_book_strip.controls = controls
 
     def _prev_stream(self) -> str:
         """An idle pane is wasted — show the last look Grok took."""
@@ -1446,6 +3581,24 @@ class ProTerminal:
             tail = raw.strip()[-3000:]
             self._prev_text = f"— previous look —\n\n{tail}" if tail else ""
         return self._prev_text
+
+    def _sync_active_page(self, *, force: bool = False) -> None:
+        """Only the visible page reads disk, and at most every PAGE_REFRESH_S."""
+        now = time.monotonic()
+        if not force and now - float(self._page_last or 0) < PAGE_REFRESH_S:
+            return
+        self._page_last = now
+        try:
+            if self.tab == "notebook":
+                self._sync_notebook_page(force=force)
+            elif self.tab == "scorecard":
+                self._sync_scorecard_page(force=force)
+            elif self.tab == "risk":
+                self._sync_risk_page(force=force)
+            elif self.tab == "settings":
+                self._sync_settings_page(force=force)
+        except Exception:
+            logger.debug("page sync failed tab=%s", self.tab, exc_info=True)
 
     def _sync_widgets(self) -> None:
         s = self.engine.state
@@ -1539,6 +3692,8 @@ class ProTerminal:
         trace = list(getattr(s, "tool_trace", None) or [])
         self.lbl_tools.value = f"Tools: {' '.join(trace[-12:])}" if trace else "Tools: —"
         self.lbl_tools.color = TEXT if trace else MUTED
+        self.lbl_dash_tools.value = self.lbl_tools.value
+        self.lbl_dash_tools.color = self.lbl_tools.color
         skip = str(getattr(s, "skip_reason", "") or getattr(s, "stage_error", "") or "")
         if getattr(s, "book_unreliable", False) and "unreliable" not in skip:
             skip = skip or "book_unreliable"
@@ -1570,6 +3725,13 @@ class ProTerminal:
             self._sync_path_line()
         self._sync_mix_line()
         self._sync_lots()
+        self._sync_orders()
+        self._sync_fills()
+        self._sync_activity()
+        self._sync_scan_tape()
+        self._sync_health_strip()
+        self._sync_book_strip()
+        self._sync_lessons_line()
         self._sync_tabs()
         try:
             from abcxauto.lab_playbook import load_lab, load_live, is_paper
@@ -1604,6 +3766,13 @@ class ProTerminal:
         self.lbl_recent_fills.value = self._format_recent_fills(fills)
         self.lbl_recent_fills.color = TEXT if fills else MUTED
         self.lbl_activity.value = self._cycle_log_text(s.records)
+        health = str(getattr(s, "mandate_health", "") or "green")
+        label = str(getattr(s, "mandate_health_label", "") or "protected")
+        self.lbl_mandate_health.value = f"{health} — {label}"
+        self.lbl_mandate_health.color = (
+            RED if health == "red" else (AMBER if health == "amber" else GREEN)
+        )
+        self._sync_active_page()
         try:
             pulse = s.reality_pulse or {}
             if pulse:
@@ -1680,7 +3849,7 @@ class ProTerminal:
                 ts = ts.split("T", 1)[-1][:8]
             else:
                 ts = ts[-8:]
-            if kind in ("connect", "start", "pause", "disconnect", "open_risk"):
+            if self._is_note(r):
                 lines.append(f"{ts}  {kind.upper()}  {r.get('msg') or '—'}")
                 continue
             strat = r.get("strat") or (r.get("action_obj") or {}).get("strategy") or "—"
@@ -1697,6 +3866,147 @@ class ProTerminal:
             GREEN if status == "regular"
             else (AMBER if status in ("premarket", "postmarket") else MUTED)
         )
+        self.lbl_countdown_title.value = (
+            "Open time" if view.get("countdown_to") == "open" else "Close time"
+        )
+        self.lbl_countdown.value = view.get("countdown_human") or "—"
+        self.lbl_data_age.value = view.get("ibkr_refresh") or "n/a"
+        narrative = (pulse or {}).get("narrative")
+        if narrative:
+            self.lbl_pulse_narrative.value = str(narrative)
+            self.lbl_pulse_narrative.color = TEXT
+
+    # ------------------------------------------------------------ right rail
+
+    @staticmethod
+    def _format_return_pct(value) -> tuple[str, str]:
+        if value is None:
+            return "—", MUTED
+        try:
+            pct = float(value) * 100.0
+        except (TypeError, ValueError):
+            return "—", MUTED
+        return f"{pct:+.2f}%", GREEN if pct >= 0 else RED
+
+    def _nav_disclaimer(self, perf: dict) -> str:
+        """Short tracking-since / updated line for the Account card."""
+        src = str((perf or {}).get("source") or "none")
+        if src != "ibkr_nav":
+            return "IBKR NAV — building history…"
+        start = (perf or {}).get("history_start")
+        days = (perf or {}).get("history_days")
+        as_of = (perf or {}).get("as_of")
+        start_bit = "—"
+        if start:
+            try:
+                dt = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+                start_bit = dt.strftime("%Y-%m-%d")
+            except ValueError:
+                start_bit = str(start)[:10]
+        days_bit = f" ({int(days)}d)" if days is not None else ""
+        updated_bit = ""
+        if as_of:
+            try:
+                dt = datetime.fromisoformat(str(as_of).replace("Z", "+00:00"))
+                updated_bit = f" · updated {dt.strftime('%H:%MZ')}"
+            except ValueError:
+                updated_bit = f" · updated {str(as_of)[:16]}"
+        return f"IBKR NAV since {start_bit}{days_bit}{updated_bit}"
+
+    def _apply_return_perf(self, perf: dict) -> None:
+        self.lbl_ret_source.value = self._nav_disclaimer(perf)
+        self.lbl_ret_source.color = MUTED
+        for lbl_attr, col_attr, key in (
+            ("lbl_ret_1w", "col_ret_1w", "ret_1w"),
+            ("lbl_ret_3m", "col_ret_3m", "ret_3m"),
+            ("lbl_ret_1y", "col_ret_1y", "ret_1y"),
+        ):
+            raw = (perf or {}).get(key)
+            label, color = self._format_return_pct(raw)
+            getattr(self, lbl_attr).value = label
+            getattr(self, lbl_attr).color = color
+            col = getattr(self, col_attr, None)
+            if col is not None:
+                col.visible = raw is not None
+
+    async def _refresh_returns(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and self._ret_last_fetch and (now - self._ret_last_fetch) < 120.0:
+            return
+        self._ret_last_fetch = now
+        try:
+            from abcxauto.account_returns import compute_account_returns
+
+            perf = compute_account_returns(
+                equity=self.engine.state.equity,
+                daily_pnl=self.engine.state.pnl,
+            )
+            self._ret_cache = perf
+            self._apply_return_perf(perf)
+        except Exception:
+            self.lbl_ret_source.value = "IBKR NAV — error"
+            self.lbl_ret_source.color = MUTED
+
+    def _render_news_list(self, items: list[dict], *, fallback: str = "") -> None:
+        rows: list[ft.Control] = []
+        for it in (items or [])[:10]:
+            hl = str(it.get("headline") or "").strip()
+            if not hl:
+                continue
+            sym = str(it.get("symbol") or "").upper()
+            src = str(it.get("source") or "")
+            if src.startswith("http"):
+                try:
+                    from urllib.parse import urlparse
+
+                    host = urlparse(src).netloc or src
+                except Exception:
+                    host = src
+            else:
+                host = src
+            meta = " · ".join(x for x in (sym, host) if x)
+            rows.append(
+                ft.Container(
+                    padding=ft.Padding.symmetric(vertical=8),
+                    border=ft.Border(bottom=ft.BorderSide(1, BORDER)),
+                    content=ft.Column(
+                        [
+                            ft.Text(hl, size=13, color=TEXT, weight=ft.FontWeight.W_500),
+                            ft.Text(meta or "news", size=11, color=MUTED),
+                        ],
+                        spacing=2,
+                        tight=True,
+                    ),
+                )
+            )
+        if not rows:
+            rows = [
+                ft.Container(
+                    padding=ft.Padding.symmetric(vertical=8),
+                    content=ft.Text(
+                        fallback or "No headlines yet.", size=13, color=MUTED, selectable=True
+                    ),
+                )
+            ]
+        self.news_list.controls = rows
+
+    async def _refresh_news(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and self._news_last_fetch and (now - self._news_last_fetch) < 60.0:
+            return
+        self._news_last_fetch = now
+        try:
+            from abcxauto.news_feed import fetch_agent_news
+
+            unique = await fetch_agent_news(
+                self.engine.state.positions, force=force, per_symbol=5
+            )
+        except Exception:
+            unique = []
+        self._news_cache = unique
+        self._render_news_list(unique)
+
+    # ----------------------------------------------------------------- loops
 
     async def _reveal_window(self) -> None:
         try:
@@ -1719,12 +4029,6 @@ class ProTerminal:
                 self.engine.drain_apply()
                 self._sync_widgets()
                 self._safe_update()
-                if getattr(self, "_think_need_scroll", False):
-                    self._think_need_scroll = False
-                    try:
-                        await self.think_scroll.scroll_to(offset=-1, duration=0)
-                    except Exception:
-                        pass
             except Exception:
                 logger.exception("poll loop tick failed")
             await asyncio.sleep(0.12)
@@ -1738,6 +4042,8 @@ class ProTerminal:
                     account=None,
                 )
                 self._apply_clock(pulse)
+                await self._refresh_returns()
+                await self._refresh_news()
                 self._safe_update()
             except Exception:
                 pass

@@ -426,20 +426,26 @@ async def test_connect_broker_no_cycles_without_xai(monkeypatch):
             return True
 
     cycle_calls = {"n": 0}
+    mine: dict = {}
 
-    async def boom_cycle(*_a, **_k):
+    async def boom_think(engine, *_a, **_k):
+        # _host_think is patched on the class: a worker thread another module
+        # left running would otherwise fail this test. Count only our engine.
+        if engine is not mine.get("eng"):
+            return {"_parked": True, "cycle": 0}
         cycle_calls["n"] += 1
-        raise AssertionError("run_cycle must not run on connect-only")
+        raise AssertionError("the think must not run on connect-only")
 
     monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _NoXaiCfg())
     monkeypatch.setattr("abcxauto.pro_engine.get_ibkr_connector", _Conn)
-    monkeypatch.setattr("abcxauto.pro_engine.run_cycle", boom_cycle)
+    monkeypatch.setattr("abcxauto.pro_engine.ProEngine._host_think", boom_think)
     monkeypatch.setattr(
         "abcxauto.pro_engine.ProEngine._start_monitor",
         lambda self: setattr(self, "monitor", type("M", (), {"running": True})()),
     )
 
     eng = ProEngine()
+    mine["eng"] = eng
     assert eng.start() == "XAI_API_KEY missing"
     err = eng.connect_broker()
     assert err is None
@@ -651,6 +657,50 @@ async def test_host_think_surfaces_question_failed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_host_think_surfaces_trailing_question_failed(monkeypatch):
+    from abcxauto.brain import BrainTurn
+
+    async def grok_turn(*_a, **_k):
+        return BrainTurn(
+            text="I'll inspect the book, status, and playbook first.\n?",
+            tool_trace=["book", "status", "playbook"],
+        )
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    out = await eng._host_think(1, SimpleNamespace(chat=None), _stay_up_snap("regular"))
+    assert out.get("_failed") is True
+    assert not out.get("_parked")
+
+
+@pytest.mark.asyncio
+async def test_host_think_resume_sends_book_facts_not_yield_resume(monkeypatch):
+    from abcxauto.brain import BrainTurn
+
+    got: dict[str, str] = {}
+
+    async def grok_turn(*_a, **k):
+        got["wake"] = str(k.get("wake") or "")
+        return BrainTurn(text="looking")
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    await eng._host_think(
+        2,
+        SimpleNamespace(chat=object()),
+        _stay_up_snap("regular"),
+        resume=True,
+    )
+    wake = got.get("wake") or ""
+    assert wake != "yield resume."
+    assert "yield resume" not in wake
+    assert "session=" in wake
+    assert "flat=" in wake
+
+
+@pytest.mark.asyncio
 async def test_paper_regular_rearms_looks(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     calls = {"n": 0, "resume": []}
@@ -796,3 +846,33 @@ async def test_live_regular_does_not_rearm(monkeypatch, tmp_path):
     assert eng._resume_think is False
     eng.stop_engine()
     eng.drain_apply()
+
+
+def test_settings_change_rebuilds_brain_and_monitor(monkeypatch):
+    """Pro Settings must land without a restart: both fingerprints move."""
+
+    class _Box:
+        model = "grok-4.6"
+        temperature = 0.3
+        max_tokens = 8192
+        monitor_enabled = True
+        monitor_poll_s = 30
+        monitor_review_s = 300
+        monitor_extended_hours = False
+
+    box = _Box()
+    monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: box)
+    eng = ProEngine()
+    brain, mon = eng._brain_fingerprint(), eng._monitor_fingerprint()
+    assert eng._brain_key == ()  # nothing built yet
+
+    box.model = "grok-4.6-fast"
+    assert eng._brain_fingerprint() != brain
+    assert eng._monitor_fingerprint() == mon  # brain change must not churn the monitor
+
+    box.monitor_poll_s = 60
+    assert eng._monitor_fingerprint() != mon
+
+    eng._monitor_key = eng._monitor_fingerprint()
+    eng._stop_monitor()
+    assert eng._monitor_key == ()  # a stopped monitor cannot look current

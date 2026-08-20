@@ -14,6 +14,13 @@ from abcxauto.cycle import run_cycle
 from abcxauto.pro_desktop import ProTerminal
 
 PRO_SRC = Path(__file__).resolve().parents[1] / "abcxauto" / "pro_desktop.py"
+
+
+def _nav():
+    from abcxauto.pro_desktop import NAV
+
+    return NAV
+
 SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-80c4246a04fb\implementer")
 REQUIRED = (
     "Connect IBKR",
@@ -177,13 +184,64 @@ def test_book_strip_sync(headless_pro):
     assert "ibkr_down" in (headless_pro.lbl_banner.value or "")
 
 
-def test_shell_tree_builds_with_book_pane(headless_pro):
+def test_shell_tree_builds_three_columns(headless_pro):
+    from abcxauto.pro_desktop import ASIDE_W, RAIL_W
+
     shell = headless_pro._shell()
     assert shell is not None
-    body = shell.controls[-1]
-    book = body.controls[-1]
-    assert book.width == 440
+    rail, center, aside = shell.controls
+    assert (rail.width, aside.width) == (RAIL_W, ASIDE_W)
+    # The feed absorbs spare width so maximizing does not leave dead gutters.
+    assert center.width is None
+    assert center.expand
     assert headless_pro.tab_bodies["lots"] is headless_pro.col_lots
+
+
+def test_nav_covers_every_surface(headless_pro):
+    from abcxauto.pro_desktop import NAV_TITLES
+
+    keys = [k for k, _label, _o, _f in _nav()]
+    assert keys == [
+        "overview",
+        "positions",
+        "notebook",
+        "scorecard",
+        "risk",
+        "settings",
+    ]
+    assert set(keys) == set(NAV_TITLES)
+    headless_pro.page.add(headless_pro._shell())
+    for key in keys:
+        headless_pro._show_tab(key)
+        assert headless_pro.tab == key
+        assert headless_pro.lbl_center_title.value == NAV_TITLES[key]
+        assert headless_pro.content.content is not None
+    headless_pro._show_tab("overview")
+    assert headless_pro.lbl_center_title.value == "Dashboard"
+
+
+def test_positions_rows_replace_text_blobs(headless_pro):
+    s = headless_pro.engine.state
+    s.open_orders = [
+        {"order_id": 9, "symbol": "SPY", "order_type": "STP", "quantity": 5, "aux_price": 490}
+    ]
+    s.positions = [
+        {"symbol": "SPY", "quantity": 5, "sec_type": "STK", "avgCost": 500.0, "conId": 1}
+    ]
+    s.recent_fills = [{"symbol": "SPY", "side": "BOT", "quantity": 5, "price": 500.0}]
+    s.records = [{"type": "cycle", "ts": "2026-08-20T14:00:00", "strat": "oca",
+                  "result": {"status": "ok"}}]
+    headless_pro._sync_widgets()
+    # Each blotter tab paints one control per record, not a single text blob.
+    assert headless_pro.col_orders.controls != [headless_pro.lbl_working_orders]
+    assert headless_pro.col_fills.controls != [headless_pro.lbl_recent_fills]
+    assert headless_pro.col_activity.controls != [headless_pro.lbl_activity]
+    # Empty states fall back to the label.
+    s.open_orders, s.recent_fills, s.records = [], [], []
+    headless_pro._sync_widgets()
+    assert headless_pro.col_orders.controls == [headless_pro.lbl_working_orders]
+    assert headless_pro.col_fills.controls == [headless_pro.lbl_recent_fills]
+    assert headless_pro.col_activity.controls == [headless_pro.lbl_activity]
 
 
 def test_lot_rows_name_the_lot_and_put_naked_first(headless_pro):
@@ -319,6 +377,17 @@ def test_window_close_marks_operator_stop(headless_pro, tmp_path, monkeypatch):
     assert operator_stopped() is False
     headless_pro._on_window_event(type("E", (), {"type": "close"})())
     assert operator_stopped() is True
+
+
+def test_probe_window_close_does_not_latch_the_desk(headless_pro, tmp_path, monkeypatch):
+    """A UI preview must not leave a stop that blocks the supervisor's next launch."""
+    from abcxauto.supervisor import clear_operator_stop, operator_stopped
+
+    monkeypatch.setenv("ABCXAUTO_OPERATOR_STOP_PATH", str(tmp_path / "stop.json"))
+    monkeypatch.setenv("ABCXAUTO_UI_PROBE", str(tmp_path / "probe.json"))
+    clear_operator_stop()
+    headless_pro._on_window_event(type("E", (), {"type": "close"})())
+    assert operator_stopped() is False
 
 
 def test_disconnected_book_does_not_score_zero_nl(headless_pro):
@@ -462,7 +531,8 @@ def test_notebook_viewer_reads_lab_not_think(headless_pro, monkeypatch):
     assert "rev=3" in head
     assert "notebook, not law" in head
     assert "look at options" in body
-    assert headless_pro.btn_notebook.text == "Notebook"
+    # Notebook is a nav surface now, not a dialog.
+    assert "notebook" in dict((k, v) for k, v, _o, _f in _nav())
     assert headless_pro._hidden_metrics.visible is False
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
@@ -503,7 +573,8 @@ def test_risk_settings_surface_hidden_metrics_stay_hidden(headless_pro, monkeypa
     assert "aggressive → balanced" in lines
     assert "trade 12.5%" in lines
     assert "gates on" in lines
-    assert headless_pro.btn_risk.text == "Risk"
+    # Risk is a nav surface now, not a dialog.
+    assert "risk" in dict((k, v) for k, v, _o, _f in _nav())
     assert headless_pro._hidden_metrics.visible is False
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_playbook in headless_pro._hidden_metrics.controls
@@ -511,9 +582,236 @@ def test_risk_settings_surface_hidden_metrics_stay_hidden(headless_pro, monkeypa
     headless_pro._set_risk_posture("balanced")
     assert calls and calls[0].get("risk_posture") == "balanced"
     assert calls[0].get("persist") is True
-    headless_pro.tf_risk_trade_pct.value = "8"
-    headless_pro._save_risk_trade_pct()
+    headless_pro.fields["max_risk_per_trade_pct"].value = "8"
+    headless_pro._apply_field("max_risk_per_trade_pct")
     assert any(c.get("max_risk_per_trade_pct") == 8.0 and c.get("persist") is True for c in calls)
+
+
+@pytest.fixture
+def real_cfg_pro(headless_pro, monkeypatch):
+    """Pro wired to the real config module (conftest isolates the settings file)."""
+    from abcxauto.config import get_config
+
+    monkeypatch.setattr("abcxauto.pro_desktop.get_config", get_config)
+    return headless_pro
+
+
+def test_settings_fields_cover_every_operator_knob(headless_pro):
+    from abcxauto.pro_desktop import AGENT_FIELD_KEYS, FLOOR_GATES, RISK_FIELDS
+
+    assert AGENT_FIELD_KEYS == {
+        "model",
+        "temperature",
+        "max_tokens",
+        "monitor_poll_s",
+        "monitor_review_s",
+        "disconnect_halt_s",
+        "ibkr_host",
+        "ibkr_client_id",
+    }
+    # Every settings knob is a real field, every floor gate a real switch.
+    for key in AGENT_FIELD_KEYS:
+        assert key in headless_pro.fields
+    for key, _label in FLOOR_GATES:
+        assert key in headless_pro.gates
+    for key, _label, _hint in RISK_FIELDS:
+        assert key in headless_pro.fields
+    assert "trading_mode" not in headless_pro.fields
+    assert "ibkr_port" not in headless_pro.fields
+    assert "live_confirm" not in headless_pro.fields
+    # self_tune owns the scan cap; agent_state would overwrite an operator edit.
+    assert "scan_fetch_cap" not in headless_pro.fields
+
+
+def test_settings_apply_persists_and_reports_clamp(real_cfg_pro):
+    from abcxauto.config import get_config
+
+    real_cfg_pro.fields["monitor_poll_s"].value = "45"
+    real_cfg_pro._apply_field("monitor_poll_s")
+    assert get_config().monitor_poll_s == 45
+    assert "monitor_poll_s" in (real_cfg_pro.lbl_settings_status.value or "")
+
+    real_cfg_pro.fields["temperature"].value = "9"
+    real_cfg_pro._apply_field("temperature")
+    assert get_config().temperature == 2.0
+    assert "clamped" in (real_cfg_pro.lbl_settings_status.value or "")
+
+
+def test_settings_refuses_a_blank_model_without_crashing(real_cfg_pro):
+    from abcxauto.config import get_config
+
+    before = get_config().model
+    real_cfg_pro.fields["model"].value = "   "
+    real_cfg_pro._apply_field("model")
+    assert get_config().model == before
+    assert "refused" in (real_cfg_pro.lbl_settings_status.value or "")
+
+
+def test_open_edit_survives_the_page_repaint(real_cfg_pro):
+    real_cfg_pro._sync_settings_page(force=True)
+    typed = real_cfg_pro.fields["monitor_review_s"]
+    typed.value = "12"
+    real_cfg_pro._dirty.add("monitor_review_s")
+    real_cfg_pro._sync_settings_page(force=True)
+    assert typed.value == "12"
+    # Leaving the page abandons the edit.
+    real_cfg_pro._show_tab("overview")
+    assert real_cfg_pro._dirty == set()
+
+
+def test_risk_knobs_are_editable_and_tighten_only(real_cfg_pro):
+    from abcxauto.config import get_config
+
+    real_cfg_pro.fields["daily_loss_limit_pct"].value = "3"
+    real_cfg_pro._apply_field("daily_loss_limit_pct")
+    assert get_config().daily_loss_limit_pct == 3.0
+
+    # Above the walk-away ceiling: clamped, and the operator is told.
+    real_cfg_pro.fields["daily_loss_limit_pct"].value = "99"
+    real_cfg_pro._apply_field("daily_loss_limit_pct")
+    assert get_config().daily_loss_limit_pct == 25.0
+    assert "clamped" in (real_cfg_pro.lbl_risk_status.value or "")
+
+    real_cfg_pro.fields["max_open_positions"].value = "6"
+    real_cfg_pro._apply_field("max_open_positions")
+    assert get_config().max_open_positions == 6
+
+
+def test_floor_gate_cannot_be_disarmed_from_the_ui(real_cfg_pro):
+    from abcxauto.config import get_config
+
+    gate = real_cfg_pro.gates["defined_risk_only"]
+    gate.value = False
+    real_cfg_pro._toggle_floor_gate("defined_risk_only")
+    assert gate.value is True
+    assert get_config().defined_risk_only is True
+    assert "floor" in (real_cfg_pro.lbl_risk_status.value or "").lower()
+
+
+class _RecordingScroll:
+    """Stands in for the stream pane's Column and records invoke_method calls."""
+
+    def __init__(self) -> None:
+        self.auto_scroll = True
+        self.calls: list[dict] = []
+
+    async def scroll_to(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+
+
+def test_stream_pane_pins_the_tail_without_an_invoke_method(headless_pro):
+    """A tab swap unregisters the pane; an in-flight scroll_to then kills the
+    flet receive loop with 'Control with ID N is not registered'."""
+    assert headless_pro.think_scroll.auto_scroll is True
+
+    rec = _RecordingScroll()
+    headless_pro.think_scroll = rec
+    headless_pro.tab = "risk"
+    headless_pro.engine.state.think_live = "grok is thinking about SPY"
+    headless_pro._sync_think_stream()
+
+    async def _tick() -> None:
+        task = asyncio.ensure_future(headless_pro._poll_loop())
+        await asyncio.sleep(0.3)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_tick())
+    assert rec.calls == []
+    headless_pro.tab = "overview"
+    asyncio.run(_tick())
+    assert rec.calls == []
+
+
+def test_no_invoke_method_calls_on_page_only_controls():
+    """Page swapping can unmount any page control, so these stay out of the file."""
+    text = PRO_SRC.read_text(encoding="utf-8")
+    for call in (".scroll_to(", ".focus(", "invoke_method"):
+        offenders = [
+            line.strip()
+            for line in text.splitlines()
+            if call in line and not line.strip().startswith("#")
+        ]
+        assert offenders == [], offenders
+    assert "_think_need_scroll" not in text
+
+
+def test_window_close_always_lets_go_of_the_window(headless_pro, tmp_path, monkeypatch):
+    """prevent_close holds the window open, so a missed destroy traps the operator."""
+    from abcxauto.supervisor import clear_operator_stop, operator_stopped
+
+    text = PRO_SRC.read_text(encoding="utf-8")
+    assert "prevent_close = True" in text
+
+    monkeypatch.setenv("ABCXAUTO_OPERATOR_STOP_PATH", str(tmp_path / "stop.json"))
+    monkeypatch.delenv("ABCXAUTO_UI_PROBE", raising=False)
+    clear_operator_stop()
+    seen: list[str] = []
+    monkeypatch.setattr(headless_pro, "_destroy_window", lambda: seen.append("gone"))
+
+    headless_pro._on_window_event(type("E", (), {"type": "close"})())
+    assert seen == ["gone"]
+    assert operator_stopped() is True
+
+    def _boom() -> None:
+        raise RuntimeError("stop file unwritable")
+
+    monkeypatch.setattr("abcxauto.supervisor.mark_operator_stop", _boom)
+    headless_pro._on_window_event(type("E", (), {"type": "close"})())
+    assert seen == ["gone", "gone"]
+
+
+def test_destroy_window_hands_the_coroutine_to_the_page_loop(headless_pro):
+    """flet window destroy/close are coroutines; calling them bare is a no-op."""
+    tasks: list[object] = []
+    headless_pro.page.run_task = lambda fn, *a, **k: tasks.append(fn)
+
+    async def _destroy() -> None:
+        return None
+
+    headless_pro.page.window.destroy = _destroy
+    headless_pro._destroy_window()
+    assert tasks == [_destroy]
+
+
+def test_size_floors_switch_is_a_two_way_paper_toggle(real_cfg_pro):
+    """The Risk page owns the floors switch; it must not just describe the chip."""
+    from abcxauto.config import get_config
+    from abcxauto.risk_gates import sizing_floors_active
+
+    real_cfg_pro._sync_risk_page(force=True)
+    before = bool(real_cfg_pro.sw_size_floors.value)
+    assert before is bool(sizing_floors_active(get_config()))
+    assert "rail chip" not in (real_cfg_pro.lbl_risk_floors.value or "")
+
+    real_cfg_pro._toggle_sizing_floors()
+    assert bool(sizing_floors_active(get_config())) is (not before)
+    assert bool(real_cfg_pro.sw_size_floors.value) is (not before)
+
+    real_cfg_pro._toggle_sizing_floors()
+    assert bool(sizing_floors_active(get_config())) is before
+    assert bool(real_cfg_pro.sw_size_floors.value) is before
+
+
+def test_field_hint_ellipsizes_instead_of_clipping_mid_word(headless_pro):
+    """A hint longer than its column reads as '…', and the full text is a tooltip."""
+    import flet as ft
+
+    row = headless_pro._field_row("temperature", "Temperature", "a hint that is far too long")
+    hint = row.content.controls[1]
+    assert hint.tooltip == "a hint that is far too long"
+    assert hint.content.overflow == ft.TextOverflow.ELLIPSIS
+
+
+def test_settings_never_offers_a_live_switch_of_its_own():
+    text = PRO_SRC.read_text(encoding="utf-8")
+    # Mode changes go through the confirm-phrase dialog only.
+    assert text.count("switch_trading_mode") == 2
+    assert "_open_live_confirm_dialog" in text
+    assert "set_trading_mode" not in text
 
 
 def test_lot_row_follows_live_marks_not_rounded_zero(headless_pro):

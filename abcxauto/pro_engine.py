@@ -189,6 +189,7 @@ class ViewState:
     ibkr_live_last: float | None = None
     ibkr_live_symbol: str = ""
     scan_fetched: list[str] = field(default_factory=list)
+    scan_hits: dict = field(default_factory=dict)
     news_items: list[dict] = field(default_factory=list)
     market_read: str = ""
     risk_posture: str = ""
@@ -249,6 +250,9 @@ class ProEngine:
         self._resume_think = False
         self._think_parked = False
         self._last_session = ""
+        self._fail_streak = 0
+        self._brain_key: tuple = ()
+        self._monitor_key: tuple = ()
         from abcxauto.think_stream import bind_engine
 
         bind_engine(self)
@@ -463,6 +467,26 @@ class ProEngine:
             except Exception:
                 pass
         self.monitor = None
+        self._monitor_key = ()
+
+    @staticmethod
+    def _monitor_fingerprint() -> tuple:
+        cfg = get_config()
+        return (
+            bool(getattr(cfg, "monitor_enabled", True)),
+            int(getattr(cfg, "monitor_poll_s", 30) or 30),
+            int(getattr(cfg, "monitor_review_s", 300) or 300),
+            bool(getattr(cfg, "monitor_extended_hours", False)),
+        )
+
+    @staticmethod
+    def _brain_fingerprint() -> tuple:
+        cfg = get_config()
+        return (
+            str(getattr(cfg, "model", "") or ""),
+            float(getattr(cfg, "temperature", 0.0) or 0.0),
+            int(getattr(cfg, "max_tokens", 0) or 0),
+        )
 
     def request_wake(self, reason: str) -> None:
         """Interrupt cycle sleep for a whitelisted pace wake (monitor → engine)."""
@@ -507,6 +531,9 @@ class ProEngine:
                 stub, self.conn, on_wake=self.request_wake
             )
             self.monitor.start()
+            # PortfolioMonitor snapshots the config, so remember what it was
+            # built with — a Settings change has to rebuild it.
+            self._monitor_key = self._monitor_fingerprint()
             self.ui.put(("log", "Portfolio monitor started (pro path)"))
         except Exception as e:
             logger.warning(f"Portfolio monitor start failed: {e}")
@@ -653,7 +680,12 @@ class ProEngine:
         s.brain_strat = d.get("strat", "hold")
         s.brain_rationale = d.get("rationale") or "—"
         s.market_read = str(d.get("market_read") or "").strip()
-        s.opportunities = list(d.get("opportunities") or [])
+        s.opportunities = list(
+            d.get("opportunities")
+            or (d.get("world_state") or {}).get("opportunities")
+            or []
+        )
+        s.scan_hits = dict(d.get("scan_hits") or {})
         s.ibkr_live_last = d.get("ibkr_live_last")
         if s.ibkr_live_last is None:
             s.ibkr_live_last = (d.get("world_state") or {}).get("ibkr_live_last")
@@ -744,6 +776,12 @@ class ProEngine:
         )
         rec = {**d, "ts": _now(), "type": "cycle"}
         s.records.append(rec)
+        try:
+            from abcxauto.think_stream import write_last_turn
+
+            write_last_turn(d)
+        except Exception:
+            logger.debug("last_turn persist on cycle failed", exc_info=True)
 
     @staticmethod
     def _session_of_snap(snap: dict | None) -> str:
@@ -765,15 +803,31 @@ class ProEngine:
         self._last_session = str(session or "")
         payload = out if isinstance(out, dict) else {}
         if payload.get("_parked"):
+            self._fail_streak = 0
             return 0.0
-        from abcxauto.wake_bus import paper_stay_up, stay_up_retry_s
+        from abcxauto.brain import provider_overloaded
+        from abcxauto.wake_bus import failed_look_backoff_s, paper_stay_up
 
+        if not payload.get("_failed"):
+            self._fail_streak = 0
         if not paper_stay_up(session=session):
             return 0.0
         self._resume_think = True
-        if payload.get("_failed"):
-            return float(stay_up_retry_s())
-        return 0.0
+        if not payload.get("_failed"):
+            return 0.0
+        self._fail_streak = int(getattr(self, "_fail_streak", 0) or 0) + 1
+        return failed_look_backoff_s(
+            self._fail_streak,
+            overloaded=provider_overloaded(payload.get("_stream_error")),
+        )
+
+    def _note_backoff(self, out: dict | None, wait_s: float) -> None:
+        from abcxauto.brain import provider_overloaded
+
+        err = str((out or {}).get("_stream_error") or "")
+        streak = int(getattr(self, "_fail_streak", 0) or 0)
+        why = "xAI at capacity" if provider_overloaded(err) else "look failed"
+        self._note("RETRY", f"{why} (x{streak}) — next look {wait_s:.0f}s")
 
     async def _wait_stay_up_retry(self, sec: float) -> None:
         """Backoff after a failed stay-up look. Not a park clock."""
@@ -793,16 +847,15 @@ class ProEngine:
     async def _host_think(
         self, n: int, g: Any, s: dict, *, resume: bool = False
     ) -> dict:
-        """One grok_turn. Pokes enter via note_interrupt → live poke inside the turn."""
-        from abcxauto.brain import EPISODE_KINDS, grok_turn
-        from abcxauto.wake_bus import last_wake
+        """One grok_turn. Book events interrupt the open think."""
+        from abcxauto.brain import grok_turn
         from abcxauto.world_state import (
             build_world_state,
             day_facts,
-            format_live_poke,
             format_wake,
         )
 
+        _ = resume
         world = build_world_state(
             cycle=n, snap=s, opportunities=[], news_items=[],
         )
@@ -814,28 +867,14 @@ class ProEngine:
             day = day_facts(world, sc)
         except Exception:
             day = None
-        ev = last_wake()
-        kind = str(ev.kind or "") if ev is not None else ""
-        if resume and getattr(g, "chat", None) is not None:
-            wake = "yield resume."
-        elif getattr(g, "chat", None) is not None and kind in EPISODE_KINDS:
-            wake = format_live_poke(
-                kind=kind,
-                detail=str(ev.detail or "") if ev is not None else "",
-                session=world.session_status,
-                flat=world.flat,
-                unprotected=world.unprotected,
-                day=day,
-            )
-        else:
-            wake = format_wake(
-                cycle=n,
-                session=world.session_status,
-                flat=world.flat,
-                unprotected=world.unprotected,
-                ibkr_up=bool(getattr(self.conn, "connected", False)),
-                day=day,
-            )
+        wake = format_wake(
+            cycle=n,
+            session=world.session_status,
+            flat=world.flat,
+            unprotected=world.unprotected,
+            ibkr_up=bool(getattr(self.conn, "connected", False)),
+            day=day,
+        )
         self.state.status = "Thinking"
         turn = await grok_turn(g, connector=self.conn, world=world, snap=s, wake=wake)
         if getattr(turn, "parked", False):
@@ -868,10 +907,12 @@ class ProEngine:
             "reality_pulse": s.get("reality_pulse") or {},
             "world_state": world.to_dict() if hasattr(world, "to_dict") else {},
             "tool_trace": list(getattr(turn, "tool_trace", None) or []),
+            "scan_hits": dict(s.get("scan_hits") or {}),
             "sends": len(getattr(turn, "sends", None) or []),
             "validation": str(result.get("note") or result.get("status") or "ok"),
             "pace": {"tier": "stay", "sleep_s": 0, "reason": "yield"},
             "_failed": failed,
+            "_stream_error": str(getattr(turn, "stream_error", "") or ""),
         }
 
     async def _do_panic(self) -> None:
@@ -977,9 +1018,19 @@ class ProEngine:
         first_think = True
         try:
             while gen == self._gen and not self.stop.is_set():
-                if self.monitor is None or not getattr(self.monitor, "running", False):
-                    if getattr(get_config(), "monitor_enabled", True):
-                        self._start_monitor()
+                mon_key = self._monitor_fingerprint()
+                mon_live = self.monitor is not None and getattr(
+                    self.monitor, "running", False
+                )
+                if not mon_key[0]:
+                    if self.monitor is not None:
+                        self._stop_monitor()
+                        self._note("MONITOR", "stopped — monitor_enabled off")
+                elif not mon_live:
+                    self._start_monitor()
+                elif mon_key != self._monitor_key:
+                    self._note("MONITOR", f"pacing changed → restart {mon_key[1]}s/{mon_key[2]}s")
+                    self._start_monitor()
                 if getattr(self, "_universe_refresh_on_start", False) and self.conn is not None:
                     self._universe_refresh_on_start = False
                     try:
@@ -1003,8 +1054,12 @@ class ProEngine:
                 ):
                     await asyncio.sleep(0.25)
                     continue
-                if g is None:
+                brain_key = self._brain_fingerprint()
+                if g is None or brain_key != self._brain_key:
+                    if g is not None:
+                        self._note("BRAIN", f"model/limits changed → {brain_key[0]}")
                     g = GrokClient()
+                    self._brain_key = brain_key
 
                 resume = bool(getattr(self, "_resume_think", False))
                 poked = peek_interrupt() is not None
@@ -1063,15 +1118,14 @@ class ProEngine:
                     self.ui.put(("cycle", out))
                     wait_s = self._rearm_after_think(out, session=session)
                     if wait_s > 0:
-                        self._note("RETRY", f"look failed — next look {wait_s:.0f}s")
+                        self._note_backoff(out, wait_s)
                         await self._wait_stay_up_retry(wait_s)
                 except Exception as e:
                     self.ui.put(("error", str(e)))
-                    wait_s = self._rearm_after_think(
-                        {"_failed": True}, session=session
-                    )
+                    payload = {"_failed": True, "_stream_error": str(e)}
+                    wait_s = self._rearm_after_think(payload, session=session)
                     if wait_s > 0:
-                        self._note("RETRY", f"look failed — next look {wait_s:.0f}s")
+                        self._note_backoff(payload, wait_s)
                         await self._wait_stay_up_retry(wait_s)
         finally:
             self._stop_monitor()
