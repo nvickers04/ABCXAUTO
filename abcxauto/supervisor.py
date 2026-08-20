@@ -8,8 +8,10 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,60 @@ logger = logging.getLogger(__name__)
 
 _REPO = Path(__file__).resolve().parents[1]
 STOP_PATH = _REPO / "data" / "state" / "operator_stop.json"
+DESK_OUT_PATH = _REPO / "logs" / "desk.out"
+
+
+def _desk_out_path() -> Path:
+    raw = (os.environ.get("ABCXAUTO_DESK_OUT_PATH") or "").strip()
+    return Path(raw) if raw else DESK_OUT_PATH
+
+
+def _desk_out_logger() -> logging.Logger:
+    """Own file for the child's console. Kept off app.log so the structured
+    record stays readable, and off ``propagate`` so it is not double-written."""
+    lg = logging.getLogger("abcxauto.desk_out")
+    lg.propagate = False
+    target = str(_desk_out_path().resolve())
+    for h in lg.handlers:
+        if isinstance(h, RotatingFileHandler):
+            try:
+                if Path(getattr(h, "baseFilename", "")).resolve() == Path(target):
+                    return lg
+            except OSError:
+                return lg
+            lg.removeHandler(h)
+            h.close()
+    _desk_out_path().parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        target, maxBytes=1_000_000, backupCount=2, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+    lg.addHandler(handler)
+    lg.setLevel(logging.INFO)
+    return lg
+
+
+def tee_child_output(stream: Any) -> None:
+    """Persist the child's stdout/stderr and still echo it to our console.
+
+    Tracebacks that kill a flet loop, and the ib_insync warnings, only ever reach
+    the child's console. Losing them means the operator has no evidence of a
+    crash the desk survived.
+    """
+    log = _desk_out_logger()
+    for raw in iter(stream.readline, ""):
+        line = str(raw).rstrip()
+        if not line:
+            continue
+        try:
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+        except Exception:
+            pass
+        try:
+            log.info(line)
+        except Exception:
+            pass
 
 
 def _stop_path() -> Path:
@@ -82,6 +138,81 @@ def tws_listening(host: str = "127.0.0.1", port: int = 7497, timeout: float = 2.
         return False
 
 
+DESK_LOCK_PATH = _REPO / "data" / "state" / "desk.lock"
+
+
+def _lock_path() -> Path:
+    raw = (os.environ.get("ABCXAUTO_DESK_LOCK_PATH") or "").strip()
+    return Path(raw) if raw else DESK_LOCK_PATH
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        import psutil
+
+        return bool(psutil.pid_exists(pid))
+    except Exception:
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            handle = ctypes.windll.kernel32.OpenProcess(0x00100000, 0, int(pid))
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def desk_owner_pid() -> int:
+    """PID of a live desk, or 0. One book = one process, one client id."""
+    p = _lock_path()
+    if not p.is_file():
+        return 0
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+        pid = int(raw.get("pid") or 0)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return 0
+    return pid if _pid_alive(pid) else 0
+
+
+def claim_desk_lock() -> bool:
+    """Claim the desk for this process. False when another desk is already up."""
+    owner = desk_owner_pid()
+    if owner and owner != os.getpid():
+        return False
+    p = _lock_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps({"pid": os.getpid(), "ts": datetime.now().isoformat()}),
+            encoding="utf-8",
+        )
+        return True
+    except OSError:
+        logger.debug("desk lock write failed", exc_info=True)
+        return True
+
+
+def release_desk_lock() -> None:
+    p = _lock_path()
+    try:
+        if p.is_file() and desk_owner_pid() in (0, os.getpid()):
+            p.unlink()
+    except OSError:
+        logger.debug("desk lock release failed", exc_info=True)
+
+
 def supervise(child_env: dict[str, str] | None = None) -> int:
     """Run Pro as a child. Relaunch on crash during useful hours if TWS is up."""
     env = dict(os.environ)
@@ -94,7 +225,17 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
             [sys.executable, "-m", "abcxauto"],
             env=env,
             cwd=str(_REPO),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=1,
+            text=True,
+            errors="replace",
         )
+        stream = getattr(proc, "stdout", None)
+        if stream is not None:
+            threading.Thread(
+                target=tee_child_output, args=(stream,), daemon=True
+            ).start()
         code = proc.wait()
         if int(code or 0) == 0:
             logger.info("supervisor: clean exit — operator closed the window, stay down")

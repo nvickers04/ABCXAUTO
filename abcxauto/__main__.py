@@ -42,16 +42,18 @@ def _cleanup(
 
 def main() -> None:
     if "--cleanup" in sys.argv:
-        from abcxauto.supervisor import mark_operator_stop
+        from abcxauto.supervisor import mark_operator_stop, release_desk_lock
 
         mark_operator_stop()
-        raise SystemExit(
-            _cleanup(
-                aggressive="--aggressive" in sys.argv,
-                flet_cache="--flet-cache" in sys.argv,
-                kill_only="--kill-only" in sys.argv,
-            )
+        code = _cleanup(
+            aggressive="--aggressive" in sys.argv,
+            flet_cache="--flet-cache" in sys.argv,
+            kill_only="--kill-only" in sys.argv,
         )
+        # The killed desk cannot drop its own lock. A stale pid heals on liveness
+        # check, but pid reuse would refuse the next launch.
+        release_desk_lock()
+        raise SystemExit(code)
     if "--desktop" in sys.argv or "--web" in sys.argv:
         print(
             "web-pro / --desktop was removed. Use python -m abcxauto for Flet Pro.",
@@ -76,11 +78,30 @@ def main() -> None:
     supervised = bool((os.environ.get("ABCXAUTO_SUPERVISED") or "").strip())
     probe = bool(os.environ.get("ABCXAUTO_LAUNCH_PROBE"))
     if not probe and not supervised:
-        from abcxauto.supervisor import clear_operator_stop, supervise
+        from abcxauto.supervisor import (
+            claim_desk_lock,
+            clear_operator_stop,
+            desk_owner_pid,
+            release_desk_lock,
+            supervise,
+        )
 
+        # Flet re-enters __main__ in its own process and loses ABCXAUTO_SUPERVISED,
+        # so without this the app child becomes a second supervisor: two desks,
+        # two think loops, two IBKR sessions fighting for one client id.
+        if not claim_desk_lock():
+            print(
+                f"desk already running (pid {desk_owner_pid()}). "
+                "python -m abcxauto --cleanup to stop it first.",
+                flush=True,
+            )
+            raise SystemExit(0)
         clear_operator_stop()
         print("supervisor: launching Pro child", flush=True)
-        raise SystemExit(supervise())
+        try:
+            raise SystemExit(supervise())
+        finally:
+            release_desk_lock()
     if not probe:
         from abcxauto.think_stream import begin_run
 
