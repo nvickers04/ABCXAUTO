@@ -19,6 +19,8 @@ _CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "ideas": []}
 _CACHE_TTL_S = 150.0
 # Seed tape size matches the book tool payload (world_state / format_scan_tape).
 TAPE_SEED_CAP = 12
+# Top-N screen hits that get an IBKR last stamped on in the same call.
+SCAN_QUOTE_CAP = 12
 
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,7}$")
 
@@ -139,24 +141,120 @@ def overlay_hits(
     *,
     positions: list[dict] | None = None,
     turn_symbols: list[str] | None = None,
+    scanner_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Unranked hit rows: symbol + on_book (+ in_turn when local). No rank / no quotes."""
+    """Hit rows: symbol + on_book, plus whatever the scanner already reported.
+
+    ``scanner_rows`` carries IBKR's own rank and scanCode metric so a screen is
+    triageable without spending a quote round on every name.
+    """
     on_book = _book_symbols(positions)
     in_turn = {
         str(s or "").upper().strip()
         for s in (turn_symbols or [])
         if str(s or "").strip()
     }
+    facts: dict[str, dict[str, Any]] = {}
+    for row in scanner_rows or []:
+        if not isinstance(row, dict):
+            continue
+        sym = str(row.get("symbol") or "").upper().strip()
+        if sym:
+            facts[sym] = row
     rows: list[dict[str, Any]] = []
     for sym in symbols:
         s = str(sym or "").upper().strip()
         if not s:
             continue
         row: dict[str, Any] = {"symbol": s, "on_book": s in on_book}
+        extra = facts.get(s) or {}
+        for key in ("rank", "distance", "benchmark", "projection", "legs"):
+            if extra.get(key) not in (None, ""):
+                row[key] = extra[key]
         if in_turn:
             row["in_turn"] = s in in_turn
         rows.append(row)
     return rows
+
+
+def scan_quote_cap() -> int:
+    """How many top hits get an IBKR last attached. 0 disables the sweep."""
+    raw = (os.environ.get("ABCXAUTO_SCAN_QUOTE_CAP") or "").strip()
+    if not raw:
+        return SCAN_QUOTE_CAP
+    try:
+        return max(0, min(24, int(raw)))
+    except ValueError:
+        return SCAN_QUOTE_CAP
+
+
+async def attach_live_quotes(
+    rows: list[dict[str, Any]],
+    *,
+    connector: Any = None,
+    cap: int | None = None,
+) -> int:
+    """Stamp IBKR last/bid/ask onto the top hits in place. Returns rows quoted.
+
+    A screen with no prices costs Grok a quote round per name. IBKR is already
+    connected here, so the sweep is one batched call.
+    """
+    limit = scan_quote_cap() if cap is None else max(0, int(cap))
+    if not rows or limit <= 0 or connector is None:
+        return 0
+    targets = [str(r.get("symbol") or "") for r in rows[:limit] if r.get("symbol")]
+    if not targets:
+        return 0
+    batch = getattr(connector, "get_live_quotes", None)
+    single = getattr(connector, "get_live_quote", None)
+    payload: Any = None
+    try:
+        if callable(batch):
+            payload = await batch(targets)
+        elif callable(single):
+            payload = {
+                "quotes": list(
+                    await asyncio.gather(
+                        *[single(s) for s in targets], return_exceptions=True
+                    )
+                )
+            }
+    except Exception:
+        logger.exception("scan quote sweep failed")
+        return 0
+    quotes: list[Any]
+    if isinstance(payload, dict):
+        quotes = list(payload.get("quotes") or [payload])
+    elif isinstance(payload, list):
+        quotes = list(payload)
+    else:
+        return 0
+    by_sym: dict[str, dict[str, Any]] = {}
+    for q in quotes:
+        if not isinstance(q, dict):
+            continue
+        sym = str(q.get("symbol") or "").upper().strip()
+        if sym:
+            by_sym[sym] = q
+    n = 0
+    for row in rows:
+        q = by_sym.get(str(row.get("symbol") or "").upper())
+        if not q:
+            continue
+        last = q.get("last") if q.get("last") is not None else q.get("mid")
+        try:
+            px = float(last)
+        except (TypeError, ValueError):
+            continue
+        if px <= 0:
+            continue
+        row["last"] = px
+        for key in ("bid", "ask"):
+            if q.get(key) is not None:
+                row[key] = q[key]
+        row["quote_source"] = "ibkr_live"
+        n += 1
+    return n
 
 
 async def criteria_scan(
@@ -182,6 +280,7 @@ async def criteria_scan(
         }
 
     hits_syms: list[str] = []
+    scanner_rows: list[dict[str, Any]] = []
     source = "symbols"
     arena_id = None
     code_out = None
@@ -205,6 +304,7 @@ async def criteria_scan(
                 err["applied"] = pulled.get("applied")
             return err
         hits_syms = list(pulled.get("symbols") or [])
+        scanner_rows = list(pulled.get("rows") or [])
         source = str(pulled.get("source") or "empty")
         arena_id = pulled.get("arena_id")
         code_out = pulled.get("scan_code")
@@ -219,8 +319,13 @@ async def criteria_scan(
         hits_syms = list(asked)
 
     rows = overlay_hits(
-        hits_syms, positions=positions, turn_symbols=turn_symbols
+        hits_syms,
+        positions=positions,
+        turn_symbols=turn_symbols,
+        scanner_rows=scanner_rows,
     )
+    quoted = await attach_live_quotes(rows, connector=connector)
+    ranked = bool(scanner_rows) and source == "ibkr"
     return {
         "ok": True,
         "source": source,
@@ -230,7 +335,13 @@ async def criteria_scan(
         "hits": rows,
         "applied": applied,
         "persisted": False,
-        "ranked": False,
+        "ranked": ranked,
+        "rank_meaning": (
+            "IBKR scanCode sort order; distance/benchmark are that code's metric"
+            if ranked
+            else "not ranked"
+        ),
+        "quoted": quoted,
     }
 
 

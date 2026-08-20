@@ -468,6 +468,7 @@ async def pull_one_screen(
             "applied": dict((filters or {}).get("applied") or {}),
         }
     pulled: list[str] = []
+    rows: list[dict[str, Any]] = []
     source = ""
     # MDA industry seed only when there is no IBKR connector (or no IBKR spec).
     # If _ibkr_scan ran and returned empty — stay empty; do not dump catalog names.
@@ -484,6 +485,7 @@ async def pull_one_screen(
             }
         if isinstance(scan_out, dict):
             pulled = list(scan_out.get("symbols") or [])
+            rows = list(scan_out.get("rows") or [])
         else:
             pulled = list(scan_out or [])
         source = "ibkr" if pulled else "empty"
@@ -497,6 +499,7 @@ async def pull_one_screen(
         "scan_code": resolved.get("scan_code"),
         "source": source or "empty",
         "symbols": list(pulled),
+        "rows": rows,
         "applied": applied,
         "persisted": False,
     }
@@ -655,6 +658,28 @@ def _stock_type_ok(stock_type: str, allowed: set[str]) -> bool:
     return st in allowed
 
 
+def _scan_row_facts(row: Any, symbol: str, *, rank_fallback: int) -> dict[str, Any]:
+    """Keep what the scanner already told us. ``distance``/``benchmark`` are the
+    scanCode's own metric (e.g. % gain for TOP_PERC_GAIN) — free triage data.
+    """
+    out: dict[str, Any] = {"symbol": symbol}
+    try:
+        rank = getattr(row, "rank", None)
+        out["rank"] = int(rank) if rank is not None else int(rank_fallback)
+    except (TypeError, ValueError):
+        out["rank"] = int(rank_fallback)
+    for src, dst in (
+        ("distance", "distance"),
+        ("benchmark", "benchmark"),
+        ("projection", "projection"),
+        ("legsStr", "legs"),
+    ):
+        val = getattr(row, src, None)
+        if val not in (None, ""):
+            out[dst] = str(val)
+    return out
+
+
 async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
     """Run one IBKR market scanner subscription.
 
@@ -726,6 +751,7 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": str(exc), "symbols": []}
     try:
         syms: list[str] = []
+        rows: list[dict[str, Any]] = []
         for row in data or []:
             cd = getattr(row, "contractDetails", None)
             contract = None
@@ -745,10 +771,11 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
             if not _stock_type_ok(st, allowed_types):
                 continue
             syms.append(sym)
-        return {"ok": True, "symbols": syms}
+            rows.append(_scan_row_facts(row, sym, rank_fallback=len(rows)))
+        return {"ok": True, "symbols": syms, "rows": rows}
     except Exception as exc:
         logger.exception("IBKR scanner parse failed scanCode=%s", spec.get("scanCode"))
-        return {"ok": False, "error": str(exc), "symbols": []}
+        return {"ok": False, "error": str(exc), "symbols": [], "rows": []}
 
 
 async def refresh_legal_set(
