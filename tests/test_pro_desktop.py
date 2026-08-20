@@ -515,3 +515,24 @@ def test_risk_settings_surface_hidden_metrics_stay_hidden(headless_pro, monkeypa
     headless_pro._save_risk_trade_pct()
     assert any(c.get("max_risk_per_trade_pct") == 8.0 and c.get("persist") is True for c in calls)
 
+
+def test_lot_row_follows_live_marks_not_rounded_zero(headless_pro):
+    row = {
+        "ident": "SPY STK long 11",
+        "qty": 11,
+        "avg": 769.591,
+        "mkt": 765.778,
+        "mtm_pct": 0.0,
+        "unprotected": False,
+    }
+    pct = headless_pro._lot_mark_pct(row)
+    assert pct is not None and pct < -0.4
+    ctrl = headless_pro._lot_control(row)
+    pct_lbl = ctrl.content.controls[2].content
+    assert "-0.50%" in (pct_lbl.value or "") or "-0.49%" in (pct_lbl.value or "")
+    assert pct_lbl.color == "#f4212e"
+    assert headless_pro.lbl_session_score in headless_pro._hidden_metrics.controls
+    assert headless_pro._hidden_metrics.visible is False
+    assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
+    assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
+

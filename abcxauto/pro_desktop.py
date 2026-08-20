@@ -237,6 +237,7 @@ class ProTerminal:
             [
                 self.lbl_mix,
                 self.lbl_score,
+                self.lbl_session_score,
                 self.lbl_path,
                 self.lbl_pace,
                 self.lbl_playbook,
@@ -468,7 +469,6 @@ class ProTerminal:
                         spacing=8,
                     ),
                     self.lbl_alert,
-                    self.lbl_session_score,
                     self.lbl_last_send,
                     ft.Container(height=1, bgcolor=BORDER),
                     ft.Row(
@@ -857,10 +857,36 @@ class ProTerminal:
         )
         return rows
 
+    @staticmethod
+    def _lot_mark_pct(row: dict) -> float | None:
+        """MTM % from live avg → mkt. Do not use a pre-rounded 0% suffix."""
+        avg, mkt = row.get("avg"), row.get("mkt")
+        try:
+            avg_f = float(avg)
+            mkt_f = float(mkt)
+        except (TypeError, ValueError):
+            mtm = row.get("mtm_pct")
+            return float(mtm) if isinstance(mtm, (int, float)) else None
+        if abs(avg_f) < 1e-12:
+            return None
+        try:
+            qty_f = float(row.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty_f = 0.0
+        if qty_f < 0:
+            return (avg_f - mkt_f) / abs(avg_f) * 100.0
+        return (mkt_f - avg_f) / abs(avg_f) * 100.0
+
     def _lot_control(self, row: dict) -> ft.Control:
-        mtm = row.get("mtm_pct")
+        mtm = self._lot_mark_pct(row)
         if isinstance(mtm, (int, float)):
-            mtm_txt, mtm_color = f"{mtm:+.0f}%", (GREEN if mtm >= 0 else RED)
+            mtm_txt = f"{mtm:+.2f}%"
+            if mtm < 0:
+                mtm_color = RED
+            elif mtm > 0:
+                mtm_color = GREEN
+            else:
+                mtm_color = MUTED
         else:
             mtm_txt, mtm_color = "—", MUTED
         avg, mkt = row.get("avg"), row.get("mkt")
@@ -885,7 +911,7 @@ class ProTerminal:
                 content=ft.Text(basis, size=11, color=MUTED, text_align=ft.TextAlign.RIGHT),
             ),
             ft.Container(
-                width=46,
+                width=58,
                 content=ft.Text(
                     mtm_txt,
                     size=12,
