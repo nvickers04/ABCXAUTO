@@ -208,34 +208,6 @@ def close_trade_plan(
         clear_trade_plan(path)
 
 
-def bump_plan_cycle(path: Path | None = None) -> Optional[ActiveTradePlan]:
-    """Bump cycles on all open plans; time-stop any that expire."""
-    plans = load_trade_plans()
-    if not plans:
-        return None
-    kept: list[ActiveTradePlan] = []
-    for plan in plans:
-        plan.cycles_open = int(plan.cycles_open or 0) + 1
-        if plan.max_hold_cycles and plan.cycles_open >= int(plan.max_hold_cycles):
-            plan.status = "closed"
-            plan.closed_at = _utc_now()
-            plan.close_reason = "time_stop"
-            try:
-                archive = _plans_path().with_name("last_closed_trade_plan.json")
-                archive.write_text(
-                    json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8"
-                )
-            except Exception:
-                pass
-        else:
-            kept.append(plan)
-    if kept:
-        save_trade_plans(kept)
-        return kept[0]
-    clear_trade_plan(path)
-    return None
-
-
 def plan_from_bracket_action(act: dict, thesis: str = "") -> Optional[ActiveTradePlan]:
     """Build a plan from a successful new-entry bracket params."""
     params = (act or {}).get("params") or {}
@@ -692,11 +664,6 @@ def _save_flat_streak_state(empty_count: int, ever_held: bool) -> None:
 
 def load_flat_streak() -> int:
     return int(_flat_streak_state().get("empty_count") or 0)
-
-
-def save_flat_streak(count: int) -> None:
-    st = _flat_streak_state()
-    _save_flat_streak_state(count, bool(st.get("ever_held")))
 
 
 def reset_flat_streak() -> None:

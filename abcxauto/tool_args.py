@@ -103,11 +103,13 @@ _SEND_HOIST = (
     # Optional % of NL annotation next to quantity. Clerk hoist only —
     # qty stays on the wire; never invent shares from %.
     "size_pct_nl",
+    # Playbook card this ticket comes from. Hoisted so the new-risk gate and
+    # the attribution log read the same key wherever Grok put it.
+    "card",
 )
 
 # Clerk-owned send annotation (not brain schema / not ORDER EXAMPLES).
 SEND_SIZE_PCT_NL = "size_pct_nl"
-
 
 def _first(args: dict[str, Any], *keys: str) -> Any:
     for key in keys:
@@ -307,6 +309,12 @@ def normalize_tool_call(
         ):
             out.pop(alias, None)
         # Bare scanCode passed as arena=MOST_ACTIVE is fine (universe.resolve_screen).
+        # Both selectors at once is a hard error in resolve_screen, and the model
+        # sent both on every wake then retried with arena alone — four dead scans
+        # a look, unlearnable because the chat is dropped. Keep the selector the
+        # retry proves works so the first call is the one that succeeds.
+        if str(out.get("arena") or "").strip() and str(out.get("scan_code") or "").strip():
+            out.pop("scan_code", None)
 
     if canon in ("candles", "option_chain"):
         if isinstance(out.get("symbol"), list) and not out.get("symbols"):

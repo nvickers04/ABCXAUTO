@@ -15,12 +15,11 @@ This module provides all options-related functionality as a mixin class:
 This mixin is imported by IBKRConnector in connector.py.
 """
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
-from ib_insync import Order, Option, ComboLeg, Contract, TagValue
+from ib_insync import Order, Option, ComboLeg, Contract
 from ib_insync.contract import Stock
 
 from abcxauto.marketdata.provider import get_data_provider
@@ -473,7 +472,7 @@ class IBKROptionsMixin:
     ) -> Dict[str, Any]:
         """IBKR stream snapshot for one option contract."""
         from abcxauto.broker.connection import safe_sleep as _safe_sleep
-        from abcxauto.broker.util import quote_from_ticker
+        from abcxauto.broker.quotes import quote_from_ticker
 
         sym = str(symbol or "").strip().upper()
         exp = str(expiration or "").strip()

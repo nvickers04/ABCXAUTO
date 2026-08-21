@@ -148,6 +148,8 @@ async def test_execute_ticket_completes_thin_idea(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    # A promoted naked entry becomes new risk; the card gate has its own suite.
+    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(

@@ -355,8 +355,9 @@ def test_format_wake_includes_day_facts():
     assert "stale=" not in text
     assert "mix=longC:7,shortC:1,vert:1" in text
     assert "ledger r50:-400.0 r51:-549.0" in text
-    assert text.rstrip().endswith("send.")
-    assert "set_wake" not in text
+    # set_wake is offered in every session now, so the wake line advertises it.
+    assert text.rstrip().endswith("send|set_wake.")
+    assert "set_wake" in text  # offered in every session now
     assert "This is a delta" not in text
     assert "no operator" not in text.lower()
     assert "clerk wake" not in text.lower()
@@ -389,7 +390,8 @@ def test_format_wake_floors_on_still_paints_max_risk():
     assert "risk/trade=" not in text
     assert "open_lots=NVDA STK long 5" in text
     assert "qty=" not in text
-    assert text.rstrip().endswith("send.")
+    # set_wake is offered in every session now, so the wake line advertises it.
+    assert text.rstrip().endswith("send|set_wake.")
 
 
 def test_format_working_exits_and_wake_lasts():
@@ -487,8 +489,9 @@ def test_format_wake_fill_is_delta_not_discovery():
     assert "prev=close_option sends=2" in text
     assert "This is a delta" not in text
     assert "yield resume" not in text
-    assert text.rstrip().endswith("send.")
-    assert "set_wake" not in text
+    # set_wake is offered in every session now, so the wake line advertises it.
+    assert text.rstrip().endswith("send|set_wake.")
+    assert "set_wake" in text  # offered in every session now
     assert "send or set_wake" not in text
     assert "Cycle 2." not in text
     assert "open_lots=XLF 260828C58.5 x1 -42%,QQQ 260918C745 x1" in text
@@ -665,8 +668,6 @@ def test_build_world_state_empty_book_no_spy_default_or_leftover_plan():
     assert ws.ibkr_live_last is None
     assert load_trade_plan() is not None
     assert ws.to_dict()["open_lots"] == []
-    block = ws.prompt_block()
-    assert '"trade_plan": null' in block
 
 
 def test_build_world_state_spy_stk11_keeps_matching_plan_not_stale_flat():
@@ -1144,15 +1145,9 @@ def test_build_world_state_regime_and_portfolio(tmp_path, monkeypatch):
     )
     assert "cash_pct_nl" in d["portfolio_risk"]["capital_liquidity"]
     assert "deployed_long_pct_nl" in d["portfolio_risk"]["capital_liquidity"]
-    block = ws.prompt_block()
-    assert "WORLDSTATE" in block
-    from tests.conftest import assert_no_cycle_counter
-
-    assert_no_cycle_counter(block)
-    assert '"cycle"' not in block
 
 
-def test_prompt_block_includes_working_orders_and_avg(tmp_path, monkeypatch):
+def test_compact_rows_keep_trail_order_and_avg_cost(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))
     from abcxauto.memory import reset_journal
@@ -1186,11 +1181,13 @@ def test_prompt_block_includes_working_orders_and_avg(tmp_path, monkeypatch):
         "portfolio_state": {},
     }
     ws = build_world_state(cycle=3, snap=snap, opportunities=[], news_items=[])
-    block = ws.prompt_block()
-    assert "working_orders" in block
-    assert "270" in block
-    assert "TRAIL" in block
-    assert "19.535" in block
+    from abcxauto.world_state import compact_position, compact_working_orders
+
+    rows = compact_working_orders(ws.open_orders, positions=ws.positions)
+    assert [r["order_id"] for r in rows] == [270]
+    assert rows[0]["type"] == "TRAIL"
+    lot = compact_position(ws.positions[0], extra=True, net_liq=ws.net_liquidation)
+    assert lot["avg"] == 19.535
 
 
 def test_compact_working_orders_keeps_option_identity():

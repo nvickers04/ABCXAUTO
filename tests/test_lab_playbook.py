@@ -85,7 +85,8 @@ def test_live_blocks_new_risk_until_promote(monkeypatch, tmp_path):
     assert live_has_promoted() is False
 
 
-def test_promote_requires_beating_and_ready(monkeypatch, tmp_path):
+def test_promote_needs_a_graduated_card_not_a_beating_book(monkeypatch, tmp_path):
+    """A lucky book no longer unlocks live. An individual card graduates."""
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
     save_lab(
@@ -95,13 +96,31 @@ def test_promote_requires_beating_and_ready(monkeypatch, tmp_path):
             "do_more": "index winners",
             "stop_doing": "lottery calls",
             "ready_to_promote": True,
+            "cards": [
+                {
+                    "name": "index bracket",
+                    "ticket": "market_bracket",
+                    "thesis": "index brackets pay",
+                    "retire_if": {"sample": 2, "condition": "two losers"},
+                }
+            ],
         },
         scorecard={"beating_model": False, "edge_usd": -2},
     )
-    assert maybe_promote(scorecard={"beating_model": False}) is None
-    live = maybe_promote(scorecard={"beating_model": True, "edge_usd": 10})
+    # Book beating, no graduated card: still no promote.
+    monkeypatch.setattr("abcxauto.lab_playbook.card_facts", lambda *_a, **_k: [])
+    assert maybe_promote(scorecard={"beating_model": True, "edge_usd": 10}) is None
+
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.card_facts",
+        lambda *_a, **_k: [
+            {"card": "index bracket", "graduated": True, "resolved": 2, "resolved_pnl": 44.0}
+        ],
+    )
+    live = maybe_promote(scorecard={"beating_model": False, "edge_usd": -2})
     assert live is not None
     assert live["promoted"] is True
+    assert live["graduated"] == ["index bracket"]
     assert "fills" in (live.get("note") or "").lower() or "copy" in (live.get("note") or "").lower()
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     assert live_new_risk_allowed() is True

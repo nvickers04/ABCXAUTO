@@ -3,30 +3,7 @@
 from __future__ import annotations
 
 from abcxauto.config import get_config
-from abcxauto.opportunity_scan import format_scan_tape, metrics_for_symbol
-
-
-def test_scan_tape_header_and_quote_sources():
-    text = format_scan_tape(
-        [
-            {
-                "symbol": "QQQ",
-                "source": "mda",
-                "freshness": "delayed",
-                "mda_last": 100.0,
-                "dist20": -0.01,
-                "ret5": 0.0,
-                "sma20": 101.0,
-                "sma50": 100.0,
-                "above_sma20": False,
-            }
-        ]
-    )
-    assert "SCAN TAPE" in text
-    assert "delayed" in text.lower()
-    assert "QUOTE SOURCES" in text or "IBKR" in text
-    assert "heuristic_rank" not in text
-    assert "MARKET FEATURES" not in text
+from abcxauto.opportunity_scan import metrics_for_symbol
 
 
 def test_metrics_no_advice_note():
@@ -180,44 +157,3 @@ def test_format_wake_includes_portfolio_pct_nl():
     assert "top QQQ=20.0% NL" in text
 
 
-def test_world_prompt_scan_tape_not_opportunities_header():
-    from abcxauto.world_state import WorldState
-
-    world = WorldState(
-        cycle=1,
-        session_status="regular",
-        flat=True,
-        needs_protection=False,
-        unprotected=[],
-        net_liquidation=1.0,
-        daily_pnl=0.0,
-        positions=[],
-        open_orders=[],
-        opportunities=[
-            {
-                "symbol": "SPY",
-                "source": "mda",
-                "freshness": "delayed",
-                "mda_last": 500.0,
-                "dist20": 0.0,
-                "ret5": 0.0,
-            }
-        ],
-        news_items=[],
-        risk_posture="balanced",
-        effective_posture="balanced",
-        gates={},
-        envelope={},
-        regime={"trend_bias": "mixed", "feature_mix_bias": "mixed", "vol_proxy": "quiet"},
-        portfolio_risk={},
-        working_thesis="",
-        recent_decisions=[],
-        trade_plan=None,
-    )
-    block = world.prompt_block()
-    assert "SCAN TAPE" in block
-    assert "MARKET FEATURES" not in block
-    assert "OPPORTUNITIES (" not in block
-    assert "QUOTE SOURCES" in block
-    assert "daily close" in block.lower()
-    assert "idle_streak" not in block

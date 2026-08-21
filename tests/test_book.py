@@ -1,12 +1,11 @@
-"""Minimal tests for book/portfolio state builders."""
+"""Minimal tests for the book state builders."""
 
 from __future__ import annotations
 
 from abcxauto.book import build_book, portfolio_narrative
-from abcxauto.portfolio import build_portfolio_state
 
 
-def test_build_portfolio_state_core_fields(monkeypatch):
+def test_build_book_core_fields(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.config.get_config",
         lambda: type("C", (), {})(),
@@ -42,14 +41,6 @@ def test_build_portfolio_state_core_fields(monkeypatch):
     assert state["positions"][0]["symbol"] == "SPY"
     assert "narrative" in state
     assert "NL=" in state["narrative"]
-    # portfolio.py remains a thin re-export
-    via_portfolio = build_portfolio_state(
-        account={"netliquidation": 50_000, "dailypnl": -100},
-        positions=[],
-        open_orders=[],
-        protection={"unprotected_symbols": []},
-    )
-    assert via_portfolio["net_liq"] == 50_000
 
 
 def test_build_book_daily_pnl_is_not_unrealized():

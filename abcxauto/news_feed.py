@@ -128,5 +128,3 @@ def format_news_for_prompt(items: list[dict], *, limit: int = 18) -> str:
     return "\n".join(lines)
 
 
-def cached_news() -> list[dict]:
-    return list(_CACHE.get("items") or [])

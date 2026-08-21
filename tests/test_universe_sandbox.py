@@ -53,8 +53,22 @@ async def test_refresh_legal_offline_fallback():
 
 def test_new_entry_is_not_limited_to_watchlist(tmp_path, monkeypatch):
     from abcxauto.agent_loop import gate_ticket
+    from abcxauto.lab_playbook import save_lab
 
     monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    save_lab(
+        {
+            "cards": [
+                {
+                    "name": "off-watchlist breakout",
+                    "ticket": "market_bracket",
+                    "thesis": "a name off the watchlist can still be the trade",
+                    "retire_if": {"sample": 5, "condition": "no follow-through"},
+                }
+            ]
+        }
+    )
     save_allowlist(
         {
             "enabled_arenas": ["index_etfs"],
@@ -96,7 +110,12 @@ def test_new_entry_is_not_limited_to_watchlist(tmp_path, monkeypatch):
         {
             "action": "market_bracket",
             "strategy": "market_bracket",
-            "params": {"symbol": "ZZZZ", "quantity": 1, "direction": "LONG"},
+            "params": {
+                "symbol": "ZZZZ",
+                "quantity": 1,
+                "direction": "LONG",
+                "card": "off-watchlist breakout",
+            },
             "rationale": "edge",
         },
         world,

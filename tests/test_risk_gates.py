@@ -127,6 +127,95 @@ async def test_halt_blocks_entries_not_exits(gate):
     assert ok is True
 
 
+def _lot(symbol="NVDA", mv=10_000.0, qty=100, sec_type="STK"):
+    return {
+        "symbol": symbol,
+        "secType": sec_type,
+        "quantity": qty,
+        "marketValue": mv,
+    }
+
+
+@pytest.mark.asyncio
+async def test_symbol_concentration_catches_orders_max_position_lets_through(
+    monkeypatch,
+):
+    """The hole this closes: three legal orders stacking into one oversized name."""
+    g = reset_risk_gate()
+    cfg = _cfg(max_position_pct=10.0, max_symbol_concentration_pct=25.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    # 8k order is 8% of NL — under max_position_pct every time it is sent.
+    order = _bracket(qty=80, entry=100.0, symbol="NVDA")
+    flat = FakeConnector()
+    ok, _ = await g.pre_trade_check(order, flat)
+    assert ok is True
+
+    # Already holding 20% of NL in NVDA: the same legal order now stacks past 25%.
+    heavy = FakeConnector(positions=[_lot("NVDA", mv=20_000.0)])
+    ok, reason = await g.pre_trade_check(order, heavy)
+    assert ok is False
+    assert "size_symbol_concentration" in reason
+
+    # A different name is untouched by NVDA's exposure.
+    ok, _ = await g.pre_trade_check(
+        _bracket(qty=80, entry=100.0, symbol="AMD"), heavy
+    )
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_symbol_concentration_aggregates_stock_and_its_options(monkeypatch):
+    """SPY shares plus SPY calls are one bet, so they sum against the ceiling."""
+    g = reset_risk_gate()
+    cfg = _cfg(max_position_pct=25.0, max_symbol_concentration_pct=25.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    conn = FakeConnector(
+        positions=[
+            _lot("SPY", mv=12_000.0),
+            _lot("SPY", mv=9_000.0, qty=2, sec_type="OPT"),
+        ]
+    )
+    ok, reason = await g.pre_trade_check(
+        _bracket(qty=60, entry=100.0, symbol="SPY"), conn
+    )
+    assert ok is False
+    assert "size_symbol_concentration" in reason
+
+
+@pytest.mark.asyncio
+async def test_symbol_concentration_never_blocks_an_exit(monkeypatch):
+    g = reset_risk_gate()
+    cfg = _cfg(max_symbol_concentration_pct=5.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    conn = FakeConnector(positions=[_lot("NVDA", mv=90_000.0)])
+    ok, reason = await g.pre_trade_check(_market_order_exit(), conn)
+    assert ok is True
+    assert "bypass" in reason
+
+
+@pytest.mark.asyncio
+async def test_symbol_concentration_is_inert_while_floors_are_off(monkeypatch):
+    """Paper default: Grok sizes. The gate arrives with the other % floors."""
+    g = reset_risk_gate()
+    cfg = _cfg(
+        sizing_floors=False,
+        max_position_pct=25.0,
+        max_symbol_concentration_pct=5.0,
+    )
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    conn = FakeConnector(positions=[_lot("NVDA", mv=50_000.0)])
+    ok, _ = await g.pre_trade_check(_bracket(qty=80, entry=100.0), conn)
+    assert ok is True
+
+
 @pytest.mark.asyncio
 async def test_daily_loss_breach_trips_halt(gate):
     # 2% of 100k = 2000; daily pnl -2500 trips
@@ -266,6 +355,7 @@ async def test_disabled_knobs_skip_rules(gate, monkeypatch):
             max_peak_drawdown_pct=0,
             max_option_premium_pct=0,
             max_risk_per_trade_pct=0,
+            max_symbol_concentration_pct=0,
         ),
     )
     # Would trip every rule if enabled
@@ -582,6 +672,7 @@ async def test_salvage_knobs_disabled(gate, monkeypatch):
             max_position_pct=0,
             daily_loss_limit_pct=0,
             max_open_positions=0,
+            max_symbol_concentration_pct=0,
         ),
     )
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())

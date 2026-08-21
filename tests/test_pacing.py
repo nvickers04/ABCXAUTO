@@ -52,14 +52,6 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
             risk_posture="balanced",
         ),
     )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.connection_status",
-        lambda _c=None: {
-            "ibkr_connected": True,
-            "mda_configured": False,
-            "trading_mode": "paper",
-        },
-    )
 
     async def _tool(_c, name: str, _a=None):
         return {
@@ -127,14 +119,6 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
             trading_mode="paper",
             risk_posture="balanced",
         ),
-    )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.connection_status",
-        lambda _c=None: {
-            "ibkr_connected": True,
-            "mda_configured": False,
-            "trading_mode": "paper",
-        },
     )
 
     pos = [{
@@ -220,14 +204,6 @@ async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.world_state.get_config", lambda: cfg)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.connection_status",
-        lambda _c=None: {
-            "ibkr_connected": True,
-            "mda_configured": False,
-            "trading_mode": "paper",
-        },
-    )
 
     pos = [{
         "symbol": "SPY", "quantity": 8, "sec_type": "STK",

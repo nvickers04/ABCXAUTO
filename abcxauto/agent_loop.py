@@ -14,7 +14,6 @@ from typing import Any, List
 
 from abcxauto.book import build_book_from_snap
 from abcxauto.config import get_config
-from abcxauto.connections import connection_status  # noqa: F401 — tests patch this
 from abcxauto.llm import GrokClient
 from abcxauto.memory import get_journal
 from abcxauto.monitor import build_protection_report
@@ -541,14 +540,55 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
                 "status": "blocked",
                 "note": f"structure cooldown {sym}: {why}",
             }
-        from abcxauto.lab_playbook import live_new_risk_allowed
+        from abcxauto.lab_playbook import live_new_risk_allowed, new_risk_card_error
 
         if not live_new_risk_allowed():
             return BLOCKED_STRAT, {
                 "status": "blocked",
                 "note": "live follower — no promoted paper playbook (no new risk)",
             }
+        # Attribution is a gate: an untagged entry scores as whole-book drift,
+        # which is the same number for every card and teaches nothing. The
+        # ticket being sent is the trunk, so the card has to branch from it.
+        card_note = new_risk_card_error(
+            params.get("card") or act.get("card"), type=strat
+        )
+        if card_note:
+            return BLOCKED_STRAT, {"status": "blocked", "note": card_note}
     return strat, None
+
+
+def _record_clerk_block(act: dict, strat: str, reason: str, *, stage: str) -> None:
+    """Durable record for a ticket the clerk refused before the executor.
+
+    executor.execute_proposal journals every proposal it sees, but the gates
+    above it return early. Without this a well-formed ticket can be refused
+    with no trace outside the live think stream, which last_turn.json
+    overwrites on the next look.
+    """
+    if str(strat or "").strip().lower() in ("", "hold", "noop"):
+        return
+    params = act.get("params") if isinstance(act.get("params"), dict) else {}
+    symbol = str(params.get("symbol") or "")
+    note = f"{stage}: {reason}"[:400]
+    logger.warning(
+        "clerk blocked %s %s before broker - %s", strat, symbol or "?", reason
+    )
+    try:
+        journal = get_journal()
+        pid = journal.record_proposal(
+            source="clerk_block",
+            strategy=str(strat),
+            symbol=symbol,
+            direction=str(params.get("direction") or params.get("action") or ""),
+            quantity=params.get("quantity"),
+            params=params,
+            validation_ok=False,
+            validation_reason=note,
+        )
+        journal.record_gate_decision(pid, False, note)
+    except Exception:
+        logger.debug("clerk block journal failed", exc_info=True)
 
 
 async def execute_ticket(
@@ -559,10 +599,15 @@ async def execute_ticket(
 ) -> dict:
     """Normalize, gate, geometry, then send_action. Never bypass the clerk."""
     positions = list(snap.get("positions") or world.positions or [])
+    asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
     strat, forced = gate_ticket(act, world)
     if forced is not None:
         act["strategy"] = act["action"] = BLOCKED_STRAT
         act["rationale"] = str(forced.get("note") or act.get("rationale") or "")
+        _record_clerk_block(
+            act, asked, str(forced.get("note") or forced.get("reason") or ""),
+            stage="gate_ticket",
+        )
         return forced
 
     if strat != BLOCKED_STRAT:
@@ -593,6 +638,7 @@ async def execute_ticket(
                 pass
             act["strategy"] = act["action"] = BLOCKED_STRAT
             act["_structure_grade"] = sh_code
+            _record_clerk_block(act, strat, sh_msg, stage="overlay_shares")
             return {"status": "blocked", "note": sh_msg, "reason_code": sh_code}
 
     _prepare_close_params(act, positions)
@@ -600,6 +646,7 @@ async def execute_ticket(
         ok, vmsg = validate_action_against_inventory(act, positions)
         if not ok and strat not in (BLOCKED_STRAT, "skipped", "set_risk", "self_tune", "hold"):
             act["strategy"] = act["action"] = BLOCKED_STRAT
+            _record_clerk_block(act, strat, vmsg, stage="inventory_validation")
             return {"status": "validated_block", "reason": vmsg}
     except Exception:
         pass
@@ -669,6 +716,9 @@ async def execute_ticket(
                 "reason_code": code,
                 "learn": gmsg,
             }
+            _record_clerk_block(
+                act, chosen_strat, f"{code}: {gmsg}", stage="live_geometry"
+            )
             await _post_act_structure_and_plan(
                 act=act, strat=chosen_strat, result=result, judgment={},
                 snap=snap, quote_last=quote_last, connector=connector,
@@ -830,13 +880,32 @@ def _order_id_of(order: dict) -> int | None:
         return None
 
 
-async def _collapse_stacked_exits_after_snap(c: Any, s: dict) -> None:
-    """Keep one covering STP/TRAIL per STK lot; cancel extras. Never flatten."""
-    try:
-        from abcxauto.executor import collapse_stacked_protective_exits
+async def _reconcile_protection_after_snap(c: Any, s: dict) -> None:
+    """One covering STP/TRAIL per STK lot, and none at all on a flat contract.
 
-        cancelled = await collapse_stacked_protective_exits(
-            c, s.get("positions") or [], s.get("open_orders") or []
+    Stacked exits and orphaned exits are the same defect seen from two sides,
+    so both collapse before Grok reads the book. Never flattens.
+    """
+    if _book_unreliable(snap=s):
+        return
+    try:
+        from abcxauto.executor import (
+            cancel_orphaned_protection,
+            collapse_stacked_protective_exits,
+        )
+
+        cancelled = list(
+            await collapse_stacked_protective_exits(
+                c, s.get("positions") or [], s.get("open_orders") or []
+            )
+        )
+        drop = set(cancelled)
+        surviving = [
+            o for o in (s.get("open_orders") or [])
+            if _order_id_of(o) not in drop
+        ]
+        cancelled += await cancel_orphaned_protection(
+            c, positions=s.get("positions") or [], open_orders=surviving
         )
         if not cancelled:
             return
@@ -863,7 +932,7 @@ async def _collapse_stacked_exits_after_snap(c: Any, s: dict) -> None:
         except Exception:
             logger.debug("reality_pulse rebuild after collapse failed", exc_info=True)
     except Exception:
-        logger.exception("stacked protective-exit collapse failed")
+        logger.exception("protective-exit reconcile failed")
 
 
 def _persist_cycle(out: dict) -> dict:
@@ -894,7 +963,7 @@ async def run_cycle(
 ) -> dict:
     """Snap facts, Grok tools, clerk on send, journal."""
     s = await snap(c)
-    await _collapse_stacked_exits_after_snap(c, s)
+    await _reconcile_protection_after_snap(c, s)
     positions = s.get("positions") or []
     for p in positions:
         if "conId" not in p and "con_id" in p:

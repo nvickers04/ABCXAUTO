@@ -725,6 +725,69 @@ def test_session_markers_ensure_and_last(journal, tmp_path):
     assert models == ["grok-4.6", "grok-4"]
 
 
+def test_dispatched_order_ids_and_closing_fills_split_manual_exits(journal):
+    """A manual TWS flatten has no dispatch behind it. That is the signal.
+
+    ``strategy_performance`` already buckets these as ``(unattributed)``; these
+    two reads expose the same fact per order id and per symbol so a setup card
+    can tell an interrupted trade from a resolved one.
+    """
+    day = "2026-08-20"
+    pid = journal.record_proposal(
+        strategy="market_bracket", symbol="WMT", validation_ok=True, ts=f"{day}T14:00:00.000Z"
+    )
+    journal.record_dispatch(
+        pid,
+        True,
+        {
+            "success": True,
+            "bracket_order_id": 4444,
+            "stop_order_id": 4445,
+            "target_order_id": 4446,
+        },
+        ts=f"{day}T14:00:00.000Z",
+    )
+    journal.record_fills(
+        [
+            {
+                "ts": f"{day}T14:00:01.000Z",
+                "exec_id": "entry",
+                "order_id": 4444,
+                "symbol": "WMT",
+                "side": "BOT",
+                "quantity": 70.0,
+                "price": 103.08,
+                "commission": 1.0,
+                "realized_pnl": 0.0,
+            },
+            {
+                "ts": f"{day}T17:40:00.000Z",
+                "exec_id": "manual-flatten",
+                "order_id": 9999,
+                "symbol": "WMT",
+                "side": "SLD",
+                "quantity": 70.0,
+                "price": 104.20,
+                "commission": 1.0,
+                "realized_pnl": 78.4,
+            },
+        ]
+    )
+
+    placed = journal.dispatched_order_ids()
+    assert {4444, 4445, 4446} <= placed
+    assert 9999 not in placed
+
+    closers = journal.closing_fills()
+    # The opener booked no realized P&L, so it is not an exit.
+    assert [f["order_id"] for f in closers] == [9999]
+    assert closers[0]["symbol"] == "WMT"
+    assert closers[0]["realized_pnl"] == 78.4
+
+    by_strategy = {r["strategy"]: r for r in journal.strategy_performance(since_day=day)}
+    assert by_strategy["(unattributed)"]["realized_pnl_sum"] == 78.4
+
+
 def test_closed_fill_stats_since(journal):
     day = "2026-08-14"
     journal.record_fills(

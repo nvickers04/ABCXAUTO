@@ -15,7 +15,6 @@ from abcxauto.structure_grade import (
     append_structure_event,
     check_live_geometry,
     detect_scrape_from_fills,
-    format_structure_lessons_for_prompt,
     recent_structure_lessons,
 )
 
@@ -104,9 +103,7 @@ def test_structure_lessons_round_trip(tmp_path, monkeypatch):
     lessons = recent_structure_lessons(3)
     assert lessons
     assert lessons[0]["symbol"] == "QQQ"
-    text = format_structure_lessons_for_prompt(lessons)
-    assert "STRUCTURE LESSONS" in text
-    assert "QQQ" in text
+    assert lessons[0]["reason_code"] == GEOMETRY_STOP_WRONG_SIDE
 
 
 def test_detect_scrape_from_fills():
@@ -424,9 +421,24 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "rev.json"))
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
 
+    from abcxauto.lab_playbook import save_lab
     from abcxauto.memory import reset_journal
 
+    # A carded ticket still has to survive geometry.
+    save_lab(
+        {
+            "cards": [
+                {
+                    "name": "qqq pullback",
+                    "ticket": "market_bracket",
+                    "thesis": "index pullbacks bounce",
+                    "retire_if": {"sample": 5, "condition": "no bounce"},
+                }
+            ]
+        }
+    )
     reset_journal(path=str(tmp_path / "j.db"), enabled=True)
 
     async def _tool(_c, name, _a=None):
@@ -457,6 +469,7 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
             "direction": "LONG",
             "stop_price": 711.99,
             "target_price": 729.22,
+            "card": "qqq pullback",
         },
         "rationale": "bad geometry",
     }
@@ -497,11 +510,6 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
             trading_mode="paper", risk_posture="aggressive",
         ),
     )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.connection_status",
-        lambda _c=None: {"ibkr_connected": True, "mda_configured": False, "trading_mode": "paper"},
-    )
-
     class Conn:
         connected = True
 

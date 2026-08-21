@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Any, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 from threading import Lock
 
 from ib_insync import IB, Order, Trade, Fill
@@ -52,6 +52,85 @@ def port_is_closed(exc: BaseException) -> bool:
         or "refused the network" in text
         or "connect call failed" in text
     )
+
+
+# ============================================================
+# EXECUTION TIMESTAMPS
+# ============================================================
+
+# A broker clock may run a little ahead of ours; only a gap this large means
+# the wall-clock digits were read in the wrong zone.
+_FILL_FUTURE_TOLERANCE_S = 300.0
+
+
+def tws_timezone() -> str:
+    """Which zone TWS stamps execution times in.
+
+    TWS sends ``execDetails`` time as bare ``YYYYmmdd  HH:MM:SS`` digits. When
+    ``IB.TimezoneTWS`` is unset, ib_insync's decoder falls through to
+    ``astimezone()`` on that naive value, which reads it as *this machine's*
+    local time and shifts every fill by the local UTC offset. Naming the zone
+    keeps the digits meaning what TWS meant by them.
+    """
+    return (os.environ.get("ABCXAUTO_TWS_TIMEZONE") or "UTC").strip() or "UTC"
+
+
+def _iso_z(dt: datetime) -> str:
+    return (
+        dt.astimezone(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def new_ib() -> IB:
+    """A fresh ib_insync session that knows which zone TWS timestamps are in."""
+    ib = IB()
+    ib.TimezoneTWS = tws_timezone()
+    return ib
+
+
+def _as_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def fill_ts_iso(
+    exec_time: Any,
+    *,
+    now: Optional[datetime] = None,
+    local_tz: Optional[tzinfo] = None,
+) -> str:
+    """Canonical ``...Z`` UTC stamp for one broker execution.
+
+    Bare digits from TWS are UTC, so they are labelled rather than converted.
+    An execution cannot have happened after now, so a stamp in the future is
+    proof the digits were already read in some other zone; reading that zone's
+    wall clock back as UTC undoes exactly that shift. ``local_tz`` defaults to
+    this machine's zone, which is the one ib_insync guesses with.
+    """
+    now_utc = now or datetime.now(timezone.utc)
+    dt = _as_datetime(exec_time)
+    if dt is None:
+        return _iso_z(now_utc)
+    dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    if (dt - now_utc).total_seconds() > _FILL_FUTURE_TOLERANCE_S:
+        reread = dt.astimezone(local_tz).replace(tzinfo=timezone.utc)
+        fixed = reread if reread <= now_utc else now_utc
+        logger.warning(
+            "fill timestamp %s is in the future - reading it as %s; "
+            "check IB.TimezoneTWS against the TWS clock",
+            _iso_z(dt),
+            _iso_z(fixed),
+        )
+        dt = fixed
+    return _iso_z(dt)
 
 
 # ============================================================
@@ -300,6 +379,11 @@ class IBKRQueriesMixin:
                     'status': status,
                     'con_id': t.contract.conId,
                     'conId': t.contract.conId,
+                    # Bracket/OCA lineage: the only proof that a resting LMT is
+                    # protection rather than an entry, so the orphan sweep can
+                    # tell a stale take-profit from a working idea.
+                    'oca_group': getattr(t.order, 'ocaGroup', '') or None,
+                    'parent_id': int(getattr(t.order, 'parentId', 0) or 0) or None,
                 }
                 if sec_type == 'OPT':
                     order_data.update({
@@ -330,19 +414,7 @@ class IBKRQueriesMixin:
                 contract = fill.contract
                 commission_report = getattr(fill, "commissionReport", None)
 
-                exec_time = getattr(execution, "time", None)
-                if exec_time is None:
-                    ts = datetime.now(timezone.utc).strftime(
-                        "%Y-%m-%dT%H:%M:%S.%f"
-                    )[:-3] + "Z"
-                elif getattr(exec_time, "tzinfo", None) is None:
-                    ts = exec_time.replace(tzinfo=timezone.utc).isoformat().replace(
-                        "+00:00", "Z"
-                    )
-                else:
-                    ts = exec_time.astimezone(timezone.utc).isoformat().replace(
-                        "+00:00", "Z"
-                    )
+                ts = fill_ts_iso(getattr(execution, "time", None))
 
                 commission = None
                 realized_pnl = None
@@ -403,7 +475,7 @@ class IBKRQueriesMixin:
             for fill in fills:
                 contract = fill.contract
                 sec = getattr(contract, "secType", None) or "STK"
-                ts = fill.execution.time.isoformat() if fill.execution.time else None
+                ts = fill_ts_iso(getattr(fill.execution, "time", None))
                 row = {
                     'symbol': contract.symbol,
                     'side': fill.execution.side,
@@ -479,7 +551,7 @@ class IBKRQueriesMixin:
 
     async def get_live_quote(self, symbol: str, *, fresh: bool = False) -> Dict[str, Any]:
         """IBKR stream snapshot for STK. Live last/bid/ask for send geometry."""
-        from abcxauto.broker.util import quote_from_ticker
+        from abcxauto.broker.quotes import quote_from_ticker
 
         sym = str(symbol or "").strip().upper()
         if not sym:
@@ -542,11 +614,12 @@ class IBKRQueriesMixin:
 
 
 # Import mixins after defining base classes to avoid circular imports
+from abcxauto.broker.bars import IBKRBarsMixin
 from abcxauto.broker.orders import IBKROrdersMixin
 from abcxauto.broker.options import IBKROptionsMixin
 
 
-class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
+class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBarsMixin):
     """
     IBKR connector with essential trading functionality.
     Thread-safe singleton pattern.
@@ -555,6 +628,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
     - IBKROrdersMixin: Stock order placement and management
     - IBKROptionsMixin: Multi-leg / single-option strategies
     - IBKRQueriesMixin: Account and position query methods
+    - IBKRBarsMixin: RTH history and the live 5s bar stream
 
     MRO: Orders before Options so close_option_position uses the orders
     implementation (JSON-friendly symbol/expiry/strike close).
@@ -590,7 +664,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
         self.client_id = int(get_config().ibkr_client_id)
 
         # Connection state
-        self.ib = IB()
+        self.ib = new_ib()
         self._connected = False
         self._connect_block = ""
         self.account_id: Optional[str] = None
@@ -1041,6 +1115,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
                 "symbol": symbol,
                 "status": status,
                 "order_type": order_type,
+                "action": str(getattr(trade.order, "action", "") or "").upper(),
                 "filled": trade.orderStatus.filled,
                 "remaining": trade.orderStatus.remaining,
                 "avg_fill_price": trade.orderStatus.avgFillPrice,
@@ -1134,7 +1209,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin):
                     self._unregister_handlers()
 
                     # Create fresh IB instance on each attempt
-                    self.ib = IB()
+                    self.ib = new_ib()
 
                     # Re-register all event handlers on new IB instance
                     self._register_handlers()

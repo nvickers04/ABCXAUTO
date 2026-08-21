@@ -1,7 +1,6 @@
 """Static Flet Pro Desktop contract check — stdout + exit code only."""
 
 import ast
-import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]

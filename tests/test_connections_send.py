@@ -7,30 +7,6 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def test_import_smoke():
-    from abcxauto.connections import (
-        connect,
-        connection_status,
-        get_connector,
-        get_quote,
-        session_info,
-        snapshot_account,
-        snapshot_open_orders,
-        snapshot_positions,
-    )
-    from abcxauto.send import send_action
-
-    assert callable(get_connector)
-    assert callable(connect)
-    assert callable(snapshot_account)
-    assert callable(snapshot_positions)
-    assert callable(snapshot_open_orders)
-    assert callable(get_quote)
-    assert callable(session_info)
-    assert callable(connection_status)
-    assert callable(send_action)
-
-
 def test_connection_status_keys():
     from abcxauto.connections import connection_status
 

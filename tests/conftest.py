@@ -24,8 +24,6 @@ def assert_no_cycle_keys(payload: dict) -> None:
     assert "previous_cycle" not in payload
     assert_no_cycle_counter(json.dumps(payload, default=str))
 
-SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-eafc232c6c32\implementer")
-
 
 class _Cfg:
     xai_api_key = "test-key"
@@ -45,10 +43,11 @@ def _drop_repo_log_handlers() -> list[str]:
     """
     from logging.handlers import RotatingFileHandler
 
+    names = ["", *logging.root.manager.loggerDict]
     dropped: list[str] = []
-    for name in ("abcxauto", ""):
+    for name in names:
         lg = logging.getLogger(name)
-        for handler in list(lg.handlers):
+        for handler in list(getattr(lg, "handlers", [])):
             if not isinstance(handler, RotatingFileHandler):
                 continue
             try:
@@ -63,9 +62,18 @@ def _drop_repo_log_handlers() -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_app_log(tmp_path, monkeypatch):
-    """logs/app.log is operator evidence — a test run must never write into it."""
+def _isolate_desk_evidence_and_latches(tmp_path, monkeypatch):
+    """A test run must not touch what the live desk reads and writes.
+
+    logs/app.log is the operator's evidence. The operator-stop file is worse than
+    evidence: the desk shuts down when it appears, so a test that writes the real
+    one kills a running desk.
+    """
     monkeypatch.setenv("ABCXAUTO_LOG_PATH", str(tmp_path / "app.log"))
+    monkeypatch.setenv("ABCXAUTO_DESK_OUT_PATH", str(tmp_path / "desk.out"))
+    monkeypatch.setenv("ABCXAUTO_OPERATOR_STOP_PATH", str(tmp_path / "operator_stop.json"))
+    monkeypatch.setenv("ABCXAUTO_DESK_LOCK_PATH", str(tmp_path / "desk.lock"))
+    monkeypatch.setenv("ABCXAUTO_START_PRO_PATH", str(tmp_path / "logs" / "_start_pro.py"))
     _drop_repo_log_handlers()
     yield
     _drop_repo_log_handlers()

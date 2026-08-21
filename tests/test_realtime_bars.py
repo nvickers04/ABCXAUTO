@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from abcxauto.broker.queries import IBKRQueriesMixin
+from abcxauto.broker.bars import IBKRBarsMixin
+from abcxauto.broker.connector import IBKRConnector
 
 
 class _FakeBars(list):
@@ -13,7 +14,7 @@ class _FakeBars(list):
         self.updateEvent = None
 
 
-class _Conn(IBKRQueriesMixin):
+class _Conn(IBKRBarsMixin):
     def __init__(self, bars):
         self.ib = SimpleNamespace(reqRealTimeBars=lambda *a, **k: bars)
         self._connected = True
@@ -23,6 +24,18 @@ class _Conn(IBKRQueriesMixin):
 
     async def _prepare_contract(self, symbol):
         return SimpleNamespace(symbol=symbol)
+
+
+def test_connector_exposes_bar_feeds():
+    """The mixin must be in the live MRO — brain/agent_loop probe it with getattr."""
+    for name in (
+        "get_historical_bars",
+        "get_realtime_bars",
+        "realtime_bar_buffer",
+        "start_realtime_bars",
+        "abandon_realtime_bars",
+    ):
+        assert callable(getattr(IBKRConnector, name, None)), name
 
 
 def test_start_realtime_bars_ingests_existing():

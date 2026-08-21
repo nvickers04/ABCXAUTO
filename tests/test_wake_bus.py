@@ -94,8 +94,13 @@ def test_ensure_next_look_if_grok_silent(tmp_path, monkeypatch):
     assert load_alarm().wake_at == alarm.wake_at
 
 
-def test_ensure_next_look_rth_silent_no_sit_clock(tmp_path, monkeypatch):
-    """RTH + skipped set_wake must not synthesize a 60s/90s clerk sit-look."""
+def test_ensure_next_look_rth_silent_gets_a_backstop_not_a_spin(tmp_path, monkeypatch):
+    """A silent RTH turn must leave a clock behind.
+
+    With no clock the alarm stays past-due, ``due()`` is instantly true, and the
+    engine thinks again with no gap. The backstop is what makes "Grok owns the
+    cadence" safe when Grok declines to choose one.
+    """
     from abcxauto.wake_bus import ensure_next_look, load_alarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
@@ -105,8 +110,8 @@ def test_ensure_next_look_rth_silent_no_sit_clock(tmp_path, monkeypatch):
         flat=False,
         session="regular",
     )
-    assert alarm.wake_at is None
-    assert load_alarm().wake_at is None
+    assert alarm.wake_at
+    assert load_alarm().wake_at == alarm.wake_at
 
 
 def test_ensure_next_look_keeps_grok_alarm(tmp_path, monkeypatch):
@@ -157,52 +162,97 @@ def test_live_interrupt_note_and_take():
     clear_interrupt()
 
 
-def test_set_wake_paper_rth_is_noop_clock(tmp_path, monkeypatch):
-    """Noah lock: paper RTH set_wake writes no wake_at (10m cap was still a nap)."""
-    from abcxauto.wake_bus import ensure_next_look, load_alarm, set_wake
+def test_paper_rth_set_wake_writes_a_real_clock(tmp_path, monkeypatch):
+    """Grok owns the cadence in every session.
+
+    Withholding the clock in paper RTH left the engine re-arming a think the
+    instant the last one ended — a hunt treadmill for a setup that only appears
+    in the opening window.
+    """
+    from abcxauto.wake_bus import _parse_iso, _utc_now, load_alarm, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    # A running lab, so the idle-nap cap is not what is under test here.
     monkeypatch.setattr(
-        "abcxauto.risk_gates.get_risk_gate",
-        lambda: type("G", (), {"is_halted": False})(),
+        "abcxauto.lab_playbook.lab_facts",
+        lambda *_a, **_k: {"resolved_trades": 4, "entry_trunks_untried": []},
     )
-    alarm = set_wake(wake_in_s=150 * 60, session="regular", flat=True, wake_if=["fill"])
-    assert alarm.wake_at is None
-    assert load_alarm().wake_at is None
+    alarm = set_wake(wake_in_s=600, session="regular", flat=True, wake_if=["fill"])
+    assert alarm.wake_at
+    assert load_alarm().wake_at == alarm.wake_at
     assert alarm.wake_if == ["fill"]
-    out = ensure_next_look(previous_set_at="", session="regular", flat=True)
-    assert out.wake_at is None
-    assert load_alarm().wake_at is None
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    assert 540 <= (at - _utc_now()).total_seconds() <= 660
 
 
-def test_set_wake_paper_rth_short_request_still_noop(tmp_path, monkeypatch):
-    from abcxauto.wake_bus import set_wake
-
-    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    monkeypatch.setattr(
-        "abcxauto.risk_gates.get_risk_gate",
-        lambda: type("G", (), {"is_halted": False})(),
-    )
-    alarm = set_wake(wake_in_s=10 * 60, session="regular", flat=False)
-    assert alarm.wake_at is None
-
-
-def test_set_wake_paper_premarket_is_noop_clock(tmp_path, monkeypatch):
-    from abcxauto.wake_bus import ensure_next_look, load_alarm, set_wake
+def test_paper_premarket_set_wake_writes_a_real_clock(tmp_path, monkeypatch):
+    from abcxauto.wake_bus import load_alarm, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    monkeypatch.setattr(
-        "abcxauto.risk_gates.get_risk_gate",
-        lambda: type("G", (), {"is_halted": False})(),
-    )
     alarm = set_wake(wake_in_s=3600, session="premarket", flat=True)
-    assert alarm.wake_at is None
-    assert load_alarm().wake_at is None
-    out = ensure_next_look(previous_set_at="", session="premarket", flat=True)
-    assert out.wake_at is None
+    assert alarm.wake_at
+    assert load_alarm().wake_at == alarm.wake_at
+
+
+def test_an_idle_lab_cannot_be_napped_through(tmp_path, monkeypatch):
+    """A park is Grok's clock, not a way to skip building the book."""
+    from abcxauto.wake_bus import (
+        LAB_IDLE_PARK_CAP_S,
+        _parse_iso,
+        _utc_now,
+        lab_idle_park_cap_s,
+        set_wake,
+    )
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    idle = {"resolved_trades": 0, "entry_trunks_untried": ["vertical_spread"]}
+    monkeypatch.setattr("abcxauto.lab_playbook.lab_facts", lambda *_a, **_k: idle)
+
+    assert lab_idle_park_cap_s(flat=True, session="regular") == LAB_IDLE_PARK_CAP_S
+    alarm = set_wake(wake_in_s=4 * 3600, session="regular", flat=True)
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    assert (at - _utc_now()).total_seconds() <= LAB_IDLE_PARK_CAP_S + 5
+
+    # A long nap is the right answer when there is no lab work to do: holding
+    # risk, or outside tradeable hours.
+    assert lab_idle_park_cap_s(flat=False, session="regular") is None
+    assert lab_idle_park_cap_s(flat=True, session="closed") is None
+    assert lab_idle_park_cap_s(flat=True, session="postmarket") is None
+
+
+def test_a_running_lab_keeps_its_full_clock(tmp_path, monkeypatch):
+    """One resolved trade, or a card under every entry structure, lifts the cap."""
+    from abcxauto.wake_bus import _parse_iso, _utc_now, lab_idle_park_cap_s, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.lab_facts",
+        lambda *_a, **_k: {"resolved_trades": 3, "entry_trunks_untried": ["butterfly"]},
+    )
+    assert lab_idle_park_cap_s(flat=True, session="regular") is None
+    alarm = set_wake(wake_in_s=3600, session="regular", flat=True)
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    assert (at - _utc_now()).total_seconds() > 1800
+
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.lab_facts",
+        lambda *_a, **_k: {"resolved_trades": 0, "entry_trunks_untried": []},
+    )
+    assert lab_idle_park_cap_s(flat=True, session="regular") is None
+
+
+def test_set_wake_offered_in_every_session():
+    from abcxauto.wake_bus import set_wake_offered
+
+    for sess in ("regular", "premarket", "postmarket", "closed", ""):
+        assert set_wake_offered(session=sess) is True, sess
 
 
 def test_set_wake_live_premarket_allows_long_park(tmp_path, monkeypatch):
@@ -256,21 +306,6 @@ def test_set_wake_floors_tiny_nap(tmp_path, monkeypatch):
     assert remaining >= MIN_LOOK_S - 1
 
 
-def test_set_wake_offered_only_outside_rth(monkeypatch):
-    from abcxauto.wake_bus import set_wake_offered
-
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    monkeypatch.setattr(
-        "abcxauto.risk_gates.get_risk_gate",
-        lambda: type("G", (), {"is_halted": False})(),
-    )
-    assert set_wake_offered(session="regular") is False
-    assert set_wake_offered(session="") is False
-    assert set_wake_offered(session="premarket") is False
-    assert set_wake_offered(session="closed") is True
-    assert set_wake_offered(session="postmarket") is True
-
-
 def test_book_move_wakes_on_mark_bucket(monkeypatch):
     from abcxauto.wake_bus import book_fingerprint, events_from_diff
 
@@ -297,60 +332,23 @@ def test_first_snap_is_not_a_flood():
     assert events_from_diff(None, b) == []
 
 
-def test_paper_stay_up_regular_and_premarket(monkeypatch):
-    from abcxauto.wake_bus import PAPER_STAY_UP_SESSIONS, paper_stay_up
+def test_should_wake_grok_is_what_the_engine_asks_now(tmp_path, monkeypatch):
+    """The decision surface that used to be tests-only is the live gate.
 
-    monkeypatch.setattr(
-        "abcxauto.config.get_config",
-        lambda: type("C", (), {"is_paper": True})(),
-    )
-    assert PAPER_STAY_UP_SESSIONS == frozenset({"regular", "premarket"})
-    assert paper_stay_up(session="regular") is True
-    assert paper_stay_up(session="premarket") is True
-    assert paper_stay_up(session="closed") is False
-    assert paper_stay_up(session="postmarket") is False
-    assert paper_stay_up(session="") is False
+    Nothing changed on the book and no clock is due, so the answer is None and
+    the engine sleeps instead of thinking again.
+    """
+    from abcxauto.wake_bus import GrokAlarm, load_alarm, should_wake_grok
 
-
-def test_paper_stay_up_live_is_false(monkeypatch):
-    from abcxauto.wake_bus import paper_stay_up
-
-    monkeypatch.setattr(
-        "abcxauto.config.get_config",
-        lambda: type("C", (), {"is_paper": False})(),
-    )
-    assert paper_stay_up(session="regular") is False
-    assert paper_stay_up(session="premarket") is False
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    quiet = GrokAlarm(wake_at=None, wake_if=[], set_at="")
+    assert should_wake_grok([], alarm=quiet) is None
+    assert load_alarm().wake_at is None
 
 
-def test_paper_rth_park_refused_covers_regular_and_premarket(monkeypatch):
-    from abcxauto.wake_bus import paper_rth_park_refused
-
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    monkeypatch.setattr(
-        "abcxauto.risk_gates.get_risk_gate",
-        lambda: type("G", (), {"is_halted": False})(),
-    )
-    assert paper_rth_park_refused(session="regular") is True
-    assert paper_rth_park_refused(session="premarket") is True
-    assert paper_rth_park_refused(session="closed") is False
-    assert paper_rth_park_refused(session="postmarket") is False
-
-
-def test_stay_up_retry_s_is_tens_of_seconds(monkeypatch):
-    from abcxauto.wake_bus import (
-        STAY_UP_RETRY_MAX_S,
-        STAY_UP_RETRY_MIN_S,
-        stay_up_retry_s,
-    )
-
-    monkeypatch.delenv("ABCXAUTO_STAY_UP_RETRY_S", raising=False)
-    samples = [stay_up_retry_s() for _ in range(24)]
-    assert all(STAY_UP_RETRY_MIN_S <= v <= STAY_UP_RETRY_MAX_S for v in samples)
-
-
-def test_stay_up_retry_s_env_override(monkeypatch):
-    from abcxauto.wake_bus import stay_up_retry_s
+def test_failed_look_backoff_honors_the_pinned_cadence(monkeypatch):
+    """ABCXAUTO_STAY_UP_RETRY_S still floors the failed-look backoff."""
+    from abcxauto.wake_bus import failed_look_backoff_s
 
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.25")
-    assert stay_up_retry_s() == 0.25
+    assert failed_look_backoff_s(1) == 0.25

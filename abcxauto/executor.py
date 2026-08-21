@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from abcxauto.broker.order_types import is_stop_order
 from abcxauto.config import get_config
 from abcxauto.memory import get_journal
 from abcxauto.proposals import OrderProposal, ProposalValidationError, validate_proposal
@@ -298,8 +297,11 @@ async def _verify_cancel_not_last_stop(
 
     Fail closed if open orders / positions cannot be read. Non-stop cancels
     and redundant stops pass. Option covering exits are Grok's to manage.
-    modify_stop is unrestricted (not routed here).
+    modify_stop is unrestricted (not routed here). The rule itself lives in
+    ``protect.last_stop_block_reason`` so the orphan sweep applies the same one.
     """
+    from abcxauto.protect import last_stop_block_reason
+
     order_id = int(proposal.params.order_id)
     try:
         orders = await connector.get_open_orders()
@@ -328,69 +330,8 @@ async def _verify_cancel_not_last_stop(
             )
         }
 
-    target = None
-    for o in orders:
-        try:
-            oid = int(o.get("order_id") if o.get("order_id") is not None else o.get("orderId"))
-        except (TypeError, ValueError):
-            continue
-        if oid == order_id:
-            target = o
-            break
-
-    if target is None:
-        # Order not found among open orders — let the gateway return its own error.
-        return None
-
-    symbol = str(target.get("symbol") or "").upper()
-    target_is_stop = is_stop_order(
-        str(target.get("order_type") or target.get("orderType") or "")
-    )
-
-    # Open stock position for this symbol?
-    held = 0
-    if symbol and target_is_stop:
-        for p in positions:
-            sec = str(p.get("sec_type") or p.get("secType") or "STK").upper()
-            if not sec.startswith("STK"):
-                continue
-            if str(p.get("symbol", "")).upper() != symbol:
-                continue
-            try:
-                held = int(float(p.get("quantity", 0) or 0))
-            except (TypeError, ValueError):
-                held = 0
-            break
-
-    if held != 0:
-        other_stops = 0
-        for o in orders:
-            try:
-                oid = int(o.get("order_id") if o.get("order_id") is not None else o.get("orderId"))
-            except (TypeError, ValueError):
-                continue
-            if oid == order_id:
-                continue
-            if str(o.get("symbol") or "").upper() != symbol:
-                continue
-            sec = str(o.get("sec_type") or o.get("secType") or "STK").upper()
-            if not sec.startswith("STK"):
-                continue
-            if is_stop_order(str(o.get("order_type") or o.get("orderType") or "")):
-                other_stops += 1
-
-        if other_stops == 0:
-            return {
-                "error": (
-                    f"cancel_order rejected: order {order_id} is the only working stop "
-                    f"protecting open {symbol} position (qty={held}). "
-                    "First place replacement protection (oca / stop_order) "
-                    "or use modify_stop to move the existing stop."
-                )
-            }
-        return None
-
-    return None
+    reason = last_stop_block_reason(order_id, orders, positions)
+    return {"error": reason} if reason else None
 
 
 def _keep_ids_from_place_result(result: Dict[str, Any]) -> set[int]:
@@ -454,16 +395,55 @@ async def _cancel_order_ids(
     return cancelled
 
 
+def _superseded_target_ids(
+    orders: list | None,
+    symbol: str,
+    direction: str,
+    keep: set[int],
+) -> list[int]:
+    """Prior OCA/bracket take-profit legs on the exit side, minus the new ones.
+
+    Only a new ``oca`` supersedes a take-profit, because only ``oca`` ships a
+    replacement one. A limit is cancellable here solely on OCA/parent evidence
+    that it was placed as protection — an unattached LMT stays put.
+    """
+    from abcxauto.protect import protective_role
+
+    want_exit = "SELL" if str(direction or "LONG").upper() == "LONG" else "BUY"
+    out: list[int] = []
+    seen: set[int] = set()
+    for o in orders or []:
+        if not isinstance(o, dict):
+            continue
+        if str(o.get("symbol") or "").upper() != symbol:
+            continue
+        sec = str(o.get("sec_type") or o.get("secType") or "STK").upper()
+        if sec and not sec.startswith("STK") and sec != "ETF":
+            continue
+        action = str(o.get("action") or o.get("side") or "").upper()
+        if action and action != want_exit:
+            continue
+        if protective_role(o) != "bracket_leg":
+            continue
+        oid = _working_stop_oid(o)
+        if oid is None or oid in keep or oid in seen:
+            continue
+        seen.add(oid)
+        out.append(oid)
+    return out
+
+
 async def _replace_protective_exits_after_place(
     proposal: OrderProposal,
     connector: Any,
     result: Dict[str, Any],
 ) -> list[int]:
-    """After a successful protective place, cancel other working STP/TRAIL.
+    """After a successful protective place, cancel the protection it replaces.
 
     Place first (brief double-cover), then cancel old. Never cancel keep ids
-    from the place result. Never cancel LMT take-profits. If the place failed
-    or keep ids are missing, cancel nothing.
+    from the place result. Stops go for every protective strategy; a prior
+    take-profit goes only when the new ticket is an ``oca`` (which brings its
+    own). If the place failed or keep ids are missing, cancel nothing.
     """
     if proposal.strategy not in _STACKABLE_PROTECTION:
         return []
@@ -499,6 +479,11 @@ async def _replace_protective_exits_after_place(
             continue
         seen.add(oid)
         to_cancel.append(oid)
+    if proposal.strategy == "oca":
+        for oid in _superseded_target_ids(orders, symbol, direction, keep):
+            if oid not in seen:
+                seen.add(oid)
+                to_cancel.append(oid)
     if not to_cancel:
         return []
     return await _cancel_order_ids(
@@ -651,6 +636,108 @@ async def collapse_stacked_protective_exits(
         return []
     return await _cancel_order_ids(
         connector, ids, log_label="collapse stacked exits"
+    )
+
+
+async def _empty_ledger_is_trustworthy(connector: Any) -> bool:
+    """An empty position list is also what a stalled portfolio feed looks like.
+
+    ``IBKRConnector.get_positions`` returns ``[]`` when disconnected, when the
+    read raises, and before ``ib.portfolio()`` has populated. Account values and
+    portfolio items arrive on the same account-update subscription, so a live
+    socket plus a readable NetLiquidation is what makes "no lots" a fact rather
+    than a gap. Without both, believe nothing and cancel nothing.
+    """
+    if not getattr(connector, "connected", True):
+        return False
+    summary = getattr(connector, "get_account_summary", None)
+    if not callable(summary):
+        return False
+    try:
+        account = await summary()
+    except Exception as e:
+        logger.warning("orphan-protection sweep skipped: no account read (%s)", e)
+        return False
+    if not isinstance(account, dict) or account.get("error"):
+        return False
+    for key in ("netliquidation", "NetLiquidation"):
+        try:
+            if float(account.get(key) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+async def cancel_orphaned_protection(
+    connector: Any,
+    *,
+    positions: list | None = None,
+    open_orders: list | None = None,
+    symbols: Any = None,
+    actions: Any = None,
+) -> list[int]:
+    """Cancel working protection whose position is gone. Never touches a live lot.
+
+    A stale SELL on a flat book is an unhedged entry: that is how 2026-08-13
+    went short 50 CSCO with no covering stop anywhere. Every id has to survive
+    three refusals before a cancel goes out — a second independent book read
+    (a lot can lag its own fill), a live-socket check when the whole ledger is
+    empty, and the shared last-stop rule.
+    """
+    from abcxauto.protect import last_stop_block_reason, orphaned_protection_ids
+
+    if positions is None or open_orders is None:
+        try:
+            positions = await connector.get_positions()
+            open_orders = await connector.get_open_orders()
+        except Exception as e:
+            logger.warning("orphan-protection sweep skipped: cannot read book (%s)", e)
+            return []
+    if positions is None or open_orders is None:
+        return []
+
+    ids = orphaned_protection_ids(
+        positions, open_orders, symbols=symbols, actions=actions
+    )
+    if not ids:
+        return []
+
+    try:
+        positions = await connector.get_positions()
+        open_orders = await connector.get_open_orders()
+    except Exception as e:
+        logger.warning("orphan-protection sweep skipped: reread failed (%s)", e)
+        return []
+    if positions is None or open_orders is None:
+        return []
+    if not positions and not await _empty_ledger_is_trustworthy(connector):
+        logger.warning(
+            "orphan-protection sweep skipped: empty ledger not confirmed (%s)", ids
+        )
+        return []
+    still = set(
+        orphaned_protection_ids(
+            positions, open_orders, symbols=symbols, actions=actions
+        )
+    )
+
+    safe: list[int] = []
+    for oid in ids:
+        if oid not in still:
+            logger.info("orphan-protection: %s covered on reread, left working", oid)
+            continue
+        blocked = last_stop_block_reason(oid, open_orders, positions)
+        if blocked:
+            # Unreachable by construction (orphans are flat), so a hit means the
+            # two views of the book disagree — keep the stop and say so.
+            logger.error("orphan-protection sweep refused %s: %s", oid, blocked)
+            continue
+        safe.append(oid)
+    if not safe:
+        return []
+    return await _cancel_order_ids(
+        connector, safe, log_label="orphan-protection"
     )
 
 

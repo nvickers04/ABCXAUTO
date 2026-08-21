@@ -12,9 +12,8 @@ This mixin is imported by IBKRConnector in connector.py.
 """
 
 import logging
-import asyncio
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 
 from ib_insync import Order, Contract, TagValue
 from ib_insync.contract import Stock

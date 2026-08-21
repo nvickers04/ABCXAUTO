@@ -19,12 +19,7 @@ from typing import Any
 from xai_sdk.chat import developer, system, tool, tool_result, user
 
 from abcxauto.llm import GrokClient, build_system_prompt
-from abcxauto.opportunity_scan import (
-    criteria_scan,
-    mda_bar_freshness,
-    mda_last_kind,
-    normalize_tickers,
-)
+from abcxauto.opportunity_scan import criteria_scan, normalize_tickers
 from abcxauto.order_examples import format_order_examples, ticket_strategy_names
 from abcxauto.think_stream import ascii_text, emit as think_emit
 from abcxauto.tools import run_readonly_tool
@@ -44,7 +39,6 @@ logger = logging.getLogger(__name__)
 # budget the model should feel — repeated reads are answered from the ledger
 # below, so an honest think finishes long before it.
 MAX_TOOL_STEPS = 64
-MAX_TOOL_ROUNDS = MAX_TOOL_STEPS  # back-compat alias
 _MUTATING_TOOLS = frozenset({"send", "self_tune", "write_lab_playbook"})
 STREAM_CHUNK_S = 8.0
 STREAM_IDLE_LIMIT = 6
@@ -56,6 +50,9 @@ SEND_S = 45.0
 CHAIN_S = 60.0
 CANDLE_S = 35.0
 SCAN_S = 35.0
+# Per-symbol news cap. The MDA client allows 30s per request, which on its own
+# outlasts TOOL_S — one stalled symbol must not spend the whole tool budget.
+NEWS_SYMBOL_S = 6.0
 _QUOTE_SCHEMA = {"type": "string", "description": "Ticker, e.g. AAPL"}
 _SYMBOLS_SCHEMA = {"type": "array", "items": {"type": "string"}}
 
@@ -96,6 +93,109 @@ def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required}
 
 
+# The branches under one order type. A card's parent key is its ticket, so it
+# carries no ticket of its own — see lab_playbook for why identity is
+# (type, name).
+_CARD_BRANCH_SCHEMA = {
+    "type": "array",
+    "description": (
+        "Hypotheses under this order type. Replaces this type's cards; omit the "
+        "key to keep them. A card that earns its sample belongs promoted into "
+        "this type's gotchas / review / tool_order — same stanza, move it up."
+    ),
+    "items": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "The setup, e.g. 'gap fade after 10:00'",
+            },
+            "thesis": {
+                "type": "string",
+                "description": "What you claim will happen, and why.",
+            },
+            "evidence": {
+                "type": "object",
+                "description": "What you actually used. Fill in what applies.",
+                "properties": {
+                    "scan": {
+                        "type": "string",
+                        "description": "arena / scan_code + filters that surfaced it.",
+                    },
+                    "news": {
+                        "type": "string",
+                        "description": "Headlines behind the thesis.",
+                    },
+                    "reads": {
+                        "type": "string",
+                        "description": "quote / candles / option_quote reads you took.",
+                    },
+                    "odds": {
+                        "type": "string",
+                        "description": "Prediction-market implied probs, where relevant.",
+                    },
+                },
+            },
+            "expect_hit_rate": {
+                "type": "number",
+                "description": (
+                    "Win rate you expect, percent. Scored against what the card "
+                    "actually hit; never gates graduation."
+                ),
+            },
+            "retire_if": {
+                "type": "object",
+                "description": (
+                    "How this card dies. The clerk enforces exactly what you "
+                    "declare and invents nothing."
+                ),
+                "properties": {
+                    "sample": {
+                        "type": "integer",
+                        "description": (
+                            "Resolved trades that settle the question. Operator "
+                            "flattens and halt exits do not count toward it."
+                        ),
+                    },
+                    "condition": {
+                        "type": "string",
+                        "description": "What would falsify the thesis.",
+                    },
+                    "max_loss_usd": {
+                        "type": "number",
+                        "description": "Resolved loss that kills it early.",
+                    },
+                    "max_losses": {
+                        "type": "integer",
+                        "description": "Losing resolved trades that kill it early.",
+                    },
+                },
+                "required": ["sample", "condition"],
+            },
+            "when_on": {
+                "type": "string",
+                "description": "Conditions that turn this card on.",
+            },
+            "scan": {
+                "type": "string",
+                "description": "Screen that finds it (arena + filters).",
+            },
+            "shape": {"type": "string"},
+            "invalidation": {"type": "string"},
+            "status": {
+                "type": "string",
+                "description": (
+                    "testing | working | retired. Graduation to live is the "
+                    "clerk's verdict from resolved trades."
+                ),
+            },
+            "note": {"type": "string"},
+        },
+        "required": ["name", "thesis", "retire_if"],
+    },
+}
+
+
 def _send_tool(strategy_names: list[str] | None = None) -> Any:
     """Build the send tool. Hold is never a ticket."""
     names = list(strategy_names) if strategy_names is not None else ticket_strategy_names()
@@ -132,8 +232,12 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
                 "card": {
                     "type": "string",
                     "description": (
-                        "Playbook card name this ticket comes from. Tags the fill so "
-                        "the card gets its own P&L instead of whole-book drift."
+                        "Playbook card this ticket comes from — a card branching "
+                        "under the strategy you are sending. Required on new risk "
+                        "(clerk blocks an untagged entry); optional on exits, "
+                        "protection, modifies and cancels, which are never blocked. "
+                        "Tags the fill so the card is scored on its own resolved "
+                        "trades instead of whole-book drift."
                     ),
                 },
                 "rationale": {"type": "string"},
@@ -318,6 +422,7 @@ AGENT_TOOLS = [
                 "max_position_pct": {"type": "number"},
                 "max_peak_drawdown_pct": {"type": "number"},
                 "max_option_premium_pct": {"type": "number"},
+                "max_symbol_concentration_pct": {"type": "number"},
                 "max_open_positions": {"type": "integer"},
                 "enabled_arenas": _SYMBOLS_SCHEMA,
                 "custom_symbols": _SYMBOLS_SCHEMA,
@@ -344,44 +449,49 @@ AGENT_TOOLS = [
     tool(
         name="write_lab_playbook",
         description=(
-            "Paper only: your setup book. cards[] is the book — one card per edge "
-            "you are testing, keyed by the setup, not the order type. instructions "
-            "is free notes (regime reads, per-name observations). Not a wake clock."
+            "Paper only: your book, one tree. Keyed by order type — each type "
+            "holds what you learned executing it (durable) and the cards "
+            "branching under it (disposable, one hypothesis each). A card's "
+            "type is what it sends, so it needs no ticket of its own. "
+            "instructions is free notes. Not a wake clock."
         ),
         parameters=_schema(
             {
-                "cards": {
-                    "type": "array",
+                "types": {
+                    "type": "object",
                     "description": (
-                        "Setup cards. Replaces the previous cards. Keep what works, "
-                        "retire what does not."
+                        "Keyed by sendable strategy name. Only what you learned "
+                        "running that structure — the schema is already in ORDER "
+                        "EXAMPLES. Omitted types keep what you last wrote, cards "
+                        "included."
                     ),
-                    "items": {
+                    "additionalProperties": {
                         "type": "object",
                         "properties": {
-                            "name": {
-                                "type": "string",
-                                "description": "The setup, e.g. 'gap fade after 10:00'",
+                            "tool_order": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "Tool sequence that actually works for this "
+                                    "structure, in order."
+                                ),
                             },
-                            "when_on": {
+                            "gotchas": {
                                 "type": "string",
-                                "description": "Conditions that turn this card on.",
+                                "description": (
+                                    "Execution traps you hit: rejects, fill lag, "
+                                    "leg order, protection timing."
+                                ),
                             },
-                            "scan": {
+                            "review": {
                                 "type": "string",
-                                "description": "Screen that finds it (arena + filters).",
-                            },
-                            "ticket": {
-                                "type": "string",
-                                "description": "Sendable strategy this expresses through.",
-                            },
-                            "shape": {"type": "string"},
-                            "invalidation": {"type": "string"},
-                            "status": {
-                                "type": "string",
-                                "description": "testing | working | retired",
+                                "description": (
+                                    "How you check the result after this structure "
+                                    "is on and after it comes off."
+                                ),
                             },
                             "note": {"type": "string"},
+                            "cards": _CARD_BRANCH_SCHEMA,
                         },
                     },
                 },
@@ -1011,12 +1121,13 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
 def _book_payload(world: WorldState) -> dict[str, Any]:
     from abcxauto.config import get_config
     from abcxauto.lab_playbook import (
-        card_scores,
+        _card_label,
+        _flat_card_projection,
+        card_facts,
         load_lab,
         notebook_text,
         playbook_glance,
         playbook_mode,
-        _norm_cards,
     )
     from abcxauto.self_tune import levers_snapshot
     from abcxauto.world_state import day_facts
@@ -1034,11 +1145,22 @@ def _book_payload(world: WorldState) -> dict[str, Any]:
     # to spend a tool call to remember its own setups.
     try:
         lab = load_lab()
-        cards = _norm_cards(lab.get("cards"))
+        scored = card_facts(lab)
         glance = dict(glance)
         glance["mode"] = playbook_mode()
-        glance["cards"] = cards
-        glance["card_scores"] = card_scores(cards)
+        # The tree is the shape Grok wrote; cards[] is the same rows flattened
+        # with their parent stamped on, for callers that want one list.
+        glance["types"] = lab.get("types") if isinstance(lab.get("types"), dict) else {}
+        glance["cards"] = _flat_card_projection(lab)
+        glance["unfiled_cards"] = list(lab.get("unfiled_cards") or [])
+        glance["card_scores"] = scored
+        glance["graduated"] = [_card_label(r) for r in scored if r.get("graduated")]
+        glance["tripped"] = [_card_label(r) for r in scored if r.get("tripped")]
+        glance["needs_declaration"] = [
+            _card_label(r)
+            for r in scored
+            if r.get("needs_retire_if") or r.get("needs_thesis")
+        ]
         glance["notes"] = notebook_text(lab)[:4000]
     except Exception:
         logger.debug("playbook block for book payload failed", exc_info=True)
@@ -1145,19 +1267,43 @@ def _compact_chain(raw: dict[str, Any], *, last: float | None = None) -> dict[st
 
 
 async def _mda_news(symbols: list[str], *, per_symbol: int = 4) -> list[dict[str, Any]]:
+    """Headlines for named symbols, fetched in parallel with a per-symbol cap.
+
+    Serial fetching here was the timeout. The MDA client allows 30s per request,
+    which alone exceeds the 20s news budget, and eight of them in sequence also
+    blew the 35s ``scan with=news`` budget this runs inside. Each symbol now gets
+    its own cap and a miss is simply absent rather than fatal to the tool —
+    ``fetch_agent_news`` has gathered its symbols this way all along.
+    """
     from abcxauto.marketdata.client import get_marketdata_client
 
     client = get_marketdata_client()
     flag = getattr(client, "is_configured", False)
     if not (flag() if callable(flag) else flag):
         return []
-    rows: list[dict[str, Any]] = []
-    for sym in symbols[:8]:
+    syms = [s for s in symbols[:8] if s]
+    if not syms:
+        return []
+
+    async def _one(sym: str) -> list[dict[str, Any]]:
         try:
-            batch = list(await client.get_stock_news(sym, countback=per_symbol) or [])
+            return list(
+                await asyncio.wait_for(
+                    client.get_stock_news(sym, countback=per_symbol),
+                    timeout=NEWS_SYMBOL_S,
+                )
+                or []
+            )
+        except asyncio.TimeoutError:
+            logger.warning("news %s timed out after %.0fs", sym, NEWS_SYMBOL_S)
+            return []
         except Exception:
             logger.exception("news failed for %s", sym)
-            batch = []
+            return []
+
+    rows: list[dict[str, Any]] = []
+    # gather preserves input order, so headlines stay in the order asked.
+    for batch in await asyncio.gather(*[_one(s) for s in syms]):
         rows.extend(batch)
     return rows
 
@@ -1383,7 +1529,6 @@ async def _run_tool(
         return _clip(out)
     if name == "candles":
         from abcxauto.broker.bars import ibkr_bar_freshness
-        from abcxauto.marketdata.client import get_marketdata_client
 
         syms = normalize_tickers(
             args.get("symbols") or args.get("symbol"), cap=CANDLE_CAP
@@ -1396,7 +1541,6 @@ async def _run_tool(
             countback = 60
         countback = max(5, min(countback, 120))
         res = str(args.get("resolution") or "D").strip() or "D"
-        client = get_marketdata_client()
         bar_cap = 40 if len(syms) > 1 else 80
         hist = getattr(connector, "get_historical_bars", None)
         realtime = getattr(connector, "get_realtime_bars", None)
@@ -1407,15 +1551,6 @@ async def _run_tool(
             qmap.update(snap["ibkr_live_quotes"])
         t0 = time.monotonic()
         budget = min(CANDLE_S, max(28.0, 12.0 + 8.0 * len(syms)))
-
-        async def _mda_candles(sym: str) -> dict[str, Any]:
-            bars = await client.get_stock_candles(sym, resolution=res, countback=countback)
-            return {
-                "symbol": sym,
-                "bars": list(bars or [])[-bar_cap:],
-                "source": "mda",
-                "freshness": mda_bar_freshness(res),
-            }
 
         def _live_last(sym: str) -> Any:
             return qmap.get(sym)
@@ -1466,26 +1601,31 @@ async def _run_tool(
                     out.setdefault("requested_resolution", res)
                     return out
                 rt_err = str((raw or {}).get("error") or "no IBKR realtime bars")
-            if ibkr_path:
-                logger.info(
-                    "candles %s hist=%s rt=%s path=ibkr_error",
-                    sym,
-                    hist_err or "n/a",
-                    rt_err or "n/a",
-                )
-                err = {
-                    "symbol": sym,
-                    "source": "ibkr",
-                    "error": rt_err or hist_err or "no IBKR bars",
-                    "freshness": "ibkr_miss",
-                    "hist_error": hist_err or None,
-                    "rt_error": rt_err or None,
-                }
-                last = _live_last(sym)
-                if last is not None:
-                    err["last"] = last
-                return err
-            return await _mda_candles(sym)
+            # A missing bar feed is a broken link, not licence to answer a
+            # live-structure question with yesterday's delayed tape. On
+            # 2026-08-20 the bars mixin was off the connector MRO, so this fell
+            # through to MDA and handed Grok the prior session as if it were
+            # today — it spent the turn discovering that instead of trading.
+            if not ibkr_path:
+                hist_err = hist_err or "connector exposes no bar feed"
+            logger.info(
+                "candles %s hist=%s rt=%s path=ibkr_error",
+                sym,
+                hist_err or "n/a",
+                rt_err or "n/a",
+            )
+            err: dict[str, Any] = {
+                "symbol": sym,
+                "source": "ibkr",
+                "error": rt_err or hist_err or "no IBKR bars",
+                "freshness": "ibkr_miss",
+                "hist_error": hist_err or None,
+                "rt_error": rt_err or None,
+            }
+            last = _live_last(sym)
+            if last is not None:
+                err["last"] = last
+            return err
 
         rows = await asyncio.gather(
             *[_one_candles(sym) for sym in syms], return_exceptions=True
@@ -1502,9 +1642,11 @@ async def _run_tool(
                 continue
             src = str(row.get("source") or "")
             fresh = str(row.get("freshness") or "")
-            if src == "mda":
-                kinds.add("mda")
-            elif fresh == "ibkr_rt_5s":
+            # A miss carries source=ibkr too; counting it as hist labelled a
+            # batch of nothing as RTH structure.
+            if fresh == "ibkr_miss" or not row.get("bars"):
+                continue
+            if fresh == "ibkr_rt_5s":
                 kinds.add("rt")
             elif src == "ibkr":
                 kinds.add("hist")
@@ -1522,17 +1664,10 @@ async def _run_tool(
                 "live_5s_not_hist",
                 "5s",
             )
-        elif kinds == {"mda"}:
-            source, freshness, use, out_res = (
-                "mda",
-                mda_bar_freshness(res),
-                "backtest_or_context_not_live_last",
-                res,
-            )
-        elif kinds <= {"hist", "rt"} and kinds:
+        elif kinds:
             source, freshness, use, out_res = "ibkr", "ibkr_hist_or_rt", "prefer_hist_then_5s", res
         else:
-            source, freshness, use, out_res = "mixed", "ibkr_or_mda", "prefer_ibkr_bars", res
+            source, freshness, use, out_res = "ibkr", "ibkr_miss", "no_bars_use_quote", res
         payload: dict[str, Any] = {
             "resolution": out_res,
             "source": source,
@@ -1541,8 +1676,6 @@ async def _run_tool(
         }
         if out_res != res:
             payload["requested_resolution"] = res
-        if source == "mda":
-            payload["mda_last_is"] = mda_last_kind(res)
         if len(series) == 1:
             payload["symbol"] = series[0].get("symbol")
             if series[0].get("error") and not series[0].get("bars"):
@@ -1658,11 +1791,13 @@ async def _run_tool(
             try:
                 from abcxauto.lab_playbook import record_card_send
 
+                params = act.get("params") if isinstance(act.get("params"), dict) else {}
                 record_card_send(
-                    card=str(args.get("card") or ""),
+                    card=str(params.get("card") or args.get("card") or ""),
                     strategy=strat,
-                    symbol=str((act.get("params") or {}).get("symbol") or ""),
+                    symbol=str(params.get("symbol") or ""),
                     result=result,
+                    params=params,
                 )
             except Exception:
                 logger.debug("card send log failed", exc_info=True)
@@ -1731,15 +1866,29 @@ async def _run_tool(
         )
         if alarm.wake_at:
             turn.parked = True
-            return _clip({
+            out: dict[str, Any] = {
                 "status": "ok",
                 "wake_at": alarm.wake_at,
                 "wake_if": list(alarm.wake_if),
-            })
+            }
+            from abcxauto.wake_bus import lab_idle_park_cap_s
+
+            cap = lab_idle_park_cap_s(
+                flat=getattr(world, "flat", None), session=session
+            )
+            if cap is not None:
+                out["park_capped_s"] = cap
+                out["capped_because"] = (
+                    "lab idle — no resolved trade yet and entry structures carry "
+                    "no card. See playbook lab.entry_trunks_untried."
+                )
+            return _clip(out)
+        # set_wake writes a clock in every session now, so a missing wake_at is
+        # a bad ask rather than a session the clerk refuses to park.
         turn.parked = False
         return _clip({
-            "status": "ignored",
-            "reason": "paper_stay_up",
+            "status": "no_clock",
+            "reason": "wake_in_s / wake_at did not resolve to a time",
             "wake_at": None,
             "session": session or "regular",
             "wanted_wake_in_s": args.get("wake_in_s"),
@@ -1816,14 +1965,25 @@ async def _invoke_named_tool(
             )
         )
         deadline = time.monotonic() + float(timeout)
+        # A read is worth cancelling — the book moved, so the answer is stale
+        # before it lands. A send is not: cancelling it mid-flight can leave an
+        # entry on the book with no protection attached. The poke waits.
+        droppable = name not in _MUTATING_TOOLS
         while True:
-            if peek_interrupt() is not None:
+            if droppable and peek_interrupt() is not None:
                 tool_task.cancel()
                 try:
                     await tool_task
                 except (asyncio.CancelledError, Exception):
                     pass
-                return json.dumps({"status": "interrupted", "tool": name})
+                _record_tool_deferred(
+                    name, "book event cancelled the read in flight", args=args
+                )
+                return json.dumps({
+                    "status": "interrupted",
+                    "tool": name,
+                    "note": _DEFERRED_READ_NOTE,
+                })
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 tool_task.cancel()
@@ -1877,6 +2037,68 @@ def _cached_read(turn: BrainTurn, name: str, args: dict[str, Any]) -> str | None
     return hit
 
 
+# Handed back for a read the clerk dropped. A read that returns nothing must
+# never look like a flat book or an empty tape — Grok would trade on it.
+_DEFERRED_READ_NOTE = (
+    "deferred: the book moved mid-message (fill / order change / unprotected "
+    "lot). Nothing was fetched and nothing is implied - this is not an empty "
+    "book, a flat quote, or a clean scan. Ask for this read again."
+)
+
+
+def _deferred_read_result(name: str) -> str:
+    return json.dumps({
+        "status": "deferred",
+        "tool": name,
+        "note": _DEFERRED_READ_NOTE,
+    })
+
+
+def _record_tool_deferred(
+    name: str, why: str, *, args: dict[str, Any] | None = None
+) -> None:
+    """Durable record for a tool call the clerk dropped.
+
+    A dropped call used to leave nothing at all — no marker, no trace, no log,
+    no journal row. The operator reads logs/app.log and the journal, so it has
+    to land in both or the drop is invisible again.
+    """
+    logger.warning("tool %s deferred - %s", name, why)
+    try:
+        from abcxauto.memory import get_journal
+
+        get_journal().record_decision(
+            action="tool_deferred",
+            strategy=str(name),
+            rationale=str(why)[:400],
+            outcome={
+                "status": "deferred",
+                "tool": str(name),
+                "reason": str(why),
+                "args": args or {},
+            },
+        )
+    except Exception:
+        logger.debug("tool deferral journal failed", exc_info=True)
+
+
+def _is_fact_result(result: str) -> bool:
+    """False for a deferred / interrupted / errored read.
+
+    Caching one of these would hand it back on the next ask stamped
+    ``repeat_of_this_think``, which reads as a settled fact.
+    """
+    try:
+        data = json.loads(result)
+    except (TypeError, json.JSONDecodeError, ValueError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    if data.get("error"):
+        return False
+    return str(data.get("status") or "") not in ("deferred", "interrupted")
+
+
 async def _dispatch_tool_calls(
     calls: list[Any],
     *,
@@ -1888,7 +2110,13 @@ async def _dispatch_tool_calls(
 ) -> bool:
     """Read tools in parallel; send / playbook stay serial and after facts.
 
-    Returns True when a live poke interrupted mid-tool.
+    A book event mid-message defers the reads, never the writes. A read is
+    stale the moment the book moves and Grok has to ask again anyway; the send
+    carries geometry Grok already decided and cannot be reconstructed. Every
+    tool_call_id still gets a result — a missing one makes the next round
+    malformed.
+
+    Returns True when a live poke is waiting for the think.
     """
     from abcxauto.wake_bus import peek_interrupt
 
@@ -1912,33 +2140,48 @@ async def _dispatch_tool_calls(
             snap=snap,
             turn=turn,
         )
-        if name not in _MUTATING_TOOLS:
+        if name not in _MUTATING_TOOLS and _is_fact_result(result):
             turn.tool_cache[_tool_key(name, args)] = result
         return tc, result
 
+    def _defer_reads(why: str) -> None:
+        for name, args, tc, _timeout in reads:
+            _record_tool_deferred(name, why, args=args)
+            think_emit("say", f"\n[{name} deferred: book moved]\n")
+            _append_tool_result(chat, tc, _deferred_read_result(name))
+
     if reads:
-        rows = await asyncio.gather(*[_one(p) for p in reads], return_exceptions=True)
-        for item, row in zip(reads, rows):
-            if isinstance(row, Exception):
-                logger.exception("parallel tool failed")
-                _append_tool_result(
-                    chat, item[2], json.dumps({"error": f"{item[0]} failed: {row}"})
-                )
-            else:
-                _append_tool_result(chat, row[0], row[1])
-        if peek_interrupt() is not None:
-            return True
+        if writes and peek_interrupt() is not None:
+            _defer_reads("book event before the reads; the ticket takes the turn")
+        else:
+            rows = await asyncio.gather(
+                *[_one(p) for p in reads], return_exceptions=True
+            )
+            for item, row in zip(reads, rows):
+                if isinstance(row, Exception):
+                    logger.exception("parallel tool failed")
+                    _append_tool_result(
+                        chat, item[2], json.dumps({"error": f"{item[0]} failed: {row}"})
+                    )
+                else:
+                    _append_tool_result(chat, row[0], row[1])
 
     for item in writes:
-        if peek_interrupt() is not None:
-            return True
-        tc, result = await _one(item)
+        try:
+            tc, result = await _one(item)
+        except Exception as exc:
+            # Never leave a write's tool_call_id unanswered, and never let the
+            # failure be the only thing that is silent about it.
+            logger.exception("write tool %s failed", item[0])
+            _record_tool_deferred(item[0], f"write raised: {exc}", args=item[1])
+            _append_tool_result(
+                chat, item[2], json.dumps({"error": f"{item[0]} failed: {exc}"})
+            )
+            continue
         _append_tool_result(chat, tc, result)
         # The book just moved. Every cached read is now a pre-trade fact.
         turn.tool_cache.clear()
-        if peek_interrupt() is not None:
-            return True
-    return False
+    return peek_interrupt() is not None
 
 
 async def _grok_turn_impl(

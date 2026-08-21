@@ -1,8 +1,8 @@
-"""Smoke tests for abcxauto.book and abcxauto.risk product surfaces."""
+"""Smoke tests for the abcxauto.book product surface."""
 
 from __future__ import annotations
 
-from abcxauto import book, risk
+from abcxauto import book
 
 
 def test_build_book_returns_net_liq(monkeypatch):
@@ -55,17 +55,6 @@ def test_build_book_portfolio_risk_pct_nl(monkeypatch):
     assert state["capital_liquidity"]["deployed_long_pct_nl"] == 30.0
 
 
-def test_build_portfolio_state_alias(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.config.get_config",
-        lambda: type("C", (), {})(),
-    )
-    via_book = book.build_book(account={"NetLiquidation": 10_000})
-    via_alias = book.build_portfolio_state(account={"NetLiquidation": 10_000})
-    assert via_book["net_liq"] == 10_000
-    assert via_alias["net_liq"] == 10_000
-
-
 def test_build_book_from_snap(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.config.get_config",
@@ -101,12 +90,3 @@ def test_build_book_clerk_halt_vs_trip(monkeypatch):
     assert state["daily_loss_limit_pct"] == 25.0
     assert state["halt_trips_at_usd"] == -8804.0
     assert state["ibkr_day_vs_halt"] == 8430.15
-
-
-def test_risk_get_risk_gate():
-    gate = risk.get_risk_gate()
-    assert gate is not None
-    assert hasattr(gate, "is_halted")
-    reset = risk.reset_risk_gate()
-    assert reset is not None
-    assert risk.is_exit_or_management is not None

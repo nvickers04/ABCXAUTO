@@ -3,11 +3,13 @@ xai-sdk>=1.8.0
 httpx>=0.27
 pydantic>=2.7
 python-dotenv>=1.0
-rich>=13.7
 exchange_calendars>=4.5
-fastapi>=0.110
-uvicorn>=0.29
+# flet alone has no window: flet-desktop backs ft.AppView.FLET_APP (the default
+# cockpit), flet-web only the ABCXAUTO_PRO_WEB=1 escape hatch.
+flet>=0.85.0
+flet-desktop>=0.85.0
+flet-web>=0.85.0
+# pid liveness for the desk lock / think stream; falls back to ctypes without it.
+psutil>=5.9
 pytest>=8.0
 pytest-asyncio>=0.23
-flet>=0.85.0
-pywebview>=5.0

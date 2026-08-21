@@ -55,19 +55,3 @@ def compute_account_returns(
         except (TypeError, ValueError):
             pass
     return result
-
-
-async def compute_account_returns_async(
-    *,
-    equity: float | None = None,
-    daily_pnl: float | None = None,
-    positions: list[dict] | None = None,
-    journal: Any = None,
-) -> dict[str, Any]:
-    """Async shim for callers that ``await`` returns refresh."""
-    return compute_account_returns(
-        equity=equity,
-        daily_pnl=daily_pnl,
-        positions=positions,
-        journal=journal,
-    )

@@ -209,18 +209,6 @@ def covering_exits(
     return out
 
 
-def covering_exit_ids(
-    position: Dict[str, Any],
-    orders: List[Dict[str, Any]] | None,
-) -> set[int]:
-    ids: set[int] = set()
-    for o in covering_exits(position, orders):
-        oid = _order_id(o)
-        if oid is not None:
-            ids.add(oid)
-    return ids
-
-
 def _order_matches_position(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
     """Prefer conId; OPT uses strike fingerprint; STK uses symbol + secType."""
     return _contract_matches(position, order)
@@ -234,6 +222,8 @@ def build_protection_report(
 
     Unprotected is STK without a working last-stop. Option covering exits are
     facts only — they do not force hold or flatten. Combos close as one BAG.
+    ``orphaned_protection`` is the mirror image: exits with no lot left to
+    cover, which the unprotected test cannot see because the book looks clean.
     """
     report = []
     unprotected = []
@@ -298,9 +288,18 @@ def build_protection_report(
 
         report.append(entry)
 
+    try:
+        from abcxauto.protect import orphaned_protection_rows
+
+        orphans = orphaned_protection_rows(positions, orders)
+    except Exception:
+        logger.exception("orphaned protection scan failed")
+        orphans = []
+
     return {
         "positions": report,
         "unprotected_symbols": unprotected,
+        "orphaned_protection": orphans,
         "checked_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -327,6 +326,7 @@ class PortfolioMonitor:
         self._prev_fill_keys: set[str] = set()
         self._prev_halted: bool = False
         self._prev_had_plan: bool | None = None
+        self.reconciler: Any = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -336,15 +336,34 @@ class PortfolioMonitor:
         if self._task and not self._task.done():
             return
         self._task = asyncio.create_task(self._run())
+        self._start_reconciler()
         logger.info(
             f"Portfolio monitor started (poll={self.cfg.monitor_poll_s}s, "
             f"review={self.cfg.monitor_review_s}s)"
         )
 
+    def _start_reconciler(self) -> None:
+        """Arm the fill-driven orphan sweep — the poll loop is too slow alone."""
+        try:
+            from abcxauto.protect_reconciler import ProtectionReconciler
+
+            rec = ProtectionReconciler(self.connector)
+            self.reconciler = rec if rec.start() else None
+        except Exception as e:
+            self.reconciler = None
+            logger.warning("Protection reconciler not armed: %s", e)
+
     def stop(self) -> None:
         if self._task and not self._task.done():
             self._task.cancel()
         self._task = None
+        rec = self.reconciler
+        self.reconciler = None
+        if rec is not None:
+            try:
+                rec.stop()
+            except Exception:
+                logger.debug("reconciler stop failed", exc_info=True)
 
     @property
     def running(self) -> bool:
@@ -431,6 +450,7 @@ class PortfolioMonitor:
         if not snapshot:
             return
 
+        await self._sweep_orphaned_protection(snapshot)
         await self._maybe_auto_panic(snapshot)
         self._detect_pace_wakes(snapshot)
 
@@ -460,6 +480,38 @@ class PortfolioMonitor:
 
         self._last_review_ts = now
         await self._ask_grok_review(snapshot, urgent=False)
+
+    async def _sweep_orphaned_protection(self, snapshot: Dict[str, Any]) -> None:
+        """Backstop for the fill-driven sweep: clean up whatever the poll finds."""
+        orphans = (snapshot.get("protection") or {}).get("orphaned_protection") or []
+        if not orphans:
+            return
+        try:
+            from abcxauto.executor import cancel_orphaned_protection
+
+            cancelled = await cancel_orphaned_protection(
+                self.connector,
+                positions=snapshot.get("positions") or [],
+                open_orders=snapshot.get("open_orders") or [],
+            )
+        except Exception:
+            logger.exception("orphan-protection sweep failed")
+            return
+        if not cancelled:
+            return
+        logger.warning(
+            "orphan-protection: cancelled %s working exit(s) on a flat book: %s",
+            len(cancelled), cancelled,
+        )
+        drop = set(cancelled)
+        remaining = [
+            o for o in (snapshot.get("open_orders") or [])
+            if _order_id(o) not in drop
+        ]
+        snapshot["open_orders"] = remaining
+        snapshot["protection"] = build_protection_report(
+            snapshot.get("positions") or [], remaining
+        )
 
     def _supports_agent_review(self) -> bool:
         """True when session can accept Grok review injections (web AgentSession)."""

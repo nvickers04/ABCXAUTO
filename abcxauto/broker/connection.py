@@ -6,11 +6,10 @@ midnight restarts), paper/live safety checks, and structured logging.
 
 from __future__ import annotations
 
-import asyncio
-import time as _time
 from enum import Enum
 from typing import Optional, Tuple
 
+from abcxauto.aio import safe_sleep  # noqa: F401  (re-export for broker modules)
 from abcxauto.config import get_config
 
 # IB API connectivity messages (see IB TWS API Reference → Error Codes)
@@ -117,31 +116,7 @@ def reconnect_backoff_seconds(
     return min(cap, base * (2 ** min(n, 5)))
 
 
-# ---------- endpoint helpers (absorbed from util.py) ----------
-
-
-async def safe_sleep(seconds: float) -> None:
-    """asyncio.sleep wrapper — falls back to time.sleep on Python 3.13 deque bug."""
-    try:
-        await asyncio.sleep(seconds)
-    except IndexError:
-        _time.sleep(seconds)
-
-
-def get_ibkr_host() -> str:
-    return get_config().ibkr_host
-
-
-def get_ibkr_port() -> int:
-    return get_config().ibkr_port
-
-
-def is_paper_trading() -> bool:
-    return get_ibkr_port() not in LIVE_PORTS
-
-
-def is_live_trading() -> bool:
-    return get_ibkr_port() in LIVE_PORTS
+# ---------- endpoint helpers ----------
 
 
 def resolve_ibkr_endpoint(mode: str | None = None) -> Tuple[str, int, str]:
@@ -162,6 +137,3 @@ def assert_connect_allowed() -> None:
     validate_trading_mode_port(cfg.trading_mode, cfg.ibkr_port, cfg.live_confirm)
 
 
-def format_ibkr_endpoint() -> str:
-    host, port, mode_str = resolve_ibkr_endpoint()
-    return f"{host}:{port} ({mode_str})"

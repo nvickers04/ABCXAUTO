@@ -5,11 +5,7 @@ active_trade_plans.json
 last_closed_trade_plan.json
 universe_allowlist.json
 flat_book_streak.json
-idle_streak_state.json
-session_prep.json
-session_review.json
 structure_events.jsonl
-structure_vocab.json
 .env
 __pycache__/
 *.pyc
@@ -22,7 +18,6 @@ journal.db-wal
 journal.db-shm
 playbook_lab.json
 playbook_live.json
-grokfolio_state.json
 # Machine state, not source: the desk rewrites all of this every look — briefs,
 # wakes, the think tail, restart scratch, UI screenshots. Nothing here is tracked.
 data/state/
@@ -30,3 +25,7 @@ data/state/
 # file a mistyped PowerShell redirect leaves behind.
 _patch_*.py
 /1
+# Journal backups and the audit trail scripts/fix_fill_timestamps.py writes
+# beside the db it rewrites.
+journal.db.bak-*
+journal.db.fill-ts-fix-*.json

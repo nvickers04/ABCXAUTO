@@ -21,7 +21,26 @@ def _nav():
 
     return NAV
 
-SCRATCH = Path(r"C:\Users\nvick\AppData\Local\Temp\grok-goal-80c4246a04fb\implementer")
+
+def _walk(control):
+    yield control
+    content = getattr(control, "content", None)
+    if content is not None and not isinstance(content, str):
+        yield from _walk(content)
+    for child in getattr(control, "controls", None) or []:
+        yield from _walk(child)
+
+
+def _visible_walk(control):
+    if getattr(control, "visible", True) is False:
+        return
+    yield control
+    content = getattr(control, "content", None)
+    if content is not None and not isinstance(content, str):
+        yield from _visible_walk(content)
+    for child in getattr(control, "controls", None) or []:
+        yield from _visible_walk(child)
+
 REQUIRED = (
     "Connect IBKR",
     "Disconnect IBKR",
@@ -218,6 +237,48 @@ def test_nav_covers_every_surface(headless_pro):
         assert headless_pro.content.content is not None
     headless_pro._show_tab("overview")
     assert headless_pro.lbl_center_title.value == "Dashboard"
+
+
+def test_surfaces_are_reachable_as_tabs(headless_pro):
+    """The operator asked for tabs, so every surface has one and it selects."""
+    headless_pro.page.add(headless_pro._shell())
+    keys = [k for k, _label, _o, _f in _nav()]
+    assert list(headless_pro.surface_tabs) == keys
+    for key in keys:
+        chip = headless_pro.surface_tabs[key]["chip"]
+        assert callable(chip.on_click)
+        chip.on_click(None)
+        assert headless_pro.tab == key
+        assert headless_pro.surface_tabs[key]["chip"].bgcolor is not None
+        others = [k for k in keys if k != key]
+        assert all(headless_pro.surface_tabs[k]["chip"].bgcolor is None for k in others)
+
+
+def test_navigation_is_tabs_only_no_second_rail_nav(headless_pro):
+    """Two navigations doing one job is worse than either alone."""
+    text = PRO_SRC.read_text(encoding="utf-8")
+    assert "_nav_btn" not in text
+    assert "sidebar_btns" not in text
+    rail = headless_pro._left_rail()
+    labels = {
+        getattr(node, "value", None)
+        for node in _walk(rail)
+        if isinstance(getattr(node, "value", None), str)
+    }
+    for _key, label, _o, _f in _nav():
+        assert label not in labels
+    # What the rail is actually for: the action pills and the account block.
+    controls = list(_walk(rail))
+    for btn in (
+        headless_pro.btn_connect,
+        headless_pro.btn_run,
+        headless_pro.btn_halt,
+        headless_pro.btn_refresh,
+    ):
+        assert btn in controls
+    assert headless_pro.lbl_account_id in controls
+    assert headless_pro.btn_account_mode in controls
+    assert headless_pro.btn_floors in controls
 
 
 def test_positions_rows_replace_text_blobs(headless_pro):
@@ -686,6 +747,75 @@ def test_floor_gate_cannot_be_disarmed_from_the_ui(real_cfg_pro):
     assert gate.value is True
     assert get_config().defined_risk_only is True
     assert "floor" in (real_cfg_pro.lbl_risk_status.value or "").lower()
+
+
+def test_the_stream_dominates_its_surface(headless_pro):
+    """It was buried under two stacked sections and the operator could not read it."""
+    from abcxauto.pro_desktop import STREAM_FONT_SIZE
+
+    page = headless_pro._page_overview()
+    painted = [c for c in _visible_walk(page) if c is not page]
+    # Exactly one thing on the surface grows: the stream.
+    growers = [
+        c
+        for c in painted
+        if getattr(c, "expand", None)
+        and (getattr(c, "content", None) is not None or getattr(c, "controls", None))
+    ]
+    assert headless_pro.think_scroll in growers
+    assert all(headless_pro.think_scroll in list(_walk(c)) for c in growers)
+    # Nothing else may claim a fixed band of the surface.
+    assert not [c for c in painted if getattr(c, "height", None)]
+    assert STREAM_FONT_SIZE >= 14
+    assert headless_pro.think_live.size == STREAM_FONT_SIZE
+    # The controls the operator uses on the stream stay.
+    assert headless_pro.btn_copy_stream in painted
+    assert headless_pro.lbl_stream_status in painted
+    assert headless_pro.btn_stream_follow in painted
+
+
+def test_the_status_strip_is_a_bar_not_a_hero_panel(headless_pro):
+    """74px cards with 18px values ate the top of the Dashboard."""
+    strip = headless_pro._status_strip()
+    painted = list(_visible_walk(strip))
+    # Small type only, and no card boxes reserving height.
+    sizes = [
+        s for s in (getattr(c, "size", None) for c in painted) if isinstance(s, (int, float))
+    ]
+    assert sizes and max(sizes) <= 13
+    assert not [c for c in painted if getattr(c, "height", None)]
+    # Kept: what would change what the operator does right now.
+    for kept in (
+        headless_pro.lbl_desk,
+        headless_pro.lbl_halt,
+        headless_pro.lbl_lot_count,
+        headless_pro.lbl_unprotected,
+        headless_pro.lbl_last_send,
+        headless_pro.lbl_result,
+        headless_pro.col_book_strip,
+    ):
+        assert kept in painted
+    # Cut: repeats of the rail pill and the Account card.
+    for cut in (
+        headless_pro.lbl_status,
+        headless_pro.lbl_open_upnl,
+        headless_pro.lbl_pace,
+    ):
+        assert cut not in painted
+        assert cut in list(_walk(headless_pro._hidden_metrics))
+
+
+def test_cut_metrics_still_sync_so_nothing_goes_stale(headless_pro):
+    """A hidden label that stops updating is a trap for whoever re-mounts it."""
+    s = headless_pro.engine.state
+    s.positions = [
+        {"symbol": "SPY", "quantity": 5, "sec_type": "STK", "unrealized_pnl": 12.0, "conId": 1}
+    ]
+    s.status = "Grok"
+    headless_pro._sync_widgets()
+    assert headless_pro.lbl_status.value == "Grok"
+    assert headless_pro.lbl_open_upnl.value not in ("", "—")
+    assert headless_pro._hidden_metrics.visible is False
 
 
 class _RecordingScroll:

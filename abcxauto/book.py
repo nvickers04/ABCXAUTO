@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 __all__ = (
     "build_book",
     "build_book_from_snap",
-    "build_portfolio_state",
     "clerk_halt_facts",
     "portfolio_narrative",
 )
@@ -260,24 +259,6 @@ def build_book(
     if include_narrative:
         state["narrative"] = portfolio_narrative(state)
     return state
-
-
-def build_portfolio_state(
-    account: Optional[dict] = None,
-    positions: Optional[list] = None,
-    open_orders: Optional[list] = None,
-    protection: Optional[dict] = None,
-    *,
-    include_narrative: bool = True,
-) -> Dict[str, Any]:
-    """Alias for build_book (compat)."""
-    return build_book(
-        account,
-        positions,
-        open_orders,
-        protection,
-        include_narrative=include_narrative,
-    )
 
 
 def build_book_from_snap(snap: dict) -> dict:

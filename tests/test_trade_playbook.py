@@ -7,36 +7,7 @@ from abcxauto.trade_playbook import (
     OVERLAY_SHARES_INSUFFICIENT,
     check_overlay_shares,
     long_share_lots,
-    world_hints_from_world,
 )
-from abcxauto.world_state import WorldState
-
-
-def _world(**kwargs) -> WorldState:
-    base = dict(
-        cycle=1,
-        session_status="regular",
-        flat=True,
-        needs_protection=False,
-        unprotected=[],
-        net_liquidation=37000.0,
-        daily_pnl=0.0,
-        positions=[],
-        open_orders=[],
-        opportunities=[],
-        news_items=[],
-        risk_posture="aggressive",
-        effective_posture="aggressive",
-        gates={},
-        envelope={},
-        regime={},
-        portfolio_risk={},
-        working_thesis="",
-        recent_decisions=[],
-        trade_plan=None,
-    )
-    base.update(kwargs)
-    return WorldState(**base)
 
 
 def test_share_lot_guard_rejects_without_stock():
@@ -89,14 +60,3 @@ def test_strategy_diversity_observe_only(tmp_path, monkeypatch):
     assert div["n_distinct"] == 2
     assert set(div["strategies"]) == {"market_bracket", "covered_call"}
     assert div["n_decisions"] == 4
-
-
-def test_world_hints_from_world():
-    world = _world(
-        flat=False,
-        positions=[{"symbol": "IWM", "secType": "STK", "quantity": 100}],
-        trade_plan={"symbol": "IWM"},
-    )
-    hints = world_hints_from_world(world)
-    assert hints["long_lots"]["IWM"] == 100.0
-    assert hints["has_trade_plan"] is True

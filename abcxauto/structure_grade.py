@@ -316,16 +316,3 @@ def detect_scrape_from_fills(
     return False
 
 
-def format_structure_lessons_for_prompt(lessons: list[dict] | None = None) -> str:
-    items = lessons if lessons is not None else recent_structure_lessons(5)
-    if not items:
-        return "STRUCTURE LESSONS: (none yet — live rejects will appear here)\n"
-    lines = ["STRUCTURE LESSONS (code gradebook — learn these facts):"]
-    for ev in items:
-        lines.append(
-            f"- {ev.get('ts', '')[:19]} {ev.get('strategy')} {ev.get('symbol')} "
-            f"outcome={ev.get('outcome')} code={ev.get('reason_code')} "
-            f"quote={ev.get('quote')} "
-            f"msg={(str(ev.get('message') or '')[:120])}"
-        )
-    return "\n".join(lines) + "\n"

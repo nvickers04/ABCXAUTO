@@ -27,6 +27,9 @@ which beats the `ABCXAUTO_MODEL` env form. Keep the clerk.
 - Defined-risk and cash-only
 - Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %;
   capacity `max_open_positions` (default 15)
+- One name across every lot vs `max_symbol_concentration_pct`. `max_position_pct`
+  only sees the ticket in front of it, so N orders in a name could stack past it.
+  Stock and its options sum — same underlying, one bet
 - Unprotected STK: last-stop; hold blocked until it rests at IBKR. Combo close is one BAG (`closing_position`), not new risk
 - Live new risk needs a promoted playbook
 - Ticket geometry uses **IBKR last**, not MDA
@@ -34,7 +37,7 @@ which beats the `ABCXAUTO_MODEL` env form. Keep the clerk.
 - Agent may tighten floors via `self_tune`; it cannot weaken them or switch to live
 
 Walk-away ceilings: **25%** daily-loss, **25%** max position, **25%** risk/trade,
-defined-risk on, cash-only, full NetLiq (`trading_budget_usd=0`).
+**25%** per name, defined-risk on, cash-only, full NetLiq (`trading_budget_usd=0`).
 Paper operator may turn % floors off (`sizing_floors`); live cannot (forced ON); 25% walk-away is the live ceiling. `% of NL` review facts live on clerk surfaces (`day_facts` / `book` / wake / `compact_position`), not `brain.py`.
 
 ## Loop

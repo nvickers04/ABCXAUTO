@@ -14,7 +14,7 @@ from abcxauto.brain import (
     _run_tool,
     _stash_live,
 )
-from abcxauto.broker.util import quote_from_ticker
+from abcxauto.broker.quotes import quote_from_ticker
 from abcxauto.world_state import WorldState
 
 
@@ -182,7 +182,79 @@ async def test_quote_tool_uses_ibkr_not_mda(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_news_and_candles_are_labeled_delayed(monkeypatch):
+async def test_news_fetches_symbols_in_parallel(monkeypatch):
+    """Serial fetching was the 20s timeout: 8 symbols x MDA latency overran it."""
+    import asyncio as _asyncio
+
+    concurrent = 0
+    peak = 0
+
+    class MDA:
+        is_configured = True
+
+        async def get_stock_news(self, symbol, countback=4):
+            nonlocal concurrent, peak
+            concurrent += 1
+            peak = max(peak, concurrent)
+            try:
+                await _asyncio.sleep(0.05)
+                return [{"symbol": symbol, "headline": f"{symbol} head"}]
+            finally:
+                concurrent -= 1
+
+    monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
+    syms = ["SPY", "QQQ", "IWM", "DIA", "TLT", "GLD", "USO", "XLE"]
+    data = json.loads(
+        await _run_tool(
+            "news",
+            {"symbols": syms},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert [it["symbol"] for it in data["items"]] == syms  # order preserved
+    assert peak > 1, "symbols must not be fetched one at a time"
+
+
+@pytest.mark.asyncio
+async def test_one_stalled_news_symbol_does_not_sink_the_tool(monkeypatch):
+    """MDA allows 30s per request; the tool budget is 20s. Cap each symbol."""
+    import asyncio as _asyncio
+
+    monkeypatch.setattr("abcxauto.brain.NEWS_SYMBOL_S", 0.05)
+
+    class MDA:
+        is_configured = True
+
+        async def get_stock_news(self, symbol, countback=4):
+            if symbol == "HANG":
+                await _asyncio.sleep(30)
+            return [{"symbol": symbol, "headline": f"{symbol} head"}]
+
+    monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
+    data = json.loads(
+        await _run_tool(
+            "news",
+            {"symbols": ["SPY", "HANG", "QQQ"]},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    # The stalled symbol is simply absent; the others still land.
+    assert [it["symbol"] for it in data["items"]] == ["SPY", "QQQ"]
+
+
+@pytest.mark.asyncio
+async def test_news_is_labeled_delayed_but_candles_never_serves_mda(monkeypatch):
+    """news is MDA and says so. candles promises IBKR, so a miss must error.
+
+    2026-08-20: the bars mixin was off the connector MRO, candles fell through
+    to MDA, and Grok read the prior session as today's intraday structure.
+    """
     async def fake_news(_pos=None, **_k):
         return [{"symbol": "SPY", "headline": "Tape note"}]
 
@@ -190,7 +262,7 @@ async def test_news_and_candles_are_labeled_delayed(monkeypatch):
         is_configured = True
 
         async def get_stock_candles(self, symbol, resolution="D", countback=60, **_k):
-            return [{"t": 1, "c": 500.0}]
+            raise AssertionError("candles must never reach MDA")
 
         async def get_stock_news(self, symbol, countback=4):
             return [{"symbol": symbol, "headline": "Head"}]
@@ -213,13 +285,11 @@ async def test_news_and_candles_are_labeled_delayed(monkeypatch):
             turn=BrainTurn(),
         )
     )
-    assert candles["source"] == "mda"
-    assert "delayed" in candles["freshness"]
-    assert candles["freshness"] == "delayed_daily"
-    assert candles["mda_last_is"] == "daily_bar_close"
-    assert "backtest" in candles["use"]
-    assert candles["symbol"] == "SPY"
-    assert candles["bars"]
+    assert candles["source"] == "ibkr"
+    assert candles["freshness"] == "ibkr_miss"
+    assert "bar feed" in candles["error"]
+    assert not candles.get("bars")
+    assert "mda_last_is" not in candles
 
 
 @pytest.mark.asyncio
@@ -392,52 +462,54 @@ async def test_candles_uses_ibkr_rt_when_hist_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_candles_15_labeled_intrabar(monkeypatch):
-    class MDA:
-        is_configured = True
-
-        async def get_stock_candles(self, symbol, resolution="D", countback=60, **_k):
-            return [{"t": 1, "c": 717.5}]
-
-    monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
+async def test_candles_error_carries_the_live_last_so_the_turn_can_continue():
+    """A miss is still useful: hand back the IBKR last instead of nothing."""
+    world = _world()
+    world.ibkr_live_quotes = {"QQQ": 708.9}
     data = json.loads(
         await _run_tool(
             "candles",
             {"symbol": "QQQ", "resolution": "15", "countback": 20},
             connector=None,
-            world=_world(),
+            world=world,
             snap={},
             turn=BrainTurn(),
         )
     )
-    assert data["freshness"] == "delayed_15m"
-    assert data["mda_last_is"] == "intrabar_close"
-    assert data["resolution"] == "15"
+    assert data["freshness"] == "ibkr_miss"
+    assert data["last"] == 708.9
+    assert data["use"] == "no_bars_use_quote"
 
 
 @pytest.mark.asyncio
 async def test_candles_batch_returns_series(monkeypatch):
     seen: list[str] = []
 
-    class MDA:
-        is_configured = True
-
-        async def get_stock_candles(self, symbol, resolution="D", countback=60, **_k):
+    class Conn:
+        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
             seen.append(symbol)
-            return [{"t": 1, "c": 100.0 + len(seen)}]
+            return {
+                "symbol": symbol,
+                "bars": [{"t": 1, "c": 100.0 + len(seen)}],
+                "source": "ibkr",
+            }
+
+    class MDA:
+        async def get_stock_candles(self, *_a, **_k):
+            raise AssertionError("candles must never reach MDA")
 
     monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
     data = json.loads(
         await _run_tool(
             "candles",
             {"symbols": ["SPY", "QQQ", "IWM"], "resolution": "D", "countback": 20},
-            connector=None,
+            connector=Conn(),
             world=_world(),
             snap={},
             turn=BrainTurn(),
         )
     )
-    assert data["source"] == "mda"
+    assert data["source"] == "ibkr"
     assert {row["symbol"] for row in data["series"]} == {"SPY", "QQQ", "IWM"}
     assert set(seen) == {"SPY", "QQQ", "IWM"}
 
@@ -827,30 +899,21 @@ def test_set_wake_tool_description_is_park_not_next_look():
     assert "do not park" not in desc.lower()
 
 
-def test_agent_tools_omits_set_wake_in_rth():
+def test_agent_tools_offer_set_wake_in_every_session():
+    """Grok owns the cadence. Withholding the clock in RTH made the engine
+    re-arm a think the instant the last one ended."""
     from abcxauto.brain import AGENT_TOOLS, agent_tools
 
     assert "set_wake" in _names_of(AGENT_TOOLS)
-    assert "set_wake" not in _names_of(agent_tools(session="regular"))
-    assert "send" in _names_of(agent_tools(session="regular"))
-
-
-def test_agent_tools_keeps_set_wake_overnight():
-    from abcxauto.brain import agent_tools
-
-    for sess in ("closed", "postmarket"):
-        assert "set_wake" in _names_of(agent_tools(session=sess))
-    assert "set_wake" not in _names_of(agent_tools(session="premarket"))
+    for sess in ("regular", "premarket", "postmarket", "closed"):
+        assert "set_wake" in _names_of(agent_tools(session=sess)), sess
+        assert "send" in _names_of(agent_tools(session=sess)), sess
 
 
 @pytest.mark.asyncio
-async def test_paper_rth_set_wake_tool_is_ignored_same_think(tmp_path, monkeypatch):
+async def test_paper_rth_set_wake_tool_parks_on_its_own_clock(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    monkeypatch.setattr(
-        "abcxauto.risk_gates.get_risk_gate",
-        lambda: type("G", (), {"is_halted": False})(),
-    )
     turn = BrainTurn()
     raw = await _run_tool(
         "set_wake",
@@ -861,12 +924,10 @@ async def test_paper_rth_set_wake_tool_is_ignored_same_think(tmp_path, monkeypat
         turn=turn,
     )
     data = json.loads(raw)
-    assert data["status"] == "ignored"
-    assert data["reason"] == "paper_stay_up"
-    assert data["wake_at"] is None
-    assert data["session"] == "regular"
-    assert data.get("wanted_wake_in_s") == 3000
-    assert turn.parked is False
+    assert data["status"] == "ok"
+    assert data["wake_at"]
+    assert data["wake_if"] == ["fill"]
+    assert turn.parked is True
 
 
 @pytest.mark.asyncio
@@ -926,7 +987,7 @@ def test_live_poke_interrupt_skips_reset_chat():
     assert "session=" in text
     assert "This is a delta" not in text
     assert "yield resume" not in text
-    assert "set_wake" not in text
+    assert "set_wake" in text  # Grok owns the clock in every session now
     assert "ORDER EXAMPLES" not in text
     assert "AWARENESS" not in text
     clear_interrupt()
@@ -1102,10 +1163,10 @@ def test_new_chat_does_not_force_a_tool():
     )
     _new_chat(g, session="regular")
     assert captured.get("tool_choice") != "required"
-    assert "set_wake" not in _names_of(captured.get("tools") or [])
+    assert "set_wake" in _names_of(captured.get("tools") or [])
 
 
-def test_new_chat_premarket_omits_set_wake():
+def test_new_chat_premarket_offers_set_wake():
     from abcxauto.brain import _new_chat
 
     captured: dict = {}
@@ -1125,7 +1186,7 @@ def test_new_chat_premarket_omits_set_wake():
         _wake_n=0,
     )
     _new_chat(g, session="premarket")
-    assert "set_wake" not in _names_of(captured.get("tools") or [])
+    assert "set_wake" in _names_of(captured.get("tools") or [])
 
 
 @pytest.mark.asyncio

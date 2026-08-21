@@ -257,10 +257,6 @@ _PE_TAG_CACHE: dict[str, Any] = {"ts": 0.0, "tags": frozenset()}
 _PE_TAG_CACHE_TTL_S = 3600.0
 
 
-def arena_catalog_ids() -> list[str]:
-    return list(ARENA_CATALOG.keys())
-
-
 def known_screen_keys() -> list[str]:
     """Tool JSON arenas= keys: catalog ids + standing IBKR scanCodes."""
     out = list(ARENA_CATALOG.keys())
@@ -268,14 +264,6 @@ def known_screen_keys() -> list[str]:
         if code not in out:
             out.append(code)
     return out
-
-
-def scan_native_filter_keys() -> list[str]:
-    return list(_SCAN_NATIVE_FILTERS.keys())
-
-
-def scan_tag_filter_keys() -> list[str]:
-    return sorted(_SCAN_TAG_FILTERS)
 
 
 def _xml_has_scanner_code(xml: str, code: str) -> bool:
@@ -522,21 +510,6 @@ def default_allowlist() -> dict[str, Any]:
         "source": "",
         "refreshed_at": "",
     }
-
-
-def arena_pull_kind(arena_id: str) -> str:
-    """How this arena fills membership: ibkr | mda_seed."""
-    meta = ARENA_CATALOG.get(str(arena_id)) or {}
-    return "ibkr" if meta.get("ibkr") else "mda_seed"
-
-
-def arena_checkbox_label(arena_id: str) -> str:
-    meta = ARENA_CATALOG.get(str(arena_id)) or {}
-    base = str(meta.get("label") or arena_id)
-    kind = arena_pull_kind(arena_id)
-    if kind == "mda_seed":
-        return f"{base}  ·  MDA seed"
-    return f"{base}  ·  IBKR"
 
 
 def _normalize_membership(raw: Any) -> list[dict[str, str]]:
@@ -918,36 +891,6 @@ def membership_rows(*, query: str = "") -> list[dict[str, str]]:
         for r in rows
         if q in r["symbol"] or q in r["arena"].upper() or q in r["source"].upper()
     ]
-
-
-def universe_status_summary() -> str:
-    al = load_allowlist()
-    legal = legal_symbols()
-    src = al.get("source") or _CACHE.get("source") or "n/a"
-    ts = al.get("refreshed_at") or "never"
-    arenas = al.get("enabled_arenas") or []
-    ibkr_n = sum(1 for a in arenas if arena_pull_kind(a) == "ibkr")
-    mda_n = len(arenas) - ibkr_n
-    return (
-        f"{len(legal)} legal  ·  {len(arenas)} arenas "
-        f"({ibkr_n} IBKR / {mda_n} MDA seed)  ·  "
-        f"refreshed {ts}  ·  {src}"
-    )
-
-
-def universe_fact_block() -> str:
-    al = load_allowlist()
-    legal = legal_symbols()
-    arenas = ", ".join(al.get("enabled_arenas") or []) or "(none)"
-    src = al.get("source") or _CACHE.get("source") or "n/a"
-    ts = al.get("refreshed_at") or "never"
-    return (
-        "UNIVERSE:\n"
-        f"- legal_n={len(legal)} source={src} refreshed_at={ts}\n"
-        f"- arenas={arenas}\n"
-        f"- custom={len(al.get('custom_symbols') or [])} "
-        f"exclude={len(al.get('exclude_symbols') or [])}\n"
-    )
 
 
 def universe_glance_line() -> str:

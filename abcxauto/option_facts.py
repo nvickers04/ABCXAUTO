@@ -197,35 +197,3 @@ async def _empty() -> dict[str, Any]:
     return {}
 
 
-def format_option_facts_for_prompt(facts: list[dict] | None) -> str:
-    """Compact FACT block (no ranking)."""
-    if not facts:
-        return "OPTION FACTS: (none — no open OPT legs or MDA silent)"
-    lines = [
-        "OPTION FACTS (open legs — Fact; source-labeled; heuristic ≠ recommendation)",
-    ]
-    for f in facts[:_MAX_LEGS]:
-        bits = [
-            f"conId={f.get('conId')}",
-            str(f.get("symbol") or ""),
-            f"{f.get('right') or '?'}{f.get('strike')}",
-            f"exp={f.get('expiration')}",
-            f"qty={f.get('qty')}",
-            f"src={f.get('source')}/{f.get('freshness')}",
-        ]
-        mda = f.get("mda") if isinstance(f.get("mda"), dict) else {}
-        ibkr = f.get("ibkr") if isinstance(f.get("ibkr"), dict) else {}
-        iv = (mda or f).get("iv")
-        delta = (mda or f).get("delta")
-        dte = (mda or f).get("dte")
-        mid = ibkr.get("mid") if ibkr else f.get("mid")
-        if iv is not None:
-            bits.append(f"iv={iv}")
-        if delta is not None:
-            bits.append(f"d={delta}")
-        if dte is not None:
-            bits.append(f"dte={dte}")
-        if mid is not None:
-            bits.append(f"mid={mid}")
-        lines.append("- " + " ".join(str(b) for b in bits if b))
-    return "\n".join(lines)

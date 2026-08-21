@@ -27,28 +27,38 @@ def _desk_out_path() -> Path:
     return Path(raw) if raw else DESK_OUT_PATH
 
 
+_DESK_OUT_LOCK = threading.Lock()
+
+
 def _desk_out_logger() -> logging.Logger:
     """Own file for the child's console. Kept off app.log so the structured
-    record stays readable, and off ``propagate`` so it is not double-written."""
+    record stays readable, and off ``propagate`` so it is not double-written.
+
+    The lock matters: the tee thread and the lifecycle notes both land here, and
+    two handlers on one file writes every line twice.
+    """
     lg = logging.getLogger("abcxauto.desk_out")
     lg.propagate = False
     target = str(_desk_out_path().resolve())
-    for h in lg.handlers:
-        if isinstance(h, RotatingFileHandler):
+    with _DESK_OUT_LOCK:
+        for h in list(lg.handlers):
+            if not isinstance(h, RotatingFileHandler):
+                continue
             try:
-                if Path(getattr(h, "baseFilename", "")).resolve() == Path(target):
-                    return lg
+                same = Path(getattr(h, "baseFilename", "")).resolve() == Path(target)
             except OSError:
+                return lg
+            if same:
                 return lg
             lg.removeHandler(h)
             h.close()
-    _desk_out_path().parent.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(
-        target, maxBytes=1_000_000, backupCount=2, encoding="utf-8"
-    )
-    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-    lg.addHandler(handler)
-    lg.setLevel(logging.INFO)
+        _desk_out_path().parent.mkdir(parents=True, exist_ok=True)
+        handler = RotatingFileHandler(
+            target, maxBytes=1_000_000, backupCount=2, encoding="utf-8"
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        lg.addHandler(handler)
+        lg.setLevel(logging.INFO)
     return lg
 
 
@@ -213,8 +223,27 @@ def release_desk_lock() -> None:
         logger.debug("desk lock release failed", exc_info=True)
 
 
+def note(msg: str, *, warn: bool = False) -> None:
+    """Record a lifecycle decision durably.
+
+    "why is the desk down" is answered by these lines, and they used to go only to
+    the console the supervisor was started from — gone the moment it closed.
+    """
+    (logger.warning if warn else logger.info)(msg)
+    try:
+        _desk_out_logger().info(msg)
+    except Exception:
+        pass
+
+
 def supervise(child_env: dict[str, str] | None = None) -> int:
     """Run Pro as a child. Relaunch on crash during useful hours if TWS is up."""
+    try:
+        from abcxauto.config import setup_file_logging
+
+        setup_file_logging()
+    except Exception:
+        logger.debug("supervisor file logging failed", exc_info=True)
     env = dict(os.environ)
     if child_env:
         env.update(child_env)
@@ -236,19 +265,20 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
             threading.Thread(
                 target=tee_child_output, args=(stream,), daemon=True
             ).start()
+        note(f"supervisor: child pid {getattr(proc, 'pid', 0)} up")
         code = proc.wait()
         if int(code or 0) == 0:
-            logger.info("supervisor: clean exit — operator closed the window, stay down")
+            note("supervisor: clean exit — operator closed the window, stay down")
             return 0
         if operator_stopped():
-            logger.info("supervisor: operator stop — stay down")
+            note("supervisor: operator stop — stay down")
             return int(code or 0)
         if not useful_hours():
-            logger.info("supervisor: outside useful hours — stay down")
+            note("supervisor: outside useful hours — stay down")
             return int(code or 0)
         if not tws_listening():
-            logger.info("supervisor: TWS 7497 down — stay down")
+            note("supervisor: TWS 7497 down — stay down")
             return int(code or 0)
-        logger.warning("supervisor: child exited %s — relaunch in %.0fs", code, backoff)
+        note(f"supervisor: child exited {code} — relaunch in {backoff:.0f}s", warn=True)
         time.sleep(backoff)
         backoff = min(60.0, backoff * 2)

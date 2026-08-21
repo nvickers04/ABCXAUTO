@@ -33,16 +33,6 @@ BOOK_EVENTS = frozenset({
 HARD_INTERRUPTS = frozenset({"unprotected", "halt"})
 # Live poke into the open xAI episode (same chat). Not a sit-clock.
 LIVE_POKE_KINDS = frozenset({"fill", "order_change", "unprotected"})
-# New think only — overnight park return, operator, session/socket death.
-HARD_RESET_KINDS = frozenset({
-    "boot",
-    "alarm",
-    "operator",
-    "session_change",
-    "socket",
-    "halt",
-})
-ALL_WAKES = BOOK_EVENTS | HARD_INTERRUPTS | frozenset({"alarm", "operator", "boot"})
 PULSE_S = 10.0
 DEFAULT_LOOK_S = 90.0
 DEFAULT_LOOK_OPEN_S = 60.0
@@ -50,6 +40,9 @@ MIN_LOOK_S = 30.0
 # Overnight / postmarket still expose set_wake. Paper premarket stays up.
 PARK_SESSIONS = frozenset({"premarket", "closed", "postmarket"})
 PAPER_STAY_UP_SESSIONS = frozenset({"regular", "premarket"})
+# Nap ceiling while the lab is idle. Not a hunt cadence — a refusal to let a
+# park stand in for writing the next hypothesis.
+LAB_IDLE_PARK_CAP_S = 300.0
 STAY_UP_RETRY_MIN_S = 20.0
 STAY_UP_RETRY_MAX_S = 45.0
 # Consecutive failed looks escalate. A provider capacity error is not a
@@ -201,10 +194,6 @@ def save_alarm(alarm: GrokAlarm) -> GrokAlarm:
     return alarm
 
 
-def clear_alarm() -> None:
-    save_alarm(GrokAlarm(set_at=_utc_now().isoformat()))
-
-
 def _env_float(name: str, default: float, *, lo: float = 1.0) -> float:
     raw = (os.environ.get(name) or "").strip()
     if not raw:
@@ -231,63 +220,64 @@ def min_look_s() -> float:
     return _env_float("ABCXAUTO_MIN_LOOK_S", MIN_LOOK_S, lo=5.0)
 
 
-def set_wake_offered(*, session: str = "") -> bool:
-    """Overnight / postmarket expose set_wake. Paper premarket and RTH do not."""
-    sess = str(session or "").lower()
-    if sess not in PARK_SESSIONS:
-        return False
-    if sess == "premarket" and paper_rth_park_refused(session="premarket"):
-        return False
-    return True
+def lab_idle_park_cap_s(
+    *,
+    flat: bool | None = None,
+    session: str = "",
+) -> float | None:
+    """Longest nap allowed while the lab has nothing under test.
 
+    The clock is Grok's, but it is not a way to opt out of building the book.
+    Flat, in tradeable hours, zero resolved trades, and entry structures carrying
+    no hypothesis at all is an idle lab: the work is to write a card and test it,
+    so a long park is cut short.
 
-def paper_rth_park_refused(*, session: str = "") -> bool:
-    """Paper stay-up: RTH and premarket write no park clock. Overnight still parks."""
+    Returns None — full clock honored — whenever a long nap is the right answer:
+    holding risk, outside tradeable hours, halted, or a lab that is genuinely
+    running (one resolved trade, or a card under every entry structure).
+    """
+    if flat is False:
+        return None
     if str(session or "").lower() not in PAPER_STAY_UP_SESSIONS:
-        return False
+        return None
     try:
         from abcxauto.lab_playbook import is_paper
 
+        # Live follows a promoted playbook. Building the lab is paper's job.
         if not is_paper():
-            return False
+            return None
     except Exception:
-        return True
+        return None
     try:
         from abcxauto.risk_gates import get_risk_gate
 
         if get_risk_gate().is_halted:
-            return False
+            return None
     except Exception:
         pass
-    return True
-
-
-def paper_stay_up(*, session: str = "") -> bool:
-    """Paper regular + premarket: re-arm the next look; do not sit forever."""
-    if str(session or "").lower() not in PAPER_STAY_UP_SESSIONS:
-        return False
     try:
-        from abcxauto.config import get_config
+        from abcxauto.lab_playbook import lab_facts
 
-        if not get_config().is_paper:
-            return False
+        facts = lab_facts()
     except Exception:
-        pass
+        return None
+    if int(facts.get("resolved_trades") or 0) > 0:
+        return None
+    if not (facts.get("entry_trunks_untried") or []):
+        return None
+    return LAB_IDLE_PARK_CAP_S
+
+
+def set_wake_offered(*, session: str = "") -> bool:
+    """Every session. Grok owns its own clock — the clerk imposes no cadence.
+
+    RTH and paper premarket used to withhold this tool, which left the engine
+    re-arming a think the instant the last one ended: a hunt treadmill for a
+    setup that only appears in the opening window. Grok now parks when it wants
+    and a book event still interrupts the park.
+    """
+    _ = session
     return True
-
-
-def stay_up_retry_s() -> float:
-    """Backoff after a failed stay-up look. Not a park clock and not set_wake."""
-    raw = (os.environ.get("ABCXAUTO_STAY_UP_RETRY_S") or "").strip()
-    if raw:
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            pass
-    span = max(0.0, STAY_UP_RETRY_MAX_S - STAY_UP_RETRY_MIN_S)
-    if span <= 0:
-        return float(STAY_UP_RETRY_MIN_S)
-    return STAY_UP_RETRY_MIN_S + random.random() * span
 
 
 def _retry_base_s() -> tuple[float, bool]:
@@ -336,25 +326,22 @@ def ensure_next_look(
     flat: bool | None = None,
     session: str = "",
 ) -> GrokAlarm:
-    """Honor a real Grok park. Paper RTH no-clock is not re-armed."""
+    """Honor a real Grok park; seed a backstop only when Grok said nothing.
+
+    A clock Grok set is never overwritten — that is the whole point of owning
+    the cadence. The default look is a backstop against a silent turn parking
+    the desk forever, not a hunt clock: any session, because RTH used to get no
+    backstop and spun instead.
+    """
     alarm = load_alarm()
     grok_parked = bool(alarm.set_at and alarm.set_at != previous_set_at)
     if grok_parked:
-        if alarm.wake_at:
-            return alarm
-        # set_wake ran with no clock (paper RTH no-op). Do not synthesize a park.
         return alarm
-    # Grok skipped set_wake. Paper stay-up / RTH: yield in place — no 9:33 nap.
-    if paper_rth_park_refused(session=session) or str(session or "").lower() == "regular":
-        if alarm.wake_at:
-            cleared = GrokAlarm(
-                wake_at=None,
-                wake_if=list(alarm.wake_if),
-                set_at=alarm.set_at,
-            )
-            return save_alarm(cleared)
+    if alarm.wake_at and not alarm.due():
+        # A clock from an earlier turn that has not come round yet still stands.
+        # A spent one must be replaced: due() stays true forever otherwise and
+        # the engine thinks again with no gap at all.
         return alarm
-    # Non-RTH silent: still seed a look so overnight/around-open is not orphaned.
     return set_wake(
         wake_in_s=default_look_s(flat=flat, session=session),
         flat=flat,
@@ -384,16 +371,8 @@ def set_wake(
     flat: bool | None = None,
     session: str = "",
 ) -> GrokAlarm:
-    """Grok-owned park overnight / around-open. Paper RTH is a no-op clock."""
+    """Grok-owned park, every session. The clock it asks for is the clock it gets."""
     clean = _clean_wake_if(wake_if)
-    if paper_rth_park_refused(session=session):
-        return save_alarm(
-            GrokAlarm(
-                wake_at=None,
-                wake_if=clean,
-                set_at=_utc_now().isoformat(),
-            )
-        )
     at = str(wake_at or "").strip() or None
     sec: float | None = None
     if wake_in_s is not None:
@@ -407,6 +386,9 @@ def set_wake(
             sec = (dt - _utc_now()).total_seconds()
     if sec is None:
         sec = default_look_s(flat=flat, session=session)
+    cap = lab_idle_park_cap_s(flat=flat, session=session)
+    if cap is not None and sec > cap:
+        sec = cap
     sec = _floor_look_s(sec, session=session)
     at = datetime.fromtimestamp(time.time() + sec, tz=timezone.utc).isoformat()
     return save_alarm(

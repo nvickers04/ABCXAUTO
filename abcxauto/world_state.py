@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from abcxauto.config import get_config, resolve_effective_posture, risk_envelope_snapshot
-from abcxauto.opportunity_scan import QUOTE_SOURCES_BLOCK, format_scan_tape
 from abcxauto.structure_grade import (
     recent_structure_lessons,
     structure_cooldown_symbols,
@@ -1447,27 +1445,6 @@ def _portfolio_wake_bits(day: dict[str, Any]) -> str:
     return " ".join(bits)
 
 
-def format_live_poke(
-    *,
-    kind: str,
-    detail: str = "",
-    session: str = "",
-    flat: bool | None = None,
-    unprotected: list[str] | None = None,
-    day: dict[str, Any] | None = None,
-) -> str:
-    """Same desk brief as format_wake. kind/detail must already be last_wake."""
-    _ = kind, detail
-    return format_wake(
-        cycle=0,
-        session=session,
-        flat=bool(flat),
-        unprotected=unprotected,
-        ibkr_up=True,
-        day=day,
-    )
-
-
 def format_wake(
     *,
     cycle: int,
@@ -1807,95 +1784,6 @@ class WorldState:
             "mix": structure_mix(self.positions),
             "open_lots": lot_labels(self.positions),
         }
-
-    def prompt_block(self, *, limit: int = 4500) -> str:
-        """Compact WORLD block for the book tool."""
-        reg = dict(self.regime or {})
-        # Prompt-facing: heuristic mix, not market-regime truth.
-        regime_prompt = {
-            "session_status": reg.get("session_status"),
-            "session_phase": reg.get("session_phase"),
-            "feature_mix_bias": reg.get("feature_mix_bias") or reg.get("trend_bias"),
-            "vol_proxy": reg.get("vol_proxy"),
-            "top_longs": reg.get("top_longs"),
-            "top_shorts": reg.get("top_shorts"),
-            "avg_heuristic_rank": reg.get("avg_heuristic_rank") or reg.get("avg_opp_score"),
-            "note": "heuristic from feature biases — not regime truth",
-        }
-        body = {
-            "session": self.session_status,
-            "regime": regime_prompt,
-            "flat": self.flat,
-            "needs_protection": self.needs_protection,
-            "unprotected": self.unprotected,
-            "net_liquidation": self.net_liquidation,
-            "daily_pnl": self.daily_pnl,
-            "portfolio_risk": self.portfolio_risk,
-            "posture": self.effective_posture or self.risk_posture,
-            "gates": self.gates,
-            "envelope": self.envelope,
-            "working_thesis": self.working_thesis[:300],
-            "trade_plan": (
-                self.trade_plan
-                if trade_plan_matches_stk(self.trade_plan, self.positions)
-                else None
-            ),
-            "trade_plans": [
-                p
-                for p in list(self.trade_plans or [])
-                if trade_plan_matches_stk(p, self.positions)
-            ][:8],
-            "capacity": dict(self.capacity or {}),
-            "exposure": (self.portfolio_risk or {}).get("exposure"),
-            "capital_liquidity": (self.portfolio_risk or {}).get("capital_liquidity"),
-            "structure_cooldown": self.structure_cooldown,
-            "scan_tape": [
-                {
-                    "symbol": o.get("symbol"),
-                    "source": o.get("source") or "mda",
-                    "freshness": o.get("freshness") or "delayed_daily",
-                    "bar": o.get("bar") or "D",
-                    "mda_last": o.get("mda_last") or o.get("last"),
-                    "mda_last_is": o.get("mda_last_is") or "daily_bar_close",
-                    "dist20": o.get("dist20"),
-                    "ret5": o.get("ret5"),
-                }
-                for o in self.opportunities[:12]
-            ],
-            "ibkr_live_last": getattr(self, "ibkr_live_last", None),
-            "ibkr_live_symbol": getattr(self, "ibkr_live_symbol", None),
-            "ibkr_live_quotes": dict(getattr(self, "ibkr_live_quotes", None) or {}),
-            "news": [
-                f"[{n.get('symbol')}] {n.get('headline')}"
-                for n in self.news_items[:8]
-                if n.get("headline")
-            ],
-            "positions": [
-                compact_position(p, extra=True, net_liq=self.net_liquidation)
-                for p in self.positions[:12]
-            ],
-            "working_orders": compact_working_orders(self.open_orders),
-            "stop_qty_fact": self.stop_qty_fact,
-            "option_facts": self.option_facts[:8],
-        }
-        text = "WORLDSTATE:\n" + json.dumps(body, default=str)
-        feats = format_scan_tape(self.opportunities)
-        try:
-            from abcxauto.option_facts import format_option_facts_for_prompt
-
-            opt_block = format_option_facts_for_prompt(self.option_facts)
-        except Exception:
-            opt_block = ""
-        out = (
-            text[:limit]
-            + "\n\n"
-            + QUOTE_SOURCES_BLOCK
-            + "\n\n"
-            + feats
-            + "\n\n"
-            + opt_block
-        )
-        return out[: limit + 2200]
 
 
 def build_world_state(

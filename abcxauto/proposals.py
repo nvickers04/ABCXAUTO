@@ -1,4 +1,4 @@
-"""Order proposals — pydantic schemas per strategy, validation, ticket rendering.
+"""Order proposals — pydantic schemas per strategy, validation.
 
 Every strategy's parameter model mirrors the matching IBKRConnector method
 signature exactly, so the executor can dispatch with ``**params.model_dump()``.
@@ -11,7 +11,6 @@ import re
 from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
-from rich.table import Table
 
 from abcxauto.config import get_config
 
@@ -268,10 +267,8 @@ STRATEGIES: Dict[str, tuple[type[BaseModel], str]] = {
 }
 
 from abcxauto.strategy_params import (  # noqa: E402
-    EXIT_ONLY_EXTRA,
     EXTRA_MANAGEMENT,
     EXTRA_STRATEGIES,
-    OPTION_STRATEGIES,
 )
 
 STRATEGIES.update(EXTRA_STRATEGIES)
@@ -378,27 +375,3 @@ def validate_proposal(
         max_loss=max_loss,
         max_gain=max_gain,
     )
-
-
-def render_ticket(proposal: OrderProposal) -> Table:
-    """Render a proposal as a rich table for the terminal."""
-    table = Table(
-        title=f"ORDER TICKET #{proposal.id} — {proposal.strategy.replace('_', ' ').upper()}",
-        title_style="bold yellow",
-        show_header=True,
-        header_style="bold",
-    )
-    table.add_column("Field", style="cyan", no_wrap=True)
-    table.add_column("Value")
-
-    for key, value in proposal.params.model_dump().items():
-        if value is None:
-            continue
-        table.add_row(key, str(value))
-    if proposal.max_loss:
-        table.add_row("max loss", f"[red]{proposal.max_loss}[/red]")
-    if proposal.max_gain:
-        table.add_row("max gain", f"[green]{proposal.max_gain}[/green]")
-    table.add_row("rationale", proposal.rationale)
-    table.add_row("executes via", proposal.gateway_method)
-    return table

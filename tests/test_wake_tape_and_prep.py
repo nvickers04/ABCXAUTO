@@ -7,7 +7,6 @@ import json
 import pytest
 
 from abcxauto.opportunity_scan import (
-    format_scan_tape,
     merge_tape,
     tape_seed_symbols,
 )
@@ -52,16 +51,6 @@ def test_merge_tape_preserves_seed_order():
     )
     assert [r["symbol"] for r in merged] == ["NVDA", "AAPL", "ZZZZ"]
     assert [r["symbol"] for r in merged] != sorted(r["symbol"] for r in merged)
-
-
-def test_format_scan_tape_does_not_alphabetize():
-    text = format_scan_tape(
-        [
-            {"symbol": "ZZZZ", "mda_last": 1, "source": "mda", "freshness": "delayed"},
-            {"symbol": "AAPL", "mda_last": 2, "source": "mda", "freshness": "delayed"},
-        ]
-    )
-    assert text.index("ZZZZ") < text.index("AAPL")
 
 
 def test_day_facts_carry_tape_and_minutes(legal_tape):
@@ -211,8 +200,8 @@ def test_format_wake_rth_fill_delta_no_tape_when_flat():
     assert "Cycle 6." not in text
     assert "you must" not in text.lower()
     assert "chain" not in text.lower()
-    assert text.rstrip().endswith("send.")
-    assert "set_wake" not in text
+    assert text.rstrip().endswith("send|set_wake.")
+    assert "set_wake" in text  # offered in every session now
 
 
 @pytest.mark.parametrize("kind", ["fill", "order_change", "book_move"])
@@ -295,7 +284,7 @@ def test_format_wake_open_lots_and_mix_still_print():
     assert "risk/trade=" not in text
     assert "mix=" in text
     assert "tape=" not in text
-    assert text.rstrip().endswith("send.")
+    assert text.rstrip().endswith("send|set_wake.")
 
 
 def test_format_wake_non_rth_fill_delta_omits_tape_and_options():

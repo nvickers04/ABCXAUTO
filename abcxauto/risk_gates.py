@@ -7,6 +7,11 @@ the daily trade budget.
 Peak-drawdown gate (``max_peak_drawdown_pct``) rejects new entries while equity
 is below the peak threshold but does **not** trip the permanent halt latch —
 it self-clears when NetLiquidation recovers above the floor.
+
+Concentration gate (``max_symbol_concentration_pct``) is the only size gate that
+reads the book instead of just the ticket: ``max_position_pct`` sees one order at
+a time, so N orders in one name could stack past it. It sums every lot in the
+proposed underlying, stock and options together, and adds the new notional.
 """
 
 from __future__ import annotations
@@ -228,6 +233,36 @@ def estimate_notional(proposal: OrderProposal) -> Optional[float]:
     if price_hint is not None and qty > 0:
         return float(price_hint) * qty
     return None
+
+
+def symbol_exposure_usd(positions: Any, symbol: str) -> float:
+    """Market value already held in one underlying, summed across lots.
+
+    Stock and its options aggregate on purpose: SPY shares plus SPY calls are
+    one bet, not two. Option ``marketValue`` is premium, which understates
+    delta — the same basis the portfolio exposure fact already reports, and a
+    cap where ``max_position_pct`` alone left none.
+    """
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return 0.0
+    total = 0.0
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("symbol") or "").strip().upper() != sym:
+            continue
+        try:
+            qty = float(p.get("quantity") or p.get("position") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(qty) < 1e-9:
+            continue
+        try:
+            total += abs(float(p.get("marketValue") or p.get("market_value") or 0))
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def estimate_bracket_risk_dollars(proposal: OrderProposal) -> Optional[float]:
@@ -514,11 +549,30 @@ class RiskGate:
                     f"{cfg.max_option_premium_pct}"
                 )
 
-        if cfg.max_open_positions > 0:
+        concentration_pct = (
+            cfg.max_symbol_concentration_pct if floors_on else 0.0
+        )
+        positions: Any = []
+        if cfg.max_open_positions > 0 or concentration_pct > 0:
             try:
                 positions = await connector.get_positions()
             except Exception as e:
                 return False, f"Risk gate fail-closed: cannot read positions ({e})"
+
+        if concentration_pct > 0:
+            notional = estimate_notional(proposal)
+            if notional is None:
+                return False, "size_unknown_notional"
+            held = symbol_exposure_usd(
+                positions, getattr(proposal.params, "symbol", "")
+            )
+            after_pct = _pct_of_nl(held + float(notional), book)
+            if after_pct > concentration_pct:
+                return False, (
+                    f"size_symbol_concentration {after_pct} > {concentration_pct}"
+                )
+
+        if cfg.max_open_positions > 0:
             open_count = 0
             for p in positions or []:
                 try:

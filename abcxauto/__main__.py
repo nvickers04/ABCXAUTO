@@ -10,10 +10,30 @@ and clear project ``__pycache__``.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+def _ensure_start_pro_script() -> None:
+    """Give a fresh clone the launcher script it never gets from git (logs/ is ignored).
+
+    Never overwrites: the operator may have edited theirs. Never fatal: a
+    read-only logs/ is not a reason to refuse to open the desk.
+    """
+    try:
+        from abcxauto.cursor_env import start_pro_path, write_start_pro_script
+
+        target = start_pro_path()
+        if target.exists():
+            return
+        write_start_pro_script(target)
+    except Exception:
+        logger.debug("start_pro script write failed", exc_info=True)
 
 
 def _cleanup(
@@ -97,6 +117,10 @@ def main() -> None:
             )
             raise SystemExit(0)
         clear_operator_stop()
+        # Only the process that won the lock is "the launch": the supervised child
+        # skips this block, and the Flet re-entry loses ABCXAUTO_SUPERVISED but
+        # bounces off the claim above. Once per launch, never on --cleanup.
+        _ensure_start_pro_script()
         print("supervisor: launching Pro child", flush=True)
         try:
             raise SystemExit(supervise())

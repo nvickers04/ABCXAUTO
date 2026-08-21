@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
-from abcxauto.option_facts import (
-    format_option_facts_for_prompt,
-    occ_symbol,
-)
+from abcxauto.option_facts import occ_symbol
 from abcxauto.trade_plan import (
     ActiveTradePlan,
     stop_qty_mismatch_fact,
@@ -21,32 +16,6 @@ def test_occ_symbol():
     assert occ_symbol("SPY", "20260718", "C", 500.0) == "SPY260718C00500000"
     assert occ_symbol("AAPL", "260120", "P", 150.0) == "AAPL260120P00150000"
     assert occ_symbol("", "20260718", "C", 1.0) is None
-
-
-def test_format_option_facts_empty():
-    assert "none" in format_option_facts_for_prompt([]).lower()
-
-
-def test_format_option_facts_lists_legs():
-    text = format_option_facts_for_prompt(
-        [
-            {
-                "conId": 1,
-                "symbol": "SPY",
-                "right": "C",
-                "strike": 500,
-                "expiration": "20260718",
-                "qty": -1,
-                "source": "mda",
-                "freshness": "delayed",
-                "iv": 0.2,
-                "delta": 0.4,
-            }
-        ]
-    )
-    assert "OPTION FACTS" in text
-    assert "SPY" in text
-    assert "heuristic" not in text.lower() or "≠" in text or "recommendation" in text
 
 
 def test_working_stop_qty_and_mismatch(tmp_path, monkeypatch):
@@ -195,7 +164,7 @@ def test_close_option_accepts_conId_only():
     assert p.params.conId == 999001
 
 
-def test_world_prompt_includes_option_facts():
+def test_world_state_carries_option_facts():
     from abcxauto.world_state import WorldState
 
     ws = WorldState(
@@ -243,6 +212,6 @@ def test_world_prompt_includes_option_facts():
             }
         ],
     )
-    block = ws.prompt_block()
-    assert "OPTION FACTS" in block
-    assert "SPY" in block
+    legs = ws.to_dict()["option_facts"]
+    assert [leg["symbol"] for leg in legs] == ["SPY"]
+    assert legs[0]["iv"] == 0.18

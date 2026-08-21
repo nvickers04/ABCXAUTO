@@ -1,8 +1,6 @@
 """Pro cycle — drives shipped snap/run_cycle on real code paths."""
 
 import json
-import time
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +14,18 @@ from abcxauto.cycle import (
     run_cycle,
     snap,
 )
+
+
+@pytest.fixture(autouse=True)
+def _card_gate_off(monkeypatch):
+    """These cover the dispatch spine, not card attribution.
+
+    New risk must name a playbook card; that gate and its rejection message are
+    covered in ``test_playbook_two_layers``.
+    """
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: ""
+    )
 
 
 class FakeConnector:
@@ -142,15 +152,6 @@ def _reset_cadence(monkeypatch, tmp_path):
     stub = _cfg()
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: stub)
     monkeypatch.setattr("abcxauto.world_state.get_config", lambda: stub)
-    # Avoid real MDA/connector in connection_status during prompts.
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.connection_status",
-        lambda _c=None: {
-            "ibkr_connected": True,
-            "mda_configured": False,
-            "trading_mode": "paper",
-        },
-    )
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "review.json"))

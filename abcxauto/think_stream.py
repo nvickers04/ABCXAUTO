@@ -214,6 +214,7 @@ def mark_review_stale(*, archive_tail: bool = False) -> None:
         "rationale": (prev.get("rationale") or "")[:400],
         "tool_trace": list(prev.get("tool_trace") or []),
         "sends": prev.get("sends") or 0,
+        "send_calls": prev.get("send_calls") or 0,
     }
     try:
         LAST_TURN_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -425,6 +426,11 @@ def write_last_turn(out: dict[str, Any]) -> None:
                 int(out["sends"])
                 if isinstance(out.get("sends"), int)
                 else len([t for t in (out.get("tool_trace") or []) if str(t) == "send"])
+            ),
+            # sends counts every mutating tool, self_tune included. Only
+            # send_calls answers "did a ticket reach the broker path".
+            "send_calls": len(
+                [t for t in (out.get("tool_trace") or []) if str(t) == "send"]
             ),
             "run_id": run.get("run_id") or "",
             "pid": run.get("pid"),

@@ -28,6 +28,7 @@ RISK_CONFIG_KEYS = frozenset({
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
     "max_risk_per_trade_pct",
+    "max_symbol_concentration_pct",
 })
 # Knobs Grok may retune via self_tune (clamped to the walk-away floor).
 SET_RISK_KEYS = frozenset({
@@ -36,6 +37,7 @@ SET_RISK_KEYS = frozenset({
     "max_position_pct",
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
+    "max_symbol_concentration_pct",
 })
 # Book capacity. Disjoint from risk capital keys.
 CAPACITY_KEYS = frozenset({
@@ -141,6 +143,9 @@ class Config:
     max_peak_drawdown_pct: float = 25.0
     max_option_premium_pct: float = 25.0
     max_risk_per_trade_pct: float = 25.0
+    # Cap on one underlying across every lot. max_position_pct only sees the
+    # order in front of it, so N orders in the same name could stack past it.
+    max_symbol_concentration_pct: float = 25.0
     max_open_positions: int = 15
 
     @property
@@ -240,6 +245,9 @@ def _load_env_config() -> Config:
         max_peak_drawdown_pct=float(_env("ABCXAUTO_MAX_PEAK_DRAWDOWN_PCT", "25")),
         max_option_premium_pct=float(_env("ABCXAUTO_MAX_OPTION_PREMIUM_PCT", "25")),
         max_risk_per_trade_pct=float(_env("ABCXAUTO_MAX_RISK_PER_TRADE_PCT", "25")),
+        max_symbol_concentration_pct=float(
+            _env("ABCXAUTO_MAX_SYMBOL_CONCENTRATION_PCT", "25")
+        ),
     )
 
 
@@ -664,13 +672,6 @@ def risk_config_snapshot(*, reload: bool = False) -> dict[str, Any]:
         load_risk_settings()
     cfg = get_config()
     return {k: getattr(cfg, k) for k in sorted(PERSISTED_OPERATOR_KEYS)}
-
-
-def capacity_config_snapshot(*, reload: bool = False) -> dict[str, Any]:
-    if reload:
-        load_risk_settings()
-    cfg = get_config()
-    return {k: getattr(cfg, k) for k in sorted(CAPACITY_KEYS)}
 
 
 def set_trading_mode(mode: str, *, live_confirm: str = "") -> Config:

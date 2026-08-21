@@ -7,7 +7,6 @@ from abcxauto.order_examples import ORDER_EXAMPLES
 from abcxauto.proposals import (
     STRATEGIES,
     ProposalValidationError,
-    render_ticket,
     validate_proposal,
 )
 
@@ -38,7 +37,6 @@ def test_valid_payloads_accepted(strategy):
     assert proposal.gateway_method == STRATEGIES[strategy][1]
     if "symbol" in VALID_PAYLOADS[strategy]:
         assert proposal.params.symbol == VALID_PAYLOADS[strategy]["symbol"].upper()
-    render_ticket(proposal)
 
 
 def test_proposal_ids_increment():

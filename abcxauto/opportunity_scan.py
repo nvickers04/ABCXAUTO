@@ -17,20 +17,12 @@ logger = logging.getLogger(__name__)
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "key": "", "ideas": []}
 _CACHE_TTL_S = 150.0
-# Seed tape size matches the book tool payload (world_state / format_scan_tape).
+# Seed tape size matches the book tool payload (world_state).
 TAPE_SEED_CAP = 12
 # Top-N screen hits that get an IBKR last stamped on in the same call.
 SCAN_QUOTE_CAP = 12
 
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,7}$")
-
-QUOTE_SOURCES_BLOCK = (
-    "QUOTE SOURCES:\n"
-    "- IBKR quote/option_quote/book: live TWS stream. Use for send geometry.\n"
-    "- MDA scan: daily-bar metrics. mda_last is daily close, not a 15m last.\n"
-    "- MDA candles: delayed OHLCV at the requested resolution (D = daily close).\n"
-    "- MDA news: typically ~15 min delayed. Context only."
-)
 
 _DAILY_RES = frozenset({"D", "1D", "W", "1W", "M", "1M"})
 
@@ -405,72 +397,6 @@ def metrics_for_symbol(
         "source": "mda",
         "freshness": mda_bar_freshness(res),
     }
-
-
-def score_symbol(candles: list[dict], symbol: str) -> dict[str, Any] | None:
-    """Compat alias — returns metrics only (no score). Prefer metrics_for_symbol."""
-    return metrics_for_symbol(candles, symbol)
-
-
-def tape_symbols(ideas: list[dict[str, Any]] | None) -> list[str]:
-    out: list[str] = []
-    for idea in ideas or []:
-        sym = str(idea.get("symbol") or "").upper().strip()
-        if sym and sym not in out:
-            out.append(sym)
-    return out
-
-
-def dismiss_cites_tape(dismissed: str, ideas: list[dict[str, Any]] | None) -> bool:
-    blob = (dismissed or "").upper()
-    if not blob:
-        return False
-    for sym in tape_symbols(ideas):
-        if sym and sym in blob:
-            return True
-    return False
-
-
-def format_scan_tape(ideas: list[dict[str, Any]], *, limit: int = 12) -> str:
-    """Unranked SCAN TAPE prompt block (MDA delayed facts)."""
-    if not ideas:
-        return (
-            "SCAN TAPE (unranked MDA daily-bar metrics — mda_last is daily close, "
-            "not live / not 15m last; Grok operates the scanner; not trade recommendations): "
-            "(none — MDA thin or unconfigured)"
-        )
-    lines = [
-        "SCAN TAPE (unranked MDA daily-bar metrics — mda_last is daily close, not live / not 15m last).",
-        "Grok operates the scanner. Shell does not recommend a top idea.",
-        "Do not use tape last for send geometry — use IBKR quote.",
-        QUOTE_SOURCES_BLOCK,
-    ]
-    # Preserve seed / fetch order — never alphabetize (A* tape bias).
-    rows = list(ideas[: max(1, limit)])
-    for idea in rows:
-        sym = idea.get("symbol")
-        src = idea.get("source") or "mda"
-        fresh = idea.get("freshness") or "delayed"
-        bar = idea.get("bar") or "D"
-        kind = idea.get("mda_last_is") or mda_last_kind(str(bar))
-        lines.append(
-            f"- {sym} source={src} freshness={fresh} bar={bar} "
-            f"mda_last={idea.get('mda_last') or idea.get('last')} "
-            f"mda_last_is={kind} "
-            f"sma20={idea.get('sma20')} sma50={idea.get('sma50')} "
-            f"dist20={idea.get('dist20')} ret5={idea.get('ret5')} "
-            f"above_sma20={idea.get('above_sma20')}"
-        )
-    return "\n".join(lines)
-
-
-def format_market_features(ideas: list[dict[str, Any]], *, limit: int = 12) -> str:
-    """Alias — prefer ``format_scan_tape``."""
-    return format_scan_tape(ideas, limit=limit)
-
-
-def format_opportunities(ideas: list[dict[str, Any]], *, limit: int = 12) -> str:
-    return format_scan_tape(ideas, limit=limit)
 
 
 def merge_tape(

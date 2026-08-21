@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 OVERLAY_SHARES_INSUFFICIENT = "overlay_shares_insufficient"
 OVERLAY_NO_LONG_STOCK = "overlay_no_long_stock"
 
@@ -28,38 +26,6 @@ def long_share_lots(positions: list[dict] | None) -> dict[str, float]:
             continue
         lots[sym] = lots.get(sym, 0.0) + qty
     return lots
-
-
-def world_hints_from_world(world: Any) -> dict[str, Any]:
-    """Build filter hints from a WorldState-like object or dict."""
-    if world is None:
-        return {
-            "flat": True,
-            "needs_protection": False,
-            "long_lots": {},
-            "has_trade_plan": False,
-        }
-    if isinstance(world, dict):
-        positions = world.get("positions") or []
-        return {
-            "flat": bool(world.get("flat", not positions)),
-            "needs_protection": bool(world.get("needs_protection")),
-            "long_lots": long_share_lots(positions),
-            "has_trade_plan": bool(world.get("trade_plan")),
-        }
-    positions = getattr(world, "positions", None) or []
-    return {
-        "flat": bool(getattr(world, "flat", not positions)),
-        "needs_protection": bool(getattr(world, "needs_protection", False)),
-        "long_lots": long_share_lots(positions),
-        "has_trade_plan": bool(getattr(world, "trade_plan", None)),
-    }
-
-
-def max_long_shares(long_lots: dict[str, float] | None) -> float:
-    if not long_lots:
-        return 0.0
-    return max(long_lots.values())
 
 
 def check_overlay_shares(

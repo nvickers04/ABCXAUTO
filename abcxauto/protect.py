@@ -1,7 +1,15 @@
-"""Clerk: simple entry idea → protected structure.
+"""Clerk: simple entry idea → protected structure, and protection vs the book.
 
 Grok picks symbol and side. Code fills missing stop / target / size from the
 live IBKR quote and the risk floor. Prices Grok already set are never rewritten.
+
+The second half of the module is the reverse question: does a working exit
+still cover an open lot? A protective order that outlives its position is not
+untidy, it is a naked entry waiting for a print — a stale SELL on a flat book
+sells stock the account does not own. ``orphaned_protection_rows`` answers
+"provably flat" conservatively (anything it cannot identify counts as still
+covering), and ``last_stop_block_reason`` is the shared last-stop rule so the
+cancel gate and the reconciler can never disagree about what is load-bearing.
 """
 
 from __future__ import annotations
@@ -175,6 +183,314 @@ def fill_missing_protection(
     if filled:
         act["_protection_filled"] = filled
     return filled
+
+
+def _order_id_of(order: dict) -> int | None:
+    raw = order.get("order_id")
+    if raw is None:
+        raw = order.get("orderId")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _order_type_of(row: dict) -> str:
+    return str(row.get("order_type") or row.get("orderType") or "").upper()
+
+
+def _sec_bucket(row: dict) -> str:
+    """STK / OPT / BAG bucket. Missing secType reads as STK, same as the book."""
+    sec = str(
+        row.get("sec_type") or row.get("secType") or row.get("sec") or "STK"
+    ).upper()
+    if sec in ("", "STK", "ETF"):
+        return "STK"
+    if sec.startswith("OPT") or sec == "FOP":
+        return "OPT"
+    return sec
+
+
+def _con_id_of(row: dict) -> str:
+    for key in ("conId", "con_id"):
+        v = row.get(key)
+        if v not in (None, "", 0, "0"):
+            return str(v)
+    return ""
+
+
+def _signed_qty(row: dict) -> float:
+    raw = row.get("quantity")
+    if raw is None:
+        raw = row.get("position")
+    if raw is None:
+        raw = row.get("totalQuantity")
+    try:
+        return float(raw or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _contract_key(row: dict) -> tuple[Any, ...] | None:
+    """Comparable identity, or None when the row cannot be pinned to a contract."""
+    sym = str(row.get("symbol") or "").upper()
+    if not sym:
+        return None
+    bucket = _sec_bucket(row)
+    if bucket == "STK":
+        return ("STK", sym)
+    if bucket != "OPT":
+        return None
+    exp = str(
+        row.get("expiration")
+        or row.get("lastTradeDateOrContractMonth")
+        or row.get("expiry")
+        or ""
+    ).replace("-", "")[-6:]
+    right = str(row.get("right") or row.get("option_right") or "")[:1].upper()
+    try:
+        strike_s = f"{float(row.get('strike')):.4f}"
+    except (TypeError, ValueError):
+        strike_s = ""
+    if not exp or not right or not strike_s:
+        return None
+    return ("OPT", sym, exp, right, strike_s)
+
+
+def _open_lot_index(
+    positions: list | None,
+) -> tuple[set[str], set[tuple[Any, ...]], set[str]]:
+    """conIds, contract keys, and symbols of lots we could not identify."""
+    con_ids: set[str] = set()
+    keys: set[tuple[Any, ...]] = set()
+    opaque: set[str] = set()
+    for p in positions or []:
+        if not isinstance(p, dict):
+            opaque.add("*")
+            continue
+        if abs(_signed_qty(p)) < 1e-9:
+            continue
+        cid = _con_id_of(p)
+        if cid:
+            con_ids.add(cid)
+        key = _contract_key(p)
+        if key is None:
+            opaque.add(str(p.get("symbol") or "").upper() or "*")
+        else:
+            keys.add(key)
+    return con_ids, keys, opaque
+
+
+def order_covers_open_lot(order: dict, positions: list | None) -> bool:
+    """True unless the contract this order trades is *provably* flat.
+
+    Deliberately biased toward "still covering": an unreadable book, a combo,
+    a lot we cannot fingerprint, or an order we cannot pin to a contract all
+    answer True. Cancelling live protection is far worse than leaving a stale
+    ticket for the next snapshot.
+    """
+    if positions is None or not isinstance(order, dict):
+        return True
+    sym = str(order.get("symbol") or "").upper()
+    if not sym:
+        return True
+    if _sec_bucket(order) not in ("STK", "OPT"):
+        return True
+    con_ids, keys, opaque = _open_lot_index(positions)
+    if "*" in opaque or sym in opaque:
+        return True
+    cid = _con_id_of(order)
+    if cid and cid in con_ids:
+        return True
+    key = _contract_key(order)
+    if key is None:
+        return True
+    return key in keys
+
+
+def _is_bracket_child(order: dict) -> bool:
+    """OCA group / parent id — proof the ticket was placed as protection."""
+    for key in ("oca_group", "ocaGroup"):
+        if str(order.get(key) or "").strip():
+            return True
+    for key in ("parent_id", "parentId"):
+        try:
+            if int(order.get(key) or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def protective_role(order: dict) -> str:
+    """``stop`` | ``bracket_leg`` | ``""`` — shapes that only exist as protection.
+
+    Bare stops qualify because ``stop_order`` / ``trailing_stop`` are exit-only
+    strategies here. A limit needs OCA/parent evidence: an unattached LMT is
+    just as likely to be a resting entry.
+    """
+    if not isinstance(order, dict):
+        return ""
+    otype = _order_type_of(order)
+    if not otype:
+        return ""
+    if any(hint in otype for hint in ("STP", "TRAIL", "STOP")):
+        return "stop"
+    if otype in ("LMT", "LIMIT", "LOC") and _is_bracket_child(order):
+        return "bracket_leg"
+    return ""
+
+
+def _awaits_a_working_parent(order: dict, working_ids: set[int]) -> bool:
+    """A child of an order that is still working protects a fill yet to come.
+
+    ABCXAUTO places bracket protection only after the entry fills, so this is
+    the operator's own TWS bracket: the lot is flat because the parent has not
+    filled, and cancelling the child would leave that entry to fill naked.
+    """
+    for key in ("parent_id", "parentId"):
+        try:
+            parent = int(order.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if parent and parent in working_ids:
+            return True
+    return False
+
+
+def orphaned_protection_rows(
+    positions: list | None,
+    open_orders: list | None,
+    *,
+    symbols: Any = None,
+    actions: Any = None,
+) -> list[dict[str, Any]]:
+    """Working protective orders whose position is gone. Facts, one per id."""
+    want = (
+        {str(s).upper() for s in symbols if str(s or "").strip()}
+        if symbols is not None
+        else None
+    )
+    want_actions = (
+        {str(a).upper() for a in actions if str(a or "").strip()}
+        if actions is not None
+        else None
+    )
+    working_ids = {
+        oid
+        for oid in (
+            _order_id_of(o) for o in (open_orders or []) if isinstance(o, dict)
+        )
+        if oid is not None
+    }
+    rows: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for o in open_orders or []:
+        if not isinstance(o, dict):
+            continue
+        sym = str(o.get("symbol") or "").upper()
+        if want is not None and sym not in want:
+            continue
+        action = str(o.get("action") or o.get("side") or "").upper()
+        if want_actions is not None and action not in want_actions:
+            continue
+        role = protective_role(o)
+        if not role:
+            continue
+        if _awaits_a_working_parent(o, working_ids):
+            continue
+        if order_covers_open_lot(o, positions):
+            continue
+        oid = _order_id_of(o)
+        if oid is None or oid in seen:
+            continue
+        seen.add(oid)
+        rows.append({
+            "order_id": oid,
+            "symbol": sym,
+            "sec": _sec_bucket(o),
+            "type": _order_type_of(o),
+            "action": action,
+            "quantity": abs(_signed_qty(o)),
+            "role": role,
+        })
+    return rows
+
+
+def orphaned_protection_ids(
+    positions: list | None,
+    open_orders: list | None,
+    *,
+    symbols: Any = None,
+    actions: Any = None,
+) -> list[int]:
+    return [
+        int(r["order_id"])
+        for r in orphaned_protection_rows(
+            positions, open_orders, symbols=symbols, actions=actions
+        )
+    ]
+
+
+def last_stop_block_reason(
+    order_id: Any,
+    open_orders: list | None,
+    positions: list | None,
+) -> str | None:
+    """Reason to refuse a cancel that would strip the only stop on a live lot.
+
+    Shared by the ``cancel_order`` gate and by the orphan sweep so the two can
+    never disagree. Returns None when the cancel is allowed (including when the
+    order is unknown — the gateway owns that error).
+    """
+    from abcxauto.broker.order_types import is_stop_order
+
+    try:
+        oid = int(order_id)
+    except (TypeError, ValueError):
+        return None
+    orders = open_orders or []
+    target = None
+    for o in orders:
+        if isinstance(o, dict) and _order_id_of(o) == oid:
+            target = o
+            break
+    if target is None:
+        return None
+
+    symbol = str(target.get("symbol") or "").upper()
+    if not symbol or not is_stop_order(_order_type_of(target)):
+        return None
+
+    held = 0.0
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        if _sec_bucket(p) != "STK":
+            continue
+        if str(p.get("symbol") or "").upper() != symbol:
+            continue
+        held = _signed_qty(p)
+        break
+    if abs(held) < 1e-9:
+        return None
+
+    for o in orders:
+        if not isinstance(o, dict) or _order_id_of(o) == oid:
+            continue
+        if str(o.get("symbol") or "").upper() != symbol:
+            continue
+        if _sec_bucket(o) != "STK":
+            continue
+        if is_stop_order(_order_type_of(o)):
+            return None
+
+    return (
+        f"cancel_order rejected: order {oid} is the only working stop "
+        f"protecting open {symbol} position (qty={int(held)}). "
+        "First place replacement protection (oca / stop_order) "
+        "or use modify_stop to move the existing stop."
+    )
 
 
 def _size_from_risk(

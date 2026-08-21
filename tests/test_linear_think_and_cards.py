@@ -313,8 +313,11 @@ def test_cards_save_and_render_as_the_book(tmp_path, monkeypatch):
     assert lab["cards"][0]["name"] == "gap fade after 10:00"
     assert lab["cards"][0]["ticket"] == "market_bracket"
     text = notebook_text(lab)
-    assert "SETUP gap fade after 10:00" in text
-    assert "ticket=market_bracket" in text
+    # The card branches under the type it sends, so the type is the header and
+    # the card no longer restates a ticket of its own.
+    assert "TYPE market_bracket" in text
+    assert "  CARD gap fade after 10:00" in text
+    assert "ticket=" not in text
     assert "when_on:" in text
     # The book is the setup, not a restatement of the order schema.
     assert "open_shape" not in text

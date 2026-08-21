@@ -361,6 +361,39 @@ def test_notebook_page_survives_a_cleared_book(pro, monkeypatch, tmp_path):
     assert "No notebook revisions yet" in ledger
 
 
+def test_notebook_page_shows_every_sendable_order_type(pro, monkeypatch, tmp_path):
+    """Operator coverage: filled trunks and untouched ones, side by side."""
+    from abcxauto.lab_playbook import playbook_type_keys
+
+    lab = tmp_path / "playbook_lab.json"
+    lab.write_text(
+        json.dumps(
+            {
+                "revision": 3,
+                "mode": "explore",
+                "types": {
+                    "market_bracket": {
+                        "gotchas": "stop must be the wrong side of live last",
+                        "cards": [{"name": "flush bounce", "status": "testing"}],
+                    },
+                    "vertical_spread": {"tool_order": ["quote", "option_chain", "send"]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(lab))
+    pro._sync_notebook_page(force=True)
+    rows = " | ".join(_row_text(c) for c in pro.col_notebook_types.controls)
+    # Every sendable trunk is listed, not only the two Grok has touched.
+    for name in playbook_type_keys():
+        assert name in rows, name
+    assert "gotchas" in rows
+    assert "tool_order" in rows
+    assert "untouched" in rows
+    assert "2/" in (pro.lbl_notebook_types.value or "")
+
+
 def test_notebook_page_falls_back_to_prose(pro, monkeypatch, tmp_path):
     lab = tmp_path / "playbook_lab.json"
     lab.write_text(

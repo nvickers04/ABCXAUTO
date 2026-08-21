@@ -152,6 +152,36 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
+def _utc_iso(value: Any) -> Optional[str]:
+    """Canonicalise a caller's timestamp to ``...Z`` UTC.
+
+    Rows are compared and bucketed by day as plain strings, so an offset-bearing
+    or bare-digit stamp from the broker layer has to be converted before it is
+    stored, not after. Every writer here means UTC, so bare digits are labelled
+    rather than shifted. An unparseable value is stored untouched — losing the
+    operator's stamp is worse than keeping an odd one.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (
+        dt.astimezone(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def _json_dumps(obj: Any) -> str:
     return json.dumps(obj, default=str)
 
@@ -500,7 +530,7 @@ class TradeJournal:
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
-                                fill.get("ts") or _utc_now_iso(),
+                                _utc_iso(fill.get("ts")) or _utc_now_iso(),
                                 str(exec_id),
                                 _coerce_order_id(fill.get("order_id")),
                                 fill.get("symbol"),
@@ -1129,6 +1159,74 @@ class TradeJournal:
         except Exception:
             logger.exception("journal.strategy_performance failed")
             return []
+
+    def dispatched_order_ids(self, limit: int = 4000) -> set:
+        """Order ids the clerk actually placed, from every dispatch result.
+
+        The complement is the signal ``strategy_performance`` already buckets as
+        ``(unattributed)``: a fill whose order id is not here came from a manual
+        TWS order, another client session, or the panic/halt flatten path —
+        never from a ticket this desk dispatched.
+        """
+        out: set = set()
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT result_json FROM dispatches
+                    WHERE result_json IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            for row in rows:
+                out |= _order_ids_from_result_json(row["result_json"])
+        except Exception:
+            logger.exception("journal.dispatched_order_ids failed")
+        return out
+
+    def closing_fills(self, limit: int = 2000) -> List[dict]:
+        """Fills that carry realized P&L — the ones that closed something.
+
+        Openers report 0 / missing realized P&L, so a non-zero value is the
+        marker of an exit. Symbol and ts let a caller line an exit up with the
+        entry it closed without re-deriving the fills join.
+        """
+        out: List[dict] = []
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT ts, order_id, symbol, side, quantity, commission, realized_pnl
+                    FROM fills
+                    WHERE realized_pnl IS NOT NULL AND ABS(realized_pnl) > 1e-9
+                    ORDER BY ts ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            for row in rows:
+                try:
+                    pnl = float(row["realized_pnl"])
+                except (TypeError, ValueError):
+                    continue
+                out.append(
+                    {
+                        "ts": row["ts"],
+                        "order_id": _coerce_order_id(row["order_id"]),
+                        "symbol": str(row["symbol"] or "").upper(),
+                        "side": row["side"],
+                        "quantity": row["quantity"],
+                        "commission": row["commission"],
+                        "realized_pnl": pnl,
+                    }
+                )
+        except Exception:
+            logger.exception("journal.closing_fills failed")
+        return out
 
     def realized_by_order_id(self, limit: int = 2000) -> dict:
         """order_id -> summed realized P&L from stored fills.

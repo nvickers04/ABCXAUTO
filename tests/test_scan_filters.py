@@ -161,6 +161,27 @@ def test_merge_filters_into_arena_spec():
     assert applied["usdMarketCapAbove"] == "50000"
 
 
+def test_both_selectors_keeps_arena_so_the_first_scan_is_the_one_that_works():
+    """resolve_screen hard-errors on both. The model sent both every wake then
+    retried with arena alone — four dead scans a look it could never learn from,
+    because the chat is dropped. Normalize to the selector the retry proves works.
+    """
+    from abcxauto.tool_args import normalize_tool_call
+
+    _name, args = normalize_tool_call(
+        "scan", {"arena": "most_active", "scan_code": "TOP_PERC_LOSE"}
+    )
+    assert args.get("arena") == "most_active"
+    assert "scan_code" not in args
+
+    # One selector on its own is untouched, either way round.
+    _n2, only_code = normalize_tool_call("scan", {"scan_code": "TOP_PERC_LOSE"})
+    assert only_code.get("scan_code") == "TOP_PERC_LOSE"
+    assert not str(only_code.get("arena") or "").strip()
+    _n3, only_arena = normalize_tool_call("scan", {"arena": "most_active"})
+    assert only_arena.get("arena") == "most_active"
+
+
 def test_scan_tool_schema_has_no_pe_and_no_tag_catalog():
     from abcxauto.brain import AGENT_TOOLS
     from abcxauto.llm import SYSTEM_PROMPT

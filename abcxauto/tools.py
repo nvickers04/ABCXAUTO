@@ -6,53 +6,9 @@ import json
 import logging
 from typing import Any, Callable, Coroutine, Dict, List
 
-from xai_sdk.chat import tool
-
 from abcxauto.marketdata.market_hours import get_session_info
 
 logger = logging.getLogger(__name__)
-
-_SYMBOL = {"type": "string", "description": "Stock ticker, e.g. AAPL"}
-
-
-def _schema(properties: Dict[str, Any], required: List[str]) -> Dict[str, Any]:
-    return {"type": "object", "properties": properties, "required": required}
-
-
-# Snap surface only — Pro JSON path does not use propose_order / MDA research tools.
-TOOL_DEFINITIONS = [
-    tool(
-        name="quote",
-        description="IBKR live last/bid/ask (TWS stream). Use this for send geometry — not MDA.",
-        parameters=_schema(
-            {
-                "symbol": _SYMBOL,
-                "symbols": {"type": "array", "items": {"type": "string"}},
-            },
-            [],
-        ),
-    ),
-    tool(
-        name="market_hours",
-        description="US session: premarket/regular/postmarket/closed.",
-        parameters=_schema({}, []),
-    ),
-    tool(
-        name="positions",
-        description="IBKR positions with P&L.",
-        parameters=_schema({}, []),
-    ),
-    tool(
-        name="account_summary",
-        description="IBKR account: NLV, cash, buying power, margin.",
-        parameters=_schema({}, []),
-    ),
-    tool(
-        name="open_orders",
-        description="Working IBKR orders.",
-        parameters=_schema({}, []),
-    ),
-]
 
 
 def _clip(data: Any, max_chars: int = 24_000) -> str:

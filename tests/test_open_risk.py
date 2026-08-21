@@ -184,7 +184,7 @@ def _judgment_world(**kwargs):
     return WorldState(**base)
 
 
-def _new_entry_act(symbol: str = "QQQ") -> dict:
+def _new_entry_act(symbol: str = "QQQ", card: str = "index momo") -> dict:
     return {
         "action": "market_bracket",
         "strategy": "market_bracket",
@@ -194,6 +194,7 @@ def _new_entry_act(symbol: str = "QQQ") -> dict:
             "direction": "LONG",
             "stop_price": 90.0,
             "target_price": 110.0,
+            "card": card,
         },
         "rationale": "new entry",
     }
@@ -205,6 +206,7 @@ def test_new_entry_allowed_when_book_open_and_capacity(monkeypatch):
 
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
     monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
     strat, forced = gate_ticket(
         _new_entry_act(),
         _judgment_world(

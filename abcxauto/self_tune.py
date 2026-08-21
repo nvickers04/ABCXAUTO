@@ -21,6 +21,7 @@ RISK_FLOOR: dict[str, tuple[float, float]] = {
     "max_risk_per_trade_pct": (0.25, 25.0),
     "max_peak_drawdown_pct": (2.0, 25.0),
     "max_option_premium_pct": (1.0, 25.0),
+    "max_symbol_concentration_pct": (5.0, 25.0),
 }
 # Integer capacity: 0 would disable the gate — forbidden. Grok sets N.
 MAX_OPEN_POSITIONS_RANGE = (1, 25)
@@ -48,6 +49,7 @@ UNSUPERVISED_DEFAULTS: dict[str, Any] = {
     "max_risk_per_trade_pct": 25.0,
     "max_peak_drawdown_pct": 25.0,
     "max_option_premium_pct": 25.0,
+    "max_symbol_concentration_pct": 25.0,
     "max_open_positions": 15,
     "scan_fetch_cap": 8,
 }

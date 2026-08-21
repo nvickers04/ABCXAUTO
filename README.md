@@ -21,6 +21,7 @@ Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro S
 - `send` is the only broker path
 - Defined-risk and cash-only
 - Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %; capacity `max_open_positions` (default 15)
+- One name across every lot vs `max_symbol_concentration_pct` — `max_position_pct` only sees one ticket, so N orders in a name could stack past it. Stock and its options sum
 - Unprotected STK: last-stop at IBKR; hold is blocked until it exists. Combo close (`closing_position` on the matching multi-leg send) is one BAG, not new risk
 - Live new risk needs a promoted playbook
 - Ticket geometry uses **IBKR last**, not MDA
@@ -72,7 +73,7 @@ IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 
 MDA delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
 
-Other: `odds` (Polymarket), `playbook` (notebook + score since last write), `write_lab_playbook` (paper notebook, up to 16000 chars, plus setup `cards` — trigger, ticket shape, invalidation, testing/working/retired), `set_wake`, `send`, `self_tune` (flat knobs; `send self_tune` still works).
+Other: `odds` (Polymarket), `playbook` (notebook + score since last write), `write_lab_playbook` (paper notebook, up to 16000 chars, plus setup `cards` — trigger, ticket shape, invalidation, testing/working/retired, and an optional `expect_hit_rate` scored against what the card actually hit), `set_wake`, `send`, `self_tune` (flat knobs; `send self_tune` still works).
 
 Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limited to it. Clerk still writes `journal.db`; there is no `journal` tool.
 
@@ -80,7 +81,7 @@ Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limit
 
 - **Pro** — Flet cockpit + Grok think stream
 - **Book / positions** — lots, working orders, fills
-- **Risk** — floor display + Halt / Resume / Panic. Sliders are status-only
+- **Risk** — floor display + Halt / Resume / Panic. Knob fields are tighten-only (the writers clamp to the floor); gate switches may re-arm a floor, never disarm one
 - **Scorecard** — book return % of starting NetLiq vs model cost
 
 Kill switch: Stop agent, Risk Halt, Panic, `Ctrl+C` on headless, or `python -m abcxauto --cleanup`. Positions stay at IBKR. Open risk is a multi-plan book reconciled from the broker (`active_trade_plans.json`).
@@ -112,7 +113,7 @@ Tickets must match `ORDER EXAMPLES` (`abcxauto/order_examples.py`). Stock entrie
 
 ## Configuration
 
-Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** max position, **25%** risk/trade, defined-risk on, cash-only, `trading_budget_usd=0` (full NetLiq), **15** max open positions.
+Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** max position, **25%** risk/trade, **25%** per name, defined-risk on, cash-only, `trading_budget_usd=0` (full NetLiq), **15** max open positions.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -123,6 +124,7 @@ Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** 
 | `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `25` | Daily-loss halt vs NetLiq |
 | `ABCXAUTO_MAX_POSITION_PCT` | `25` | Max position vs NetLiq |
 | `ABCXAUTO_MAX_RISK_PER_TRADE_PCT` | `25` | Max risk per ticket vs NetLiq |
+| `ABCXAUTO_MAX_SYMBOL_CONCENTRATION_PCT` | `25` | Max one underlying, all lots, vs NetLiq |
 | `ABCXAUTO_DEFINED_RISK_ONLY` | `true` | Locked on |
 | `ABCXAUTO_JOURNAL_PATH` | `journal.db` | Clerk SQLite journal |
 | `ABCXAUTO_DEFAULT_LOOK_S` | `90` (`60` when open and not flat) | Clerk look if Grok skips `set_wake` (Grok's clock is not max-clamped) |

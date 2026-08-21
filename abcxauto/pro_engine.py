@@ -226,6 +226,10 @@ class ViewState:
     tool_trace: list[str] = field(default_factory=list)
     book_unreliable: bool = False
     skip_reason: str = ""
+    # Burn: looks that cost a model call and produced no ticket.
+    sends_last_look: int = 0
+    looks_since_send: int = 0
+    backoff_wait_s: float = 0.0
 
 
 class ProEngine:
@@ -710,6 +714,12 @@ class ProEngine:
         s.intent = dict(d.get("intent") or s.judgment.get("intent") or {})
         s.stage_error = str(d.get("stage_error") or "")
         s.tool_trace = list(d.get("tool_trace") or [])
+        s.sends_last_look = int(d.get("sends") or 0)
+        s.looks_since_send = (
+            0 if s.sends_last_look else int(getattr(s, "looks_since_send", 0) or 0) + 1
+        )
+        if not d.get("_failed"):
+            s.backoff_wait_s = 0.0
         s.book_unreliable = bool(
             d.get("book_unreliable")
             or ((d.get("world_state") or {}).get("gates") or {}).get("book_unreliable")
@@ -799,23 +809,26 @@ class ProEngine:
         return str(block or "").strip().lower()
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
-        """Stay-up: re-arm the next look. Return backoff seconds (0 = now)."""
+        """Backoff after a failed look. Return seconds to wait (0 = alarm drives).
+
+        A good look set its own next clock, so success re-arms nothing — that
+        unconditional re-arm was the treadmill. A failed look produced no clock
+        and may have produced no text either, so it still retries on a backoff
+        rather than waiting on an alarm that was never written.
+        """
         self._last_session = str(session or "")
         payload = out if isinstance(out, dict) else {}
         if payload.get("_parked"):
             self._fail_streak = 0
             return 0.0
         from abcxauto.brain import provider_overloaded
-        from abcxauto.wake_bus import failed_look_backoff_s, paper_stay_up
+        from abcxauto.wake_bus import failed_look_backoff_s
 
         if not payload.get("_failed"):
             self._fail_streak = 0
-        if not paper_stay_up(session=session):
-            return 0.0
-        self._resume_think = True
-        if not payload.get("_failed"):
             return 0.0
         self._fail_streak = int(getattr(self, "_fail_streak", 0) or 0) + 1
+        self._resume_think = True
         return failed_look_backoff_s(
             self._fail_streak,
             overloaded=provider_overloaded(payload.get("_stream_error")),
@@ -827,6 +840,7 @@ class ProEngine:
         err = str((out or {}).get("_stream_error") or "")
         streak = int(getattr(self, "_fail_streak", 0) or 0)
         why = "xAI at capacity" if provider_overloaded(err) else "look failed"
+        self.state.backoff_wait_s = float(wait_s)
         self._note("RETRY", f"{why} (x{streak}) — next look {wait_s:.0f}s")
 
     async def _wait_stay_up_retry(self, sec: float) -> None:
@@ -1011,7 +1025,7 @@ class ProEngine:
             self.worker = None
             self.conn = None
             return
-        from abcxauto.wake_bus import paper_stay_up, peek_interrupt, take_interrupt
+        from abcxauto.wake_bus import peek_interrupt, take_interrupt
 
         g = None
         n = 0
@@ -1069,20 +1083,26 @@ class ProEngine:
                     await asyncio.sleep(0.25)
                     continue
                 if not first_think and not poked and not resume:
-                    if paper_stay_up(session=getattr(self, "_last_session", "") or ""):
-                        # Paper RTH / premarket: do not sit. Re-arm the same think.
+                    # Grok owns the cadence. Sleep on its clock, wake when the
+                    # clock is due or a book event pokes — never re-arm a think
+                    # the instant the last one ended.
+                    from abcxauto.wake_bus import load_alarm, pulse_sleep_s
+
+                    alarm = load_alarm()
+                    if alarm.due():
                         self._resume_think = True
                         continue
-                    self.state.status = "On"
+                    wait = pulse_sleep_s(alarm)
+                    self.state.status = "On" if alarm.wake_at is None else "Waiting"
                     ev = self._wake_event
                     if ev is not None:
                         ev.clear()
                         try:
-                            await asyncio.wait_for(ev.wait(), timeout=1.0)
+                            await asyncio.wait_for(ev.wait(), timeout=wait)
                         except asyncio.TimeoutError:
                             pass
                     else:
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(wait)
                     continue
 
                 try:
@@ -1098,9 +1118,25 @@ class ProEngine:
                 n += 1
                 session = self._session_of_snap(s)
                 self._last_session = session
+                from abcxauto.wake_bus import ensure_next_look, load_alarm
+
+                prev_set_at = str(load_alarm().set_at or "")
                 try:
                     out = await self._host_think(n, g, s, resume=resume and not poked)
                     if out.get("_parked"):
+                        # A park with a clock is a nap the engine wakes from. Only
+                        # a clockless park is a shutdown that needs Start — before
+                        # this, every park stopped the desk for the day, so Grok
+                        # choosing its next look meant choosing to stop.
+                        from abcxauto.wake_bus import load_alarm
+
+                        alarm = load_alarm()
+                        if alarm.wake_at and alarm.seconds_until() is not None:
+                            self.state.status = "Waiting"
+                            self._note(
+                                "PARK", f"Grok parked until {alarm.wake_at} — book events still wake it"
+                            )
+                            continue
                         self._think_parked = True
                         self.state.autonomous = False
                         self.state.running = False
@@ -1110,12 +1146,25 @@ class ProEngine:
                             take_interrupt()
                         except Exception:
                             pass
-                        self._note("PARK", "Overnight park — Grok down")
+                        self._note("PARK", "Park with no clock — Grok down")
                         continue
                     self._last_grok_mono = time.monotonic()
                     self._last_cycle_out = out
                     self.state.status = "On"
                     self.ui.put(("cycle", out))
+                    # The LOOK step: honor a clock Grok just set, and seed a
+                    # backstop when it set none, so a silent turn cannot leave a
+                    # past-due alarm the loop would spin on. A failed look writes
+                    # no clock — its backoff owns the retry.
+                    if not out.get("_failed"):
+                        try:
+                            ensure_next_look(
+                                previous_set_at=prev_set_at,
+                                flat=not (s.get("positions") or []),
+                                session=session,
+                            )
+                        except Exception:
+                            self._note("WAKE", "next look seed failed")
                     wait_s = self._rearm_after_think(out, session=session)
                     if wait_s > 0:
                         self._note_backoff(out, wait_s)

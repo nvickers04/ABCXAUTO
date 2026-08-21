@@ -8,7 +8,6 @@ from abcxauto.agent_loop import (  # noqa: F401
     BLOCKED_STRAT,
     RULES,
     VALID_ACTIONS,
-    _tool,
     equity_of,
     execute_ticket,
     format_position_inventory,

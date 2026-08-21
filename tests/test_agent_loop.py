@@ -104,14 +104,6 @@ def _stub_config(monkeypatch, tmp_path):
             risk_posture="balanced",
         ),
     )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.connection_status",
-        lambda _c=None: {
-            "ibkr_connected": True,
-            "mda_configured": False,
-            "trading_mode": "paper",
-        },
-    )
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
 
     async def _empty(*_a, **_k):
