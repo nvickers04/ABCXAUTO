@@ -219,8 +219,11 @@ def test_an_idle_lab_cannot_be_napped_through(tmp_path, monkeypatch):
     assert (at - _utc_now()).total_seconds() <= LAB_IDLE_PARK_CAP_S + 5
 
     # A long nap is the right answer when there is no lab work to do: holding
-    # risk, or outside tradeable hours.
+    # risk, or outside the open session. Premarket is exempt on purpose — a card
+    # that triggers on the opening print cannot be tested before the bell, so
+    # parking to the open is judgement rather than avoidance.
     assert lab_idle_park_cap_s(flat=False, session="regular") is None
+    assert lab_idle_park_cap_s(flat=True, session="premarket") is None
     assert lab_idle_park_cap_s(flat=True, session="closed") is None
     assert lab_idle_park_cap_s(flat=True, session="postmarket") is None
 

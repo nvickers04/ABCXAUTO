@@ -1877,10 +1877,27 @@ async def _run_tool(
                 flat=getattr(world, "flat", None), session=session
             )
             if cap is not None:
+                # Say exactly what is idle and exactly what lifts the cap. The
+                # first wording said "entry structures carry no card", which read
+                # as *no* structure having one; the model answered "odd, we have a
+                # card on market_bracket" and started setting 30s naps instead.
+                from abcxauto.lab_playbook import lab_facts
+
+                try:
+                    lab = lab_facts()
+                except Exception:
+                    lab = {}
+                untried = list(lab.get("entry_trunks_untried") or [])
                 out["park_capped_s"] = cap
                 out["capped_because"] = (
-                    "lab idle — no resolved trade yet and entry structures carry "
-                    "no card. See playbook lab.entry_trunks_untried."
+                    f"lab idle: {int(lab.get('resolved_trades') or 0)} resolved "
+                    f"trades, and {len(untried)} entry structures still have no "
+                    f"card of their own ({', '.join(untried[:4])}"
+                    f"{', ...' if len(untried) > 4 else ''}). "
+                    "The cap is a ceiling on how long you may sleep, not a "
+                    "request to look more often — a shorter park does not lift "
+                    "it. It lifts on one resolved trade, or a card under every "
+                    "entry structure."
                 )
             return _clip(out)
         # set_wake writes a clock in every session now, so a missing wake_at is

@@ -911,6 +911,43 @@ def test_agent_tools_offer_set_wake_in_every_session():
 
 
 @pytest.mark.asyncio
+async def test_capped_park_says_what_is_idle_and_what_lifts_it(tmp_path, monkeypatch):
+    """The first wording made the model set 30s naps.
+
+    It read "entry structures carry no card" as *no* structure having one,
+    answered "odd, we have a card on market_bracket", and inferred the clerk
+    wanted faster cycling — rebuilding the treadmill the cap exists to prevent.
+    """
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.lab_facts",
+        lambda *_a, **_k: {
+            "resolved_trades": 0,
+            "entry_trunks_untried": ["vertical_spread", "iron_condor", "collar"],
+        },
+    )
+    data = json.loads(
+        await _run_tool(
+            "set_wake",
+            {"wake_in_s": 4 * 3600},
+            connector=None,
+            world=_world(session_status="regular", flat=True),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    why = data["capped_because"]
+    assert data["park_capped_s"] == 300.0
+    # Counts, not a sweeping claim the model can disprove from its own book.
+    assert "3 entry structures" in why
+    assert "vertical_spread" in why
+    # And it must not read as "look more often".
+    assert "not a request to look more often" in why
+    assert "shorter park does not lift it" in why
+
+
+@pytest.mark.asyncio
 async def test_paper_rth_set_wake_tool_parks_on_its_own_clock(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)

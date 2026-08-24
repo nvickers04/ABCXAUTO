@@ -233,12 +233,16 @@ def lab_idle_park_cap_s(
     so a long park is cut short.
 
     Returns None — full clock honored — whenever a long nap is the right answer:
-    holding risk, outside tradeable hours, halted, or a lab that is genuinely
+    holding risk, outside the open session, halted, or a lab that is genuinely
     running (one resolved trade, or a card under every entry structure).
+
+    Premarket is deliberately exempt. A card that triggers on the opening print
+    has nothing to test before the bell, so parking to the open is judgement, not
+    avoidance — capping it there just spends money re-screening a closed tape.
     """
     if flat is False:
         return None
-    if str(session or "").lower() not in PAPER_STAY_UP_SESSIONS:
+    if str(session or "").lower() != "regular":
         return None
     try:
         from abcxauto.lab_playbook import is_paper
