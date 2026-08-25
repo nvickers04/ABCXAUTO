@@ -2,7 +2,13 @@
 
 import math
 
-from abcxauto.path_math import path_facts
+from abcxauto.path_math import (
+    net_signed_premium,
+    path_facts,
+    path_from_journal,
+    path_pnls_from_rows,
+    signed_premium_usd,
+)
 
 
 def test_even_money_coin_matches_post():
@@ -40,3 +46,112 @@ def test_ruin_is_certain_when_p_not_above_half():
     out = path_facts(pnls, equity=100.0, risk_pct=25.0)
     assert out["p"] == 0.4
     assert out["ruin"] == 1.0
+
+
+def test_signed_premium_keeps_debit_and_credit():
+    debit = signed_premium_usd(
+        {
+            "avg_fill_price": 1.25,
+            "quantity": 2,
+            "side": "BUY",
+            "sec_type": "OPT",
+        }
+    )
+    credit = signed_premium_usd(
+        {
+            "avg_fill_price": 1.25,
+            "quantity": 2,
+            "side": "SELL",
+            "sec_type": "OPT",
+        }
+    )
+    assert debit == -250.0
+    assert credit == 250.0
+
+
+def test_last_is_not_a_fill_premium():
+    last_only = {
+        "last": 2.50,
+        "mid": 2.48,
+        "quantity": 2,
+        "side": "BUY",
+        "sec_type": "OPT",
+    }
+    assert signed_premium_usd(last_only) is None
+    assert path_pnls_from_rows([{**last_only, "realized_pnl": None}]) == []
+    # last sitting next to a real close must not replace the fill P&L
+    assert path_pnls_from_rows(
+        [{"order_id": 7, "quantity": 1, "realized_pnl": -80.0, "last": 2.50}]
+    ) == [-80.0]
+
+
+def test_qty_blind_premium_is_not_cash():
+    assert signed_premium_usd(
+        {"avg_fill_price": 1.25, "side": "BUY", "sec_type": "OPT"}
+    ) is None
+    assert signed_premium_usd(
+        {"avg_fill_price": 1.25, "quantity": 0, "side": "SELL", "sec_type": "OPT"}
+    ) is None
+    # realized dollars without a qty are not a fill
+    assert path_pnls_from_rows([{"realized_pnl": 80.0, "last": 2.5}]) == []
+
+
+def test_debit_vertical_does_not_invert():
+    long_call = {
+        "avg_fill_price": 2.00,
+        "quantity": 1,
+        "side": "BUY",
+        "sec_type": "OPT",
+        "right": "C",
+        "strike": 370,
+    }
+    short_call = {
+        "avg_fill_price": 0.75,
+        "quantity": 1,
+        "side": "SELL",
+        "sec_type": "OPT",
+        "right": "C",
+        "strike": 375,
+    }
+    assert net_signed_premium([long_call, short_call]) == -125.0
+    # last on a wing fails the combo closed — do not invent a credit
+    assert net_signed_premium([long_call, {**short_call, "avg_fill_price": None, "last": 0.75}]) is None
+
+
+def test_vertical_close_nets_one_signed_sample():
+    # Losing debit vertical: long wing -150, short wing +100. Net debit -50.
+    # Per-leg path samples would look like a win and a loss (inverted structure).
+    rows = [
+        {"order_id": 10, "quantity": 1, "realized_pnl": -150.0, "last": 1.50},
+        {"order_id": 10, "quantity": 1, "realized_pnl": 100.0, "last": 0.75},
+        {"order_id": 11, "quantity": 2, "realized_pnl": -80.0},
+        {"order_id": 12, "quantity": 1, "realized_pnl": 40.0},
+        {"order_id": 13, "quantity": 1, "realized_pnl": -20.0},
+    ]
+    xs = path_pnls_from_rows(rows)
+    assert xs == [-50.0, -80.0, 40.0, -20.0]
+    out = path_facts(rows, equity=10_000.0, risk_pct=1.0)
+    assert out["n"] == 4
+    assert out["E"] == -27.5
+    assert out["p"] == 0.25
+
+
+def test_path_from_journal_nets_vertical_not_leg_tape():
+    class _J:
+        def closing_fills(self):
+            return [
+                {"order_id": 10, "quantity": 1, "realized_pnl": -150.0, "last": 2.5},
+                {"order_id": 10, "quantity": 1, "realized_pnl": 100.0, "last": 0.8},
+                {"order_id": 11, "quantity": 1, "realized_pnl": -40.0},
+                {"order_id": 12, "quantity": 1, "realized_pnl": 10.0},
+                {"order_id": 13, "quantity": 1, "realized_pnl": -10.0},
+            ]
+
+        def closed_fill_pnls(self):
+            # Per-leg tape — using this would invert the vertical into a coin flip.
+            return [-150.0, 100.0, -40.0, 10.0, -10.0]
+
+    out = path_from_journal(_J(), equity=10_000.0, risk_pct=1.0)
+    assert out["n"] == 4
+    assert out["E"] == -22.5
+    assert out["p"] == 0.25
