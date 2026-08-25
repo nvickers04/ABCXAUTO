@@ -6,11 +6,23 @@ Adapter only — all IBKR and MDA logic lives in ``abcxauto.broker`` and
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from abcxauto.broker.connector import get_ibkr_connector
 from abcxauto.config import get_config
 from abcxauto.marketdata.client import get_marketdata_client
+
+
+async def snapshot_positions(connector: Any = None) -> List[Dict[str, Any]]:
+    """IBKR positions only. Does not merge a universe or tape-seed list."""
+    conn = connector if connector is not None else get_ibkr_connector()
+    get_pos = getattr(conn, "get_positions", None)
+    if not callable(get_pos):
+        return []
+    rows = await get_pos()
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def connection_status(connector: Any = None) -> Dict[str, Any]:
