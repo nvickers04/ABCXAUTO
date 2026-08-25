@@ -18,8 +18,6 @@ import asyncio
 import logging
 from typing import Any, Dict, Optional, Set
 
-from abcxauto.broker.order_types import is_stop_order
-
 logger = logging.getLogger(__name__)
 
 _SETTLE_S = 1.0
@@ -27,6 +25,7 @@ _RETRY_S = 5.0
 # Same slack as trade_plan stacked-stop cover and the protection report.
 _COVER_QTY_SLACK = 0.51
 _FILL_SIDES = {"BUY": "BUY", "BOT": "BUY", "SELL": "SELL", "SLD": "SELL"}
+_STOP_TYPES = frozenset({"STP", "STP LMT", "TRAIL", "TRAIL LIMIT"})
 
 
 def _qty(row: Any) -> float:
@@ -37,8 +36,6 @@ def _qty(row: Any) -> float:
         raw = row.get("position")
     if raw is None:
         raw = row.get("totalQuantity")
-    if raw is None:
-        raw = row.get("filled")
     try:
         return float(raw or 0)
     except (TypeError, ValueError):
@@ -85,8 +82,8 @@ def last_stop_covers_lot(position: Any, orders: Any) -> bool:
             continue
         if _sec_bucket(order) != "STK":
             continue
-        otype = str(order.get("order_type") or order.get("orderType") or "")
-        if not is_stop_order(otype):
+        otype = str(order.get("order_type") or order.get("orderType") or "").upper()
+        if otype not in _STOP_TYPES:
             continue
         if _fill_side(order.get("action") or order.get("side")) != want:
             continue
