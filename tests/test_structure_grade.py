@@ -9,6 +9,7 @@ import pytest
 
 from abcxauto.proposals import ProposalValidationError, validate_proposal
 from abcxauto.structure_grade import (
+    GEOMETRY_ENTRY_STALE,
     GEOMETRY_QUOTE_REQUIRED,
     GEOMETRY_STOP_TOO_TIGHT,
     GEOMETRY_STOP_TOO_WIDE,
@@ -19,6 +20,7 @@ from abcxauto.structure_grade import (
     check_live_geometry,
     detect_scrape_from_fills,
     recent_structure_lessons,
+    structure_cooldown_symbols,
 )
 
 
@@ -79,7 +81,7 @@ def test_valid_long_market_bracket_passes():
 
 
 def test_opening_low_stop_skips_percent_bands():
-    """A ≥6% gap card stops under the opening low — not the 0.2–5% posture band."""
+    """Opening-low tape is still session-level; invented % is not a send reject."""
     params = {
         "symbol": "SNDK",
         "quantity": 2,
@@ -91,8 +93,8 @@ def test_opening_low_stop_skips_percent_bands():
     wide = check_live_geometry(
         "market_bracket", params, quote_last=100.0, posture="balanced"
     )
-    assert wide[0] is False
-    assert wide[1] == GEOMETRY_STOP_TOO_WIDE
+    assert wide[0] is True
+    assert wide[1] == STRUCTURE_OK
     ok, code, msg = check_live_geometry(
         "market_bracket",
         params,
@@ -112,8 +114,8 @@ def test_opening_low_stop_skips_percent_bands():
     bare_tight = check_live_geometry(
         "market_bracket", tight, quote_last=100.0, posture="balanced"
     )
-    assert bare_tight[0] is False
-    assert bare_tight[1] == GEOMETRY_STOP_TOO_TIGHT
+    assert bare_tight[0] is True
+    assert bare_tight[1] == STRUCTURE_OK
     pinned, pin_code, _ = check_live_geometry(
         "market_bracket",
         tight,
@@ -130,8 +132,8 @@ def test_opening_low_stop_skips_percent_bands():
         posture="balanced",
         session={"low": 92.0, "high": 101.0, "today": False},
     )
-    assert stale[0] is False
-    assert stale[1] == GEOMETRY_STOP_TOO_WIDE
+    assert stale[0] is True
+    assert stale[1] == STRUCTURE_OK
 
 
 def test_validate_proposal_blocks_qqq_geometry():
@@ -168,6 +170,100 @@ def test_validate_proposal_accepts_legal_geometry():
         posture="balanced",
     )
     assert prop.strategy == "market_bracket"
+
+
+def test_invented_stop_pct_is_not_a_send_gate():
+    """Grok owns stop distance. Clerk posture % bands are not a send reject."""
+    wide = {
+        "symbol": "QQQ",
+        "quantity": 2,
+        "direction": "LONG",
+        "stop_price": 639.0,  # ~10% — used to be geometry_stop_too_wide
+        "target_price": 750.0,
+    }
+    ok, code, _ = check_live_geometry(
+        "market_bracket", wide, quote_last=710.0, posture="defensive",
+    )
+    assert ok is True
+    assert code == STRUCTURE_OK
+
+    tight = {
+        "symbol": "QQQ",
+        "quantity": 2,
+        "direction": "LONG",
+        "stop_price": 709.65,  # ~0.05% — used to be geometry_stop_too_tight
+        "target_price": 712.0,
+    }
+    ok, code, _ = check_live_geometry(
+        "market_bracket", tight, quote_last=710.0, posture="defensive",
+    )
+    assert ok is True
+    assert code == STRUCTURE_OK
+
+
+def test_bracket_entry_far_from_quote_is_not_a_pct_gate():
+    params = {
+        "symbol": "QQQ",
+        "quantity": 2,
+        "direction": "LONG",
+        "entry_price": 680.0,  # ~4% below last — used to be geometry_entry_stale
+        "stop_price": 670.0,
+        "target_price": 720.0,
+    }
+    ok, code, _ = check_live_geometry(
+        "bracket", params, quote_last=710.0, posture="balanced",
+    )
+    assert ok is True
+    assert code == STRUCTURE_OK
+
+
+def test_validate_proposal_does_not_invent_stop_pct_gate():
+    prop = validate_proposal(
+        "market_bracket",
+        {
+            "symbol": "QQQ",
+            "quantity": 2,
+            "direction": "LONG",
+            "stop_price": 639.0,
+            "target_price": 750.0,
+            "price_hint": 710.0,
+        },
+        "wide stop is grok's",
+        quote_last=710.0,
+        posture="defensive",
+    )
+    assert prop.strategy == "market_bracket"
+
+
+def test_invented_pct_lessons_do_not_cooldown():
+    cool = structure_cooldown_symbols(
+        [
+            {
+                "symbol": "QQQ",
+                "reason_code": GEOMETRY_STOP_TOO_WIDE,
+                "outcome": "geometry_rejected",
+            },
+            {
+                "symbol": "SPY",
+                "reason_code": GEOMETRY_STOP_TOO_TIGHT,
+                "outcome": "geometry_rejected",
+            },
+            {
+                "symbol": "IWM",
+                "reason_code": GEOMETRY_ENTRY_STALE,
+                "outcome": "geometry_rejected",
+            },
+            {
+                "symbol": "AAPL",
+                "reason_code": GEOMETRY_STOP_WRONG_SIDE,
+                "outcome": "geometry_rejected",
+            },
+        ]
+    )
+    assert "QQQ" not in cool
+    assert "SPY" not in cool
+    assert "IWM" not in cool
+    assert cool.get("AAPL") == GEOMETRY_STOP_WRONG_SIDE
 
 
 def test_structure_lessons_round_trip(tmp_path, monkeypatch):
