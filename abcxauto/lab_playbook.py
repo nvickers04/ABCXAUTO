@@ -3747,7 +3747,7 @@ def hunt_send_sketch(
     *,
     card: Any = None,
 ) -> dict[str, Any] | None:
-    """Today's session as send fields. Clerk does not dispatch."""
+    """Stamped ticket on today's session, if any. Clerk does not invent fields."""
     store = session_range if isinstance(session_range, dict) else {}
     if not store:
         return None
@@ -3782,7 +3782,6 @@ def hunt_send_sketch(
                 if type_name not in ("market_bracket", "bracket"):
                     return None
                 break
-    facts = live_card_send_facts()
     min_px = live_card_scan_constraints().get("min_price")
     no_reentry = live_card_needs_no_reentry()
     tight = live_card_needs_tight_spread()
@@ -3823,7 +3822,9 @@ def hunt_send_sketch(
             continue
         if scanned and name and name not in allowed:
             continue
-        if no_reentry and name and card_sent_symbol_today(pick_name or str(facts.get("card") or ""), name):
+        if no_reentry and name and card_sent_symbol_today(
+            pick_name or str(prior.get("card") or ""), name
+        ):
             continue
         if tight and rng.get("spread") is not None and rng.get("last") is not None:
             stop = prior.get("stop_price") if prior.get("stop_price") not in (None, "") else rng.get("low")
@@ -3834,9 +3835,7 @@ def hunt_send_sketch(
                 except (TypeError, ValueError):
                     pass
         ticket = rng.get("ticket") if isinstance(rng.get("ticket"), dict) else {}
-        hold_side = str(
-            ticket.get("direction") or facts.get("direction") or "LONG"
-        ).upper()
+        hold_side = str(ticket.get("direction") or "LONG").upper()
         if rng.get("above_low") is False and hold_side != "SHORT":
             continue
         if (
@@ -3845,79 +3844,23 @@ def hunt_send_sketch(
             and hold_side != "SHORT"
         ):
             continue
-        sketch = dict(ticket)
-        name = str(sym or sketch.get("symbol") or "").upper()
-        if name:
-            sketch["symbol"] = name
-        if sketch.get("stop_price") is None and rng.get("low") is not None:
-            sketch["stop_price"] = rng["low"]
-        side = str(sketch.get("direction") or facts.get("direction") or "LONG").upper()
-        tgt = session_target(rng, side)
+        tgt = session_target(rng, hold_side)
         if tgt is None and (
             rng.get("retrace_30") is not None or rng.get("retrace_50") is not None
         ):
             continue
-        if tgt is not None:
-            existing = sketch.get("target_price")
-            if existing is None or session_target(
-                {"last": rng.get("last"), "retrace_30": existing}, side
-            ) is None:
-                sketch["target_price"] = tgt
-        if sketch.get("quantity") is None:
-            size = rng.get("size") if isinstance(rng.get("size"), dict) else {}
-            qty = size.get("card_qty") or size.get("qty")
-            if qty:
-                sketch["quantity"] = qty
-            elif size:
-                continue
-        if not sketch.get("strategy"):
-            sketch["strategy"] = type_name or facts.get("type")
-        if not sketch.get("card"):
-            sketch["card"] = pick_name or facts.get("card")
-        if not sketch.get("direction") and facts.get("direction"):
-            sketch["direction"] = facts["direction"]
+        sketch = dict(ticket)
+        # Session key names the row. Clerk does not invent the rest of the ticket.
+        if name:
+            sketch["symbol"] = name
         if sketch.get("symbol") and sketch.get("card"):
             return sketch
     return None
 
 
 def apply_hunt_send_sketch(act: dict[str, Any], snap: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Fill omitted send fields from today's hunt sketch. Never overwrite Grok."""
-    if not isinstance(act, dict):
-        return None
-    store = snap.get("session_range") if isinstance(snap, dict) else None
-    sketch = hunt_send_sketch(store, tape=snap)
-    if not sketch:
-        return None
-    params = act.get("params")
-    if not isinstance(params, dict):
-        params = {}
-        act["params"] = params
-    strat = str(act.get("strategy") or act.get("action") or "").strip().lower()
-    want = str(sketch.get("strategy") or "").strip().lower()
-    if strat and want and strat != want:
-        return None
-    grok_card = str(params.get("card") or act.get("card") or "").strip()
-    sketch_card = str(sketch.get("card") or "").strip()
-    if grok_card and sketch_card and grok_card != sketch_card:
-        return None
-    grok_sym = str(params.get("symbol") or "").upper()
-    sketch_sym = str(sketch.get("symbol") or "").upper()
-    if grok_sym and sketch_sym and grok_sym != sketch_sym:
-        return None
-    filled: list[str] = []
-    for key in ("symbol", "direction", "stop_price", "target_price", "quantity", "card"):
-        if params.get(key) in (None, "") and sketch.get(key) not in (None, ""):
-            params[key] = sketch[key]
-            filled.append(key)
-    if not str(act.get("rationale") or "").strip():
-        card = str(params.get("card") or sketch_card or "").strip()
-        sym = str(params.get("symbol") or sketch_sym or "").strip()
-        act["rationale"] = f"card={card} {sym}".strip()
-        filled.append("rationale")
-    if filled:
-        act["_hunt_sketch"] = filled
-    return sketch if filled else None
+    """No-op. Playbook is a notebook — clerk does not fill omitted send fields."""
+    return None
 
 
 def hunt_recipe_has(name: str, book: dict[str, Any] | None = None) -> bool:

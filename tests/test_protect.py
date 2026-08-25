@@ -315,7 +315,7 @@ def test_bot_alias_is_exit_side_for_a_short():
 
 
 @pytest.mark.asyncio
-async def test_execute_ticket_fills_omitted_fields_from_hunt_sketch(monkeypatch):
+async def test_execute_ticket_does_not_fill_omitted_fields_from_hunt_sketch(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
@@ -407,15 +407,14 @@ async def test_execute_ticket_fills_omitted_fields_from_hunt_sketch(monkeypatch)
         },
     }
     result = await execute_ticket(act, object(), world, snap)
-    assert result.get("status") == "ok"
-    assert sent
-    p = sent[0]["params"]
-    assert p["symbol"] == "SNDK"
-    assert p["card"] == "flush bounce"
-    assert p["stop_price"] == 88.0
-    assert p["target_price"] == 93.0
-    assert int(p["quantity"]) == 10
-    assert "card=flush bounce" in str(sent[0].get("rationale") or "")
+    assert result.get("status") == "blocked"
+    assert "params.symbol" in str(result.get("note") or "")
+    assert sent == []
+    p = act.get("params") or {}
+    assert p.get("card") == "flush bounce"
+    for key in ("symbol", "direction", "stop_price", "target_price", "quantity"):
+        assert p.get(key) in (None, "")
+    assert "_hunt_sketch" not in act
 
 
 def test_fill_uses_today_session_low_and_retrace():
@@ -1093,8 +1092,15 @@ async def test_execute_ticket_uses_scan_hit_last_when_quote_map_misses(monkeypat
         {
             "action": "market_bracket",
             "strategy": "market_bracket",
-            "params": {"card": "flush bounce"},
-            "rationale": "",
+            "params": {
+                "card": "flush bounce",
+                "symbol": "SNDK",
+                "direction": "LONG",
+                "stop_price": 88.0,
+                "target_price": 93.0,
+                "quantity": 10,
+            },
+            "rationale": "card=flush bounce SNDK",
         },
         object(),
         world,
