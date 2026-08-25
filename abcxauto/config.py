@@ -95,6 +95,7 @@ _runtime_overrides: dict[str, Any] = {}
 _file_overrides: dict[str, Any] = {}
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_RISK_SETTINGS_PATH = _REPO_ROOT / "risk_settings.json"
+_DEFAULT_FILE_LOG_PATH = _REPO_ROOT / "logs" / "app.log"
 
 
 @dataclass(frozen=True)
@@ -169,30 +170,42 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.lower() in ("1", "true", "yes", "on")
 
 
+def default_file_log_path() -> Path:
+    """Repo-absolute ``logs/app.log`` (next to the package). Independent of cwd.
+
+    Start-Process of ``logs/_start_pro.py`` can leave process cwd off the repo
+    root. A ``Path('logs')/'app.log'`` default then writes elsewhere and leaves
+    the operator's ``logs/app.log`` stale while Grok thinks.
+    """
+    return _DEFAULT_FILE_LOG_PATH.resolve()
+
+
 def setup_file_logging(
     *,
     path: str | Path | None = None,
     max_bytes: int = 1_000_000,
     backup_count: int = 2,
-) -> None:
+) -> Path:
     """Attach a WARNING+ RotatingFileHandler to the abcxauto logger (once).
 
-    ``ABCXAUTO_LOG_PATH`` redirects it. The operator reads ``logs/app.log`` as
-    evidence of what the desk did, so tests must never land in it.
+    Default path is repo-absolute ``<repo>/logs/app.log``. ``ABCXAUTO_LOG_PATH``
+    redirects it. The operator reads ``logs/app.log`` as evidence of what the
+    desk did, so tests must never land in it.
     """
     if path is None:
         path = os.environ.get("ABCXAUTO_LOG_PATH") or None
-    log_path = Path(path) if path is not None else Path("logs") / "app.log"
+    log_path = Path(path) if path is not None else default_file_log_path()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger("abcxauto")
     abs_target = str(log_path.resolve())
+    resolved = Path(abs_target)
     for h in root.handlers:
         if isinstance(h, RotatingFileHandler):
             try:
-                if Path(getattr(h, "baseFilename", "")).resolve() == Path(abs_target):
-                    return
+                if Path(getattr(h, "baseFilename", "")).resolve() == resolved:
+                    return resolved
             except OSError:
-                return
+                return resolved
     handler = RotatingFileHandler(
         abs_target,
         maxBytes=max_bytes,
@@ -206,6 +219,7 @@ def setup_file_logging(
     root.addHandler(handler)
     if root.level == logging.NOTSET or root.level > logging.WARNING:
         root.setLevel(logging.WARNING)
+    return resolved
 
 
 @lru_cache(maxsize=1)
