@@ -2,7 +2,7 @@
 
 import pytest
 
-from abcxauto.prediction_odds import compact_event, fetch_odds
+from abcxauto.prediction_odds import compact_event, fetch_odds, related_search_set
 
 
 def _event(**market):
@@ -16,6 +16,23 @@ def _event(**market):
     }
 
 
+def _client(seen: list[str]):
+    class Client:
+        async def get(self, url, params=None):
+            seen.append(str((params or {}).get("q") or ""))
+
+            class Resp:
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {"events": []}
+
+            return Resp()
+
+    return Client()
+
+
 def test_compact_event_parses_string_prices():
     row = compact_event(_event(
         question="Will the Fed cut 25 bps?",
@@ -27,6 +44,9 @@ def test_compact_event_parses_string_prices():
     assert row["title"].startswith("Fed")
     assert row["url"] == "https://polymarket.com/event/fed-september"
     assert row["markets"][0]["implied"][0] == {"name": "Yes", "px": 0.72}
+    assert row["kind"] == "rates"
+    assert "pct" not in row
+    assert "%" not in row["kind"]
 
 
 def test_compact_event_skips_closed():
@@ -89,6 +109,64 @@ def test_compact_event_keeps_real_fifty_fifty_book():
     ]
 
 
+def test_compact_event_kind_from_title_question():
+    book = {
+        "outcomes": '["Yes", "No"]',
+        "outcomePrices": '["0.4", "0.6"]',
+    }
+    earn = compact_event({
+        "title": "Nvidia Q2 earnings",
+        "slug": "nvda-earn",
+        "markets": [{**book, "question": "Will Nvidia beat EPS?"}],
+    })
+    assert earn["kind"] == "earnings"
+
+    company = compact_event({
+        "title": "Will Nvidia be the largest company?",
+        "slug": "nvda-mcap",
+        "markets": [{**book, "question": "Highest market cap?"}],
+    })
+    assert company["kind"] == "company"
+
+    index = compact_event({
+        "title": "S&P 500 year end",
+        "slug": "spx-ye",
+        "markets": [{**book, "question": "Will the S&P 500 close above 6000?"}],
+    })
+    assert index["kind"] == "index"
+
+    other = compact_event({
+        "title": "World Cup winner",
+        "slug": "wc",
+        "markets": [{**book, "question": "Will Brazil win the World Cup?"}],
+    })
+    assert other["kind"] == "other"
+
+
+def test_related_search_set_nvda_includes_earnings_not_fed():
+    fan = related_search_set(["NVDA"], "")
+    assert "Nvidia" in fan
+    assert "Nvidia earnings" in fan
+    assert "NVDA" not in fan
+    assert "Fed" not in fan
+    assert "CPI" not in fan
+    assert "SPY" not in fan
+    assert all("S&P" not in q for q in fan)
+
+
+def test_related_search_set_empty_does_not_invent_spy():
+    assert related_search_set([], "") == []
+    assert related_search_set([], "  ") == []
+
+
+def test_related_search_set_index_can_include_macro():
+    fan = related_search_set(["SPY"], "")
+    assert "S&P 500" in fan
+    assert "S&P 500 earnings" in fan
+    assert "Fed" in fan
+    assert "CPI" in fan
+
+
 @pytest.mark.asyncio
 async def test_fetch_odds_no_query_does_not_invent_spy():
     class Boom:
@@ -98,32 +176,54 @@ async def test_fetch_odds_no_query_does_not_invent_spy():
     out = await fetch_odds(client=Boom())
     assert out["events"] == []
     assert out["searched"] == []
+    assert out["related_queries"] == []
+    assert out["note"] == "no_query"
     assert out["use"] == "crowd_odds_not_send_geometry"
     assert "SPY" not in str(out)
     assert "S&P" not in str(out)
 
 
 @pytest.mark.asyncio
+async def test_fetch_odds_nvda_fans_earnings_not_index_tape():
+    seen: list[str] = []
+    out = await fetch_odds(symbols=["NVDA"], client=_client(seen))
+    assert "Nvidia" in out["searched"]
+    assert "Nvidia earnings" in out["searched"]
+    assert seen == out["searched"]
+    assert "Fed" not in out["searched"]
+    assert "CPI" not in out["searched"]
+    assert "SPY" not in out["searched"]
+    assert "S&P" not in str(out["searched"])
+    assert "NVDA" in out["related_queries"]
+    assert "SPY" not in out["related_queries"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_odds_positions_still_search():
     seen: list[str] = []
-
-    class Client:
-        async def get(self, url, params=None):
-            seen.append(str((params or {}).get("q") or ""))
-
-            class Resp:
-                def raise_for_status(self):
-                    return None
-
-                def json(self):
-                    return {"events": []}
-
-            return Resp()
-
     out = await fetch_odds(
         positions=[{"symbol": "QQQ", "quantity": 1}],
-        client=Client(),
+        client=_client(seen),
     )
-    assert seen == ["Nasdaq"]
-    assert out["searched"] == ["Nasdaq"]
+    assert "Nasdaq" in seen
+    assert "Nasdaq" in out["searched"]
+    assert any("earnings" in q.lower() for q in out["searched"])
+    assert seen == out["searched"]
     assert out["events"] == []
+    assert "SPY" not in out["searched"]
+    assert "S&P" not in str(out["searched"])
+
+
+@pytest.mark.asyncio
+async def test_fetch_odds_overflow_earnings_go_to_related_queries():
+    seen: list[str] = []
+    out = await fetch_odds(
+        symbols=["NVDA", "AAPL", "MSFT", "TSLA"],
+        client=_client(seen),
+    )
+    assert out["searched"] == ["Nvidia", "Apple", "Microsoft", "Tesla"]
+    assert any(q.endswith("earnings") for q in out["related_queries"])
+    assert "Nvidia earnings" in out["related_queries"]
+    assert seen == out["searched"]
+    assert "SPY" not in out["searched"]
+    assert "Fed" not in out["searched"]
