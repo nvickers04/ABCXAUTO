@@ -23,14 +23,14 @@ the type entry it is supposed to improve â€” promoting what it learned is a
 within one stanza, not a join across two lists. Card identity is therefore
 ``(type, name)``, not a bare name.
 
-The clerk's job is attribution, not authorship: ``send`` must name a card under
-the type it is sending (new risk only â€” exits are never blocked), every
-dispatched ticket is tagged, and each card is scored on its own resolved
-trades. Operator flattens, panic, and halt exits are tracked but kept out of
-the graduation math â€” an interrupted trade is neither proof nor falsification.
-A card graduates when it meets *its own* declared sample with positive resolved
-edge; only graduated cards, inside their pruned type stanzas, reach
-``playbook_live.json``.
+The clerk's job is attribution, not authorship: a named ``params.card`` tags
+the fill so the card is scored on its own resolved trades, but a missing card
+is not a refuse. Notebook prose is not a send gate. Operator flattens, panic,
+and halt exits are tracked but kept out of the graduation math — an interrupted
+trade is neither proof nor falsification. A card graduates when it meets *its
+own* declared sample with positive resolved edge; only graduated cards, inside
+their pruned type stanzas, reach ``playbook_live.json``. Live new risk still
+needs that promoted snapshot.
 
 A flat top-level ``cards`` list is still accepted on a write and is still
 *projected* on a read for the cockpit and older callers, but the tree is the
@@ -2003,84 +2003,12 @@ def new_risk_card_error(
     type: str = "",
     book: dict[str, Any] | None = None,
 ) -> str:
-    """Clerk gate on new risk. Empty string means this ticket may go.
+    """No-op. Playbook is a notebook — clerk does not gate send on a card name.
 
-    A card's identity is ``(type, name)``, so the ticket being sent has to be
-    the trunk the card branches from. ``type`` is the strategy on the send;
-    empty means "look the name up anywhere", which is what an ad-hoc caller
-    without a ticket gets.
-
-    Exits, protection, closes, modifies and cancels never reach here â€”
-    ``is_new_risk`` is False for them, and that invariant is what keeps a
-    tripped or retired card manageable instead of stranded.
+    A named ``params.card`` still tags the fill for attribution. Missing,
+    unknown, retired, tripped, or unfiled names are not a refuse. Live new
+    risk is ``live_new_risk_allowed`` (promoted book), not this function.
     """
-    paper = is_paper()
-    state = book if isinstance(book, dict) else (load_lab() if paper else load_live())
-    pairs = walk_cards(state)
-    sending = str(type or "").strip().lower()
-    want = str(card or "").strip()
-    if not want:
-        if sending:
-            return (
-                f"new risk requires params.card naming a card under TYPE {sending}; "
-                f"cards under {sending}: {_cards_under_blob(pairs, sending)}"
-            )
-        return (
-            "new risk requires params.card naming a playbook card; "
-            f"cards: {_card_names_blob([str(c.get('name')) for _t, c in pairs])}"
-        )
-    hits = [(t, c) for t, c in pairs if str(c.get("name") or "").lower() == want.lower()]
-    if not hits:
-        return (
-            f"new risk card {want!r} is not on the playbook; "
-            f"cards under {sending or 'any type'}: {_cards_under_blob(pairs, sending)}"
-        )
-    if sending:
-        under = [(t, c) for t, c in hits if t == sending]
-        if not under:
-            homes = ", ".join(sorted({t or "unfiled" for t, _c in hits}))
-            return (
-                f"card {want!r} lives under TYPE {homes}, not {sending} — send it "
-                f"as {homes} or write it under {sending} "
-                f"(cards under {sending}: {_cards_under_blob(pairs, sending)})"
-            )
-        hits = under
-    elif len(hits) > 1:
-        homes = ", ".join(sorted({t or "unfiled" for t, _c in hits}))
-        return (
-            f"card {want!r} exists under TYPE {homes} — name the type by sending "
-            "that ticket so the trade is attributed to one card"
-        )
-    card_type, match = hits[0]
-    label = f"{match.get('name')!r} under TYPE {card_type or 'unfiled'}"
-    if not card_type:
-        return (
-            f"card {label} has no parent order type — nest it under the type it "
-            "sends before taking risk on it"
-        )
-    if match.get("status") == "retired":
-        return (
-            f"card {label} is retired — no new risk on it (exits are never "
-            f"blocked); cards under {card_type}: {_cards_under_blob(pairs, card_type)}"
-        )
-    key = card_key(card_type, match.get("name"))
-    facts = next(
-        (r for r in card_facts(state) if card_key(r.get("type"), r.get("card")) == key),
-        {},
-    )
-    if facts.get("tripped"):
-        return (
-            f"card {label} tripped its declared retire_if "
-            f"({facts.get('trip_reason')}) — rewrite or retire it "
-            "(exits are never blocked)"
-        )
-    if not paper:
-        grads = graduated_card_names(state)
-        if str(match.get("name")) not in grads:
-            return (
-                f"live new risk must cite a graduated card; "
-                f"graduated: {_card_names_blob(grads)}"
-            )
     return ""
 
 
@@ -3026,45 +2954,7 @@ def live_card_session_error(
     session: Any = None,
     book: dict[str, Any] | None = None,
 ) -> str:
-    """New risk that misses the written hold / gap is not that card."""
-    card_name = ""
-    if isinstance(params, dict):
-        card_name = str(params.get("card") or "")
-    needs = live_card_needs_session(book, card=card_name)
-    min_gap = live_card_min_gap_pct(book, card=card_name)
-    if not needs and not min_gap:
-        return ""
-    src = params if isinstance(params, dict) else {}
-    if needs:
-        try:
-            from abcxauto.structure_grade import session_usable
-
-            usable = session_usable(session)
-        except Exception:
-            usable = False
-        if not usable:
-            if src.get("stop_price") in (None, "") or src.get("target_price") in (
-                None,
-                "",
-            ):
-                return "card needs today's session — candles first"
-        elif isinstance(session, dict):
-            direction = str(
-                src.get("direction")
-                or live_card_send_facts(book).get("direction")
-                or "LONG"
-            ).upper()
-            if direction != "SHORT" and session.get("above_low") is False:
-                return "card off — last not above opening low"
-            if (
-                direction != "SHORT"
-                and live_card_needs_hold_above_open(book, card=card_name)
-                and session.get("above_open") is False
-            ):
-                return "card off — last not above the open"
-    mag = _session_gap_mag(session)
-    if min_gap and mag is not None and mag + 1e-9 < min_gap:
-        return f"card off — gap under {min_gap:g}%"
+    """No-op. Card prose is a notebook, not a hold / gap / candles send gate."""
     return ""
 
 
@@ -3327,24 +3217,7 @@ def live_card_book_error(
     positions: Any = None,
     book: dict[str, Any] | None = None,
 ) -> str:
-    """New risk that pyramids or adds a second name is not that card."""
-    src = params if isinstance(params, dict) else {}
-    row = _testing_card(book, src.get("card"))
-    shape = str((row or {}).get("shape") or "") or _live_card_prose(book, ("shape",))
-    no_add = bool(_CARD_NO_ADD_RE.search(shape))
-    one_name = bool(_CARD_ONE_NAME_RE.search(shape))
-    if not no_add and not one_name:
-        return ""
-    lots = _open_stk_symbols(positions)
-    if not lots:
-        return ""
-    sym = str(src.get("symbol") or "").upper()
-    if no_add and sym and sym in lots:
-        return f"card off — no add {sym}"
-    if one_name:
-        others = [name for name in lots if name != sym]
-        if others:
-            return f"card off — one name (open {others[0]})"
+    """No-op. Card prose is a notebook, not a no-add / one-name send gate."""
     return ""
 
 
@@ -3375,36 +3248,7 @@ def live_card_tape_error(
     snap: dict[str, Any] | None = None,
     book: dict[str, Any] | None = None,
 ) -> str:
-    """New risk that misses the written tape floors is not that card."""
-    src = params if isinstance(params, dict) else {}
-    sym = str(src.get("symbol") or "").upper()
-    card = str(src.get("card") or live_card_send_facts(book).get("card") or "").strip()
-    constraints = live_card_scan_constraints(book, card=card)
-    min_px = constraints.get("min_price")
-    last = None
-    if isinstance(session, dict):
-        last = session.get("last")
-    if last is None:
-        last = ibkr_live_last(sym, snap=snap)
-    if min_px and last is not None:
-        try:
-            if float(last) + 1e-9 < float(min_px):
-                return f"card off — last under ${float(min_px):g}"
-        except (TypeError, ValueError):
-            pass
-    if live_card_needs_no_reentry(book, card=card) and card_sent_symbol_today(card, sym):
-        return f"card off — already sent {sym} today"
-    if live_card_needs_tight_spread(book, card=card):
-        width = _spread_width(session, snap, sym)
-        stop = src.get("stop_price")
-        if stop in (None, "") and isinstance(session, dict):
-            stop = session.get("low")
-        if width is not None and last is not None and stop not in (None, ""):
-            try:
-                if width + 1e-9 >= abs(float(last) - float(stop)):
-                    return "card off — live spread wider than the stop"
-            except (TypeError, ValueError):
-                pass
+    """No-op. Card prose is a notebook, not a price / spread / reentry send gate."""
     return ""
 
 

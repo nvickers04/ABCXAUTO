@@ -540,21 +540,15 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
                 "status": "blocked",
                 "note": f"structure cooldown {sym}: {why}",
             }
-        from abcxauto.lab_playbook import live_new_risk_allowed, new_risk_card_error
+        from abcxauto.lab_playbook import live_new_risk_allowed
 
         if not live_new_risk_allowed():
             return BLOCKED_STRAT, {
                 "status": "blocked",
                 "note": "live follower — no promoted paper playbook (no new risk)",
             }
-        # Attribution is a gate: an untagged entry scores as whole-book drift,
-        # which is the same number for every card and teaches nothing. The
-        # ticket being sent is the trunk, so the card has to branch from it.
-        card_note = new_risk_card_error(
-            params.get("card") or act.get("card"), type=strat
-        )
-        if card_note:
-            return BLOCKED_STRAT, {"status": "blocked", "note": card_note}
+        # Paper notebook is not a send gate. live_new_risk_allowed is the
+        # live follower lock (promoted book), not a card-name or card-prose check.
     return strat, None
 
 
@@ -606,38 +600,6 @@ async def execute_ticket(
         apply_hunt_send_sketch(act, snap)
     except Exception:
         logger.debug("hunt send sketch apply failed", exc_info=True)
-    try:
-        from abcxauto.lab_playbook import live_card_session_error
-
-        params = act.get("params") if isinstance(act.get("params"), dict) else {}
-        store = snap.get("session_range") if isinstance(snap, dict) else None
-        session = None
-        if isinstance(store, dict):
-            sym = str(params.get("symbol") or "").upper()
-            row = store.get(sym) if sym else None
-            if isinstance(row, dict):
-                session = row
-            elif not sym:
-                for rng in store.values():
-                    if isinstance(rng, dict) and rng.get("today") is True:
-                        session = rng
-                        break
-        sess_note = ""
-        if is_new_risk(asked, params):
-            sess_note = live_card_session_error(params, session)
-            if not sess_note:
-                from abcxauto.lab_playbook import live_card_book_error, live_card_tape_error
-
-                sess_note = live_card_book_error(params, positions)
-                if not sess_note:
-                    sess_note = live_card_tape_error(params, session, snap)
-        if sess_note:
-            act["strategy"] = act["action"] = BLOCKED_STRAT
-            act["rationale"] = sess_note
-            _record_clerk_block(act, asked, sess_note, stage="card_session")
-            return {"status": "blocked", "note": sess_note}
-    except Exception:
-        logger.debug("card session gate failed", exc_info=True)
     strat, forced = gate_ticket(act, world)
     if forced is not None:
         act["strategy"] = act["action"] = BLOCKED_STRAT

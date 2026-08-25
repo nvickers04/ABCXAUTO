@@ -7,10 +7,11 @@
 A card's position *is* its ticket, so identity is ``(type, name)`` and a winning
 card sits inside the type entry it is supposed to improve.
 
-The clerk's half is attribution: new risk must name a card under the type being
-sent, every dispatched ticket is tagged, and a card is scored on the trades that
-actually resolved. An operator flatten or a halt exit is real P&L but not
-evidence, so it never advances a card toward live money.
+The clerk's half is attribution: a named ``params.card`` tags the fill so the
+card is scored on the trades that actually resolved. A missing card is not a
+refuse — the lab playbook is a notebook, not a send gate. An operator flatten
+or a halt exit is real P&L but not evidence, so it never advances a card toward
+live money. Live new risk still needs a promoted snapshot.
 """
 
 from __future__ import annotations
@@ -507,75 +508,68 @@ def test_missing_declaration_is_surfaced_not_rejected():
     assert "retire_if" not in card
 
 
-# --- the new-risk card gate ---------------------------------------------------
+# --- the new-risk card gate is not a send gate --------------------------------
 
 
-def test_new_risk_without_a_card_is_blocked_and_names_the_cards_under_that_type():
+def test_paper_new_risk_without_a_card_is_not_a_notebook_block():
+    """Paper 7497: Grok owns the ticket. Missing params.card is not a refuse."""
     _save(market_bracket=[_card("flush bounce"), _card("gap fade")])
     strat, forced = gate_ticket(_entry(), _world())
-    assert strat == "blocked"
-    note = str((forced or {}).get("note") or "")
-    assert note.startswith(
-        "new risk requires params.card naming a card under TYPE market_bracket; "
-        "cards under market_bracket: "
-    )
-    assert "flush bounce" in note
-    assert "gap fade" in note
+    assert forced is None, forced
+    assert strat == "market_bracket"
+    assert new_risk_card_error("") == ""
+    assert new_risk_card_error("", type="market_bracket") == ""
 
 
-def test_new_risk_points_at_the_right_trunk_when_the_cards_are_elsewhere():
+def test_paper_new_risk_does_not_care_which_trunk_holds_the_cards():
     _save(vertical_spread=[_card("post-earnings IV crush")])
     strat, forced = gate_ticket(_entry(), _world())
-    assert strat == "blocked"
-    note = str((forced or {}).get("note") or "")
-    assert "cards under market_bracket: none (elsewhere: " in note
-    assert "post-earnings IV crush [vertical_spread]" in note
+    assert forced is None, forced
+    assert strat == "market_bracket"
+    assert new_risk_card_error("post-earnings IV crush", type="market_bracket") == ""
 
 
-def test_new_risk_names_no_cards_when_the_book_is_empty():
-    assert "write_lab_playbook first" in new_risk_card_error("")
-    assert "write_lab_playbook first" in new_risk_card_error("", type="market_bracket")
+def test_new_risk_card_error_is_a_noop_even_when_the_book_is_empty():
+    assert new_risk_card_error("") == ""
+    assert new_risk_card_error("", type="market_bracket") == ""
+    assert new_risk_card_error("moon shot", type="market_bracket") == ""
+    assert new_risk_card_error("homeless") == ""
 
 
-def test_new_risk_with_a_live_card_passes_the_gate():
+def test_new_risk_with_a_named_card_still_passes():
     _save(market_bracket=[_card("flush bounce")])
     strat, forced = gate_ticket(_entry("flush bounce"), _world())
     assert forced is None, forced
     assert strat == "market_bracket"
-    # Case and padding are not the point of the gate.
     assert new_risk_card_error("  FLUSH Bounce ", type="market_bracket") == ""
 
 
-def test_unknown_card_name_is_blocked_with_the_real_names():
+def test_unknown_card_name_is_not_a_send_block():
     _save(market_bracket=[_card("flush bounce")])
-    note = new_risk_card_error("moon shot", type="market_bracket")
-    assert "'moon shot' is not on the playbook" in note
-    assert "flush bounce" in note
+    assert new_risk_card_error("moon shot", type="market_bracket") == ""
+    strat, forced = gate_ticket(_entry("moon shot"), _world())
+    assert forced is None, forced
+    assert strat == "market_bracket"
 
 
-def test_a_card_under_another_type_cannot_be_sent_as_this_one():
-    """The ripple of nesting: the ticket has to be the trunk the card grew on."""
+def test_a_card_under_another_type_is_not_a_send_block():
+    """Notebook nesting is attribution, not a clerk refuse."""
     _save(
         market_bracket=[_card("flush bounce")],
         vertical_spread=[_card("post-earnings IV crush")],
     )
     strat, forced = gate_ticket(_entry("post-earnings IV crush"), _world())
-    assert strat == "blocked"
-    note = str((forced or {}).get("note") or "")
-    assert "lives under TYPE vertical_spread, not market_bracket" in note
-    assert "send it as vertical_spread" in note
-    # And it goes through fine on its own ticket.
+    assert forced is None, forced
+    assert strat == "market_bracket"
     assert new_risk_card_error("post-earnings IV crush", type="vertical_spread") == ""
 
 
-def test_an_ambiguous_bare_name_asks_for_the_type():
+def test_an_ambiguous_bare_name_is_not_a_send_block():
     _save(
         market_bracket=[_card("earnings flush")],
         vertical_spread=[_card("earnings flush")],
     )
-    note = new_risk_card_error("earnings flush")
-    assert "exists under TYPE market_bracket, vertical_spread" in note
-    # Sending the ticket disambiguates it.
+    assert new_risk_card_error("earnings flush") == ""
     assert new_risk_card_error("earnings flush", type="market_bracket") == ""
 
 
@@ -637,13 +631,12 @@ def test_exits_are_not_gated_even_when_the_tree_is_empty():
     assert forced is None
 
 
-def test_retired_card_cannot_open_but_its_lot_can_still_be_exited():
+def test_retired_card_is_not_a_send_block_and_its_lot_can_still_be_exited():
     _save(market_bracket=[_card("flush bounce", status="retired")])
     strat, forced = gate_ticket(_entry("flush bounce"), _world())
-    assert strat == "blocked"
-    note = str((forced or {}).get("note") or "")
-    assert "retired" in note
-    assert "under TYPE market_bracket" in note
+    assert forced is None, forced
+    assert strat == "market_bracket"
+    assert new_risk_card_error("flush bounce", type="market_bracket") == ""
     exit_strat, exit_forced = gate_ticket(
         {
             "action": "market_order",
@@ -662,7 +655,7 @@ def test_retired_card_cannot_open_but_its_lot_can_still_be_exited():
     assert exit_forced is None
 
 
-def test_tripped_card_cannot_open_but_can_still_be_exited(monkeypatch):
+def test_tripped_card_is_not_a_send_block_and_can_still_be_exited(monkeypatch):
     _save(market_bracket=[_card("flush bounce")])
     monkeypatch.setattr(
         "abcxauto.lab_playbook.card_facts",
@@ -676,10 +669,9 @@ def test_tripped_card_cannot_open_but_can_still_be_exited(monkeypatch):
         ],
     )
     strat, forced = gate_ticket(_entry("flush bounce"), _world())
-    assert strat == "blocked"
-    note = str((forced or {}).get("note") or "")
-    assert "tripped its declared retire_if" in note
-    assert "declared sample 3" in note
+    assert forced is None, forced
+    assert strat == "market_bracket"
+    assert new_risk_card_error("flush bounce", type="market_bracket") == ""
     close_strat, close_forced = gate_ticket(
         {
             "action": "close_option",
@@ -1380,11 +1372,14 @@ def test_live_snapshot_holds_only_graduated_cards_inside_their_types(monkeypatch
     assert "condor grind" not in json.dumps(on_disk)
 
 
-def test_live_new_risk_needs_a_graduated_card_and_must_cite_it(monkeypatch):
+def test_live_new_risk_needs_a_promoted_book_not_a_cited_card(monkeypatch):
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     from abcxauto.lab_playbook import live_new_risk_allowed
 
     assert live_new_risk_allowed() is False
+    strat, forced = gate_ticket(_entry(), _world())
+    assert strat == "blocked"
+    assert "promoted paper playbook" in str((forced or {}).get("note") or "")
 
     assert load_live() == {}  # nothing promoted yet
 
@@ -1402,10 +1397,13 @@ def test_live_new_risk_needs_a_graduated_card_and_must_cite_it(monkeypatch):
         },
     )
     assert live_new_risk_allowed() is True
+    # Citing a card is optional even on live once a promoted book exists.
     assert new_risk_card_error("flush bounce", type="market_bracket") == ""
-    note = new_risk_card_error("condor grind", type="iron_condor")
-    assert "must cite a graduated card" in note
-    assert "flush bounce" in note
+    assert new_risk_card_error("condor grind", type="iron_condor") == ""
+    assert new_risk_card_error("") == ""
+    named, named_forced = gate_ticket(_entry(), _world())
+    assert named_forced is None, named_forced
+    assert named == "market_bracket"
 
 
 def test_a_promoted_snapshot_with_no_graduated_card_does_not_unlock_live(monkeypatch):
@@ -1497,13 +1495,14 @@ def test_revision_1_cards_migrate_into_the_tree_untouched():
     assert flush["needs_thesis"] is True
     assert flush["tripped"] is False
     assert flush["graduated"] is False
-    # The undeclared card can still open risk on its own ticket.
+    # The undeclared card can still open risk on its own ticket; naming it
+    # is attribution, not a clerk refuse.
     assert new_risk_card_error(
         "mega-cap earnings-flush bounce", type="market_bracket"
     ) == ""
-    assert "retired" in new_risk_card_error(
+    assert new_risk_card_error(
         "naked / short-dated option spray", type="buy_option"
-    )
+    ) == ""
 
 
 def test_migration_never_drops_a_card_it_cannot_file():
@@ -1524,10 +1523,10 @@ def test_migration_never_drops_a_card_it_cannot_file():
     assert [c["name"] for c in type_cards(lab["types"], "market_bracket")] == ["filed"]
     assert [c["name"] for c in lab["unfiled_cards"]] == ["homeless"]
     assert lab["unfiled_cards"][0]["note"] == "keep me"
-    # It is visible in the render and in the scores, but it cannot take risk.
+    # It is visible in the render and in the scores. Unfiled is not a send gate.
     assert "UNFILED" in notebook_text(lab)
     assert {r["card"] for r in card_facts(lab)} == {"filed", "homeless"}
-    assert "no parent order type" in new_risk_card_error("homeless")
+    assert new_risk_card_error("homeless") == ""
 
 
 def test_legacy_type_schema_echo_is_dropped_on_read():
@@ -1796,7 +1795,7 @@ def test_run_sheet_follows_parent_tool_order_instead_of_rescan():
     from abcxauto.lab_playbook import live_card_needs_session, live_card_session_error
 
     assert live_card_needs_session() is True
-    assert "candles" in live_card_session_error({"card": "flush bounce"})
+    assert live_card_session_error({"card": "flush bounce"}) == ""
     assert live_card_session_error(
         {"stop_price": 88.0, "target_price": 93.0},
         {"low": 88.0, "today": True},
@@ -2195,10 +2194,10 @@ def test_hunt_send_sketch_skips_a_name_sitting_on_the_opening_low():
     )
     assert sheets[0]["next"] == "candles"
     assert sheets[0]["above_low"] is False
-    assert "opening low" in live_card_session_error(
+    assert live_card_session_error(
         {"card": "flush bounce", "direction": "LONG"},
         store["SNDK"],
-    )
+    ) == ""
     assert live_card_session_error(
         {"card": "flush bounce", "direction": "LONG"},
         store["MU"],
@@ -2232,10 +2231,10 @@ def test_hunt_send_sketch_skips_a_name_still_under_the_open():
         }
     }
     assert hunt_send_sketch(store) is None
-    assert "not above the open" in live_card_session_error(
+    assert live_card_session_error(
         {"card": "flush bounce", "direction": "LONG"},
         store["SNDK"],
-    )
+    ) == ""
 
 
 def test_hunt_send_sketch_skips_a_gap_under_the_written_floor():
@@ -2300,10 +2299,10 @@ def test_hunt_send_sketch_skips_a_gap_under_the_written_floor():
     )
     assert "gate=off" in bit
     assert "next=send" not in bit
-    assert "gap under 6%" in live_card_session_error(
+    assert live_card_session_error(
         {"card": "flush bounce", "direction": "LONG"},
         store["MU"],
-    )
+    ) == ""
     assert live_card_session_error(
         {"card": "flush bounce", "direction": "LONG"},
         store["SNDK"],
@@ -2400,10 +2399,10 @@ def test_sibling_cards_bind_gap_and_sketch_to_card_name():
         "retrace_30": 137.7,
         "retrace_50": 138.8,
     }
-    assert "gap under 6%" in live_card_session_error(
+    assert live_card_session_error(
         {"card": "flush bounce", "direction": "LONG"},
         alb,
-    )
+    ) == ""
     assert live_card_session_error(
         {"card": "3pct gap hold", "direction": "LONG"},
         alb,
@@ -2495,10 +2494,10 @@ def test_live_card_scan_constraints_apply_written_floors():
     )
     assert [r["symbol"] for r in keep] == ["SNDK", "UNK"]
     assert dropped == ["AAOI"]
-    assert "last under $15" in live_card_tape_error(
+    assert live_card_tape_error(
         {"symbol": "AAOI"},
         {"today": True, "last": 12.0},
-    )
+    ) == ""
     cheap = {
         "AAOI": {
             "today": True,
@@ -2545,10 +2544,10 @@ def test_live_card_tape_blocks_wide_spread_and_same_session_reentry():
         "above_low": True,
         "open_gap_pct": -6.5,
     }
-    assert "spread wider than the stop" in live_card_tape_error(
+    assert live_card_tape_error(
         {"card": "flush bounce", "symbol": "SNDK", "stop_price": 88.0},
         wide,
-    )
+    ) == ""
     tight = dict(wide)
     tight.update({"bid": 91.45, "ask": 91.55, "spread": 0.10})
     assert live_card_tape_error(
@@ -2568,10 +2567,10 @@ def test_live_card_tape_blocks_wide_spread_and_same_session_reentry():
         result={"status": "ok"},
         params={"symbol": "SNDK", "card": "flush bounce"},
     )
-    assert "already sent SNDK today" in live_card_tape_error(
+    assert live_card_tape_error(
         {"card": "flush bounce", "symbol": "SNDK", "stop_price": 88.0},
         tight,
-    )
+    ) == ""
     assert hunt_send_sketch({
         "SNDK": {
             **tight,
@@ -2580,7 +2579,7 @@ def test_live_card_tape_blocks_wide_spread_and_same_session_reentry():
     }) is None
 
 
-def test_live_card_book_error_blocks_pyramid_and_a_second_name():
+def test_live_card_book_error_is_not_a_send_gate():
     from abcxauto.lab_playbook import live_card_book_error, playbook_run_sheets
 
     _save(
@@ -2593,15 +2592,10 @@ def test_live_card_book_error_blocks_pyramid_and_a_second_name():
             ]
         }
     )
+    lots = [{"symbol": "SNDK", "sec_type": "STK", "quantity": 10}]
     assert live_card_book_error({"symbol": "SNDK"}, []) == ""
-    assert "no add SNDK" in live_card_book_error(
-        {"symbol": "SNDK"},
-        [{"symbol": "SNDK", "sec_type": "STK", "quantity": 10}],
-    )
-    assert "one name (open SNDK)" in live_card_book_error(
-        {"symbol": "MU"},
-        [{"symbol": "SNDK", "sec_type": "STK", "quantity": 10}],
-    )
+    assert live_card_book_error({"symbol": "SNDK"}, lots) == ""
+    assert live_card_book_error({"symbol": "MU"}, lots) == ""
     sheets = playbook_run_sheets(
         load_lab(),
         tool_trace=["book", "scan", "news", "quote", "candles"],
@@ -2622,10 +2616,13 @@ def test_live_card_book_error_blocks_pyramid_and_a_second_name():
                 },
             }
         },
-        positions=[{"symbol": "SNDK", "sec_type": "STK", "quantity": 10}],
+        positions=lots,
     )
-    assert sheets[0].get("gate") == "off"
-    assert "send" not in sheets[0]
+    # Hunt sketch is a notebook suggestion. Card prose cannot hide it.
+    assert sheets[0].get("gate") != "off" or "send" in sheets[0]
+    assert live_card_book_error(
+        sheets[0].get("send") or {"symbol": "MU"}, lots, load_lab()
+    ) == ""
 
 
 def test_ibkr_live_last_reads_scan_rows_without_quote_map():
