@@ -128,7 +128,7 @@ def check_live_geometry(
     """Return (ok, reason_code, human_message).
 
     Grok's prices are never rewritten — only accepted or rejected.
-    posture bands fill omitted stops; they are not a send reject.
+    Omitted stop/target stay omitted; posture bands are not a fill.
     New risk must use IBKR live last — a Grok price_hint is not that print.
     A stop pinned to this look's session low/high is the tape, not a % gate.
     """

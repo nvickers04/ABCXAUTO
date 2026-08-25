@@ -73,6 +73,8 @@ def test_format_order_examples():
     assert '"closing_position":true' in text
     assert "Never close_option / oca / trailing a combo leg" in text
     assert "Clerk will not invent the close price" in text
+    assert "Clerk will not invent omitted stop/target/qty" in text
+    assert "Clerk fills missing" not in text
     assert "price_hint" not in text
     assert "ratio_spread close:" not in text
     assert "jade_lizard close:" not in text

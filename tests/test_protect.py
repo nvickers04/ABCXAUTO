@@ -1,4 +1,4 @@
-"""Clerk completes missing protection; never rewrites Grok's prices."""
+"""Clerk must not invent omitted ticket fields; last-stop cover stays locked."""
 
 from __future__ import annotations
 
@@ -16,10 +16,25 @@ from abcxauto.protect import (
 from abcxauto.structure_grade import check_live_geometry
 
 
+_TICKET_OWNED = (
+    "stop_price",
+    "target_price",
+    "entry_price",
+    "price_hint",
+    "quantity",
+)
+
+
 def _cfg(**kw):
     base = dict(max_risk_per_trade_pct=1.0, max_position_pct=20.0)
     base.update(kw)
     return SimpleNamespace(**base)
+
+
+def _assert_omitted(params: dict, *keys: str) -> None:
+    want = keys or _TICKET_OWNED
+    for key in want:
+        assert params.get(key) in (None, ""), key
 
 
 def test_promote_opening_market_order():
@@ -60,20 +75,23 @@ def test_fill_thin_long_bracket():
         "strategy": "market_bracket",
         "params": {"symbol": "SPY", "direction": "LONG"},
     }
+    snapshot = dict(act["params"])
     filled = fill_missing_protection(
         act, quote_last=500.0, equity=100_000.0, posture="balanced", cfg=_cfg()
     )
     p = act["params"]
-    assert "stop_price" in filled
-    assert "target_price" in filled
-    assert "quantity" in filled
-    assert p["stop_price"] < 500.0 < p["target_price"]
-    assert p["quantity"] >= 1
-    ok, code, _ = check_live_geometry(
+    assert filled == []
+    assert "_protection_filled" not in act
+    _assert_omitted(p)
+    # 1% balanced band around last would have been 495 / 505 — must not appear.
+    assert p.get("stop_price") != 495.0
+    assert p.get("target_price") != 505.0
+    assert p == snapshot
+    ok, _code, msg = check_live_geometry(
         "market_bracket", p, quote_last=500.0, posture="balanced"
     )
-    assert ok is True
-    assert code == "ok"
+    assert ok is False
+    assert "required" in msg
 
 
 def test_fill_does_not_rewrite_grok_prices():
@@ -95,9 +113,8 @@ def test_fill_does_not_rewrite_grok_prices():
     assert p["stop_price"] == 490.0
     assert p["target_price"] == 520.0
     assert p["quantity"] == 7
-    assert "stop_price" not in filled
-    assert "target_price" not in filled
-    assert "quantity" not in filled
+    assert filled == []
+    _assert_omitted(p, "entry_price", "price_hint")
 
 
 def test_fill_short_sides():
@@ -106,11 +123,14 @@ def test_fill_short_sides():
         "strategy": "market_bracket",
         "params": {"symbol": "SPY", "direction": "SHORT"},
     }
-    fill_missing_protection(
+    filled = fill_missing_protection(
         act, quote_last=500.0, equity=100_000.0, posture="balanced", cfg=_cfg()
     )
     p = act["params"]
-    assert p["target_price"] < 500.0 < p["stop_price"]
+    assert filled == []
+    _assert_omitted(p)
+    assert p.get("stop_price") != 505.0
+    assert p.get("target_price") != 495.0
 
 
 def test_fill_noop_without_quote():
@@ -120,7 +140,7 @@ def test_fill_noop_without_quote():
         "params": {"symbol": "SPY", "direction": "LONG"},
     }
     assert fill_missing_protection(act, quote_last=None, equity=100_000.0) == []
-    assert "stop_price" not in act["params"]
+    _assert_omitted(act["params"])
 
 
 def test_oca_qty_from_open_stock():
@@ -129,7 +149,7 @@ def test_oca_qty_from_open_stock():
         "strategy": "oca",
         "params": {"symbol": "IWM", "direction": "LONG"},
     }
-    fill_missing_protection(
+    filled = fill_missing_protection(
         act,
         quote_last=200.0,
         equity=50_000.0,
@@ -137,11 +157,27 @@ def test_oca_qty_from_open_stock():
         cfg=_cfg(),
         positions=[{"symbol": "IWM", "quantity": 12, "sec_type": "STK"}],
     )
-    assert act["params"]["quantity"] == 12
+    assert filled == []
+    assert act["params"].get("quantity") in (None, "")
+    _assert_omitted(act["params"])
+
+
+def test_fill_does_not_invent_entry_or_price_hint_from_quote():
+    act = {
+        "action": "bracket",
+        "strategy": "bracket",
+        "params": {"symbol": "SPY", "direction": "LONG", "quantity": 3},
+    }
+    filled = fill_missing_protection(
+        act, quote_last=500.0, equity=100_000.0, posture="balanced", cfg=_cfg()
+    )
+    assert filled == []
+    _assert_omitted(act["params"], "stop_price", "target_price", "entry_price", "price_hint")
+    assert act["params"]["quantity"] == 3
 
 
 @pytest.mark.asyncio
-async def test_execute_ticket_completes_thin_idea(monkeypatch):
+async def test_execute_ticket_refuses_thin_idea(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.world_state import WorldState
 
@@ -200,13 +236,148 @@ async def test_execute_ticket_completes_thin_idea(monkeypatch):
         "ibkr_live_quotes": {"SPY": 500.0},
     }
     result = await execute_ticket(act, object(), world, snap)
-    assert result.get("status") == "ok"
-    assert sent
-    ticket = sent[0]
-    assert ticket["strategy"] == "market_bracket"
-    p = ticket["params"]
-    assert p["stop_price"] < 500.0 < p["target_price"]
-    assert int(p["quantity"]) >= 1
+    assert result.get("status") == "blocked"
+    assert sent == []
+    p = act.get("params") or {}
+    _assert_omitted(p)
+    assert p.get("stop_price") != 495.0
+    assert p.get("quantity") not in (1, 2, 20, 40)
+
+
+def _stub_thin_send(monkeypatch) -> list[dict]:
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: SimpleNamespace(
+            is_paper=True,
+            trading_mode="paper",
+            max_risk_per_trade_pct=1.0,
+            max_position_pct=20.0,
+        ),
+    )
+    return sent
+
+
+def _flat_world(**kw):
+    from abcxauto.world_state import WorldState
+
+    fields = dict(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=100_000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    fields.update(kw)
+    return WorldState(**fields)
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_refuses_omitted_qty_when_size_would_fit(monkeypatch):
+    """Old fill would size qty from |last-stop| and 1% NL. Clerk must not."""
+    from abcxauto.agent_loop import execute_ticket
+
+    sent = _stub_thin_send(monkeypatch)
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {
+            "symbol": "SPY",
+            "direction": "LONG",
+            "stop_price": 490.0,
+            "target_price": 520.0,
+        },
+    }
+    result = await execute_ticket(
+        act,
+        object(),
+        _flat_world(),
+        {
+            "account": {"netliquidation": 100_000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {"SPY": 500.0},
+        },
+    )
+    assert result.get("status") == "blocked"
+    assert sent == []
+    p = act.get("params") or {}
+    assert p["stop_price"] == 490.0
+    assert p["target_price"] == 520.0
+    assert p.get("quantity") in (None, "")
+    assert p.get("price_hint") in (None, "")
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_refuses_omitted_stop_even_with_session_low(monkeypatch):
+    """Session low / 1% band must not complete a thin stop. Send is refused."""
+    from abcxauto.agent_loop import execute_ticket
+
+    sent = _stub_thin_send(monkeypatch)
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.apply_hunt_send_sketch",
+        lambda *_a, **_k: None,
+    )
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {
+            "symbol": "SNDK",
+            "direction": "LONG",
+            "quantity": 10,
+        },
+    }
+    result = await execute_ticket(
+        act,
+        object(),
+        _flat_world(net_liquidation=37000.0),
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {"SNDK": 91.5},
+            "session_range": {
+                "SNDK": {
+                    "today": True,
+                    "low": 88.0,
+                    "high": 92.0,
+                    "last": 91.5,
+                    "retrace_30": 93.0,
+                }
+            },
+        },
+    )
+    assert result.get("status") == "blocked"
+    assert sent == []
+    p = act.get("params") or {}
+    assert p["quantity"] == 10
+    assert p.get("stop_price") not in (88.0, 90.59)  # session low / ~1% band
+    assert p.get("target_price") not in (93.0, 92.41)
+    _assert_omitted(p, "stop_price", "target_price", "entry_price", "price_hint")
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +589,7 @@ async def test_execute_ticket_fills_omitted_fields_from_hunt_sketch(monkeypatch)
     assert "card=flush bounce" in str(sent[0].get("rationale") or "")
 
 
-def test_fill_uses_today_session_low_and_retrace():
+def test_fill_does_not_invent_from_today_session_low():
     act = {
         "action": "market_bracket",
         "strategy": "market_bracket",
@@ -438,19 +609,19 @@ def test_fill_uses_today_session_low_and_retrace():
         },
     )
     p = act["params"]
-    assert "stop_price" in filled
-    assert "target_price" in filled
-    assert p["stop_price"] == 88.0
-    assert p["target_price"] == 93.0
-    ok, code, _ = check_live_geometry(
+    assert filled == []
+    _assert_omitted(p)
+    assert p.get("stop_price") != 88.0
+    assert p.get("target_price") != 93.0
+    ok, _code, msg = check_live_geometry(
         "market_bracket",
         p,
         quote_last=91.5,
         posture="balanced",
         session={"low": 88.0, "high": 92.0, "today": True},
     )
-    assert ok is True
-    assert code == "ok"
+    assert ok is False
+    assert "required" in msg
 
 
 def test_fill_ignores_prior_day_session():
@@ -459,7 +630,7 @@ def test_fill_ignores_prior_day_session():
         "strategy": "market_bracket",
         "params": {"symbol": "SNDK", "direction": "LONG"},
     }
-    fill_missing_protection(
+    filled = fill_missing_protection(
         act,
         quote_last=91.5,
         equity=37000.0,
@@ -468,8 +639,10 @@ def test_fill_ignores_prior_day_session():
         session={"low": 88.0, "high": 92.0, "retrace_30": 93.0, "today": False},
     )
     p = act["params"]
-    assert p["stop_price"] != 88.0
-    assert p["target_price"] != 93.0
+    assert filled == []
+    _assert_omitted(p)
+    assert p.get("stop_price") != 88.0
+    assert p.get("target_price") != 93.0
 
 
 def test_size_if_stop_is_knob_math_not_a_ticket():
@@ -520,9 +693,8 @@ def test_gap_card_does_not_invent_a_percent_stop():
         posture="balanced",
         cfg=_cfg(),
     )
-    assert "stop_price" not in filled
-    assert "target_price" not in filled
-    assert act["params"].get("stop_price") in (None, "")
+    assert filled == []
+    _assert_omitted(act["params"])
 
 
 @pytest.mark.asyncio
