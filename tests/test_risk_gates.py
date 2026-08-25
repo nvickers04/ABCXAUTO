@@ -15,6 +15,7 @@ from abcxauto.risk_gates import (
     is_exit_or_management,
     reset_risk_gate,
     risk_base_usd,
+    sizing_floors_active,
     symbol_exposure_usd,
 )
 from tests.test_proposals import RATIONALE, VALID_PAYLOADS
@@ -326,6 +327,30 @@ def test_symbol_exposure_usd_fail_closed_on_nan_mark():
 
 
 @pytest.mark.asyncio
+async def test_live_port_paper_mode_still_enforces_concentration(monkeypatch):
+    """Live TWS port + TRADING_MODE paper must still apply the name cap."""
+    g = reset_risk_gate()
+    cfg = _cfg(
+        trading_mode="paper",
+        sizing_floors=False,
+        ibkr_port=7496,
+        max_position_pct=10.0,
+        max_symbol_concentration_pct=25.0,
+    )
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    order = _bracket(qty=80, entry=100.0, symbol="NVDA")
+    ok, _ = await g.pre_trade_check(order, FakeConnector())
+    assert ok is True
+
+    heavy = FakeConnector(positions=[_lot("NVDA", mv=20_000.0)])
+    ok, reason = await g.pre_trade_check(order, heavy)
+    assert ok is False
+    assert "size_symbol_concentration" in reason
+
+
+@pytest.mark.asyncio
 async def test_positions_error_dict_fail_closed(monkeypatch):
     g = reset_risk_gate()
     cfg = _cfg(max_position_pct=25.0, max_symbol_concentration_pct=25.0)
@@ -377,6 +402,26 @@ def test_risk_base_usd_is_full_net_liq():
     assert risk_base_usd(100_000.0) == 100_000.0
     assert risk_base_usd(1_000.0) == 1_000.0
     assert risk_base_usd(1_000_000.0) == 1_000_000.0
+
+
+def test_paper_ports_follow_sizing_floors_flag():
+    """7497 / 4002 stay clerk-controlled. Live send is not involved."""
+    for port in (7497, 4002):
+        off = _cfg(trading_mode="paper", sizing_floors=False, ibkr_port=port)
+        assert off.is_paper is True
+        assert sizing_floors_active(off) is False
+        on = _cfg(trading_mode="paper", sizing_floors=True, ibkr_port=port)
+        assert sizing_floors_active(on) is True
+
+
+def test_live_ports_force_floors_even_when_trading_mode_is_paper():
+    """7496 / 4001 are the live socket family — floors stay on. Send stays gated."""
+    for port in (7496, 4001):
+        cfg = _cfg(trading_mode="paper", sizing_floors=False, ibkr_port=port)
+        assert cfg.trading_mode == "paper"
+        assert cfg.sizing_floors is False
+        assert cfg.is_paper is False
+        assert sizing_floors_active(cfg) is True
 
 
 @pytest.mark.asyncio

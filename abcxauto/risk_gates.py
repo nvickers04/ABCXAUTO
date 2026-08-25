@@ -191,11 +191,29 @@ def risk_base_usd(net_liq: float, cfg: Any = None) -> float:
         return 0.0
 
 
+# TWS 7496 / Gateway 4001 — live socket family. Paper is 7497 / 4002.
+_LIVE_IBKR_PORTS = frozenset({7496, 4001})
+
+
 def sizing_floors_active(cfg: Any = None) -> bool:
-    """True when % size floors apply. Live always ON; paper follows clerk flag."""
+    """True when % size floors apply. Live always ON; paper follows clerk flag.
+
+    Live is ``trading_mode==live`` or a live-family port (TWS 7496 / Gateway
+    4001), or any config that already reports ``is_paper`` as false. A live
+    socket with ``TRADING_MODE`` still paper must not skip % floors. This does
+    not enable live send — only the size/loss breaker.
+    """
     c = cfg if cfg is not None else get_config()
     mode = str(getattr(c, "trading_mode", "paper") or "paper").strip().lower()
     if mode == "live":
+        return True
+    if getattr(c, "is_paper", None) is False:
+        return True
+    try:
+        port = int(getattr(c, "ibkr_port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if port in _LIVE_IBKR_PORTS:
         return True
     return bool(getattr(c, "sizing_floors", False))
 
