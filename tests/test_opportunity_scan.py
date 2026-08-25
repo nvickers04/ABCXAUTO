@@ -7,6 +7,7 @@ from abcxauto.config import (
     get_config,
 )
 from abcxauto.opportunity_scan import (
+    criteria_scan,
     metrics_for_symbol,
     normalize_tickers,
     reset_opportunity_cache,
@@ -285,6 +286,60 @@ def test_metrics_intraday_last_is_labeled():
     assert idea is not None
     assert idea["mda_last_is"] == "intrabar_close"
     assert idea["source"] == "mda"
+
+
+@pytest.mark.asyncio
+async def test_criteria_scan_index_etfs_is_not_catalog_dump():
+    """index_etfs has no IBKR spec — must not dump SPY/QQQ/IWM as a screen."""
+    out = await criteria_scan(arena="index_etfs", connector=None)
+    assert out.get("ok") is False
+    assert out.get("symbols") in (None, [])
+    assert out.get("hits") in (None, [])
+    for name in ("SPY", "QQQ", "IWM", "DIA"):
+        assert name not in (out.get("symbols") or [])
+        assert name not in str(out.get("hits") or [])
+    assert "catalog" in str(out.get("error") or "").lower() or "ibkr" in str(
+        out.get("error") or ""
+    ).lower()
+
+
+@pytest.mark.asyncio
+async def test_criteria_scan_industry_arena_not_catalog_even_with_connector():
+    class Conn:
+        connected = True
+
+    out = await criteria_scan(arena="technology", connector=Conn())
+    assert out.get("ok") is False
+    assert "AAPL" not in (out.get("symbols") or [])
+    assert "MSFT" not in (out.get("symbols") or [])
+    assert out.get("hits") in (None, [])
+
+
+@pytest.mark.asyncio
+async def test_criteria_scan_mega_cap_without_ibkr_does_not_dump_catalog():
+    out = await criteria_scan(arena="mega_cap", connector=None)
+    assert out.get("ok") is False
+    for name in ("AAPL", "MSFT", "NVDA", "AMZN"):
+        assert name not in (out.get("symbols") or [])
+
+
+@pytest.mark.asyncio
+async def test_criteria_scan_symbols_still_returns_asked_names():
+    out = await criteria_scan(symbols=["NVDA", "XLE"], connector=None)
+    assert out["ok"] is True
+    assert out["symbols"] == ["NVDA", "XLE"]
+    assert out["source"] == "symbols"
+
+
+@pytest.mark.asyncio
+async def test_criteria_scan_catalog_seed_does_not_quote(monkeypatch):
+    async def boom(*_a, **_k):
+        raise AssertionError("catalog seed must not start a quote sweep")
+
+    monkeypatch.setattr("abcxauto.opportunity_scan.attach_live_quotes", boom)
+    out = await criteria_scan(arena="index_etfs", connector=object())
+    assert out.get("ok") is False
+    assert "SPY" not in (out.get("symbols") or [])
 
 
 def test_session_range_from_live_open_at_the_bell():

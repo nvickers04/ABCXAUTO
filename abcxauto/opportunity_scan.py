@@ -331,6 +331,16 @@ async def criteria_scan(
         arena_id = pulled.get("arena_id")
         code_out = pulled.get("scan_code")
         applied = dict(pulled.get("applied") or applied)
+        # Catalog / MDA seed lists are not a screen. Empty IBKR already stays
+        # empty; a no-scanner arena must not dump SPY/QQQ/AAPL as hits.
+        if source == "mda_seed":
+            return {
+                "ok": False,
+                "error": "scan requires an IBKR arena | scan_code (catalog seed is not a screen)",
+                "arena": arena_id,
+                "scan_code": code_out,
+                "applied": applied,
+            }
     elif filt and (filt.get("applied") or filt.get("native") or filt.get("tags")):
         return {
             "ok": False,
