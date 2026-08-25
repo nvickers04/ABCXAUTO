@@ -733,6 +733,39 @@ def test_ensure_fills_hollow_legacy_marker(journal, tmp_path):
     assert nl == 35_000.0
 
 
+def test_record_fills_normalizes_aug19_spy11_plus_five_hours(journal, tmp_path):
+    """Replay: SPY 11 fill stored 23:13:02Z, dispatch 18:13:03Z."""
+    dispatch_ts = "2026-08-19T18:13:03.000Z"
+    pid = journal.record_proposal(
+        strategy="market_order", symbol="SPY", validation_ok=True, ts=dispatch_ts
+    )
+    journal.record_dispatch(
+        pid, True, {"success": True, "order_id": 11}, ts=dispatch_ts
+    )
+    assert journal.record_fills(
+        [
+            {
+                "ts": "2026-08-19T23:13:02.000Z",
+                "exec_id": "spy-11-aug19",
+                "order_id": 11,
+                "symbol": "SPY",
+                "side": "BOT",
+                "quantity": 1,
+                "price": 500.0,
+                "realized_pnl": 0.0,
+            }
+        ]
+    ) == 1
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        stored = conn.execute(
+            "SELECT ts FROM fills WHERE exec_id = 'spy-11-aug19'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert stored == "2026-08-19T18:13:02.000Z"
+
+
 def test_record_fills_normalizes_plus_five_hours_onto_dispatch_day(journal, tmp_path):
     """CDT +5h of 20:13Z is 01:13Z the next UTC day — wrong daily/session bucket."""
     dispatch_ts = "2026-08-19T20:13:03.000Z"
