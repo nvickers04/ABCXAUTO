@@ -682,6 +682,106 @@ def test_model_usage_round_trip_and_since(journal, tmp_path):
     assert rows[0][5] == 0.0123
 
 
+def test_ensure_model_session_does_not_stamp_without_nl(journal, tmp_path):
+    """Headless/boot used to persist NL=None at 2026-08-19T12:50:52Z."""
+    assert journal.ensure_model_session(
+        "grok-4.6", ts="2026-08-19T12:50:52.000Z"
+    ) is None
+    assert journal.last_session_marker() is None
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM session_markers").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0
+
+    journal.record_snapshot(
+        account={"NetLiquidation": 35_000.0, "DailyPnL": 0.0},
+        ts="2026-08-19T12:51:00.000Z",
+    )
+    last = journal.last_session_marker()
+    assert last == {
+        "ts": "2026-08-19T12:50:52.000Z",
+        "model": "grok-4.6",
+        "net_liquidation": 35_000.0,
+    }
+
+
+def test_ensure_fills_hollow_legacy_marker(journal, tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        conn.execute(
+            "INSERT INTO session_markers (ts, model, net_liquidation) VALUES (?, ?, ?)",
+            ("2026-08-19T12:50:52.000Z", "grok-4.6", None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    filled = journal.ensure_model_session("grok-4.6", net_liquidation=35_000.0)
+    assert filled == {
+        "ts": "2026-08-19T12:50:52.000Z",
+        "model": "grok-4.6",
+        "net_liquidation": 35_000.0,
+    }
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM session_markers").fetchone()[0]
+        nl = conn.execute("SELECT net_liquidation FROM session_markers").fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1
+    assert nl == 35_000.0
+
+
+def test_record_fills_normalizes_plus_five_hours_onto_dispatch_day(journal, tmp_path):
+    """CDT +5h of 20:13Z is 01:13Z the next UTC day — wrong daily/session bucket."""
+    dispatch_ts = "2026-08-19T20:13:03.000Z"
+    pid = journal.record_proposal(
+        strategy="market_order", symbol="SPY", validation_ok=True, ts=dispatch_ts
+    )
+    journal.record_dispatch(
+        pid, True, {"success": True, "order_id": 11}, ts=dispatch_ts
+    )
+    assert journal.record_fills(
+        [
+            {
+                "ts": "2026-08-20T01:13:02.000Z",
+                "exec_id": "spy-11",
+                "order_id": 11,
+                "symbol": "SPY",
+                "side": "BOT",
+                "quantity": 1,
+                "price": 500.0,
+                "realized_pnl": 0.0,
+            }
+        ]
+    ) == 1
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        stored = conn.execute(
+            "SELECT ts FROM fills WHERE exec_id = 'spy-11'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert stored == "2026-08-19T20:13:02.000Z"
+    assert stored.startswith("2026-08-19")
+    assert stored < "2026-08-20"
+
+
+def test_record_model_usage_drops_all_zero_token_rows(journal):
+    assert journal.record_model_usage(stage="grok", cost_usd=0.18) is None
+    tot = journal.model_usage_totals()
+    assert tot["calls"] == 0
+    assert tot["cost_usd"] == 0.0
+    rid = journal.record_model_usage(
+        stage="grok", output_tokens=100, cost_usd=0.18
+    )
+    assert isinstance(rid, int) and rid > 0
+    tot = journal.model_usage_totals()
+    assert tot["calls"] == 1
+    assert abs(tot["cost_usd"] - 0.18) < 1e-9
+
+
 def test_session_markers_ensure_and_last(journal, tmp_path):
     assert journal.last_session_marker() is None
 
