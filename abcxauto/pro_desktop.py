@@ -257,7 +257,7 @@ class ProTerminal:
         self.lbl_halt = ft.Text("clear", size=13, weight=ft.FontWeight.W_600, color=GREEN)
         self.lbl_edge = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=MUTED)
         self.lbl_edge_sub = ft.Text("vs model", size=11, color=MUTED)
-        self.lbl_open_upnl = ft.Text("—", size=18, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_open_upnl = ft.Text("—", size=14, weight=ft.FontWeight.W_600, color=MUTED)
         self.lbl_open_upnl_sub = ft.Text("open marks", size=11, color=MUTED)
         self.lbl_desk = ft.Text("Grok off", size=13, weight=ft.FontWeight.W_600, color=MUTED)
         self.lbl_desk_sub = ft.Text("", size=11, color=MUTED)
@@ -497,9 +497,9 @@ class ProTerminal:
             lbl.max_lines = 1
             lbl.overflow = ft.TextOverflow.ELLIPSIS
         # Facts the Cockpit computes; the Dashboard stays a live look, not a report.
-        # Also the metrics cut from the status strip: Mode repeats the rail's
-        # Paper/Live pill, open MTM repeats the Account card, and tools / focus /
-        # pace are already in the stream, the playbook and the next-look line.
+        # Mode repeats the rail's Paper/Live pill. tools / focus / pace live in
+        # the stream, the playbook and the next-look line. Open MTM is on the
+        # Account card next to Today — not hidden.
         self._hidden_metrics = ft.Column(
             [
                 self.lbl_session_score,
@@ -507,8 +507,6 @@ class ProTerminal:
                 self.lbl_playbook,
                 self.lbl_tools,
                 self.lbl_status,
-                self.lbl_open_upnl,
-                self.lbl_open_upnl_sub,
                 self.lbl_focus,
                 self.lbl_dash_tools,
                 self.lbl_pulse_narrative,
@@ -1032,6 +1030,7 @@ class ProTerminal:
                     ft.Row(
                         [
                             _ret_col("Today", self.lbl_pnl),
+                            _ret_col("Open", self.lbl_open_upnl),
                             self.col_ret_1w,
                             self.col_ret_3m,
                             self.col_ret_1y,
@@ -1040,6 +1039,7 @@ class ProTerminal:
                         wrap=True,
                     ),
                     self.lbl_pnl_pct,
+                    self.lbl_open_upnl_sub,
                     self.lbl_ret_source,
                     ft.Container(height=4),
                     ft.Row(
@@ -3565,18 +3565,25 @@ class ProTerminal:
         streak = int(getattr(eng, "_fail_streak", 0) or 0)
         last = float(getattr(eng, "_last_grok_mono", 0.0) or 0.0)
         status = str(getattr(s, "status", "") or "")
+        st = status.lower()
         if not running:
             state, color = "off", MUTED
         elif streak:
             state, color = "backing off", AMBER
-        elif getattr(eng, "_think_parked", False):
+        elif getattr(eng, "_think_parked", False) or st == "parked":
             state, color = "parked", AMBER
-        elif status.lower().startswith("grok"):
+        elif st.startswith("thinking") or st.startswith("grok"):
             state, color = "thinking now", GREEN
-        else:
+        elif st.startswith("wait"):
             state, color = "waiting", TEXT
+        else:
+            state, color = (st or "on"), TEXT
         self.lbl_hs_state.value = state
         self.lbl_hs_state.color = color
+        # Grok tile mirrors the strip so "On" alone never hides a think or a wait.
+        if running:
+            self.lbl_desk_sub.value = state
+            self.lbl_desk_sub.color = color
         age = (time.monotonic() - last) if last else None
         if age is None:
             self.lbl_hs_age.value = "no look yet"
@@ -3808,11 +3815,15 @@ class ProTerminal:
         self._sync_think_stream()
         strat = str(getattr(s, "brain_strat", "") or "").strip()
         stage_err = str(getattr(s, "stage_error", "") or "").strip()
+        sends_look = int(getattr(s, "sends_last_look", 0) or 0)
         if stage_err:
             self.lbl_last_send.value = f"Block: {stage_err[:240]}"
             self.lbl_last_send.color = AMBER
         elif strat and strat not in ("—",):
             self.lbl_last_send.value = f"Last send: {strat}"
+            self.lbl_last_send.color = TEXT
+        elif sends_look:
+            self.lbl_last_send.value = f"Last look: {sends_look} send(s)"
             self.lbl_last_send.color = TEXT
         elif not s.equity and self._brief().get("strat"):
             brief = self._brief()
@@ -3822,8 +3833,13 @@ class ProTerminal:
             )
             self.lbl_last_send.color = MUTED
         else:
-            self.lbl_last_send.value = "Last send: —"
-            self.lbl_last_send.color = MUTED
+            looks = int(getattr(s, "looks_since_send", 0) or 0)
+            if looks:
+                self.lbl_last_send.value = f"Last send: — · {looks} look(s) since"
+                self.lbl_last_send.color = AMBER if looks >= 3 else MUTED
+            else:
+                self.lbl_last_send.value = "Last send: —"
+                self.lbl_last_send.color = MUTED
         result = s.last_result or {}
         status = self._format_result_status(result)
         self.lbl_result.value = f"Result: {status}"

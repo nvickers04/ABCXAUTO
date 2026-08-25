@@ -1032,3 +1032,36 @@ def test_lot_row_follows_live_marks_not_rounded_zero(headless_pro):
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
 
+
+def test_status_strip_shows_thinking_and_book_money(headless_pro):
+    s = headless_pro.engine.state
+    s.running = True
+    s.autonomous = True
+    s.paused = False
+    s.status = "Thinking"
+    s.equity = 35298.08
+    s.pnl = -36.85
+    s.positions = [
+        {
+            "symbol": "SPY",
+            "quantity": 11,
+            "sec_type": "STK",
+            "avgCost": 769.591,
+            "market_price": 765.778,
+            "unrealized_pnl": -41.95,
+            "conId": 1,
+        }
+    ]
+    s.sends_last_look = 0
+    s.looks_since_send = 4
+    s.brain_strat = ""
+    headless_pro._sync_widgets()
+    assert headless_pro.lbl_hs_state.value == "thinking now"
+    assert "thinking" in (headless_pro.lbl_desk_sub.value or "").lower()
+    assert headless_pro.lbl_open_upnl not in headless_pro._hidden_metrics.controls
+    assert "-41.95" in (headless_pro.lbl_open_upnl.value or "")
+    assert headless_pro.lbl_open_upnl.color == "#f4212e"
+    assert "4 look" in (headless_pro.lbl_last_send.value or "")
+    assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
+    assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
+
