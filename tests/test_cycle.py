@@ -33,27 +33,28 @@ class FakeConnector:
         return []
 
 
-async def _fake_tool(_c, name: str, _a=None):
-    return {
-        "account_summary": {"netliquidation": 1000, "unrealizedpnl": 5},
-        "positions": [],
-        "open_orders": [],
-        "market_hours": {"session": "regular"},
-        "quote": {"symbol": "SPY", "last": 500},
-    }.get(name, {})
-
-
 @pytest.mark.asyncio
-async def test_snap_with_fake_connector(monkeypatch):
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
+async def test_snap_is_retired_noop(monkeypatch):
+    """cycle.snap must not launch a book look or arm a wake clock."""
+    started: list[str] = []
+
+    async def boom(*_a, **_k):
+        started.append("async")
+        raise AssertionError("cycle.snap must not look or send")
+
+    def boom_sync(*_a, **_k):
+        started.append("sync")
+        raise AssertionError("cycle.snap must not arm a nap clock")
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", boom)
+    monkeypatch.setattr("abcxauto.agent_loop.snap", boom)
+    monkeypatch.setattr("abcxauto.wake_bus.set_wake", boom_sync)
+    monkeypatch.setattr("abcxauto.wake_bus.ensure_next_look", boom_sync)
+
     out = await snap(FakeConnector())
-    assert {
-        "taken_at", "account", "positions", "open_orders", "market_hours",
-        "spy_quote", "protection", "reality_pulse", "vix_quote", "portfolio_state",
-    }.issubset(out.keys())
-    assert out["account"]["netliquidation"] == 1000
-    assert "narrative" in out["reality_pulse"]
-    assert out["reality_pulse"]["session"]["status"] == "regular"
+    assert started == []
+    assert out.get("book_unreliable") is True
+    assert "cycle_snap_retired" in str(out.get("validation") or "")
 
 
 @pytest.mark.asyncio
