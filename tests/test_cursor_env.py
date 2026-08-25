@@ -40,6 +40,27 @@ def test_autostart_when_flagged(monkeypatch):
     assert should_autostart() is True
 
 
+def test_autostart_in_cursor_persists_env(monkeypatch):
+    """Cursor detection must set ABCXAUTO_AUTOSTART so Flet re-entry still starts Grok."""
+    monkeypatch.setenv("ABCXAUTO_IN_CURSOR", "1")
+    monkeypatch.delenv("ABCXAUTO_NOT_CURSOR", raising=False)
+    monkeypatch.delenv("ABCXAUTO_AUTOSTART", raising=False)
+    monkeypatch.delenv("ABCXAUTO_NO_AUTOSTART", raising=False)
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("ABCXAUTO_UI_PROBE", raising=False)
+    monkeypatch.delenv("ABCXAUTO_LAUNCH_PROBE", raising=False)
+    assert should_autostart() is True
+    assert os.environ.get("ABCXAUTO_AUTOSTART") == "1"
+
+
+def test_autostart_skip_does_not_set_env(monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_IN_CURSOR", "1")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_cursor_env.py")
+    monkeypatch.delenv("ABCXAUTO_AUTOSTART", raising=False)
+    assert should_autostart() is False
+    assert not (os.environ.get("ABCXAUTO_AUTOSTART") or "").strip()
+
+
 def test_headless_flag_still_opens_pro(monkeypatch):
     import sys
 

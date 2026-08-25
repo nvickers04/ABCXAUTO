@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from abcxauto.cycle import run_cycle
+from abcxauto.agent_loop import run_cycle
 from abcxauto.pro_desktop import ProTerminal
 
 PRO_SRC = Path(__file__).resolve().parents[1] / "abcxauto" / "pro_desktop.py"

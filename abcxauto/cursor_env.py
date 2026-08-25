@@ -63,11 +63,17 @@ def _in_pytest() -> bool:
 
 
 def should_autostart() -> bool:
-    """Start the agent as soon as Pro is up so the think stream is live."""
+    """Start the agent as soon as Pro is up so the think stream is live.
+
+    Persist ``ABCXAUTO_AUTOSTART=1`` when we decide yes. Flet re-enters
+    ``__main__`` and can drop Cursor-only env; the flag is what keeps Grok
+    starting so the think stream is not a silent console.
+    """
     if _in_pytest() or os.environ.get("ABCXAUTO_UI_PROBE"):
         return False
     if _truthy("ABCXAUTO_NO_AUTOSTART"):
         return False
-    if _truthy("ABCXAUTO_AUTOSTART"):
+    if _truthy("ABCXAUTO_AUTOSTART") or running_in_cursor():
+        os.environ["ABCXAUTO_AUTOSTART"] = "1"
         return True
-    return running_in_cursor()
+    return False

@@ -1,27 +1,39 @@
-"""Overlay share guard. Tickets are ORDER EXAMPLES; send is the book."""
+"""Overlay share guard only. Not a notebook, clock, tape, or ticket."""
 
 from __future__ import annotations
 
+import math
+
 OVERLAY_SHARES_INSUFFICIENT = "overlay_shares_insufficient"
 OVERLAY_NO_LONG_STOCK = "overlay_no_long_stock"
+OVERLAY_SHARES_UNSPECIFIED = "overlay_shares_unspecified"
+
+__all__ = (
+    "OVERLAY_NO_LONG_STOCK",
+    "OVERLAY_SHARES_INSUFFICIENT",
+    "OVERLAY_SHARES_UNSPECIFIED",
+    "check_overlay_shares",
+    "long_share_lots",
+)
 
 
 def long_share_lots(positions: list[dict] | None) -> dict[str, float]:
-    """Symbol → long STK/ETF share quantity (shorts ignored)."""
+    """Symbol → long STK/ETF share quantity (shorts and untyped lots ignored)."""
     lots: dict[str, float] = {}
     for p in positions or []:
-        sec = str(p.get("secType") or p.get("sec_type") or "STK").upper()
-        if sec not in ("STK", "ETF", ""):
+        if not isinstance(p, dict):
             continue
+        sec = str(p.get("secType") or p.get("sec_type") or "").strip().upper()
+        if sec not in ("STK", "ETF"):
+            continue
+        raw = p.get("quantity") if p.get("quantity") is not None else p.get("position")
         try:
-            qty = float(
-                p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0
-            )
+            qty = float(raw)
         except (TypeError, ValueError):
             continue
-        if qty <= 0:
+        if not math.isfinite(qty) or qty <= 0:
             continue
-        sym = str(p.get("symbol") or "").upper()
+        sym = str(p.get("symbol") or "").strip().upper()
         if not sym:
             continue
         lots[sym] = lots.get(sym, 0.0) + qty
@@ -35,13 +47,14 @@ def check_overlay_shares(
 ) -> tuple[bool, str, str]:
     """Validate covered_call/collar/protective_put against long stock.
 
-    Returns (ok, reason_code, message).
+    Returns (ok, reason_code, message). Does not mutate params.
+    Missing or unreadable ``shares`` fails closed — the clerk does not invent a size.
     """
     strat = (strategy or "").strip().lower()
     if strat not in ("covered_call", "collar", "protective_put"):
         return True, "ok", "n/a"
     params = params or {}
-    sym = str(params.get("symbol") or "").upper()
+    sym = str(params.get("symbol") or "").strip().upper()
     lots = long_share_lots(positions)
     if not sym:
         return False, OVERLAY_NO_LONG_STOCK, f"{strat} requires symbol with long stock"
@@ -52,12 +65,27 @@ def check_overlay_shares(
             OVERLAY_NO_LONG_STOCK,
             f"{strat} on {sym}: no long STK shares in book",
         )
+    raw_shares = params.get("shares")
+    if isinstance(raw_shares, bool) or raw_shares in (None, ""):
+        return (
+            False,
+            OVERLAY_SHARES_UNSPECIFIED,
+            f"{strat} on {sym}: shares required (not invented)",
+        )
     try:
-        need = float(params.get("shares") or 100)
+        need = float(raw_shares)
     except (TypeError, ValueError):
-        need = 100.0
-    if need <= 0:
-        need = 100.0
+        return (
+            False,
+            OVERLAY_SHARES_UNSPECIFIED,
+            f"{strat} on {sym}: shares unreadable",
+        )
+    if not math.isfinite(need) or need <= 0:
+        return (
+            False,
+            OVERLAY_SHARES_UNSPECIFIED,
+            f"{strat} on {sym}: shares unreadable",
+        )
     if have + 1e-9 < need:
         return (
             False,

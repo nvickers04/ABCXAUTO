@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 _EXPIRATION_RE = re.compile(r"^\d{8}$")
 _PROTECTION_REQUIRED_MSG = (
@@ -41,7 +41,7 @@ def _coerce_direction_aliases(data: Any) -> Any:
 
 
 def _exit_only(closing: bool) -> None:
-    if not closing:
+    if closing is not True:
         raise ValueError(f"Bare stock order rejected — {_PROTECTION_REQUIRED_MSG}")
 
 
@@ -545,3 +545,94 @@ EXIT_ONLY_EXTRA = frozenset({
     "adaptive", "midprice", "relative", "limit_order_gtd", "fill_or_kill",
     "immediate_or_cancel", "vwap", "twap", "iceberg", "snap_to_midpoint",
 })
+
+# Dummies for required fields when probing a BUY without closing_position.
+# Unknown required names fail-closed — do not invent a silent skip.
+_NAKED_BUY_PROBE: Dict[str, Any] = {
+    "symbol": "SPY",
+    "action": "BUY",
+    "quantity": 1,
+    "limit_price": 100.0,
+    "good_till_date": "20261231 16:00:00",
+    "total_quantity": 10,
+    "display_size": 1,
+    "offset": 0.01,
+    "order_type": "MKT",
+    "priority": "Normal",
+}
+
+
+def extra_bare_stock_strategies() -> frozenset[str]:
+    """Extra STK tickets that are not option shapes and not trail/roll management."""
+    return frozenset(EXTRA_STRATEGIES) - OPTION_STRATEGIES - EXTRA_MANAGEMENT
+
+
+def _naked_buy_probe(model_cls: type[BaseModel]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    missing: list[str] = []
+    for name, field in model_cls.model_fields.items():
+        if name == "closing_position":
+            continue
+        if not field.is_required():
+            continue
+        if name not in _NAKED_BUY_PROBE:
+            missing.append(name)
+            continue
+        payload[name] = _NAKED_BUY_PROBE[name]
+    if missing:
+        raise RuntimeError(
+            f"fail-closed: cannot probe {model_cls.__name__} naked BUY — "
+            f"no dummy for required {missing}"
+        )
+    if "action" in model_cls.model_fields:
+        payload["action"] = "BUY"
+    payload.pop("closing_position", None)
+    return payload
+
+
+def extra_stock_naked_buy_leaks() -> list[str]:
+    """Names / reasons for extra STK schemas that accept a BUY without closing_position.
+
+    Empty list means fail-closed held. A new extra stock ticket must land in
+    EXIT_ONLY_EXTRA and reject a naked BUY — otherwise this reports a leak.
+    """
+    leaks: list[str] = []
+    expected = extra_bare_stock_strategies()
+    extra = EXIT_ONLY_EXTRA - expected
+    missing = expected - EXIT_ONLY_EXTRA
+    if extra:
+        leaks.append(f"EXIT_ONLY_EXTRA has non-bare extras: {sorted(extra)}")
+    if missing:
+        leaks.append(f"EXIT_ONLY_EXTRA missing bare STK: {sorted(missing)}")
+
+    for name in sorted(expected | EXIT_ONLY_EXTRA):
+        entry = EXTRA_STRATEGIES.get(name)
+        if entry is None:
+            leaks.append(f"{name}: in EXIT_ONLY_EXTRA but not EXTRA_STRATEGIES")
+            continue
+        model, _ = entry
+        try:
+            probe = _naked_buy_probe(model)
+        except RuntimeError as exc:
+            leaks.append(str(exc))
+            continue
+        for attempt in (probe, {**probe, "closing_position": False}):
+            try:
+                model.model_validate(attempt)
+            except ValidationError:
+                continue
+            leaks.append(f"{name}: accepted BUY without closing_position")
+            break
+    return leaks
+
+
+def assert_extra_stock_exit_only() -> None:
+    leaks = extra_stock_naked_buy_leaks()
+    if leaks:
+        raise RuntimeError(
+            "fail-closed: extra STK schema allows a naked buy without "
+            f"closing_position: {'; '.join(leaks)}"
+        )
+
+
+assert_extra_stock_exit_only()

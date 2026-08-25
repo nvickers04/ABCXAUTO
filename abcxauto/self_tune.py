@@ -9,6 +9,7 @@ Cadence is wake_bus; process % dials do not exist.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,12 @@ LOCKED_TRUE: frozenset[str] = frozenset({
     "auto_panic_on_breach",
     "defined_risk_only",
     "cash_only",
+})
+# Mode/port are operator-only. Extra keys here are rejects, not knobs.
+_LIVE_GATED: frozenset[str] = frozenset({
+    "trading_mode",
+    "live_confirm",
+    "ibkr_port",
 })
 
 SCAN_FETCH_CAP_RANGE = (1, 8)
@@ -65,15 +72,21 @@ def is_self_tune_strategy(name: str) -> bool:
 
 def _f(value: Any) -> float | None:
     try:
-        return float(value)
+        out = float(value)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(out):
+        return None
+    return out
 
 
 def _i(value: Any) -> int | None:
+    raw = _f(value)
+    if raw is None:
+        return None
     try:
-        return int(float(value))
-    except (TypeError, ValueError):
+        return int(raw)
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -160,7 +173,7 @@ def apply_self_tune(
         if key == "risk_posture":
             rejected[key] = "operator-only — agent cannot retune risk_posture"
             continue
-        if key == "trading_mode" or key == "live_confirm":
+        if key in _LIVE_GATED:
             rejected[key] = "live remains gated — agent cannot switch mode"
             continue
         if key == "sizing_floors":
@@ -175,6 +188,22 @@ def apply_self_tune(
             if new_v is None:
                 rejected[key] = "invalid value"
                 continue
+            hi = (
+                MAX_OPEN_POSITIONS_RANGE[1]
+                if key == "max_open_positions"
+                else RISK_FLOOR[key][1]
+            )
+            try:
+                as_f = float(new_v)
+            except (TypeError, ValueError):
+                rejected[key] = "invalid value"
+                continue
+            if not math.isfinite(as_f):
+                rejected[key] = "invalid value"
+                continue
+            if as_f > hi:
+                note = {"raw": value, "clamped": hi}
+                new_v = int(hi) if key == "max_open_positions" else float(hi)
             if note:
                 clamped[key] = note
             if key == "max_open_positions":
