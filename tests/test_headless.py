@@ -1,8 +1,9 @@
 """Headless paper runner is the autonomous path (no approval print-and-exit)."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
-from abcxauto.headless import format_cycle_digest, format_record, run_headless
+from abcxauto.headless import apply_kill_switch, format_cycle_digest, format_record, run_headless
 
 
 def test_headless_refuses_live(monkeypatch):
@@ -77,3 +78,44 @@ def test_format_record_benign_error_type_is_log():
     assert line is not None
     assert "ERROR" not in line
     assert "LOG" in line
+
+
+def test_kill_switch_stops_engine_and_does_not_flatten():
+    """Ctrl+C stops the agent + IBKR link. Positions stay at the broker."""
+    calls: list[str] = []
+
+    class _Engine:
+        def stop_engine(self) -> None:
+            calls.append("stop_engine")
+
+        def panic(self) -> None:
+            calls.append("panic")
+
+        def flatten_all(self) -> None:
+            calls.append("flatten_all")
+
+    apply_kill_switch(_Engine())
+    assert calls == ["stop_engine"]
+
+
+def test_kill_switch_survives_stop_error():
+    """A broken stop must not raise NameError (logger was missing) or flatten."""
+
+    class _Boom:
+        def stop_engine(self) -> None:
+            raise RuntimeError("disconnect failed")
+
+        def panic(self) -> None:
+            raise AssertionError("panic must not run")
+
+    apply_kill_switch(_Boom())
+
+
+def test_headless_source_never_flattens_or_panics():
+    src = Path(__file__).resolve().parents[1].joinpath("abcxauto", "headless.py").read_text(
+        encoding="utf-8"
+    )
+    assert "flatten_all" not in src
+    assert ".panic(" not in src
+    assert "apply_kill_switch" in src
+    assert "logger = logging.getLogger(__name__)" in src
