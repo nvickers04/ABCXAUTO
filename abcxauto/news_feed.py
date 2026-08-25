@@ -48,10 +48,16 @@ def _configured(client: Any) -> bool:
     return bool(flag() if callable(flag) else flag)
 
 
+def _get_client() -> Any:
+    from abcxauto.marketdata.client import get_marketdata_client
+
+    return get_marketdata_client()
+
+
 def _miss(symbol: str, reason: str) -> dict:
     return {
         "symbol": symbol,
-        "headline": f"(unavailable — {reason})",
+        "headline": f"(unavailable - {reason})",
         "error": reason,
     }
 
@@ -106,9 +112,7 @@ async def fetch_agent_news(
     items: list[dict] = []
     misses: list[dict] = []
     try:
-        from abcxauto.marketdata.client import get_marketdata_client
-
-        client = get_marketdata_client()
+        client = _get_client()
         if not _configured(client):
             return []
 
@@ -157,7 +161,7 @@ def format_news_for_prompt(items: list[dict], *, limit: int = 18) -> str:
     if not real:
         if misses:
             why = str(misses[0].get("error") or "timed out")
-            lines.append(f"(news unavailable — fetch {why})")
+            lines.append(f"(news unavailable - fetch {why})")
         else:
             lines.append("(no headlines available)")
         return "\n".join(lines)

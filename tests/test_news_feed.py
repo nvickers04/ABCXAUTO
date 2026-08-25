@@ -38,7 +38,7 @@ def test_format_news_for_prompt_items():
 
 def test_format_news_for_prompt_timeout_is_unavailable_not_empty():
     text = format_news_for_prompt([
-        {"symbol": "NKE", "headline": "(unavailable — timed out)", "error": "timed out"},
+        {"symbol": "NKE", "headline": "(unavailable - timed out)", "error": "timed out"},
     ])
     assert "unavailable" in text
     assert "timed out" in text
@@ -110,9 +110,7 @@ async def test_timeout_is_not_empty_success(monkeypatch):
     client = _MDA(hang)
     monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["NKE"])
-    monkeypatch.setattr(
-        "abcxauto.marketdata.client.get_marketdata_client", lambda: client
-    )
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_agent_news([{"symbol": "NKE"}])
     assert items
     assert items[0].get("error") == "timed out"
@@ -138,9 +136,7 @@ async def test_timeout_retries_then_lands(monkeypatch):
     client = _MDA(once_then_ok)
     monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["AG"])
-    monkeypatch.setattr(
-        "abcxauto.marketdata.client.get_marketdata_client", lambda: client
-    )
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_agent_news([{"symbol": "AG"}])
     assert [it.get("headline") for it in items] == ["AG printed"]
     assert not any(it.get("error") for it in items)
@@ -160,9 +156,7 @@ async def test_timeout_does_not_cache_so_next_look_refetches(monkeypatch):
     client = _MDA(hang)
     monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["BE"])
-    monkeypatch.setattr(
-        "abcxauto.marketdata.client.get_marketdata_client", lambda: client
-    )
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     first = await fetch_agent_news([{"symbol": "BE"}])
     second = await fetch_agent_news([{"symbol": "BE"}])
     assert first[0].get("error") == "timed out"
@@ -177,9 +171,7 @@ async def test_completed_empty_fetch_is_still_empty(monkeypatch):
 
     client = _MDA(none)
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["PANW"])
-    monkeypatch.setattr(
-        "abcxauto.marketdata.client.get_marketdata_client", lambda: client
-    )
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_agent_news([{"symbol": "PANW"}])
     assert items == []
     assert format_news_for_prompt(items).count("no headlines") == 1
