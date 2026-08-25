@@ -6,7 +6,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from abcxauto.protect import fill_missing_protection, promote_naked_entry
+from abcxauto.protect import (
+    fill_missing_protection,
+    last_stop_block_reason,
+    order_covers_open_lot,
+    orphaned_protection_ids,
+    promote_naked_entry,
+)
 from abcxauto.structure_grade import check_live_geometry
 
 
@@ -201,3 +207,108 @@ async def test_execute_ticket_completes_thin_idea(monkeypatch):
     p = ticket["params"]
     assert p["stop_price"] < 500.0 < p["target_price"]
     assert int(p["quantity"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# last-stop: exit-side qty, not "any other stop"
+# ---------------------------------------------------------------------------
+
+
+def _stk(symbol: str, qty: float, **extra) -> dict:
+    row = {"symbol": symbol, "quantity": qty, "sec_type": "STK"}
+    row.update(extra)
+    return row
+
+
+def _order(oid: int, symbol: str, action: str, qty: float, otype: str, **extra) -> dict:
+    row = {
+        "order_id": oid,
+        "symbol": symbol,
+        "sec_type": "STK",
+        "action": action,
+        "quantity": qty,
+        "order_type": otype,
+    }
+    row.update(extra)
+    return row
+
+
+def test_crumb_stop_is_not_a_replacement_last_stop():
+    """A 1-share STP must not unlock cancel of the 10-share last-stop."""
+    orders = [
+        _order(9, "AAPL", "SELL", 10, "STP"),
+        _order(10, "AAPL", "SELL", 1, "STP"),
+    ]
+    lot = [_stk("AAPL", 10)]
+    reason = last_stop_block_reason(9, orders, lot)
+    assert reason and "only working stop" in reason
+    assert last_stop_block_reason(10, orders, lot) is None
+
+
+def test_wrong_side_stop_is_not_a_replacement_last_stop():
+    """A BUY stop on a long is not cover — cancelling the SELL last-stop is refused."""
+    orders = [
+        _order(9, "AAPL", "SELL", 10, "STP"),
+        _order(10, "AAPL", "BUY", 10, "STP"),
+    ]
+    lot = [_stk("AAPL", 10)]
+    assert last_stop_block_reason(9, orders, lot)
+    assert last_stop_block_reason(10, orders, lot) is None
+    assert last_stop_block_reason(
+        9, [_order(9, "AAPL", "BUY", 10, "STP")], lot
+    ) is None
+
+
+def test_wrong_side_leftover_after_flatten_flip_is_not_a_last_stop():
+    """Long flattened through, now short: leftover SELL may be cancelled.
+
+    The orphan sweep still leaves it (same contract is live). The last-stop
+    gate must not treat it as load-bearing cover — it is a naked add.
+    """
+    leftover = [_order(9, "AAPL", "SELL", 10, "STP")]
+    short = [_stk("AAPL", -10)]
+    assert last_stop_block_reason(9, leftover, short) is None
+    assert order_covers_open_lot(leftover[0], short) is True
+    assert orphaned_protection_ids(short, leftover) == []
+
+
+def test_covering_sell_stop_still_blocks_on_a_live_long():
+    orders = [_order(9, "AAPL", "SELL", 10, "STP")]
+    assert last_stop_block_reason(9, orders, [_stk("AAPL", 10)])
+    assert order_covers_open_lot(orders[0], [_stk("AAPL", 10)]) is True
+    assert orphaned_protection_ids([_stk("AAPL", 10)], orders) == []
+
+
+def test_second_covering_stop_allows_cancel():
+    orders = [
+        _order(9, "AAPL", "SELL", 10, "STP"),
+        _order(10, "AAPL", "SELL", 10, "TRAIL"),
+    ]
+    assert last_stop_block_reason(9, orders, [_stk("AAPL", 10)]) is None
+
+
+def test_flat_book_releases_last_stop():
+    orders = [_order(9, "AAPL", "SELL", 10, "STP")]
+    assert last_stop_block_reason(9, orders, []) is None
+
+
+def test_cover_qty_slack_matches_the_book():
+    lot = [_stk("AAPL", 10)]
+    assert last_stop_block_reason(9, [_order(9, "AAPL", "SELL", 9.49, "STP")], lot)
+    assert last_stop_block_reason(9, [_order(9, "AAPL", "SELL", 9.48, "STP")], lot) is None
+
+
+def test_sld_alias_is_exit_side_for_a_long():
+    orders = [_order(9, "AAPL", "SLD", 10, "STP")]
+    assert last_stop_block_reason(9, orders, [_stk("AAPL", 10)])
+
+
+def test_covering_buy_stop_blocks_on_a_live_short():
+    orders = [_order(9, "TSLA", "BUY", 10, "STP")]
+    assert last_stop_block_reason(9, orders, [_stk("TSLA", -10)])
+    assert order_covers_open_lot(orders[0], [_stk("TSLA", -10)]) is True
+
+
+def test_bot_alias_is_exit_side_for_a_short():
+    orders = [_order(9, "TSLA", "BOT", 10, "STP")]
+    assert last_stop_block_reason(9, orders, [_stk("TSLA", -10)])
