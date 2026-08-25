@@ -121,6 +121,13 @@ def test_compact_event_kind_from_title_question():
     })
     assert earn["kind"] == "earnings"
 
+    q2 = compact_event({
+        "title": "NVIDIA (NVDA) Q2 Data Center Revenue",
+        "slug": "nvda-rev",
+        "markets": [{**book, "question": "Will revenue be above 40B?"}],
+    })
+    assert q2["kind"] == "earnings"
+
     company = compact_event({
         "title": "Will Nvidia be the largest company?",
         "slug": "nvda-mcap",
@@ -145,9 +152,9 @@ def test_compact_event_kind_from_title_question():
 
 def test_related_search_set_nvda_includes_earnings_not_fed():
     fan = related_search_set(["NVDA"], "")
-    assert "Nvidia" in fan
+    assert fan[0] == "Nvidia"
     assert "Nvidia earnings" in fan
-    assert "NVDA" not in fan
+    assert "NVDA" in fan
     assert "Fed" not in fan
     assert "CPI" not in fan
     assert "SPY" not in fan
@@ -157,6 +164,23 @@ def test_related_search_set_nvda_includes_earnings_not_fed():
 def test_related_search_set_empty_does_not_invent_spy():
     assert related_search_set([], "") == []
     assert related_search_set([], "  ") == []
+
+
+def test_related_search_set_query_nvda_fans_earnings():
+    fan = related_search_set([], "NVDA")
+    assert fan[0] == "Nvidia"
+    assert "Nvidia earnings" in fan
+    assert "NVDA" in fan
+    assert "Fed" not in fan
+    assert "SPY" not in fan
+
+
+def test_related_search_set_fed_query_does_not_invent_spy():
+    fan = related_search_set([], "Fed September")
+    assert fan[0] == "Fed September"
+    assert "CPI" in fan
+    assert "SPY" not in fan
+    assert all("earnings" not in q.lower() for q in fan)
 
 
 def test_related_search_set_index_can_include_macro():
@@ -187,15 +211,16 @@ async def test_fetch_odds_no_query_does_not_invent_spy():
 async def test_fetch_odds_nvda_fans_earnings_not_index_tape():
     seen: list[str] = []
     out = await fetch_odds(symbols=["NVDA"], client=_client(seen))
-    assert "Nvidia" in out["searched"]
+    assert out["searched"][0] == "Nvidia"
     assert "Nvidia earnings" in out["searched"]
+    assert "NVDA" in out["searched"]
     assert seen == out["searched"]
     assert "Fed" not in out["searched"]
     assert "CPI" not in out["searched"]
     assert "SPY" not in out["searched"]
     assert "S&P" not in str(out["searched"])
-    assert "NVDA" in out["related_queries"]
     assert "SPY" not in out["related_queries"]
+    assert "Fed" not in out["related_queries"]
 
 
 @pytest.mark.asyncio

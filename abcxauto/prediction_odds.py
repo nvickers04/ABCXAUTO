@@ -42,7 +42,18 @@ _ALIASES = {
 }
 
 _INDEX_SYMS = frozenset({"SPY", "QQQ", "IWM", "DIA", "VIX"})
-_EARN_HINTS = ("earnings", "eps", "beat estimates")
+_EARN_HINTS = (
+    "earnings",
+    "eps",
+    "beat estimates",
+    "quarterly",
+    "q1",
+    "q2",
+    "q3",
+    "q4",
+    "revenue",
+    "gross margin",
+)
 _RATE_HINTS = (
     "fed",
     "fomc",
@@ -183,10 +194,11 @@ def _event_kind(title: str, questions: list[str]) -> str:
 
 
 def related_search_set(symbols: list[str], query: str = "") -> list[str]:
-    """Company / earnings / pointed macro. Empty ask stays empty — no index tape."""
+    """Company / ticker / earnings / pointed macro. Empty ask stays empty — no index tape."""
     lead: list[str] = []
     names: list[str] = []
     earnings: list[str] = []
+    tickers: list[str] = []
     macro: list[str] = []
 
     raw_q = (query or "").strip()
@@ -196,6 +208,13 @@ def related_search_set(symbols: list[str], query: str = "") -> list[str]:
         raw_sym = raw_q.upper()
         if _should_add_earnings(q):
             earnings.append(f"{q} earnings")
+        if raw_sym in _ALIASES and _ALIASES[raw_sym].lower() != raw_sym.lower():
+            tickers.append(raw_sym)
+        else:
+            for sym, alias in _ALIASES.items():
+                if alias.lower() == q.lower() and sym.lower() != q.lower():
+                    tickers.append(sym)
+                    break
         q_sym = raw_sym if raw_sym in _ALIASES or raw_sym in _INDEX_SYMS else ""
         if _points_to_macro(q_sym, q):
             for term in ("Fed", "CPI"):
@@ -210,45 +229,21 @@ def related_search_set(symbols: list[str], query: str = "") -> list[str]:
         names.append(name)
         if _should_add_earnings(name):
             earnings.append(f"{name} earnings")
+        if name.lower() != s.lower():
+            tickers.append(s)
         if _points_to_macro(s, name):
             for term in ("Fed", "CPI"):
                 if not _covers(lead + names + macro, term):
                     macro.append(term)
 
-    return _unique(lead + names + earnings + macro)
-
-
-def _ticker_hops(symbols: list[str], query: str, searched: list[str]) -> list[str]:
-    have = {x.lower() for x in searched}
-    hops: list[str] = []
-    rev = {
-        alias.lower(): sym
-        for sym, alias in _ALIASES.items()
-        if alias.lower() != sym.lower()
-    }
-    for item in searched:
-        tick = rev.get(item.lower())
-        if tick and tick.lower() not in have:
-            hops.append(tick)
-            have.add(tick.lower())
-    for raw in [*(symbols or []), (query or "").strip()]:
-        s = str(raw or "").upper().strip()
-        if not s or s.lower() in have:
-            continue
-        alias = _ALIASES.get(s)
-        if alias and alias.lower() != s.lower():
-            hops.append(s)
-            have.add(s.lower())
-    return hops
+    return _unique(lead + names + earnings + tickers + macro)
 
 
 def _queries(symbols: list[str], query: str) -> tuple[list[str], list[str]]:
     fan = related_search_set(symbols, query)
     searched = fan[:SEARCH_CAP]
-    leftover = list(fan[SEARCH_CAP:])
-    hops = _ticker_hops(symbols, query, searched)
     skip = {s.lower() for s in searched}
-    related = [q for q in _unique(leftover + hops) if q.lower() not in skip]
+    related = [q for q in fan[SEARCH_CAP:] if q.lower() not in skip]
     return searched, related[:RELATED_CAP]
 
 
