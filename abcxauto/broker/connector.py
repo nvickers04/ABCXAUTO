@@ -636,7 +636,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
     _instance: Optional['IBKRConnector'] = None
     _lock: Lock = Lock()
-    _async_lock: Optional[asyncio.Lock] = None  # Created lazily per event loop
+    _async_lock: Optional[asyncio.Lock] = None  # Rebound when the bound loop dies
 
     def __new__(cls) -> 'IBKRConnector':
         if cls._instance is None:
@@ -646,12 +646,83 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                     cls._instance._initialized = False
         return cls._instance
 
+    def _api_socket_live(self) -> bool:
+        """True when the current IB() still has an API socket (1100 may keep it)."""
+        ib = getattr(self, "ib", None)
+        if ib is None:
+            return False
+        try:
+            return bool(ib.isConnected())
+        except Exception:
+            return False
+
+    def _ib_usable_on_running_loop(self) -> bool:
+        """Live API socket that this event loop is allowed to keep (no new IB())."""
+        if not self._api_socket_live():
+            return False
+        ib_loop = getattr(self.ib, "loop", None)
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        if ib_loop is None:
+            return True
+        try:
+            if ib_loop.is_closed():
+                return False
+        except Exception:
+            return False
+        return ib_loop is running
+
+    def _adopt_live_socket(self) -> bool:
+        """Keep the existing API socket. Error 1100 forbids a replacement IB()."""
+        self._connected = True
+        task = getattr(self, "_heartbeat_task", None)
+        if task is None or task.done():
+            try:
+                self._start_heartbeat()
+            except Exception:
+                logger.debug("Heartbeat restart on live socket failed", exc_info=True)
+        logger.info("IBKR API socket still up — keep socket; no new IB()")
+        return True
+
     @property
     def async_lock(self) -> asyncio.Lock:
-        """Get async lock, creating if needed for current event loop."""
-        if self._async_lock is None:
+        """Lock for the current event loop.
+
+        ``asyncio.Lock`` binds to the loop that first acquired it. The Pro
+        worker is ``asyncio.run`` per generation, so a singleton lock from a
+        dead loop raises ``Lock bound to a different event loop`` on reconnect
+        and the desk stays down until the 120s HALT. Replace a lock whose loop
+        is closed. If another live loop still owns it, fail closed — do not
+        mint a second lock and interleave IB() calls.
+        """
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+
+        lock = self._async_lock
+        if lock is None:
             self._async_lock = asyncio.Lock()
-        return self._async_lock
+            return self._async_lock
+
+        bound = getattr(lock, "_loop", None)
+        if bound is None or running is None or bound is running:
+            return lock
+
+        try:
+            bound_closed = bound.is_closed()
+        except Exception:
+            bound_closed = True
+        if bound_closed:
+            logger.warning("IBKR async_lock rebound after event loop closed")
+            self._async_lock = asyncio.Lock()
+            return self._async_lock
+
+        raise RuntimeError(
+            "IBKR async_lock is bound to a different event loop"
+        )
 
     def __init__(self):
         if self._initialized:
@@ -664,6 +735,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         self.client_id = int(get_config().ibkr_client_id)
 
         # Connection state
+        self._async_lock = None
         self.ib = new_ib()
         self._connected = False
         self._connect_block = ""
@@ -901,15 +973,23 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         self._schedule_reconnect(cause)
 
     def _resolve_loop(self) -> Optional[asyncio.AbstractEventLoop]:
-        """Prefer the running loop; fall back to the loop captured at connect."""
+        """Prefer the loop captured at connect if it is still running.
+
+        Using whichever loop happens to be running (Flet, a stray caller)
+        schedules reconnect off the lock's loop and raises
+        ``Lock bound to a different event loop``.
+        """
+        captured = self._loop
+        if captured is not None:
+            try:
+                if not captured.is_closed() and captured.is_running():
+                    return captured
+            except Exception:
+                pass
         try:
             return asyncio.get_running_loop()
         except RuntimeError:
-            pass
-        loop = self._loop
-        if loop is not None and not loop.is_closed():
-            return loop
-        return None
+            return None
 
     def _schedule_reconnect(self, reason: str) -> None:
         """Kick off reconnect on the connector loop without blocking callers."""
@@ -1193,10 +1273,16 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         except RuntimeError:
             pass
 
+        # 1100 / heartbeat may clear _connected while the API socket is still up.
+        if self._ib_usable_on_running_loop():
+            return self._adopt_live_socket()
+
         async with self.async_lock:
             # Double-check after acquiring lock
             if self.connected:
                 return True
+            if self._ib_usable_on_running_loop():
+                return self._adopt_live_socket()
 
             for attempt in range(max_retries):
                 try:
@@ -1768,6 +1854,14 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 await _safe_sleep(self._heartbeat_interval_s())
 
                 if not self.connected:
+                    if self._api_socket_live():
+                        self._connected = True
+                        logger.warning(
+                            "Heartbeat: API socket still up (stale=%s) — "
+                            "keep socket; no new IB()",
+                            self._ibkr_data_stale,
+                        )
+                        continue
                     self._disconnect_cause = self._disconnect_cause or DisconnectCause.HEARTBEAT_FAILED.value
                     logger.warning(
                         f"Heartbeat: disconnected (cause={self._disconnect_cause}, "
@@ -1785,6 +1879,12 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                     logger.debug("Heartbeat OK")
                 except Exception as e:
                     self._heartbeat_failures += 1
+                    if self._api_socket_live():
+                        logger.warning(
+                            f"Heartbeat failed ({e}) — API socket still up; "
+                            "keep socket; no new IB()"
+                        )
+                        continue
                     self._connected = False
                     self._disconnect_cause = DisconnectCause.HEARTBEAT_FAILED.value
                     logger.warning(
