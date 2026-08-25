@@ -223,6 +223,76 @@ def release_desk_lock() -> None:
         logger.debug("desk lock release failed", exc_info=True)
 
 
+# Same launchers cleanup_pro matches. Not cleanup itself — Start is not flatten.
+_PRO_CMDLINE_MARKERS = (
+    "-m abcxauto",
+    "-mabcxauto",
+    "abcxauto.pro_desktop",
+    "pro_desktop.py",
+    "_start_pro.py",
+    "pro_launch",
+)
+_PRO_CMDLINE_SKIP = ("cleanup_pro", "--cleanup", "pytest")
+
+
+def _cmdline_is_pro(cmd: Any) -> bool:
+    """True for a Pro / supervisor launcher, never for cleanup or pytest."""
+    if isinstance(cmd, (list, tuple)):
+        blob = " ".join(str(part) for part in cmd)
+    else:
+        blob = str(cmd or "")
+    low = blob.lower().replace("\\", "/")
+    if any(skip in low for skip in _PRO_CMDLINE_SKIP):
+        return False
+    return any(mark in low for mark in _PRO_CMDLINE_MARKERS)
+
+
+def live_pro_pids(*, exclude: set[int] | None = None) -> list[int]:
+    """PIDs of already-running Pro desks. Read-only — never signals them."""
+    skip = {os.getpid()}
+    try:
+        parent = int(os.getppid() or 0)
+        if parent > 0:
+            skip.add(parent)
+    except Exception:
+        pass
+    if exclude:
+        skip.update(int(pid) for pid in exclude if int(pid) > 0)
+    found: list[int] = []
+    try:
+        import psutil
+
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            info = proc.info or {}
+            pid = int(info.get("pid") or 0)
+            if pid <= 0 or pid in skip:
+                continue
+            if _cmdline_is_pro(info.get("cmdline") or []):
+                found.append(pid)
+    except Exception:
+        logger.debug("live Pro scan failed", exc_info=True)
+    return found
+
+
+def foreign_desk_pid(*, exclude: set[int] | None = None) -> int:
+    """A live paper Pro that is not this process, or 0.
+
+    The desk lock is the supervisor wrapper's pid. ``_start_pro.py`` never
+    writes it, and a dead wrapper heals the lock while its child still holds
+    client id 42 on 7497. Spawning then is Error 326 — or a stolen session
+    that looks like Start flattened the book.
+    """
+    skip = {os.getpid()}
+    if exclude:
+        skip.update(int(pid) for pid in exclude if int(pid) > 0)
+    owner = desk_owner_pid()
+    if owner and owner not in skip:
+        return owner
+    for pid in live_pro_pids(exclude=skip):
+        return pid
+    return 0
+
+
 def note(msg: str, *, warn: bool = False) -> None:
     """Record a lifecycle decision durably.
 
@@ -249,7 +319,12 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
         env.update(child_env)
     env["ABCXAUTO_SUPERVISED"] = "1"
     backoff = 15.0
+    child_pid = 0
     while True:
+        held = foreign_desk_pid(exclude={child_pid})
+        if held:
+            note(f"supervisor: Pro already up (pid {held}) — stay down")
+            return 0
         proc = subprocess.Popen(
             [sys.executable, "-m", "abcxauto"],
             env=env,
@@ -260,18 +335,25 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
             text=True,
             errors="replace",
         )
+        child_pid = int(getattr(proc, "pid", 0) or 0)
         stream = getattr(proc, "stdout", None)
         if stream is not None:
             threading.Thread(
                 target=tee_child_output, args=(stream,), daemon=True
             ).start()
-        note(f"supervisor: child pid {getattr(proc, 'pid', 0)} up")
+        note(f"supervisor: child pid {child_pid} up")
         code = proc.wait()
         if int(code or 0) == 0:
             note("supervisor: clean exit — operator closed the window, stay down")
             return 0
         if operator_stopped():
             note("supervisor: operator stop — stay down")
+            return int(code or 0)
+        held = foreign_desk_pid(exclude={child_pid})
+        if held:
+            note(
+                f"supervisor: Pro still up (pid {held}) after child exit {code} — stay down"
+            )
             return int(code or 0)
         if not useful_hours():
             note("supervisor: outside useful hours — stay down")
