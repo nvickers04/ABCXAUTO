@@ -706,9 +706,6 @@ async def execute_ticket(
         return {"status": "blocked", "note": note}
     if quote_last is not None:
         act["_quote_last"] = quote_last
-        params = act.setdefault("params", {})
-        if isinstance(params, dict) and params.get("price_hint") is None:
-            params["price_hint"] = quote_last
     act["_posture"] = world.effective_posture or world.risk_posture
     from abcxauto.protect import fill_missing_protection
 

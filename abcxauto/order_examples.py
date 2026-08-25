@@ -372,7 +372,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         allowed = _allowed
     lines = [
         "ORDER EXAMPLES (send tool — strategy + params)",
-        "Stock entries: symbol+direction. Clerk fills missing stop/target/qty. "
+        "Stock entries: symbol+direction. Clerk will not invent omitted stop/target/qty. "
         "Bare opens become a bracket; exits stay exits. "
         "New risk requires card= naming a playbook card under that strategy.",
         "Use direction LONG|SHORT for bracket/market_bracket/oca/trailing.",

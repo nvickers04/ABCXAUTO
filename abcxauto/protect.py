@@ -1,7 +1,8 @@
 """Clerk: simple entry idea → protected structure, and protection vs the book.
 
-Grok picks symbol and side. Code fills missing stop / target / size from the
-live IBKR quote and the risk floor. Prices Grok already set are never rewritten.
+Grok owns the ticket. Code must not invent omitted stop / target / entry /
+price_hint / quantity from last, quote, 1% posture bands, or session high/low.
+``fill_missing_protection`` is a standing no-op so a thin send is refused.
 
 The second half of the module is the reverse question: does a working exit
 still cover an open lot? A protective order that outlives its position is not
@@ -18,11 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from abcxauto.structure_grade import posture_stop_bands, session_usable
-
 _NAKED_OPEN = frozenset({"market_order", "limit_order", "stop_order"})
-_PROTECT_STRATS = frozenset({"market_bracket", "bracket", "oca"})
-_DEFAULT_STOP_PCT = 0.01
 # Same slack as trade_plan stacked-stop cover and the protection report.
 _COVER_QTY_SLACK = 0.51
 _FILL_SIDES = {"BUY": "BUY", "BOT": "BUY", "SELL": "SELL", "SLD": "SELL"}
@@ -49,10 +46,6 @@ def _missing(params: dict[str, Any], key: str) -> bool:
     return False
 
 
-def _px(value: float) -> float:
-    return round(float(value) + 1e-9, 2)
-
-
 def _direction(params: dict[str, Any]) -> str:
     d = str(params.get("direction") or "").upper()
     if d in ("LONG", "SHORT"):
@@ -72,25 +65,6 @@ def _is_exit(act: dict, positions: list) -> bool:
     if act.get("target_conId") or params.get("conId") or params.get("con_id"):
         return True
     return False
-
-
-def _stk_qty(positions: list, symbol: str) -> int | None:
-    want = str(symbol or "").upper()
-    if not want:
-        return None
-    for p in positions or []:
-        if str(p.get("symbol") or "").upper() != want:
-            continue
-        sec = str(p.get("sec_type") or p.get("secType") or "STK").upper()
-        if not sec.startswith("STK"):
-            continue
-        try:
-            qty = abs(int(float(p.get("quantity") or p.get("position") or 0)))
-        except (TypeError, ValueError):
-            continue
-        if qty > 0:
-            return qty
-    return None
 
 
 def promote_naked_entry(act: dict, positions: list | None = None) -> bool:
@@ -130,105 +104,14 @@ def fill_missing_protection(
     positions: list | None = None,
     session: Any = None,
 ) -> list[str]:
-    """Fill omitted stop / target / qty. Never overwrite Grok's numbers.
+    """Grok owns the ticket. Omitted fields stay omitted.
 
-    When this look already has today's session range, a missing stop is the
-    opening low (LONG) / high (SHORT) and a missing target is the 30% retrace
-    if it sits on the right side of live. That is the written card, not a 1% band.
+    Never invent stop_price / target_price / entry_price / price_hint /
+    quantity from last, quote, 1% posture bands, or session high/low.
+    Send refuses a thin ticket; this function does not complete one.
     """
-    if not isinstance(act, dict):
-        return []
-    strat = str(act.get("strategy") or act.get("action") or "").strip().lower()
-    if strat not in _PROTECT_STRATS:
-        return []
-    params = _params(act)
-    direction = _direction(params)
-    if direction not in ("LONG", "SHORT"):
-        return []
-    params["direction"] = direction
-    try:
-        quote = float(quote_last) if quote_last is not None else 0.0
-    except (TypeError, ValueError):
-        quote = 0.0
-    if quote <= 0:
-        return []
-
-    filled: list[str] = []
-    lo, hi = posture_stop_bands(posture)
-    stop_pct = min(hi, max(lo, _DEFAULT_STOP_PCT))
-    stop_dist = quote * stop_pct
-    tape = session if session_usable(session) else None
-    invent_bands = True
-    if tape is None:
-        try:
-            from abcxauto.lab_playbook import live_card_needs_session
-
-            invent_bands = not live_card_needs_session()
-        except Exception:
-            invent_bands = True
-
-    if _missing(params, "stop_price"):
-        if tape and direction == "LONG" and tape.get("low") not in (None, ""):
-            params["stop_price"] = _px(tape["low"])
-            filled.append("stop_price")
-        elif tape and direction == "SHORT" and tape.get("high") not in (None, ""):
-            params["stop_price"] = _px(tape["high"])
-            filled.append("stop_price")
-        elif invent_bands and direction == "LONG":
-            params["stop_price"] = _px(quote - stop_dist)
-            filled.append("stop_price")
-        elif invent_bands:
-            params["stop_price"] = _px(quote + stop_dist)
-            filled.append("stop_price")
-    if _missing(params, "target_price"):
-        retrace = None
-        if tape:
-            try:
-                from abcxauto.lab_playbook import session_target
-
-                row = dict(tape)
-                if quote > 0:
-                    row["last"] = quote
-                retrace = session_target(row, direction)
-            except Exception:
-                retrace = None
-        if direction == "LONG" and retrace is not None and retrace > quote:
-            params["target_price"] = _px(retrace)
-            filled.append("target_price")
-        elif direction == "SHORT" and retrace is not None and retrace < quote:
-            params["target_price"] = _px(retrace)
-            filled.append("target_price")
-        elif invent_bands and direction == "LONG":
-            params["target_price"] = _px(quote + stop_dist)
-            filled.append("target_price")
-        elif invent_bands:
-            params["target_price"] = _px(quote - stop_dist)
-            filled.append("target_price")
-    if strat == "bracket" and _missing(params, "entry_price"):
-        params["entry_price"] = _px(quote)
-        filled.append("entry_price")
-    if _missing(params, "price_hint"):
-        params["price_hint"] = _px(quote)
-        filled.append("price_hint")
-
-    if _missing(params, "quantity"):
-        qty = None
-        if strat == "oca":
-            qty = _stk_qty(positions or [], str(params.get("symbol") or ""))
-        if qty is None:
-            qty = _size_from_risk(
-                quote=quote,
-                stop=params.get("stop_price"),
-                equity=equity,
-                cfg=cfg,
-            )
-        if qty and qty > 0:
-            params["quantity"] = int(qty)
-            filled.append("quantity")
-
-    if filled:
-        act["_protection_filled"] = filled
-    return filled
+    _ = (act, quote_last, equity, posture, cfg, positions, session)
+    return []
 
 
 def _order_id_of(order: dict) -> int | None:
