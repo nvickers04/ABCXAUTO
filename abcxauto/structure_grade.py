@@ -27,6 +27,15 @@ SCRAPE_SUSPECT = "scrape_suspect"
 GEOMETRY_REJECTED = "geometry_rejected"
 STRUCTURE_OK = "ok"
 
+# Invented % codes — leftover lessons only. Never a send or cooldown gate.
+_INVENTED_PCT_REASON_CODES = frozenset(
+    {
+        GEOMETRY_STOP_TOO_TIGHT,
+        GEOMETRY_STOP_TOO_WIDE,
+        GEOMETRY_ENTRY_STALE,
+    }
+)
+
 
 def _path_events() -> Path:
     import os
@@ -91,6 +100,7 @@ def check_live_geometry(
     """Return (ok, reason_code, human_message).
 
     Grok's prices are never rewritten — only accepted or rejected.
+    posture bands fill omitted stops; they are not a send reject.
     """
     if strategy not in ("market_bracket", "oca", "bracket"):
         return True, STRUCTURE_OK, "n/a"
@@ -142,35 +152,7 @@ def check_live_geometry(
                 f"SHORT target {target} must be below live/entry {proxy}",
             )
 
-    # Bracket entry must be near live quote when both present
-    if strategy == "bracket" and quote_last is not None:
-        try:
-            entry = float(params.get("entry_price") or 0)
-            q = float(quote_last)
-            if entry > 0 and q > 0 and abs(entry - q) / q > 0.02:
-                return (
-                    False,
-                    GEOMETRY_ENTRY_STALE,
-                    f"bracket entry {entry} >2% from live quote {q}",
-                )
-        except (TypeError, ValueError):
-            pass
-
-    lo, hi = posture_stop_bands(posture)
-    stop_pct = abs(proxy - stop) / proxy
-    if stop_pct < lo:
-        return (
-            False,
-            GEOMETRY_STOP_TOO_TIGHT,
-            f"stop distance {stop_pct*100:.3f}% below min {lo*100:.2f}% for {posture or 'balanced'}",
-        )
-    if stop_pct > hi:
-        return (
-            False,
-            GEOMETRY_STOP_TOO_WIDE,
-            f"stop distance {stop_pct*100:.2f}% above max {hi*100:.2f}% for {posture or 'balanced'}",
-        )
-
+    _ = posture  # fill bands only; never a % send reject
     return True, STRUCTURE_OK, "geometry ok"
 
 
@@ -224,17 +206,19 @@ def recent_structure_lessons(limit: int = 5) -> list[dict[str, Any]]:
 
 
 def structure_cooldown_symbols(lessons: list[dict] | None = None) -> dict[str, str]:
-    """Symbols with soft new-entry cooldown from scrape/geometry reject."""
+    """Symbols with soft new-entry cooldown from scrape/illegal geometry."""
     cool: dict[str, str] = {}
     for ev in lessons or recent_structure_lessons(8):
-        code = str(ev.get("reason_code") or ev.get("outcome") or "")
+        reason = str(ev.get("reason_code") or "")
+        if reason in _INVENTED_PCT_REASON_CODES:
+            continue
+        code = reason or str(ev.get("outcome") or "")
+        if code in _INVENTED_PCT_REASON_CODES:
+            continue
         if code not in (
             SCRAPE_SUSPECT,
             GEOMETRY_REJECTED,
             GEOMETRY_STOP_WRONG_SIDE,
-            GEOMETRY_STOP_TOO_TIGHT,
-            GEOMETRY_STOP_TOO_WIDE,
-            GEOMETRY_ENTRY_STALE,
             GEOMETRY_TARGET_WRONG_SIDE,
             GEOMETRY_QUOTE_REQUIRED,
         ):
