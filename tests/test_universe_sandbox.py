@@ -9,6 +9,7 @@ from abcxauto.universe import (
     filter_to_legal,
     is_common_equity_symbol,
     is_legal_symbol,
+    legal_symbols,
     load_allowlist,
     refresh_legal_set,
     reset_universe_cache,
@@ -203,3 +204,87 @@ async def test_pull_one_screen_no_ibkr_may_use_mda_seed():
     assert out["symbols"][0] == seed[0]
     assert "AAPL" in out["symbols"]
     assert out["persisted"] is False
+
+
+_CANNED_TAPE = ("SPY", "QQQ", "IWM", "DIA")
+
+
+def test_legal_symbols_empty_persist_does_not_dump_canned_tape():
+    """Empty persist stays empty — no catalog dump, no SPY/QQQ/IWM invent."""
+    from abcxauto.universe import ARENA_CATALOG
+
+    al = load_allowlist()
+    assert al["legal_symbols"] == []
+    got = legal_symbols()
+    assert got == []
+    for name in _CANNED_TAPE:
+        assert name not in got
+    for arena_id in ("index_etfs", "mega_cap"):
+        for name in ARENA_CATALOG[arena_id]["mda_fallback"] or []:
+            assert name not in got
+    assert not is_legal_symbol("SPY")
+    assert not is_legal_symbol("QQQ")
+
+
+def test_legal_symbols_caches_empty_without_dump():
+    """[] is a cache hit. A later persist write must not leak through until miss."""
+    assert legal_symbols() == []
+    save_allowlist(
+        {
+            "enabled_arenas": ["index_etfs"],
+            "legal_symbols": ["SPY", "QQQ", "IWM"],
+        }
+    )
+    assert legal_symbols() == []
+    assert legal_symbols(use_cache=False) == ["SPY", "QQQ", "IWM"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_empty_does_not_invent_index_defaults():
+    """most_active has no MDA seed. Empty must not persist SPY/QQQ/IWM."""
+    save_allowlist(
+        {
+            "enabled_arenas": ["most_active"],
+            "custom_symbols": [],
+            "exclude_symbols": [],
+        }
+    )
+    al = await refresh_legal_set(connector=None, persist=True)
+    assert al["legal_symbols"] == []
+    assert al["membership"] == []
+    assert al["source"] == "empty"
+    for name in _CANNED_TAPE:
+        assert name not in al["legal_symbols"]
+    assert legal_symbols() == []
+    persisted = load_allowlist()
+    assert persisted["legal_symbols"] == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_ibkr_empty_no_mda_catalog_dump(monkeypatch):
+    """Connected IBKR + empty mega_cap screen → persist empty, not catalog names."""
+    from abcxauto.universe import ARENA_CATALOG
+
+    async def empty_scan(_connector, _spec):
+        return {"ok": True, "symbols": []}
+
+    monkeypatch.setattr("abcxauto.universe._ibkr_scan", empty_scan)
+    catalog = list(ARENA_CATALOG["mega_cap"]["mda_fallback"] or [])
+    assert catalog
+    save_allowlist(
+        {
+            "enabled_arenas": ["mega_cap"],
+            "custom_symbols": [],
+            "exclude_symbols": [],
+        }
+    )
+
+    class Conn:
+        connected = True
+
+    al = await refresh_legal_set(Conn(), persist=True)
+    assert al["legal_symbols"] == []
+    assert al["source"] == "empty"
+    for name in catalog:
+        assert name not in al["legal_symbols"]
+    assert legal_symbols() == []
