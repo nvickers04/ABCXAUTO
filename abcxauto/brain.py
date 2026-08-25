@@ -1378,7 +1378,7 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
         return text
     if isinstance(data, dict):
         slim = dict(data)
-        for key in ("hits", "news", "bars", "series", "symbols", "rows"):
+        for key in ("hits", "news", "bars", "series", "symbols", "rows", "types"):
             if key not in slim:
                 continue
             slim.pop(key)
@@ -1387,10 +1387,13 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
             if len(text) <= max_chars:
                 return text
         if slim.get("run") is not None:
-            return json.dumps(
-                {"run": slim["run"], "ok": slim.get("ok"), "_clipped": "payload"},
-                default=str,
-            )[:max_chars]
+            kept: dict[str, Any] = {}
+            if "lab" in slim:
+                kept["lab"] = slim["lab"]
+            kept["run"] = slim["run"]
+            kept["ok"] = slim.get("ok")
+            kept["_clipped"] = "payload"
+            return json.dumps(kept, default=str)[:max_chars]
     return text[:max_chars] + "... [truncated]"
 
 
