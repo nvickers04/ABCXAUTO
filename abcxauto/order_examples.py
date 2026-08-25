@@ -30,6 +30,7 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "stop_price": 97.0,
         "target_price": 106.0,
         "price_hint": 100.0,
+        "card": "card-name",
     },
     "bracket": {
         "symbol": "NVDA",
@@ -39,6 +40,7 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "stop_price": 97.0,
         "target_price": 106.0,
         "price_hint": 100.0,
+        "card": "card-name",
     },
     "oca": {
         "symbol": "NVDA",
@@ -382,7 +384,8 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
     lines = [
         "ORDER EXAMPLES (send tool — strategy + params)",
         "Stock entries: symbol+direction. Clerk fills missing stop/target/qty. "
-        "Bare opens become a bracket; exits stay exits.",
+        "Bare opens become a bracket; exits stay exits. "
+        "New risk requires card= naming a playbook card under that strategy.",
         "Use direction LONG|SHORT for bracket/market_bracket/oca/trailing.",
         "Stock exits: target_conId + quantity (partial trim OK; omit qty = full). After trim check stop_qty_fact.",
         "close_option: prefer conId; quantity may be partial. roll_option for lifecycle.",

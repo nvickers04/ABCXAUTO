@@ -191,26 +191,98 @@ def option_quote_specs(args: dict[str, Any] | None) -> list[dict[str, Any]]:
     return specs[:OPTION_QUOTE_CAP]
 
 
+def _collect_symbols(*blobs: Any) -> list[str]:
+    """Symbols from scan_hits rows, opportunity rows, or a flat name list."""
+    out: list[str] = []
+
+    def add(raw: Any) -> None:
+        name = str(raw or "").strip().upper()
+        if name and name not in out:
+            out.append(name)
+
+    for blob in blobs:
+        if blob is None:
+            continue
+        if isinstance(blob, dict):
+            rows = blob.get("rows")
+            if isinstance(rows, list):
+                for row in rows:
+                    if isinstance(row, dict):
+                        add(row.get("symbol"))
+                continue
+            add(blob.get("symbol"))
+            continue
+        if isinstance(blob, (list, tuple)):
+            for item in blob:
+                if isinstance(item, dict):
+                    add(item.get("symbol"))
+                else:
+                    add(item)
+            continue
+        add(blob)
+    return out
+
+
 def fallback_quote_symbols(world: Any = None, snap: dict | None = None) -> list[str]:
-    """Open STK names, then SPY — so bare quote() still hits IBKR."""
+    """Open STK, then this look's scan hits, then last look — SPY only if empty.
+
+    Bare quote/news/candles used to land on SPY while flat. The live card
+    forbids a same-session SPY scrape, so that fallback skipped the screen
+    Grok had just pulled.
+    """
     out: list[str] = []
     rows = []
     if world is not None:
         rows.extend(list(getattr(world, "positions", None) or []))
     if isinstance(snap, dict):
         rows.extend(list(snap.get("positions") or []))
-    for p in rows:
-        if not isinstance(p, dict):
+    for pos in rows:
+        if not isinstance(pos, dict):
             continue
-        sec = str(p.get("sec_type") or p.get("secType") or "STK").upper()
+        sec = str(pos.get("sec_type") or pos.get("secType") or "STK").upper()
         if not sec.startswith("STK"):
             continue
-        sym = str(p.get("symbol") or "").strip().upper()
+        sym = str(pos.get("symbol") or "").strip().upper()
         if sym and sym not in out:
             out.append(sym)
         if len(out) >= 8:
             return out
-    if "SPY" not in out:
+    hits = []
+    if isinstance(snap, dict):
+        hits.extend(
+            _collect_symbols(
+                snap.get("scan_hits"),
+                snap.get("opportunities"),
+                snap.get("scan_fetched"),
+            )
+        )
+    if world is not None:
+        hits.extend(
+            _collect_symbols(
+                getattr(world, "opportunities", None),
+                getattr(world, "scan_fetched", None),
+            )
+        )
+    if not hits:
+        try:
+            from abcxauto.think_stream import last_look_for_hunt
+
+            hits = _collect_symbols((last_look_for_hunt() or {}).get("scan_hits"))
+        except Exception:
+            hits = []
+    for sym in hits:
+        if sym not in out:
+            out.append(sym)
+        if len(out) >= 8:
+            return out
+    if not out:
+        try:
+            from abcxauto.lab_playbook import live_card_send_facts, live_card_skips_spy
+
+            if live_card_send_facts().get("card") or live_card_skips_spy():
+                return []
+        except Exception:
+            pass
         out.append("SPY")
     return out[:8]
 
@@ -263,12 +335,13 @@ def normalize_tool_call(
             if got not in (None, ""):
                 out[dest] = got
 
-    if canon == "quote":
+    if canon in ("quote", "news", "odds", "candles"):
         if out.get("symbol") in (None, "") and out.get("symbols") in (None, "", []):
-            fb = [s for s in (fallback_symbols or []) if s]
+            cap = 4 if canon == "candles" else 8
+            fb = [s for s in (fallback_symbols or []) if s][:cap]
             if fb:
-                out["symbols"] = fb[:8]
-        if isinstance(out.get("symbol"), list) and not out.get("symbols"):
+                out["symbols"] = fb
+        if canon == "quote" and isinstance(out.get("symbol"), list) and not out.get("symbols"):
             out["symbols"] = out["symbol"]
             out.pop("symbol", None)
 
@@ -308,13 +381,8 @@ def normalize_tool_call(
             "ticker",
         ):
             out.pop(alias, None)
-        # Bare scanCode passed as arena=MOST_ACTIVE is fine (universe.resolve_screen).
-        # Both selectors at once is a hard error in resolve_screen, and the model
-        # sent both on every wake then retried with arena alone — four dead scans
-        # a look, unlearnable because the chat is dropped. Keep the selector the
-        # retry proves works so the first call is the one that succeeds.
-        if str(out.get("arena") or "").strip() and str(out.get("scan_code") or "").strip():
-            out.pop("scan_code", None)
+        # Both selectors compose: arena is the universe, scan_code is the sort.
+        # Dropping the sort made mega_cap+TOP_PERC_LOSE run HOT_BY_VOLUME.
 
     if canon in ("candles", "option_chain"):
         if isinstance(out.get("symbol"), list) and not out.get("symbols"):

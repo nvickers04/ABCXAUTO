@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from types import SimpleNamespace
 from typing import Any, Callable, List
@@ -419,6 +420,128 @@ async def test_handlers_not_double_wired(monkeypatch):
     assert len(fake.disconnectedEvent._handlers) == 1
     conn._register_handlers()  # idempotent
     assert len(fake.disconnectedEvent._handlers) == 1
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_resolve_loop_prefers_captured_running_loop():
+    """Reconnect must stay on the connect loop, not a stray running loop."""
+    from abcxauto.broker.connector import IBKRConnector
+
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+
+    class _Other:
+        def is_closed(self):
+            return False
+
+        def is_running(self):
+            return True
+
+    other = _Other()
+    conn._loop = other
+    assert conn._resolve_loop() is other
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_async_lock_rebinds_after_bound_loop_closes():
+    """Closed-loop lock is the paper 'Lock bound to a different event loop' hole."""
+    from abcxauto.broker.connector import IBKRConnector
+
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+    done = threading.Event()
+
+    def _bind_and_close():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def _bind():
+            async with conn.async_lock:
+                pass
+
+        loop.run_until_complete(_bind())
+        loop.close()
+        done.set()
+
+    t = threading.Thread(target=_bind_and_close)
+    t.start()
+    assert done.wait(timeout=2)
+    t.join(timeout=2)
+    stale = conn._async_lock
+    assert stale is not None
+    current = conn.async_lock
+    assert current is not stale
+    async with current:
+        pass
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_async_lock_fail_closed_when_held_on_other_live_loop():
+    from abcxauto.broker.connector import IBKRConnector
+
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+    held = threading.Event()
+    release = threading.Event()
+
+    def _hold():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def _run():
+            async with conn.async_lock:
+                held.set()
+                while not release.is_set():
+                    await asyncio.sleep(0.01)
+
+        try:
+            loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_hold)
+    t.start()
+    assert held.wait(timeout=2)
+    with pytest.raises(RuntimeError, match="different event loop"):
+        _ = conn.async_lock
+    release.set()
+    t.join(timeout=2)
+    assert not t.is_alive()
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_connect_adopts_live_api_socket_no_new_ib(monkeypatch):
+    """1100 keeps the socket; connect must not replace IB()."""
+    from abcxauto.broker.connector import IBKRConnector
+
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+    created = {"n": 0}
+
+    def _boom():
+        created["n"] += 1
+        raise AssertionError("new_ib must not run while API socket is up")
+
+    monkeypatch.setattr("abcxauto.broker.connector.new_ib", _boom)
+    monkeypatch.setattr(IBKRConnector, "_start_heartbeat", lambda self: None)
+
+    class _Live:
+        def isConnected(self):
+            return True
+
+        loop = asyncio.get_running_loop()
+
+    conn.ib = _Live()
+    conn._connected = False
+    conn._loop = asyncio.get_running_loop()
+    ok = await conn.connect(max_retries=3)
+    assert ok is True
+    assert conn._connected is True
+    assert created["n"] == 0
     IBKRConnector._instance = None
 
 

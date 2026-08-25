@@ -1,6 +1,6 @@
 # ABCXAUTO spec
 
-Grok owns a paper IBKR book. The clerk is facts, hard gates, and a wake clock.
+Grok owns a paper IBKR book. The clerk is facts, hard gates, and the next-look clock.
 Brain is the `model` knob (default grok-4.6). Mainline is `master`.
 
 Paper (TWS **7497**) is the lab. Live (TWS **7496**, confirm phrase, a different
@@ -13,8 +13,8 @@ the cost of the model. Same rules at $1k, $100k, or $1M.
 
 | Owner | Job |
 |-------|-----|
-| **Grok** | Tickets (`send`), knobs (`self_tune`), lab notebook (`write_lab_playbook`), next look (`set_wake`) |
-| **Clerk** | Live facts, `ORDER EXAMPLES`, hard gates, default look if Grok skips `set_wake` |
+| **Grok** | Tickets (`send`), knobs (`self_tune`), lab notebook (`write_lab_playbook`) |
+| **Clerk** | Live facts, `ORDER EXAMPLES`, hard gates, next-look clock from playbook + defaults |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No strategy card. |
 
 Do not grow the system prompt. Do not inject strategy menus or a Judge/Act form.
@@ -60,7 +60,7 @@ IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 MDA ~15m delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
 
 Other: `odds` (Polymarket, not send geometry), `playbook`, `write_lab_playbook`,
-`set_wake`, `send`, `self_tune` (flat knobs).
+`send`, `self_tune` (flat knobs).
 
 Universe is a watchlist Grok can change via `self_tune`; `send` is not limited
 to it. Clerk writes `journal.db`; there is no `journal` tool.

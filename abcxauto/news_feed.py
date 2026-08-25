@@ -24,22 +24,19 @@ def reset_news_cache() -> None:
 
 
 def _universe(positions: list[dict] | None) -> list[str]:
-    """Book underlyings first, then Universe legal sample. No index pad."""
+    """Book underlyings only. No sandbox junk, no index pad.
+
+    legal_symbols is the IBKR screen leftover (levered/micro junk). Polling
+    that tape for headlines 404s MDA and starves the look's catalyst fetch.
+    SPY/QQQ pads are canned names, not the book.
+    """
     out: list[str] = []
     for p in positions or []:
         sym = str((p or {}).get("symbol") or "").upper()
         if sym and sym not in out:
             out.append(sym)
-    try:
-        from abcxauto.universe import legal_symbols
-
-        for sym in legal_symbols():
-            if sym not in out:
-                out.append(sym)
-            if len(out) >= _UNIVERSE_CAP:
-                break
-    except Exception:
-        logger.exception("news universe legal_symbols failed")
+        if len(out) >= _UNIVERSE_CAP:
+            break
     return out
 
 
@@ -66,6 +63,14 @@ async def _fetch_symbol_news(
     client: Any, sym: str, *, per_symbol: int
 ) -> tuple[list[dict], str | None]:
     """One symbol: try, retry once on timeout/error. Miss is not empty."""
+    try:
+        from abcxauto.prints import mda_worth_asking
+
+        if not mda_worth_asking(sym):
+            return [], None
+    except Exception:
+        logger.exception("mda_worth_asking failed for %s", sym)
+
     reason: str | None = None
     tries = max(1, int(NEWS_TRIES))
     timeout_s = float(NEWS_SYMBOL_S)
@@ -91,7 +96,7 @@ async def fetch_agent_news(
     force: bool = False,
     per_symbol: int = 4,
 ) -> list[dict]:
-    """Fetch / cache headlines for book + sandbox sample.
+    """Fetch / cache headlines for open-book underlyings.
 
     A timeout or transport miss is returned as an ``error`` item and is not
     cached. Empty headlines from a completed fetch stay empty.
@@ -119,9 +124,9 @@ async def fetch_agent_news(
         batches = await asyncio.gather(
             *[_fetch_symbol_news(client, s, per_symbol=per_symbol) for s in symbols]
         )
-        for sym, (batch, err) in zip(symbols, batches):
+        for _sym, (batch, err) in zip(symbols, batches):
             if err:
-                misses.append(_miss(sym, err))
+                misses.append(_miss(_sym, err))
             else:
                 items.extend(batch)
     except Exception:
