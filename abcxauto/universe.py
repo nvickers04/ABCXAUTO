@@ -757,7 +757,11 @@ async def refresh_legal_set(
     allowlist: dict[str, Any] | None = None,
     persist: bool = True,
 ) -> dict[str, Any]:
-    """Pull IBKR (preferred) / MDA-fallback symbols for enabled arenas."""
+    """Pull IBKR (preferred) / MDA-seed symbols for enabled arenas.
+
+    Same empty rule as ``pull_one_screen``: if IBKR ran, stay empty — do not
+    dump ARENA_CATALOG names. Never invent SPY/QQQ/IWM.
+    """
     al = dict(allowlist if allowlist is not None else load_allowlist())
     enabled = list(al.get("enabled_arenas") or _DEFAULT_ENABLED)
     custom = normalize_symbols(al.get("custom_symbols") or [])
@@ -772,6 +776,8 @@ async def refresh_legal_set(
         pulled: list[str] = []
         pull_src = ""
         ibkr_spec = meta.get("ibkr")
+        # MDA seed only when there is no IBKR connector (or no IBKR spec).
+        # If _ibkr_scan ran and returned empty — stay empty; do not dump catalog names.
         if ibkr_spec and connector is not None:
             scan_out = await _ibkr_scan(connector, ibkr_spec)
             if isinstance(scan_out, dict):
@@ -781,7 +787,7 @@ async def refresh_legal_set(
             if pulled:
                 pull_src = "ibkr"
                 sources.append(f"{arena_id}:ibkr")
-        if not pulled:
+        else:
             pulled = normalize_symbols(meta.get("mda_fallback") or [])
             if pulled:
                 pull_src = "mda_fallback"
@@ -797,14 +803,6 @@ async def refresh_legal_set(
         if sym not in legal and sym not in exclude:
             legal.append(sym)
             membership.append({"symbol": sym, "arena": "custom", "source": "custom"})
-
-    # Fail-closed minimal default if empty
-    if not legal:
-        legal = ["SPY", "QQQ", "IWM"]
-        membership = [
-            {"symbol": s, "arena": "default", "source": "default"} for s in legal
-        ]
-        sources.append("default:index")
 
     # Keep arena / scanner order — do not alphabetize (that biases SCAN TAPE to A*).
     source = "+".join(sources) if sources else "empty"
@@ -825,30 +823,14 @@ async def refresh_legal_set(
 
 
 def legal_symbols(*, use_cache: bool = True) -> list[str]:
-    """Current legal set (from cache or last persisted refresh)."""
+    """Current legal set (from cache or last persisted refresh). Empty stays empty."""
     now = time.monotonic()
-    if (
-        use_cache
-        and _CACHE.get("legal")
-        and (now - float(_CACHE.get("ts") or 0)) < _CACHE_TTL_S
-    ):
-        return list(_CACHE["legal"])
+    ts = float(_CACHE.get("ts") or 0)
+    # Empty list is a hit — do not treat [] as a miss and dump catalog / SPY/QQQ.
+    if use_cache and ts and (now - ts) < _CACHE_TTL_S:
+        return list(_CACHE.get("legal") or [])
     al = load_allowlist()
     legal = normalize_symbols(al.get("legal_symbols") or [])
-    if not legal:
-        # Build from fallbacks without IBKR (offline)
-        for arena_id in al.get("enabled_arenas") or _DEFAULT_ENABLED:
-            meta = ARENA_CATALOG.get(str(arena_id)) or {}
-            for sym in normalize_symbols(meta.get("mda_fallback") or []):
-                if sym not in legal:
-                    legal.append(sym)
-        for sym in normalize_symbols(al.get("custom_symbols") or []):
-            if sym not in legal:
-                legal.append(sym)
-        exclude = set(normalize_symbols(al.get("exclude_symbols") or []))
-        legal = [s for s in legal if s not in exclude]
-        if not legal:
-            legal = ["SPY", "QQQ", "IWM"]
     _CACHE.update(
         ts=now,
         legal=list(legal),
