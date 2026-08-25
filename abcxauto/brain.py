@@ -897,12 +897,9 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
                 "card": {
                     "type": "string",
                     "description": (
-                        "Playbook card this ticket comes from — a card branching "
-                        "under the strategy you are sending. Required on new risk "
-                        "(clerk blocks an untagged entry); optional on exits, "
-                        "protection, modifies and cancels, which are never blocked. "
-                        "Tags the fill so the card is scored on its own resolved "
-                        "trades instead of whole-book drift."
+                        "Optional playbook card this ticket comes from. Tags the "
+                        "fill so the card is scored on its own resolved trades "
+                        "instead of whole-book drift. Not a send gate."
                     ),
                 },
                 "rationale": {"type": "string"},

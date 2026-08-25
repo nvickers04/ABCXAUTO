@@ -2354,6 +2354,9 @@ def test_send_tool_says_one_ticket_per_call():
     assert "bracket" in strat["enum"]
     assert "symbol" in props
     assert "quantity" in props
+    card = props.get("card") or {}
+    assert "required on new risk" not in str(card.get("description") or "").lower()
+    assert "not a send gate" in str(card.get("description") or "").lower()
 
 
 def test_self_tune_tool_is_flat():

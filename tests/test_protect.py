@@ -698,7 +698,52 @@ def test_gap_card_does_not_invent_a_percent_stop():
 
 
 @pytest.mark.asyncio
-async def test_execute_ticket_without_session_blocks_gap_card(monkeypatch):
+async def test_paper_send_without_a_card_reaches_geometry_not_notebook(monkeypatch):
+    """A complete Grok ticket needs no playbook card. Thin tickets hit real gates."""
+    from abcxauto.agent_loop import execute_ticket
+
+    sent = _stub_thin_send(monkeypatch)
+    world = _flat_world(net_liquidation=37000.0)
+    snap = {
+        "account": {"netliquidation": 37000.0},
+        "positions": [],
+        "open_orders": [],
+        "ibkr_live_quotes": {"SNDK": 91.5},
+    }
+    thin = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {"symbol": "SNDK", "direction": "LONG", "quantity": 10},
+        "rationale": "no card",
+    }
+    result = await execute_ticket(thin, object(), world, snap)
+    assert result.get("status") in ("blocked", "rejected")
+    blob = str(result)
+    assert "params.card" not in blob
+    assert "playbook card" not in blob.lower()
+    assert "required" in blob.lower() or "stop" in blob.lower()
+    assert sent == []
+
+    complete = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {
+            "symbol": "SNDK",
+            "direction": "LONG",
+            "stop_price": 88.0,
+            "target_price": 93.0,
+            "quantity": 10,
+        },
+        "rationale": "grok owns the ticket",
+    }
+    result2 = await execute_ticket(complete, object(), world, snap)
+    assert result2.get("status") == "ok"
+    assert sent and sent[0]["params"].get("card") in (None, "")
+    assert sent[0]["params"]["stop_price"] == 88.0
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_without_session_does_not_invent_a_candles_gate(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.world_state import WorldState
 
@@ -747,7 +792,8 @@ async def test_execute_ticket_without_session_blocks_gap_card(monkeypatch):
         {"account": {"netliquidation": 37000.0}, "positions": [], "open_orders": []},
     )
     assert result.get("status") == "blocked"
-    assert "candles" in str(result.get("note") or "")
+    assert "params.symbol" in str(result.get("note") or "")
+    assert "candles" not in str(result.get("note") or "").lower()
     assert sent == []
 
     act2 = {
@@ -779,7 +825,7 @@ async def test_execute_ticket_without_session_blocks_gap_card(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_execute_ticket_blocks_when_last_is_on_opening_low(monkeypatch):
+async def test_execute_ticket_does_not_invent_a_hold_above_open_gate(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.world_state import WorldState
 
@@ -836,25 +882,26 @@ async def test_execute_ticket_blocks_when_last_is_on_opening_low(monkeypatch):
             "account": {"netliquidation": 37000.0},
             "positions": [],
             "open_orders": [],
-            "ibkr_live_quotes": {"SNDK": 88.0},
+            "ibkr_live_quotes": {"SNDK": 91.5},
             "session_range": {
                 "SNDK": {
                     "today": True,
                     "low": 88.0,
-                    "last": 88.0,
+                    "last": 91.5,
                     "above_low": False,
+                    "above_open": False,
                     "retrace_30": 93.0,
                 }
             },
         },
     )
-    assert result.get("status") == "blocked"
-    assert "opening low" in str(result.get("note") or "")
-    assert sent == []
+    assert result.get("status") == "ok"
+    assert "opening low" not in str(result.get("note") or "")
+    assert sent and sent[0]["params"]["stop_price"] == 88.0
 
 
 @pytest.mark.asyncio
-async def test_execute_ticket_blocks_when_gap_is_under_the_card_floor(monkeypatch):
+async def test_execute_ticket_does_not_invent_a_gap_floor_gate(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
@@ -943,13 +990,13 @@ async def test_execute_ticket_blocks_when_gap_is_under_the_card_floor(monkeypatc
             },
         },
     )
-    assert result.get("status") == "blocked"
-    assert "gap under 6%" in str(result.get("note") or "")
-    assert sent == []
+    assert result.get("status") == "ok"
+    assert "gap under" not in str(result.get("note") or "")
+    assert sent and sent[0]["params"]["symbol"] == "MU"
 
 
 @pytest.mark.asyncio
-async def test_execute_ticket_blocks_when_last_is_under_card_price_floor(monkeypatch):
+async def test_execute_ticket_does_not_invent_a_card_price_floor_gate(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
@@ -1036,13 +1083,13 @@ async def test_execute_ticket_blocks_when_last_is_under_card_price_floor(monkeyp
             },
         },
     )
-    assert result.get("status") == "blocked"
-    assert "last under $15" in str(result.get("note") or "")
-    assert sent == []
+    assert result.get("status") == "ok"
+    assert "last under" not in str(result.get("note") or "")
+    assert sent and sent[0]["params"]["symbol"] == "AAOI"
 
 
 @pytest.mark.asyncio
-async def test_execute_ticket_blocks_wide_spread_on_tight_spread_card(monkeypatch):
+async def test_execute_ticket_does_not_invent_a_tight_spread_gate(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
@@ -1130,9 +1177,9 @@ async def test_execute_ticket_blocks_wide_spread_on_tight_spread_card(monkeypatc
         },
     }
     result = await execute_ticket(act, object(), world, snap)
-    assert result.get("status") == "blocked"
-    assert "spread wider than the stop" in str(result.get("note") or "")
-    assert sent == []
+    assert result.get("status") == "ok"
+    assert "spread wider" not in str(result.get("note") or "")
+    assert sent and sent[0]["params"]["symbol"] == "SNDK"
 
 
 @pytest.mark.asyncio
@@ -1312,7 +1359,7 @@ async def test_execute_ticket_uses_scan_hit_last_when_quote_map_misses(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_execute_ticket_blocks_no_add_on_an_open_name(monkeypatch):
+async def test_execute_ticket_does_not_invent_a_no_add_gate(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
@@ -1398,9 +1445,9 @@ async def test_execute_ticket_blocks_no_add_on_an_open_name(monkeypatch):
             },
         },
     )
-    assert result.get("status") == "blocked"
-    assert "no add SNDK" in str(result.get("note") or "")
-    assert sent == []
+    assert result.get("status") == "ok"
+    assert "no add" not in str(result.get("note") or "")
+    assert sent and sent[0]["params"]["symbol"] == "SNDK"
 
 
 @pytest.mark.asyncio
