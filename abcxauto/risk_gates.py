@@ -17,6 +17,7 @@ proposed underlying, stock and options together, and adds the new notional.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from datetime import date
 from typing import Any, Optional, Tuple
@@ -146,20 +147,40 @@ def _market_bracket_risk_entry(params: Any) -> Optional[float]:
         return None
 
 
-def _account_float(account: dict, *keys: str) -> Optional[float]:
+def _parse_account_number(raw: Any) -> Optional[float]:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _account_number_state(
+    account: dict, *keys: str
+) -> Tuple[str, Optional[float]]:
+    """Read a USD tag. ``ok`` / ``missing`` / ``unreadable`` (present but not finite)."""
+    saw_present = False
     for key in keys:
-        if key in account and account[key] is not None:
-            try:
-                return float(account[key])
-            except (TypeError, ValueError):
+        for candidate in (key, key.lower()):
+            if candidate not in account:
                 continue
-        lower = key.lower()
-        if lower in account and account[lower] is not None:
-            try:
-                return float(account[lower])
-            except (TypeError, ValueError):
+            raw = account[candidate]
+            if raw is None:
                 continue
-    return None
+            saw_present = True
+            parsed = _parse_account_number(raw)
+            if parsed is not None:
+                return "ok", parsed
+    if saw_present:
+        return "unreadable", None
+    return "missing", None
+
+
+def _account_float(account: dict, *keys: str) -> Optional[float]:
+    _state, value = _account_number_state(account, *keys)
+    return value
 
 
 def risk_base_usd(net_liq: float, cfg: Any = None) -> float:
@@ -235,13 +256,49 @@ def estimate_notional(proposal: OrderProposal) -> Optional[float]:
     return None
 
 
-def symbol_exposure_usd(positions: Any, symbol: str) -> float:
+def _lot_names(position: dict) -> set[str]:
+    """Tickers that identify one underlying on a lot.
+
+    Live IBKR options use ``contract.symbol`` = underlying. Some snapshots also
+    carry ``underlying`` next to an OCC ``symbol`` — both must count as one name.
+    """
+    names: set[str] = set()
+    for key in ("underlying", "underSymbol", "symbol", "ticker"):
+        val = str(position.get(key) or "").strip().upper()
+        if val:
+            names.add(val)
+    return names
+
+
+def _lot_market_value(position: dict) -> Optional[float]:
+    """Priced mark for a lot. None when the field is present but unreadable."""
+    raw: Any = None
+    if "marketValue" in position and position["marketValue"] is not None:
+        raw = position["marketValue"]
+    elif "market_value" in position and position["market_value"] is not None:
+        raw = position["market_value"]
+    else:
+        return 0.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return abs(value)
+
+
+def symbol_exposure_usd(positions: Any, symbol: str) -> Optional[float]:
     """Market value already held in one underlying, summed across lots.
 
     Stock and its options aggregate on purpose: SPY shares plus SPY calls are
     one bet, not two. Option ``marketValue`` is premium, which understates
     delta — the same basis the portfolio exposure fact already reports, and a
     cap where ``max_position_pct`` alone left none.
+
+    Returns ``None`` when a matching lot cannot be priced (NaN / non-finite
+    mark). Callers must fail-closed — ``nan > cap`` is False in Python, which
+    would let a second ticket in the same name pass.
     """
     sym = str(symbol or "").strip().upper()
     if not sym:
@@ -250,7 +307,7 @@ def symbol_exposure_usd(positions: Any, symbol: str) -> float:
     for p in positions or []:
         if not isinstance(p, dict):
             continue
-        if str(p.get("symbol") or "").strip().upper() != sym:
+        if sym not in _lot_names(p):
             continue
         try:
             qty = float(p.get("quantity") or p.get("position") or 0)
@@ -258,10 +315,10 @@ def symbol_exposure_usd(positions: Any, symbol: str) -> float:
             continue
         if abs(qty) < 1e-9:
             continue
-        try:
-            total += abs(float(p.get("marketValue") or p.get("market_value") or 0))
-        except (TypeError, ValueError):
-            continue
+        marked = _lot_market_value(p)
+        if marked is None:
+            return None
+        total += marked
     return total
 
 
@@ -436,16 +493,27 @@ class RiskGate:
             err = account.get("error") if isinstance(account, dict) else "invalid account"
             return False, f"Risk gate fail-closed: cannot read account summary ({err})"
 
-        net_liq = _account_float(account, "netliquidation", "NetLiquidation")
-        daily_pnl = _account_float(account, "dailypnl", "DailyPnL")
-        if net_liq is None or net_liq <= 0:
+        nl_state, net_liq = _account_number_state(
+            account, "netliquidation", "NetLiquidation"
+        )
+        pnl_state, daily_pnl = _account_number_state(account, "dailypnl", "DailyPnL")
+        if nl_state != "ok" or net_liq is None or net_liq <= 0:
             return False, "Risk gate fail-closed: NetLiquidation unavailable or non-positive"
+        # Missing DailyPnL is flat (IBKR often omits it early session). A
+        # present but non-finite tag is unknown — fail-closed when the
+        # breaker is armed, and never treat NaN as "no loss".
+        floors_on = sizing_floors_active(cfg)
+        if (
+            pnl_state == "unreadable"
+            and floors_on
+            and cfg.daily_loss_limit_pct > 0
+        ):
+            return False, "Risk gate fail-closed: DailyPnL unreadable"
         if daily_pnl is None:
             daily_pnl = 0.0
 
         self.update_equity(net_liq)
         book = risk_base_usd(net_liq, cfg)
-        floors_on = sizing_floors_active(cfg)
 
         # Fail-closed: option tickets must carry a price (no sizing on a lie).
         if proposal.strategy in OPTION_STRATEGIES:
@@ -558,6 +626,13 @@ class RiskGate:
                 positions = await connector.get_positions()
             except Exception as e:
                 return False, f"Risk gate fail-closed: cannot read positions ({e})"
+            if isinstance(positions, dict) and positions.get("error"):
+                return False, (
+                    "Risk gate fail-closed: cannot read positions "
+                    f"({positions.get('error')})"
+                )
+            if not isinstance(positions, list):
+                return False, "Risk gate fail-closed: cannot read positions"
 
         if concentration_pct > 0:
             notional = estimate_notional(proposal)
@@ -566,8 +641,11 @@ class RiskGate:
             held = symbol_exposure_usd(
                 positions, getattr(proposal.params, "symbol", "")
             )
-            after_pct = _pct_of_nl(held + float(notional), book)
-            if after_pct > concentration_pct:
+            if held is None:
+                return False, "size_symbol_concentration unknown"
+            after = held + float(notional)
+            after_pct = _pct_of_nl(after, book)
+            if not math.isfinite(after_pct) or after_pct > concentration_pct:
                 return False, (
                     f"size_symbol_concentration {after_pct} > {concentration_pct}"
                 )
