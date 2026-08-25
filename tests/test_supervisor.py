@@ -31,6 +31,32 @@ class _Proc:
         return self._code
 
 
+def test_orphan_flet_pids_keeps_a_live_parent():
+    from abcxauto.supervisor import orphan_flet_pids
+
+    rows = [
+        {
+            "Name": "flet.exe",
+            "ProcessId": 11,
+            "ParentProcessId": 99,
+            "CommandLine": r"C:\flet\flet.exe C:\Users\nvick\ABCXAUTO\assets",
+        },
+        {
+            "Name": "flet.exe",
+            "ProcessId": 22,
+            "ParentProcessId": 88,
+            "CommandLine": r"C:\flet\flet.exe C:\Users\nvick\ABCXAUTO\assets",
+        },
+        {
+            "Name": "flet.exe",
+            "ProcessId": 33,
+            "ParentProcessId": 77,
+            "CommandLine": r"C:\flet\flet.exe C:\other\project\assets",
+        },
+    ]
+    assert orphan_flet_pids(rows, repo=r"C:\Users\nvick\ABCXAUTO", pid_alive=lambda p: p == 99) == [22]
+
+
 def test_operator_stop_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_OPERATOR_STOP_PATH", str(tmp_path / "stop.json"))
     clear_operator_stop()

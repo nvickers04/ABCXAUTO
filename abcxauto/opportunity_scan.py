@@ -11,7 +11,11 @@ import logging
 import os
 import re
 import time
+from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
+
+from abcxauto.prints import USE_MDA, asof_fields, ibkr_block, parse_ibkr_bar_et
 
 logger = logging.getLogger(__name__)
 
@@ -241,12 +245,38 @@ async def attach_live_quotes(
         if px <= 0:
             continue
         row["last"] = px
-        for key in ("bid", "ask"):
+        for key in ("bid", "ask", "open", "close", "change_pct", "open_gap_pct"):
             if q.get(key) is not None:
                 row[key] = q[key]
+        from abcxauto.prints import spread_fields
+
+        row.update(spread_fields(row.get("bid"), row.get("ask"), px))
         row["quote_source"] = "ibkr_live"
+        live = ibkr_block(q)
+        if live:
+            live["last"] = px
+            row["ibkr"] = live
         n += 1
     return n
+
+
+async def attach_mda_metrics(
+    rows: list[dict[str, Any]],
+    *,
+    cap: int = 8,
+) -> int:
+    """Nest delayed daily metrics on the top hits. Never writes ``last``."""
+    from abcxauto.prints import merge_mda_metrics, mda_worth_asking
+
+    targets = [
+        str(r.get("symbol") or "")
+        for r in (rows or [])[: max(0, int(cap))]
+        if r.get("symbol") and mda_worth_asking(str(r.get("symbol") or ""))
+    ]
+    if not targets:
+        return 0
+    ideas = await fetch_scan_metrics(targets, cap=cap)
+    return merge_mda_metrics(rows, ideas)
 
 
 async def criteria_scan(
@@ -317,6 +347,22 @@ async def criteria_scan(
         scanner_rows=scanner_rows,
     )
     quoted = await attach_live_quotes(rows, connector=connector)
+    try:
+        from abcxauto.lab_playbook import drop_hits_off_card
+
+        rows, dropped = drop_hits_off_card(rows)
+        hits_syms = [str(r.get("symbol") or "") for r in rows if r.get("symbol")]
+        if dropped:
+            applied = dict(applied)
+            applied["dropped"] = dropped[:16]
+        quoted = sum(
+            1
+            for r in rows
+            if r.get("last") is not None
+            or (isinstance(r.get("ibkr"), dict) and r["ibkr"].get("last") is not None)
+        )
+    except Exception:
+        logger.debug("card hit drop failed", exc_info=True)
     ranked = bool(scanner_rows) and source == "ibkr"
     return {
         "ok": True,
@@ -383,6 +429,7 @@ def metrics_for_symbol(
             last_t = row.get("t")
             break
     res = (resolution or "D").strip() or "D"
+    extra = asof_fields(last_t)
     return {
         "symbol": str(symbol or "").upper(),
         "mda_last": round(last, 4),
@@ -396,7 +443,289 @@ def metrics_for_symbol(
         "above_sma20": bool(last >= sma20),
         "source": "mda",
         "freshness": mda_bar_freshness(res),
+        "use": USE_MDA,
+        **extra,
     }
+
+
+def _gap_levels(open_px: float, gap_pct: Any) -> dict[str, Any]:
+    """Prior close and 30/50 retrace of the open gap. Tape math, not a ticket."""
+    try:
+        pct = float(gap_pct)
+    except (TypeError, ValueError):
+        return {}
+    if pct <= -100.0:
+        return {}
+    prior = open_px / (1.0 + pct / 100.0)
+    fill = prior - open_px
+    return {
+        "prior_close": round(prior, 4),
+        "gap_pts": round(open_px - prior, 4),
+        "gap_pct": round(pct, 4),
+        "retrace_30": round(open_px + 0.3 * fill, 4),
+        "retrace_50": round(open_px + 0.5 * fill, 4),
+    }
+
+
+_RTH_START_MIN = 9 * 60 + 30
+_RTH_END_MIN = 16 * 60
+
+
+def _bar_has_clock(raw: str) -> bool:
+    return "T" in raw or " " in raw or ":" in raw
+
+
+def _bar_et(bar: dict[str, Any]) -> datetime | None:
+    """Session clock from the original print. ``t_iso`` is last — it can be UTC-wrong."""
+    wall = str(bar.get("t") or bar.get("date") or "").strip()
+    if wall:
+        return parse_ibkr_bar_et(wall)
+    iso = str(bar.get("t_iso") or "").strip()
+    return parse_ibkr_bar_et(iso) if iso else None
+
+
+def _bar_minutes_et(bar: dict[str, Any]) -> int | None:
+    wall = str(bar.get("t") or bar.get("date") or "").strip()
+    if wall and not _bar_has_clock(wall):
+        return None
+    stamp = _bar_et(bar)
+    if stamp is None:
+        return None
+    return stamp.hour * 60 + stamp.minute
+
+
+def _rth_bars(session: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+    """RTH bars if any timed prints exist. Premarket-only is not the opening low."""
+    rth: list[dict[str, Any]] = []
+    timed: list[dict[str, Any]] = []
+    untimed: list[dict[str, Any]] = []
+    for bar in session:
+        mins = _bar_minutes_et(bar)
+        if mins is None:
+            untimed.append(bar)
+            continue
+        timed.append(bar)
+        if _RTH_START_MIN <= mins < _RTH_END_MIN:
+            rth.append(bar)
+    if rth:
+        return rth, "rth"
+    if timed:
+        return timed, "premarket"
+    return untimed or session, "daily"
+
+
+def _et_calendar_day(now: datetime | date | None = None) -> str:
+    if isinstance(now, date) and not isinstance(now, datetime):
+        return now.isoformat()
+    clock = now if isinstance(now, datetime) else datetime.now(ZoneInfo("America/New_York"))
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=ZoneInfo("America/New_York"))
+    else:
+        clock = clock.astimezone(ZoneInfo("America/New_York"))
+    return clock.date().isoformat()
+
+
+def _prior_rth_close(
+    rows: list[dict[str, Any]],
+    day: str,
+    day_of,
+    px,
+) -> float | None:
+    """Last RTH close before ``day``. The card's gap is vs this print."""
+    if not day:
+        return None
+    prior = [b for b in rows if day_of(b) and day_of(b) < day]
+    if not prior:
+        return None
+    prev_day = day_of(prior[-1])
+    prev = [b for b in prior if day_of(b) == prev_day]
+    prev, _kind = _rth_bars(prev)
+    closes = [p for p in (px(b, "c", "close") for b in prev) if p is not None]
+    if not closes:
+        return None
+    last = closes[-1]
+    return last if last > 0 else None
+
+
+def session_range_from_bars(
+    bars: list[dict[str, Any]] | None,
+    *,
+    last: Any = None,
+    open_gap_pct: Any = None,
+    rth_open: Any = None,
+    now: datetime | date | None = None,
+) -> dict[str, Any] | None:
+    """Open / high / low / last for the last calendar day in the series.
+
+    Facts only. The card's opening-low stop is this low, not SMA.
+    ``today`` is whether that bar date is the current New York session date.
+    ``rth_open`` is the ticker / scan regular-session open. A midday 5-min
+    window's first bar is not that print — hold-above-open uses this.
+    """
+    rows = [b for b in (bars or []) if isinstance(b, dict)]
+    if not rows:
+        return None
+
+    def _day(bar: dict[str, Any]) -> str:
+        stamp = _bar_et(bar)
+        if stamp is not None:
+            return stamp.date().isoformat()
+        raw = str(bar.get("t") or bar.get("date") or bar.get("t_iso") or "")
+        return raw[:10] if len(raw) >= 10 and raw[4:5] == "-" else ""
+
+    def _px(bar: dict[str, Any], *keys: str) -> float | None:
+        for key in keys:
+            if bar.get(key) is not None:
+                try:
+                    return float(bar[key])
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    day = _day(rows[-1])
+    session = [b for b in rows if _day(b) == day] if day else rows
+    if not session:
+        session = rows
+    session, kind = _rth_bars(session)
+    opens = [p for p in (_px(b, "o", "open") for b in session) if p is not None]
+    highs = [p for p in (_px(b, "h", "high") for b in session) if p is not None]
+    lows = [p for p in (_px(b, "l", "low") for b in session) if p is not None]
+    closes = [p for p in (_px(b, "c", "close") for b in session) if p is not None]
+    if not opens or not lows:
+        return None
+    last_px = None
+    if last is not None:
+        try:
+            last_px = float(last)
+        except (TypeError, ValueError):
+            last_px = None
+    if last_px is None and closes:
+        last_px = closes[-1]
+    open_px = opens[0]
+    if rth_open is not None:
+        try:
+            pinned = float(rth_open)
+        except (TypeError, ValueError):
+            pinned = None
+        if pinned is not None and pinned > 0:
+            open_px = pinned
+    gap = open_gap_pct
+    if gap is None and kind != "premarket":
+        prior = _prior_rth_close(rows, day, _day, _px)
+        if prior:
+            gap = (open_px / prior - 1.0) * 100.0
+    high_px = max(highs) if highs else None
+    if high_px is not None:
+        high_px = max(high_px, open_px)
+    out: dict[str, Any] = {
+        "date": day or None,
+        "open": open_px,
+        "high": high_px,
+        "low": min(lows),
+        "last": last_px,
+        "n": len(session),
+    }
+    if last_px is not None:
+        out["vs_open"] = round(last_px - open_px, 4)
+        out["vs_low"] = round(last_px - min(lows), 4)
+        out["above_open"] = last_px >= open_px
+        out["above_low"] = last_px > min(lows)
+    out.update(_gap_levels(open_px, gap))
+    if day:
+        out["today"] = day == _et_calendar_day(now)
+    if kind == "premarket":
+        out["today"] = False
+        out["rth"] = False
+    elif kind == "rth":
+        out["rth"] = True
+    return out
+
+
+def rth_now(*, now: datetime | None = None) -> bool:
+    """True during the NYSE regular session on a weekday."""
+    clock = now if isinstance(now, datetime) else datetime.now(ZoneInfo("America/New_York"))
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=ZoneInfo("America/New_York"))
+    else:
+        clock = clock.astimezone(ZoneInfo("America/New_York"))
+    if clock.weekday() >= 5:
+        return False
+    mins = clock.hour * 60 + clock.minute
+    return _RTH_START_MIN <= mins < _RTH_END_MIN
+
+
+def session_range_from_live_open(
+    *,
+    last: Any,
+    rth_open: Any,
+    open_gap_pct: Any = None,
+    now: datetime | None = None,
+    regular: bool | None = None,
+) -> dict[str, Any] | None:
+    """Today's RTH open from the live quote when hist has no completed bar yet.
+
+    IBKR 5-min useRTH hist does not include the in-progress 09:30 bar, so a
+    look at 09:30:20 would otherwise pin yesterday. The ticker open is the
+    regular-session open. Premarket must not use this.
+    """
+    if regular is False:
+        return None
+    if regular is not True and not rth_now(now=now):
+        return None
+    try:
+        last_px = float(last)
+        open_px = float(rth_open)
+    except (TypeError, ValueError):
+        return None
+    if last_px <= 0 or open_px <= 0:
+        return None
+    # Ticker open that has not rolled to today's RTH print still shows
+    # yesterday. At the bell, last is next to the open; a 12%+ gap
+    # between them is a stale open, not the card's hold.
+    if abs(last_px - open_px) / open_px > 0.12:
+        return None
+    low = min(open_px, last_px)
+    high = max(open_px, last_px)
+    out: dict[str, Any] = {
+        "date": _et_calendar_day(now),
+        "open": open_px,
+        "high": high,
+        "low": low,
+        "last": last_px,
+        "n": 1,
+        "today": True,
+        "rth": True,
+        "print": "live_open",
+        "vs_open": round(last_px - open_px, 4),
+        "vs_low": round(last_px - low, 4),
+        "above_open": last_px >= open_px,
+        "above_low": last_px > low,
+    }
+    out.update(_gap_levels(open_px, open_gap_pct))
+    return out
+
+
+def structure_from_bars(
+    candles: list[dict],
+    symbol: str,
+    *,
+    resolution: str = "D",
+    source: str = "ibkr",
+    freshness: str = "ibkr_rth",
+) -> dict[str, Any] | None:
+    """Same sma/dist/ret keys as MDA metrics; last is ``bar_last`` when not MDA."""
+    idea = metrics_for_symbol(candles, symbol, resolution=resolution)
+    if not idea:
+        return None
+    out = dict(idea)
+    out["source"] = source
+    out["freshness"] = freshness
+    if str(source).lower() != "mda":
+        out["bar_last"] = out.pop("mda_last", None)
+        out["bar_last_is"] = out.pop("mda_last_is", None)
+        out["bar_last_t"] = out.pop("mda_last_t", None)
+        out["use"] = "ibkr_rth_structure"
+    return out
 
 
 def merge_tape(

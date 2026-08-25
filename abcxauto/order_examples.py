@@ -29,6 +29,7 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "direction": "LONG",
         "stop_price": 97.0,
         "target_price": 106.0,
+        "card": "card-name",
     },
     "bracket": {
         "symbol": "NVDA",
@@ -37,6 +38,7 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "entry_price": 100.0,
         "stop_price": 97.0,
         "target_price": 106.0,
+        "card": "card-name",
     },
     "oca": {
         "symbol": "NVDA",
@@ -335,6 +337,8 @@ COMBO_BAG_CLOSE = frozenset({
 
 # Clerk-owned optional keys. A number here is copied as if it were a default.
 _CLERK_FILLS_OMIT = frozenset({"price_hint"})
+# New-risk gate hoist — not a pydantic strategy field, still a real ticket key.
+_TAUGHT_HOIST = frozenset({"card"})
 
 
 def combo_close_example(name: str) -> dict[str, Any]:
@@ -369,7 +373,8 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
     lines = [
         "ORDER EXAMPLES (send tool — strategy + params)",
         "Stock entries: symbol+direction. Clerk fills missing stop/target/qty. "
-        "Bare opens become a bracket; exits stay exits.",
+        "Bare opens become a bracket; exits stay exits. "
+        "New risk requires card= naming a playbook card under that strategy.",
         "Use direction LONG|SHORT for bracket/market_bracket/oca/trailing.",
         "Stock exits: target_conId + quantity (partial trim OK; omit qty = full). After trim check stop_qty_fact.",
         "close_option: prefer conId; quantity may be partial. roll_option for lifecycle.",
@@ -414,7 +419,7 @@ def assert_examples_cover_strategies() -> None:
     for name, params in ORDER_EXAMPLES.items():
         if name not in STRATEGIES:
             continue
-        fields = set(STRATEGIES[name][0].model_fields)
+        fields = set(STRATEGIES[name][0].model_fields) | _TAUGHT_HOIST
         extra = sorted(set(params) - fields)
         if extra:
             invented.append(f"{name}: {extra}")

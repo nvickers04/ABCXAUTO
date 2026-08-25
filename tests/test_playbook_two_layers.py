@@ -30,6 +30,8 @@ from abcxauto.lab_playbook import (
     card_facts,
     card_scores,
     card_verdict,
+    card_waiting,
+    lab_facts,
     classify_card_trades,
     clamp_update,
     graduated_card_names,
@@ -171,23 +173,35 @@ def test_evidence_rewrite_keeps_the_declaration_it_did_not_restate():
                 thesis="mega-cap sales-miss gap retraces 30-50%",
                 retire_if={"sample": 8, "condition": "three closes on the lows"},
                 expect_hit_rate=45,
+                when_on="mega/large >=6% earnings-miss gap",
+                scan="most_active + top_losers",
+                shape="LONG STK market_bracket",
+                invalidation="stop through opening low",
+                status="testing",
+                evidence={"news": "no fresh mega miss", "reads": "BABA -4%"},
             )
         ]
     )
-    # A look later: same card, fresh evidence, declaration not restated.
+    # A look later: same card, fresh note, gate and declaration not restated.
     _save(
         market_bracket=[
             {"name": "flush bounce", "note": "10:12 ET gate off, BABA only -4%"}
         ]
     )
     card = type_cards(load_lab()["types"], "market_bracket")[0]
-    assert card["note"].startswith("10:12 ET")
+    assert not (card.get("note") or "").startswith("10:12 ET")
     assert card["retire_if"] == {
         "sample": 8,
         "condition": "three closes on the lows",
     }
     assert card["thesis"].startswith("mega-cap sales-miss")
     assert card["expect_hit_rate"] == 45.0
+    assert card["when_on"].startswith("mega/large")
+    assert card["scan"].startswith("most_active")
+    assert card["shape"].startswith("LONG STK")
+    assert card["invalidation"].startswith("stop through")
+    assert card["status"] == "testing"
+    assert card["evidence"]["news"].startswith("no fresh")
     # So the clerk stops asking for a declaration that was never really gone.
     facts = {r["card"]: r for r in card_facts(load_lab())}
     assert facts["flush bounce"]["needs_retire_if"] is False
@@ -226,10 +240,14 @@ def test_lab_facts_reports_what_is_untried_not_only_what_scored():
     facts = lab_facts(load_lab())
     assert facts["cards"] == {"testing": 2, "working": 0, "retired": 1}
     assert facts["resolved_trades"] == 0
-    assert sorted(facts["cards_awaiting_first_trade"]) == [
+    awaiting = {r["card"]: r for r in facts["cards_awaiting_first_trade"]}
+    assert set(awaiting) == {
         "flush bounce [market_bracket]",
         "opening drive [market_bracket]",
-    ]
+    }
+    for row in awaiting.values():
+        assert row["sends"] == 0
+        assert row["days"] is not None
     assert facts["trunks_with_cards"] == ["market_bracket", "buy_option"]
     untried = facts["entry_trunks_untried"]
     # A trunk holding only a learning still carries no hypothesis.
@@ -245,6 +263,34 @@ def test_lab_facts_reports_what_is_untried_not_only_what_scored():
     payload = playbook_payload()
     assert payload["lab"]["entry_trunks_untried"] == untried
     assert "strategy_scores" in payload
+    from abcxauto.lab_playbook import lab_wake_bit
+
+    bit = lab_wake_bit(load_lab())
+    assert "lab flush bounce" in bit
+    assert "0sends" in bit
+    # A live card under test is the wake — untried trunks stay on playbook().
+    assert "untried=" not in bit
+    assert facts["entry_trunks_untried"]
+
+
+def test_playbook_clip_keeps_lab_ahead_of_the_essay():
+    """A 16k notebook used to push lab past the 24k tool clip."""
+    from abcxauto.brain import _clip
+    from abcxauto.lab_playbook import playbook_payload
+
+    _save(market_bracket={"note": "x" * 20_000, "cards": [_card("flush bounce")]})
+    raw = playbook_payload()
+    assert list(raw).index("lab") < list(raw).index("tree")
+    clipped = _clip(raw)
+    assert "entry_trunks_untried" in clipped
+    assert "cards_awaiting_first_trade" in clipped
+    assert "flush bounce" in clipped
+    from abcxauto.brain import PLAYBOOK_CLIP_CHARS
+
+    wide = _clip(raw, max_chars=PLAYBOOK_CLIP_CHARS)
+    parsed = json.loads(wide)
+    assert parsed["cards"][0]["name"] == "flush bounce"
+    assert "TYPE market_bracket" in parsed["tree"]
 
 
 def test_type_coverage_lists_every_trunk_without_seeding_one():
@@ -1114,6 +1160,105 @@ def test_wins_are_counted_off_resolved_exits_and_reach_the_card(monkeypatch):
     assert cal["hit_rate_gap"] == 5.0
 
 
+def test_looks_without_a_send_are_counted_and_never_trip(monkeypatch):
+    """A trigger that never prints is a fact. Grok retires it, not the clerk."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime(2026, 8, 24, 16, 0, tzinfo=timezone.utc)
+    written = (now - timedelta(days=4)).isoformat()
+
+    class _J:
+        def model_usage_since(self, _since):
+            return {"calls": 17}
+
+    monkeypatch.setattr("abcxauto.memory.get_journal", lambda: _J())
+    _save(
+        market_bracket=[
+            _card(
+                "flush bounce",
+                retire_if={
+                    "sample": 8,
+                    "condition": "no bounce",
+                    "max_looks_without_trigger": 12,
+                },
+            )
+        ]
+    )
+    stored = type_cards(load_lab()["types"], "market_bracket")[0]
+    stored["written_at"] = written
+    wait = card_waiting({"sends": 0, "trades": 0}, stored, now=now)
+    assert wait["looks_without_trigger"] == 17
+    assert wait["days_without_trigger"] == 4.0
+    assert wait["max_looks_without_trigger"] == 12
+
+    verdict = card_verdict({"sends": 0, "trades": 0, "resolved": 0}, stored)
+    assert verdict["tripped"] is False
+    assert verdict["graduated"] is False
+    assert verdict["looks_without_trigger"] == 17
+    assert verdict["trip_reason"] == ""
+
+    facts = lab_facts(load_lab())
+    # Disk stamp is this write, not the 4-day fixture — the count still lands.
+    row = facts["cards_awaiting_first_trade"][0]
+    assert row["card"] == "flush bounce [market_bracket]"
+    assert row["sends"] == 0
+    assert row["max_looks_without_trigger"] == 12
+    assert facts["cards_without_trigger"][0]["card"] == row["card"]
+
+
+def test_a_send_restarts_the_waiting_count_from_last_send(monkeypatch):
+    from datetime import datetime, timezone
+
+    class _J:
+        def model_usage_since(self, since):
+            assert "13:32" in str(since)
+            return {"calls": 9}
+
+    monkeypatch.setattr("abcxauto.memory.get_journal", lambda: _J())
+    card = {
+        **_card("flush bounce"),
+        "written_at": "2026-08-20T12:00:00+00:00",
+    }
+    wait = card_waiting(
+        {
+            "sends": 1,
+            "trades": 1,
+            "last_send": "2026-08-25T13:32:00+00:00",
+        },
+        card,
+        now=datetime(2026, 8, 25, 15, 32, tzinfo=timezone.utc),
+    )
+    assert wait["looks_without_trigger"] == 9
+    assert wait["days_without_trigger"] == 0.1
+    assert wait["last_send"] == "2026-08-25T13:32:00+00:00"
+    verdict = card_verdict(
+        {
+            "sends": 1,
+            "trades": 1,
+            "resolved": 1,
+            "last_send": "2026-08-25T13:32:00+00:00",
+        },
+        card,
+    )
+    assert verdict["looks_without_trigger"] == 9
+    assert verdict["tripped"] is False
+
+
+def test_card_written_at_survives_an_evidence_rewrite():
+    first = _save(market_bracket=[_card("flush bounce")])
+    clock = type_cards(first["types"], "market_bracket")[0]["written_at"]
+    assert clock
+    held = _save(
+        market_bracket=[
+            {"name": "flush bounce", "note": "gate still off"}
+        ]
+    )
+    assert held.get("revision_held") is True
+    again = type_cards(load_lab()["types"], "market_bracket")[0]
+    assert again["written_at"] == clock
+    assert not (again.get("note") or "").startswith("gate still off")
+
+
 def test_declared_max_loss_and_max_losses_trip_early():
     card = _card(
         "flush bounce",
@@ -1514,13 +1659,14 @@ def test_book_payload_surfaces_which_cards_earned(monkeypatch):
     assert pb["tripped"] == []
     assert pb["card_scores"][0]["interrupted"] == 2
     assert pb["card_scores"][0]["anchored_type"] == "market_bracket"
-    assert pb["types"]["market_bracket"]["gotchas"] == "stop side of last"
-    # The tree stanza carries its own branches, and the flat view still exists.
-    assert [c["name"] for c in pb["types"]["market_bracket"]["cards"]] == [
-        "flush bounce"
-    ]
+    assert "types" not in pb
     assert pb["cards"][0]["ticket"] == "market_bracket"
     assert "TYPE market_bracket" in pb["notes"]
+    assert "stop side of last" in pb["notes"]
+    assert pb["lab"]["resolved_trades"] == 3
+    assert "flush bounce" not in " ".join(
+        str(r.get("card") or r) for r in (pb["lab"].get("cards_awaiting_first_trade") or [])
+    )
 
 
 def test_playbook_tool_reports_the_tree_and_the_verdicts():
@@ -1538,3 +1684,1042 @@ def test_playbook_tool_reports_the_tree_and_the_verdicts():
     assert payload["graduated"] == []
     assert payload["tripped"] == []
     assert payload["needs_declaration"] == []
+
+
+def test_run_sheet_follows_parent_tool_order_instead_of_rescan():
+    from abcxauto.lab_playbook import playbook_run_sheets
+
+    _save(
+        market_bracket={
+            "tool_order": ["scan", "news", "quote", "candles", "send"],
+            "cards": [
+                _card(
+                    "flush bounce",
+                    when_on="mega/large >=6% earnings-miss gap",
+                    scan="most_active + top_losers",
+                )
+            ],
+        },
+        buy_option={
+            "cards": [_card("premium spray", status="retired")],
+        },
+    )
+    lab = load_lab()
+    first = playbook_run_sheets(lab, flat=True)
+    assert [row["card"] for row in first] == ["flush bounce"]
+    assert first[0]["next"] == "scan"
+    assert first[0]["sends"] == 0
+    assert first[0]["resolved"] == 0
+    assert first[0]["sample_left"] == 3
+    assert first[0]["tool_order"] == ["scan", "news", "quote", "candles", "send"]
+    assert ">=6%" in first[0]["when_on"]
+    assert "most_active" in first[0]["scan"]
+
+    after_news = playbook_run_sheets(
+        lab,
+        tool_trace=["book", "scan", "scan", "news"],
+        flat=True,
+    )
+    assert after_news[0]["next"] == "quote"
+
+    carry = playbook_run_sheets(
+        lab,
+        tool_trace=["book"],
+        last_look=[
+            "book",
+            "playbook",
+            "status",
+            "scan",
+            "news",
+            "write_lab_playbook",
+        ],
+        flat=True,
+    )
+    assert carry[0]["next"] == "quote"
+
+    already_live = playbook_run_sheets(
+        lab,
+        tool_trace=["book"],
+        last_look=["book", "scan", "news", "write_lab_playbook"],
+        flat=True,
+        quoted={"quoted": 12, "rows": [{"symbol": "SNDK", "last": 1485.0}]},
+    )
+    assert already_live[0]["next"] == "candles"
+
+    scan_carried_news = playbook_run_sheets(
+        lab,
+        tool_trace=["book", "scan"],
+        news=[{"symbol": "SNDK", "headline": "sales miss"}],
+        flat=True,
+    )
+    assert scan_carried_news[0]["next"] == "quote"
+
+    scan_quoted_and_news = playbook_run_sheets(
+        lab,
+        tool_trace=["book", "scan"],
+        news=[{"symbol": "SNDK", "headline": "sales miss"}],
+        quoted={"quoted": 1, "rows": [{"symbol": "SNDK", "last": 91.5}]},
+        flat=True,
+    )
+    assert scan_quoted_and_news[0]["next"] == "candles"
+
+    prior_day = playbook_run_sheets(
+        lab,
+        tool_trace=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_today=False,
+    )
+    assert prior_day[0]["next"] == "candles"
+    assert prior_day[0]["session_today"] is False
+
+    from abcxauto.lab_playbook import live_card_send_facts
+
+    _save(
+        market_bracket={
+            "cards": [
+                _card(
+                    "flush bounce",
+                    shape=(
+                        "LONG STK market_bracket. Stop under opening low. "
+                        "Qty so dollar risk ≤1% NL and notional ≤25% NL."
+                    ),
+                )
+            ]
+        }
+    )
+    facts = live_card_send_facts()
+    assert facts["type"] == "market_bracket"
+    assert facts["card"] == "flush bounce"
+    assert facts["direction"] == "LONG"
+    assert facts["risk_pct"] == 1.0
+    assert facts["notional_pct"] == 25.0
+    from abcxauto.lab_playbook import live_card_needs_session, live_card_session_error
+
+    assert live_card_needs_session() is True
+    assert "candles" in live_card_session_error({"card": "flush bounce"})
+    assert live_card_session_error(
+        {"stop_price": 88.0, "target_price": 93.0},
+        {"low": 88.0, "today": True},
+    ) == ""
+
+    from abcxauto.lab_playbook import lab_wake_bit, live_card_scan_arenas, live_card_scan_screens
+
+    _save(
+        market_bracket={
+            "cards": [
+                _card(
+                    "flush bounce",
+                    scan="most_active + top_losers; mega/large only",
+                )
+            ]
+        }
+    )
+    assert live_card_scan_arenas() == ["most_active", "top_losers"]
+    screens = live_card_scan_screens()
+    assert {"arena": "mega_cap", "scan_code": "MOST_ACTIVE"} in screens
+    assert {"arena": "mega_cap", "scan_code": "TOP_PERC_LOSE"} in screens
+    assert {"arena": "large_cap", "scan_code": "MOST_ACTIVE"} in screens
+    assert {"arena": "large_cap", "scan_code": "TOP_PERC_LOSE"} in screens
+    assert live_card_scan_screens(scan="most_active + top_losers") == [
+        {"arena": "most_active", "scan_code": "MOST_ACTIVE"},
+        {"arena": "top_losers", "scan_code": "TOP_PERC_LOSE"},
+    ]
+    _save(
+        market_bracket={
+            "cards": [
+                _card(
+                    "flush bounce",
+                    scan="most_active + top_losers; mega/large only",
+                    when_on="mega/large ≥6% earnings-miss gap",
+                )
+            ]
+        }
+    )
+    gap_screens = live_card_scan_screens()
+    assert {"arena": "mega_cap", "scan_code": "TOP_OPEN_PERC_LOSE"} in gap_screens
+    assert {"arena": "large_cap", "scan_code": "TOP_OPEN_PERC_LOSE"} in gap_screens
+    assert gap_screens[0] == {"arena": "mega_cap", "scan_code": "TOP_OPEN_PERC_LOSE"}
+    bit = lab_wake_bit(load_lab(), flat=True)
+    assert "next=scan" in bit
+    assert "mega_cap:TOP_OPEN_PERC_LOSE" in bit
+
+    rescanned = playbook_run_sheets(
+        lab,
+        tool_trace=["book", "scan"],
+        last_look=["book", "scan", "news"],
+        flat=True,
+    )
+    assert rescanned[0]["next"] == "news"
+
+    after_send = playbook_run_sheets(
+        lab,
+        tool_trace=["book"],
+        last_look=["book", "scan", "news", "quote", "candles", "send"],
+        flat=True,
+    )
+    assert after_send[0]["next"] == "scan"
+
+
+def test_run_sheet_manage_uses_review_tools():
+    from abcxauto.lab_playbook import playbook_run_sheets
+
+    _save(
+        market_bracket={
+            "tool_order": ["scan", "news", "quote", "candles", "send"],
+            "review": "fills then book; confirm both children rest",
+            "cards": [_card("flush bounce")],
+        }
+    )
+    lab = load_lab()
+    sheets = playbook_run_sheets(lab, tool_trace=["book"], flat=False)
+    assert sheets[0]["next"] == "fills"
+    assert sheets[0]["tool_order"] == ["book", "fills", "quote", "candles"]
+    assert "fills then book" in sheets[0]["review"]
+    after = playbook_run_sheets(lab, tool_trace=["book", "fills"], flat=False)
+    assert after[0]["next"] == "quote"
+    default_manage = playbook_run_sheets(
+        {"types": {"market_bracket": {"cards": [_card("open lot")]}}},
+        tool_trace=["book"],
+        flat=False,
+    )
+    assert default_manage[0]["next"] == "fills"
+    assert default_manage[0]["tool_order"][:2] == ["book", "fills"]
+
+
+def test_lab_wake_and_book_payload_paint_the_next_tool(monkeypatch):
+    from abcxauto.brain import _book_payload
+    from abcxauto.lab_playbook import lab_wake_bit, playbook_payload
+
+    _save(
+        market_bracket={
+            "tool_order": ["scan", "news", "quote", "candles", "send"],
+            "cards": [_card("flush bounce")],
+        }
+    )
+    bit = lab_wake_bit(
+        load_lab(),
+        last_look=["book", "scan", "news"],
+        flat=True,
+    )
+    assert "lab flush bounce" in bit
+    assert "next=quote" in bit
+    monkeypatch.setattr(
+        "abcxauto.think_stream.last_look_facts",
+        lambda: {
+            "tools": ["book", "scan", "news"],
+            "send_calls": 0,
+            "scan_hits": {
+                "quoted": 12,
+                "rows": [
+                    {"symbol": "SNDK", "last": 1485.095, "open_gap_pct": -6.5},
+                    {"symbol": "MU", "last": 911.49, "open_gap_pct": -3.3},
+                ]
+            },
+        },
+    )
+    pb = _book_payload(_world(flat=True, positions=[]), tool_trace=["book"])["playbook"]
+    keys = list(pb)
+    assert keys.index("run") < keys.index("cards")
+    assert pb["run"][0]["next"] == "candles"
+    assert [row["symbol"] for row in pb["run"][0]["hits"]] == ["SNDK", "MU"]
+    assert "now_beating" in pb
+    payload = playbook_payload()
+    assert payload["run"][0]["next"] == "candles"
+    assert payload["run"][0]["card"] == "flush bounce"
+
+
+def test_book_run_does_not_paint_stale_overnight_hits(monkeypatch):
+    from abcxauto.brain import _book_payload
+
+    _save(
+        market_bracket={
+            "tool_order": ["scan", "news", "quote", "candles", "send"],
+            "cards": [_card("flush bounce")],
+        }
+    )
+    stale = {
+        "tools": ["book", "scan", "news"],
+        "send_calls": 0,
+        "fresh": False,
+        "scan_hits": {
+            "quoted": 12,
+            "rows": [{"symbol": "SNDK", "last": 1485.095, "open_gap_pct": -6.5}],
+        },
+    }
+    monkeypatch.setattr("abcxauto.think_stream.last_look_facts", lambda *a, **k: stale)
+    monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda *a, **k: {})
+    pb = _book_payload(_world(flat=True, positions=[]), tool_trace=["book"])["playbook"]
+    assert "hits" not in pb["run"][0]
+    assert pb["run"][0]["next"] == "scan"
+
+
+def test_run_sheet_and_wake_paint_send_sketch_from_session(monkeypatch):
+    from abcxauto.brain import _book_payload
+    from abcxauto.lab_playbook import lab_wake_bit, playbook_run_sheets
+
+    _save(
+        market_bracket={
+            "tool_order": ["scan", "news", "quote", "candles", "send"],
+            "cards": [
+                _card(
+                    "flush bounce",
+                    shape="LONG STK market_bracket. Qty so dollar risk <=1% NL.",
+                )
+            ],
+        }
+    )
+    lab = load_lab()
+    rng = {
+        "SNDK": {
+            "today": True,
+            "low": 88.0,
+            "retrace_30": 93.0,
+            "ticket": {
+                "strategy": "market_bracket",
+                "card": "flush bounce",
+                "direction": "LONG",
+                "stop_price": 88.0,
+                "target_price": 93.0,
+                "quantity": 10,
+            },
+        }
+    }
+    sheets = playbook_run_sheets(
+        lab,
+        tool_trace=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_range=rng,
+    )
+    assert sheets[0]["next"] == "send"
+    assert sheets[0]["send"]["symbol"] == "SNDK"
+    assert sheets[0]["send"]["card"] == "flush bounce"
+    assert sheets[0]["send"]["stop_price"] == 88.0
+    assert sheets[0]["send"]["quantity"] == 10
+    bit = lab_wake_bit(
+        lab,
+        last_look=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_range=rng,
+    )
+    assert "next=send" in bit
+    assert "send SNDK" in bit
+    assert "card=flush bounce" in bit
+    hunt = {
+        "tools": ["book", "scan", "news", "quote", "candles"],
+        "send_calls": 0,
+        "fresh": True,
+        "scan_hits": {"quoted": 1, "rows": [{"symbol": "SNDK", "last": 91.5}]},
+        "session_range": rng,
+    }
+    monkeypatch.setattr("abcxauto.think_stream.last_look_facts", lambda *a, **k: hunt)
+    monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda *a, **k: hunt)
+    pb = _book_payload(_world(flat=True, positions=[]), tool_trace=["book"])["playbook"]
+    assert pb["run"][0]["next"] == "send"
+    assert pb["run"][0]["send"]["symbol"] == "SNDK"
+
+
+def test_apply_hunt_send_sketch_does_not_rewrite_grok():
+    from abcxauto.lab_playbook import apply_hunt_send_sketch
+
+    rng = {
+        "SNDK": {
+            "today": True,
+            "low": 88.0,
+            "ticket": {
+                "strategy": "market_bracket",
+                "card": "flush bounce",
+                "symbol": "SNDK",
+                "direction": "LONG",
+                "stop_price": 88.0,
+                "quantity": 10,
+            },
+        }
+    }
+    act = {
+        "strategy": "market_bracket",
+        "params": {"card": "flush bounce", "symbol": "SNDK", "stop_price": 87.5},
+        "rationale": "my stop",
+    }
+    apply_hunt_send_sketch(act, {"session_range": rng})
+    assert act["params"]["stop_price"] == 87.5
+    assert act["rationale"] == "my stop"
+    other = {
+        "strategy": "market_bracket",
+        "params": {"card": "other card"},
+    }
+    assert apply_hunt_send_sketch(other, {"session_range": rng}) is None
+    assert other["params"].get("symbol") is None
+
+
+def test_hunt_send_sketch_uses_50_pct_retrace_when_30_is_through():
+    from abcxauto.lab_playbook import hunt_send_sketch, session_target
+
+    rng = {
+        "today": True,
+        "low": 88.0,
+        "last": 94.0,
+        "above_low": True,
+        "open_gap_pct": -6.5,
+        "retrace_30": 93.0,
+        "retrace_50": 95.0,
+        "ticket": {
+            "card": "flush bounce",
+            "strategy": "market_bracket",
+            "direction": "LONG",
+        },
+    }
+    assert session_target(rng, "LONG") == 95.0
+    sketch = hunt_send_sketch({"SNDK": rng})
+    assert sketch is not None
+    assert sketch["target_price"] == 95.0
+    through = dict(rng, last=96.0)
+    assert session_target(through, "LONG") is None
+    assert hunt_send_sketch({"SNDK": through}) is None
+
+
+def test_hunt_send_sketch_prefers_the_wider_gap():
+    from abcxauto.lab_playbook import hunt_send_sketch
+
+    sketch = hunt_send_sketch({
+        "MU": {
+            "today": True,
+            "low": 900.0,
+            "open_gap_pct": -3.3,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        },
+        "SNDK": {
+            "today": True,
+            "low": 88.0,
+            "open_gap_pct": -6.5,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        },
+    })
+    assert sketch is not None
+    assert sketch["symbol"] == "SNDK"
+    assert sketch["stop_price"] == 88.0
+    assert hunt_send_sketch({
+        "SNDK": {
+            "low": 88.0,
+            "open_gap_pct": -6.5,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        }
+    }) is None
+
+
+def test_hunt_send_sketch_skips_a_name_sitting_on_the_opening_low():
+    from abcxauto.lab_playbook import hunt_send_sketch, live_card_session_error, playbook_run_sheets
+
+    _save(
+        market_bracket={
+            "cards": [
+                _card(
+                    "flush bounce",
+                    shape="LONG STK. Stop under opening low.",
+                    when_on="price holding above the opening low",
+                )
+            ]
+        }
+    )
+    store = {
+        "SNDK": {
+            "today": True,
+            "low": 88.0,
+            "last": 88.0,
+            "above_low": False,
+            "open_gap_pct": -6.5,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        },
+        "MU": {
+            "today": True,
+            "low": 900.0,
+            "last": 910.0,
+            "above_low": True,
+            "open_gap_pct": -3.3,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        },
+    }
+    sketch = hunt_send_sketch(store)
+    assert sketch is not None
+    assert sketch["symbol"] == "MU"
+    assert hunt_send_sketch({"SNDK": store["SNDK"]}) is None
+    sheets = playbook_run_sheets(
+        load_lab(),
+        tool_trace=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_today=True,
+        session_range={"SNDK": store["SNDK"]},
+    )
+    assert sheets[0]["next"] == "candles"
+    assert sheets[0]["above_low"] is False
+    assert "opening low" in live_card_session_error(
+        {"card": "flush bounce", "direction": "LONG"},
+        store["SNDK"],
+    )
+    assert live_card_session_error(
+        {"card": "flush bounce", "direction": "LONG"},
+        store["MU"],
+    ) == ""
+
+
+def test_hunt_send_sketch_skips_a_name_still_under_the_open():
+    from abcxauto.lab_playbook import hunt_send_sketch, live_card_session_error
+
+    _save(
+        market_bracket={
+            "cards": [
+                _card(
+                    "flush bounce",
+                    shape="LONG STK. Stop under opening low.",
+                    when_on="hold above the open after a 5-min bar",
+                )
+            ]
+        }
+    )
+    store = {
+        "SNDK": {
+            "today": True,
+            "open": 90.0,
+            "low": 88.0,
+            "last": 89.0,
+            "above_low": True,
+            "above_open": False,
+            "open_gap_pct": -6.5,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        }
+    }
+    assert hunt_send_sketch(store) is None
+    assert "not above the open" in live_card_session_error(
+        {"card": "flush bounce", "direction": "LONG"},
+        store["SNDK"],
+    )
+
+
+def test_hunt_send_sketch_skips_a_gap_under_the_written_floor():
+    from abcxauto.lab_playbook import (
+        hunt_send_sketch,
+        lab_wake_bit,
+        live_card_min_gap_pct,
+        live_card_session_error,
+        playbook_run_sheets,
+    )
+
+    _save(
+        market_bracket={
+            "cards": [
+                _card(
+                    "flush bounce",
+                    shape="LONG STK. Stop under opening low.",
+                    when_on="mega/large ≥6% earnings-miss gap, hold above the opening low",
+                )
+            ]
+        }
+    )
+    assert live_card_min_gap_pct() == 6.0
+    store = {
+        "MU": {
+            "today": True,
+            "low": 900.0,
+            "last": 910.0,
+            "above_low": True,
+            "open_gap_pct": -3.3,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        },
+        "SNDK": {
+            "today": True,
+            "low": 88.0,
+            "last": 91.5,
+            "above_low": True,
+            "open_gap_pct": -6.5,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        },
+    }
+    sketch = hunt_send_sketch(store)
+    assert sketch is not None
+    assert sketch["symbol"] == "SNDK"
+    assert hunt_send_sketch({"MU": store["MU"]}) is None
+    sheets = playbook_run_sheets(
+        load_lab(),
+        tool_trace=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_today=True,
+        session_range={"MU": store["MU"]},
+    )
+    assert sheets[0]["next"] == ""
+    assert sheets[0]["gate"] == "off"
+    assert sheets[0]["min_gap_pct"] == 6.0
+    assert "send" not in sheets[0]
+    bit = lab_wake_bit(
+        load_lab(),
+        tool_trace=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_range={"MU": store["MU"]},
+    )
+    assert "gate=off" in bit
+    assert "next=send" not in bit
+    assert "gap under 6%" in live_card_session_error(
+        {"card": "flush bounce", "direction": "LONG"},
+        store["MU"],
+    )
+    assert live_card_session_error(
+        {"card": "flush bounce", "direction": "LONG"},
+        store["SNDK"],
+    ) == ""
+
+
+def test_hunt_send_sketch_skips_a_name_without_a_gap_print():
+    from abcxauto.lab_playbook import hunt_send_sketch, live_card_min_gap_pct
+
+    _save(
+        market_bracket={
+            "cards": [
+                _card(
+                    "flush bounce",
+                    shape="LONG STK. Stop under opening low.",
+                    when_on="mega/large ≥6% earnings-miss gap, hold above the opening low",
+                )
+            ]
+        }
+    )
+    assert live_card_min_gap_pct() == 6.0
+    assert hunt_send_sketch({
+        "AMD": {
+            "today": True,
+            "low": 160.0,
+            "last": 165.0,
+            "above_low": True,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        }
+    }) is None
+
+
+def test_sibling_cards_bind_gap_and_sketch_to_card_name():
+    from abcxauto.brain import _stamp_session_ticket
+    from abcxauto.lab_playbook import (
+        hunt_send_sketch,
+        lab_wake_bit,
+        live_card_gap_floors,
+        live_card_min_gap_pct,
+        live_card_session_error,
+        playbook_run_sheets,
+    )
+
+    _save(
+        market_bracket={
+            "tool_order": ["scan", "news", "quote", "candles", "send"],
+            "cards": [
+                _card(
+                    "flush bounce",
+                    shape="LONG STK. Stop under opening low.",
+                    when_on="mega/large ≥6% earnings-miss gap, hold above the opening low",
+                    scan="most_active + top_losers + low_open_gap; mega/large only",
+                ),
+                _card(
+                    "3pct gap hold",
+                    shape="LONG STK. Stop under opening low. One name.",
+                    when_on="mega/large ≥3% open gap, hold above the open",
+                    scan="top_losers + low_open_gap + top_open_perc_lose; mega/large only",
+                ),
+            ],
+        },
+        vertical_spread={
+            "cards": [
+                _card(
+                    "defined-risk flush debit",
+                    when_on="same flush tape, gap >=3%, defined-risk only",
+                    shape="debit vertical. option_facts first.",
+                )
+            ]
+        },
+    )
+    assert live_card_min_gap_pct() == 3.0
+    assert live_card_min_gap_pct(card="flush bounce") == 6.0
+    assert live_card_min_gap_pct(card="3pct gap hold") == 3.0
+    floors = {row["card"]: row for row in live_card_gap_floors(deepest=3.8)}
+    assert floors["flush bounce"] == {
+        "card": "flush bounce",
+        "min_gap_pct": 6.0,
+        "met": False,
+    }
+    assert floors["3pct gap hold"] == {
+        "card": "3pct gap hold",
+        "min_gap_pct": 3.0,
+        "met": True,
+    }
+    alb = {
+        "today": True,
+        "low": 134.0,
+        "last": 135.2,
+        "above_low": True,
+        "above_open": True,
+        "open": 136.1,
+        "open_gap_pct": -3.8,
+        "retrace_30": 137.7,
+        "retrace_50": 138.8,
+    }
+    assert "gap under 6%" in live_card_session_error(
+        {"card": "flush bounce", "direction": "LONG"},
+        alb,
+    )
+    assert live_card_session_error(
+        {"card": "3pct gap hold", "direction": "LONG"},
+        alb,
+    ) == ""
+    sketch = hunt_send_sketch({"ALB": alb})
+    assert sketch is not None
+    assert sketch["symbol"] == "ALB"
+    assert sketch["card"] == "3pct gap hold"
+    assert hunt_send_sketch({"ALB": alb}, card="flush bounce") is None
+    named = hunt_send_sketch({"ALB": alb}, card="3pct gap hold")
+    assert named is not None
+    assert named["card"] == "3pct gap hold"
+    assert hunt_send_sketch({"ALB": alb}, card="defined-risk flush debit") is None
+    stamped = dict(alb)
+    _stamp_session_ticket(stamped)
+    assert stamped["ticket"]["card"] == "3pct gap hold"
+    sheets = playbook_run_sheets(
+        load_lab(),
+        tool_trace=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_today=True,
+        session_range={"ALB": alb},
+    )
+    by_name = {row["card"]: row for row in sheets}
+    assert by_name["flush bounce"]["min_gap_pct"] == 6.0
+    assert by_name["flush bounce"].get("gate") == "off"
+    assert by_name["3pct gap hold"]["min_gap_pct"] == 3.0
+    assert by_name["3pct gap hold"].get("send", {}).get("symbol") == "ALB"
+    bit = lab_wake_bit(
+        load_lab(),
+        tool_trace=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_range={"ALB": alb},
+    )
+    assert "send ALB" in bit
+    assert "card=3pct gap hold" in bit
+    assert "gate=off" not in bit
+
+
+def test_live_card_scan_constraints_apply_written_floors():
+    from abcxauto.lab_playbook import (
+        apply_card_constraints_to_spec,
+        drop_hits_off_card,
+        hunt_send_sketch,
+        live_card_scan_constraints,
+        live_card_tape_error,
+    )
+
+    _save(
+        market_bracket={
+            "cards": [
+                _card(
+                    "flush bounce",
+                    scan=(
+                        "most_active + top_losers; mega/large only; "
+                        "skip levered ETFs and sub-$15 names"
+                    ),
+                    when_on="mega/large ≥6% earnings-miss gap",
+                    shape="LONG STK. Stop under opening low.",
+                )
+            ]
+        }
+    )
+    c = live_card_scan_constraints()
+    assert c["min_price"] == 15.0
+    assert c["skip_levered"] is True
+    assert c["caps"] == ["mega_cap", "large_cap"]
+    spec, applied = apply_card_constraints_to_spec(
+        {
+            "scanCode": "MOST_ACTIVE",
+            "stockTypeFilter": "CORP,ETF",
+            "abovePrice": 5.0,
+        }
+    )
+    assert spec["abovePrice"] == 15.0
+    assert spec["stockTypeFilter"] == "CORP"
+    assert spec["marketCapAbove"] == 10_000_000_000.0
+    assert applied["card_min_price"] == 15.0
+    tighter, _ = apply_card_constraints_to_spec(
+        {
+            "scanCode": "MOST_ACTIVE",
+            "abovePrice": 20.0,
+            "marketCapAbove": 200_000_000_000.0,
+            "stockTypeFilter": "CORP",
+        }
+    )
+    assert tighter["abovePrice"] == 20.0
+    assert tighter["marketCapAbove"] == 200_000_000_000.0
+    keep, dropped = drop_hits_off_card(
+        [
+            {"symbol": "AAOI", "last": 12.0},
+            {"symbol": "SNDK", "last": 91.5},
+            {"symbol": "UNK"},
+        ]
+    )
+    assert [r["symbol"] for r in keep] == ["SNDK", "UNK"]
+    assert dropped == ["AAOI"]
+    assert "last under $15" in live_card_tape_error(
+        {"symbol": "AAOI"},
+        {"today": True, "last": 12.0},
+    )
+    cheap = {
+        "AAOI": {
+            "today": True,
+            "last": 12.0,
+            "low": 11.0,
+            "above_low": True,
+            "open_gap_pct": -8.0,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        }
+    }
+    assert hunt_send_sketch(cheap) is None
+
+
+def test_live_card_tape_blocks_wide_spread_and_same_session_reentry():
+    from abcxauto.lab_playbook import (
+        hunt_send_sketch,
+        live_card_needs_no_reentry,
+        live_card_needs_tight_spread,
+        live_card_tape_error,
+        record_card_send,
+    )
+
+    _save(
+        market_bracket={
+            "review": "After exit do not re-enter that name the same session.",
+            "cards": [
+                _card(
+                    "flush bounce",
+                    when_on="tight live spread, hold above the opening low",
+                    shape="LONG STK. Stop under opening low.",
+                )
+            ],
+        }
+    )
+    assert live_card_needs_tight_spread() is True
+    assert live_card_needs_no_reentry() is True
+    wide = {
+        "today": True,
+        "last": 91.5,
+        "low": 88.0,
+        "bid": 89.0,
+        "ask": 93.0,
+        "spread": 4.0,
+        "above_low": True,
+        "open_gap_pct": -6.5,
+    }
+    assert "spread wider than the stop" in live_card_tape_error(
+        {"card": "flush bounce", "symbol": "SNDK", "stop_price": 88.0},
+        wide,
+    )
+    tight = dict(wide)
+    tight.update({"bid": 91.45, "ask": 91.55, "spread": 0.10})
+    assert live_card_tape_error(
+        {"card": "flush bounce", "symbol": "SNDK", "stop_price": 88.0},
+        tight,
+    ) == ""
+    assert hunt_send_sketch({
+        "SNDK": {
+            **wide,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        }
+    }) is None
+    record_card_send(
+        card="flush bounce",
+        strategy="market_bracket",
+        symbol="SNDK",
+        result={"status": "ok"},
+        params={"symbol": "SNDK", "card": "flush bounce"},
+    )
+    assert "already sent SNDK today" in live_card_tape_error(
+        {"card": "flush bounce", "symbol": "SNDK", "stop_price": 88.0},
+        tight,
+    )
+    assert hunt_send_sketch({
+        "SNDK": {
+            **tight,
+            "ticket": {"card": "flush bounce", "strategy": "market_bracket"},
+        }
+    }) is None
+
+
+def test_live_card_book_error_blocks_pyramid_and_a_second_name():
+    from abcxauto.lab_playbook import live_card_book_error, playbook_run_sheets
+
+    _save(
+        market_bracket={
+            "cards": [
+                _card(
+                    "flush bounce",
+                    shape="LONG STK market_bracket. One name, no add.",
+                )
+            ]
+        }
+    )
+    assert live_card_book_error({"symbol": "SNDK"}, []) == ""
+    assert "no add SNDK" in live_card_book_error(
+        {"symbol": "SNDK"},
+        [{"symbol": "SNDK", "sec_type": "STK", "quantity": 10}],
+    )
+    assert "one name (open SNDK)" in live_card_book_error(
+        {"symbol": "MU"},
+        [{"symbol": "SNDK", "sec_type": "STK", "quantity": 10}],
+    )
+    sheets = playbook_run_sheets(
+        load_lab(),
+        tool_trace=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_range={
+            "MU": {
+                "today": True,
+                "low": 900.0,
+                "retrace_30": 920.0,
+                "above_low": True,
+                "ticket": {
+                    "strategy": "market_bracket",
+                    "card": "flush bounce",
+                    "direction": "LONG",
+                    "stop_price": 900.0,
+                    "target_price": 920.0,
+                    "quantity": 1,
+                },
+            }
+        },
+        positions=[{"symbol": "SNDK", "sec_type": "STK", "quantity": 10}],
+    )
+    assert sheets[0].get("gate") == "off"
+    assert "send" not in sheets[0]
+
+
+def test_ibkr_live_last_reads_scan_rows_without_quote_map():
+    from abcxauto.lab_playbook import ibkr_live_last
+
+    assert ibkr_live_last(
+        "SNDK",
+        snap={
+            "scan_hits": {
+                "quoted": 1,
+                "rows": [{"symbol": "SNDK", "last": 91.5}],
+            }
+        },
+    ) == 91.5
+    assert ibkr_live_last(
+        "SNDK",
+        quoted={"quoted": 1, "rows": [{"symbol": "SNDK", "last": 91.5}]},
+    ) == 91.5
+    assert ibkr_live_last("MU", snap={"scan_hits": {"rows": [{"symbol": "SNDK", "last": 91.5}]}}) is None
+
+
+def test_empty_scan_does_not_walk_the_hunt_to_send():
+    from abcxauto.lab_playbook import hunt_send_sketch, playbook_run_sheets
+
+    _save(
+        market_bracket={
+            "gotchas": "do not re-ticket SPY the same session",
+            "tool_order": ["scan", "news", "quote", "candles", "send"],
+            "cards": [_card("flush bounce", when_on="mega/large >=6% earnings-miss gap")],
+        }
+    )
+    lab = load_lab()
+    empty = playbook_run_sheets(
+        lab,
+        tool_trace=["book", "scan"],
+        flat=True,
+        quoted={"quoted": 0, "rows": []},
+    )
+    assert empty[0]["next"] == ""
+    assert empty[0]["gate"] == "off"
+
+    failed = playbook_run_sheets(
+        lab,
+        tool_trace=["book", "scan"],
+        flat=True,
+        quoted={"ok": False, "error": "IBKR scanner timeout"},
+    )
+    assert failed[0]["next"] == "scan"
+
+    no_sketch = playbook_run_sheets(
+        lab,
+        tool_trace=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_range={},
+    )
+    assert no_sketch[0]["next"] == "candles"
+    assert no_sketch[0].get("gate") != "off"
+    prior = playbook_run_sheets(
+        lab,
+        tool_trace=["book", "scan", "news", "quote", "candles"],
+        flat=True,
+        session_range={
+            "SNDK": {
+                "today": False,
+                "low": 88.0,
+                "last": 91.5,
+                "above_low": True,
+                "open_gap_pct": -6.5,
+                "retrace_30": 93.0,
+            }
+        },
+    )
+    assert prior[0]["next"] == "candles"
+    assert prior[0].get("gate") != "off"
+
+    spy = {
+        "SPY": {
+            "today": True,
+            "low": 640.0,
+            "last": 650.0,
+            "above_low": True,
+            "retrace_30": 655.0,
+            "ticket": {
+                "strategy": "market_bracket",
+                "card": "flush bounce",
+                "direction": "LONG",
+                "stop_price": 640.0,
+                "target_price": 655.0,
+                "quantity": 1,
+            },
+        }
+    }
+    assert hunt_send_sketch(spy) is None
+    assert hunt_send_sketch(
+        spy,
+        tape={"rows": [{"symbol": "SNDK", "last": 91.5}]},
+    ) is None
+    assert hunt_send_sketch(
+        {
+            "SNDK": {
+                "today": True,
+                "low": 88.0,
+                "last": 91.5,
+                "above_low": True,
+                "open_gap_pct": -6.5,
+                "retrace_30": 93.0,
+                "ticket": {
+                    "strategy": "market_bracket",
+                    "card": "flush bounce",
+                    "direction": "LONG",
+                    "stop_price": 88.0,
+                    "target_price": 93.0,
+                    "quantity": 10,
+                },
+            }
+        },
+        tape={"rows": [{"symbol": "SNDK", "last": 91.5}]},
+    )["symbol"] == "SNDK"
+    assert hunt_send_sketch({
+        "SNDK": {
+            "today": True,
+            "low": 88.0,
+            "last": 91.5,
+            "above_low": True,
+            "open_gap_pct": -6.5,
+            "size": {"risk_usd": 500.0},
+            "ticket": {
+                "strategy": "market_bracket",
+                "card": "flush bounce",
+                "direction": "LONG",
+                "stop_price": 88.0,
+                "target_price": 93.0,
+            },
+        }
+    }) is None

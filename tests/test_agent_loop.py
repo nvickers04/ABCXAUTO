@@ -212,6 +212,46 @@ async def test_new_entry_quote_ignores_mda_tape():
     assert got is None
 
 
+@pytest.mark.asyncio
+async def test_new_entry_quote_uses_this_look_scan_print():
+    from abcxauto.agent_loop import _quote_for_action
+
+    act = {
+        "strategy": "market_bracket",
+        "params": {"symbol": "SNDK", "price_hint": 100.0},
+    }
+    snap_d = {
+        "ibkr_live_quotes": {},
+        "scan_hits": {
+            "quoted": 1,
+            "rows": [{"symbol": "SNDK", "last": 91.5, "ibkr": {"last": 91.5}}],
+        },
+        "spy_quote": {"last": 500},
+    }
+    got = await _quote_for_action(act, snap_d, connector=None)
+    assert got == 91.5
+
+
+@pytest.mark.asyncio
+async def test_new_entry_quote_does_not_use_prior_close_as_last(monkeypatch):
+    from abcxauto.agent_loop import _quote_for_action
+
+    class Conn:
+        connected = True
+
+    async def _tool(_c, name, a=None):
+        assert name == "quote"
+        return {"symbol": "SNDK", "close": 100.0, "open": 90.0, "open_gap_pct": -10.0}
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", _tool)
+    act = {
+        "strategy": "market_bracket",
+        "params": {"symbol": "SNDK", "stop_price": 88.0, "target_price": 93.0},
+    }
+    got = await _quote_for_action(act, {"ibkr_live_quotes": {}}, Conn())
+    assert got is None
+
+
 def test_unprotected_blocks_hold_and_new_risk():
     world = _world(needs_protection=True, unprotected=["SPY"], flat=False)
     strat, forced = gate_ticket({"action": "hold", "strategy": "hold"}, world)
@@ -644,3 +684,28 @@ async def test_explicit_hold_send_unprotected_still_forbidden(monkeypatch):
     assert "hold_forbidden" in str(
         (out.get("result") or {}).get("note") or out.get("validation") or ""
     )
+
+
+def test_result_dict_keeps_hunt_tape():
+    from abcxauto.agent_loop import _result_dict
+
+    out = _result_dict(
+        n=1,
+        s={
+            "scan_hits": {
+                "quoted": 1,
+                "rows": [{"symbol": "SNDK", "open_gap_pct": -6.5}],
+            },
+            "session_range": {"SNDK": {"today": True, "low": 88.0}},
+        },
+        act={},
+        strat="",
+        result={},
+        pnl=0.0,
+        eq=1.0,
+        prev=0.0,
+        inventory="",
+        validation="ok",
+    )
+    assert out["scan_hits"]["rows"][0]["symbol"] == "SNDK"
+    assert out["session_range"]["SNDK"]["low"] == 88.0

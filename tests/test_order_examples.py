@@ -85,6 +85,8 @@ def test_format_order_examples():
             assert '"closing_position":true' in line
     text_narrow = format_order_examples(allowed=frozenset({"market_bracket"}))
     assert "market_bracket" in text_narrow
+    assert "New risk requires card=" in text_narrow
+    assert '"card":"card-name"' in text_narrow
     assert "vertical_spread" not in text_narrow
     assert "vertical_spread close:" not in text_narrow
     assert "hold:" not in text_narrow
@@ -109,7 +111,7 @@ def test_examples_are_not_clerk_defaults_or_invented_fields():
     for name, params in ORDER_EXAMPLES.items():
         if name not in STRATEGIES:
             continue
-        fields = set(STRATEGIES[name][0].model_fields)
+        fields = set(STRATEGIES[name][0].model_fields) | {"card"}
         assert set(params) <= fields, name
         assert "price_hint" not in params, name
 

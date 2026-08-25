@@ -1,5 +1,5 @@
 """Structure referee + gradebook — Grok owns prices; code rejects illegal geometry
-and records lessons for the next cycle.
+and records lessons for the next send.
 """
 
 from __future__ import annotations
@@ -81,16 +81,46 @@ def resolve_entry_proxy(
     return None
 
 
+def session_usable(session: Any) -> bool:
+    """Today's RTH session may pin a stop. Missing or prior-day tape must not."""
+    return isinstance(session, dict) and session.get("today") is True
+
+
+def stop_pins_session(direction: str, stop: float, session: Any) -> bool:
+    """True when the stop is at or slightly under/over this session's extreme.
+
+    The live gap card stops under the opening low. That distance is the tape,
+    not the generic 0.2–5% posture band.
+    """
+    if not session_usable(session):
+        return False
+    side = str(direction or "").upper()
+    try:
+        if side == "LONG":
+            low = float(session.get("low"))
+            return low > 0 and low * 0.98 <= float(stop) <= low + 1e-9
+        if side == "SHORT":
+            high = float(session.get("high"))
+            return high > 0 and high - 1e-9 <= float(stop) <= high * 1.02
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
 def check_live_geometry(
     strategy: str,
     params: dict[str, Any],
     *,
     quote_last: float | None = None,
     posture: str = "balanced",
+    session: Any = None,
+    require_live: bool = False,
 ) -> tuple[bool, str, str]:
     """Return (ok, reason_code, human_message).
 
     Grok's prices are never rewritten — only accepted or rejected.
+    A stop pinned to this look's session low/high skips the % width bands.
+    New risk must use IBKR live last — a Grok price_hint is not that print.
     """
     if strategy not in ("market_bracket", "oca", "bracket"):
         return True, STRUCTURE_OK, "n/a"
@@ -105,7 +135,20 @@ def check_live_geometry(
     except (KeyError, TypeError, ValueError):
         return False, GEOMETRY_QUOTE_REQUIRED, "stop_price and target_price required"
 
-    proxy = resolve_entry_proxy(strategy, params, quote_last)
+    if require_live:
+        try:
+            live = float(quote_last) if quote_last is not None else 0.0
+        except (TypeError, ValueError):
+            live = 0.0
+        if live <= 0:
+            return (
+                False,
+                GEOMETRY_QUOTE_REQUIRED,
+                "card needs IBKR live last — quote first",
+            )
+        proxy = live
+    else:
+        proxy = resolve_entry_proxy(strategy, params, quote_last)
     if proxy is None or proxy <= 0:
         return (
             False,
@@ -155,6 +198,9 @@ def check_live_geometry(
                 )
         except (TypeError, ValueError):
             pass
+
+    if stop_pins_session(direction, stop, session):
+        return True, STRUCTURE_OK, "geometry ok (session level)"
 
     lo, hi = posture_stop_bands(posture)
     stop_pct = abs(proxy - stop) / proxy

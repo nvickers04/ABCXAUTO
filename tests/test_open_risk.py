@@ -64,8 +64,9 @@ def test_reconcile_rebuilds_from_book_when_plan_missing(tmp_path, monkeypatch):
     assert plan.stop_price == 293.4
     assert plan.target_price == 300.5
     assert plan.entry_price == 295.75
-    assert "IWM" in plan.thesis
+    assert plan.thesis == ""
     assert "OPEN RISK" in format_open_risk_line(plan)
+    assert "cycles=" not in format_open_risk_line(plan)
 
 
 def test_reconcile_refreshes_existing_plan_qty_and_exits(tmp_path, monkeypatch):
@@ -429,3 +430,32 @@ def test_stacked_stop_cancel_ids_no_covering_keeps_all():
     orders = _csco_stops(n=7, qty=10)
     assert working_stop_qty(orders, "CSCO", "LONG") == 70.0
     assert stacked_stop_cancel_ids(pos, orders) == []
+
+
+def test_stop_qty_fact_stacked_crumbs_are_not_a_match():
+    """Five 10-share stops sum to the 50-share lot; no single order covers."""
+    from abcxauto.trade_plan import ActiveTradePlan, stop_qty_mismatch_fact
+
+    pos = [{"symbol": "CSCO", "quantity": 50, "sec_type": "STK"}]
+    orders = _csco_stops(n=5, qty=10)
+    plan = ActiveTradePlan(symbol="CSCO", direction="LONG", quantity=50)
+    fact = stop_qty_mismatch_fact(pos, orders, plan)
+    assert fact is not None
+    assert fact["mismatch"] is True
+    assert fact["match"] is False
+    assert fact["stop_order_qty"] == 10.0
+    assert "single stop" in str(fact.get("note") or "")
+
+
+def test_stop_qty_fact_stacked_covering_is_per_order_match():
+    """Seven 50-share stops sum to 350; each order already covers the lot."""
+    from abcxauto.trade_plan import ActiveTradePlan, stop_qty_mismatch_fact
+
+    pos = [{"symbol": "CSCO", "quantity": 50, "sec_type": "STK"}]
+    orders = _csco_stops()
+    plan = ActiveTradePlan(symbol="CSCO", direction="LONG", quantity=50)
+    fact = stop_qty_mismatch_fact(pos, orders, plan)
+    assert fact is not None
+    assert fact["mismatch"] is False
+    assert fact["match"] is True
+    assert fact["stop_order_qty"] == 50.0

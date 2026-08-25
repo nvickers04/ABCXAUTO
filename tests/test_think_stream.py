@@ -21,6 +21,9 @@ def test_ascii_text_is_cp1252_safe():
     assert ascii_text("I'll inspect") == "I'll inspect"
     assert "?" not in ascii_text("I'll inspect")
     assert ascii_text("wait \u2014 crash") == "wait - crash"
+    assert ascii_text("no \u22656% flush") == "no >=6% flush"
+    assert "?" not in ascii_text("CVX \u22121.4%")
+    assert ascii_text("CVX \u22121.4%") == "CVX -1.4%"
 
 
 def test_emit_reaches_subscriber():
@@ -136,6 +139,458 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     assert brief["open_lots"] == ["IWM 260821C306 long 1"]
 
 
+def test_last_turn_reads_scan_fetched_from_world(tmp_path, monkeypatch):
+    """Pro _host_think used to omit the top-level key; last_turn then said []."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
+    ts._run = {"run_id": "r1", "pid": 1}
+    ts.write_last_turn({
+        "strat": "hold",
+        "rationale": "flat",
+        "tool_trace": ["scan", "set_wake"],
+        "reality_pulse": {"ibkr_connected": True},
+        "world_state": {
+            "flat": True,
+            "net_liquidation": 35000,
+            "scan_fetched": ["NVDA", "MU"],
+            "candle_source": "ibkr",
+        },
+    })
+    last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert last["scan_fetched"] == ["NVDA", "MU"]
+    assert last["candle_source"] == "ibkr"
+
+
+def test_last_turn_keeps_open_gap_rows_and_the_gate_table(tmp_path, monkeypatch):
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
+    ts._run = {"run_id": "r1", "pid": 1}
+    table = (
+        "Flat. No send. Gate OFF at 11:56 ET.\n"
+        "| Check | Result |\n"
+        "| mega TOP_PERC_LOSE | SNDK -7% / open_gap -6.5% memory-rally |\n"
+        "| MU | gap -3.3% |"
+    )
+    ts.write_last_turn({
+        "strat": "hold",
+        "rationale": table,
+        "tool_trace": ["scan"],
+        "scan_hits": {
+            "source": "ibkr",
+            "arena": "mega_cap",
+            "scan_code": "TOP_PERC_LOSE",
+            "quoted": 12,
+            "rows": [
+                {"symbol": "SNDK", "last": 1485.0, "open_gap_pct": -6.5, "change_pct": -7.0},
+                {"symbol": "MU", "last": 911.0, "open_gap_pct": -3.3},
+            ],
+        },
+        "world_state": {"flat": True, "net_liquidation": 35000},
+    })
+    last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert "open_gap -6.5%" in last["rationale"]
+    assert last["scan_hits"]["rows"][0]["symbol"] == "SNDK"
+    assert last["scan_hits"]["rows"][0]["open_gap_pct"] == -6.5
+    snap: dict = {}
+    ts.seed_snap_from_last_turn(snap)
+    assert snap["scan_hits"]["rows"][0]["open_gap_pct"] == -6.5
+    assert snap["ibkr_live_quotes"]["SNDK"] == 1485.0
+    snap_none = {"candle_source": "none"}
+    ts.seed_snap_from_last_turn(snap_none)
+    assert snap_none["scan_hits"]["rows"][0]["open_gap_pct"] == -6.5
+    brief = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+    assert "open_gap -6.5%" in brief["rationale"]
+
+
+def test_merge_scan_hits_keeps_the_gap_row_after_a_junk_screen():
+    from abcxauto.think_stream import last_look_wake_bit, merge_scan_hits
+
+    mega = {
+        "source": "ibkr",
+        "arena": "mega_cap",
+        "scan_code": "TOP_PERC_LOSE",
+        "quoted": 12,
+        "rows": [
+            {"symbol": "SNDK", "last": 1485.0, "open_gap_pct": -6.5},
+            {"symbol": "MU", "last": 911.0, "open_gap_pct": -3.3},
+        ],
+    }
+    junk = {
+        "source": "ibkr",
+        "arena": "all",
+        "scan_code": "MOST_ACTIVE",
+        "quoted": 12,
+        "rows": [
+            {"symbol": "DFNS", "last": 8.0},
+            {"symbol": "QBTX", "last": 8.07},
+        ],
+    }
+    merged = merge_scan_hits(mega, junk)
+    assert merged["rows"][0]["symbol"] == "SNDK"
+    assert merged["rows"][0]["open_gap_pct"] == -6.5
+    assert merged["arena"] == "mega_cap"
+    assert {r["symbol"] for r in merged["rows"]} >= {"SNDK", "MU", "DFNS", "QBTX"}
+    bit = last_look_wake_bit({
+        "send_calls": 0,
+        "tool_trace": ["scan"],
+        "scan_hits": merged,
+    })
+    assert "last_scan SNDK -6.5" in bit
+
+
+def test_merge_scan_hits_puts_the_down_gap_ahead_of_a_green_active_page():
+    from abcxauto.think_stream import merge_scan_hits
+
+    merged = merge_scan_hits(
+        {
+            "arena": "mega_cap",
+            "scan_code": "MOST_ACTIVE",
+            "rows": [{"symbol": "AMD", "last": 472.0, "open_gap_pct": 4.2}],
+        },
+        {
+            "arena": "large_cap",
+            "scan_code": "TOP_PERC_LOSE",
+            "rows": [{"symbol": "ALB", "last": 134.0, "open_gap_pct": -3.8}],
+        },
+    )
+    assert merged["rows"][0]["symbol"] == "ALB"
+    assert merged["scan_code"] == "TOP_PERC_LOSE"
+
+
+def test_seed_snap_from_last_turn_skips_none(tmp_path, monkeypatch):
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    (tmp_path / "last_turn.json").write_text(
+        json.dumps({"strat": "hold", "candle_source": "none", "stale": False}),
+        encoding="utf-8",
+    )
+    snap: dict = {}
+    ts.seed_snap_from_last_turn(snap)
+    assert "candle_source" not in snap
+
+    (tmp_path / "last_turn.json").write_text(
+        json.dumps({"strat": "hold", "candle_source": "ibkr", "stale": False}),
+        encoding="utf-8",
+    )
+    ts.seed_snap_from_last_turn(snap)
+    assert snap["candle_source"] == "ibkr"
+
+    snap = {}
+    (tmp_path / "last_turn.json").write_text(
+        json.dumps({"strat": "hold", "candle_source": "ibkr", "stale": True}),
+        encoding="utf-8",
+    )
+    ts.seed_snap_from_last_turn(snap)
+    assert snap["candle_source"] == "ibkr"
+
+
+def test_stale_last_turn_does_not_seed_yesterday_scan_hits(tmp_path, monkeypatch):
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    (tmp_path / "last_turn.json").write_text(
+        json.dumps({
+            "strat": "hold",
+            "stale": True,
+            "scan_hits": {
+                "quoted": 12,
+                "rows": [{"symbol": "SNDK", "last": 1485.0, "open_gap_pct": -6.5}],
+            },
+        }),
+        encoding="utf-8",
+    )
+    snap: dict = {}
+    ts.seed_snap_from_last_turn(snap)
+    assert "scan_hits" not in snap
+    assert not snap.get("ibkr_live_quotes")
+
+
+def test_seed_snap_carries_fresh_ibkr_quotes(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    (tmp_path / "last_turn.json").write_text(
+        json.dumps({
+            "strat": "hold",
+            "stale": False,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "ibkr_live_quotes": {"SNDK": 91.5},
+            "scan_hits": {
+                "quoted": 1,
+                "rows": [{"symbol": "MU", "last": 910.0}],
+            },
+        }),
+        encoding="utf-8",
+    )
+    snap: dict = {"ibkr_live_quotes": {"SPY": 500.0}}
+    ts.seed_snap_from_last_turn(snap)
+    assert snap["ibkr_live_quotes"]["SPY"] == 500.0
+    assert snap["ibkr_live_quotes"]["SNDK"] == 91.5
+    assert snap["ibkr_live_quotes"]["MU"] == 910.0
+    assert snap["scan_hits"]["rows"][0]["symbol"] == "MU"
+
+
+def test_overnight_last_turn_does_not_seed_scan_hits(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    (tmp_path / "last_turn.json").write_text(
+        json.dumps({
+            "strat": "hold",
+            "stale": False,
+            "ts": (datetime.now(timezone.utc) - timedelta(hours=18)).isoformat(),
+            "ibkr_live_quotes": {"SNDK": 1485.0},
+            "scan_hits": {
+                "quoted": 12,
+                "rows": [{"symbol": "SNDK", "last": 1485.0, "open_gap_pct": -6.5}],
+            },
+        }),
+        encoding="utf-8",
+    )
+    snap: dict = {}
+    ts.seed_snap_from_last_turn(snap)
+    assert "scan_hits" not in snap
+    assert not snap.get("ibkr_live_quotes")
+
+
+def test_seed_snap_carries_today_session_range_not_yesterday(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
+    ts._run = {"run_id": "r1", "pid": 1}
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    now = datetime.now(timezone.utc)
+    ts.write_last_turn({
+        "strat": "hold",
+        "tool_trace": ["book", "scan", "candles"],
+        "session_range": {
+            "SNDK": {
+                "date": today,
+                "open": 90.0,
+                "low": 88.0,
+                "last": 91.5,
+                "retrace_30": 93.0,
+                "ticket": {"card": "flush bounce", "stop_price": 88.0},
+            }
+        },
+        "world_state": {"flat": True, "net_liquidation": 35000},
+    })
+    last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    last["ts"] = (now - timedelta(minutes=8)).isoformat()
+    (tmp_path / "last_turn.json").write_text(json.dumps(last), encoding="utf-8")
+    snap: dict = {}
+    ts.seed_snap_from_last_turn(snap)
+    assert snap["session_range"]["SNDK"]["low"] == 88.0
+    assert snap["session_range"]["SNDK"]["ticket"]["card"] == "flush bounce"
+
+    # snap() stamps candle_source="none" before seed — that must not drop the tape.
+    snap_none = {"candle_source": "none"}
+    ts.seed_snap_from_last_turn(snap_none)
+    assert snap_none["session_range"]["SNDK"]["low"] == 88.0
+    assert snap_none["candle_source"] == "none"
+
+    last["session_range"] = {
+        "SNDK": {"date": "2020-01-01", "open": 90.0, "low": 88.0, "today": True}
+    }
+    last["stale"] = False
+    (tmp_path / "last_turn.json").write_text(json.dumps(last), encoding="utf-8")
+    snap = {}
+    ts.seed_snap_from_last_turn(snap)
+    assert "session_range" not in snap
+
+    last["session_range"] = {
+        "SNDK": {"date": today, "open": 90.0, "low": 88.0}
+    }
+    last["stale"] = False
+    last["ts"] = (now - timedelta(hours=18)).isoformat()
+    (tmp_path / "last_turn.json").write_text(json.dumps(last), encoding="utf-8")
+    snap = {}
+    ts.seed_snap_from_last_turn(snap)
+    assert "session_range" not in snap
+
+
+def test_seed_snap_from_in_progress_keeps_today_session(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+    (tmp_path / "last_turn.json").write_text(
+        json.dumps({
+            "strat": "in_progress",
+            "stale": False,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "session_range": {
+                "SNDK": {
+                    "date": today,
+                    "open": 90.0,
+                    "low": 88.0,
+                    "last": 91.5,
+                    "ticket": {"card": "flush bounce", "stop_price": 88.0},
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
+    snap = {"candle_source": "none"}
+    ts.seed_snap_from_last_turn(snap)
+    assert snap["session_range"]["SNDK"]["low"] == 88.0
+
+
+def test_seed_snap_reuses_card_screens_inside_three_minutes(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    (tmp_path / "last_turn.json").write_text(
+        json.dumps({
+            "stale": False,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "scan_screens": [
+                "mega_cap:LOW_OPEN_GAP",
+                "mega_cap:TOP_PERC_LOSE",
+            ],
+            "scan_calls": 2,
+            "scan_hits": {
+                "rows": [{"symbol": "ALB", "open_gap_pct": -3.8}],
+            },
+        }),
+        encoding="utf-8",
+    )
+    snap: dict = {"candle_source": "none"}
+    ts.seed_snap_from_last_turn(snap)
+    assert snap["scan_screens"][0] == "mega_cap:LOW_OPEN_GAP"
+    assert snap["scan_calls"] == 2
+    assert snap["scan_hits"]["rows"][0]["symbol"] == "ALB"
+
+
+def test_seed_snap_does_not_slide_manage_reuse_off_look_ts(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    now = datetime.now(timezone.utc)
+    (tmp_path / "last_turn.json").write_text(
+        json.dumps({
+            "stale": False,
+            "flat": False,
+            "ts": now.isoformat(),
+            "scan_at": (now - timedelta(seconds=20 * 60)).isoformat(),
+            "scan_screens": ["mega_cap:LOW_OPEN_GAP"],
+            "scan_calls": 1,
+        }),
+        encoding="utf-8",
+    )
+    snap: dict = {"candle_source": "none"}
+    ts.seed_snap_from_last_turn(snap)
+    assert "scan_screens" not in snap
+    assert snap["scan_at"]
+
+
+def test_seed_snap_does_not_reuse_when_row_asof_is_stale(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    now = datetime.now(timezone.utc)
+    (tmp_path / "last_turn.json").write_text(
+        json.dumps({
+            "stale": False,
+            "flat": False,
+            "ts": now.isoformat(),
+            "scan_screens": ["mega_cap:LOW_OPEN_GAP"],
+            "scan_calls": 1,
+            "scan_hits": {
+                "rows": [{
+                    "symbol": "NKE",
+                    "last": 39.615,
+                    "ibkr": {"asof_iso": (now - timedelta(minutes=45)).strftime("%Y-%m-%dT%H:%M:%SZ")},
+                }]
+            },
+        }),
+        encoding="utf-8",
+    )
+    snap: dict = {"candle_source": "none"}
+    ts.seed_snap_from_last_turn(snap)
+    assert "scan_screens" not in snap
+
+
+def test_seed_snap_reuses_manage_screens_past_the_hunt_window(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    age = datetime.now(timezone.utc) - timedelta(seconds=240)
+    row = {
+        "stale": False,
+        "ts": age.isoformat(),
+        "scan_screens": ["mega_cap:LOW_OPEN_GAP"],
+        "scan_calls": 1,
+    }
+    (tmp_path / "last_turn.json").write_text(json.dumps(row), encoding="utf-8")
+    hunt: dict = {"candle_source": "none"}
+    ts.seed_snap_from_last_turn(hunt)
+    assert "scan_screens" not in hunt
+    row["flat"] = False
+    (tmp_path / "last_turn.json").write_text(json.dumps(row), encoding="utf-8")
+    manage: dict = {"candle_source": "none"}
+    ts.seed_snap_from_last_turn(manage)
+    assert manage["scan_screens"] == ["mega_cap:LOW_OPEN_GAP"]
+
+
+def test_last_look_for_hunt_drops_an_overnight_brief():
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.think_stream import last_look_facts, last_look_for_hunt
+
+    now = datetime.now(timezone.utc)
+    old = {
+        "ts": (now - timedelta(hours=18)).isoformat(),
+        "tool_trace": ["book", "scan", "news"],
+        "send_calls": 0,
+        "scan_hits": {
+            "quoted": 12,
+            "rows": [{"symbol": "SNDK", "last": 1485.0, "open_gap_pct": -6.5}],
+        },
+    }
+    facts = last_look_facts(old)
+    assert facts["fresh"] is False
+    assert facts.get("tools") == []
+    assert not facts.get("scan_hits")
+    assert not facts.get("rationale")
+    assert last_look_for_hunt(old) == {}
+    from abcxauto.think_stream import last_look_wake_bit
+
+    bit = last_look_wake_bit(old)
+    assert bit == ""
+    assert "last_scan" not in bit
+    assert "book,scan,news" not in bit
+
+    recent = dict(old)
+    recent["ts"] = (now - timedelta(minutes=10)).isoformat()
+    assert last_look_facts(recent)["fresh"] is True
+    assert last_look_for_hunt(recent)["tools"][:3] == ["book", "scan", "news"]
+
+
 def test_last_turn_operator_paint_omits_cycle(tmp_path, monkeypatch):
     from tests.conftest import assert_no_cycle_keys
     from abcxauto import think_stream as ts
@@ -165,7 +620,18 @@ def test_run_identity_stale_last_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")
     ts._run = {}
     first = ts.begin_run()
-    ts.write_last_turn({"cycle": 7, "strat": "hold", "tool_trace": ["book"]})
+    ts.write_last_turn({
+        "cycle": 7,
+        "strat": "hold",
+        "tool_trace": ["book"],
+        "scan_fetched": ["NVDA"],
+        "scan_hits": {
+            "arena": "mega_cap",
+            "scan_code": "TOP_PERC_LOSE",
+            "rows": [{"symbol": "NVDA", "open_gap_pct": -1.2}],
+        },
+        "world_state": {"candle_source": "ibkr", "flat": True, "net_liquidation": 1},
+    })
     live = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
     from tests.conftest import assert_no_cycle_keys
 
@@ -175,11 +641,37 @@ def test_run_identity_stale_last_turn(tmp_path, monkeypatch):
     assert ts.last_turn_is_live(live) is True
     second = ts.begin_run()
     assert second["run_id"] != first["run_id"]
-    stale = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
-    assert_no_cycle_keys(stale)
-    assert stale["stale"] is True
-    assert ts.last_turn_is_live(stale) is False
+    kept = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert_no_cycle_keys(kept)
+    assert kept["stale"] is False
+    assert kept["scan_fetched"] == ["NVDA"]
+    assert kept["scan_hits"]["rows"][0]["open_gap_pct"] == -1.2
+    assert kept["candle_source"] == "ibkr"
+    assert ts.last_turn_is_live(kept) is False
     assert ts.last_turn_is_live(live) is False
+
+
+def test_begin_run_stales_an_overnight_last_turn(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")
+    ts._run = {}
+    ts.begin_run()
+    ts.write_last_turn({
+        "strat": "hold",
+        "tool_trace": ["book"],
+        "world_state": {"flat": True, "net_liquidation": 1},
+    })
+    live = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    live["ts"] = (datetime.now(timezone.utc) - timedelta(hours=18)).isoformat()
+    (tmp_path / "last_turn.json").write_text(json.dumps(live), encoding="utf-8")
+    ts.begin_run()
+    stale = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert stale["stale"] is True
 
 
 def test_stop_keeps_think_tail_new_run_archives(tmp_path, monkeypatch):
