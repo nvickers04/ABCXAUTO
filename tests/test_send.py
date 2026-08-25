@@ -73,7 +73,26 @@ async def _assert_paper_live_port_does_not_place(monkeypatch, port: int) -> None
 @pytest.mark.asyncio
 async def test_port_7496_trading_mode_paper_must_not_place(monkeypatch):
     """Port 7496 with TRADING_MODE=paper must not place."""
-    await _assert_paper_live_port_does_not_place(monkeypatch, 7496)
+    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("IBKR_PORT", "7496")
+    clear_runtime_overrides()
+    get_config.cache_clear()
+    cfg = get_config()
+    assert cfg.trading_mode == "paper"
+    assert cfg.ibkr_port == 7496
+    monkeypatch.setattr("abcxauto.send.safe_execute", _safe_execute_must_not_run)
+
+    from abcxauto.send import send_action
+
+    connector = _connector()
+    result = await send_action(_placeable_ticket(), connector)
+
+    assert result["status"] == "blocked"
+    assert result.get("reason_code") == "live_port_paper"
+    assert "7496" in str(result.get("note") or "")
+    connector.place_order.assert_not_called()
+    assert get_config().trading_mode == "paper"
+    assert get_config().ibkr_port == 7496
 
 
 @pytest.mark.asyncio
