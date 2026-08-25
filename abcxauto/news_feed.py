@@ -11,34 +11,31 @@ logger = logging.getLogger(__name__)
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "items": [], "symbols": []}
 _CACHE_TTL_S = 90.0
+_UNIVERSE_CAP = 14
 
-# Thin market context when book + sandbox are empty — not a trade allowlist.
-_MARKET_CONTEXT = (
-    "SPY",
-    "QQQ",
-    "IWM",
-    "DIA",
-    "TLT",
-    "GLD",
-    "USO",
-)
+# Per-symbol cap. MDA's client allows 30s, which outlasts the 20s news tool
+# budget; a stall must not look like "no headlines." One retry, then miss.
+NEWS_SYMBOL_S = 12.0
+NEWS_TRIES = 2
+
+
+def reset_news_cache() -> None:
+    _CACHE.update(ts=0.0, items=[], symbols=[])
 
 
 def _universe(positions: list[dict] | None) -> list[str]:
-    """Book underlyings, then index context. Not the scan sandbox.
+    """Book underlyings only. No sandbox junk, no index pad.
 
     legal_symbols is the IBKR screen leftover (levered/micro junk). Polling
     that tape for headlines 404s MDA and starves the look's catalyst fetch.
+    SPY/QQQ pads are canned names, not the book.
     """
     out: list[str] = []
     for p in positions or []:
         sym = str((p or {}).get("symbol") or "").upper()
         if sym and sym not in out:
             out.append(sym)
-    for sym in _MARKET_CONTEXT:
-        if sym not in out:
-            out.append(sym)
-        if len(out) >= 14:
+        if len(out) >= _UNIVERSE_CAP:
             break
     return out
 
@@ -48,13 +45,62 @@ def _configured(client: Any) -> bool:
     return bool(flag() if callable(flag) else flag)
 
 
+def _get_client() -> Any:
+    from abcxauto.marketdata.client import get_marketdata_client
+
+    return get_marketdata_client()
+
+
+def _miss(symbol: str, reason: str) -> dict:
+    return {
+        "symbol": symbol,
+        "headline": f"(unavailable - {reason})",
+        "error": reason,
+    }
+
+
+async def _fetch_symbol_news(
+    client: Any, sym: str, *, per_symbol: int
+) -> tuple[list[dict], str | None]:
+    """One symbol: try, retry once on timeout/error. Miss is not empty."""
+    try:
+        from abcxauto.prints import mda_worth_asking
+
+        if not mda_worth_asking(sym):
+            return [], None
+    except Exception:
+        logger.exception("mda_worth_asking failed for %s", sym)
+
+    reason: str | None = None
+    tries = max(1, int(NEWS_TRIES))
+    timeout_s = float(NEWS_SYMBOL_S)
+    for _attempt in range(tries):
+        try:
+            rows = await asyncio.wait_for(
+                client.get_stock_news(sym, countback=per_symbol),
+                timeout=timeout_s,
+            )
+            return list(rows or []), None
+        except asyncio.TimeoutError:
+            reason = "timed out"
+            logger.warning("news %s timed out after %.0fs", sym, timeout_s)
+        except Exception:
+            reason = "error"
+            logger.exception("news fetch failed for %s", sym)
+    return [], reason
+
+
 async def fetch_agent_news(
     positions: list[dict] | None = None,
     *,
     force: bool = False,
     per_symbol: int = 4,
 ) -> list[dict]:
-    """Fetch / cache headlines for book + sandbox sample."""
+    """Fetch / cache headlines for open-book underlyings.
+
+    A timeout or transport miss is returned as an ``error`` item and is not
+    cached. Empty headlines from a completed fetch stay empty.
+    """
     now = time.monotonic()
     symbols = _universe(positions)
     if (
@@ -65,37 +111,28 @@ async def fetch_agent_news(
     ):
         return list(_CACHE["items"])
 
-    items: list[dict] = []
-    try:
-        from abcxauto.marketdata.client import get_marketdata_client
+    if not symbols:
+        return []
 
-        client = get_marketdata_client()
+    items: list[dict] = []
+    misses: list[dict] = []
+    try:
+        client = _get_client()
         if not _configured(client):
-            _CACHE.update(ts=now, items=[], symbols=symbols)
             return []
 
-        async def _one(sym: str) -> list[dict]:
-            try:
-                from abcxauto.prints import mda_worth_asking
-
-                if not mda_worth_asking(sym):
-                    return []
-                return list(await client.get_stock_news(sym, countback=per_symbol) or [])
-            except Exception:
-                logger.exception("news fetch failed for %s", sym)
-                return []
-
-        batches = await asyncio.gather(*[_one(s) for s in symbols], return_exceptions=True)
-        for batch in batches:
-            if isinstance(batch, list):
+        batches = await asyncio.gather(
+            *[_fetch_symbol_news(client, s, per_symbol=per_symbol) for s in symbols]
+        )
+        for _sym, (batch, err) in zip(symbols, batches):
+            if err:
+                misses.append(_miss(_sym, err))
+            else:
                 items.extend(batch)
-            elif isinstance(batch, Exception):
-                logger.exception("news gather failed: %s", batch)
     except Exception:
         logger.exception("fetch_agent_news failed")
-        items = []
+        return [_miss(s, "error") for s in symbols]
 
-    # Prefer fresher / book-relevant: keep order but dedupe by headline
     seen: set[str] = set()
     unique: list[dict] = []
     for it in items:
@@ -104,6 +141,9 @@ async def fetch_agent_news(
             continue
         seen.add(hl)
         unique.append(it)
+
+    if misses:
+        return unique + misses
 
     _CACHE.update(ts=now, items=unique, symbols=symbols)
     return list(unique)
@@ -114,15 +154,24 @@ def format_news_for_prompt(items: list[dict], *, limit: int = 18) -> str:
     lines = [
         "NEWS (headlines — not orders):",
     ]
-    if not items:
-        lines.append("(no headlines available)")
+    real: list[dict] = []
+    misses: list[dict] = []
+    for it in items or []:
+        if it.get("error"):
+            misses.append(it)
+            continue
+        hl = str(it.get("headline") or "").strip()
+        if hl:
+            real.append(it)
+    if not real:
+        if misses:
+            why = str(misses[0].get("error") or "timed out")
+            lines.append(f"(news unavailable - fetch {why})")
+        else:
+            lines.append("(no headlines available)")
         return "\n".join(lines)
-    for it in items[:limit]:
+    for it in real[:limit]:
         sym = str(it.get("symbol") or "?").upper()
         hl = str(it.get("headline") or "").strip()
-        if not hl:
-            continue
         lines.append(f"- [{sym}] {hl[:180]}")
     return "\n".join(lines)
-
-
