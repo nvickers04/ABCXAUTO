@@ -14,6 +14,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from xai_sdk.chat import developer, system, tool, tool_result, user
@@ -52,7 +53,7 @@ CANDLE_S = 35.0
 SCAN_S = 35.0
 # Per-symbol news cap. The MDA client allows 30s per request, which on its own
 # outlasts TOOL_S — one stalled symbol must not spend the whole tool budget.
-NEWS_SYMBOL_S = 6.0
+NEWS_SYMBOL_S = 12.0
 _QUOTE_SCHEMA = {"type": "string", "description": "Ticker, e.g. AAPL"}
 _SYMBOLS_SCHEMA = {"type": "array", "items": {"type": "string"}}
 
@@ -87,6 +88,656 @@ def _scan_code_keys() -> list[str]:
             "TOP_PERC_LOSE",
             "HOT_BY_VOLUME",
         ]
+
+
+# Default when the live card writes no screens. A compose line
+# ``most_active + top_losers; mega/large`` is four IBKR jobs — one look
+# fetches all of them, then reuses.
+_SCAN_SCREENS_PER_LOOK = 2
+
+
+def _scan_screen_budget() -> int:
+    try:
+        from abcxauto.lab_playbook import live_card_scan_screens
+
+        n = len(live_card_scan_screens())
+    except Exception:
+        n = 0
+    if n <= 0:
+        return _SCAN_SCREENS_PER_LOOK
+    return min(8, n)
+
+
+def _written_scan_jobs(snap: dict[str, Any] | None) -> list[dict[str, str]]:
+    used = [str(x) for x in ((snap or {}).get("scan_screens") or [])]
+    try:
+        from abcxauto.lab_playbook import live_card_scan_screens, scan_screen_key
+
+        screens = live_card_scan_screens()
+    except Exception:
+        return []
+    jobs: list[dict[str, str]] = []
+    for screen in screens:
+        arena = str(screen.get("arena") or "").strip()
+        code = str(screen.get("scan_code") or "").strip()
+        key = scan_screen_key(arena, code)
+        if key and key not in used:
+            job = {"arena": arena}
+            if code:
+                job["scan_code"] = code
+            jobs.append(job)
+    return jobs
+
+
+def _news_symbols_for_scan(
+    merged: dict[str, Any] | None,
+    pulled: list[str] | None,
+) -> list[str]:
+    """Headlines for the gap tape, not the first MOST_ACTIVE page."""
+    from abcxauto.prints import mda_worth_asking
+
+    order: list[str] = []
+    rows = (merged or {}).get("rows") if isinstance(merged, dict) else None
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        su = str(row.get("symbol") or "").upper().strip()
+        if su and su not in order:
+            order.append(su)
+    for raw in pulled or []:
+        su = str(raw or "").upper().strip()
+        if su and su not in order:
+            order.append(su)
+    return [s for s in order[:8] if mda_worth_asking(s)]
+
+
+def _news_symbols_this_look(
+    world: Any,
+    snap: dict[str, Any] | None,
+    asked: list[str] | None,
+) -> list[str]:
+    """Bare news() reads this look's gap tape, not SPY, when the book is flat."""
+    if asked:
+        return list(asked)
+    from abcxauto.prints import mda_worth_asking
+
+    order: list[str] = []
+
+    def _add(raw: Any) -> None:
+        su = str(raw or "").upper().strip()
+        if su and su not in order:
+            order.append(su)
+
+    for s in getattr(world, "scan_fetched", None) or []:
+        _add(s)
+    blob = snap if isinstance(snap, dict) else {}
+    hits = blob.get("scan_hits") if isinstance(blob.get("scan_hits"), dict) else {}
+    for row in hits.get("rows") or []:
+        if isinstance(row, dict):
+            _add(row.get("symbol"))
+    if not order:
+        try:
+            from abcxauto.think_stream import last_look_for_hunt
+
+            last = last_look_for_hunt()
+            last_hits = last.get("scan_hits") if isinstance(last.get("scan_hits"), dict) else {}
+            for row in last_hits.get("rows") or []:
+                if isinstance(row, dict):
+                    _add(row.get("symbol"))
+        except Exception:
+            pass
+    return [s for s in order[:12] if mda_worth_asking(s)]
+
+
+def _record_scan_screen(snap: dict[str, Any], arena: str, scan_code: str) -> None:
+    from abcxauto.lab_playbook import scan_screen_key
+
+    key = scan_screen_key(arena, scan_code)
+    if not key:
+        return
+    seen_screens = [str(x) for x in (snap.get("scan_screens") or [])]
+    if key not in seen_screens:
+        seen_screens.append(key)
+    snap["scan_screens"] = seen_screens
+    if arena:
+        seen = [str(x) for x in (snap.get("scan_arenas") or [])]
+        if arena not in seen:
+            seen.append(arena)
+        snap["scan_arenas"] = seen
+
+
+def _scan_gate_facts(rows: list[Any] | None) -> dict[str, Any]:
+    """Card gap floor vs this look's deepest flush-side open gap. Not a send."""
+    try:
+        from abcxauto.think_stream import _card_wants_down_gaps, _signed_open_gap
+    except Exception:
+        return {}
+    down = _card_wants_down_gaps()
+    deepest = None
+    deepest_sym = ""
+    deepest_signed = None
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        signed = _signed_open_gap(row)
+        if row.get("open_gap_pct") is None:
+            continue
+        if down and signed > 0:
+            continue
+        if (not down) and signed < 0:
+            continue
+        mag = abs(signed)
+        if deepest is None or mag > deepest:
+            deepest = mag
+            deepest_signed = signed
+            deepest_sym = str(row.get("symbol") or "").upper()
+    out: dict[str, Any] = {
+        "deepest_open_gap_pct": deepest_signed,
+        "deepest_symbol": deepest_sym or None,
+    }
+    try:
+        from abcxauto.lab_playbook import live_card_gap_floors, live_card_min_gap_pct
+
+        floor = live_card_min_gap_pct()
+        floors = live_card_gap_floors(deepest=deepest)
+    except Exception:
+        floor = None
+        floors = []
+    if floors:
+        out["card_gap_floors"] = floors
+    if floor:
+        out["card_min_gap_pct"] = floor
+        out["card_gap_met"] = bool(
+            deepest is not None and deepest + 1e-9 >= float(floor)
+        )
+    return out
+
+
+def _quote_last(raw: Any) -> float | None:
+    if isinstance(raw, (int, float)) and raw == raw:
+        val = float(raw)
+        return val if val > 0 else None
+    if isinstance(raw, dict):
+        for key in ("last", "price", "mid"):
+            if raw.get(key) is None:
+                continue
+            try:
+                val = float(raw[key])
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                return val
+    return None
+
+
+def _scan_paint_rows(
+    hits: dict[str, Any] | None,
+    fallback: list[Any] | None = None,
+    quotes: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    from abcxauto.think_stream import sort_scan_rows
+
+    rows = [r for r in ((hits or {}).get("rows") or []) if isinstance(r, dict)]
+    if not rows:
+        rows = [r for r in (fallback or []) if isinstance(r, dict)][:24]
+    painted: list[dict[str, Any]] = []
+    qmap = quotes if isinstance(quotes, dict) else {}
+    for row in sort_scan_rows(rows):
+        item = dict(row)
+        sym = str(item.get("symbol") or "").upper().strip()
+        px = _quote_last(qmap.get(sym))
+        if px is not None:
+            item["last"] = px
+            close = item.get("close")
+            try:
+                prior = float(close) if close is not None else 0.0
+            except (TypeError, ValueError):
+                prior = 0.0
+            if prior > 0:
+                item["change_pct"] = round((px / prior - 1.0) * 100.0, 3)
+        painted.append(item)
+    return painted
+
+
+def _scan_open(snap: dict[str, Any] | None, symbol: str) -> Any:
+    if not isinstance(snap, dict):
+        return None
+    want = str(symbol or "").strip().upper()
+    hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
+    for row in hits.get("rows") or []:
+        if not isinstance(row, dict) or str(row.get("symbol") or "").upper() != want:
+            continue
+        if row.get("open") is not None:
+            return row.get("open")
+        ibkr = row.get("ibkr")
+        if isinstance(ibkr, dict) and ibkr.get("open") is not None:
+            return ibkr.get("open")
+    qmap = snap.get("ibkr_live_quotes")
+    if isinstance(qmap, dict):
+        quote = qmap.get(want)
+        if isinstance(quote, dict) and quote.get("open") is not None:
+            return quote.get("open")
+    return None
+
+
+def _scan_gap_pct(snap: dict[str, Any] | None, symbol: str) -> Any:
+    if not isinstance(snap, dict):
+        return None
+    want = str(symbol or "").strip().upper()
+    hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
+    for row in hits.get("rows") or []:
+        if not isinstance(row, dict) or str(row.get("symbol") or "").upper() != want:
+            continue
+        if row.get("open_gap_pct") is not None:
+            return row.get("open_gap_pct")
+        ibkr = row.get("ibkr")
+        if isinstance(ibkr, dict) and ibkr.get("open_gap_pct") is not None:
+            return ibkr.get("open_gap_pct")
+    qmap = snap.get("ibkr_live_quotes")
+    if isinstance(qmap, dict):
+        quote = qmap.get(want)
+        if isinstance(quote, dict) and quote.get("open_gap_pct") is not None:
+            return quote.get("open_gap_pct")
+    return None
+
+
+def _candle_res_from_tape(snap: dict[str, Any] | None) -> str:
+    """Daily bars cannot answer an opening-low hold on a gap screen."""
+    try:
+        from abcxauto.lab_playbook import live_card_needs_session
+
+        if live_card_needs_session():
+            return "5"
+    except Exception:
+        pass
+    hits = snap.get("scan_hits") if isinstance(snap, dict) else None
+    if not isinstance(hits, dict):
+        return "D"
+    for row in hits.get("rows") or []:
+        if isinstance(row, dict) and row.get("open_gap_pct") is not None:
+            return "5"
+    return "D"
+
+
+def _stamp_session_size(session: dict[str, Any], world: WorldState) -> None:
+    """Knob-sized shares if stop is this session low. Not a ticket."""
+    if not isinstance(session, dict) or session.get("size"):
+        return
+    try:
+        from abcxauto.protect import size_if_stop
+
+        sized = size_if_stop(
+            last=session.get("last"),
+            stop=session.get("low"),
+            equity=getattr(world, "net_liquidation", None),
+        )
+    except Exception:
+        sized = {}
+    if sized:
+        session["size"] = sized
+    try:
+        from types import SimpleNamespace
+
+        from abcxauto.lab_playbook import live_card_send_facts
+
+        facts = live_card_send_facts()
+    except Exception:
+        facts = {}
+    if not facts:
+        return
+    try:
+        from abcxauto.protect import size_if_stop
+
+        card_sized = size_if_stop(
+            last=session.get("last"),
+            stop=session.get("low"),
+            equity=getattr(world, "net_liquidation", None),
+            cfg=SimpleNamespace(
+                max_risk_per_trade_pct=facts.get("risk_pct") or 1.0,
+                max_position_pct=facts.get("notional_pct") or 25.0,
+            ),
+        )
+    except Exception:
+        card_sized = {}
+    if card_sized:
+        session.setdefault("size", {})
+        session["size"]["card_qty"] = card_sized["qty"]
+        if facts.get("risk_pct") is not None:
+            session["size"]["card_risk_pct"] = facts["risk_pct"]
+        if facts.get("notional_pct") is not None:
+            session["size"]["card_notional_pct"] = facts["notional_pct"]
+
+
+def _stamp_session_ticket(session: dict[str, Any]) -> None:
+    """Card + tape numbers Grok can hoist into send. Clerk does not send."""
+    if not isinstance(session, dict) or session.get("today") is False:
+        return
+    try:
+        from abcxauto.lab_playbook import (
+            _session_gap_mag,
+            _tightest_matching_card,
+            live_card_send_facts,
+        )
+
+        mag = _session_gap_mag(session)
+        picked = _tightest_matching_card(None, mag)
+        if not picked:
+            session.pop("ticket", None)
+            return
+        _type_name, row = picked
+        facts = live_card_send_facts(card=row.get("name"))
+    except Exception:
+        return
+    if not facts.get("card") or not facts.get("type"):
+        return
+    if facts.get("direction") != "SHORT" and session.get("above_low") is False:
+        session.pop("ticket", None)
+        return
+    try:
+        from abcxauto.lab_playbook import live_card_needs_hold_above_open
+
+        if (
+            facts.get("direction") != "SHORT"
+            and live_card_needs_hold_above_open(card=facts.get("card"))
+            and session.get("above_open") is False
+        ):
+            session.pop("ticket", None)
+            return
+    except Exception:
+        pass
+    try:
+        from abcxauto.lab_playbook import (
+            _card_min_gap_pct,
+            live_card_scan_constraints,
+        )
+
+        min_gap = _card_min_gap_pct(row)
+        mag = _session_gap_mag(session)
+        if min_gap and (mag is None or mag + 1e-9 < min_gap):
+            session.pop("ticket", None)
+            return
+        min_px = live_card_scan_constraints(card=facts.get("card")).get("min_price")
+        if min_px is not None and session.get("last") is not None:
+            if float(session["last"]) + 1e-9 < float(min_px):
+                session.pop("ticket", None)
+                return
+    except Exception:
+        pass
+    size = session.get("size") if isinstance(session.get("size"), dict) else {}
+    ticket: dict[str, Any] = {
+        "strategy": facts["type"],
+        "card": facts["card"],
+    }
+    if facts.get("direction"):
+        ticket["direction"] = facts["direction"]
+    if facts.get("direction") != "SHORT" and session.get("low") is not None:
+        ticket["stop_price"] = session["low"]
+    elif facts.get("direction") == "SHORT" and session.get("high") is not None:
+        ticket["stop_price"] = session["high"]
+    try:
+        from abcxauto.lab_playbook import session_target
+
+        tgt = session_target(session, facts.get("direction") or "LONG")
+    except Exception:
+        tgt = session.get("retrace_30") or session.get("retrace_50")
+    if tgt is None and (
+        session.get("retrace_30") is not None or session.get("retrace_50") is not None
+    ):
+        session.pop("ticket", None)
+        return
+    if tgt is not None:
+        ticket["target_price"] = tgt
+    qty = size.get("card_qty") or size.get("qty")
+    if qty:
+        ticket["quantity"] = qty
+    session["ticket"] = ticket
+
+
+def _snap_is_rth(snap: dict[str, Any] | None) -> bool:
+    s = snap if isinstance(snap, dict) else {}
+    pulse = s.get("reality_pulse") if isinstance(s.get("reality_pulse"), dict) else {}
+    sess = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
+    if not sess:
+        sess = s.get("session") if isinstance(s.get("session"), dict) else {}
+    status = str(sess.get("status") or sess.get("session") or "").lower()
+    if status == "regular":
+        return True
+    if status in ("premarket", "closed", "postmarket"):
+        return False
+    try:
+        from abcxauto.opportunity_scan import rth_now
+
+        return rth_now()
+    except Exception:
+        return False
+
+
+def _live_open_session(
+    snap: dict[str, Any] | None,
+    symbol: str,
+    *,
+    last: Any = None,
+    open_px: Any = None,
+    open_gap_pct: Any = None,
+) -> dict[str, Any] | None:
+    from abcxauto.opportunity_scan import session_range_from_live_open
+
+    want = str(symbol or "").upper()
+    last_px = last
+    open_last = open_px
+    gap = open_gap_pct if open_gap_pct is not None else _scan_gap_pct(snap, want)
+    hits = snap.get("scan_hits") if isinstance(snap, dict) and isinstance(snap.get("scan_hits"), dict) else {}
+    for row in hits.get("rows") or []:
+        if not isinstance(row, dict) or str(row.get("symbol") or "").upper() != want:
+            continue
+        if last_px is None:
+            last_px = row.get("last")
+        if open_last is None:
+            open_last = row.get("open")
+        if gap is None:
+            gap = row.get("open_gap_pct")
+        break
+    return session_range_from_live_open(
+        last=last_px,
+        rth_open=open_last,
+        open_gap_pct=gap,
+        regular=_snap_is_rth(snap),
+    )
+
+
+def _finish_live_session(
+    rng: dict[str, Any],
+    *,
+    snap: dict[str, Any],
+    world: WorldState,
+    symbol: str,
+    tape: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    src = tape if isinstance(tape, dict) else {}
+    for key in ("bid", "ask", "spread", "spread_pct"):
+        if src.get(key) is not None and rng.get(key) is None:
+            rng[key] = src[key]
+    _remember_session(snap, symbol, rng)
+    kept = (snap.get("session_range") or {}).get(str(symbol).upper()) or rng
+    _stamp_session_size(kept, world)
+    _stamp_session_ticket(kept)
+    return kept
+
+
+def _session_rank(rng: dict[str, Any] | None) -> tuple:
+    """Prefer today's multi-bar RTH range over a 1-print live open."""
+    if not isinstance(rng, dict):
+        return (0, 0, 0, 0.0)
+    today = 1 if rng.get("today") is True else 0
+    try:
+        n = int(rng.get("n") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    hist = 0 if str(rng.get("print") or "") == "live_open" or n <= 1 else 1
+    try:
+        low = float(rng["low"]) if rng.get("low") is not None else None
+        high = float(rng["high"]) if rng.get("high") is not None else None
+        span = abs(high - low) if low is not None and high is not None else 0.0
+    except (TypeError, ValueError):
+        span = 0.0
+    return (today, hist, n, span)
+
+
+def _refresh_session_last(
+    kept: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    out = dict(kept)
+    if incoming.get("last") is None:
+        return out
+    try:
+        last_px = float(incoming["last"])
+    except (TypeError, ValueError):
+        return out
+    out["last"] = last_px
+    try:
+        open_px = float(out["open"]) if out.get("open") is not None else None
+    except (TypeError, ValueError):
+        open_px = None
+    try:
+        low_px = float(out["low"]) if out.get("low") is not None else None
+    except (TypeError, ValueError):
+        low_px = None
+    if open_px is not None:
+        out["vs_open"] = round(last_px - open_px, 4)
+        out["above_open"] = last_px >= open_px
+    if low_px is not None:
+        out["vs_low"] = round(last_px - low_px, 4)
+        out["above_low"] = last_px > low_px
+    return out
+
+
+def _remember_session(
+    snap: dict[str, Any],
+    symbol: str,
+    session: dict[str, Any],
+) -> None:
+    store = snap.setdefault("session_range", {})
+    if not isinstance(store, dict):
+        return
+    key = str(symbol).upper()
+    prev = store.get(key)
+    if isinstance(prev, dict) and _session_rank(prev) > _session_rank(session):
+        store[key] = _refresh_session_last(prev, session)
+        return
+    store[key] = session
+
+
+def _apply_candle_session(
+    out: dict[str, Any],
+    *,
+    sym: str,
+    snap: dict[str, Any],
+    world: WorldState,
+    last: Any,
+) -> None:
+    from abcxauto.opportunity_scan import session_range_from_bars
+    from abcxauto.structure_grade import session_usable
+
+    hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
+    want = str(sym or "").upper()
+    tape = None
+    for row in hits.get("rows") or []:
+        if isinstance(row, dict) and str(row.get("symbol") or "").upper() == want:
+            tape = row
+            break
+    rth_open = None
+    if isinstance(tape, dict) and tape.get("open") is not None:
+        rth_open = tape.get("open")
+    if rth_open is None:
+        rth_open = _scan_open(snap, sym)
+    last_px = _quote_last(last)
+    rng = session_range_from_bars(
+        out.get("bars"),
+        last=last_px if last_px is not None else last,
+        open_gap_pct=_scan_gap_pct(snap, sym),
+        rth_open=rth_open,
+    )
+    if not session_usable(rng):
+        live = _live_open_session(snap, sym, last=last, open_px=rth_open)
+        if live:
+            rng = live
+    if not rng:
+        return
+    out["session"] = _finish_live_session(
+        rng, snap=snap, world=world, symbol=sym, tape=tape
+    )
+
+
+def _note_scan_news(turn: BrainTurn, payload: dict[str, Any]) -> None:
+    """Headlines already on the screen are the card's news step."""
+    from abcxauto.lab_playbook import _scan_carries_news
+
+    if not _scan_carries_news(payload):
+        return
+    if "news" not in turn.tool_trace:
+        turn.tool_trace.append("news")
+
+
+def _attach_run_sheet(
+    out: dict[str, Any],
+    *,
+    turn: BrainTurn,
+    world: WorldState,
+    tool: str,
+    quoted: Any = None,
+) -> None:
+    try:
+        from abcxauto.lab_playbook import playbook_run_sheets
+        from abcxauto.think_stream import last_look_for_hunt
+
+        last_facts = last_look_for_hunt()
+        sess = out.get("session") if isinstance(out.get("session"), dict) else None
+        today = sess.get("today") if sess else None
+        store = last_facts.get("session_range") if isinstance(last_facts, dict) else None
+        snap_store = (
+            quoted.get("session_range")
+            if isinstance(quoted, dict) and isinstance(quoted.get("session_range"), dict)
+            else None
+        )
+        if snap_store:
+            store = snap_store
+        elif sess:
+            sym = str(out.get("symbol") or "").upper()
+            store = {sym: sess} if sym else sess
+        if today is None and isinstance(store, dict):
+            flags = [
+                row.get("today")
+                for row in store.values()
+                if isinstance(row, dict) and "today" in row
+            ]
+            if any(flag is True for flag in flags):
+                today = True
+            elif any(flag is False for flag in flags):
+                today = False
+        sheets = playbook_run_sheets(
+            tool_trace=list(turn.tool_trace or []) + [tool],
+            last_look=list(last_facts.get("tools") or []),
+            flat=getattr(world, "flat", None),
+            quoted=quoted if quoted is not None else out,
+            news=out if tool == "scan" else None,
+            session_today=today,
+            session_range=store,
+            positions=list(getattr(world, "positions", None) or []),
+        )
+        if sheets:
+            out["run"] = sheets[0]
+    except Exception:
+        logger.debug("%s run sheet failed", tool, exc_info=True)
+
+
+def _attach_scan_run(
+    out: dict[str, Any],
+    *,
+    turn: BrainTurn,
+    world: WorldState,
+) -> None:
+    _attach_run_sheet(out, turn=turn, world=world, tool="scan", quoted=out)
 
 
 def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
@@ -169,6 +820,13 @@ _CARD_BRANCH_SCHEMA = {
                         "type": "integer",
                         "description": "Losing resolved trades that kill it early.",
                     },
+                    "max_looks_without_trigger": {
+                        "type": "integer",
+                        "description": (
+                            "Looks with no send that you treat as a dead "
+                            "trigger. Counted and shown; never trips the card."
+                        ),
+                    },
                 },
                 "required": ["sample", "condition"],
             },
@@ -190,6 +848,13 @@ _CARD_BRANCH_SCHEMA = {
                 ),
             },
             "note": {"type": "string"},
+            "next_look_s": {
+                "type": "number",
+                "description": (
+                    "Clerk cadence hint for this card, seconds. Floor 30s, "
+                    "cap 4h. Not a ticket and not a wake tool."
+                ),
+            },
         },
         "required": ["name", "thesis", "retire_if"],
     },
@@ -247,7 +912,7 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
     )
 
 
-# Catalog for this look. agent_tools() may omit set_wake.
+# Catalog for this look.
 AGENT_TOOLS = [
     tool(
         name="book",
@@ -274,7 +939,10 @@ AGENT_TOOLS = [
     ),
     tool(
         name="news",
-        description="MDA headlines (~15 min delayed). Context only, not live last.",
+        description=(
+            "MDA headlines (~15 min delayed). Context only, not live last. "
+            "Bare news() uses this look's scan tape when present, not SPY."
+        ),
         parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, []),
     ),
     tool(
@@ -294,10 +962,12 @@ AGENT_TOOLS = [
     tool(
         name="scan",
         description=(
-            "One screen this look (arena|scan_code|symbols[]); name is the sort; "
-            "optional native price/cap/volume filters. Hits come back in IBKR rank "
-            "order with that scanCode's own metric (distance/benchmark) and an "
-            "IBKR live last on the top names — triage from these, do not re-quote."
+            "Bare scan() runs every live-card screen this look (gap/loser sorts "
+            "first when the card has a min gap), then reuses. arena+scan_code is "
+            "one extra sort only if it is not already in that set. Or symbols[]. "
+            "Hits are the union, down-gap first on a LONG flush card, with "
+            "deepest_open_gap_pct vs the card floor. IBKR live last on the top "
+            "names — triage from these, do not re-quote."
         ),
         parameters=_schema(
             {
@@ -337,7 +1007,10 @@ AGENT_TOOLS = [
                 "with": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional: news",
+                    "description": (
+                        "Optional: news and/or metrics. MDA delayed, nested on "
+                        "the same hits as ibkr live last — not send geometry."
+                    ),
                 },
             },
             [],
@@ -453,7 +1126,9 @@ AGENT_TOOLS = [
             "holds what you learned executing it (durable) and the cards "
             "branching under it (disposable, one hypothesis each). A card's "
             "type is what it sends, so it needs no ticket of its own. "
-            "instructions is free notes. Not a wake clock."
+            "instructions is free notes. A revision is a card, type, or mode "
+            "change — a same-book rescan note is dropped, not a new revision. "
+            "Not a wake clock."
         ),
         parameters=_schema(
             {
@@ -505,25 +1180,6 @@ AGENT_TOOLS = [
             [],
         ),
     ),
-    tool(
-        name="set_wake",
-        description=(
-            "Park overnight / around-open until wake_at / wake_in_s "
-            "(or sooner on wake_if). Empty wake_if = any book event. "
-            "Unprotected stock still interrupts."
-        ),
-        parameters=_schema(
-            {
-                "wake_in_s": {"type": "number"},
-                "wake_at": {"type": "string"},
-                "wake_if": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-            },
-            [],
-        ),
-    ),
 ]
 
 
@@ -533,17 +1189,13 @@ def _send_strategy_names_for_look() -> list[str]:
 
 
 def agent_tools(*, session: str = "") -> list:
-    """Tools this look. Omit set_wake in RTH and paper premarket."""
-    from abcxauto.wake_bus import set_wake_offered
-
+    """Tools this look. Cadence is clerk + playbook, not a Grok clock."""
+    _ = session
     names = _send_strategy_names_for_look()
-    offer_wake = set_wake_offered(session=session)
     out: list = []
     for t in AGENT_TOOLS:
         fn = getattr(t, "function", None)
         name = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
-        if name == "set_wake" and not offer_wake:
-            continue
         if name == "send":
             out.append(_send_tool(names))
         else:
@@ -706,14 +1358,43 @@ async def _write_last_turn_after_send(
         reality_pulse=snap.get("reality_pulse") or {},
         ibkr_live_last=getattr(world, "ibkr_live_last", None),
         ibkr_live_quotes=dict(getattr(world, "ibkr_live_quotes", None) or {}),
+        scan_hits=snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {},
+        session_range=(
+            snap.get("session_range")
+            if isinstance(snap.get("session_range"), dict)
+            else {}
+        ),
     )
 
 
+PLAYBOOK_CLIP_CHARS = 48_000
+
+
 def _clip(data: Any, max_chars: int = 24_000) -> str:
+    """Keep the run sheet when hits/news overflow. A tail clip hid next=send."""
+    if isinstance(data, dict) and data.get("run") is not None:
+        lead = {"run": data["run"]}
+        rest = {k: v for k, v in data.items() if k != "run"}
+        data = {**lead, **rest}
     text = json.dumps(data, default=str)
-    if len(text) > max_chars:
-        return text[:max_chars] + "... [truncated]"
-    return text
+    if len(text) <= max_chars:
+        return text
+    if isinstance(data, dict):
+        slim = dict(data)
+        for key in ("hits", "news", "bars", "series", "symbols", "rows"):
+            if key not in slim:
+                continue
+            slim.pop(key)
+            slim["_clipped"] = key
+            text = json.dumps(slim, default=str)
+            if len(text) <= max_chars:
+                return text
+        if slim.get("run") is not None:
+            return json.dumps(
+                {"run": slim["run"], "ok": slim.get("ok"), "_clipped": "payload"},
+                default=str,
+            )[:max_chars]
+    return text[:max_chars] + "... [truncated]"
 
 
 _CADENCE_LOOP = re.compile(
@@ -1118,16 +1799,22 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
     }
 
 
-def _book_payload(world: WorldState) -> dict[str, Any]:
+def _book_payload(
+    world: WorldState,
+    tool_trace: list[str] | None = None,
+    snap: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from abcxauto.config import get_config
     from abcxauto.lab_playbook import (
         _card_label,
         _flat_card_projection,
         card_facts,
+        lab_facts,
         load_lab,
         notebook_text,
         playbook_glance,
         playbook_mode,
+        playbook_run_sheets,
     )
     from abcxauto.self_tune import levers_snapshot
     from abcxauto.world_state import day_facts
@@ -1141,6 +1828,17 @@ def _book_payload(world: WorldState) -> dict[str, Any]:
         sc = {}
     facts = _book_facts(world)
     glance = playbook_glance(sc)
+    last_look: dict[str, Any] = {}
+    carry: dict[str, Any] = {}
+    try:
+        from abcxauto.think_stream import last_look_facts, last_look_for_hunt
+
+        last_look = last_look_facts()
+        carry = last_look_for_hunt()
+    except Exception:
+        last_look = {}
+        carry = {}
+    last_tools = list((carry or {}).get("tools") or [])
     # The book Grok wrote travels with the book it trades — it should not have
     # to spend a tool call to remember its own setups.
     try:
@@ -1148,9 +1846,51 @@ def _book_payload(world: WorldState) -> dict[str, Any]:
         scored = card_facts(lab)
         glance = dict(glance)
         glance["mode"] = playbook_mode()
-        # The tree is the shape Grok wrote; cards[] is the same rows flattened
-        # with their parent stamped on, for callers that want one list.
-        glance["types"] = lab.get("types") if isinstance(lab.get("types"), dict) else {}
+        # Run sheet first so a 24k clip cannot drop the next unused tool behind
+        # a 4k notebook. Full type stanzas stay on the playbook tool.
+        quoted: dict[str, Any] = dict(carry) if isinstance(carry, dict) else {}
+        this_hits = snap.get("scan_hits") if isinstance(snap, dict) else None
+        if isinstance(this_hits, dict) and (
+            this_hits.get("rows") or this_hits.get("quoted")
+        ):
+            quoted["scan_hits"] = this_hits
+        qmap: dict[str, Any] = {}
+        if isinstance(quoted.get("ibkr_live_quotes"), dict):
+            qmap.update(quoted["ibkr_live_quotes"])
+        live_map = getattr(world, "ibkr_live_quotes", None)
+        if isinstance(live_map, dict):
+            qmap.update(live_map)
+        if isinstance(snap, dict) and isinstance(snap.get("ibkr_live_quotes"), dict):
+            qmap.update(snap["ibkr_live_quotes"])
+        if qmap:
+            quoted["ibkr_live_quotes"] = qmap
+        session = None
+        if isinstance(snap, dict) and isinstance(snap.get("session_range"), dict):
+            session = snap["session_range"]
+        elif isinstance(carry, dict):
+            session = carry.get("session_range")
+        run = playbook_run_sheets(
+            lab,
+            tool_trace=tool_trace,
+            last_look=last_tools,
+            flat=getattr(world, "flat", None),
+            quoted=quoted,
+            session_range=session,
+            positions=list(getattr(world, "positions", None) or []),
+        )
+        hits = quoted.get("scan_hits") if isinstance(quoted.get("scan_hits"), dict) else {}
+        if not isinstance(hits, dict):
+            hits = {}
+        hit_rows = [
+            row
+            for row in (hits.get("rows") or [])
+            if isinstance(row, dict) and row.get("symbol")
+        ][:6]
+        if run and hit_rows:
+            top = dict(run[0])
+            top["hits"] = hit_rows
+            run = [top, *run[1:]]
+        glance["run"] = run
         glance["cards"] = _flat_card_projection(lab)
         glance["unfiled_cards"] = list(lab.get("unfiled_cards") or [])
         glance["card_scores"] = scored
@@ -1162,9 +1902,10 @@ def _book_payload(world: WorldState) -> dict[str, Any]:
             if r.get("needs_retire_if") or r.get("needs_thesis")
         ]
         glance["notes"] = notebook_text(lab)[:4000]
+        glance["lab"] = lab_facts(lab, rows=scored)
     except Exception:
         logger.debug("playbook block for book payload failed", exc_info=True)
-    return {
+    out: dict[str, Any] = {
         "day": day_facts(world, sc),
         "world": facts,
         "ibkr_live_quotes": dict(world.ibkr_live_quotes or {}),
@@ -1177,6 +1918,9 @@ def _book_payload(world: WorldState) -> dict[str, Any]:
         "playbook": glance,
         "path": _path_block(world, cfg),
     }
+    if last_look:
+        out["last_look"] = last_look
+    return out
 
 
 def _path_block(world: WorldState, cfg: Any) -> dict[str, Any]:
@@ -1194,14 +1938,25 @@ def _path_block(world: WorldState, cfg: Any) -> dict[str, Any]:
         return {"n": 0, "note": "path unavailable"}
 
 
-def _stash_live(world: WorldState, snap: dict[str, Any], data: dict[str, Any]) -> None:
+def _stash_live(
+    world: WorldState,
+    snap: dict[str, Any],
+    data: dict[str, Any],
+    *,
+    mark: bool = True,
+) -> None:
+    """Record IBKR lasts. ``mark`` is the desk print — quote() yes, scan sweep no.
+
+    A 40-name screen used to leave last_turn.ibkr_live_last as the last junk
+    ticker (QBTX 8.07) while the book was flat.
+    """
     if not isinstance(data, dict):
         return
     rows = data.get("quotes")
     if isinstance(rows, list):
         for row in rows:
             if isinstance(row, dict):
-                _stash_live(world, snap, row)
+                _stash_live(world, snap, row, mark=mark)
         return
     if data.get("source") != "ibkr":
         return
@@ -1220,13 +1975,15 @@ def _stash_live(world: WorldState, snap: dict[str, Any], data: dict[str, Any]) -
         qmap = {}
         snap["ibkr_live_quotes"] = qmap
     qmap[sym] = px
-    snap["ibkr_live_symbol"] = sym
-    snap["ibkr_live_last"] = px
     live = getattr(world, "ibkr_live_quotes", None)
     if not isinstance(live, dict):
         world.ibkr_live_quotes = {}
         live = world.ibkr_live_quotes
     live[sym] = px
+    if not mark:
+        return
+    snap["ibkr_live_symbol"] = sym
+    snap["ibkr_live_last"] = px
     world.ibkr_live_symbol = sym
     world.ibkr_live_last = px
 
@@ -1277,11 +2034,13 @@ async def _mda_news(symbols: list[str], *, per_symbol: int = 4) -> list[dict[str
     """
     from abcxauto.marketdata.client import get_marketdata_client
 
+    from abcxauto.prints import mda_worth_asking
+
     client = get_marketdata_client()
     flag = getattr(client, "is_configured", False)
     if not (flag() if callable(flag) else flag):
         return []
-    syms = [s for s in symbols[:8] if s]
+    syms = [s for s in symbols[:8] if s and mda_worth_asking(s)]
     if not syms:
         return []
 
@@ -1369,7 +2128,7 @@ async def _run_tool(
     )
 
     if name == "book":
-        payload = _book_payload(world)
+        payload = _book_payload(world, tool_trace=turn.tool_trace, snap=snap)
         payload["sends_this_turn"] = len(turn.sends)
         world_facts = payload.get("world")
         if isinstance(world_facts, dict):
@@ -1393,6 +2152,28 @@ async def _run_tool(
             st["levers"] = {}
         st["combo"] = COMBO_FACT
         st["sends_this_turn"] = len(turn.sends)
+        pulse = snap.get("reality_pulse") if isinstance(snap.get("reality_pulse"), dict) else {}
+        if not pulse:
+            pulse = getattr(world, "pulse", None) or {}
+        if isinstance(pulse, dict) and pulse:
+            sess = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
+            if sess.get("countdown_to") or sess.get("countdown_human"):
+                st["countdown"] = {
+                    "to": sess.get("countdown_to"),
+                    "s": sess.get("countdown_s"),
+                    "human": sess.get("countdown_human"),
+                }
+            if pulse.get("tradable_now") is not None:
+                st["tradable_now"] = pulse.get("tradable_now")
+            fresh = pulse.get("data_freshness") if isinstance(pulse.get("data_freshness"), dict) else {}
+            if fresh:
+                st["freshness"] = {
+                    "ibkr_connected": fresh.get("ibkr_connected"),
+                    "ibkr_snapshot_age_s": fresh.get("ibkr_snapshot_age_s"),
+                    "mda_spy_quote_age_s": fresh.get("mda_spy_quote_age_s"),
+                    "spy_last": fresh.get("spy_last"),
+                    "vix": fresh.get("vix"),
+                }
         return _clip(st)
     if name == "quote":
         raw = await run_readonly_tool("quote", args, connector)
@@ -1402,6 +2183,22 @@ async def _run_tool(
             data = {}
         if isinstance(data, dict):
             _stash_live(world, snap, data)
+            live = _live_open_session(
+                snap,
+                str(data.get("symbol") or ""),
+                last=data.get("last") if data.get("last") is not None else data.get("mid"),
+                open_px=data.get("open"),
+                open_gap_pct=data.get("open_gap_pct"),
+            )
+            if live:
+                data["session"] = _finish_live_session(
+                    live,
+                    snap=snap,
+                    world=world,
+                    symbol=str(data.get("symbol") or ""),
+                    tape=data,
+                )
+                raw = _clip(data)
         return raw if isinstance(raw, str) else _clip(raw)
     if name == "fills":
         fn = getattr(connector, "get_fills", None) or getattr(connector, "get_recent_executions", None)
@@ -1413,18 +2210,21 @@ async def _run_tool(
         from abcxauto.news_feed import fetch_agent_news
 
         asked = normalize_tickers(args.get("symbols"))
-        if asked:
-            items = await _mda_news(asked)
+        tape = _news_symbols_this_look(world, snap, asked)
+        if tape:
+            items = await _mda_news(tape)
         else:
             items = await fetch_agent_news(world.positions or snap.get("positions") or [])
         world.news_items = list(items)
         snap["news_items"] = list(items)
-        return _clip({
+        payload = {
             "source": "mda",
             "freshness": "delayed_15m",
             "use": "context_not_live_last",
             "items": items[:24],
-        })
+        }
+        _attach_run_sheet(payload, turn=turn, world=world, tool="news", quoted=snap)
+        return _clip(payload)
     if name == "odds":
         from abcxauto.config import get_config
         from abcxauto.prediction_odds import fetch_odds
@@ -1447,6 +2247,15 @@ async def _run_tool(
         else:
             with_bits = []
         want_news = "news" in with_bits
+        want_metrics = any(b in ("metrics", "mda") for b in with_bits)
+        if not with_bits and not snap.get("scan_news_attached"):
+            try:
+                from abcxauto.lab_playbook import hunt_recipe_has
+
+                if hunt_recipe_has("news"):
+                    want_news = True
+            except Exception:
+                pass
         turn_syms: list[str] = []
         for s in list(getattr(world, "scan_fetched", None) or []):
             if s and s not in turn_syms:
@@ -1464,66 +2273,231 @@ async def _run_tool(
         parsed = parse_scan_filters(args, pe_tags=pe_tags)
         if not parsed.get("ok"):
             return _clip({"ok": False, "error": parsed.get("error") or "bad scan filters"})
-        payload = await criteria_scan(
-            arena=args.get("arena"),
-            scan_code=args.get("scan_code"),
-            symbols=args.get("symbols"),
-            positions=list(world.positions or snap.get("positions") or []),
-            connector=connector,
-            turn_symbols=turn_syms,
-            filters=parsed,
+        bare = (
+            not str(args.get("arena") or "").strip()
+            and not str(args.get("scan_code") or "").strip()
+            and not normalize_tickers(args.get("symbols") or [])
         )
-        if not payload.get("ok"):
-            return _clip(payload)
-        syms = list(payload.get("symbols") or [])
-        world.scan_fetched = list(syms)
-        # Keep opportunities as symbol stubs only (no MDA daily metrics here).
-        stub_ideas = [{"symbol": s, "source": payload.get("source") or "scan"} for s in syms]
-        if stub_ideas:
-            from abcxauto.opportunity_scan import merge_tape
+        written = _written_scan_jobs(snap) if bare else []
+        calls = int(snap.get("scan_calls") or 0)
+        prior_hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
+        leftover = max(0, _scan_screen_budget() - calls)
+        if leftover <= 0:
+            rows = _scan_paint_rows(prior_hits, quotes=qmap)
+            screens = list(snap.get("scan_screens") or [])
+            reused = {
+                "ok": True,
+                "reused": True,
+                "screens_this_look": calls,
+                "screens": screens,
+                "note": "card screens already fetched this look",
+                "source": prior_hits.get("source") or "ibkr",
+                "symbols": [r.get("symbol") for r in rows if r.get("symbol")],
+                "hits": rows,
+                "rows": rows,
+                "applied": {},
+                "persisted": False,
+                "ranked": bool(prior_hits.get("ranked")),
+                "rank_meaning": prior_hits.get("rank_meaning"),
+                "quoted": prior_hits.get("quoted") or 0,
+            }
+            reused.update(_scan_gate_facts(rows))
+            if rows:
+                painted = dict(prior_hits)
+                painted["rows"] = rows
+                snap["scan_hits"] = painted
+            _attach_scan_run(reused, turn=turn, world=world)
+            think_emit(
+                "say",
+                f"hits={len(reused['symbols'])} reused screens={calls}\n",
+            )
+            return _clip(reused)
+        if written:
+            jobs = written[:leftover]
+        elif leftover:
+            jobs = [
+                {
+                    "arena": args.get("arena"),
+                    "scan_code": args.get("scan_code"),
+                    "symbols": args.get("symbols"),
+                }
+            ]
+        else:
+            jobs = []
+        last_ok: dict[str, Any] | None = None
+        last_err: dict[str, Any] | None = None
+        pulled_hits: list[dict[str, Any]] = []
+        pulled_syms: list[str] = []
+        from abcxauto.think_stream import merge_scan_hits
 
-            ideas = merge_tape(list(world.opportunities or []), stub_ideas)
-            world.opportunities = ideas
-            snap["opportunities"] = ideas
-        hits = payload.get("hits") or []
-        for row in hits:
-            if isinstance(row, dict) and row.get("last") is not None:
-                _stash_live(
-                    world,
-                    snap,
-                    {"symbol": row.get("symbol"), "last": row.get("last"), "source": "ibkr"},
-                )
-        # Keep the triageable rows on the snap so the clerk surfaces can show the
-        # screen Grok actually pulled. Not a prompt block.
-        snap["scan_hits"] = {
-            "source": str(payload.get("source") or ""),
-            "arena": payload.get("arena"),
-            "scan_code": payload.get("scan_code"),
-            "ranked": bool(payload.get("ranked")),
-            "rank_meaning": str(payload.get("rank_meaning") or ""),
-            "quoted": int(payload.get("quoted") or 0),
-            "rows": [r for r in hits if isinstance(r, dict)][:24],
-        }
+        for job in jobs:
+            snap["scan_calls"] = int(snap.get("scan_calls") or 0) + 1
+            payload = await criteria_scan(
+                arena=job.get("arena"),
+                scan_code=job.get("scan_code"),
+                symbols=job.get("symbols") or args.get("symbols"),
+                positions=list(world.positions or snap.get("positions") or []),
+                connector=connector,
+                turn_symbols=turn_syms,
+                filters=parsed,
+            )
+            if not payload.get("ok"):
+                last_err = payload
+                continue
+            last_ok = payload
+            syms = list(payload.get("symbols") or [])
+            for s in syms:
+                su = str(s or "").upper().strip()
+                if su and su not in pulled_syms:
+                    pulled_syms.append(su)
+            # Union this look's screens. Last-scan-wins dropped names when a later
+            # empty mega/large sort followed a tape that actually had hits.
+            fetched = list(getattr(world, "scan_fetched", None) or [])
+            seen = {str(x).upper() for x in fetched if x}
+            for s in syms:
+                su = str(s or "").upper().strip()
+                if su and su not in seen:
+                    fetched.append(su)
+                    seen.add(su)
+            world.scan_fetched = fetched
+            snap["scan_fetched"] = list(fetched)
+            stub_ideas = [
+                {"symbol": s, "source": payload.get("source") or "scan"} for s in syms
+            ]
+            if stub_ideas:
+                from abcxauto.opportunity_scan import merge_tape
+
+                ideas = merge_tape(list(world.opportunities or []), stub_ideas)
+                world.opportunities = ideas
+                snap["opportunities"] = ideas
+            hits = payload.get("hits") or []
+            for row in hits:
+                if not isinstance(row, dict):
+                    continue
+                pulled_hits.append(row)
+                if row.get("last") is not None:
+                    _stash_live(
+                        world,
+                        snap,
+                        {
+                            "symbol": row.get("symbol"),
+                            "last": row.get("last"),
+                            "source": "ibkr",
+                        },
+                        mark=False,
+                    )
+            incoming = {
+                "source": str(payload.get("source") or ""),
+                "arena": payload.get("arena"),
+                "scan_code": payload.get("scan_code"),
+                "ranked": bool(payload.get("ranked")),
+                "rank_meaning": str(payload.get("rank_meaning") or ""),
+                "quoted": int(payload.get("quoted") or 0),
+                "rows": [r for r in hits if isinstance(r, dict)][:24],
+            }
+            prior = (
+                snap.get("scan_hits")
+                if int(snap.get("scan_calls") or 0) > 1 or "scan" in turn.tool_trace
+                else None
+            )
+            snap["scan_hits"] = merge_scan_hits(prior, incoming)
+            _record_scan_screen(
+                snap,
+                str(job.get("arena") or payload.get("arena") or ""),
+                str(job.get("scan_code") or payload.get("scan_code") or ""),
+            )
+        if last_ok is None:
+            err = last_err or {
+                "ok": False,
+                "error": "scan requires arena | scan_code | symbols[]",
+            }
+            if isinstance(err, dict):
+                err = dict(err)
+                err.setdefault("ok", False)
+                _attach_scan_run(err, turn=turn, world=world)
+            return _clip(err)
+        snap["scan_at"] = datetime.now(timezone.utc).isoformat()
+        merged = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
+        rows = _scan_paint_rows(merged, pulled_hits, quotes=qmap)
+        hits = rows
+        syms = pulled_syms or [str(r.get("symbol")) for r in hits if r.get("symbol")]
+        screens = list(snap.get("scan_screens") or [])
         out: dict[str, Any] = {
             "ok": True,
-            "source": payload.get("source"),
-            "arena": payload.get("arena"),
-            "scan_code": payload.get("scan_code"),
+            "source": last_ok.get("source"),
             "symbols": syms,
             "hits": hits,
-            "applied": payload.get("applied") or {},
+            "applied": last_ok.get("applied") or {},
             "persisted": False,
-            "ranked": bool(payload.get("ranked")),
-            "rank_meaning": payload.get("rank_meaning"),
-            "quoted": payload.get("quoted") or 0,
+            "ranked": bool(merged.get("ranked") if merged else last_ok.get("ranked")),
+            "rank_meaning": (merged.get("rank_meaning") if merged else None)
+            or last_ok.get("rank_meaning"),
+            "quoted": merged.get("quoted") or last_ok.get("quoted") or 0,
+            "screens": screens,
+            "screens_this_look": int(snap.get("scan_calls") or len(screens) or 0),
         }
-        if want_news and syms:
-            out["news"] = await _mda_news(syms[:8])
+        if len(screens) <= 1:
+            out["arena"] = last_ok.get("arena")
+            out["scan_code"] = last_ok.get("scan_code")
+        out.update(_scan_gate_facts(rows))
+        pulled_by = {
+            str(r.get("symbol") or "").upper(): r
+            for r in pulled_hits
+            if isinstance(r, dict) and r.get("symbol")
+        }
+        hits = [pulled_by.get(str(r.get("symbol") or "").upper(), r) for r in rows]
+        out["hits"] = hits
+        out["rows"] = rows
+        if want_metrics and hits:
+            from abcxauto.opportunity_scan import attach_mda_metrics
+
+            await attach_mda_metrics(hits)
+        if want_news and (syms or hits):
+            from abcxauto.prints import attach_mda_news
+
+            news_syms = _news_symbols_for_scan(merged, pulled_syms)
+            out["news"] = await _mda_news(news_syms)
             out["news_freshness"] = "delayed_15m"
             out["news_use"] = "context_not_live_last"
+            attach_mda_news(hits, out["news"])
+            if out["news"]:
+                snap["scan_news_attached"] = True
+        snap["scan_hits"] = merge_scan_hits(merged, {**merged, "rows": out["rows"]})
+        if _snap_is_rth(snap):
+            sessions: dict[str, Any] = {}
+            for row in out.get("rows") or []:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("symbol") or "").upper()
+                if not name:
+                    continue
+                live = _live_open_session(
+                    snap,
+                    name,
+                    last=row.get("last"),
+                    open_px=row.get("open"),
+                    open_gap_pct=row.get("open_gap_pct"),
+                )
+                if not live:
+                    continue
+                row["session"] = _finish_live_session(
+                    live, snap=snap, world=world, symbol=name, tape=row
+                )
+                sessions[name] = row["session"]
+            if sessions:
+                out["sessions"] = sessions
+        _note_scan_news(turn, out)
+        _attach_scan_run(out, turn=turn, world=world)
+        gate = _scan_gate_facts(out.get("rows"))
+        deepest = gate.get("deepest_open_gap_pct")
+        deep_s = f"{deepest:+.1f}%" if isinstance(deepest, (int, float)) else "n/a"
+        met = gate.get("card_gap_met")
+        met_s = "on" if met is True else ("off" if met is False else "")
         think_emit(
             "say",
-            f"hits={len(syms)} quoted={out.get('quoted')} "
+            f"hits={len(syms)} screens={len(out.get('screens') or [])} "
+            f"deepest={deep_s} {gate.get('deepest_symbol') or ''} "
+            f"{'card_gap=' + met_s if met_s else ''} "
             f"src={out.get('source') or 'empty'}\n",
         )
         return _clip(out)
@@ -1540,8 +2514,21 @@ async def _run_tool(
         except (TypeError, ValueError):
             countback = 60
         countback = max(5, min(countback, 120))
-        res = str(args.get("resolution") or "D").strip() or "D"
-        bar_cap = 40 if len(syms) > 1 else 80
+        from abcxauto.broker.bars import normalize_resolution, session_countback
+
+        res = str(args.get("resolution") or "").strip()
+        if not res:
+            res = _candle_res_from_tape(snap)
+        else:
+            res = normalize_resolution(res)
+        if normalize_resolution(res) in ("5", "15", "60"):
+            countback = min(
+                120,
+                max(countback, session_countback(res, n_symbols=len(syms))),
+            )
+            bar_cap = countback
+        else:
+            bar_cap = 40 if len(syms) > 1 else 80
         hist = getattr(connector, "get_historical_bars", None)
         realtime = getattr(connector, "get_realtime_bars", None)
         peek = getattr(connector, "realtime_bar_buffer", None)
@@ -1564,7 +2551,7 @@ async def _run_tool(
                     warm = bool(peek(sym))
                 except Exception:
                     warm = False
-            if callable(hist) and not warm:
+            if callable(hist):
                 try:
                     raw = await hist(sym, resolution=res, countback=countback)
                 except Exception as exc:
@@ -1574,6 +2561,26 @@ async def _run_tool(
                     out["bars"] = list(out.get("bars") or [])[-bar_cap:]
                     out.setdefault("source", "ibkr")
                     out.setdefault("freshness", ibkr_bar_freshness(res))
+                    last_bar = (out["bars"] or [{}])[-1]
+                    if last_bar.get("t_unix"):
+                        out.setdefault("asof", last_bar["t_unix"])
+                        if last_bar.get("t_iso"):
+                            out.setdefault("asof_iso", last_bar["t_iso"])
+                    if out.get("freshness") != "ibkr_rt_5s":
+                        from abcxauto.opportunity_scan import structure_from_bars
+
+                        metrics = structure_from_bars(
+                            out["bars"],
+                            sym,
+                            resolution=res,
+                            source="ibkr",
+                            freshness=str(out.get("freshness") or "ibkr_rth"),
+                        )
+                        if metrics:
+                            out["metrics"] = metrics
+                    _apply_candle_session(
+                        out, sym=sym, snap=snap, world=world, last=_live_last(sym)
+                    )
                     return out
                 hist_err = str((raw or {}).get("error") or "no IBKR bars")
             elif warm:
@@ -1599,6 +2606,9 @@ async def _run_tool(
                     out.setdefault("freshness", ibkr_bar_freshness("5s"))
                     out.setdefault("resolution", "5s")
                     out.setdefault("requested_resolution", res)
+                    _apply_candle_session(
+                        out, sym=sym, snap=snap, world=world, last=_live_last(sym)
+                    )
                     return out
                 rt_err = str((raw or {}).get("error") or "no IBKR realtime bars")
             # A missing bar feed is a broken link, not licence to answer a
@@ -1668,6 +2678,13 @@ async def _run_tool(
             source, freshness, use, out_res = "ibkr", "ibkr_hist_or_rt", "prefer_hist_then_5s", res
         else:
             source, freshness, use, out_res = "ibkr", "ibkr_miss", "no_bars_use_quote", res
+        # Stamp the world so last_turn / the next wake do not say candles=none
+        # after this look already fetched bars.
+        try:
+            world.candle_source = source if kinds else "ibkr_miss"
+            snap["candle_source"] = world.candle_source
+        except Exception:
+            pass
         payload: dict[str, Any] = {
             "resolution": out_res,
             "source": source,
@@ -1697,8 +2714,22 @@ async def _run_tool(
                     payload["requested_resolution"] = series[0]["requested_resolution"]
                 if series[0].get("use"):
                     payload["use"] = series[0]["use"]
+                if series[0].get("metrics"):
+                    payload["metrics"] = series[0]["metrics"]
+                if series[0].get("asof") is not None:
+                    payload["asof"] = series[0]["asof"]
+                if series[0].get("asof_iso"):
+                    payload["asof_iso"] = series[0]["asof_iso"]
+                if series[0].get("session"):
+                    payload["session"] = series[0]["session"]
+            _attach_run_sheet(
+                payload, turn=turn, world=world, tool="candles", quoted=snap
+            )
             return _clip(payload)
         payload["series"] = series
+        _attach_run_sheet(
+            payload, turn=turn, world=world, tool="candles", quoted=snap
+        )
         return _clip(payload)
     if name == "option_chain":
         fn = getattr(connector, "get_option_chain", None)
@@ -1840,7 +2871,10 @@ async def _run_tool(
         full = args.get("full")
         if isinstance(full, str):
             full = full.strip().lower() in ("1", "true", "yes", "on")
-        return _clip(playbook_payload(args.get("revision"), full=bool(full)))
+        return _clip(
+            playbook_payload(args.get("revision"), full=bool(full)),
+            max_chars=PLAYBOOK_CLIP_CHARS,
+        )
     if name == "write_lab_playbook":
         from abcxauto.lab_playbook import apply_from_judgment, grounding_error
 
@@ -1852,65 +2886,6 @@ async def _run_tool(
         state = apply_from_judgment(judgment)
         turn.lab_playbook = state
         return _clip(state or {"status": "ignored", "note": "live cannot rewrite lab"})
-    if name == "set_wake":
-        from abcxauto.wake_bus import set_wake
-
-        session = str(getattr(world, "session_status") or "")
-        ifs = args.get("wake_if")
-        alarm = set_wake(
-            wake_in_s=args.get("wake_in_s"),
-            wake_at=args.get("wake_at"),
-            wake_if=ifs,
-            flat=getattr(world, "flat", None),
-            session=session,
-        )
-        if alarm.wake_at:
-            turn.parked = True
-            out: dict[str, Any] = {
-                "status": "ok",
-                "wake_at": alarm.wake_at,
-                "wake_if": list(alarm.wake_if),
-            }
-            from abcxauto.wake_bus import lab_idle_park_cap_s
-
-            cap = lab_idle_park_cap_s(
-                flat=getattr(world, "flat", None), session=session
-            )
-            if cap is not None:
-                # Say exactly what is idle and exactly what lifts the cap. The
-                # first wording said "entry structures carry no card", which read
-                # as *no* structure having one; the model answered "odd, we have a
-                # card on market_bracket" and started setting 30s naps instead.
-                from abcxauto.lab_playbook import lab_facts
-
-                try:
-                    lab = lab_facts()
-                except Exception:
-                    lab = {}
-                untried = list(lab.get("entry_trunks_untried") or [])
-                out["park_capped_s"] = cap
-                out["capped_because"] = (
-                    f"lab idle: {int(lab.get('resolved_trades') or 0)} resolved "
-                    f"trades, and {len(untried)} entry structures still have no "
-                    f"card of their own ({', '.join(untried[:4])}"
-                    f"{', ...' if len(untried) > 4 else ''}). "
-                    "The cap is a ceiling on how long you may sleep, not a "
-                    "request to look more often — a shorter park does not lift "
-                    "it. It lifts on one resolved trade, or a card under every "
-                    "entry structure."
-                )
-            return _clip(out)
-        # set_wake writes a clock in every session now, so a missing wake_at is
-        # a bad ask rather than a session the clerk refuses to park.
-        turn.parked = False
-        return _clip({
-            "status": "no_clock",
-            "reason": "wake_in_s / wake_at did not resolve to a time",
-            "wake_at": None,
-            "session": session or "regular",
-            "wanted_wake_in_s": args.get("wake_in_s"),
-            "wanted_wake_at": args.get("wake_at"),
-        })
     return json.dumps({"error": f"unknown tool {name}"})
 
 

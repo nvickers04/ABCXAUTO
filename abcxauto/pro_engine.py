@@ -319,6 +319,17 @@ class ProEngine:
         self.state.status = "Thinking"
         self._think_parked = False
         self._resume_think = True
+        try:
+            from abcxauto.wake_bus import load_alarm
+
+            alarm = load_alarm()
+            if alarm.wake_at and not alarm.due():
+                # Fresh launch: honor Grok's leftover park. Operator Start
+                # on a live worker still pokes (already=True returned above).
+                self._resume_think = False
+                self.state.status = "Waiting"
+        except Exception:
+            pass
         self._note("START", "Starting Grok")
         self.worker = threading.Thread(target=lambda: self._worker(gen), daemon=True)
         self.worker.start()
@@ -376,18 +387,11 @@ class ProEngine:
         orders = list(
             open_orders if open_orders is not None else (self.state.open_orders or [])
         )
-        thesis = str(self.state.thesis or "")
-        try:
-            from abcxauto.memory import get_journal
-
-            thesis = thesis or (get_journal().get_working_thesis() or "")
-        except Exception:
-            pass
         try:
             plan = sync_open_risk(
                 pos,
                 orders,
-                thesis=thesis,
+                thesis="",
                 bump=False,
                 allow_flat_close=allow_flat_close,
             )
@@ -870,6 +874,12 @@ class ProEngine:
         )
 
         _ = resume
+        try:
+            from abcxauto.think_stream import seed_snap_from_last_turn
+
+            seed_snap_from_last_turn(s)
+        except Exception:
+            pass
         world = build_world_state(
             cycle=n, snap=s, opportunities=[], news_items=[],
         )
@@ -891,8 +901,7 @@ class ProEngine:
         )
         self.state.status = "Thinking"
         turn = await grok_turn(g, connector=self.conn, world=world, snap=s, wake=wake)
-        if getattr(turn, "parked", False):
-            return {"_parked": True, "cycle": n}
+        parked = bool(getattr(turn, "parked", False))
         failed = False
         look_fn = getattr(turn, "look_failed", None)
         if callable(look_fn):
@@ -914,7 +923,7 @@ class ProEngine:
             "action_obj": act,
             "result": result,
             "strat": strat,
-            "rationale": act.get("rationale") or (turn.text or "")[:400],
+            "rationale": act.get("rationale") or (turn.text or "")[:1200],
             "positions": s.get("positions") or [],
             "open_orders": s.get("open_orders") or [],
             "inventory": format_position_inventory(s.get("positions") or []),
@@ -922,10 +931,19 @@ class ProEngine:
             "world_state": world.to_dict() if hasattr(world, "to_dict") else {},
             "tool_trace": list(getattr(turn, "tool_trace", None) or []),
             "scan_hits": dict(s.get("scan_hits") or {}),
+            "scan_screens": list(s.get("scan_screens") or []),
+            "scan_calls": int(s.get("scan_calls") or 0),
+            "scan_at": str(s.get("scan_at") or ""),
+            "session_range": dict(s.get("session_range") or {}),
+            "scan_fetched": list(getattr(world, "scan_fetched", None) or []),
+            "candle_source": (
+                getattr(world, "candle_source", None) or s.get("candle_source") or ""
+            ),
             "sends": len(getattr(turn, "sends", None) or []),
             "validation": str(result.get("note") or result.get("status") or "ok"),
             "pace": {"tier": "stay", "sleep_s": 0, "reason": "yield"},
-            "_failed": failed,
+            "_parked": parked,
+            "_failed": failed and not parked,
             "_stream_error": str(getattr(turn, "stream_error", "") or ""),
         }
 
@@ -1082,13 +1100,17 @@ class ProEngine:
                     self.state.status = "Parked"
                     await asyncio.sleep(0.25)
                     continue
-                if not first_think and not poked and not resume:
-                    # Grok owns the cadence. Sleep on its clock, wake when the
-                    # clock is due or a book event pokes — never re-arm a think
-                    # the instant the last one ended.
-                    from abcxauto.wake_bus import load_alarm, pulse_sleep_s
+                from abcxauto.wake_bus import load_alarm, pulse_sleep_s
 
-                    alarm = load_alarm()
+                alarm = load_alarm()
+                # A leftover park is still the clerk clock. Launch used to skip
+                # this on first_think and burn a look the operator did not ask for.
+                future_park = bool(alarm.wake_at) and not alarm.due()
+                if not poked and not resume and (not first_think or future_park):
+                    # Sleep on the clerk clock, wake when it is due or a book
+                    # event pokes — never re-arm a think the instant the last
+                    # one ended.
+                    first_think = False
                     if alarm.due():
                         self._resume_think = True
                         continue
@@ -1115,53 +1137,72 @@ class ProEngine:
                 first_think = False
                 self._resume_think = False
                 self._wake_reason = ""
-                n += 1
                 session = self._session_of_snap(s)
                 self._last_session = session
-                from abcxauto.wake_bus import ensure_next_look, load_alarm
+                from abcxauto.agent_loop import _wake_grok_for_session
+                from abcxauto.wake_bus import (
+                    ensure_next_look,
+                    load_alarm,
+                    minutes_to_open_from_snap,
+                )
 
-                prev_set_at = str(load_alarm().set_at or "")
+                prot = s.get("protection") if isinstance(s.get("protection"), dict) else {}
+                needs_prot = bool(prot.get("unprotected_symbols"))
+                mins_open = minutes_to_open_from_snap(s)
+                flat_book = not (s.get("positions") or [])
+                if not _wake_grok_for_session(session, needs_prot=needs_prot):
+                    try:
+                        ensure_next_look(
+                            flat=flat_book,
+                            session=session,
+                            minutes_to_open=mins_open,
+                        )
+                    except Exception:
+                        self._note("WAKE", "next look seed failed")
+                    self.state.status = "Waiting"
+                    self._note("SKIP", f"session={session or 'closed'} — no Grok")
+                    continue
+
+                n += 1
                 try:
                     out = await self._host_think(n, g, s, resume=resume and not poked)
                     if out.get("_parked"):
-                        # A park with a clock is a nap the engine wakes from. Only
-                        # a clockless park is a shutdown that needs Start — before
-                        # this, every park stopped the desk for the day, so Grok
-                        # choosing its next look meant choosing to stop.
-                        from abcxauto.wake_bus import load_alarm
-
+                        # Persist the look. A clockless park used to shut the
+                        # desk — clerk always reseeds a wake_at instead.
+                        self.ui.put(("cycle", out))
                         alarm = load_alarm()
-                        if alarm.wake_at and alarm.seconds_until() is not None:
-                            self.state.status = "Waiting"
-                            self._note(
-                                "PARK", f"Grok parked until {alarm.wake_at} — book events still wake it"
-                            )
-                            continue
-                        self._think_parked = True
-                        self.state.autonomous = False
-                        self.state.running = False
-                        self.state.paused = False
-                        self.state.status = "Parked"
-                        try:
-                            take_interrupt()
-                        except Exception:
-                            pass
-                        self._note("PARK", "Park with no clock — Grok down")
+                        if not (alarm.wake_at and alarm.seconds_until() is not None):
+                            try:
+                                ensure_next_look(
+                                    flat=flat_book,
+                                    session=session,
+                                    minutes_to_open=mins_open,
+                                )
+                            except Exception:
+                                self._note("WAKE", "next look seed failed")
+                            alarm = load_alarm()
+                        self.state.status = "Waiting"
+                        self._note(
+                            "PARK",
+                            f"next look {alarm.wake_at} — book events still wake it",
+                        )
                         continue
                     self._last_grok_mono = time.monotonic()
                     self._last_cycle_out = out
                     self.state.status = "On"
                     self.ui.put(("cycle", out))
-                    # The LOOK step: honor a clock Grok just set, and seed a
-                    # backstop when it set none, so a silent turn cannot leave a
-                    # past-due alarm the loop would spin on. A failed look writes
-                    # no clock — its backoff owns the retry.
+                    # LOOK: seed a clerk clock when the last one is spent so a
+                    # silent turn cannot leave a past-due alarm the loop spins on.
+                    # A failed look writes no clock — its backoff owns the retry.
                     if not out.get("_failed"):
                         try:
+                            just_sent = int(out.get("sends") or 0) > 0
+                            pos = list(out.get("positions") or s.get("positions") or [])
                             ensure_next_look(
-                                previous_set_at=prev_set_at,
-                                flat=not (s.get("positions") or []),
+                                flat=(not just_sent) and (not pos),
                                 session=session,
+                                minutes_to_open=mins_open,
+                                replace=True,
                             )
                         except Exception:
                             self._note("WAKE", "next look seed failed")

@@ -534,13 +534,16 @@ class IBKRQueriesMixin:
         bag[symbol] = (time.monotonic(), dict(payload))
 
     async def get_live_quotes(self, symbols: List[str], *, fresh: bool = False) -> Dict[str, Any]:
-        """IBKR live quotes for up to 8 symbols (parallel, short cache)."""
+        """IBKR live quotes for one scan sweep (parallel, short cache)."""
+        from abcxauto.broker.quotes import quote_batch_cap
+
         seen: List[str] = []
+        batch_cap = quote_batch_cap()
         for raw in symbols or []:
             sym = str(raw or "").strip().upper()
             if sym and sym not in seen:
                 seen.append(sym)
-            if len(seen) >= 8:
+            if len(seen) >= batch_cap:
                 break
         rows = await asyncio.gather(*[self.get_live_quote(s, fresh=fresh) for s in seen])
         return {

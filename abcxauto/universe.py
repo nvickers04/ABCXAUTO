@@ -386,23 +386,36 @@ def merge_scan_filters_into_spec(
     return spec, applied
 
 
-def resolve_screen(
-    arena: str | None = None,
-    scan_code: str | None = None,
+def _usd_to_scanner_millions(usd: Any) -> float | None:
+    """Clerk specs are raw USD. IBKR scanner cap filters are millions of USD."""
+    try:
+        v = float(usd)
+    except (TypeError, ValueError):
+        return None
+    if v <= 0:
+        return None
+    return v / 1e6 if v >= 1_000_000 else v
+
+
+def _with_spec_cap_applied(
+    spec: dict[str, Any] | None,
+    applied: dict[str, Any],
 ) -> dict[str, Any]:
-    """Resolve one screen. Unknown → error. Does not persist."""
-    raw_arena = str(arena or "").strip()
-    raw_code = str(scan_code or "").strip().upper()
-    if raw_arena and raw_code:
-        return {
-            "ok": False,
-            "error": "pass arena or scan_code, not both",
-        }
-    key = raw_arena or raw_code
+    """Echo the arena's cap so an empty mega/large screen is not a silent miss."""
+    out = dict(applied or {})
+    if not spec:
+        return out
+    if spec.get("marketCapAbove") is not None and "market_cap_above" not in out:
+        out["market_cap_above"] = spec["marketCapAbove"]
+    if spec.get("marketCapBelow") is not None and "market_cap_below" not in out:
+        out["market_cap_below"] = spec["marketCapBelow"]
+    return out
+
+
+def _resolve_one_selector(key: str) -> dict[str, Any]:
+    """One catalog id or standing IBKR scanCode."""
     if not key:
         return {"ok": False, "error": "arena or scan_code required"}
-
-    # Catalog id (case-insensitive).
     lower = key.lower()
     if lower in ARENA_CATALOG:
         meta = ARENA_CATALOG[lower]
@@ -413,8 +426,6 @@ def resolve_screen(
             "ibkr": dict(meta["ibkr"]) if meta.get("ibkr") else None,
             "mda_fallback": list(meta.get("mda_fallback") or []),
         }
-
-    # Standing IBKR scanCode as arena= or scan_code=.
     code = key.upper()
     if code in KNOWN_SCAN_CODES:
         arena_id = _SCAN_CODE_TO_ARENA.get(code)
@@ -429,12 +440,50 @@ def resolve_screen(
             if arena_id
             else [],
         }
-
     return {
         "ok": False,
         "error": f"unknown arena/scan_code: {key}",
         "arenas": known_screen_keys(),
     }
+
+
+def resolve_screen(
+    arena: str | None = None,
+    scan_code: str | None = None,
+) -> dict[str, Any]:
+    """Resolve one screen. arena is the universe; scan_code is the sort.
+
+    Both together is a compose, not an error: mega_cap + TOP_PERC_LOSE keeps the
+    cap filter and ranks losers. Dropping the sort was why that call came back
+    as HOT_BY_VOLUME and the model spent the look retrying.
+    """
+    raw_arena = str(arena or "").strip()
+    raw_code = str(scan_code or "").strip().upper()
+    if raw_arena and raw_code:
+        if raw_code not in KNOWN_SCAN_CODES:
+            return {
+                "ok": False,
+                "error": f"unknown arena/scan_code: {raw_code}",
+                "arenas": known_screen_keys(),
+            }
+        base = _resolve_one_selector(raw_arena)
+        if not base.get("ok"):
+            return base
+        ibkr = dict(base.get("ibkr") or {})
+        if not ibkr:
+            return {
+                "ok": False,
+                "error": "scan filters require an IBKR arena|scan_code",
+            }
+        ibkr["scanCode"] = raw_code
+        return {
+            "ok": True,
+            "arena_id": base.get("arena_id"),
+            "scan_code": raw_code,
+            "ibkr": ibkr,
+            "mda_fallback": list(base.get("mda_fallback") or []),
+        }
+    return _resolve_one_selector(raw_arena or raw_code)
 
 
 async def pull_one_screen(
@@ -449,6 +498,14 @@ async def pull_one_screen(
     if not resolved.get("ok"):
         return resolved
     ibkr_spec, applied = merge_scan_filters_into_spec(resolved.get("ibkr"), filters)
+    try:
+        from abcxauto.lab_playbook import apply_card_constraints_to_spec
+
+        ibkr_spec, extra = apply_card_constraints_to_spec(ibkr_spec)
+        applied.update(extra)
+    except Exception:
+        logger.debug("card scan constraints apply failed", exc_info=True)
+    applied = _with_spec_cap_applied(ibkr_spec, applied)
     if (filters or {}).get("applied") and ibkr_spec is None:
         return {
             "ok": False,
@@ -674,10 +731,18 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
         scanCode=str(spec.get("scanCode") or "MOST_ACTIVE"),
         numberOfRows=int(spec.get("rows") or 25),
     )
-    if spec.get("marketCapAbove") is not None:
-        sub.marketCapAbove = float(spec["marketCapAbove"])
-    if spec.get("marketCapBelow") is not None:
-        sub.marketCapBelow = float(spec["marketCapBelow"])
+    existing_tags = {
+        str(k)
+        for k in ((spec.get("filterTags") or {}) if isinstance(spec.get("filterTags"), dict) else {})
+    }
+    cap_above = _usd_to_scanner_millions(spec.get("marketCapAbove"))
+    cap_below = _usd_to_scanner_millions(spec.get("marketCapBelow"))
+    if cap_above is not None:
+        # Native field is millions. Sending raw USD (200e9) made mega/large
+        # TOP_PERC_LOSE come back empty every look.
+        sub.marketCapAbove = cap_above
+    if cap_below is not None:
+        sub.marketCapBelow = cap_below
     if spec.get("stockTypeFilter") is not None:
         sub.stockTypeFilter = str(spec["stockTypeFilter"])
     if spec.get("abovePrice") is not None:
@@ -693,6 +758,11 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
     if isinstance(raw_tags, dict):
         for tag, val in raw_tags.items():
             filter_opts.append(TagValue(str(tag), str(val)))
+    # IBKR's documented cap filter is millions via TagValue, not raw USD.
+    if cap_above is not None and "marketCapAbove1e6" not in existing_tags:
+        filter_opts.append(TagValue("marketCapAbove1e6", str(int(round(cap_above)))))
+    if cap_below is not None and "marketCapBelow1e6" not in existing_tags:
+        filter_opts.append(TagValue("marketCapBelow1e6", str(int(round(cap_below)))))
     allowed_types = {
         t.strip().upper()
         for t in str(spec.get("stockTypeFilter") or "CORP,ETF,ADR").split(",")

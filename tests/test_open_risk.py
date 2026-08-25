@@ -64,8 +64,9 @@ def test_reconcile_rebuilds_from_book_when_plan_missing(tmp_path, monkeypatch):
     assert plan.stop_price == 293.4
     assert plan.target_price == 300.5
     assert plan.entry_price == 295.75
-    assert "IWM" in plan.thesis
+    assert plan.thesis == ""
     assert "OPEN RISK" in format_open_risk_line(plan)
+    assert "cycles=" not in format_open_risk_line(plan)
 
 
 def test_reconcile_refreshes_existing_plan_qty_and_exits(tmp_path, monkeypatch):

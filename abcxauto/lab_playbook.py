@@ -36,12 +36,14 @@ A flat top-level ``cards`` list is still accepted on a write and is still
 *projected* on a read for the cockpit and older callers, but the tree is the
 only thing stored. See ``_migrate_book`` and ``_flat_card_projection``.
 
-Notebook is not executable, not a wake clock, not a standing order. Clerk
-validates writes against gates (floors / live / sleeve) like self_tune.
+Notebook is not executable, not a standing order. Optional ``next_look_s`` on
+a card is a clerk cadence hint. Clerk validates writes against gates
+(floors / live / sleeve) like self_tune.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -661,6 +663,15 @@ def _norm_retire_if(raw: Any) -> dict[str, Any]:
         if num <= 0:
             continue
         out[key] = int(min(num, cap)) if key == "max_losses" else round(min(num, cap), 2)
+    looks = raw.get("max_looks_without_trigger", raw.get("max_looks"))
+    try:
+        n_looks = int(float(looks)) if looks not in (None, "") else 0
+    except (TypeError, ValueError):
+        n_looks = 0
+    if n_looks > 0:
+        # Stored so Grok can see the count against its own claim. The clerk
+        # never trips on it — a trigger that never prints is a judgment.
+        out["max_looks_without_trigger"] = min(n_looks, 10_000)
     return out
 
 
@@ -683,12 +694,12 @@ def _incoming_card_name(raw: Any) -> str:
 def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """One card. Its parent type is the ticket, so no ``ticket`` is stored.
 
-    A card already on the tree keeps its declarations when a write omits them.
-    ``cards`` is a full replace, so an evidence-only rewrite used to delete the
-    ``retire_if`` it did not restate: the clerk then reported the card as owing a
-    declaration, and the model spent a second write putting it back — every look,
-    and the card could neither graduate nor trip in between. Observations still
-    replace on every write; declarations persist until Grok changes them.
+    A card already on the tree keeps its declarations and gate fields when a
+    write omits them. ``cards`` is a full replace, so an evidence-only rewrite
+    used to delete the ``retire_if`` / ``when_on`` it did not restate: the clerk
+    then reported the card as owing a declaration, and the next look re-hunted
+    a gate that was still on disk until the wipe. Observations still replace
+    when Grok sends them; omitted fields persist until Grok changes them.
     """
     carried = prev if isinstance(prev, dict) else {}
     if isinstance(raw, str):
@@ -703,12 +714,17 @@ def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any
     if isinstance(scan, (list, tuple)):
         scan = ", ".join(str(x).strip() for x in scan if str(x).strip())
     scan_s = str(scan or "").strip()[:400]
-    evidence = _norm_evidence(raw.get("evidence"), scan=scan_s)
+    incoming_evidence = raw.get("evidence")
+    evidence = _norm_evidence(incoming_evidence, scan=scan_s)
     # ``scan`` stays top-level as well: it is the one evidence field that
     # already exists on disk and on the cockpit card. What the card wrote there
     # wins — the evidence copy only fills the gap.
     scan_s = scan_s or evidence.get("scan") or ""
-    status = str(raw.get("status") or "testing").strip().lower()
+    if not scan_s:
+        scan_s = str(carried.get("scan") or "").strip()[:400]
+    status = str(raw.get("status") or "").strip().lower()
+    if not status:
+        status = str(carried.get("status") or "testing").strip().lower()
     if status not in CARD_STATUSES:
         # Graduation is the clerk's verdict from resolved trades, not a status
         # Grok can assert.
@@ -718,15 +734,33 @@ def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any
     ).strip()[:1200]
     if not thesis:
         thesis = str(carried.get("thesis") or "").strip()[:1200]
+    when_on = str(raw.get("when_on") or "").strip()[:800]
+    if not when_on:
+        when_on = str(carried.get("when_on") or "").strip()[:800]
+    shape = str(raw.get("shape") or raw.get("ticket_shape") or "").strip()[:800]
+    if not shape:
+        shape = str(carried.get("shape") or "").strip()[:800]
+    invalidation = str(raw.get("invalidation") or "").strip()[:800]
+    if not invalidation:
+        invalidation = str(carried.get("invalidation") or "").strip()[:800]
+    note = str(raw.get("note") or raw.get("notes") or "").strip()[:1200]
+    if not note:
+        note = str(carried.get("note") or "").strip()[:1200]
+    if not evidence and isinstance(carried.get("evidence"), dict):
+        evidence = {
+            k: str(v).strip()[:800]
+            for k, v in carried["evidence"].items()
+            if str(v or "").strip()
+        }
     out: dict[str, Any] = {
         "name": name[:120],
         "thesis": thesis,
-        "when_on": str(raw.get("when_on") or "").strip()[:800],
+        "when_on": when_on,
         "scan": scan_s,
-        "shape": str(raw.get("shape") or raw.get("ticket_shape") or "").strip()[:800],
-        "invalidation": str(raw.get("invalidation") or "").strip()[:800],
+        "shape": shape,
+        "invalidation": invalidation,
         "status": status,
-        "note": str(raw.get("note") or raw.get("notes") or "").strip()[:800],
+        "note": note,
     }
     if evidence:
         out["evidence"] = evidence
@@ -740,6 +774,21 @@ def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any
         retire = _norm_retire_if(carried.get("retire_if"))
     if retire:
         out["retire_if"] = retire
+    written = str(raw.get("written_at") or carried.get("written_at") or "").strip()
+    if written:
+        out["written_at"] = written[:48]
+    look = raw.get("next_look_s")
+    if look is None:
+        look = carried.get("next_look_s")
+    if look is not None:
+        try:
+            from abcxauto.wake_bus import clamp_next_look_s
+
+            clamped = clamp_next_look_s(look)
+        except Exception:
+            clamped = None
+        if clamped is not None:
+            out["next_look_s"] = clamped
     return out
 
 
@@ -842,6 +891,8 @@ def _retire_if_line(retire: Any) -> str:
         bits.append(f"max_loss_usd={row['max_loss_usd']}")
     if row.get("max_losses"):
         bits.append(f"max_losses={row['max_losses']}")
+    if row.get("max_looks_without_trigger"):
+        bits.append(f"max_looks_without_trigger={row['max_looks_without_trigger']}")
     if row.get("condition"):
         bits.append(str(row["condition"]))
     return " ".join(bits)
@@ -863,6 +914,9 @@ def render_cards(cards: list[dict[str, Any]] | None, *, indent: str = "") -> str
             val = str(card.get(key) or "").strip()
             if val:
                 lines.append(f"{indent}  {key}: {val}")
+        look = card.get("next_look_s")
+        if look is not None:
+            lines.append(f"{indent}  next_look_s: {look}")
         evidence = card.get("evidence") if isinstance(card.get("evidence"), dict) else {}
         for key in EVIDENCE_FIELDS:
             if key == "scan":
@@ -1060,8 +1114,8 @@ def book_shape_rejects(raw: Any) -> dict[str, str]:
     last one is the reason this is a reject and not a silent re-filing â€” position
     and ticket disagreeing is exactly the ambiguity nesting removes. Everything
     else — notes, regime reads, per-name observations — saves. The notebook is
-    never a clock: ``set_wake`` parks, and ``format_block`` never paints notes as
-    orders.
+    not a standing order: ``format_block`` never paints notes as tickets, and
+    ``next_look_s`` is a clerk cadence hint, not a send.
     """
     if not isinstance(raw, dict):
         return {}
@@ -1659,6 +1713,110 @@ def card_scores(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any
     )
 
 
+def _looks_since(since_iso: str) -> int | None:
+    """Grok looks (model calls) since a stamp. None when the journal is dark."""
+    if not str(since_iso or "").strip():
+        return None
+    try:
+        from abcxauto.memory import get_journal
+
+        journal = get_journal()
+        fn = getattr(journal, "model_usage_since", None)
+        if not callable(fn):
+            return None
+        usage = fn(since_iso) or {}
+        return int(usage.get("calls") or 0)
+    except Exception:
+        return None
+
+
+def _hours_since(raw: str, *, now: datetime | None = None) -> float | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        written = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if written.tzinfo is None:
+        written = written.replace(tzinfo=timezone.utc)
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    return max(0.0, (clock - written).total_seconds() / 3600.0)
+
+
+def _card_clock(card: dict[str, Any] | None, book: dict[str, Any] | None = None) -> str:
+    """When the hypothesis first landed. Book wipe is the fallback for unstamped cards."""
+    row = card if isinstance(card, dict) else {}
+    written = str(row.get("written_at") or "").strip()
+    if written:
+        return written
+    blob = book if isinstance(book, dict) else {}
+    return str(blob.get("cleared_at") or blob.get("written_at") or "").strip()
+
+
+def card_waiting(
+    score: dict[str, Any] | None,
+    card: dict[str, Any] | None = None,
+    *,
+    book: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Looks and days since the last send (or since write if never sent).
+
+    Report only — never a trip. A prior fill must not hide later empty hunts:
+    that is how a card keeps the same when_on after a -1R and ten rescans.
+    Grok judges whether that means wait, retire, or write a different card.
+    """
+    sc = score if isinstance(score, dict) else {}
+    row = card if isinstance(card, dict) else {}
+    retire = row.get("retire_if") if isinstance(row.get("retire_if"), dict) else {}
+    try:
+        declared = int(retire.get("max_looks_without_trigger") or 0) or None
+    except (TypeError, ValueError):
+        declared = None
+    clock = str(sc.get("last_send") or "").strip() or _card_clock(row, book)
+    hours = _hours_since(clock, now=now) if clock else None
+    looks = _looks_since(clock) if clock else None
+    days = round(hours / 24.0, 1) if hours is not None else None
+    return {
+        "written_at": _card_clock(row, book) or None,
+        "last_send": str(sc.get("last_send") or "").strip() or None,
+        "looks_without_trigger": looks,
+        "days_without_trigger": days,
+        "max_looks_without_trigger": declared,
+    }
+
+
+def _ensure_card_clocks(
+    state: dict[str, Any],
+    prev: dict[str, Any],
+    now: str,
+) -> None:
+    """Stamp written_at once. Existing unstamped cards inherit the last wipe."""
+    prev_by = {
+        card_key(t, c.get("name")): c
+        for t, c in walk_cards(prev)
+        if isinstance(c, dict) and c.get("name")
+    }
+    old_fallback = str(
+        (prev or {}).get("cleared_at") or (prev or {}).get("written_at") or now
+    ).strip()
+    for _t, card in walk_cards(state):
+        if not isinstance(card, dict) or not card.get("name"):
+            continue
+        if str(card.get("written_at") or "").strip():
+            continue
+        old = prev_by.get(card_key(_t, card.get("name")))
+        if old and str(old.get("written_at") or "").strip():
+            card["written_at"] = str(old["written_at"]).strip()[:48]
+        elif old:
+            card["written_at"] = old_fallback[:48]
+        else:
+            card["written_at"] = now[:48]
+
+
 def card_calibration(
     score: dict[str, Any] | None,
     card: dict[str, Any] | None = None,
@@ -1733,6 +1891,7 @@ def card_verdict(
         "tripped": False,
         "trip_reason": "",
     }
+    out.update(card_waiting(sc, row))
     if status == "retired":
         return out
     max_loss = retire.get("max_loss_usd")
@@ -1783,6 +1942,8 @@ def card_facts(book: dict[str, Any] | None = None) -> list[dict[str, Any]]:
             row["on_current_book"] = True
         stamped = dict(card)
         stamped["type"] = type_name
+        if not str(stamped.get("written_at") or "").strip():
+            stamped["written_at"] = _card_clock({}, state)
         row.update(card_verdict(row, stamped))
         stray = unresolved.get(str(card.get("name") or "").lower())
         if stray is not None:
@@ -2043,13 +2204,104 @@ def revision_card(revision: int, lab: dict[str, Any] | None = None) -> dict[str,
     return None
 
 
-def save_lab(update: dict[str, Any], *, scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
+def _norm_book_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _card_book_tuple(card: dict[str, Any]) -> tuple[Any, ...]:
+    retire = card.get("retire_if") if isinstance(card.get("retire_if"), dict) else {}
+    return (
+        _norm_book_text(card.get("name")).lower(),
+        _norm_book_text(card.get("thesis")),
+        _norm_book_text(card.get("when_on")),
+        _norm_book_text(card.get("scan")),
+        _norm_book_text(card.get("shape")),
+        _norm_book_text(card.get("invalidation")),
+        _norm_book_text(card.get("status")).lower(),
+        json.dumps(retire, sort_keys=True, default=str),
+        _norm_book_text(card.get("expect_hit_rate")),
+    )
+
+
+def book_fingerprint(state: dict[str, Any] | None) -> tuple[Any, ...]:
+    """Durable book only. Notes, evidence, and next_look_s are look diary."""
+    blob = state if isinstance(state, dict) else {}
+    types = _clean_types(blob.get("types"))
+    trunks: list[tuple[Any, ...]] = []
+    for type_name in sorted(types):
+        stanza = types[type_name] if isinstance(types.get(type_name), dict) else {}
+        cards = tuple(
+            _card_book_tuple(c)
+            for c in (stanza.get("cards") or [])
+            if isinstance(c, dict) and c.get("name")
+        )
+        order = tuple(
+            _norm_book_text(x).lower()
+            for x in (stanza.get("tool_order") or [])
+            if str(x or "").strip()
+        )
+        trunks.append(
+            (
+                type_name,
+                order,
+                _norm_book_text(stanza.get("gotchas")),
+                _norm_book_text(stanza.get("review")),
+                cards,
+            )
+        )
+    return (
+        str(blob.get("mode") or "explore").strip().lower(),
+        bool(blob.get("ready_to_promote")),
+        tuple(trunks),
+    )
+
+
+def _cadence_tuple(book: dict[str, Any] | None) -> tuple[tuple[Any, ...], ...]:
+    rows: list[tuple[Any, ...]] = []
+    for type_name, card in walk_cards(book if isinstance(book, dict) else {}):
+        rows.append((type_name, card.get("name"), card.get("next_look_s")))
+    return tuple(rows)
+
+
+def _held_book(
+    prev: dict[str, Any],
+    staged: dict[str, Any],
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    """Same fingerprint: keep the last real book. Overlay clerk-only fields.
+
+    Cadence may move. Sanitized instructions (invented gates stripped) must
+    land. Diary notes and evidence do not — those were minting fake progress.
+    """
+    out = _strip_projection(copy.deepcopy(prev))
+    dest_types = out.get("types") if isinstance(out.get("types"), dict) else {}
+    src_types = staged.get("types") if isinstance(staged.get("types"), dict) else {}
+    for tname, stanza in src_types.items():
+        dst = dest_types.get(tname)
+        if not isinstance(dst, dict) or not isinstance(stanza, dict):
+            continue
+        by_name = {
+            c.get("name"): c
+            for c in (stanza.get("cards") or [])
+            if isinstance(c, dict) and c.get("name")
+        }
+        for card in dst.get("cards") or []:
+            if not isinstance(card, dict):
+                continue
+            src = by_name.get(card.get("name"))
+            if isinstance(src, dict) and "next_look_s" in src:
+                card["next_look_s"] = src["next_look_s"]
+    return out
+
+
+def save_lab(
+    update: dict[str, Any],
+    *,
+    scorecard: dict[str, Any] | None = None,
+    persist_instructions: bool = False,
+) -> dict[str, Any]:
     prev = load_lab()
     now = datetime.now(timezone.utc).isoformat()
-    rev = int(prev.get("revision") or 0) + 1
-    ledger = ensure_ledger(prev)
-    if ledger and scorecard:
-        ledger[-1] = _close_card(ledger[-1], scorecard, now)
     lots_at = update.get("lots_at_write")
     if not lots_at:
         try:
@@ -2058,6 +2310,34 @@ def save_lab(update: dict[str, Any], *, scorecard: dict[str, Any] | None = None)
             lots_at = list((_read_json(LAST_TURN_PATH) or {}).get("open_lots") or [])
         except Exception:
             lots_at = list(prev.get("lots_at_write") or [])
+    staged = _strip_projection(
+        _migrate_book(
+            {
+                **_strip_projection(prev),
+                **update,
+            }
+        )
+    )
+    prev_rev = int(prev.get("revision") or 0)
+    hold = prev_rev > 0 and book_fingerprint(prev) == book_fingerprint(staged)
+    if hold:
+        out = _held_book(prev, staged, update)
+        if persist_instructions and "instructions" in update:
+            out["instructions"] = update.get("instructions") or ""
+        dirty = (
+            (out.get("instructions") or "") != (prev.get("instructions") or "")
+            or _cadence_tuple(out) != _cadence_tuple(prev)
+        )
+        if dirty:
+            disk = dict(out)
+            disk.pop("revision_held", None)
+            _write(_lab_path(), disk)
+        out["revision_held"] = True
+        return out
+    ledger = ensure_ledger(prev)
+    rev = prev_rev + 1
+    if ledger and scorecard:
+        ledger[-1] = _close_card(ledger[-1], scorecard, now)
     # A caller may still hand us the flat shape, so file ``update``'s cards into
     # the tree. ``prev``'s derived list is dropped first: replaying it would
     # resurrect a card this write just deleted.
@@ -2069,10 +2349,12 @@ def save_lab(update: dict[str, Any], *, scorecard: dict[str, Any] | None = None)
         "promoted": False,
         "lots_at_write": [str(x) for x in (lots_at or [])][:32],
     }))
+    _ensure_card_clocks(state, prev, now)
     if scorecard:
         state["paper_score"] = _score_snap(scorecard)
     ledger.append(_ledger_card(state, state.get("paper_score")))
     state["ledger"] = ledger[-_LEDGER_CAP:]
+    state.pop("revision_held", None)
     _write(_lab_path(), state)
     return state
 
@@ -2169,6 +2451,28 @@ def playbook_mode() -> str:
     return mode if mode in ("explore", "exploit") else "explore"
 
 
+def playbook_next_look_s() -> float | None:
+    """Smallest next_look_s on a live (non-retired) card, if any."""
+    try:
+        from abcxauto.wake_bus import clamp_next_look_s
+    except Exception:
+        return None
+    found: list[float] = []
+    try:
+        lab = load_lab()
+    except Exception:
+        return None
+    for _typ, card in walk_cards(lab):
+        if str(card.get("status") or "").strip().lower() == "retired":
+            continue
+        clamped = clamp_next_look_s(card.get("next_look_s"))
+        if clamped is not None:
+            found.append(clamped)
+    if not found:
+        return None
+    return min(found)
+
+
 def live_has_promoted() -> bool:
     """A promoted snapshot only counts if a graduated card is actually in it."""
     live = load_live()
@@ -2236,10 +2540,26 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
         score = compute_scorecard()
     except Exception:
         score = None
-    state = save_lab(update, scorecard=score)
+    state = save_lab(
+        update,
+        scorecard=score,
+        persist_instructions="invented_pct_gate" in rejected,
+    )
     maybe_promote(scorecard=score)
     out = dict(state)
     facts = card_facts(state)
+    if state.get("revision_held"):
+        out["revision_held"] = True
+        wait_row = next(
+            (r for r in facts if r.get("looks_without_trigger") is not None),
+            None,
+        )
+        looks = (wait_row or {}).get("looks_without_trigger")
+        note = "book unchanged — revision held"
+        if isinstance(looks, int):
+            note += f"; {looks} looks since last send or write"
+            out["looks_without_trigger"] = looks
+        out.setdefault("note", note)
     out["cards"] = _flat_card_projection(state)
     out["graduated_cards"] = [_card_label(r) for r in facts if r.get("graduated")]
     out["tripped_cards"] = [_card_label(r) for r in facts if r.get("tripped")]
@@ -2326,12 +2646,47 @@ def _since_write_score(
     }
 
 
+def _parse_card_clock(raw: Any) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _hypothesis_clock(lab: dict[str, Any] | None) -> str:
+    """Newest testing card clock. Lab written_at is a diary stamp after holds.
+
+    First-card-only made a 5-day flush sibling keep ``book_stale`` on after a
+    same-day card was written and sent — Grok then wrote the book every look.
+    """
+    state = lab if isinstance(lab, dict) else {}
+    best = ""
+    best_dt: datetime | None = None
+    for _type_name, card in walk_cards(state):
+        if str(card.get("status") or "").strip().lower() == "retired":
+            continue
+        clock = str(card.get("written_at") or "").strip()
+        dt = _parse_card_clock(clock)
+        if dt is None:
+            continue
+        if best_dt is None or dt > best_dt:
+            best_dt = dt
+            best = clock
+    return best or str(state.get("written_at") or "").strip()
+
+
 def playbook_age_hours(
     lab: dict[str, Any] | None = None,
     *,
     now: datetime | None = None,
 ) -> float | None:
-    raw = str((lab or {}).get("written_at") or "")
+    raw = _hypothesis_clock(lab)
     if not raw:
         return None
     try:
@@ -2346,6 +2701,1377 @@ def playbook_age_hours(
     return max(0.0, (clock - written).total_seconds() / 3600.0)
 
 
+_HUNT_PREFIX = frozenset({
+    "book",
+    "status",
+    "playbook",
+    "write_lab_playbook",
+    "self_tune",
+    "set_wake",
+})
+_DEFAULT_HUNT_ORDER = ("scan", "news", "quote", "candles", "send")
+_DEFAULT_MANAGE_ORDER = ("book", "fills", "quote", "candles")
+
+
+def _tool_names(raw: Any) -> list[str]:
+    out: list[str] = []
+    for item in raw or []:
+        name = str(item or "").strip()
+        if name and name not in out:
+            out.append(name)
+        if len(out) >= 16:
+            break
+    return out
+
+
+def _next_in_order(order: list[str], done: list[str]) -> str:
+    seen = {str(name) for name in done}
+    for name in order:
+        if name not in seen:
+            return name
+    return order[-1] if order else "book"
+
+
+def _effective_tool_trace(
+    this_look: list[str] | None,
+    last_look: list[str] | None,
+    *,
+    managing: bool,
+) -> list[str]:
+    """This look's tools, or last look's hunt if this look has not started one.
+
+    A completed send starts a new hunt when the book is flat. An open book
+    uses the manage order and does not inherit last look's scan loop.
+    """
+    this = _tool_names(this_look)
+    last = _tool_names(last_look)
+    if any(name not in _HUNT_PREFIX for name in this):
+        return this
+    if managing or "send" in last:
+        return this
+    return last + this
+
+
+def _screen_quoted(raw: Any) -> bool:
+    """True when a scan already stamped IBKR last/bid/ask on its rows."""
+    if raw is True:
+        return True
+    if isinstance(raw, (int, float)) and raw > 0:
+        return True
+    if not isinstance(raw, dict):
+        return False
+    try:
+        if int(raw.get("quoted") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    hits = raw.get("scan_hits") if isinstance(raw.get("scan_hits"), dict) else raw
+    if not isinstance(hits, dict):
+        return False
+    try:
+        if int(hits.get("quoted") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    for row in hits.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("last") is not None or row.get("ibkr") or row.get("bid") is not None:
+            return True
+    return False
+
+
+def _scan_carries_news(raw: Any) -> bool:
+    """True when a scan already nested MDA headlines on the same hits."""
+    if raw is True:
+        return True
+    if isinstance(raw, list):
+        return any(
+            isinstance(item, dict)
+            and (item.get("headline") or item.get("title") or item.get("summary"))
+            for item in raw
+        )
+    if not isinstance(raw, dict):
+        return False
+    items = raw.get("news")
+    if isinstance(items, list) and items:
+        return True
+    for row in list(raw.get("hits") or []) + list(raw.get("rows") or []):
+        if not isinstance(row, dict):
+            continue
+        if row.get("news"):
+            return True
+        mda = row.get("mda")
+        if isinstance(mda, dict) and mda.get("news"):
+            return True
+    return False
+
+
+_CARD_RISK_RE = re.compile(r"(?i)(?:dollar\s+)?risk\s*[≤<=]{1,2}\s*([\d.]+)\s*%")
+_CARD_NOTIONAL_RE = re.compile(r"(?i)notional\s*[≤<=]{1,2}\s*([\d.]+)\s*%")
+_CARD_MIN_GAP_RE = re.compile(r"(?:>=|≥)\s*([\d.]+)\s*%")
+_CARD_MIN_PRICE_RE = re.compile(r"(?i)sub-?\s*\$?\s*([\d.]+)")
+_CARD_TIGHT_SPREAD_RE = re.compile(r"(?i)tight.{0,24}spread|spread.{0,24}tight")
+_CARD_REENTRY_RE = re.compile(r"(?i)do not re-enter|same session")
+_CARD_NO_ADD_RE = re.compile(r"(?i)\bno add\b")
+_CARD_ONE_NAME_RE = re.compile(r"(?i)\bone name\b")
+_CARD_SKIP_SPY_RE = re.compile(
+    r"(?i)\bSPY\b.{0,48}(?:same session|scrape)|(?:skip|no|not|never|do not).{0,24}\bSPY\b"
+)
+_CARD_SESSION_RE = re.compile(
+    r"(?i)opening low|opening high|session low|session high|gap retrace"
+)
+_CARD_HOLD_OPEN_RE = re.compile(
+    r"(?i)hold(?:s|ing)? above(?: the)? open(?!ing)"
+)
+
+
+def _send_facts_from_row(type_name: str, card: dict[str, Any]) -> dict[str, Any]:
+    shape = str(card.get("shape") or "")
+    upper = shape.upper()
+    direction = (
+        "LONG" if "LONG" in upper else ("SHORT" if "SHORT" in upper else None)
+    )
+    risk_m = _CARD_RISK_RE.search(shape)
+    notional_m = _CARD_NOTIONAL_RE.search(shape)
+    try:
+        risk_pct = float(risk_m.group(1)) if risk_m else None
+    except (TypeError, ValueError):
+        risk_pct = None
+    try:
+        notional_pct = float(notional_m.group(1)) if notional_m else None
+    except (TypeError, ValueError):
+        notional_pct = None
+    return {
+        "type": type_name,
+        "card": card.get("name"),
+        "direction": direction,
+        "risk_pct": risk_pct,
+        "notional_pct": notional_pct,
+    }
+
+
+def live_card_send_facts(
+    book: dict[str, Any] | None = None,
+    *,
+    card: Any = None,
+) -> dict[str, Any]:
+    """Type, card, direction, and size caps from a named card or the first live one."""
+    named = str(card or "").strip().lower()
+    for type_name, row in _walk_testing(book):
+        if named and str(row.get("name") or "").strip().lower() != named:
+            continue
+        return _send_facts_from_row(type_name, row)
+    return {}
+
+
+def live_card_gap_floors(
+    book: dict[str, Any] | None = None,
+    *,
+    deepest: float | None = None,
+) -> list[dict[str, Any]]:
+    """Each testing card's |gap| floor, and whether ``deepest`` clears it."""
+    out: list[dict[str, Any]] = []
+    for _type_name, row in _walk_testing(book):
+        gap = _card_min_gap_pct(row)
+        if gap is None:
+            continue
+        item: dict[str, Any] = {"card": row.get("name"), "min_gap_pct": gap}
+        if deepest is not None:
+            item["met"] = deepest + 1e-9 >= gap
+        out.append(item)
+    return out
+
+
+def _testing_card(
+    book: dict[str, Any] | None,
+    card_name: Any = None,
+) -> dict[str, Any] | None:
+    """Named testing card, or the first live card when no name is given."""
+    state = book if isinstance(book, dict) else load_lab()
+    want = str(card_name or "").strip().lower()
+    first: dict[str, Any] | None = None
+    for type_name, card in walk_cards(state):
+        if not type_name:
+            continue
+        if str(card.get("status") or "testing").strip().lower() == "retired":
+            continue
+        if first is None:
+            first = card
+        if want and str(card.get("name") or "").strip().lower() == want:
+            return card
+    return None if want else first
+
+
+def _card_min_gap_pct(card: dict[str, Any] | None) -> float | None:
+    row = card if isinstance(card, dict) else {}
+    match = _CARD_MIN_GAP_RE.search(str(row.get("when_on") or ""))
+    if not match:
+        return None
+    try:
+        val = float(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
+def _walk_testing(
+    book: dict[str, Any] | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    state = book if isinstance(book, dict) else load_lab()
+    out: list[tuple[str, dict[str, Any]]] = []
+    for type_name, card in walk_cards(state):
+        if not type_name:
+            continue
+        if str(card.get("status") or "testing").strip().lower() == "retired":
+            continue
+        out.append((type_name, card))
+    return out
+
+
+def _tightest_matching_card(
+    book: dict[str, Any] | None,
+    mag: float | None,
+    *,
+    card_name: Any = None,
+) -> tuple[str, dict[str, Any]] | None:
+    """Named card if its floor is met, else the tightest testing card the gap clears."""
+    want = str(card_name or "").strip().lower()
+    hits: list[tuple[float, str, dict[str, Any]]] = []
+    for type_name, card in _walk_testing(book):
+        if want and str(card.get("name") or "").strip().lower() != want:
+            continue
+        floor = _card_min_gap_pct(card)
+        if floor is not None and (mag is None or mag + 1e-9 < floor):
+            continue
+        hits.append((floor or 0.0, type_name, card))
+    if not hits:
+        return None
+    hits.sort(key=lambda row: row[0], reverse=True)
+    return hits[0][1], hits[0][2]
+
+
+def live_card_min_gap_pct(
+    book: dict[str, Any] | None = None,
+    *,
+    card: Any = None,
+) -> float | None:
+    """|gap| floor on a named card, else the loosest floor among testing cards.
+
+    Scan paint uses the loosest floor so a 3% sibling can fire while a 6%
+    card stays on the book. Send uses ``card=`` so the ticket's own floor binds.
+    """
+    state = book if isinstance(book, dict) else load_lab()
+    named = str(card or "").strip()
+    if named:
+        return _card_min_gap_pct(_testing_card(state, named))
+    floors: list[float] = []
+    for type_name, row in walk_cards(state):
+        if not type_name:
+            continue
+        if str(row.get("status") or "testing").strip().lower() == "retired":
+            continue
+        gap = _card_min_gap_pct(row)
+        if gap is not None:
+            floors.append(gap)
+    return min(floors) if floors else None
+
+
+def _session_gap_mag(session: Any) -> float | None:
+    if not isinstance(session, dict):
+        return None
+    raw = session.get("gap_pct", session.get("open_gap_pct"))
+    if raw is None:
+        return None
+    try:
+        return abs(float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def live_card_needs_session(
+    book: dict[str, Any] | None = None,
+    *,
+    card: Any = None,
+) -> bool:
+    """True when the card's stop is the opening low / gap retrace."""
+    row = _testing_card(book, card)
+    if not row:
+        return False
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in ("shape", "when_on", "invalidation", "thesis")
+    )
+    return bool(_CARD_SESSION_RE.search(text))
+
+
+def live_card_needs_hold_above_open(
+    book: dict[str, Any] | None = None,
+    *,
+    card: Any = None,
+) -> bool:
+    """True when the card wants last above the RTH open, not only the low."""
+    row = _testing_card(book, card)
+    if row is not None:
+        text = " ".join(
+            str(row.get(key) or "")
+            for key in ("when_on", "shape", "thesis")
+        )
+        return bool(_CARD_HOLD_OPEN_RE.search(text))
+    return bool(_CARD_HOLD_OPEN_RE.search(_live_card_prose(book, ("when_on", "shape", "thesis"))))
+
+
+def live_card_session_error(
+    params: dict[str, Any] | None,
+    session: Any = None,
+    book: dict[str, Any] | None = None,
+) -> str:
+    """New risk that misses the written hold / gap is not that card."""
+    card_name = ""
+    if isinstance(params, dict):
+        card_name = str(params.get("card") or "")
+    needs = live_card_needs_session(book, card=card_name)
+    min_gap = live_card_min_gap_pct(book, card=card_name)
+    if not needs and not min_gap:
+        return ""
+    src = params if isinstance(params, dict) else {}
+    if needs:
+        try:
+            from abcxauto.structure_grade import session_usable
+
+            usable = session_usable(session)
+        except Exception:
+            usable = False
+        if not usable:
+            if src.get("stop_price") in (None, "") or src.get("target_price") in (
+                None,
+                "",
+            ):
+                return "card needs today's session — candles first"
+        elif isinstance(session, dict):
+            direction = str(
+                src.get("direction")
+                or live_card_send_facts(book).get("direction")
+                or "LONG"
+            ).upper()
+            if direction != "SHORT" and session.get("above_low") is False:
+                return "card off — last not above opening low"
+            if (
+                direction != "SHORT"
+                and live_card_needs_hold_above_open(book, card=card_name)
+                and session.get("above_open") is False
+            ):
+                return "card off — last not above the open"
+    mag = _session_gap_mag(session)
+    if min_gap and mag is not None and mag + 1e-9 < min_gap:
+        return f"card off — gap under {min_gap:g}%"
+    return ""
+
+
+def _live_card_prose(
+    book: dict[str, Any] | None,
+    keys: tuple[str, ...],
+    type_keys: tuple[str, ...] = (),
+) -> str:
+    state = book if isinstance(book, dict) else load_lab()
+    types = state.get("types") if isinstance(state.get("types"), dict) else {}
+    for type_name, card in walk_cards(state):
+        if not type_name:
+            continue
+        if str(card.get("status") or "testing").strip().lower() == "retired":
+            continue
+        bits = [str(card.get(key) or "") for key in keys]
+        stanza = types.get(type_name) if isinstance(types.get(type_name), dict) else {}
+        bits.extend(str(stanza.get(key) or "") for key in type_keys)
+        return " ".join(bits)
+    return ""
+
+
+def live_card_needs_tight_spread(
+    book: dict[str, Any] | None = None,
+    *,
+    card: Any = None,
+) -> bool:
+    row = _testing_card(book, card)
+    if row is not None:
+        text = " ".join(
+            str(row.get(key) or "")
+            for key in ("when_on", "thesis", "shape")
+        )
+        return bool(_CARD_TIGHT_SPREAD_RE.search(text))
+    return bool(
+        _CARD_TIGHT_SPREAD_RE.search(
+            _live_card_prose(book, ("when_on", "thesis", "shape"))
+        )
+    )
+
+
+def live_card_skips_spy(book: dict[str, Any] | None = None) -> bool:
+    text = " ".join(
+        [
+            _live_card_prose(
+                book,
+                ("when_on", "shape", "invalidation", "thesis"),
+                ("gotchas", "review"),
+            ),
+            notebook_text(book if isinstance(book, dict) else load_lab())[:800],
+        ]
+    )
+    return bool(_CARD_SKIP_SPY_RE.search(text))
+
+
+def _tape_symbols(quoted: Any) -> set[str]:
+    names: set[str] = set()
+    blobs: list[dict[str, Any]] = []
+    if isinstance(quoted, dict):
+        hits = quoted.get("scan_hits")
+        if isinstance(hits, dict):
+            blobs.append(hits)
+        blobs.append(quoted)
+    for blob in blobs:
+        for row in blob.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("symbol") or "").upper().strip()
+            if name:
+                names.add(name)
+        for raw in blob.get("symbols") or []:
+            name = str(raw or "").upper().strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _has_tape_blob(quoted: Any) -> bool:
+    if not isinstance(quoted, dict):
+        return False
+    if "scan_hits" in quoted or "rows" in quoted or quoted.get("quoted") is not None:
+        return True
+    return False
+
+
+def _explicit_empty_tape(quoted: Any) -> bool:
+    """True only when a screen ran and produced no names. Missing tape is not that."""
+    if not isinstance(quoted, dict):
+        return False
+    hits = quoted.get("scan_hits") if isinstance(quoted.get("scan_hits"), dict) else None
+    blob = hits if hits is not None else quoted
+    if "rows" not in blob and blob.get("quoted") is None:
+        return False
+    return _tape_empty(quoted)
+
+
+def _tape_empty(quoted: Any) -> bool:
+    if quoted is True:
+        return False
+    if isinstance(quoted, (int, float)) and quoted > 0:
+        return False
+    if not isinstance(quoted, dict):
+        return True
+    try:
+        if int(quoted.get("quoted") or 0) > 0:
+            return False
+    except (TypeError, ValueError):
+        pass
+    hits = quoted.get("scan_hits") if isinstance(quoted.get("scan_hits"), dict) else {}
+    try:
+        if int(hits.get("quoted") or 0) > 0:
+            return False
+    except (TypeError, ValueError):
+        pass
+    return not _tape_symbols(quoted)
+
+
+def live_card_needs_no_reentry(
+    book: dict[str, Any] | None = None,
+    *,
+    card: Any = None,
+) -> bool:
+    row = _testing_card(book, card)
+    text = " ".join(
+        [
+            " ".join(
+                str((row or {}).get(key) or "")
+                for key in ("invalidation", "shape", "when_on", "review")
+            ),
+            _live_card_prose(
+                book,
+                ("review", "invalidation", "shape", "when_on"),
+                ("review",),
+            ),
+        ]
+    )
+    return bool(_CARD_REENTRY_RE.search(text))
+
+
+def _et_day_of(ts: str) -> str:
+    raw = str(ts or "").strip()
+    if not raw:
+        return ""
+    try:
+        from zoneinfo import ZoneInfo
+
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        return raw[:10] if len(raw) >= 10 else ""
+
+
+def card_sent_symbol_today(card: str, symbol: str) -> bool:
+    """True when this card already opened new risk in ``symbol`` today (ET)."""
+    name = str(card or "").strip().lower()
+    want = str(symbol or "").upper().strip()
+    if not want:
+        return False
+    try:
+        from abcxauto.opportunity_scan import _et_calendar_day
+
+        today = _et_calendar_day()
+    except Exception:
+        today = ""
+    if not today:
+        return False
+    for row in _card_sends():
+        if not row.get("new_risk"):
+            continue
+        if str(row.get("symbol") or "").upper() != want:
+            continue
+        if name and str(row.get("card") or "").strip().lower() != name:
+            continue
+        if _et_day_of(str(row.get("ts") or "")) == today:
+            return True
+    return False
+
+
+def _scan_hit_row(snap: dict[str, Any] | None, symbol: str) -> dict[str, Any]:
+    if not isinstance(snap, dict) or not symbol:
+        return {}
+    want = str(symbol).upper()
+    blobs: list[dict[str, Any]] = []
+    hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else None
+    if hits:
+        blobs.append(hits)
+    blobs.append(snap)
+    for blob in blobs:
+        for row in blob.get("rows") or []:
+            if isinstance(row, dict) and str(row.get("symbol") or "").upper() == want:
+                return row
+    return {}
+
+
+def _positive_px(raw: Any) -> float | None:
+    if isinstance(raw, dict):
+        return _positive_px(raw.get("last")) or _positive_px(raw.get("mid"))
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
+def _row_ibkr_last(row: dict[str, Any] | None) -> float | None:
+    if not isinstance(row, dict):
+        return None
+    ibkr = row.get("ibkr") if isinstance(row.get("ibkr"), dict) else {}
+    return _positive_px(ibkr.get("last")) or _positive_px(row.get("last"))
+
+
+def ibkr_live_last(
+    symbol: str,
+    *,
+    snap: dict[str, Any] | None = None,
+    quoted: Any = None,
+) -> float | None:
+    """IBKR last for a name: quote map first, then this look's scan print."""
+    want = str(symbol or "").upper()
+    if not want:
+        return None
+    for blob in (snap, quoted):
+        if not isinstance(blob, dict):
+            continue
+        qmap = blob.get("ibkr_live_quotes")
+        if isinstance(qmap, dict):
+            px = _positive_px(qmap.get(want))
+            if px:
+                return px
+        px = _row_ibkr_last(_scan_hit_row(blob, want))
+        if px:
+            return px
+    return None
+
+
+def _open_stk_symbols(positions: Any) -> list[str]:
+    out: list[str] = []
+    for pos in positions or []:
+        if not isinstance(pos, dict):
+            continue
+        sec = str(pos.get("sec_type") or pos.get("secType") or "STK").upper()
+        if sec not in ("STK", "ETF"):
+            continue
+        try:
+            qty = float(pos.get("quantity") or pos.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+        if qty == 0:
+            continue
+        name = str(pos.get("symbol") or "").upper().strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def live_card_book_error(
+    params: dict[str, Any] | None,
+    positions: Any = None,
+    book: dict[str, Any] | None = None,
+) -> str:
+    """New risk that pyramids or adds a second name is not that card."""
+    src = params if isinstance(params, dict) else {}
+    row = _testing_card(book, src.get("card"))
+    shape = str((row or {}).get("shape") or "") or _live_card_prose(book, ("shape",))
+    no_add = bool(_CARD_NO_ADD_RE.search(shape))
+    one_name = bool(_CARD_ONE_NAME_RE.search(shape))
+    if not no_add and not one_name:
+        return ""
+    lots = _open_stk_symbols(positions)
+    if not lots:
+        return ""
+    sym = str(src.get("symbol") or "").upper()
+    if no_add and sym and sym in lots:
+        return f"card off — no add {sym}"
+    if one_name:
+        others = [name for name in lots if name != sym]
+        if others:
+            return f"card off — one name (open {others[0]})"
+    return ""
+
+
+def _spread_width(session: Any, snap: dict[str, Any] | None, symbol: str) -> float | None:
+    sources = []
+    if isinstance(session, dict):
+        sources.append(session)
+    row = _scan_hit_row(snap, symbol)
+    if row:
+        sources.append(row)
+        ibkr = row.get("ibkr")
+        if isinstance(ibkr, dict):
+            sources.append(ibkr)
+    for src in sources:
+        try:
+            bid = float(src.get("bid"))
+            ask = float(src.get("ask"))
+        except (TypeError, ValueError):
+            continue
+        if bid > 0 and ask > bid:
+            return ask - bid
+    return None
+
+
+def live_card_tape_error(
+    params: dict[str, Any] | None,
+    session: Any = None,
+    snap: dict[str, Any] | None = None,
+    book: dict[str, Any] | None = None,
+) -> str:
+    """New risk that misses the written tape floors is not that card."""
+    src = params if isinstance(params, dict) else {}
+    sym = str(src.get("symbol") or "").upper()
+    card = str(src.get("card") or live_card_send_facts(book).get("card") or "").strip()
+    constraints = live_card_scan_constraints(book, card=card)
+    min_px = constraints.get("min_price")
+    last = None
+    if isinstance(session, dict):
+        last = session.get("last")
+    if last is None:
+        last = ibkr_live_last(sym, snap=snap)
+    if min_px and last is not None:
+        try:
+            if float(last) + 1e-9 < float(min_px):
+                return f"card off — last under ${float(min_px):g}"
+        except (TypeError, ValueError):
+            pass
+    if live_card_needs_no_reentry(book, card=card) and card_sent_symbol_today(card, sym):
+        return f"card off — already sent {sym} today"
+    if live_card_needs_tight_spread(book, card=card):
+        width = _spread_width(session, snap, sym)
+        stop = src.get("stop_price")
+        if stop in (None, "") and isinstance(session, dict):
+            stop = session.get("low")
+        if width is not None and last is not None and stop not in (None, ""):
+            try:
+                if width + 1e-9 >= abs(float(last) - float(stop)):
+                    return "card off — live spread wider than the stop"
+            except (TypeError, ValueError):
+                pass
+    return ""
+
+
+_CAP_SCAN_WORDS = {
+    "mega": "mega_cap",
+    "mega_cap": "mega_cap",
+    "large": "large_cap",
+    "large_cap": "large_cap",
+    "mid": "mid_cap",
+    "mid_cap": "mid_cap",
+}
+
+
+def _live_card_scan_line(book: dict[str, Any] | None = None) -> str:
+    state = book if isinstance(book, dict) else load_lab()
+    for type_name, card in walk_cards(state):
+        if not type_name:
+            continue
+        if str(card.get("status") or "testing").strip().lower() == "retired":
+            continue
+        return str(card.get("scan") or "")
+    return ""
+
+
+def live_card_scan_arenas(book: dict[str, Any] | None = None) -> list[str]:
+    """Known arena names written on the first live card's scan line."""
+    try:
+        from abcxauto.universe import ARENA_CATALOG
+
+        known = {str(key).lower() for key in ARENA_CATALOG}
+    except Exception:
+        known = {"most_active", "top_losers", "mega_cap", "large_cap"}
+    out: list[str] = []
+    for token in re.findall(r"[a-z][a-z0-9_]+", _live_card_scan_line(book).lower()):
+        if token in known and token not in out:
+            out.append(token)
+    return out
+
+
+def live_card_scan_screens(
+    book: dict[str, Any] | None = None,
+    *,
+    scan: str | None = None,
+) -> list[dict[str, str]]:
+    """Written scan line as compose screens: universe × sort.
+
+    ``most_active + top_losers; mega/large only`` is mega/large ranked by
+    those sorts, not an unfiltered MOST_ACTIVE junk tape.
+    """
+    try:
+        from abcxauto.universe import ARENA_CATALOG
+    except Exception:
+        ARENA_CATALOG = {}
+    if scan is not None:
+        text = scan
+    else:
+        lines: list[str] = []
+        state = book if isinstance(book, dict) else load_lab()
+        for type_name, card in walk_cards(state):
+            if not type_name:
+                continue
+            if str(card.get("status") or "testing").strip().lower() == "retired":
+                continue
+            line = str(card.get("scan") or "").strip()
+            if line and line not in lines:
+                lines.append(line)
+        text = " ".join(lines) if lines else _live_card_scan_line(book)
+    if not text:
+        return []
+    caps: list[str] = []
+    sorts: list[str] = []
+    for token in re.findall(r"[a-z][a-z0-9_]+", text.lower()):
+        cap = _CAP_SCAN_WORDS.get(token)
+        if cap:
+            if cap not in caps:
+                caps.append(cap)
+            continue
+        meta = ARENA_CATALOG.get(token) or {}
+        if meta.get("group") == "scans" and token not in sorts:
+            sorts.append(token)
+        elif meta.get("group") == "caps" and token not in caps:
+            caps.append(token)
+    # A ≥N% gap card is not a MOST_ACTIVE page. IBKR's open-gap loser
+    # screen is the sort that surfaces a -20% name the %change ranks miss.
+    min_gap = bool(scan is None and live_card_min_gap_pct(book))
+    if (
+        min_gap
+        and "top_open_perc_lose" not in sorts
+        and "low_open_gap" not in sorts
+    ):
+        sorts.append("top_open_perc_lose")
+    if min_gap:
+        gap_first = (
+            "top_open_perc_lose",
+            "low_open_gap",
+            "top_losers",
+            "top_perc_lose",
+        )
+        sorts = [s for s in gap_first if s in sorts] + [
+            s for s in sorts if s not in gap_first
+        ]
+    screens: list[dict[str, str]] = []
+    if caps and sorts:
+        pairs = ((cap, sort) for cap in caps for sort in sorts)
+    elif sorts:
+        pairs = ((sort, sort) for sort in sorts)
+    elif caps:
+        pairs = ((cap, "") for cap in caps)
+    else:
+        pairs = ()
+    for arena, sort in pairs:
+        code = ""
+        if sort:
+            ibkr = (ARENA_CATALOG.get(sort) or {}).get("ibkr") or {}
+            code = str(ibkr.get("scanCode") or "").strip().upper()
+        if arena:
+            row = {"arena": arena}
+            if code:
+                row["scan_code"] = code
+            screens.append(row)
+        if len(screens) >= 8:
+            break
+    return screens
+
+
+def live_card_scan_constraints(
+    book: dict[str, Any] | None = None,
+    *,
+    card: Any = None,
+) -> dict[str, Any]:
+    """Price floor, CORP-only, and cap floor written on a card's scan line."""
+    named = str(card or "").strip()
+    if named:
+        row = _testing_card(book, named)
+        line = str((row or {}).get("scan") or "")
+    else:
+        line = _live_card_scan_line(book)
+    if not line:
+        return {}
+    out: dict[str, Any] = {}
+    match = _CARD_MIN_PRICE_RE.search(line)
+    if match:
+        try:
+            px = float(match.group(1))
+            if px > 0:
+                out["min_price"] = px
+        except (TypeError, ValueError):
+            pass
+    if re.search(r"(?i)levered", line):
+        out["skip_levered"] = True
+    caps: list[str] = []
+    for screen in live_card_scan_screens(book, scan=line):
+        arena = str(screen.get("arena") or "")
+        if arena in ("mega_cap", "large_cap", "mid_cap") and arena not in caps:
+            caps.append(arena)
+    if not caps:
+        for token in re.findall(r"[a-z][a-z0-9_]+", line.lower()):
+            cap = _CAP_SCAN_WORDS.get(token)
+            if cap and cap not in caps:
+                caps.append(cap)
+    if caps:
+        out["caps"] = caps
+    return out
+
+
+def apply_card_constraints_to_spec(
+    spec: dict[str, Any] | None,
+    book: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Overlay the written scan floors onto one IBKR spec. Never lowers a tighter floor."""
+    applied: dict[str, Any] = {}
+    if not spec:
+        return spec, applied
+    constraints = live_card_scan_constraints(book)
+    if not constraints:
+        return spec, applied
+    out = dict(spec)
+    min_px = constraints.get("min_price")
+    if min_px is not None:
+        try:
+            cur = float(out.get("abovePrice") or 0)
+        except (TypeError, ValueError):
+            cur = 0.0
+        out["abovePrice"] = max(cur, float(min_px))
+        applied["card_min_price"] = float(min_px)
+        applied["above_price"] = out["abovePrice"]
+    if constraints.get("skip_levered"):
+        out["stockTypeFilter"] = "CORP"
+        applied["card_stock_type"] = "CORP"
+    floors: list[float] = []
+    try:
+        from abcxauto.universe import ARENA_CATALOG
+    except Exception:
+        ARENA_CATALOG = {}
+    for cap in constraints.get("caps") or []:
+        ibkr = (ARENA_CATALOG.get(cap) or {}).get("ibkr") or {}
+        raw = ibkr.get("marketCapAbove")
+        if raw is None:
+            continue
+        try:
+            floors.append(float(raw))
+        except (TypeError, ValueError):
+            continue
+    if floors:
+        floor = min(floors)
+        try:
+            cur = float(out.get("marketCapAbove") or 0)
+        except (TypeError, ValueError):
+            cur = 0.0
+        out["marketCapAbove"] = max(cur, floor)
+        applied["card_market_cap_above"] = floor
+        applied["market_cap_above"] = out["marketCapAbove"]
+    return out, applied
+
+
+def drop_hits_off_card(
+    rows: list[dict[str, Any]] | None,
+    book: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Drop quoted names under the written sub-$ floor. Unknown last stays."""
+    constraints = live_card_scan_constraints(book)
+    min_px = constraints.get("min_price")
+    src = [r for r in (rows or []) if isinstance(r, dict)]
+    if not min_px:
+        return src, []
+    keep: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    for row in src:
+        last = row.get("last")
+        if last is None:
+            ibkr = row.get("ibkr")
+            if isinstance(ibkr, dict):
+                last = ibkr.get("last")
+            elif ibkr is not None:
+                last = ibkr
+        if last is None:
+            keep.append(row)
+            continue
+        try:
+            if float(last) + 1e-9 < float(min_px):
+                name = str(row.get("symbol") or "").upper()
+                if name:
+                    dropped.append(name)
+                continue
+        except (TypeError, ValueError):
+            keep.append(row)
+            continue
+        keep.append(row)
+    return keep, dropped
+
+
+def scan_screen_key(arena: str = "", scan_code: str = "") -> str:
+    name = str(arena or "").strip()
+    code = str(scan_code or "").strip()
+    if name and code:
+        return f"{name}:{code}"
+    return name or code
+
+
+def _session_rows(session_range: Any) -> list[dict[str, Any]]:
+    store = session_range if isinstance(session_range, dict) else {}
+    if not store:
+        return []
+    try:
+        from abcxauto.think_stream import _compact_session_range
+
+        compact = _compact_session_range(store)
+        if compact:
+            store = compact
+    except Exception:
+        pass
+    if store.get("ticket") or store.get("low") is not None or store.get("open") is not None:
+        return [store]
+    return [rng for rng in store.values() if isinstance(rng, dict)]
+
+
+def _has_today_session(session_range: Any) -> bool:
+    """True when this look already has a today RTH range to pin the stop."""
+    return any(rng.get("today") is True for rng in _session_rows(session_range))
+
+
+def _today_session_on_lows(session_range: Any) -> bool:
+    """True when every today session is sitting on or through the opening low."""
+    saw_today = False
+    for rng in _session_rows(session_range):
+        if rng.get("today") is not True:
+            continue
+        saw_today = True
+        if rng.get("above_low") is not False:
+            return False
+    return saw_today
+
+
+def _today_session_under_min_gap(session_range: Any, min_gap: float) -> bool:
+    """True when every today gap we have is under the card's written floor."""
+    saw_gap = False
+    for rng in _session_rows(session_range):
+        if rng.get("today") is not True:
+            continue
+        mag = _session_gap_mag(rng)
+        if mag is None:
+            continue
+        saw_gap = True
+        if mag + 1e-9 >= min_gap:
+            return False
+    return saw_gap
+
+
+def session_target(session: Any, direction: str = "LONG") -> float | None:
+    """30% retrace, or 50% if last already traded through 30. None if both are gone."""
+    if not isinstance(session, dict):
+        return None
+    side = str(direction or "LONG").upper()
+    last = session.get("last")
+    try:
+        last_f = float(last) if last not in (None, "") else None
+    except (TypeError, ValueError):
+        last_f = None
+    for key in ("retrace_30", "retrace_50"):
+        raw = session.get(key)
+        if raw is None:
+            continue
+        try:
+            tgt = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if last_f is None:
+            return tgt
+        if side == "SHORT":
+            if tgt < last_f:
+                return tgt
+        elif tgt > last_f:
+            return tgt
+    return None
+
+
+def hunt_send_sketch(
+    session_range: Any,
+    tape: Any = None,
+    *,
+    card: Any = None,
+) -> dict[str, Any] | None:
+    """Today's session as send fields. Clerk does not dispatch."""
+    store = session_range if isinstance(session_range, dict) else {}
+    if not store:
+        return None
+    try:
+        from abcxauto.think_stream import _compact_session_range
+
+        compact = _compact_session_range(store)
+        if compact:
+            store = compact
+    except Exception:
+        pass
+    items: list[tuple[str, dict[str, Any]]] = []
+    if store.get("ticket") or store.get("low") is not None or store.get("open") is not None:
+        items.append(("", store))
+    else:
+        for key, rng in store.items():
+            if isinstance(rng, dict):
+                items.append((str(key), rng))
+
+        def _gap_mag(item: tuple[str, dict[str, Any]]) -> float:
+            try:
+                raw = item[1].get("gap_pct", item[1].get("open_gap_pct"))
+                return abs(float(raw or 0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        items.sort(key=_gap_mag, reverse=True)
+    named = str(card or "").strip()
+    if named:
+        for type_name, row in _walk_testing():
+            if str(row.get("name") or "").strip().lower() == named.lower():
+                if type_name not in ("market_bracket", "bracket"):
+                    return None
+                break
+    facts = live_card_send_facts()
+    min_px = live_card_scan_constraints().get("min_price")
+    no_reentry = live_card_needs_no_reentry()
+    tight = live_card_needs_tight_spread()
+    skip_spy = live_card_skips_spy()
+    allowed = _tape_symbols(tape) if _has_tape_blob(tape) else set()
+    scanned = _has_tape_blob(tape)
+    for sym, rng in items:
+        if rng.get("today") is not True:
+            continue
+        prior = rng.get("ticket") if isinstance(rng.get("ticket"), dict) else {}
+        want_card = named or str(prior.get("card") or "").strip()
+        mag = _session_gap_mag(rng)
+        picked = _tightest_matching_card(None, mag, card_name=want_card or None)
+        existing = _testing_card(None, want_card) if want_card else None
+        if picked is None:
+            if want_card and existing is not None:
+                continue
+            if not want_card and live_card_min_gap_pct() is not None:
+                continue
+            type_name = str(prior.get("strategy") or "")
+            row = {"name": want_card or prior.get("card")}
+        else:
+            type_name, row = picked
+        if type_name and type_name not in ("market_bracket", "bracket"):
+            continue
+        pick_name = str(row.get("name") or "")
+        min_gap = _card_min_gap_pct(existing or row)
+        if min_gap and (mag is None or mag + 1e-9 < min_gap):
+            continue
+        if min_px is not None and rng.get("last") is not None:
+            try:
+                if float(rng["last"]) + 1e-9 < float(min_px):
+                    continue
+            except (TypeError, ValueError):
+                pass
+        name = str(sym or prior.get("symbol") or "").upper()
+        if skip_spy and name == "SPY":
+            continue
+        if scanned and name and name not in allowed:
+            continue
+        if no_reentry and name and card_sent_symbol_today(pick_name or str(facts.get("card") or ""), name):
+            continue
+        if tight and rng.get("spread") is not None and rng.get("last") is not None:
+            stop = prior.get("stop_price") if prior.get("stop_price") not in (None, "") else rng.get("low")
+            if stop not in (None, ""):
+                try:
+                    if float(rng["spread"]) + 1e-9 >= abs(float(rng["last"]) - float(stop)):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+        ticket = rng.get("ticket") if isinstance(rng.get("ticket"), dict) else {}
+        hold_side = str(
+            ticket.get("direction") or facts.get("direction") or "LONG"
+        ).upper()
+        if rng.get("above_low") is False and hold_side != "SHORT":
+            continue
+        if (
+            live_card_needs_hold_above_open(card=pick_name)
+            and rng.get("above_open") is False
+            and hold_side != "SHORT"
+        ):
+            continue
+        sketch = dict(ticket)
+        name = str(sym or sketch.get("symbol") or "").upper()
+        if name:
+            sketch["symbol"] = name
+        if sketch.get("stop_price") is None and rng.get("low") is not None:
+            sketch["stop_price"] = rng["low"]
+        side = str(sketch.get("direction") or facts.get("direction") or "LONG").upper()
+        tgt = session_target(rng, side)
+        if tgt is None and (
+            rng.get("retrace_30") is not None or rng.get("retrace_50") is not None
+        ):
+            continue
+        if tgt is not None:
+            existing = sketch.get("target_price")
+            if existing is None or session_target(
+                {"last": rng.get("last"), "retrace_30": existing}, side
+            ) is None:
+                sketch["target_price"] = tgt
+        if sketch.get("quantity") is None:
+            size = rng.get("size") if isinstance(rng.get("size"), dict) else {}
+            qty = size.get("card_qty") or size.get("qty")
+            if qty:
+                sketch["quantity"] = qty
+            elif size:
+                continue
+        if not sketch.get("strategy"):
+            sketch["strategy"] = type_name or facts.get("type")
+        if not sketch.get("card"):
+            sketch["card"] = pick_name or facts.get("card")
+        if not sketch.get("direction") and facts.get("direction"):
+            sketch["direction"] = facts["direction"]
+        if sketch.get("symbol") and sketch.get("card"):
+            return sketch
+    return None
+
+
+def apply_hunt_send_sketch(act: dict[str, Any], snap: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Fill omitted send fields from today's hunt sketch. Never overwrite Grok."""
+    if not isinstance(act, dict):
+        return None
+    store = snap.get("session_range") if isinstance(snap, dict) else None
+    sketch = hunt_send_sketch(store, tape=snap)
+    if not sketch:
+        return None
+    params = act.get("params")
+    if not isinstance(params, dict):
+        params = {}
+        act["params"] = params
+    strat = str(act.get("strategy") or act.get("action") or "").strip().lower()
+    want = str(sketch.get("strategy") or "").strip().lower()
+    if strat and want and strat != want:
+        return None
+    grok_card = str(params.get("card") or act.get("card") or "").strip()
+    sketch_card = str(sketch.get("card") or "").strip()
+    if grok_card and sketch_card and grok_card != sketch_card:
+        return None
+    grok_sym = str(params.get("symbol") or "").upper()
+    sketch_sym = str(sketch.get("symbol") or "").upper()
+    if grok_sym and sketch_sym and grok_sym != sketch_sym:
+        return None
+    filled: list[str] = []
+    for key in ("symbol", "direction", "stop_price", "target_price", "quantity", "card"):
+        if params.get(key) in (None, "") and sketch.get(key) not in (None, ""):
+            params[key] = sketch[key]
+            filled.append(key)
+    if not str(act.get("rationale") or "").strip():
+        card = str(params.get("card") or sketch_card or "").strip()
+        sym = str(params.get("symbol") or sketch_sym or "").strip()
+        act["rationale"] = f"card={card} {sym}".strip()
+        filled.append("rationale")
+    if filled:
+        act["_hunt_sketch"] = filled
+    return sketch if filled else None
+
+
+def hunt_recipe_has(name: str, book: dict[str, Any] | None = None) -> bool:
+    """Whether a live card's hunt order names this tool."""
+    want = str(name or "").strip()
+    if not want:
+        return False
+    for row in playbook_run_sheets(book, flat=True):
+        if want in (row.get("tool_order") or []):
+            return True
+    return False
+
+
+def playbook_run_sheets(
+    book: dict[str, Any] | None = None,
+    *,
+    tool_trace: list[str] | None = None,
+    last_look: list[str] | None = None,
+    flat: bool | None = None,
+    quoted: Any = None,
+    news: Any = None,
+    session_today: bool | None = None,
+    session_range: Any = None,
+    positions: Any = None,
+) -> list[dict[str, Any]]:
+    """Live cards as a run sheet: parent tool_order and the next unused tool.
+
+    Facts only. Clerk does not invent a thesis. After last look already ran
+    scan/news, the next look starts at the first unread hunt tool. A screen
+    that already stamped live last/bid/ask counts as quote. Headlines already
+    nested on that screen count as news.
+    """
+    state = book if isinstance(book, dict) else load_lab()
+    types = state.get("types") if isinstance(state.get("types"), dict) else {}
+    managing = flat is False
+    done = _effective_tool_trace(tool_trace, last_look, managing=managing)
+    if not managing and _scan_carries_news(news):
+        if "news" not in done:
+            done = list(done) + ["news"]
+    if not managing and _screen_quoted(quoted):
+        if "quote" not in done:
+            done = list(done) + ["quote"]
+    scored = {
+        card_key(row.get("type"), row.get("card")): row
+        for row in card_facts(state)
+    }
+    out: list[dict[str, Any]] = []
+    for type_name, card in walk_cards(state):
+        if not type_name:
+            continue
+        status = str(card.get("status") or "testing").strip().lower()
+        if status == "retired":
+            continue
+        stanza = types.get(type_name) if isinstance(types.get(type_name), dict) else {}
+        parent_order = _norm_recipe(
+            stanza.get("tool_order") or stanza.get("default_tool_recipe")
+        )
+        review = str(stanza.get("review") or card.get("review") or "").strip()
+        if managing:
+            # Review is prose, not a recipe. A line that only names book
+            # must not hide fills/quote/candles.
+            order = list(_DEFAULT_MANAGE_ORDER)
+        else:
+            order = parent_order or list(_DEFAULT_HUNT_ORDER)
+        score = scored.get(card_key(type_name, card.get("name"))) or {}
+        nxt = _next_in_order(order, done)
+        if (
+            not managing
+            and isinstance(quoted, dict)
+            and quoted.get("ok") is False
+        ):
+            done = [name for name in done if name != "scan"]
+            nxt = _next_in_order(order, done)
+        elif (
+            not managing
+            and "scan" in done
+            and quoted is not None
+            and _explicit_empty_tape(quoted)
+        ):
+            nxt = ""
+        if not managing and nxt == "send" and (
+            session_today is False or not _has_today_session(session_range)
+        ):
+            nxt = "candles"
+        row: dict[str, Any] = {
+            "type": type_name,
+            "card": card.get("name"),
+            "status": status,
+            "tool_order": order,
+            "next": nxt,
+            "sends": int(score.get("sends") or 0),
+            "resolved": int(score.get("resolved") or 0),
+        }
+        if session_today is False:
+            row["session_today"] = False
+        min_gap = live_card_min_gap_pct(state, card=card.get("name"))
+        if min_gap:
+            row["min_gap_pct"] = min_gap
+        min_px = live_card_scan_constraints(state, card=card.get("name")).get("min_price")
+        if min_px:
+            row["min_price"] = min_px
+        if not nxt:
+            row["next"] = ""
+            row["gate"] = "off"
+        if nxt == "send":
+            sketch = hunt_send_sketch(
+                session_range, tape=quoted, card=card.get("name")
+            )
+            if sketch:
+                book_note = live_card_book_error(sketch, positions, state)
+                if book_note:
+                    row["next"] = ""
+                    row["gate"] = "off"
+                else:
+                    row["send"] = sketch
+            elif _today_session_on_lows(session_range):
+                nxt = "candles"
+                row["next"] = "candles"
+                row["above_low"] = False
+            elif min_gap and _today_session_under_min_gap(session_range, min_gap):
+                row["next"] = ""
+                row["gate"] = "off"
+            else:
+                row["next"] = ""
+                row["gate"] = "off"
+        if score.get("sample_left") is not None:
+            row["sample_left"] = score.get("sample_left")
+        if score.get("looks_without_trigger") is not None:
+            row["looks_without_trigger"] = score.get("looks_without_trigger")
+        if score.get("days_without_trigger") is not None:
+            row["days_without_trigger"] = score.get("days_without_trigger")
+        if managing:
+            if review:
+                row["review"] = review[:240]
+        else:
+            when_on = str(card.get("when_on") or "").strip()
+            scan = str(card.get("scan") or "").strip()
+            if when_on:
+                row["when_on"] = when_on[:200]
+            if scan:
+                row["scan"] = scan[:160]
+            screens = live_card_scan_screens(state)
+            if screens:
+                row["screens"] = [
+                    scan_screen_key(str(s.get("arena") or ""), str(s.get("scan_code") or ""))
+                    for s in screens[:8]
+                    if s.get("arena") or s.get("scan_code")
+                ]
+        out.append(row)
+        if len(out) >= 6:
+            break
+    return out
+
+
 def playbook_glance(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
     """Score since the last write. Not the notebook text â€” Grok asks playbook() for that."""
     facts = playbook_facts(scorecard)
@@ -2354,8 +4080,11 @@ def playbook_glance(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
         "age_h": facts.get("age_h"),
         "since_write_edge": facts.get("since_write_edge"),
         "now_edge": facts.get("now_edge"),
+        "now_edge_pct_of_nl": facts.get("now_edge_pct_of_nl"),
+        "now_beating": facts.get("now_beating"),
         "win_4h": facts.get("win_4h"),
         "lots_at_write": list(facts.get("lots_at_write") or [])[:16],
+        "stale": playbook_is_stale(),
     }
 
 
@@ -2386,7 +4115,8 @@ def lab_facts(
     state = book if isinstance(book, dict) else load_lab()
     card_rows = rows if rows is not None else card_facts(state)
     by_status = {status: 0 for status in CARD_STATUSES}
-    awaiting: list[str] = []
+    awaiting: list[dict[str, Any]] = []
+    idle: list[dict[str, Any]] = []
     resolved_total = 0
     for row in card_rows:
         status = str(row.get("status") or "testing").strip().lower()
@@ -2394,19 +4124,124 @@ def lab_facts(
             by_status[status] += 1
         n = int(row.get("resolved") or 0)
         resolved_total += n
-        if status != "retired" and n == 0:
-            awaiting.append(_card_label(row))
+        if status == "retired":
+            continue
+        wait_row = {
+            "card": _card_label(row),
+            "sends": int(row.get("sends") or 0),
+            "resolved": n,
+            "looks": row.get("looks_without_trigger"),
+            "days": row.get("days_without_trigger"),
+            "last_send": row.get("last_send"),
+            "max_looks_without_trigger": row.get("max_looks_without_trigger"),
+        }
+        idle.append(wait_row)
+        if n == 0:
+            awaiting.append(wait_row)
     coverage = type_coverage(state)
     return {
         "cards": by_status,
         "resolved_trades": resolved_total,
         "cards_awaiting_first_trade": awaiting[:12],
+        "cards_without_trigger": idle[:12],
         "trunks_with_cards": [r["type"] for r in coverage if r["cards"]],
         "entry_trunks_untried": [
             r["type"] for r in coverage
             if not r["cards"] and r["type"] not in _MANAGEMENT_TRUNKS()
         ],
     }
+
+
+def lab_wake_bit(
+    book: dict[str, Any] | None = None,
+    *,
+    tool_trace: list[str] | None = None,
+    last_look: list[str] | None = None,
+    flat: bool | None = None,
+    quoted: Any = None,
+    session_range: Any = None,
+    positions: Any = None,
+) -> str:
+    """One wake-line clause: the waiting card and the next unused tool.
+
+    Counts and the parent tool_order only. Which structure to test is Grok's.
+    """
+    try:
+        facts = lab_facts(book)
+    except Exception:
+        return ""
+    bits: list[str] = []
+    awaiting = facts.get("cards_awaiting_first_trade") or []
+    if awaiting:
+        top = awaiting[0] if isinstance(awaiting[0], dict) else {}
+        name = str(top.get("card") or "").split(" [")[0][:40]
+        wait: list[str] = []
+        looks = top.get("looks")
+        days = top.get("days")
+        if isinstance(looks, int):
+            wait.append(f"{looks}looks")
+        if isinstance(days, (int, float)) and days:
+            wait.append(f"{days:g}d")
+        wait.append("0sends")
+        if name:
+            bits.append(f"lab {name} {'/'.join(wait)}")
+    try:
+        sheets = playbook_run_sheets(
+            book,
+            tool_trace=tool_trace,
+            last_look=last_look,
+            flat=flat,
+            quoted=quoted,
+            session_range=session_range,
+            positions=positions,
+        )
+    except Exception:
+        sheets = []
+    if sheets:
+        sheet = sheets[0]
+        for cand in sheets:
+            send_row = cand.get("send")
+            if cand.get("next") == "send" and isinstance(send_row, dict) and send_row.get("symbol"):
+                sheet = cand
+                break
+        else:
+            for cand in sheets:
+                if cand.get("gate") != "off" and cand.get("next"):
+                    sheet = cand
+                    break
+        if not awaiting:
+            name = str(sheet.get("card") or "").strip()[:40]
+            if name:
+                bits.append(f"lab {name}")
+        nxt = str(sheet.get("next") or "").strip()
+        if sheet.get("gate") == "off":
+            bits.append("gate=off")
+        if nxt:
+            bits.append(f"next={nxt}")
+        looks = sheet.get("looks_without_trigger")
+        if isinstance(looks, int) and looks and not awaiting:
+            bits.append(f"{looks}looks_no_trigger")
+        if nxt == "scan":
+            screens = sheet.get("screens") or []
+            if screens:
+                bits.append(str(screens[0])[:40])
+        send = sheet.get("send") if nxt == "send" else None
+        if isinstance(send, dict) and send.get("symbol"):
+            card = str(send.get("card") or "").strip()
+            bit = f"send {send['symbol']}"
+            if card:
+                bit += f" card={card[:40]}"
+            bits.append(bit)
+    else:
+        untried = facts.get("entry_trunks_untried") or []
+        if untried:
+            bits.append(f"untried={len(untried)}")
+    try:
+        if playbook_is_stale(book):
+            bits.append("book_stale")
+    except Exception:
+        pass
+    return " ".join(bits)
 
 
 def playbook_facts(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2578,28 +4413,32 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
         "promoted": bool(lab.get("promoted")),
         "written_at": lab.get("written_at") or lab.get("promoted_at"),
         "paper_score": lab.get("paper_score") or {},
-        "types": types,
-        "instructions": inst,
         "instructions_n": len(inst),
+        "stale": playbook_is_stale(lab) if paper else False,
     }
     cards = _flat_card_projection(lab)
     facts_by_card = card_facts(lab)
+    last_facts: dict[str, Any] = {}
+    try:
+        from abcxauto.think_stream import last_look_for_hunt
+
+        last_facts = last_look_for_hunt()
+    except Exception:
+        last_facts = {}
+    last_tools = list(last_facts.get("tools") or [])
     out: dict[str, Any] = {
         "scope": "lab" if paper else "live",
-        "tree": notebook_text(lab),
-        "cards": cards,
-        "types": types,
-        "unfiled_cards": list(lab.get(UNFILED_KEY) or []),
-        "card_scores": facts_by_card,
-        "graduated": [_card_label(r) for r in facts_by_card if r.get("graduated")],
-        "tripped": [_card_label(r) for r in facts_by_card if r.get("tripped")],
-        "needs_declaration": [
-            _card_label(r)
-            for r in facts_by_card
-            if r.get("needs_retire_if") or r.get("needs_thesis")
-        ],
-        "strategy_scores": strategy_scores(),
+        # Facts and the notebook before the score tables. Copying types into
+        # current plus a trailing tree used to blow the 24k tool clip and
+        # return broken JSON — Grok then re-hunted a card it had already
+        # written.
         "lab": lab_facts(lab, rows=facts_by_card),
+        "run": playbook_run_sheets(
+            lab,
+            last_look=last_tools,
+            quoted=last_facts,
+            session_range=last_facts.get("session_range"),
+        ),
         "score": {
             "revision": facts.get("revision"),
             "age_h": facts.get("age_h"),
@@ -2619,9 +4458,22 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
             "now_edge_pct_of_nl": facts.get("now_edge_pct_of_nl"),
             "since_write_edge_pct_of_nl": facts.get("since_write_edge_pct_of_nl"),
         },
-        "current": current,
-        "facts": facts,
+        "cards": cards,
+        "tree": notebook_text(lab),
+        "card_scores": facts_by_card,
+        "graduated": [_card_label(r) for r in facts_by_card if r.get("graduated")],
+        "tripped": [_card_label(r) for r in facts_by_card if r.get("tripped")],
+        "needs_declaration": [
+            _card_label(r)
+            for r in facts_by_card
+            if r.get("needs_retire_if") or r.get("needs_thesis")
+        ],
+        "strategy_scores": strategy_scores(),
+        "unfiled_cards": list(lab.get(UNFILED_KEY) or []),
         "ledger": [_compact_card(r) for r in ensure_ledger(lab)],
+        "facts": facts,
+        "current": current,
+        "types": types,
     }
     if revision in (None, ""):
         return out

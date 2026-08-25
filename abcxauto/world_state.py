@@ -1232,6 +1232,8 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     except Exception:
         tape_seed = []
     mins_open = _minutes_to_open(world)
+    pulse = getattr(world, "pulse", None) if isinstance(getattr(world, "pulse", None), dict) else {}
+    sess_block = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
     return {
         "nl": nl,
         "ibkr_daily_pnl": daily,
@@ -1266,7 +1268,7 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         # Ceiling knob — not the working size. Wake prints max_risk=, not risk/trade=.
         "max_risk_per_trade_pct": risk_pct,
         "risk_per_trade_pct": risk_pct,
-        "playbook": _playbook_day(sc),
+        "playbook": _playbook_day(sc, flat=getattr(world, "flat", None)),
         "lot_lasts": lot_lasts,
         "working_exits": working_exits,
         "halt_trips_at_usd": halt_at,
@@ -1282,10 +1284,17 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         # Optional seed for tools; format_wake does not print tape=.
         "tape_seed": tape_seed,
         "minutes_to_open": mins_open,
+        "countdown_to": sess_block.get("countdown_to"),
+        "countdown_human": sess_block.get("countdown_human"),
+        "tradable_now": pulse.get("tradable_now"),
     }
 
 
-def _playbook_day(scorecard: dict[str, Any] | None) -> dict[str, Any]:
+def _playbook_day(
+    scorecard: dict[str, Any] | None,
+    *,
+    flat: bool | None = None,
+) -> dict[str, Any]:
     """Glance only when the notebook has instructions. Revision alone is not law."""
     try:
         from abcxauto.lab_playbook import load_lab, playbook_glance
@@ -1295,6 +1304,23 @@ def _playbook_day(scorecard: dict[str, Any] | None) -> dict[str, Any]:
             return {}
         glance = playbook_glance(scorecard)
         glance["has_instructions"] = True
+        try:
+            from abcxauto.lab_playbook import lab_wake_bit
+            from abcxauto.think_stream import last_look_for_hunt
+
+            last_facts = last_look_for_hunt()
+            last_tools = list(last_facts.get("tools") or [])
+            bit = lab_wake_bit(
+                lab,
+                last_look=last_tools,
+                flat=flat,
+                quoted=last_facts,
+                session_range=last_facts.get("session_range"),
+            )
+            if bit:
+                glance["lab_wake"] = bit
+        except Exception:
+            pass
         return glance
     except Exception:
         return {}
@@ -1362,7 +1388,7 @@ def _ibkr_live_mark(
     snap: dict[str, Any],
     positions: list[dict],
 ) -> tuple[str, Any]:
-    """Live mark from this snap. Empty book does not default to SPY."""
+    """Live mark from this snap. Empty book does not default to SPY or scan junk."""
     from abcxauto.trade_plan import book_has_risk
 
     quotes = snap.get("ibkr_live_quotes") or {}
@@ -1371,22 +1397,23 @@ def _ibkr_live_mark(
     explicit = str(snap.get("ibkr_live_symbol") or "").strip()
     last_raw = snap.get("ibkr_live_last")
     empty = not book_has_risk(positions)
+    if empty:
+        # quote() may pin a candidate. A scan sweep must not.
+        if explicit and last_raw is not None:
+            return explicit, last_raw
+        return "", None
     if explicit:
         sym = explicit
-    elif empty:
-        sym = ""
     elif "SPY" in quotes:
         sym = "SPY"
     else:
         sym = ""
     if last_raw is not None:
         last = last_raw
-    elif empty and not explicit:
-        last = None
     elif sym and sym in quotes:
         last = quotes.get(sym)
     else:
-        last = None if empty else quotes.get("SPY")
+        last = quotes.get("SPY")
     return str(sym), last
 
 
@@ -1468,15 +1495,12 @@ def format_wake(
     open_n = cap.get("open_count", cap.get("open"))
     max_n = cap.get("max_open_positions", cap.get("max"))
     ev = None
-    offer_wake = False
     try:
-        from abcxauto.wake_bus import last_wake, set_wake_offered
+        from abcxauto.wake_bus import last_wake
 
         ev = last_wake()
-        offer_wake = set_wake_offered(session=session)
     except Exception:
         ev = None
-        offer_wake = False
     brief: dict[str, Any] = {}
     try:
         from abcxauto.think_stream import load_desk_brief
@@ -1522,18 +1546,36 @@ def format_wake(
             parts.append(f"{port_bits}.")
         if lot_s:
             parts.append(f"open_lots={lot_s}.")
+        if (
+            str(session or "").lower() == "regular"
+            and day.get("countdown_to") == "close"
+            and day.get("countdown_human")
+        ):
+            parts.append(f"close_in={day.get('countdown_human')}.")
+        tradable = day.get("tradable_now") if isinstance(day.get("tradable_now"), dict) else {}
+        if tradable.get("equity_rth") is False:
+            parts.append("equity_rth=off.")
         if day.get("lot_lasts"):
             parts.append(f"{day.get('lot_lasts')}.")
         if day.get("working_exits"):
             parts.append(f"exits={day.get('working_exits')}.")
-        if day.get("candle_source"):
-            parts.append(f"candles={day.get('candle_source')}.")
+        src = str(day.get("candle_source") or "").strip()
+        if src and src not in ("none",):
+            parts.append(f"candles={src}.")
         if mix_s:
             parts.append(f"mix={mix_s}.")
         if ev is not None:
             parts.append(f"event={ev.kind} {ev.detail}.".strip())
         if live_lots and prev_strat:
             parts.append(f"prev={prev_strat} sends={prev_sends}.")
+        try:
+            from abcxauto.think_stream import last_look_wake_bit
+
+            last_s = last_look_wake_bit(brief)
+        except Exception:
+            last_s = ""
+        if last_s:
+            parts.append(f"{last_s}.")
         pb = day.get("playbook") if isinstance(day.get("playbook"), dict) else {}
         if _playbook_is_law(pb):
             parts.append(
@@ -1547,7 +1589,10 @@ def format_wake(
             ledger = format_ledger_line(pb)
             if ledger:
                 parts.append(f"ledger {ledger}.")
-    parts.append("send|set_wake." if offer_wake else "send.")
+            lab_s = str(pb.get("lab_wake") or "").strip()
+            if lab_s:
+                parts.append(f"{lab_s}.")
+    parts.append("send.")
     return " ".join(parts)
 
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_REAL_POPEN = subprocess.Popen
 
 _REPO = Path(__file__).resolve().parents[1]
 STOP_PATH = _REPO / "data" / "state" / "operator_stop.json"
@@ -236,6 +237,84 @@ def note(msg: str, *, warn: bool = False) -> None:
         pass
 
 
+def orphan_flet_pids(
+    rows: list[dict[str, Any]],
+    *,
+    repo: str = "",
+    pid_alive: Any = None,
+) -> list[int]:
+    """Flet windows for this repo whose python parent is already dead."""
+    root = str(repo or _REPO)
+    alive = _pid_alive if pid_alive is None else pid_alive
+    out: list[int] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("Name") or "").lower()
+        if name != "flet.exe":
+            continue
+        cmd = str(row.get("cmd") or row.get("CommandLine") or "")
+        if root.lower() not in cmd.lower():
+            continue
+        try:
+            parent = int(row.get("parent") or row.get("ParentProcessId") or 0)
+            pid = int(row.get("pid") or row.get("ProcessId") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        if parent > 0 and alive(parent):
+            continue
+        out.append(pid)
+    return out
+
+
+def sweep_orphan_flet_windows() -> list[int]:
+    """Stop leftover ABCXAUTO windows after a python-only kill/reload."""
+    if os.name != "nt":
+        return []
+    try:
+        proc = _REAL_POPEN(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='flet.exe'\" | "
+                "Select-Object ProcessId,ParentProcessId,Name,CommandLine | "
+                "ConvertTo-Json -Compress",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        raw, _ = proc.communicate(timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    try:
+        parsed = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    killed = orphan_flet_pids(
+        [r for r in parsed if isinstance(r, dict)],
+        repo=str(_REPO),
+    )
+    for pid in killed:
+        try:
+            killer = _REAL_POPEN(
+                ["taskkill", "/F", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            killer.communicate(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+    if killed:
+        note(f"supervisor: swept orphan flet {killed}")
+    return killed
+
+
 def supervise(child_env: dict[str, str] | None = None) -> int:
     """Run Pro as a child. Relaunch on crash during useful hours if TWS is up."""
     try:
@@ -250,6 +329,10 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
     env["ABCXAUTO_SUPERVISED"] = "1"
     backoff = 15.0
     while True:
+        try:
+            sweep_orphan_flet_windows()
+        except Exception:
+            logger.debug("orphan flet sweep skipped", exc_info=True)
         proc = subprocess.Popen(
             [sys.executable, "-m", "abcxauto"],
             env=env,

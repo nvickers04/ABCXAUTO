@@ -9,6 +9,9 @@ import pytest
 
 from abcxauto.proposals import ProposalValidationError, validate_proposal
 from abcxauto.structure_grade import (
+    GEOMETRY_QUOTE_REQUIRED,
+    GEOMETRY_STOP_TOO_TIGHT,
+    GEOMETRY_STOP_TOO_WIDE,
     GEOMETRY_STOP_WRONG_SIDE,
     SCRAPE_SUSPECT,
     STRUCTURE_OK,
@@ -36,6 +39,29 @@ def test_qqq_inverted_stop_rejected():
     assert "below" in msg.lower() or "wrong-side" in msg.lower()
 
 
+def test_new_risk_geometry_rejects_a_price_hint_as_live():
+    params = {
+        "symbol": "SNDK",
+        "quantity": 10,
+        "direction": "LONG",
+        "stop_price": 88.0,
+        "target_price": 93.0,
+        "price_hint": 91.5,
+    }
+    ok, code, msg = check_live_geometry(
+        "market_bracket", params, quote_last=None, require_live=True
+    )
+    assert ok is False
+    assert code == GEOMETRY_QUOTE_REQUIRED
+    assert "IBKR live last" in msg
+    ok2, code2, _ = check_live_geometry(
+        "market_bracket", params, quote_last=91.5, require_live=True,
+        session={"low": 88.0, "today": True},
+    )
+    assert ok2 is True
+    assert code2 == STRUCTURE_OK
+
+
 def test_valid_long_market_bracket_passes():
     params = {
         "symbol": "QQQ",
@@ -50,6 +76,62 @@ def test_valid_long_market_bracket_passes():
     )
     assert ok is True
     assert code == STRUCTURE_OK
+
+
+def test_opening_low_stop_skips_percent_bands():
+    """A ≥6% gap card stops under the opening low — not the 0.2–5% posture band."""
+    params = {
+        "symbol": "SNDK",
+        "quantity": 2,
+        "direction": "LONG",
+        "stop_price": 92.0,
+        "target_price": 104.0,
+        "price_hint": 100.0,
+    }
+    wide = check_live_geometry(
+        "market_bracket", params, quote_last=100.0, posture="balanced"
+    )
+    assert wide[0] is False
+    assert wide[1] == GEOMETRY_STOP_TOO_WIDE
+    ok, code, msg = check_live_geometry(
+        "market_bracket",
+        params,
+        quote_last=100.0,
+        posture="balanced",
+        session={"low": 92.0, "high": 101.0, "today": True},
+    )
+    assert ok is True
+    assert code == STRUCTURE_OK
+    assert "session" in msg
+    tight = {
+        **params,
+        "stop_price": 99.85,
+        "target_price": 104.0,
+        "price_hint": 100.0,
+    }
+    bare_tight = check_live_geometry(
+        "market_bracket", tight, quote_last=100.0, posture="balanced"
+    )
+    assert bare_tight[0] is False
+    assert bare_tight[1] == GEOMETRY_STOP_TOO_TIGHT
+    pinned, pin_code, _ = check_live_geometry(
+        "market_bracket",
+        tight,
+        quote_last=100.0,
+        posture="balanced",
+        session={"low": 99.85, "high": 101.0, "today": True},
+    )
+    assert pinned is True
+    assert pin_code == STRUCTURE_OK
+    stale = check_live_geometry(
+        "market_bracket",
+        params,
+        quote_last=100.0,
+        posture="balanced",
+        session={"low": 92.0, "high": 101.0, "today": False},
+    )
+    assert stale[0] is False
+    assert stale[1] == GEOMETRY_STOP_TOO_WIDE
 
 
 def test_validate_proposal_blocks_qqq_geometry():
