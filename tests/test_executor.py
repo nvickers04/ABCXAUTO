@@ -99,7 +99,7 @@ async def test_dispatch_maps_strategy_to_gateway_method(strategy):
     # Fields with Field(exclude=True) stay on the model for gates but never hit IBKR.
     from abcxauto.world_state import COMBO_STRATS
 
-    _never_dispatch = frozenset({"price_hint"})
+    _never_dispatch = frozenset({"price_hint", "card"})
     for key, value in VALID_PAYLOADS[strategy].items():
         if key == "closing_position" and strategy not in COMBO_STRATS:
             assert key not in kwargs

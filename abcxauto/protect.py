@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from abcxauto.structure_grade import posture_stop_bands
+from abcxauto.structure_grade import posture_stop_bands, session_usable
 
 _NAKED_OPEN = frozenset({"market_order", "limit_order", "stop_order"})
 _PROTECT_STRATS = frozenset({"market_bracket", "bracket", "oca"})
@@ -128,8 +128,14 @@ def fill_missing_protection(
     posture: str = "balanced",
     cfg: Any = None,
     positions: list | None = None,
+    session: Any = None,
 ) -> list[str]:
-    """Fill omitted stop / target / qty. Never overwrite Grok's numbers."""
+    """Fill omitted stop / target / qty. Never overwrite Grok's numbers.
+
+    When this look already has today's session range, a missing stop is the
+    opening low (LONG) / high (SHORT) and a missing target is the 30% retrace
+    if it sits on the right side of live. That is the written card, not a 1% band.
+    """
     if not isinstance(act, dict):
         return []
     strat = str(act.get("strategy") or act.get("action") or "").strip().lower()
@@ -151,19 +157,53 @@ def fill_missing_protection(
     lo, hi = posture_stop_bands(posture)
     stop_pct = min(hi, max(lo, _DEFAULT_STOP_PCT))
     stop_dist = quote * stop_pct
+    tape = session if session_usable(session) else None
+    invent_bands = True
+    if tape is None:
+        try:
+            from abcxauto.lab_playbook import live_card_needs_session
+
+            invent_bands = not live_card_needs_session()
+        except Exception:
+            invent_bands = True
 
     if _missing(params, "stop_price"):
-        if direction == "LONG":
+        if tape and direction == "LONG" and tape.get("low") not in (None, ""):
+            params["stop_price"] = _px(tape["low"])
+            filled.append("stop_price")
+        elif tape and direction == "SHORT" and tape.get("high") not in (None, ""):
+            params["stop_price"] = _px(tape["high"])
+            filled.append("stop_price")
+        elif invent_bands and direction == "LONG":
             params["stop_price"] = _px(quote - stop_dist)
-        else:
+            filled.append("stop_price")
+        elif invent_bands:
             params["stop_price"] = _px(quote + stop_dist)
-        filled.append("stop_price")
+            filled.append("stop_price")
     if _missing(params, "target_price"):
-        if direction == "LONG":
+        retrace = None
+        if tape:
+            try:
+                from abcxauto.lab_playbook import session_target
+
+                row = dict(tape)
+                if quote > 0:
+                    row["last"] = quote
+                retrace = session_target(row, direction)
+            except Exception:
+                retrace = None
+        if direction == "LONG" and retrace is not None and retrace > quote:
+            params["target_price"] = _px(retrace)
+            filled.append("target_price")
+        elif direction == "SHORT" and retrace is not None and retrace < quote:
+            params["target_price"] = _px(retrace)
+            filled.append("target_price")
+        elif invent_bands and direction == "LONG":
             params["target_price"] = _px(quote + stop_dist)
-        else:
+            filled.append("target_price")
+        elif invent_bands:
             params["target_price"] = _px(quote - stop_dist)
-        filled.append("target_price")
+            filled.append("target_price")
     if strat == "bracket" and _missing(params, "entry_price"):
         params["entry_price"] = _px(quote)
         filled.append("entry_price")
@@ -562,3 +602,41 @@ def _size_from_risk(
     cap_qty = int((eq * (pos_pct / 100.0)) / quote)
     qty = min(risk_qty, cap_qty)
     return qty if qty >= 1 else 0
+
+
+def size_if_stop(
+    *,
+    last: Any,
+    stop: Any,
+    equity: Any,
+    cfg: Any = None,
+) -> dict[str, Any]:
+    """Shares that fit the live knobs if the stop is ``stop``. Not a ticket."""
+    try:
+        last_f = float(last)
+        stop_f = float(stop)
+        eq = float(equity)
+    except (TypeError, ValueError):
+        return {}
+    if last_f <= 0 or stop_f <= 0 or eq <= 0:
+        return {}
+    dist = abs(last_f - stop_f)
+    if dist <= 0:
+        return {}
+    if cfg is None:
+        try:
+            from abcxauto.config import get_config
+
+            cfg = get_config()
+        except Exception:
+            return {}
+    qty = _size_from_risk(quote=last_f, stop=stop_f, equity=eq, cfg=cfg)
+    if qty < 1:
+        return {}
+    return {
+        "qty": qty,
+        "stop": round(stop_f, 4),
+        "last": round(last_f, 4),
+        "risk_per_share": round(dist, 4),
+        "risk_usd": round(qty * dist, 2),
+    }

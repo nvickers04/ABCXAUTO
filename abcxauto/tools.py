@@ -33,7 +33,7 @@ def _quote_symbols(args: Dict[str, Any]) -> List[str]:
         sym = str(item or "").strip().upper()
         if sym and sym not in out:
             out.append(sym)
-        if len(out) >= 8:
+        if len(out) >= 12:
             break
     return out
 

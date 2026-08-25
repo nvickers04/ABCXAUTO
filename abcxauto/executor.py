@@ -778,11 +778,12 @@ async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
         proposal = validate_proposal(
             strategy,
             params,
-            action.get("rationale", "auto"),
+            str(action.get("rationale") or "auto"),
             action.get("max_loss"),
             action.get("max_gain"),
             quote_last=float(quote_last) if quote_last is not None else None,
             posture=str(posture) if posture else None,
+            session=action.get("_session"),
         )
     except ProposalValidationError as e:
         err = str(e)

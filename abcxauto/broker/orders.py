@@ -57,6 +57,27 @@ def modify_did_stick(*, requested: float, live: float | None, tol: float = 0.005
     return abs(float(live) - float(requested)) <= tol
 
 
+def _action_matches(got: Any, want: str) -> bool:
+    """BUY matches BOT; SELL matches SLD. Empty/other is not a match."""
+    g = str(got or "").upper()
+    w = str(want or "").upper()
+    if w == "BUY":
+        return g in ("BUY", "BOT")
+    if w == "SELL":
+        return g in ("SELL", "SLD")
+    return False
+
+
+def _no_fill() -> Dict[str, Any]:
+    return {
+        "filled": False,
+        "fill_status": "NotFound",
+        "avg_fill_price": None,
+        "filled_quantity": 0,
+        "reconciled": False,
+    }
+
+
 class IBKROrdersMixin:
     """
     Mixin class providing order placement and management methods.
@@ -346,16 +367,16 @@ class IBKROrdersMixin:
                 except Exception as _cancel_err:
                     logger.debug(f"Cancel unfilled entry failed (may already be cancelled): {_cancel_err}")
 
-                # Fetch current bid/ask from MDA so caller can make informed retry decision
+                # Fetch current bid/ask from IBKR so caller can retry on live tape
                 current_bid, current_ask = None, None
                 try:
-                    from abcxauto.marketdata.provider import get_data_provider
-                    _q = get_data_provider().get_quote(symbol)
-                    if _q:
-                        current_bid = _q.bid if _q.bid and _q.bid > 0 else None
-                        current_ask = _q.ask if _q.ask and _q.ask > 0 else None
+                    fn = getattr(self, "get_live_quote", None)
+                    _q = await fn(symbol, fresh=True) if callable(fn) else None
+                    if isinstance(_q, dict) and not _q.get("error"):
+                        current_bid = _q.get("bid") if _q.get("bid") and float(_q.get("bid") or 0) > 0 else None
+                        current_ask = _q.get("ask") if _q.get("ask") and float(_q.get("ask") or 0) > 0 else None
                 except Exception as _mkt_err:
-                    logger.debug(f"MDA quote fetch failed for {symbol}: {_mkt_err}")
+                    logger.debug(f"IBKR quote fetch failed for {symbol}: {_mkt_err}")
 
                 result = {
                     'success': False,
@@ -623,8 +644,18 @@ class IBKROrdersMixin:
                     'symbol': symbol,
                 }
 
-        filled_qty = int(entry.get('filled_quantity') or quantity)
-        fill_price = entry.get('avg_fill_price')
+        try:
+            filled_qty = int(entry.get('filled_quantity') or 0)
+        except (TypeError, ValueError):
+            filled_qty = 0
+        if filled_qty <= 0:
+            return {
+                'success': False,
+                'filled': False,
+                'reason': 'Market entry fill has no quantity',
+                'symbol': symbol,
+            }
+        fill_price = _finite_px(entry.get('avg_fill_price'))
 
         protection = await self.place_oca(symbol, filled_qty, direction, stop_price, target_price)
         if protection.get('error') or not protection.get('success'):
@@ -885,7 +916,7 @@ class IBKROrdersMixin:
                             f"Market order fill-wait missed but reconciled for {symbol}"
                         )
             else:
-                # Trade already gone from open book — reconcile via fills / positions.
+                # Trade already gone from open book — reconcile via fills.
                 reconciled = await self._reconcile_market_fill(
                     symbol=symbol,
                     action=action,
@@ -908,21 +939,17 @@ class IBKROrdersMixin:
         return result
 
     def _find_trade_by_order_id(self, order_id: int):
-        """Find a Trade in open or completed trades by order id."""
+        """Find a Trade in open or completed trades by order id or permId."""
         if order_id is None:
             return None
-        try:
-            for t in self.ib.openTrades():
-                if t.order.orderId == order_id:
+        for getter in ("openTrades", "trades"):
+            try:
+                rows = getattr(self.ib, getter)()
+            except Exception:
+                continue
+            for t in rows or []:
+                if _oid_matches(getattr(t, "order", None), order_id):
                     return t
-        except Exception:
-            pass
-        try:
-            for t in self.ib.trades():
-                if t.order.orderId == order_id:
-                    return t
-        except Exception:
-            pass
         return None
 
     async def _reconcile_market_fill(
@@ -933,63 +960,101 @@ class IBKROrdersMixin:
         quantity: int,
         order_id: int | None,
     ) -> Dict[str, Any]:
-        """Confirm a market fill when the Trade left openTrades too fast."""
+        """Confirm a market fill from this order's execution, not last or a lot.
+
+        Paper often drops the Trade from openTrades after a fast fill. We still
+        require this order id, this symbol, this side, a real filled qty, and
+        an execution price. Requested qty, last/market_price, and a pre-existing
+        same-side position are not a fill.
+        """
+        del quantity  # never invent filled size from the ticket
+        try:
+            order_key = int(order_id) if order_id is not None else None
+        except (TypeError, ValueError):
+            order_key = None
+        if order_key is None:
+            return _no_fill()
+
         sym = str(symbol or "").upper()
-        # Prefer execution report for this order id.
+        want_action = str(action or "").upper()
+        if not sym or want_action not in ("BUY", "SELL"):
+            return _no_fill()
+
+        # Prefer the Trade / orderStatus for this order id.
         try:
             for t in self.ib.trades():
-                if order_id is not None and t.order.orderId != order_id:
+                if not _oid_matches(getattr(t, "order", None), order_key):
                     continue
-                status = getattr(t.orderStatus, "status", "") or ""
-                filled_qty = int(getattr(t.orderStatus, "filled", 0) or 0)
-                avg = getattr(t.orderStatus, "avgFillPrice", None)
-                if status == "Filled" or filled_qty > 0:
+                t_sym = str(getattr(getattr(t, "contract", None), "symbol", "") or "").upper()
+                if t_sym != sym:
+                    continue
+                t_action = str(getattr(getattr(t, "order", None), "action", "") or "")
+                if not _action_matches(t_action, want_action):
+                    continue
+                status = getattr(getattr(t, "orderStatus", None), "status", "") or ""
+                try:
+                    filled_qty = int(getattr(t.orderStatus, "filled", 0) or 0)
+                except (TypeError, ValueError):
+                    filled_qty = 0
+                avg = _finite_px(getattr(getattr(t, "orderStatus", None), "avgFillPrice", None))
+                if filled_qty > 0 and avg is not None:
                     return {
                         "filled": True,
                         "fill_status": status or "Filled",
-                        "avg_fill_price": float(avg) if avg else None,
-                        "filled_quantity": filled_qty or int(quantity),
+                        "avg_fill_price": avg,
+                        "filled_quantity": filled_qty,
                         "reconciled": True,
                     }
         except Exception as exc:
             logger.debug("reconcile via trades failed: %s", exc)
 
-        # Fall back: position in the expected direction appeared.
+        # Execution prints for this order (what the docstring always promised).
         try:
-            positions = await self.get_positions()
-        except Exception:
-            positions = []
-        want_sign = 1 if str(action).upper() == "BUY" else -1
-        for p in positions or []:
-            if str(p.get("symbol") or "").upper() != sym:
-                continue
-            try:
-                qty = float(p.get("quantity") or p.get("position") or 0)
-            except (TypeError, ValueError):
-                continue
-            if qty == 0:
-                continue
-            if (qty > 0 and want_sign > 0) or (qty < 0 and want_sign < 0):
-                avg = p.get("avg_cost") or p.get("avgCost") or p.get("market_price")
+            fills_fn = getattr(self.ib, "fills", None)
+            fills = fills_fn() if callable(fills_fn) else []
+            qty = 0
+            notional = 0.0
+            for f in fills or []:
+                ex = getattr(f, "execution", None)
+                if ex is None:
+                    continue
+                if not (
+                    _oid_matches(ex, order_key)
+                    or _oid_matches(getattr(f, "order", None), order_key)
+                ):
+                    continue
+                f_sym = str(
+                    getattr(getattr(f, "contract", None), "symbol", "")
+                    or getattr(ex, "symbol", "")
+                    or ""
+                ).upper()
+                if f_sym != sym:
+                    continue
+                if not _action_matches(getattr(ex, "side", None), want_action):
+                    continue
                 try:
-                    avg_f = float(avg) if avg is not None else None
+                    shares = int(getattr(ex, "shares", 0) or 0)
                 except (TypeError, ValueError):
-                    avg_f = None
+                    shares = 0
+                px = _finite_px(getattr(ex, "price", None)) or _finite_px(
+                    getattr(ex, "avgPrice", None)
+                )
+                if shares <= 0 or px is None:
+                    continue
+                qty += shares
+                notional += px * shares
+            if qty > 0 and notional > 0:
                 return {
                     "filled": True,
-                    "fill_status": "ReconciledFromPosition",
-                    "avg_fill_price": avg_f,
-                    "filled_quantity": int(abs(qty)) if abs(qty) >= 1 else int(quantity),
+                    "fill_status": "Filled",
+                    "avg_fill_price": notional / qty,
+                    "filled_quantity": qty,
                     "reconciled": True,
-                    "conId": p.get("conId") or p.get("con_id"),
                 }
-        return {
-            "filled": False,
-            "fill_status": "NotFound",
-            "avg_fill_price": None,
-            "filled_quantity": 0,
-            "reconciled": False,
-        }
+        except Exception as exc:
+            logger.debug("reconcile via fills failed: %s", exc)
+
+        return _no_fill()
 
     # ========== MODIFY ORDER ==========
 
@@ -1395,25 +1460,25 @@ class IBKROrdersMixin:
 
             if limit_price is None:
                 try:
-                    from abcxauto.marketdata.client import get_marketdata_client
-
-                    exp = contract.lastTradeDateOrContractMonth  # YYYYMMDD
-                    occ = (
-                        f"{contract.symbol}{exp[2:]}"
-                        f"{contract.right.upper()[0]}"
-                        f"{int(round(contract.strike * 1000)):08d}"
-                    )
-                    q = await get_marketdata_client().get_option_quote(occ)
-                    if q:
-                        bid, ask = q.get('bid'), q.get('ask')
-                        limit_price = q.get('mid') or q.get('last') or (
-                            (bid + ask) / 2 if bid and ask else None
+                    fn = getattr(self, "get_live_option_quote", None)
+                    if callable(fn):
+                        live = await fn(
+                            contract.symbol,
+                            contract.lastTradeDateOrContractMonth,
+                            contract.strike,
+                            contract.right,
                         )
+                        from abcxauto.prints import live_limit_px
+
+                        limit_price = live_limit_px(live if isinstance(live, dict) else None)
                         if limit_price:
-                            limit_price = round(float(limit_price), 2)
-                            logger.info(f"External mid for close {occ}: {limit_price}")
+                            logger.info(
+                                "IBKR mid for close %s: %s",
+                                getattr(contract, "conId", None),
+                                limit_price,
+                            )
                 except Exception as e:
-                    logger.debug(f"External price fallback failed for {symbol}: {e}")
+                    logger.debug(f"IBKR close quote failed for {symbol}: {e}")
                 if not limit_price:
                     limit_price = None  # MKT fallback only as last resort
 

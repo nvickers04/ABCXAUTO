@@ -1,8 +1,8 @@
-"""ActiveTradePlan(s) — durable open-trade lifecycle across cycles.
+"""ActiveTradePlan(s) — IBKR open-risk reconciliation, not a second notebook.
 
-Multi-plan book: ``active_trade_plans.json`` holds all open STK plans.
-Legacy ``active_trade_plan.json`` migrates on load. Broker book is source of
-truth; confirmed-flat (not a single empty snap) closes plans.
+Multi-plan book: ``active_trade_plans.json`` holds STK lots vs working exits.
+Thesis / lifecycle live on the playbook card tagged at send. Broker book is
+source of truth; confirmed-flat (not a single empty snap) closes plans.
 """
 
 from __future__ import annotations
@@ -234,10 +234,11 @@ def plan_from_bracket_action(act: dict, thesis: str = "") -> Optional[ActiveTrad
         entry = float(params["entry_price"]) if params.get("entry_price") is not None else None
     except (TypeError, ValueError):
         entry = None
+    _ = thesis
     return ActiveTradePlan(
         symbol=symbol,
         direction=direction if direction in ("LONG", "SHORT") else "LONG",
-        thesis=(thesis or str((act or {}).get("rationale") or ""))[:500],
+        thesis="",
         invalidation=f"stop {stop}" if stop else "stop hit",
         entry_price=entry,
         stop_price=stop,
@@ -441,15 +442,28 @@ def stacked_stop_cancel_ids(
     return to_cancel
 
 
+def _per_order_stop_qty(
+    open_orders: list[dict] | None, symbol: str, direction: str, held: float
+) -> tuple[float | None, bool]:
+    """One working STP/TRAIL qty vs held. Stacked crumbs that sum are not a cover."""
+    qtys = [q for _o, q in iter_working_stops(open_orders, symbol, direction)]
+    if not qtys:
+        return None, False
+    covering = [q for q in qtys if q + 1e-9 >= held - 0.51]
+    if covering:
+        return min(covering), True
+    return max(qtys), False
+
+
 def stop_qty_mismatch_fact(
     positions: list[dict] | None,
     open_orders: list[dict] | None,
     plan: ActiveTradePlan | None = None,
 ) -> dict[str, Any] | None:
-    """Fact: working stop qty vs STK held (after trim, stop may be oversized).
+    """Fact: one working stop's qty vs STK held (after trim, stop may be oversized).
 
-    Checks every open plan (or ``plan`` if given). First mismatch wins for
-    prompt Fact; ``all`` lists every plan checked.
+    Per order — same 0.51 slack as ``stacked_stop_cancel_ids``. Stacked crumbs
+    that sum to held are not a match. ``match`` is the wake-line key.
     """
     plans = [plan] if plan is not None else load_trade_plans()
     if plan is not None and not plans:
@@ -464,29 +478,37 @@ def stop_qty_mismatch_fact(
         held = abs(stk_qty_for_symbol(positions, p.symbol))
         if held < 1e-9:
             continue
-        stop_q = working_stop_qty(open_orders, p.symbol, p.direction)
+        stop_q, covers = _per_order_stop_qty(
+            open_orders, p.symbol, p.direction, held
+        )
         if stop_q is None:
             row = {
                 "symbol": p.symbol,
                 "held_qty": held,
                 "stop_order_qty": None,
                 "mismatch": True,
+                "match": False,
                 "note": "no working stop qty found",
                 "heuristic": "stop_qty vs held — heuristic ≠ recommendation",
             }
         else:
-            mismatch = abs(stop_q - held) > 0.51
+            mismatch = (not covers) or abs(stop_q - held) > 0.51
             row = {
                 "symbol": p.symbol,
                 "held_qty": held,
                 "stop_order_qty": stop_q,
                 "mismatch": mismatch,
+                "match": not mismatch,
                 "heuristic": "stop_qty vs held — heuristic ≠ recommendation",
             }
             if mismatch:
                 row["note"] = (
-                    "stop order qty ≠ held — after trim, resize stop "
-                    "(modify/oca/cancel+replace)"
+                    "no single stop covers held"
+                    if not covers
+                    else (
+                        "stop order qty ≠ held — after trim, resize stop "
+                        "(modify/oca/cancel+replace)"
+                    )
                 )
         checked.append(row)
         if row.get("mismatch") and first_bad is None:
@@ -541,8 +563,7 @@ def _refresh_plan_from_row(
         plan.target_price = target
     if plan.entry_price is None:
         plan.entry_price = _avg_cost(row["raw"])
-    if thesis and not (plan.thesis or "").strip():
-        plan.thesis = thesis[:500]
+    _ = thesis
     if plan.stop_price is not None:
         plan.invalidation = f"stop {plan.stop_price}"
     plan.status = "open"
@@ -579,9 +600,9 @@ def reconcile_open_risk_all(
                 ActiveTradePlan(
                     symbol=sym,
                     direction=direction,
-                    thesis=(thesis or f"Rehydrated open risk {sym} {direction}")[:500],
+                    thesis="",
                     invalidation=(
-                        f"stop {stop}" if stop is not None else "stop hit / thesis invalid"
+                        f"stop {stop}" if stop is not None else "stop hit"
                     ),
                     entry_price=_avg_cost(row["raw"]),
                     stop_price=stop,
@@ -745,10 +766,11 @@ def sync_open_risk(
 ) -> Optional[ActiveTradePlan]:
     """Reconcile + persist all STK plans; confirmed-flat close when book empty.
 
-    When ``bump``, increment cycles_open on every plan; time-stop individually.
+    ``bump`` is ignored — hold time is the playbook card, not a cycle counter.
     Set ``allow_flat_close=False`` on Pause/Stop so an empty in-memory snap
     cannot wipe a durable plan.
     """
+    _ = bump
     if allow_flat_close and maybe_close_on_confirmed_flat(positions, path=path):
         return None
     if _stk_rows(positions):
@@ -760,24 +782,6 @@ def sync_open_risk(
         if not allow_flat_close:
             return load_trade_plan(path)
         return None
-    if bump:
-        kept: list[ActiveTradePlan] = []
-        for plan in plans:
-            plan.cycles_open = int(plan.cycles_open or 0) + 1
-            if plan.max_hold_cycles and plan.cycles_open >= int(plan.max_hold_cycles):
-                plan.status = "closed"
-                plan.closed_at = _utc_now()
-                plan.close_reason = "time_stop"
-                try:
-                    archive = _plans_path().with_name("last_closed_trade_plan.json")
-                    archive.write_text(
-                        json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8"
-                    )
-                except Exception:
-                    pass
-            else:
-                kept.append(plan)
-        plans = kept
     if plans:
         save_trade_plans(plans)
         return plans[0]
@@ -809,7 +813,6 @@ def format_open_risk_lines(plans: list[ActiveTradePlan] | None = None) -> str:
             bits.append(f"stop={p.stop_price}")
         if p.target_price is not None:
             bits.append(f"tgt={p.target_price}")
-        bits.append(f"cycles={p.cycles_open}/{p.max_hold_cycles}")
         return "  ".join(bits)
     parts = []
     for p in plans:
@@ -911,12 +914,8 @@ def working_entry_slots(
                 continue
             seen.add(key)
             legs = o.get("combo_legs") or o.get("comboLegs") or []
-            try:
-                n = int(o.get("reserved_slots") or 0)
-            except (TypeError, ValueError):
-                n = 0
-            if n <= 0:
-                n = len(legs) if isinstance(legs, list) and legs else 2
+            # combo_legs only — ignore invented reserved_slots on the ticket.
+            n = len(legs) if isinstance(legs, list) and legs else 2
             slots += max(1, n)
             continue
         strike = o.get("strike")
