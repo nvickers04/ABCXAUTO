@@ -10,6 +10,8 @@ sells stock the account does not own. ``orphaned_protection_rows`` answers
 "provably flat" conservatively (anything it cannot identify counts as still
 covering), and ``last_stop_block_reason`` is the shared last-stop rule so the
 cancel gate and the reconciler can never disagree about what is load-bearing.
+A last-stop is exit-side size that covers the lot; a crumb or a wrong-side
+leftover after flatten is not.
 """
 
 from __future__ import annotations
@@ -21,6 +23,10 @@ from abcxauto.structure_grade import posture_stop_bands, session_usable
 _NAKED_OPEN = frozenset({"market_order", "limit_order", "stop_order"})
 _PROTECT_STRATS = frozenset({"market_bracket", "bracket", "oca"})
 _DEFAULT_STOP_PCT = 0.01
+# Same slack as trade_plan stacked-stop cover and the protection report.
+_COVER_QTY_SLACK = 0.51
+_FILL_SIDES = {"BUY": "BUY", "BOT": "BUY", "SELL": "SELL", "SLD": "SELL"}
+_STOP_TYPES = frozenset({"STP", "STP LMT", "TRAIL", "TRAIL LIMIT"})
 
 
 def _params(act: dict) -> dict[str, Any]:
@@ -271,6 +277,49 @@ def _signed_qty(row: dict) -> float:
         return 0.0
 
 
+def _order_side(row: dict) -> str:
+    """BUY/SELL, including IBKR fill aliases BOT/SLD. Unknown stays empty."""
+    return _FILL_SIDES.get(
+        str(row.get("action") or row.get("side") or "").strip().upper(), ""
+    )
+
+
+def _is_stk_stop(order: dict) -> bool:
+    return _sec_bucket(order) == "STK" and _order_type_of(order) in _STOP_TYPES
+
+
+def _held_stk_signed(positions: list | None, symbol: str) -> float:
+    """Net STK/ETF quantity for symbol. 0 if none."""
+    want = str(symbol or "").upper()
+    if not want:
+        return 0.0
+    held = 0.0
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        if _sec_bucket(p) != "STK":
+            continue
+        if str(p.get("symbol") or "").upper() != want:
+            continue
+        held += _signed_qty(p)
+    return held
+
+
+def _stop_covers_held(order: dict, symbol: str, held: float) -> bool:
+    """True when this working stop is exit-side and covers held STK qty."""
+    if not isinstance(order, dict) or abs(held) < 1e-9:
+        return False
+    if str(order.get("symbol") or "").upper() != symbol:
+        return False
+    if not _is_stk_stop(order):
+        return False
+    side = _order_side(order)
+    want = "SELL" if held > 0 else "BUY"
+    if side and side != want:
+        return False
+    return abs(_signed_qty(order)) + 1e-9 >= abs(held) - _COVER_QTY_SLACK
+
+
 def _contract_key(row: dict) -> tuple[Any, ...] | None:
     """Comparable identity, or None when the row cannot be pinned to a contract."""
     sym = str(row.get("symbol") or "").upper()
@@ -477,14 +526,15 @@ def last_stop_block_reason(
     open_orders: list | None,
     positions: list | None,
 ) -> str | None:
-    """Reason to refuse a cancel that would strip the only stop on a live lot.
+    """Reason to refuse a cancel that would strip the covering last-stop.
 
     Shared by the ``cancel_order`` gate and by the orphan sweep so the two can
-    never disagree. Returns None when the cancel is allowed (including when the
-    order is unknown — the gateway owns that error).
+    never disagree. A last-stop is an exit-side STP/TRAIL whose qty covers the
+    held STK lot (0.51 slack). A crumb or a wrong-side leftover — including
+    after a flatten that flipped the book — is not cover and may be cancelled.
+    Returns None when the cancel is allowed (including when the order is
+    unknown — the gateway owns that error).
     """
-    from abcxauto.broker.order_types import is_stop_order
-
     try:
         oid = int(order_id)
     except (TypeError, ValueError):
@@ -499,31 +549,21 @@ def last_stop_block_reason(
         return None
 
     symbol = str(target.get("symbol") or "").upper()
-    if not symbol or not is_stop_order(_order_type_of(target)):
+    if not symbol or not _is_stk_stop(target):
         return None
 
-    held = 0.0
-    for p in positions or []:
-        if not isinstance(p, dict):
-            continue
-        if _sec_bucket(p) != "STK":
-            continue
-        if str(p.get("symbol") or "").upper() != symbol:
-            continue
-        held = _signed_qty(p)
-        break
+    held = _held_stk_signed(positions, symbol)
     if abs(held) < 1e-9:
         return None
-
-    for o in orders:
-        if not isinstance(o, dict) or _order_id_of(o) == oid:
-            continue
-        if str(o.get("symbol") or "").upper() != symbol:
-            continue
-        if _sec_bucket(o) != "STK":
-            continue
-        if is_stop_order(_order_type_of(o)):
-            return None
+    # Not load-bearing (crumb, wrong side, flatten-flip leftover).
+    if not _stop_covers_held(target, symbol, held):
+        return None
+    if any(
+        _stop_covers_held(o, symbol, held)
+        for o in orders
+        if isinstance(o, dict) and _order_id_of(o) != oid
+    ):
+        return None
 
     return (
         f"cancel_order rejected: order {oid} is the only working stop "
