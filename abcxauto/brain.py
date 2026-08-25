@@ -897,9 +897,11 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
                 "card": {
                     "type": "string",
                     "description": (
-                        "Optional playbook card this ticket comes from. Tags the "
-                        "fill so the card is scored on its own resolved trades "
-                        "instead of whole-book drift. Not a send gate."
+                        "Playbook card this ticket comes from. Required on new "
+                        "risk (must name an existing lab card so the fill is "
+                        "scored); optional on exits, protection, modifies and "
+                        "cancels. Scorecard label, not law — card prose is not "
+                        "a send gate."
                     ),
                 },
                 "rationale": {"type": "string"},

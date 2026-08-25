@@ -698,11 +698,29 @@ def test_gap_card_does_not_invent_a_percent_stop():
 
 
 @pytest.mark.asyncio
-async def test_paper_send_without_a_card_reaches_geometry_not_notebook(monkeypatch):
-    """A complete Grok ticket needs no playbook card. Thin tickets hit real gates."""
+async def test_opening_market_bracket_needs_a_real_card_then_reaches_geometry(monkeypatch):
+    """No card / unknown card refuse at the label. A real name reaches geometry."""
     from abcxauto.agent_loop import execute_ticket
 
-    sent = _stub_thin_send(monkeypatch)
+    _save_gap_card()
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: SimpleNamespace(
+            is_paper=True,
+            trading_mode="paper",
+            max_risk_per_trade_pct=1.0,
+            max_position_pct=20.0,
+        ),
+    )
     world = _flat_world(net_liquidation=37000.0)
     snap = {
         "account": {"netliquidation": 37000.0},
@@ -710,36 +728,163 @@ async def test_paper_send_without_a_card_reaches_geometry_not_notebook(monkeypat
         "open_orders": [],
         "ibkr_live_quotes": {"SNDK": 91.5},
     }
-    thin = {
-        "action": "market_bracket",
-        "strategy": "market_bracket",
-        "params": {"symbol": "SNDK", "direction": "LONG", "quantity": 10},
-        "rationale": "no card",
+    complete = {
+        "symbol": "SNDK",
+        "direction": "LONG",
+        "stop_price": 88.0,
+        "target_price": 93.0,
+        "quantity": 10,
     }
-    result = await execute_ticket(thin, object(), world, snap)
-    assert result.get("status") in ("blocked", "rejected")
-    blob = str(result)
+    missing = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": dict(complete),
+            "rationale": "no card",
+        },
+        object(),
+        world,
+        snap,
+    )
+    assert missing.get("status") == "blocked"
+    assert "params.card" in str(missing.get("note") or "")
+    assert sent == []
+
+    unknown = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {**complete, "card": "moon shot"},
+            "rationale": "unknown card",
+        },
+        object(),
+        world,
+        snap,
+    )
+    assert unknown.get("status") == "blocked"
+    assert "not on the playbook" in str(unknown.get("note") or "")
+    assert sent == []
+
+    thin = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {
+                "card": "flush bounce",
+                "symbol": "SNDK",
+                "direction": "LONG",
+                "quantity": 10,
+            },
+            "rationale": "card but no stop",
+        },
+        object(),
+        world,
+        snap,
+    )
+    assert thin.get("status") in ("blocked", "rejected")
+    blob = str(thin)
     assert "params.card" not in blob
     assert "playbook card" not in blob.lower()
     assert "required" in blob.lower() or "stop" in blob.lower()
     assert sent == []
 
-    complete = {
-        "action": "market_bracket",
-        "strategy": "market_bracket",
-        "params": {
-            "symbol": "SNDK",
-            "direction": "LONG",
-            "stop_price": 88.0,
-            "target_price": 93.0,
-            "quantity": 10,
+    ok = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {**complete, "card": "flush bounce"},
+            "rationale": "card=flush bounce SNDK",
         },
-        "rationale": "grok owns the ticket",
-    }
-    result2 = await execute_ticket(complete, object(), world, snap)
-    assert result2.get("status") == "ok"
-    assert sent and sent[0]["params"].get("card") in (None, "")
+        object(),
+        world,
+        snap,
+    )
+    assert ok.get("status") == "ok"
+    assert sent and sent[0]["params"]["card"] == "flush bounce"
     assert sent[0]["params"]["stop_price"] == 88.0
+
+
+@pytest.mark.asyncio
+async def test_close_and_cancel_without_card_still_send(monkeypatch):
+    """Exits / cancel / flatten-style closes do not need params.card."""
+    from abcxauto.agent_loop import execute_ticket
+
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    world = _flat_world(
+        net_liquidation=37000.0,
+        flat=False,
+        positions=[{"symbol": "NKE", "sec_type": "STK", "quantity": 70, "conId": 9}],
+        open_orders=[{"order_id": 42, "symbol": "NKE"}],
+    )
+    snap = {
+        "account": {"netliquidation": 37000.0},
+        "positions": world.positions,
+        "open_orders": world.open_orders,
+        "ibkr_live_quotes": {"NKE": 91.5},
+    }
+    cancel = await execute_ticket(
+        {
+            "action": "cancel_order",
+            "strategy": "cancel_order",
+            "params": {"order_id": 42},
+            "rationale": "cancel child",
+        },
+        object(),
+        world,
+        snap,
+    )
+    assert cancel.get("status") == "ok"
+    assert "params.card" not in str(cancel.get("note") or "")
+    assert sent and sent[0]["strategy"] == "cancel_order"
+
+    sent.clear()
+    close = await execute_ticket(
+        {
+            "action": "market_order",
+            "strategy": "market_order",
+            "params": {
+                "symbol": "NKE",
+                "action": "SELL",
+                "quantity": 70,
+                "closing_position": True,
+                "conId": 9,
+            },
+            "rationale": "flatten-style close",
+        },
+        object(),
+        world,
+        snap,
+    )
+    assert close.get("status") == "ok"
+    assert "params.card" not in str(close.get("note") or "")
+    assert sent and sent[0]["strategy"] == "market_order"
+    assert sent[0]["params"].get("card") in (None, "")
+
+    sent.clear()
+    nke = await execute_ticket(
+        {
+            "action": "market_order",
+            "strategy": "market_order",
+            "params": {"symbol": "NKE", "action": "SELL", "closing_position": True},
+            "rationale": "symbol-only close",
+        },
+        object(),
+        world,
+        snap,
+    )
+    assert nke.get("status") in ("blocked", "validated_block")
+    blob = str(nke)
+    assert "params.card" not in blob
+    assert "conId" in blob or "conid" in blob.lower()
+    assert sent == []
 
 
 @pytest.mark.asyncio

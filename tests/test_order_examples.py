@@ -87,8 +87,8 @@ def test_format_order_examples():
             assert '"closing_position":true' in line
     text_narrow = format_order_examples(allowed=frozenset({"market_bracket"}))
     assert "market_bracket" in text_narrow
-    assert "card= is optional attribution" in text_narrow
-    assert "New risk requires card=" not in text_narrow
+    assert "New risk requires card=" in text_narrow
+    assert "card= is optional attribution" not in text_narrow
     assert '"card":"card-name"' in text_narrow
     assert "vertical_spread" not in text_narrow
     assert "vertical_spread close:" not in text_narrow

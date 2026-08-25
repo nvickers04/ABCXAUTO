@@ -32,6 +32,7 @@ which beats the `ABCXAUTO_MODEL` env form. Keep the clerk.
   Stock and its options sum — same underlying, one bet
 - Unprotected STK: last-stop; hold blocked until it rests at IBKR. Combo close is one BAG (`closing_position`), not new risk
 - Live new risk needs a promoted playbook
+- New risk must name an existing lab playbook card (scorecard label; prose is not law)
 - Ticket geometry uses **IBKR last**, not MDA
 - Exits never blocked; fail-closed if the book is unknown
 - Agent may tighten floors via `self_tune`; it cannot weaken them or switch to live
