@@ -19,7 +19,10 @@ One tree, two layers, both written by Grok::
   declares for itself (``retire_if``). Numerous, tested, retired.
 * **locked OPEN starters** fill a trunk that has no live hypothesis so the book
   is not three flush cards plus empty slots. Seeded on lab load/save only.
-  Live snapshots are never seeded. Starters are catalog, not a parallel hunt.
+  Live snapshots are never seeded. ``locked`` is clerk seed identity — not a
+  hunt floor, not a send stamp, not a freeze. Grok rewrites the same name;
+  a named write drops ``locked`` so the upgrade can hunt. Virgin starters stay
+  in the ``playbook()`` catalog and off the run sheet.
 
 A card's position in the tree *is* its ticket, so a winning card sits inside
 the type entry it is supposed to improve â€” promoting what it learned is a move
@@ -647,6 +650,38 @@ def _drop_dead_lab_keys(state: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _named_card_in(cards: Any, name: str) -> dict[str, Any] | None:
+    want = str(name or "").strip().lower()
+    if not want:
+        return None
+    for card in cards or []:
+        if isinstance(card, dict) and str(card.get("name") or "").strip().lower() == want:
+            return card
+    return None
+
+
+def _upsert_named_card(
+    branch: list[Any],
+    row: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Replace a same-name card in place; append if the name is new."""
+    key = str(row.get("name") or "").strip().lower()
+    out: list[dict[str, Any]] = []
+    found = False
+    for card in branch:
+        if not isinstance(card, dict) or not card.get("name"):
+            continue
+        if str(card.get("name") or "").strip().lower() == key:
+            if not found:
+                out.append(row)
+                found = True
+            continue
+        out.append(card)
+    if not found:
+        out.append(row)
+    return out
+
+
 def _file_cards_into_tree(
     types: Any,
     cards: list[Any],
@@ -655,7 +690,8 @@ def _file_cards_into_tree(
 
     A card is never dropped for want of a stanza. One that names nothing
     sendable cannot be placed, so it lands in ``unfiled_cards`` where it is
-    still visible and still owed a parent.
+    still visible and still owed a parent. Same-name writes merge against the
+    stored card and keep siblings — a one-card flat list is not a wipe.
     """
     allowed = set(playbook_type_keys())
     tree: dict[str, Any] = {
@@ -663,11 +699,11 @@ def _file_cards_into_tree(
     } if isinstance(types, dict) else {}
     unfiled: list[dict[str, Any]] = []
     for raw in cards:
-        row = _norm_card(raw)
-        if row is None:
-            continue
         ticket = card_ticket_of(raw)
         if not ticket or ticket not in allowed:
+            row = _norm_card(raw)
+            if row is None:
+                continue
             if ticket:
                 # Unsendable, so it has no parent — but keep what it claimed so
                 # the cockpit can still say which ticket does not exist.
@@ -676,14 +712,15 @@ def _file_cards_into_tree(
                 unfiled.append(row)
             continue
         stanza = dict(tree.get(ticket) or {})
+        prev_card = _named_card_in(stanza.get("cards"), _incoming_card_name(raw))
+        row = _norm_card(raw, prev=prev_card)
+        if row is None:
+            continue
         branch = [
-            c
-            for c in (stanza.get("cards") or [])
-            if isinstance(c, dict)
-            and str(c.get("name") or "").lower() != row["name"].lower()
+            c for c in (stanza.get("cards") or [])
+            if isinstance(c, dict) and c.get("name")
         ]
-        branch.append(row)
-        stanza["cards"] = branch
+        stanza["cards"] = _upsert_named_card(branch, row)
         tree[ticket] = stanza
     return tree, unfiled
 
@@ -869,9 +906,10 @@ def _walk_text(obj: Any) -> str:
 def _norm_type_row(row: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any]:
     """One trunk: learned execution plus its cards.
 
-    Schema echoes are dropped, never merged forward. ``cards`` is a full
-    replace when present and keeps the previous branch list when omitted, so
-    a note-only write does not silently prune the hypotheses under it.
+    Schema echoes are dropped, never merged forward. ``cards`` omitted keeps
+    the previous branch list. A non-empty ``cards`` list merges by name —
+    one upgraded card does not wipe siblings. ``cards: []`` is the explicit
+    clear of this type.
     """
     prev = prev if isinstance(prev, dict) else {}
     src = row if isinstance(row, dict) else {}
@@ -1101,11 +1139,13 @@ def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any
     """One card. Its parent type is the ticket, so no ``ticket`` is stored.
 
     A card already on the tree keeps its declarations and gate fields when a
-    write omits them. ``cards`` is a full replace, so an evidence-only rewrite
-    used to delete the ``retire_if`` / ``when_on`` it did not restate: the clerk
-    then reported the card as owing a declaration, and the next look re-hunted
-    a gate that was still on disk until the wipe. Observations still replace
+    write omits them. Named writes merge, so an evidence-only rewrite must not
+    delete the ``retire_if`` / ``when_on`` it did not restate: the clerk then
+    reported the card as owing a declaration, and the next look re-hunted a
+    gate that was still on disk until the wipe. Observations still replace
     when Grok sends them; omitted fields persist until Grok changes them.
+    ``locked`` is clerk seed identity. Re-norm of a stored starter keeps it;
+    a named rewrite drops it so Grok's upgrade is not frozen off the hunt.
     """
     carried = prev if isinstance(prev, dict) else {}
     if isinstance(raw, str):
@@ -1202,7 +1242,11 @@ def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any
         )
     if order:
         out["tool_order"] = order
-    if raw.get("locked") is True or carried.get("locked") is True:
+    # Pinning locked from ``carried`` froze upgrades off the hunt. Seed and
+    # re-norm of a stored starter pass no prev, so the flag on the row sticks.
+    # A named rewrite (prev is the stored card) drops it even if Grok copies
+    # locked=true — lock is not a freeze.
+    if prev is None and raw.get("locked") is True:
         out["locked"] = True
     return out
 
@@ -1350,30 +1394,51 @@ def _norm_cards(
     cap: int = _MAX_CARDS,
     prev: Any = None,
 ) -> list[dict[str, Any]]:
-    """Normalize one card list. Last write of a name wins within the list.
+    """Normalize one card list. Named writes merge; an empty list clears.
 
-    ``prev`` is the branch list already on the tree. A card that reappears is
-    merged against its stored self so declarations survive a partial rewrite;
-    a card left out of the list is still dropped, so retiring one still works.
+    ``prev`` is the branch list already on the tree. A name that reappears is
+    merged against its stored self so declarations survive a partial rewrite.
+    Names left out stay — the replace-list was the wipe that collapsed the
+    book to three flush cards. Drop a card with ``status=retired`` (stays on
+    the book, off the hunt) or ``cards: []`` (explicit clear of this type).
+    Last write of a name wins within the incoming list. Sibling order is
+    previous order, then new names.
     """
     if not isinstance(raw, list):
         return []
+    if not raw:
+        return []
     carried: dict[str, dict[str, Any]] = {}
+    prev_rows: list[dict[str, Any]] = []
     for row in prev or []:
         if isinstance(row, dict) and row.get("name"):
             carried[str(row["name"]).strip().lower()] = row
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
+            prev_rows.append(row)
+    incoming_by_key: dict[str, dict[str, Any]] = {}
+    incoming_order: list[str] = []
     for item in raw:
         row = _norm_card(item, prev=carried.get(_incoming_card_name(item).lower()))
         if not row:
             continue
         key = row["name"].lower()
+        if key not in incoming_by_key:
+            incoming_order.append(key)
+        incoming_by_key[key] = row
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in prev_rows:
+        key = str(row["name"]).strip().lower()
         if key in seen:
-            out = [r for r in out if r["name"].lower() != key]
-        else:
-            seen.add(key)
-        out.append(row)
+            continue
+        seen.add(key)
+        out.append(incoming_by_key[key] if key in incoming_by_key else row)
+        if len(out) >= cap:
+            return out
+    for key in incoming_order:
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(incoming_by_key[key])
         if len(out) >= cap:
             break
     return out
@@ -1682,21 +1747,27 @@ def _merge_type_catalog(
 
 
 def _cards_update(raw: dict[str, Any], prev: dict[str, Any]) -> dict[str, Any] | None:
-    """Incoming loose ``cards`` list refiled under the tree, or None if absent.
+    """Incoming loose ``cards`` list filed under the tree, or None if absent.
 
-    The flat list is the legacy write shape and still means *replace the whole
-    card set*, so it is applied to a tree stripped of its branches. Nested
-    ``types[*].cards`` then wins for any trunk that declared one.
+    A non-empty flat list updates those names and keeps every sibling and
+    every other trunk — the old strip-then-file is how a one-card write
+    wiped the book. ``cards: []`` is the explicit clear of every branch.
+    Nested ``types[*].cards`` then wins for any trunk that declared one.
     """
     if "cards" not in raw:
         return None
-    bare = {
-        name: {k: v for k, v in row.items() if k != "cards"}
-        for name, row in _clean_types(prev.get("types")).items()
-        if isinstance(row, dict)
-    }
-    tree, _unfiled = _file_cards_into_tree(bare, list(raw.get("cards") or []))
-    return tree
+    incoming = list(raw.get("cards") or [])
+    tree = _clean_types(prev.get("types"))
+    if not incoming:
+        bare = {
+            name: {k: v for k, v in row.items() if k != "cards"}
+            for name, row in tree.items()
+            if isinstance(row, dict)
+        }
+        filed, _unfiled = _file_cards_into_tree(bare, [])
+        return filed
+    filed, _unfiled = _file_cards_into_tree(tree, incoming)
+    return filed
 
 
 def gate_rejects(raw: Any) -> dict[str, str]:
@@ -1744,8 +1815,8 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
         return None
     prev = load_lab()
 
-    # A loose cards[] list replaces the whole card set; nested types[*].cards
-    # then wins for any trunk that named one.
+    # A loose cards[] list merges by name into the tree; nested types[*].cards
+    # then wins for any trunk that named one. cards: [] still clears.
     base = _cards_update(raw, prev)
     cards_given = base is not None
     staged = dict(prev)
@@ -2651,6 +2722,7 @@ def _card_book_tuple(card: dict[str, Any]) -> tuple[Any, ...]:
         _norm_book_text(card.get("shape")),
         _norm_book_text(card.get("invalidation")),
         _norm_book_text(card.get("status")).lower(),
+        card.get("locked") is True,
         json.dumps(retire, sort_keys=True, default=str),
         _norm_book_text(card.get("expect_hit_rate")),
     )
@@ -2774,9 +2846,8 @@ def save_lab(
     if ledger and scorecard:
         ledger[-1] = _close_card(ledger[-1], scorecard, now)
     # A caller may still hand us the flat shape, so file ``update``'s cards into
-    # the tree. ``prev``'s derived list is dropped first: replaying it would
-    # resurrect a card this write just deleted. Locked OPEN starters come back
-    # after a 3-card collapse.
+    # the tree. ``prev``'s derived list is dropped first so a projection replay
+    # does not double-file. Named writes merge; they do not wipe siblings.
     state = _strip_projection(
         _seed_open_type_starters(
             _migrate_book(
@@ -3326,7 +3397,7 @@ def live_card_gap_floors(
 
 
 def _is_live_hypothesis(card: Any) -> bool:
-    """Grok's testing card. Locked OPEN starters are catalog, not a hunt."""
+    """Grok's testing card. Virgin locked starters are catalog, not a hunt."""
     if not isinstance(card, dict) or not card.get("name"):
         return False
     if str(card.get("status") or "testing").strip().lower() == "retired":

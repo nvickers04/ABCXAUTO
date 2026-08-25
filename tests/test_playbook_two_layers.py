@@ -221,12 +221,29 @@ def test_a_rewritten_declaration_still_replaces_the_old_one():
     assert card["retire_if"] == {"sample": 3, "condition": "b"}
 
 
-def test_a_card_left_out_of_the_list_is_still_dropped():
-    """Merge is per re-sent card, so retiring by omission still works."""
+def test_a_named_write_keeps_siblings_left_out_of_the_list():
+    """The replace-list was the wipe. One-card write must not drop siblings."""
     _save(market_bracket=[_card("flush bounce"), _card("opening drive")])
-    _save(market_bracket=[_card("flush bounce")])
+    _save(market_bracket=[_card("flush bounce", thesis="flush into support still bounces")])
     names = [c["name"] for c in type_cards(load_lab()["types"], "market_bracket")]
-    assert names == ["flush bounce"]
+    assert names == ["flush bounce", "opening drive"]
+    by_name = {c["name"]: c for c in type_cards(load_lab()["types"], "market_bracket")}
+    assert by_name["flush bounce"]["thesis"] == "flush into support still bounces"
+    assert by_name["opening drive"]["thesis"] == "flush into support bounces"
+
+
+def test_status_retired_drops_a_card_from_the_hunt_not_by_omission():
+    _save(market_bracket=[_card("flush bounce"), _card("opening drive")])
+    _save(market_bracket=[_card("opening drive", status="retired")])
+    lab = load_lab()
+    by_name = {c["name"]: c for c in type_cards(lab["types"], "market_bracket")}
+    assert by_name["flush bounce"]["status"] == "testing"
+    assert by_name["opening drive"]["status"] == "retired"
+    from abcxauto.lab_playbook import playbook_run_sheets
+
+    assert [row["card"] for row in playbook_run_sheets(lab, flat=True)] == [
+        "flush bounce"
+    ]
 
 
 def test_lab_facts_reports_what_is_untried_not_only_what_scored():
@@ -291,6 +308,12 @@ def test_playbook_clip_keeps_lab_ahead_of_the_essay():
     parsed = json.loads(wide)
     assert parsed["cards"][0]["name"] == "flush bounce"
     assert "TYPE market_bracket" in parsed["tree"]
+    tight = json.loads(_clip(raw, max_chars=24_000))
+    names = {c["name"] for c in (tight.get("cards") or [])}
+    assert "flush bounce" in names
+    from abcxauto.lab_playbook import OPEN_TYPE_STARTERS
+
+    assert OPEN_TYPE_STARTERS["iron_condor"]["name"] in names
 
 
 def test_type_coverage_lists_every_trunk_without_seeding_schema():

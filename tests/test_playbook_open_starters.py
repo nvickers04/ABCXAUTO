@@ -463,3 +463,196 @@ def test_seeded_book_still_has_no_schema_echo_on_disk(tmp_path, monkeypatch):
     assert "open_shape" not in json.dumps(disk)
     assert "close_tp_sl" not in json.dumps(disk)
     assert disk["types"]["bracket"]["gotchas"] == "limit entry can hang"
+
+
+def test_one_upgraded_card_keeps_siblings_and_locked_starter_rewrites(
+    tmp_path, monkeypatch
+):
+    """Lock is not a freeze. One-card write cannot wipe the type."""
+    from datetime import datetime, timezone
+
+    from abcxauto.lab_playbook import (
+        apply_from_judgment,
+        playbook_age_hours,
+        playbook_payload,
+        playbook_run_sheets,
+    )
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    from abcxauto.lab_playbook import _lab_path, _write
+
+    raw = _todays_three_type_book()
+    _write(_lab_path(), raw)
+    lab = load_lab()
+    mb_before = [c["name"] for c in type_cards(lab["types"], "market_bracket")]
+    assert mb_before[:3] == [
+        "mega-cap earnings-flush bounce",
+        "large-cap 3pct gap hold",
+        "news-miss large-cap flush",
+    ]
+    starter = OPEN_TYPE_STARTERS["iron_condor"]
+    iron = next(
+        c
+        for c in type_cards(lab["types"], "iron_condor")
+        if c["name"] == starter["name"]
+    )
+    assert iron["locked"] is True
+    payload = playbook_payload()
+    catalog_names = {c["name"] for c in payload["cards"]}
+    assert starter["name"] in catalog_names
+    assert "mega-cap earnings-flush bounce" in catalog_names
+    assert starter["name"] in payload["tree"]
+    assert starter["name"] not in {
+        row["card"] for row in playbook_run_sheets(lab, flat=True)
+    }
+
+    flush_clock = datetime(2026, 8, 20, 16, 4, tzinfo=timezone.utc).isoformat()
+    lab["types"]["market_bracket"]["cards"][0]["written_at"] = flush_clock
+    now = datetime(2026, 8, 25, 16, 32, tzinfo=timezone.utc)
+    age = playbook_age_hours(lab, now=now)
+    assert age is not None and age > 24.0
+
+    upgraded_thesis = (
+        "Short listed wings around a range-bound large-cap; defined at the "
+        "width, not a narrative."
+    )
+    out = apply_from_judgment(
+        {
+            "lab_playbook": {
+                "types": {
+                    "iron_condor": {
+                        "cards": [
+                            {
+                                "name": starter["name"],
+                                "thesis": upgraded_thesis,
+                                "when_on": (
+                                    "Range-bound large/mega, both wings listed, "
+                                    "no binary into the body"
+                                ),
+                                "scan": starter["scan"],
+                                "shape": starter["shape"],
+                                "invalidation": starter["invalidation"],
+                                "status": "testing",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    assert out is not None
+    assert out.get("status") != "rejected"
+    after = load_lab()
+    iron_after = next(
+        c
+        for c in type_cards(after["types"], "iron_condor")
+        if c["name"] == starter["name"]
+    )
+    assert iron_after["thesis"] == upgraded_thesis
+    assert iron_after.get("locked") is not True
+    assert iron_after["when_on"].startswith("Range-bound large/mega")
+    mb_after = [c["name"] for c in type_cards(after["types"], "market_bracket")]
+    assert mb_after[:3] == mb_before[:3]
+    vs = [c["name"] for c in type_cards(after["types"], "vertical_spread")]
+    assert "defined-risk debit/credit vertical" in vs
+    sheets = [row["card"] for row in playbook_run_sheets(after, flat=True)]
+    assert starter["name"] in sheets
+    assert "mega-cap earnings-flush bounce" in sheets
+
+    retired = apply_from_judgment(
+        {
+            "lab_playbook": {
+                "types": {
+                    "market_bracket": {
+                        "cards": [
+                            {
+                                "name": "news-miss large-cap flush",
+                                "status": "retired",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    assert retired is not None
+    assert retired.get("status") != "rejected"
+    mb = {
+        c["name"]: c
+        for c in type_cards(load_lab()["types"], "market_bracket")
+    }
+    assert mb["mega-cap earnings-flush bounce"]["status"] == "testing"
+    assert mb["large-cap 3pct gap hold"]["status"] == "testing"
+    assert mb["news-miss large-cap flush"]["status"] == "retired"
+    hunt = [
+        row["card"]
+        for row in playbook_run_sheets(load_lab(), flat=True)
+    ]
+    assert "news-miss large-cap flush" not in hunt
+    assert "mega-cap earnings-flush bounce" in hunt
+    assert "large-cap 3pct gap hold" in hunt
+
+
+def test_flat_one_card_write_does_not_wipe_the_type(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    save_lab(
+        clamp_update(
+            {
+                "types": {
+                    "market_bracket": {
+                        "cards": [
+                            _flush("mega-cap earnings-flush bounce"),
+                            _flush("large-cap 3pct gap hold"),
+                            _flush("news-miss large-cap flush"),
+                        ]
+                    }
+                }
+            }
+        )
+    )
+    save_lab(
+        clamp_update(
+            {
+                "cards": [
+                    {
+                        **_flush(
+                            "mega-cap earnings-flush bounce",
+                            thesis="upgraded mega-cap flush: hold the open low",
+                        ),
+                        "ticket": "market_bracket",
+                    }
+                ]
+            }
+        )
+    )
+    names = [c["name"] for c in type_cards(load_lab()["types"], "market_bracket")]
+    assert names[:3] == [
+        "mega-cap earnings-flush bounce",
+        "large-cap 3pct gap hold",
+        "news-miss large-cap flush",
+    ]
+    got = type_cards(load_lab()["types"], "market_bracket")[0]
+    assert got["thesis"].startswith("upgraded mega-cap flush")
+    for type_name in open_playbook_types():
+        if type_name == "market_bracket":
+            continue
+        names = {c["name"] for c in type_cards(load_lab()["types"], type_name)}
+        assert OPEN_TYPE_STARTERS[type_name]["name"] in names, type_name
+
+
+def test_write_tool_schema_says_named_merge_not_replace_list():
+    from abcxauto.brain import AGENT_TOOLS
+
+    blob = json.dumps(
+        [
+            getattr(getattr(t, "function", None), "parameters", None)
+            or getattr(t, "parameters", None)
+            for t in AGENT_TOOLS
+        ],
+        default=str,
+    )
+    assert "keeps siblings" in blob
+    assert "Replaces this type's cards" not in blob

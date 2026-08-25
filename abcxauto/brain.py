@@ -750,9 +750,11 @@ def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
 _CARD_BRANCH_SCHEMA = {
     "type": "array",
     "description": (
-        "Hypotheses under this order type. Replaces this type's cards; omit the "
-        "key to keep them. A card that earns its sample belongs promoted into "
-        "this type's gotchas / review / tool_order — same stanza, move it up."
+        "Hypotheses under this order type. A named card updates that name and "
+        "keeps siblings; omit the key to keep the list. cards=[] clears this "
+        "type. status=retired drops it from the hunt. A card that earns its "
+        "sample belongs promoted into this type's gotchas / review / "
+        "tool_order — same stanza, move it up."
     ),
     "items": {
         "type": "object",
@@ -1390,6 +1392,11 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
             kept: dict[str, Any] = {}
             if "lab" in slim:
                 kept["lab"] = slim["lab"]
+            # Catalog (including locked starters) so Grok can pick a name to
+            # rewrite after overflow. Tree/types can be huge; cards is the
+            # pick-list and must survive the emergency clip.
+            if "cards" in slim:
+                kept["cards"] = slim["cards"]
             kept["run"] = slim["run"]
             kept["ok"] = slim.get("ok")
             kept["_clipped"] = "payload"
