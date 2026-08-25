@@ -197,6 +197,42 @@ def test_matching_conid_stop_protects():
     assert report["unprotected_symbols"] == []
 
 
+def test_undersized_stop_does_not_protect_stk():
+    """1-share STP on a 10-share lot is not a last-stop."""
+    report = build_protection_report(
+        [_pos("AAPL", 10, conId=111)],
+        [_order("AAPL", "SELL", "STP", order_id=1, quantity=1, conId=111, aux_price=140.0)],
+    )
+    entry = report["positions"][0]
+    assert entry["protected"] is False
+    assert entry["stop_orders"] == []
+    assert "stop_loss" in entry["missing"]
+    assert report["unprotected_symbols"] == ["AAPL"]
+
+
+def test_undersized_bag_does_not_cover_vertical():
+    """1-lot BAG on a 5-lot vert is not a full cover."""
+    long_leg = _pos(
+        "JPM", 5, sec_type="OPT", conId=787026479,
+        expiration="20260918", strike=370.0, right="C",
+    )
+    short_leg = _pos(
+        "JPM", -5, sec_type="OPT", conId=846417188,
+        expiration="20260918", strike=375.0, right="C",
+    )
+    cut = {
+        "order_id": 10, "symbol": "JPM", "sec_type": "BAG", "action": "SELL",
+        "quantity": 1, "order_type": "LMT", "lmt_price": 0.71,
+        "combo_legs": [
+            {"conId": 787026479, "action": "SELL", "ratio": 1},
+            {"conId": 846417188, "action": "BUY", "ratio": 1},
+        ],
+    }
+    report = build_protection_report([long_leg, short_leg], [cut])
+    assert report["unprotected_symbols"] == []
+    assert all(e["covering_exits"] == 0 for e in report["positions"])
+
+
 def test_symbol_fallback_when_conids_absent():
     report = build_protection_report(
         [_pos("MSFT", 5)],
