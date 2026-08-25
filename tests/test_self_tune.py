@@ -1,5 +1,8 @@
 """Walk-away floor + agent self_tune (no approval). Size is % of NetLiq."""
 
+import math
+from types import SimpleNamespace
+
 from abcxauto.config import (
     clear_risk_settings,
     clear_runtime_overrides,
@@ -13,8 +16,15 @@ from abcxauto.self_tune import (
     apply_self_tune,
     clamp_risk_to_floor,
     ensure_immutable_floor,
+    floor_clamp_config_fields,
     is_self_tune_strategy,
     levers_snapshot,
+)
+
+_CEILING_KEYS = (
+    "max_risk_per_trade_pct",
+    "max_position_pct",
+    "daily_loss_limit_pct",
 )
 
 
@@ -137,6 +147,190 @@ def test_cannot_switch_to_live():
     out = apply_self_tune({"trading_mode": "live"}, persist=False)
     assert get_config().trading_mode == "paper"
     assert "trading_mode" in (out.get("rejected") or {}) or out["status"] == "blocked"
+
+
+def test_clamp_risk_to_floor_cannot_raise_past_ceiling():
+    for key in _CEILING_KEYS:
+        hi = RISK_FLOOR[key][1]
+        for raw in (hi + 1.0, 99.0, 1e9, "50"):
+            v, note = clamp_risk_to_floor(key, raw)
+            assert v is not None
+            assert v <= hi
+            assert note is not None
+    v, note = clamp_risk_to_floor("max_open_positions", 99)
+    assert v == MAX_OPEN_POSITIONS_RANGE[1]
+    assert note is not None
+
+
+def test_clamp_risk_to_floor_rejects_nonfinite():
+    for key in _CEILING_KEYS:
+        assert clamp_risk_to_floor(key, float("nan")) == (None, None)
+        assert clamp_risk_to_floor(key, float("inf")) == (None, None)
+        assert clamp_risk_to_floor(key, float("-inf")) == (None, None)
+        assert clamp_risk_to_floor(key, "NaN") == (None, None)
+    assert clamp_risk_to_floor("max_open_positions", float("nan")) == (None, None)
+    assert clamp_risk_to_floor("max_open_positions", float("inf")) == (None, None)
+
+
+def test_malicious_self_tune_cannot_weaken_floor_or_go_live(tmp_path, monkeypatch):
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    apply_self_tune(
+        {
+            "max_risk_per_trade_pct": 0.5,
+            "max_position_pct": 5.0,
+            "daily_loss_limit_pct": 1.0,
+            "max_open_positions": 2,
+        },
+        persist=True,
+    )
+
+    payload = {
+        "trading_mode": "live",
+        "live_confirm": "I_UNDERSTAND_LIVE_TRADING_RISK",
+        "ibkr_port": 7496,
+        "is_paper": False,
+        "max_risk_per_trade_pct": 99,
+        "max_position_pct": 1e9,
+        "daily_loss_limit_pct": "100",
+        "max_open_positions": 10_000,
+        "defined_risk_only": False,
+        "cash_only": False,
+        "risk_gates_enabled": False,
+        "auto_panic_on_breach": False,
+        "sizing_floors": False,
+        "trading_budget_usd": 50_000,
+        "risk_posture": "aggressive",
+        "risk": {
+            "trading_mode": "live",
+            "live_confirm": "I_UNDERSTAND_LIVE_TRADING_RISK",
+            "ibkr_port": 7496,
+            "max_risk_per_trade_pct": float("nan"),
+            "max_position_pct": float("inf"),
+            "daily_loss_limit_pct": 50,
+            "max_open_positions": 99,
+        },
+    }
+    out = apply_self_tune(payload, persist=True)
+    cfg = get_config()
+    assert cfg.trading_mode == "paper"
+    assert cfg.ibkr_port == 7497
+    assert cfg.is_paper is True
+    assert not cfg.live_confirm
+    assert cfg.max_risk_per_trade_pct <= RISK_FLOOR["max_risk_per_trade_pct"][1]
+    assert cfg.max_position_pct <= RISK_FLOOR["max_position_pct"][1]
+    assert cfg.daily_loss_limit_pct <= RISK_FLOOR["daily_loss_limit_pct"][1]
+    assert cfg.max_open_positions <= MAX_OPEN_POSITIONS_RANGE[1]
+    assert math.isfinite(cfg.max_risk_per_trade_pct)
+    assert math.isfinite(cfg.max_position_pct)
+    assert math.isfinite(cfg.daily_loss_limit_pct)
+    assert cfg.max_risk_per_trade_pct != 99
+    assert cfg.max_position_pct != 1e9
+    assert cfg.daily_loss_limit_pct != 100
+    assert cfg.max_open_positions != 10_000
+    assert cfg.defined_risk_only is True
+    assert cfg.cash_only is True
+    assert cfg.risk_gates_enabled is True
+    assert cfg.auto_panic_on_breach is True
+    assert cfg.trading_budget_usd == 0.0
+    rejected = out.get("rejected") or {}
+    assert "trading_mode" in rejected
+    assert "live_confirm" in rejected
+    assert "ibkr_port" in rejected
+    applied = out.get("applied") or {}
+    assert "trading_mode" not in applied
+    assert "live_confirm" not in applied
+    assert "ibkr_port" not in applied
+    if path.is_file():
+        persisted = path.read_text(encoding="utf-8")
+        assert "7496" not in persisted
+        assert '"trading_mode"' not in persisted
+
+
+def test_nonfinite_self_tune_cannot_poison_floor_or_go_live():
+    before = get_config()
+    out = apply_self_tune(
+        {
+            "max_risk_per_trade_pct": float("nan"),
+            "max_position_pct": float("inf"),
+            "daily_loss_limit_pct": float("-inf"),
+            "max_open_positions": float("nan"),
+            "trading_mode": "live",
+            "ibkr_port": 7496,
+        },
+        persist=False,
+    )
+    cfg = get_config()
+    assert cfg.trading_mode == "paper"
+    assert cfg.ibkr_port == 7497
+    assert cfg.max_risk_per_trade_pct == before.max_risk_per_trade_pct
+    assert cfg.max_position_pct == before.max_position_pct
+    assert cfg.daily_loss_limit_pct == before.daily_loss_limit_pct
+    assert cfg.max_open_positions == before.max_open_positions
+    assert math.isfinite(cfg.max_risk_per_trade_pct)
+    rejected = out.get("rejected") or {}
+    assert "max_risk_per_trade_pct" in rejected
+    assert "max_position_pct" in rejected
+    assert "daily_loss_limit_pct" in rejected
+    assert "max_open_positions" in rejected
+    assert "trading_mode" in rejected
+    assert out["status"] == "blocked" or not (out.get("applied") or {})
+
+
+def test_nested_malicious_risk_blob_clamps_and_stays_paper():
+    out = apply_self_tune(
+        {
+            "risk": {
+                "trading_mode": "live",
+                "live_confirm": "I_UNDERSTAND_LIVE_TRADING_RISK",
+                "ibkr_port": 7496,
+                "max_risk_per_trade_pct": 50,
+                "max_position_pct": 50,
+                "daily_loss_limit_pct": 50,
+                "max_open_positions": 99,
+            }
+        },
+        persist=False,
+    )
+    cfg = get_config()
+    assert cfg.trading_mode == "paper"
+    assert cfg.ibkr_port == 7497
+    assert cfg.max_risk_per_trade_pct == RISK_FLOOR["max_risk_per_trade_pct"][1]
+    assert cfg.max_position_pct == RISK_FLOOR["max_position_pct"][1]
+    assert cfg.daily_loss_limit_pct == RISK_FLOOR["daily_loss_limit_pct"][1]
+    assert cfg.max_open_positions == MAX_OPEN_POSITIONS_RANGE[1]
+    rejected = out.get("rejected") or {}
+    assert "trading_mode" in rejected
+    assert "ibkr_port" in rejected
+    applied = out.get("applied") or {}
+    assert applied.get("max_risk_per_trade_pct") == RISK_FLOOR["max_risk_per_trade_pct"][1]
+
+
+def test_floor_clamp_repairs_nonfinite():
+    cfg = SimpleNamespace(
+        daily_loss_limit_pct=float("nan"),
+        max_position_pct=float("inf"),
+        max_risk_per_trade_pct=float("-inf"),
+        max_peak_drawdown_pct=25.0,
+        max_option_premium_pct=25.0,
+        max_symbol_concentration_pct=25.0,
+        max_open_positions=15,
+        risk_gates_enabled=True,
+        auto_panic_on_breach=True,
+        defined_risk_only=True,
+        cash_only=True,
+        scan_fetch_cap=8,
+        trading_budget_usd=0.0,
+        trading_mode="paper",
+        sizing_floors=False,
+    )
+    fixes = floor_clamp_config_fields(cfg)
+    assert fixes["daily_loss_limit_pct"] == 25.0
+    assert fixes["max_position_pct"] == 25.0
+    assert fixes["max_risk_per_trade_pct"] == 25.0
 
 
 def test_set_risk_alias_no_approval():
