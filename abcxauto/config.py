@@ -186,11 +186,15 @@ def setup_file_logging(
     max_bytes: int = 1_000_000,
     backup_count: int = 2,
 ) -> Path:
-    """Attach a WARNING+ RotatingFileHandler to the abcxauto logger (once).
+    """Attach an INFO+ RotatingFileHandler to the abcxauto logger (once).
 
     Default path is repo-absolute ``<repo>/logs/app.log``. ``ABCXAUTO_LOG_PATH``
     redirects it. The operator reads ``logs/app.log`` as evidence of what the
-    desk did, so tests must never land in it.
+    desk did (think / send / fill are INFO), so tests must never land in it.
+
+    DEBUG (ib_insync cancelMktData spam) stays off this file — that noise is
+    the child's console / ``desk.out``. The handler lives on ``abcxauto``, not
+    the process root, so ``ib_insync`` records never reach it.
     """
     if path is None:
         path = os.environ.get("ABCXAUTO_LOG_PATH") or None
@@ -203,6 +207,9 @@ def setup_file_logging(
         if isinstance(h, RotatingFileHandler):
             try:
                 if Path(getattr(h, "baseFilename", "")).resolve() == resolved:
+                    h.setLevel(logging.INFO)
+                    if root.level == logging.NOTSET or root.level > logging.INFO:
+                        root.setLevel(logging.INFO)
                     return resolved
             except OSError:
                 return resolved
@@ -212,13 +219,13 @@ def setup_file_logging(
         backupCount=backup_count,
         encoding="utf-8",
     )
-    handler.setLevel(logging.WARNING)
+    handler.setLevel(logging.INFO)
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
     root.addHandler(handler)
-    if root.level == logging.NOTSET or root.level > logging.WARNING:
-        root.setLevel(logging.WARNING)
+    if root.level == logging.NOTSET or root.level > logging.INFO:
+        root.setLevel(logging.INFO)
     return resolved
 
 
