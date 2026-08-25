@@ -703,12 +703,20 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             running = None
 
         lock = self._async_lock
+        # CPython 3.12 uncontended Lock.acquire never writes lock._loop.
+        # Track the owner loop on the connector so reconnect can rebind.
+        bound = getattr(self, "_async_lock_loop", None)
+        if bound is None and lock is not None:
+            bound = getattr(lock, "_loop", None)
+
         if lock is None:
             self._async_lock = asyncio.Lock()
+            self._async_lock_loop = running
             return self._async_lock
 
-        bound = getattr(lock, "_loop", None)
         if bound is None or running is None or bound is running:
+            if bound is None and running is not None:
+                self._async_lock_loop = running
             return lock
 
         try:
@@ -718,6 +726,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         if bound_closed:
             logger.warning("IBKR async_lock rebound after event loop closed")
             self._async_lock = asyncio.Lock()
+            self._async_lock_loop = running
             return self._async_lock
 
         raise RuntimeError(
@@ -736,6 +745,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
         # Connection state
         self._async_lock = None
+        self._async_lock_loop = None
         self.ib = new_ib()
         self._connected = False
         self._connect_block = ""
