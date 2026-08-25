@@ -8,8 +8,8 @@ A card's position *is* its ticket, so identity is ``(type, name)`` and a winning
 card sits inside the type entry it is supposed to improve.
 
 The clerk's half is attribution: a named ``params.card`` tags the fill so the
-card is scored on the trades that actually resolved. A missing card is not a
-refuse — the lab playbook is a notebook, not a send gate. An operator flatten
+card is scored on the trades that actually resolved. New risk must name an
+existing card (scorecard label). Notebook prose is not law. An operator flatten
 or a halt exit is real P&L but not evidence, so it never advances a card toward
 live money. Live new risk still needs a promoted snapshot.
 """
@@ -508,32 +508,38 @@ def test_missing_declaration_is_surfaced_not_rejected():
     assert "retire_if" not in card
 
 
-# --- the new-risk card gate is not a send gate --------------------------------
+# --- new risk needs a real card name (label, not law) -------------------------
 
 
-def test_paper_new_risk_without_a_card_is_not_a_notebook_block():
-    """Paper 7497: Grok owns the ticket. Missing params.card is not a refuse."""
+def test_paper_new_risk_without_a_card_is_refused():
+    """Paper 7497: a complete opening ticket still needs params.card."""
     _save(market_bracket=[_card("flush bounce"), _card("gap fade")])
     strat, forced = gate_ticket(_entry(), _world())
-    assert forced is None, forced
-    assert strat == "market_bracket"
-    assert new_risk_card_error("") == ""
-    assert new_risk_card_error("", type="market_bracket") == ""
+    assert strat == "blocked"
+    note = str((forced or {}).get("note") or "")
+    assert "params.card" in note
+    assert "flush bounce" in note
+    assert "params.card" in new_risk_card_error("")
+    assert "params.card" in new_risk_card_error("", type="market_bracket")
 
 
-def test_paper_new_risk_does_not_care_which_trunk_holds_the_cards():
+def test_paper_new_risk_card_is_a_name_not_a_trunk():
+    """A real card name is a label. It does not have to live under this send type."""
     _save(vertical_spread=[_card("post-earnings IV crush")])
-    strat, forced = gate_ticket(_entry(), _world())
+    strat, forced = gate_ticket(_entry("post-earnings IV crush"), _world())
     assert forced is None, forced
     assert strat == "market_bracket"
     assert new_risk_card_error("post-earnings IV crush", type="market_bracket") == ""
 
 
-def test_new_risk_card_error_is_a_noop_even_when_the_book_is_empty():
-    assert new_risk_card_error("") == ""
-    assert new_risk_card_error("", type="market_bracket") == ""
-    assert new_risk_card_error("moon shot", type="market_bracket") == ""
-    assert new_risk_card_error("homeless") == ""
+def test_new_risk_without_a_real_card_is_refused_when_the_book_is_empty():
+    assert "params.card" in new_risk_card_error("")
+    assert "params.card" in new_risk_card_error("", type="market_bracket")
+    assert "not on the playbook" in new_risk_card_error("moon shot", type="market_bracket")
+    assert "not on the playbook" in new_risk_card_error("homeless")
+    strat, forced = gate_ticket(_entry(), _world())
+    assert strat == "blocked"
+    assert "params.card" in str((forced or {}).get("note") or "")
 
 
 def test_new_risk_with_a_named_card_still_passes():
@@ -544,12 +550,14 @@ def test_new_risk_with_a_named_card_still_passes():
     assert new_risk_card_error("  FLUSH Bounce ", type="market_bracket") == ""
 
 
-def test_unknown_card_name_is_not_a_send_block():
+def test_unknown_card_name_is_a_send_block():
     _save(market_bracket=[_card("flush bounce")])
-    assert new_risk_card_error("moon shot", type="market_bracket") == ""
+    note = new_risk_card_error("moon shot", type="market_bracket")
+    assert "not on the playbook" in note
+    assert "flush bounce" in note
     strat, forced = gate_ticket(_entry("moon shot"), _world())
-    assert forced is None, forced
-    assert strat == "market_bracket"
+    assert strat == "blocked"
+    assert "moon shot" in str((forced or {}).get("note") or "")
 
 
 def test_a_card_under_another_type_is_not_a_send_block():
@@ -583,6 +591,38 @@ def test_top_level_card_arg_is_hoisted_into_params():
 
 
 # --- exits are never blocked --------------------------------------------------
+
+
+def test_defined_risk_open_requires_a_real_card():
+    _save(vertical_spread=[_card("post-earnings IV crush")])
+    open_params = {
+        "symbol": "SPY",
+        "quantity": 1,
+        "expiration": "20260918",
+        "long_strike": 500.0,
+        "short_strike": 505.0,
+        "right": "C",
+    }
+    strat, forced = gate_ticket(
+        {
+            "action": "vertical_spread",
+            "strategy": "vertical_spread",
+            "params": dict(open_params),
+        },
+        _world(),
+    )
+    assert strat == "blocked"
+    assert "params.card" in str((forced or {}).get("note") or "")
+    named, named_forced = gate_ticket(
+        {
+            "action": "vertical_spread",
+            "strategy": "vertical_spread",
+            "params": {**open_params, "card": "post-earnings IV crush"},
+        },
+        _world(),
+    )
+    assert named_forced is None, named_forced
+    assert named == "vertical_spread"
 
 
 @pytest.mark.parametrize(
@@ -629,6 +669,23 @@ def test_exits_are_not_gated_even_when_the_tree_is_empty():
     )
     assert strat == "market_order"
     assert forced is None
+
+
+def test_symbol_only_close_is_not_refused_for_a_missing_card():
+    """Today's blocked NKE close must not start requiring params.card."""
+    _save(market_bracket=[_card("large-cap 3pct gap hold")])
+    strat, forced = gate_ticket(
+        {
+            "action": "market_order",
+            "strategy": "market_order",
+            "params": {"symbol": "NKE", "action": "SELL", "closing_position": True},
+        },
+        _world(),
+    )
+    assert strat == "market_order"
+    assert forced is None
+    note = str((forced or {}).get("note") or "")
+    assert "params.card" not in note
 
 
 def test_retired_card_is_not_a_send_block_and_its_lot_can_still_be_exited():
@@ -1372,7 +1429,7 @@ def test_live_snapshot_holds_only_graduated_cards_inside_their_types(monkeypatch
     assert "condor grind" not in json.dumps(on_disk)
 
 
-def test_live_new_risk_needs_a_promoted_book_not_a_cited_card(monkeypatch):
+def test_live_new_risk_needs_a_promoted_book_and_a_cited_card(monkeypatch):
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     from abcxauto.lab_playbook import live_new_risk_allowed
 
@@ -1397,11 +1454,13 @@ def test_live_new_risk_needs_a_promoted_book_not_a_cited_card(monkeypatch):
         },
     )
     assert live_new_risk_allowed() is True
-    # Citing a card is optional even on live once a promoted book exists.
     assert new_risk_card_error("flush bounce", type="market_bracket") == ""
     assert new_risk_card_error("condor grind", type="iron_condor") == ""
-    assert new_risk_card_error("") == ""
-    named, named_forced = gate_ticket(_entry(), _world())
+    assert "params.card" in new_risk_card_error("")
+    unnamed, unnamed_forced = gate_ticket(_entry(), _world())
+    assert unnamed == "blocked"
+    assert "params.card" in str((unnamed_forced or {}).get("note") or "")
+    named, named_forced = gate_ticket(_entry("flush bounce"), _world())
     assert named_forced is None, named_forced
     assert named == "market_bracket"
 

@@ -24,13 +24,14 @@ within one stanza, not a join across two lists. Card identity is therefore
 ``(type, name)``, not a bare name.
 
 The clerk's job is attribution, not authorship: a named ``params.card`` tags
-the fill so the card is scored on its own resolved trades, but a missing card
-is not a refuse. Notebook prose is not a send gate. Operator flattens, panic,
-and halt exits are tracked but kept out of the graduation math — an interrupted
-trade is neither proof nor falsification. A card graduates when it meets *its
-own* declared sample with positive resolved edge; only graduated cards, inside
-their pruned type stanzas, reach ``playbook_live.json``. Live new risk still
-needs that promoted snapshot.
+the fill so the card is scored on its own resolved trades. New risk must name
+an existing card (scorecard label). Notebook prose is not a send gate — hold,
+gap, tape, session, and book sentences cannot invent a refuse. Operator
+flattens, panic, and halt exits are tracked but kept out of the graduation
+math — an interrupted trade is neither proof nor falsification. A card
+graduates when it meets *its own* declared sample with positive resolved
+edge; only graduated cards, inside their pruned type stanzas, reach
+``playbook_live.json``. Live new risk still needs that promoted snapshot.
 
 A flat top-level ``cards`` list is still accepted on a write and is still
 *projected* on a read for the cockpit and older callers, but the tree is the
@@ -2003,12 +2004,41 @@ def new_risk_card_error(
     type: str = "",
     book: dict[str, Any] | None = None,
 ) -> str:
-    """No-op. Playbook is a notebook — clerk does not gate send on a card name.
+    """Label gate on new risk. Empty string means this ticket may go.
 
-    A named ``params.card`` still tags the fill for attribution. Missing,
-    unknown, retired, tripped, or unfiled names are not a refuse. Live new
-    risk is ``live_new_risk_allowed`` (promoted book), not this function.
+    ``params.card`` must name an existing playbook card so scorecard/journal
+    can tally the strategy. The name is a label, not law: trunk, retired,
+    tripped, unfiled, and card prose are not refuses. Exits, protection,
+    modifies and cancels never reach here — ``is_new_risk`` is False for
+    them. Live new risk still needs ``live_new_risk_allowed`` (promoted book).
+    ``type`` is accepted for callers that pass the send strategy; it is not
+    a trunk match.
     """
+    _ = type
+    paper = is_paper()
+    state = book if isinstance(book, dict) else (load_lab() if paper else load_live())
+    pairs = walk_cards(state)
+    names = [
+        str(c.get("name") or "").strip()
+        for _t, c in pairs
+        if str(c.get("name") or "").strip()
+    ]
+    want = str(card or "").strip()
+    if not want:
+        return (
+            "new risk requires params.card naming a playbook card; "
+            f"cards: {_card_names_blob(names)}"
+        )
+    hits = [
+        (t, c)
+        for t, c in pairs
+        if str(c.get("name") or "").strip().lower() == want.lower()
+    ]
+    if not hits:
+        return (
+            f"new risk card {want!r} is not on the playbook; "
+            f"cards: {_card_names_blob(names)}"
+        )
     return ""
 
 

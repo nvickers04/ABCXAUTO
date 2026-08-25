@@ -540,15 +540,20 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
                 "status": "blocked",
                 "note": f"structure cooldown {sym}: {why}",
             }
-        from abcxauto.lab_playbook import live_new_risk_allowed
+        from abcxauto.lab_playbook import live_new_risk_allowed, new_risk_card_error
 
         if not live_new_risk_allowed():
             return BLOCKED_STRAT, {
                 "status": "blocked",
                 "note": "live follower — no promoted paper playbook (no new risk)",
             }
-        # Paper notebook is not a send gate. live_new_risk_allowed is the
-        # live follower lock (promoted book), not a card-name or card-prose check.
+        # Label only: scorecard/journal need a real card name. Card prose
+        # (hold / gap / tape / session / book) is not a refuse.
+        card_note = new_risk_card_error(
+            params.get("card") or act.get("card"), type=strat
+        )
+        if card_note:
+            return BLOCKED_STRAT, {"status": "blocked", "note": card_note}
     return strat, None
 
 
