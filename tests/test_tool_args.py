@@ -68,6 +68,66 @@ def test_bare_quote_uses_book_symbols():
     )
     assert name == "quote"
     assert "IWM" in args["symbols"]
+    assert args["symbols"][0] == "IWM"
+
+
+def test_bare_quote_uses_scan_hits_not_spy():
+    snap = {
+        "scan_hits": {
+            "rows": [
+                {"symbol": "SNDK", "open_gap_pct": -6.5},
+                {"symbol": "MU", "open_gap_pct": -3.3},
+            ]
+        }
+    }
+    fb = fallback_quote_symbols(_world(positions=[]), snap)
+    assert fb[:2] == ["SNDK", "MU"]
+    assert "SPY" not in fb
+    name, args = normalize_tool_call("quote", {}, fallback_symbols=fb)
+    assert args["symbols"][:2] == ["SNDK", "MU"]
+    news_name, news_args = normalize_tool_call("news", {}, fallback_symbols=fb)
+    assert news_name == "news"
+    assert news_args["symbols"][:2] == ["SNDK", "MU"]
+    candle_name, candle_args = normalize_tool_call("candles", {}, fallback_symbols=fb)
+    assert candle_name == "candles"
+    assert candle_args["symbols"][:2] == ["SNDK", "MU"]
+
+
+def test_bare_quote_empty_book_still_has_spy(monkeypatch):
+    monkeypatch.setattr("abcxauto.think_stream.last_look_facts", lambda: {})
+    monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda: {})
+    fb = fallback_quote_symbols(_world(positions=[]), {})
+    assert fb == ["SPY"]
+
+
+def test_bare_quote_empty_tape_does_not_invent_spy_on_a_live_card(monkeypatch):
+    from abcxauto.lab_playbook import clamp_update, save_lab
+
+    monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda: {})
+    update = clamp_update(
+        {
+            "instructions": "Skip SPY same-session scrape.",
+            "types": {
+                "market_bracket": {
+                    "gotchas": "do not re-ticket SPY the same session",
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ],
+                }
+            },
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    fb = fallback_quote_symbols(_world(positions=[]), {})
+    assert fb == []
+    name, args = normalize_tool_call("quote", {}, fallback_symbols=fb)
+    assert args.get("symbols") in (None, "", [])
+    assert args.get("symbol") in (None, "")
 
 
 def test_send_hoists_flat_fields():

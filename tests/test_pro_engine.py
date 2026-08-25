@@ -30,6 +30,8 @@ def patch_config(monkeypatch):
 async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_path):
     """Engine.start() drives >=3 run_cycle with inventory+validation in records."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "0.05")
+    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
     monkeypatch.setattr("abcxauto.wake_bus.min_look_s", lambda: 0.05)
     monkeypatch.setattr("abcxauto.wake_bus.default_look_s", lambda **_k: 0.05)
     monkeypatch.setattr("abcxauto.wake_bus.pulse_sleep_s", lambda *_a, **_k: 0.05)
@@ -566,12 +568,6 @@ def _wire_stay_up_engine(monkeypatch, *, session: str, think, paper: bool = True
     # Every park is floored at min_look_s (30s, env-clamped at 5s), so a test
     # clock has to go under the floor directly or one look eats the deadline.
     monkeypatch.setattr("abcxauto.wake_bus.min_look_s", lambda: 0.01)
-    # A running lab: the idle-nap cap reads the real notebook otherwise and
-    # would clamp these sub-second test clocks to five minutes.
-    monkeypatch.setattr(
-        "abcxauto.lab_playbook.lab_facts",
-        lambda *_a, **_k: {"resolved_trades": 4, "entry_trunks_untried": []},
-    )
 
 
 def test_session_of_snap_reads_pulse_and_hours():
@@ -654,6 +650,31 @@ async def test_host_think_surfaces_trailing_question_failed(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_host_think_park_keeps_the_look_for_last_turn(monkeypatch):
+    """A stub {_parked, cycle} left desk_brief on 'retry scans' from the last kill."""
+    from abcxauto.brain import BrainTurn
+
+    async def grok_turn(*_a, **_k):
+        return BrainTurn(
+            text="Gate off. Parking.",
+            tool_trace=["playbook", "book", "scan", "set_wake"],
+            parked=True,
+        )
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    out = await eng._host_think(1, SimpleNamespace(chat=None), _stay_up_snap("regular"))
+    assert out.get("_parked") is True
+    assert out.get("_failed") is False
+    assert out.get("tool_trace") == ["playbook", "book", "scan", "set_wake"]
+    assert "Gate off" in str(out.get("rationale") or "")
+    assert "equity" in out
+    assert "pnl" in out
+    assert "scan_fetched" in out
+
+
+@pytest.mark.asyncio
 async def test_host_think_resume_sends_book_facts_not_yield_resume(monkeypatch):
     from abcxauto.brain import BrainTurn
 
@@ -687,6 +708,7 @@ async def test_paper_regular_looks_on_a_clock_not_back_to_back(monkeypatch, tmp_
     ~20-tool screen with no gap at all.
     """
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "0.3")
     monkeypatch.setattr("abcxauto.wake_bus.default_look_s", lambda **_k: 0.3)
     stamps: list[float] = []
 
@@ -712,6 +734,31 @@ async def test_paper_regular_looks_on_a_clock_not_back_to_back(monkeypatch, tmp_
     assert len(stamps) >= 3
     gaps = [b - a for a, b in zip(stamps, stamps[1:])]
     assert all(g >= 0.2 for g in gaps), gaps
+
+
+@pytest.mark.asyncio
+async def test_launch_honors_an_existing_future_park(monkeypatch, tmp_path):
+    """Restart used to skip the clock on first_think and burn a look."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    from abcxauto.wake_bus import set_wake
+
+    set_wake(wake_in_s=30, session="regular", flat=True)
+    calls = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        return {"cycle": n, "pnl": 0, "equity": 100000, "_failed": False}
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 1.2
+    while time.time() < deadline:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert calls["n"] == 0
 
 
 @pytest.mark.asyncio
@@ -754,6 +801,7 @@ async def test_a_grok_park_holds_without_stopping_the_desk(monkeypatch, tmp_path
 @pytest.mark.asyncio
 async def test_paper_premarket_looks_on_a_clock(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "0.3")
     monkeypatch.setattr("abcxauto.wake_bus.default_look_s", lambda **_k: 0.3)
     calls = {"n": 0}
 
@@ -813,7 +861,7 @@ async def test_failed_look_backs_off_without_set_wake_clock(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_parked_overnight_stays_parked_until_start(monkeypatch, tmp_path):
+async def test_closed_session_skips_grok_and_keeps_a_clock(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     calls = {"n": 0}
 
@@ -824,18 +872,16 @@ async def test_parked_overnight_stays_parked_until_start(monkeypatch, tmp_path):
     _wire_stay_up_engine(monkeypatch, session="closed", think=think)
     eng = ProEngine()
     assert eng.start() is None
-    deadline = time.time() + 6
-    while time.time() < deadline and calls["n"] < 1:
+    deadline = time.time() + 2
+    while time.time() < deadline:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    assert calls["n"] == 1
-    await asyncio.sleep(0.5)
-    eng.drain_apply()
-    assert calls["n"] == 1
-    assert eng._think_parked is True
-    assert eng._resume_think is False
-    assert eng.state.status == "Parked"
-    assert eng.state.autonomous is False
+    assert calls["n"] == 0
+    assert eng._think_parked is False
+    assert eng.state.autonomous is True
+    from abcxauto.wake_bus import load_alarm
+
+    assert load_alarm().wake_at
     eng.stop_engine()
     eng.drain_apply()
 

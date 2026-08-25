@@ -1535,7 +1535,7 @@ class ProTerminal:
                                 ft.Text(
                                     "How often the background monitor polls, reviews "
                                     "and halts on a dead broker link. Scan depth is "
-                                    "self_tune; Grok's own wake stays set_wake.",
+                                    "self_tune; the clerk owns the next look.",
                                     size=11,
                                     color=MUTED,
                                 ),
@@ -2439,7 +2439,7 @@ class ProTerminal:
         except Exception:
             lab = {}
         lab = lab if isinstance(lab, dict) else {}
-        cards = [c for c in (lab.get("cards") or []) if isinstance(c, dict) and c.get("name")]
+        cards = self._notebook_setup_cards(lab)
         body = ""
         try:
             body = notebook_text(lab) or ""
@@ -2478,11 +2478,11 @@ class ProTerminal:
             f"lots at write: {', '.join(lots)}" if lots else "lots at write: none"
         )
         try:
-            from abcxauto.lab_playbook import card_scores
+            from abcxauto.lab_playbook import card_facts
 
             attrib = {
                 str(r.get("card") or "").lower(): r
-                for r in (card_scores(cards) or [])
+                for r in (card_facts(lab) or [])
                 if isinstance(r, dict)
             }
         except Exception:
@@ -2507,6 +2507,39 @@ class ProTerminal:
         self.lbl_nb_playbook.value = self.lbl_playbook.value
         self.lbl_nb_playbook.color = self.lbl_playbook.color
         self.lbl_nb_playbook.tooltip = self.lbl_playbook.tooltip
+
+    def _notebook_setup_cards(self, lab: dict) -> list[dict]:
+        """Nested type cards first. A leftover flat list is the fallback."""
+        out: list[dict] = []
+        try:
+            from abcxauto.lab_playbook import playbook_run_sheets, walk_cards
+
+            sheets: dict[tuple[str, str], dict] = {}
+            try:
+                for row in playbook_run_sheets(lab, flat=True):
+                    if isinstance(row, dict):
+                        sheets[(str(row.get("type") or ""), str(row.get("card") or ""))] = row
+            except Exception:
+                pass
+            for type_name, card in walk_cards(lab):
+                if not isinstance(card, dict) or not card.get("name"):
+                    continue
+                row = dict(card)
+                if type_name and not row.get("ticket"):
+                    row["ticket"] = type_name
+                sheet = sheets.get((str(type_name or ""), str(card.get("name") or ""))) or {}
+                if sheet.get("gate") == "off":
+                    row["_run"] = "gate=off"
+                elif isinstance(sheet.get("send"), dict) and sheet["send"].get("symbol"):
+                    row["_run"] = f"send {sheet['send']['symbol']}"
+                elif sheet.get("next"):
+                    row["_run"] = f"next={sheet['next']}"
+                out.append(row)
+        except Exception:
+            out = []
+        if out:
+            return out
+        return [c for c in (lab.get("cards") or []) if isinstance(c, dict) and c.get("name")]
 
     def _sync_notebook_types(self, lab: dict) -> None:
         """Every sendable trunk, filled or not. A gap here is Grok's to write."""
@@ -2570,13 +2603,24 @@ class ProTerminal:
         ticket = str(card.get("ticket") or "").strip()
         if ticket:
             head.append(self._chip(ticket, BLUE))
+        run = str(card.get("_run") or "").strip()
+        if run:
+            head.append(self._chip(run, AMBER if "gate" in run else BLUE))
         # A card nothing was attributed to has not traded flat — say which it is.
         score = (attrib or {}).get(str(card.get("name") or "").lower()) or {}
         sends = int(score.get("sends") or 0)
         fills = int(score.get("attributed_fills") or 0)
         pnl = score.get("realized_pnl")
+        looks = score.get("looks_without_trigger")
+        days = score.get("days_without_trigger")
+        wait_bits: list[str] = []
+        if isinstance(days, (int, float)) and days:
+            wait_bits.append(f"{days:g}d")
+        if isinstance(looks, int) and looks:
+            wait_bits.append(f"{looks} look(s) no trigger")
         if not sends:
-            head.append(self._chip("no sends yet", MUTED))
+            wait = f"{' / '.join(wait_bits)}, no sends" if wait_bits else "no sends yet"
+            head.append(self._chip(wait, MUTED))
         elif not fills or not isinstance(pnl, (int, float)):
             head.append(self._chip(f"{sends} send(s) · no fills yet", MUTED))
         else:
@@ -2585,6 +2629,8 @@ class ProTerminal:
                     f"{sends} send(s) · ${pnl:+,.2f}", GREEN if pnl > 0 else RED if pnl else MUTED
                 )
             )
+        if sends and wait_bits:
+            head.append(self._chip(" / ".join(wait_bits) + " since last send", MUTED))
         rows: list[ft.Control] = [ft.Row(head, spacing=6)]
         for field, label in (
             ("when_on", "when"),
@@ -2718,10 +2764,20 @@ class ProTerminal:
 
     def _sync_sc_cards(self) -> None:
         try:
-            from abcxauto.lab_playbook import card_scores, load_lab
+            from abcxauto.lab_playbook import card_scores, load_lab, walk_cards
 
             lab = load_lab()
-            cards = [c for c in (lab.get("cards") or []) if isinstance(c, dict)]
+            cards: list[dict] = []
+            for type_name, card in walk_cards(lab):
+                if not isinstance(card, dict) or not card.get("name"):
+                    continue
+                row = dict(card)
+                row["type"] = type_name
+                if type_name:
+                    row.setdefault("ticket", type_name)
+                cards.append(row)
+            if not cards:
+                cards = [c for c in (lab.get("cards") or []) if isinstance(c, dict)]
             scores = card_scores(cards) or []
         except Exception:
             scores = []
@@ -3834,7 +3890,7 @@ class ProTerminal:
         self._sync_lessons_line()
         self._sync_tabs()
         try:
-            from abcxauto.lab_playbook import load_lab, load_live, is_paper
+            from abcxauto.lab_playbook import is_paper, lab_wake_bit, load_lab, load_live
 
             pb = load_lab() if is_paper() else load_live()
             pb = pb if isinstance(pb, dict) else {}
@@ -3849,10 +3905,27 @@ class ProTerminal:
             score = pb.get("paper_score") if isinstance(pb.get("paper_score"), dict) else {}
             edge = score.get("edge_usd")
             edge_s = f"{edge:,.2f}" if isinstance(edge, (int, float)) else edge
-            self.lbl_playbook.value = (
+            line = (
                 f"Playbook [{tag}] rev={rev} edge={edge_s}"
                 if inst else f"Playbook [{tag}]: none"
             )
+            if inst and is_paper():
+                try:
+                    from abcxauto.think_stream import last_look_for_hunt
+
+                    last_facts = last_look_for_hunt()
+                    bit = lab_wake_bit(
+                        pb,
+                        last_look=list(last_facts.get("tools") or []),
+                        flat=getattr(s, "flat", None),
+                        quoted=last_facts,
+                        session_range=last_facts.get("session_range"),
+                    )
+                    if bit:
+                        line = f"{line} · {bit}"
+                except Exception:
+                    pass
+            self.lbl_playbook.value = line
             self.lbl_playbook.tooltip = str(pb.get("instructions") or "")[:600] or None
             self.lbl_playbook.color = TEXT if inst else MUTED
         except Exception:
@@ -4054,7 +4127,10 @@ class ProTerminal:
             if not hl:
                 continue
             sym = str(it.get("symbol") or "").upper()
-            src = str(it.get("source") or "")
+            src = str(it.get("publisher") or "")
+            feed = str(it.get("source") or "")
+            if not src and feed not in ("mda", "ibkr", "marketdata"):
+                src = feed
             if src.startswith("http"):
                 try:
                     from urllib.parse import urlparse

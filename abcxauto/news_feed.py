@@ -25,22 +25,16 @@ _MARKET_CONTEXT = (
 
 
 def _universe(positions: list[dict] | None) -> list[str]:
-    """Book underlyings first, then Universe legal sample, then thin index context."""
+    """Book underlyings, then index context. Not the scan sandbox.
+
+    legal_symbols is the IBKR screen leftover (levered/micro junk). Polling
+    that tape for headlines 404s MDA and starves the look's catalyst fetch.
+    """
     out: list[str] = []
     for p in positions or []:
         sym = str((p or {}).get("symbol") or "").upper()
         if sym and sym not in out:
             out.append(sym)
-    try:
-        from abcxauto.universe import legal_symbols
-
-        for sym in legal_symbols():
-            if sym not in out:
-                out.append(sym)
-            if len(out) >= 14:
-                return out
-    except Exception:
-        logger.exception("news universe legal_symbols failed")
     for sym in _MARKET_CONTEXT:
         if sym not in out:
             out.append(sym)
@@ -82,6 +76,10 @@ async def fetch_agent_news(
 
         async def _one(sym: str) -> list[dict]:
             try:
+                from abcxauto.prints import mda_worth_asking
+
+                if not mda_worth_asking(sym):
+                    return []
                 return list(await client.get_stock_news(sym, countback=per_symbol) or [])
             except Exception:
                 logger.exception("news fetch failed for %s", sym)

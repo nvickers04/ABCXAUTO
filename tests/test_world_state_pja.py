@@ -355,12 +355,42 @@ def test_format_wake_includes_day_facts():
     assert "stale=" not in text
     assert "mix=longC:7,shortC:1,vert:1" in text
     assert "ledger r50:-400.0 r51:-549.0" in text
-    # set_wake is offered in every session now, so the wake line advertises it.
-    assert text.rstrip().endswith("send|set_wake.")
-    assert "set_wake" in text  # offered in every session now
+    assert text.rstrip().endswith("send.")
+    assert "set_wake" not in text
     assert "This is a delta" not in text
     assert "no operator" not in text.lower()
     assert "clerk wake" not in text.lower()
+
+
+def test_format_wake_prints_lab_waiting_when_the_glance_has_it():
+    from abcxauto.wake_bus import note_wake
+
+    note_wake(None)
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "names": 0,
+            "lots": 0,
+            "open_lots": [],
+            "capacity": {"open_count": 0, "max_open_positions": 5},
+            "max_risk_per_trade_pct": 25.0,
+            "playbook": {
+                "revision": 20,
+                "has_instructions": True,
+                "since_write_edge": 0,
+                "now_edge": 0,
+                "win_4h": 0,
+                "lab_wake": "lab flush bounce 147looks/3.9d/0sends untried=13",
+            },
+        },
+    )
+    assert "lab flush bounce 147looks/3.9d/0sends" in text
+    assert "untried=13" in text
+    assert text.rstrip().endswith("send.")
 
 
 def test_format_wake_floors_on_still_paints_max_risk():
@@ -390,8 +420,7 @@ def test_format_wake_floors_on_still_paints_max_risk():
     assert "risk/trade=" not in text
     assert "open_lots=NVDA STK long 5" in text
     assert "qty=" not in text
-    # set_wake is offered in every session now, so the wake line advertises it.
-    assert text.rstrip().endswith("send|set_wake.")
+    assert text.rstrip().endswith("send.")
 
 
 def test_format_working_exits_and_wake_lasts():
@@ -444,6 +473,25 @@ def test_format_working_exits_and_wake_lasts():
     assert "haltAt=$-704.0" in text
 
 
+def test_format_wake_omits_candles_none():
+    """candles=none invited a re-fetch every look after a fresh snap."""
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "nl": 35000,
+            "names": 0,
+            "lots": 0,
+            "candle_source": "none",
+            "capacity": {"open_count": 0, "max_open_positions": 5},
+        },
+    )
+    assert "candles=" not in text
+
+
 def test_format_wake_fill_is_delta_not_discovery():
     from abcxauto.think_stream import write_desk_brief
     from abcxauto.wake_bus import BookEvent, note_wake
@@ -489,9 +537,8 @@ def test_format_wake_fill_is_delta_not_discovery():
     assert "prev=close_option sends=2" in text
     assert "This is a delta" not in text
     assert "yield resume" not in text
-    # set_wake is offered in every session now, so the wake line advertises it.
-    assert text.rstrip().endswith("send|set_wake.")
-    assert "set_wake" in text  # offered in every session now
+    assert text.rstrip().endswith("send.")
+    assert "set_wake" not in text
     assert "send or set_wake" not in text
     assert "Cycle 2." not in text
     assert "open_lots=XLF 260828C58.5 x1 -42%,QQQ 260918C745 x1" in text
@@ -579,7 +626,18 @@ def test_format_wake_flat_empty_omits_leftover_prev():
     from abcxauto.think_stream import write_desk_brief
     from abcxauto.wake_bus import note_wake
 
-    write_desk_brief({"strat": "market_bracket", "sends": 3, "open_lots": []})
+    write_desk_brief({
+        "strat": "market_bracket",
+        "sends": 0,
+        "send_calls": 0,
+        "open_lots": [],
+        "tool_trace": ["book", "playbook", "scan", "news", "set_wake"],
+        "scan_hits": {
+            "arena": "mega_cap",
+            "scan_code": "TOP_PERC_LOSE",
+            "rows": [{"symbol": "SNDK", "open_gap_pct": -6.5}],
+        },
+    })
     note_wake(None)
     text = format_wake(
         cycle=1,
@@ -602,6 +660,8 @@ def test_format_wake_flat_empty_omits_leftover_prev():
     assert "open_lots=" not in text
     assert "max_risk=25.0% floors=on" in text
     assert "risk/trade=" not in text
+    assert "last_look 0sends book,playbook,scan,news,set_wake" in text
+    assert "last_scan SNDK -6.5" in text
 
 
 def test_day_facts_wiped_instructions_drop_playbook_glance():

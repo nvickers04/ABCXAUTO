@@ -1,8 +1,7 @@
 """Standing IBKR + on-demand Grok. No clerk decision checklist.
 
-Book events are facts. set_wake parks overnight / around-open.
-Paper RTH set_wake writes no clock — yield stays in the same think.
-Hard interrupts are gates.
+Book events are facts. The clerk owns the next look (playbook cadence +
+defaults). Hard interrupts are gates.
 """
 
 from __future__ import annotations
@@ -35,14 +34,17 @@ HARD_INTERRUPTS = frozenset({"unprotected", "halt"})
 LIVE_POKE_KINDS = frozenset({"fill", "order_change", "unprotected"})
 PULSE_S = 10.0
 DEFAULT_LOOK_S = 90.0
-DEFAULT_LOOK_OPEN_S = 60.0
+DEFAULT_LOOK_OPEN_S = 300.0
+DEFAULT_LOOK_HUNT_S = 600.0
+LAST_HOUR_LOOK_S = 90.0
 MIN_LOOK_S = 30.0
-# Overnight / postmarket still expose set_wake. Paper premarket stays up.
+# First RTH print after 09:30. A session-card look one minute before the
+# bell cannot pin an opening low; a 30-minute park after that look misses it.
+OPEN_PRINT_S = 20.0
+NEXT_LOOK_S_MAX = 4 * 3600.0
+# Closed / postmarket skip Grok (unprotected still interrupts). Premarket stays up.
 PARK_SESSIONS = frozenset({"premarket", "closed", "postmarket"})
 PAPER_STAY_UP_SESSIONS = frozenset({"regular", "premarket"})
-# Nap ceiling while the lab is idle. Not a hunt cadence — a refusal to let a
-# park stand in for writing the next hypothesis.
-LAB_IDLE_PARK_CAP_S = 300.0
 STAY_UP_RETRY_MIN_S = 20.0
 STAY_UP_RETRY_MAX_S = 45.0
 # Consecutive failed looks escalate. A provider capacity error is not a
@@ -220,68 +222,10 @@ def min_look_s() -> float:
     return _env_float("ABCXAUTO_MIN_LOOK_S", MIN_LOOK_S, lo=5.0)
 
 
-def lab_idle_park_cap_s(
-    *,
-    flat: bool | None = None,
-    session: str = "",
-) -> float | None:
-    """Longest nap allowed while the lab has nothing under test.
-
-    The clock is Grok's, but it is not a way to opt out of building the book.
-    Flat, in tradeable hours, zero resolved trades, and entry structures carrying
-    no hypothesis at all is an idle lab: the work is to write a card and test it,
-    so a long park is cut short.
-
-    Returns None — full clock honored — whenever a long nap is the right answer:
-    holding risk, outside the open session, halted, or a lab that is genuinely
-    running (one resolved trade, or a card under every entry structure).
-
-    Premarket is deliberately exempt. A card that triggers on the opening print
-    has nothing to test before the bell, so parking to the open is judgement, not
-    avoidance — capping it there just spends money re-screening a closed tape.
-    """
-    if flat is False:
-        return None
-    if str(session or "").lower() != "regular":
-        return None
-    try:
-        from abcxauto.lab_playbook import is_paper
-
-        # Live follows a promoted playbook. Building the lab is paper's job.
-        if not is_paper():
-            return None
-    except Exception:
-        return None
-    try:
-        from abcxauto.risk_gates import get_risk_gate
-
-        if get_risk_gate().is_halted:
-            return None
-    except Exception:
-        pass
-    try:
-        from abcxauto.lab_playbook import lab_facts
-
-        facts = lab_facts()
-    except Exception:
-        return None
-    if int(facts.get("resolved_trades") or 0) > 0:
-        return None
-    if not (facts.get("entry_trunks_untried") or []):
-        return None
-    return LAB_IDLE_PARK_CAP_S
-
-
 def set_wake_offered(*, session: str = "") -> bool:
-    """Every session. Grok owns its own clock — the clerk imposes no cadence.
-
-    RTH and paper premarket used to withhold this tool, which left the engine
-    re-arming a think the instant the last one ended: a hunt treadmill for a
-    setup that only appears in the opening window. Grok now parks when it wants
-    and a book event still interrupts the park.
-    """
+    """Never. Cadence is clerk + playbook, not a Grok tool."""
     _ = session
-    return True
+    return False
 
 
 def _retry_base_s() -> tuple[float, bool]:
@@ -324,33 +268,204 @@ def _floor_look_s(sec: float, *, session: str = "") -> float:
     return max(min_look_s(), float(sec))
 
 
+def et_minutes_to_rth_open(*, now: datetime | None = None) -> float | None:
+    """Minutes to today's 09:30 ET. None when already open or not a weekday."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        clock = now or datetime.now(ZoneInfo("America/New_York"))
+        if clock.tzinfo is None:
+            clock = clock.replace(tzinfo=ZoneInfo("America/New_York"))
+        else:
+            clock = clock.astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        return None
+    if clock.weekday() >= 5:
+        return None
+    bell = clock.replace(hour=9, minute=30, second=0, microsecond=0)
+    if clock >= bell:
+        return None
+    return (bell - clock).total_seconds() / 60.0
+
+
+def session_card_open_s(
+    session: str = "",
+    minutes_to_open: float | None = None,
+) -> float | None:
+    """Seconds until the RTH open plus a first-print buffer.
+
+    Only for a live card whose stop is today's opening low. Premarket looks
+    cannot implement that card; the clerk clock must land after the bell.
+    """
+    sess = str(session or "").lower()
+    mins = minutes_to_open
+    if mins is None:
+        mins = et_minutes_to_rth_open()
+        if mins is not None and not sess:
+            sess = "premarket"
+    if sess not in ("premarket", "closed"):
+        return None
+    if mins is None:
+        return None
+    try:
+        mins = float(mins)
+    except (TypeError, ValueError):
+        return None
+    if mins != mins or mins <= 0:
+        return None
+    try:
+        from abcxauto.lab_playbook import live_card_needs_session
+
+        if not live_card_needs_session():
+            return None
+    except Exception:
+        return None
+    return max(min_look_s(), mins * 60.0 + float(OPEN_PRINT_S))
+
+
+def minutes_to_open_from_snap(snap: dict[str, Any] | None) -> float | None:
+    """Minutes to the RTH open from a snap pulse or market_hours block."""
+    s = snap if isinstance(snap, dict) else {}
+    pulse = s.get("reality_pulse") if isinstance(s.get("reality_pulse"), dict) else {}
+    sess = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
+    if sess.get("countdown_to") == "open" and sess.get("countdown_s") is not None:
+        try:
+            return max(0.0, float(sess["countdown_s"]) / 60.0)
+        except (TypeError, ValueError):
+            pass
+    hours = s.get("market_hours") if isinstance(s.get("market_hours"), dict) else {}
+    if hours.get("minutes_to_open") is not None:
+        try:
+            return max(0.0, float(hours["minutes_to_open"]))
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def clamp_next_look_s(raw: Any) -> float | None:
+    """Card cadence hint. Floor MIN_LOOK_S, cap NEXT_LOOK_S_MAX."""
+    try:
+        sec = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if sec != sec or sec <= 0:
+        return None
+    return max(min_look_s(), min(float(NEXT_LOOK_S_MAX), sec))
+
+
+def clerk_look_s(
+    *,
+    flat: bool | None = None,
+    session: str = "",
+    minutes_to_open: float | None = None,
+    next_look_s: float | None = None,
+) -> float:
+    """Clerk next-look seconds. Playbook card may tighten or stretch inside the floor."""
+    sess = str(session or "").lower()
+    mins = minutes_to_open
+    if mins is not None:
+        try:
+            mins = float(mins)
+        except (TypeError, ValueError):
+            mins = None
+        if mins is not None and mins != mins:
+            mins = None
+    last_hour = (
+        mins is not None
+        and 0 < mins <= 60
+        and sess in ("premarket", "closed", "postmarket")
+    )
+    open_s = session_card_open_s(sess, mins)
+    if open_s is not None:
+        return open_s
+    if next_look_s is None:
+        try:
+            from abcxauto.lab_playbook import playbook_next_look_s
+
+            next_look_s = playbook_next_look_s()
+        except Exception:
+            next_look_s = None
+    if next_look_s is not None:
+        clamped = clamp_next_look_s(next_look_s)
+        if clamped is not None:
+            if sess == "regular" and flat is False:
+                return max(clamped, float(DEFAULT_LOOK_OPEN_S))
+            return clamped
+    raw = (os.environ.get("ABCXAUTO_DEFAULT_LOOK_S") or "").strip()
+    if raw:
+        return default_look_s(flat=flat, session=session)
+    if last_hour:
+        return max(min_look_s(), float(LAST_HOUR_LOOK_S))
+    if sess == "regular" and flat is False:
+        return max(min_look_s(), float(DEFAULT_LOOK_OPEN_S))
+    if sess in ("closed", "postmarket") and mins is not None and mins > 60:
+        return max(min_look_s(), (mins - 60.0) * 60.0)
+    if sess in ("regular", "premarket") and flat is not False:
+        return max(min_look_s(), float(DEFAULT_LOOK_HUNT_S))
+    return default_look_s(flat=flat, session=session)
+
+
 def ensure_next_look(
     *,
     previous_set_at: str = "",
     flat: bool | None = None,
     session: str = "",
+    minutes_to_open: float | None = None,
+    replace: bool = False,
 ) -> GrokAlarm:
-    """Honor a real Grok park; seed a backstop only when Grok said nothing.
+    """Seed a clerk clock when none is standing. Never leave a spent or empty alarm.
 
-    A clock Grok set is never overwritten — that is the whole point of owning
-    the cadence. The default look is a backstop against a silent turn parking
-    the desk forever, not a hunt clock: any session, because RTH used to get no
-    backstop and spun instead.
+    ``replace`` reseeds after a look so a leftover manage clock cannot fire
+    a second hunt a minute after flatten. Launch / begin_run keep a future
+    clock. ``previous_set_at`` is unused — Grok no longer owns the clock.
     """
+    _ = previous_set_at
+    sess = str(session or "").lower()
+    mins = minutes_to_open
+    if mins is None:
+        mins = et_minutes_to_rth_open()
+        if mins is not None and not sess:
+            sess = "premarket"
     alarm = load_alarm()
-    grok_parked = bool(alarm.set_at and alarm.set_at != previous_set_at)
-    if grok_parked:
-        return alarm
-    if alarm.wake_at and not alarm.due():
-        # A clock from an earlier turn that has not come round yet still stands.
-        # A spent one must be replaced: due() stays true forever otherwise and
-        # the engine thinks again with no gap at all.
+    if alarm.wake_at and not alarm.due() and not replace:
+        # A clock from an earlier look that has not come round yet still stands
+        # unless it would think before the bell — or skip the open entirely —
+        # on a card that needs today's opening low.
+        nudged = _nudge_session_card_wake(alarm, sess, mins)
+        if nudged is not None:
+            return nudged
         return alarm
     return set_wake(
-        wake_in_s=default_look_s(flat=flat, session=session),
+        wake_in_s=clerk_look_s(
+            flat=flat,
+            session=sess,
+            minutes_to_open=mins,
+        ),
         flat=flat,
-        session=session,
+        session=sess,
     )
+
+
+def _nudge_session_card_wake(
+    alarm: GrokAlarm,
+    session: str,
+    minutes_to_open: float | None,
+) -> GrokAlarm | None:
+    open_s = session_card_open_s(session, minutes_to_open)
+    if open_s is None:
+        return None
+    until = alarm.seconds_until()
+    if until is None:
+        return None
+    try:
+        bell = float(minutes_to_open) * 60.0
+    except (TypeError, ValueError):
+        bell = None
+    if bell is not None and until + 1.0 < bell:
+        return set_wake(wake_in_s=open_s, session=session)
+    if until > open_s + 120.0:
+        return set_wake(wake_in_s=open_s, session=session)
+    return None
 
 
 def _clean_wake_if(wake_if: list[str] | str | None) -> list[str]:
@@ -375,7 +490,7 @@ def set_wake(
     flat: bool | None = None,
     session: str = "",
 ) -> GrokAlarm:
-    """Grok-owned park, every session. The clock it asks for is the clock it gets."""
+    """Clerk park. Always writes a wake_at so the desk is never clockless."""
     clean = _clean_wake_if(wake_if)
     at = str(wake_at or "").strip() or None
     sec: float | None = None
@@ -390,9 +505,6 @@ def set_wake(
             sec = (dt - _utc_now()).total_seconds()
     if sec is None:
         sec = default_look_s(flat=flat, session=session)
-    cap = lab_idle_park_cap_s(flat=flat, session=session)
-    if cap is not None and sec > cap:
-        sec = cap
     sec = _floor_look_s(sec, session=session)
     at = datetime.fromtimestamp(time.time() + sec, tz=timezone.utc).isoformat()
     return save_alarm(
