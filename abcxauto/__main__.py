@@ -44,6 +44,13 @@ def _cleanup(
     ui_only: bool = False,
     extra_exclude: list[int] | None = None,
 ) -> int:
+    if "--cleanup" not in sys.argv:
+        # kill_only matches python -m abcxauto and can suicide the desk
+        # that is starting (commit 8eb97ce). Operator stop is --cleanup.
+        raise RuntimeError(
+            "refusing pre-launch cleanup; "
+            "python -m abcxauto --cleanup to stop the desk"
+        )
     script = Path(__file__).resolve().parents[1] / "scripts" / "cleanup_pro.py"
     cmd = [sys.executable, str(script), "--exclude-pid", str(os.getpid())]
     if extra_exclude:
