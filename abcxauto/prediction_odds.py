@@ -55,6 +55,16 @@ def _num(raw: Any) -> float | None:
         return None
 
 
+def _implied_px(raw: Any) -> float | None:
+    """Crowd book share in [0, 1]. Not last, not cents, not a ticket price."""
+    if isinstance(raw, bool):
+        return None
+    val = _num(raw)
+    if val is None or val != val or val < 0.0 or val > 1.0:
+        return None
+    return val
+
+
 def _queries(symbols: list[str], query: str) -> list[str]:
     out: list[str] = []
     q = (query or "").strip()
@@ -91,7 +101,7 @@ def compact_event(ev: dict[str, Any], *, market_cap: int = MARKET_CAP) -> dict[s
         prices = _json_list(m.get("outcomePrices"))
         implied: list[dict[str, Any]] = []
         for name, px in zip(outcomes, prices):
-            val = _num(px)
+            val = _implied_px(px)
             if val is None:
                 continue
             implied.append({"name": name, "px": round(val, 4)})
@@ -150,9 +160,16 @@ async def fetch_odds(
                 syms.append(s)
             if len(syms) >= SEARCH_CAP:
                 break
-        if not syms:
-            syms = ["SPY"]
     searches = _queries(syms, query)
+    if not searches:
+        return {
+            "source": "polymarket",
+            "freshness": "betting_book",
+            "use": "crowd_odds_not_send_geometry",
+            "searched": [],
+            "events": [],
+            "note": "no_query",
+        }
     events: list[dict[str, Any]] = []
     own = client is None
     http = client or httpx.AsyncClient(timeout=_TIMEOUT_S)
