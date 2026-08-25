@@ -145,7 +145,9 @@ def test_working_stop_qty_and_mismatch(tmp_path, monkeypatch):
     fact = stop_qty_mismatch_fact(positions, orders, plan)
     assert fact is not None
     assert fact["mismatch"] is True
+    assert fact["match"] is False
     assert fact["held_qty"] == 5.0
+    assert fact["stop_order_qty"] == 10.0
     assert "heuristic" in fact
 
 
