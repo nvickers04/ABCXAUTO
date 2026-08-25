@@ -122,5 +122,10 @@ def test_combo_bag_close_excludes_unlimited_shapes():
 
 @pytest.mark.parametrize("strategy", sorted(STRATEGIES))
 def test_validate_proposal_accepts_non_hold_examples(strategy):
-    proposal = validate_proposal(strategy, ORDER_EXAMPLES[strategy], RATIONALE)
+    params = ORDER_EXAMPLES[strategy]
+    # Clerk geometry uses live IBKR last, not a catalog price_hint.
+    quote = None
+    if strategy in ("market_bracket", "oca", "bracket"):
+        quote = float(params.get("entry_price") or 100.0)
+    proposal = validate_proposal(strategy, params, RATIONALE, quote_last=quote)
     assert proposal.strategy == strategy
