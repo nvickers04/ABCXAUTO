@@ -2018,7 +2018,7 @@ def test_run_sheet_and_wake_paint_send_sketch_from_session(monkeypatch):
     assert pb["run"][0]["send"]["symbol"] == "SNDK"
 
 
-def test_apply_hunt_send_sketch_does_not_rewrite_grok():
+def test_apply_hunt_send_sketch_does_not_fill_omitted_ticket_fields():
     from abcxauto.lab_playbook import apply_hunt_send_sketch
 
     rng = {
@@ -2031,27 +2031,65 @@ def test_apply_hunt_send_sketch_does_not_rewrite_grok():
                 "symbol": "SNDK",
                 "direction": "LONG",
                 "stop_price": 88.0,
+                "target_price": 93.0,
                 "quantity": 10,
             },
         }
     }
+    snap = {"session_range": rng}
     act = {
         "strategy": "market_bracket",
         "params": {"card": "flush bounce", "symbol": "SNDK", "stop_price": 87.5},
         "rationale": "my stop",
     }
-    apply_hunt_send_sketch(act, {"session_range": rng})
+    assert apply_hunt_send_sketch(act, snap) is None
     assert act["params"]["stop_price"] == 87.5
     assert act["rationale"] == "my stop"
+    assert act["params"].get("quantity") in (None, "")
+    assert act["params"].get("target_price") in (None, "")
+    assert act["params"].get("direction") in (None, "")
+    assert "_hunt_sketch" not in act
+
+    thin = {
+        "strategy": "market_bracket",
+        "params": {"card": "flush bounce"},
+        "rationale": "",
+    }
+    assert apply_hunt_send_sketch(thin, snap) is None
+    assert thin["params"] == {"card": "flush bounce"}
+    assert thin.get("rationale") == ""
+    for key in ("symbol", "direction", "stop_price", "target_price", "quantity"):
+        assert thin["params"].get(key) in (None, "")
+    assert "_hunt_sketch" not in thin
+
     other = {
         "strategy": "market_bracket",
         "params": {"card": "other card"},
     }
-    assert apply_hunt_send_sketch(other, {"session_range": rng}) is None
+    assert apply_hunt_send_sketch(other, snap) is None
     assert other["params"].get("symbol") is None
 
+    no_card = {
+        "strategy": "market_bracket",
+        "params": {"symbol": "SNDK", "quantity": 10, "stop_price": 88.0},
+        "rationale": "",
+    }
+    assert apply_hunt_send_sketch(no_card, snap) is None
+    assert no_card["params"].get("card") in (None, "")
+    assert no_card["params"]["symbol"] == "SNDK"
+    assert no_card.get("rationale") == ""
 
-def test_hunt_send_sketch_uses_50_pct_retrace_when_30_is_through():
+    no_stop = {
+        "strategy": "market_bracket",
+        "params": {"symbol": "SNDK", "card": "flush bounce", "quantity": 10},
+    }
+    assert apply_hunt_send_sketch(no_stop, snap) is None
+    assert no_stop["params"].get("stop_price") in (None, "")
+    assert no_stop["params"].get("target_price") in (None, "")
+    assert no_stop["params"]["quantity"] == 10
+
+
+def test_hunt_send_sketch_does_not_invent_target_from_retrace():
     from abcxauto.lab_playbook import hunt_send_sketch, session_target
 
     rng = {
@@ -2071,7 +2109,10 @@ def test_hunt_send_sketch_uses_50_pct_retrace_when_30_is_through():
     assert session_target(rng, "LONG") == 95.0
     sketch = hunt_send_sketch({"SNDK": rng})
     assert sketch is not None
-    assert sketch["target_price"] == 95.0
+    assert sketch.get("card") == "flush bounce"
+    assert sketch.get("target_price") in (None, "")
+    assert sketch.get("stop_price") in (None, "")
+    assert sketch.get("quantity") in (None, "")
     through = dict(rng, last=96.0)
     assert session_target(through, "LONG") is None
     assert hunt_send_sketch({"SNDK": through}) is None
@@ -2096,7 +2137,10 @@ def test_hunt_send_sketch_prefers_the_wider_gap():
     })
     assert sketch is not None
     assert sketch["symbol"] == "SNDK"
-    assert sketch["stop_price"] == 88.0
+    assert sketch.get("stop_price") in (None, "")
+    assert sketch.get("target_price") in (None, "")
+    assert sketch.get("quantity") in (None, "")
+    assert sketch.get("direction") in (None, "")
     assert hunt_send_sketch({
         "SNDK": {
             "low": 88.0,
@@ -2365,13 +2409,9 @@ def test_sibling_cards_bind_gap_and_sketch_to_card_name():
         alb,
     ) == ""
     sketch = hunt_send_sketch({"ALB": alb})
-    assert sketch is not None
-    assert sketch["symbol"] == "ALB"
-    assert sketch["card"] == "3pct gap hold"
+    assert sketch is None
     assert hunt_send_sketch({"ALB": alb}, card="flush bounce") is None
-    named = hunt_send_sketch({"ALB": alb}, card="3pct gap hold")
-    assert named is not None
-    assert named["card"] == "3pct gap hold"
+    assert hunt_send_sketch({"ALB": alb}, card="3pct gap hold") is None
     assert hunt_send_sketch({"ALB": alb}, card="defined-risk flush debit") is None
     stamped = dict(alb)
     _stamp_session_ticket(stamped)
@@ -2387,16 +2427,14 @@ def test_sibling_cards_bind_gap_and_sketch_to_card_name():
     assert by_name["flush bounce"]["min_gap_pct"] == 6.0
     assert by_name["flush bounce"].get("gate") == "off"
     assert by_name["3pct gap hold"]["min_gap_pct"] == 3.0
-    assert by_name["3pct gap hold"].get("send", {}).get("symbol") == "ALB"
+    assert "send" not in by_name["3pct gap hold"]
     bit = lab_wake_bit(
         load_lab(),
         tool_trace=["book", "scan", "news", "quote", "candles"],
         flat=True,
         session_range={"ALB": alb},
     )
-    assert "send ALB" in bit
-    assert "card=3pct gap hold" in bit
-    assert "gate=off" not in bit
+    assert "send ALB" not in bit
 
 
 def test_live_card_scan_constraints_apply_written_floors():
@@ -2706,14 +2744,14 @@ def test_empty_scan_does_not_walk_the_hunt_to_send():
         },
         tape={"rows": [{"symbol": "SNDK", "last": 91.5}]},
     )["symbol"] == "SNDK"
-    assert hunt_send_sketch({
+    sized = hunt_send_sketch({
         "SNDK": {
             "today": True,
             "low": 88.0,
             "last": 91.5,
             "above_low": True,
             "open_gap_pct": -6.5,
-            "size": {"risk_usd": 500.0},
+            "size": {"risk_usd": 500.0, "card_qty": 10},
             "ticket": {
                 "strategy": "market_bracket",
                 "card": "flush bounce",
@@ -2722,4 +2760,6 @@ def test_empty_scan_does_not_walk_the_hunt_to_send():
                 "target_price": 93.0,
             },
         }
-    }) is None
+    })
+    assert sized is not None
+    assert sized.get("quantity") in (None, "")
