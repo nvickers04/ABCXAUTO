@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from abcxauto.pacing import WakeGate, wait_for_pace
+from abcxauto.pacing import STAY_UP_RETRY_CAP_S, WakeGate, stay_up_retry_s, wait_for_pace
 
 
 def test_wake_whitelist_and_debounce():
@@ -32,6 +33,71 @@ async def test_wait_for_pace_wakes():
     asyncio.create_task(setter())
     result = await wait_for_pace(5.0, ev, chunk_s=0.05)
     assert result == "woken"
+
+
+def test_stay_up_retry_cap_is_tens_of_seconds():
+    """Noah rejected ~30 min windows. The cap is the 20–45s class."""
+    assert 20.0 <= STAY_UP_RETRY_CAP_S <= 45.0
+
+
+def test_stay_up_retry_caps_thirty_minute_window():
+    assert stay_up_retry_s(30 * 60) == STAY_UP_RETRY_CAP_S
+    assert stay_up_retry_s(1800.0) == STAY_UP_RETRY_CAP_S
+    assert stay_up_retry_s(33 * 60) == STAY_UP_RETRY_CAP_S
+    assert stay_up_retry_s(float("inf")) == 0.0
+
+
+def test_stay_up_retry_caps_bell_style_remaining():
+    """9:03 → 9:33 is a 30-minute remaining-to-bell. Pace cannot sit that out."""
+    from datetime import datetime
+
+    now = datetime(2026, 8, 25, 9, 3, 0)
+    bell = datetime(2026, 8, 25, 9, 33, 0)
+    remaining = (bell - now).total_seconds()
+    assert remaining == 1800.0
+    assert stay_up_retry_s(remaining) == STAY_UP_RETRY_CAP_S
+
+    earlier = datetime(2026, 8, 25, 8, 0, 0)
+    assert stay_up_retry_s((bell - earlier).total_seconds()) == STAY_UP_RETRY_CAP_S
+
+
+def test_stay_up_retry_keeps_short_waits():
+    assert stay_up_retry_s(8.0) == 8.0
+    assert stay_up_retry_s(20.0) == 20.0
+    assert stay_up_retry_s(44.0) == 44.0
+    assert stay_up_retry_s(45.0) == STAY_UP_RETRY_CAP_S
+    assert stay_up_retry_s(45.1) == STAY_UP_RETRY_CAP_S
+    assert stay_up_retry_s(0.0) == 0.0
+    assert stay_up_retry_s(-12.0) == 0.0
+    assert stay_up_retry_s("nope") == 0.0  # type: ignore[arg-type]
+    assert stay_up_retry_s(None) == 0.0  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_pace_cannot_park_thirty_minutes(monkeypatch):
+    import time
+
+    import abcxauto.pacing as pacing
+
+    monkeypatch.setattr(pacing, "STAY_UP_RETRY_CAP_S", 0.08)
+    ev = asyncio.Event()
+    t0 = time.monotonic()
+    result = await wait_for_pace(1800.0, ev, chunk_s=0.02)
+    elapsed = time.monotonic() - t0
+    assert result == ""
+    assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_wait_for_pace_wakes_even_when_asked_to_park():
+    import time
+
+    ev = asyncio.Event()
+    ev.set()
+    t0 = time.monotonic()
+    result = await wait_for_pace(1800.0, ev, chunk_s=0.05)
+    assert result == "woken"
+    assert time.monotonic() - t0 < 1.0
 
 
 @pytest.mark.asyncio
