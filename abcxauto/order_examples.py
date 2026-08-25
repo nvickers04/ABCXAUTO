@@ -29,7 +29,6 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "direction": "LONG",
         "stop_price": 97.0,
         "target_price": 106.0,
-        "price_hint": 100.0,
         "card": "card-name",
     },
     "bracket": {
@@ -39,7 +38,6 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "entry_price": 100.0,
         "stop_price": 97.0,
         "target_price": 106.0,
-        "price_hint": 100.0,
         "card": "card-name",
     },
     "oca": {
@@ -48,7 +46,6 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "direction": "LONG",
         "stop_price": 97.0,
         "target_price": 106.0,
-        "price_hint": 100.0,
     },
     "modify_stop": {"order_id": 101, "new_stop_price": 97.5},
     "modify_target": {"order_id": 102, "new_limit_price": 112.0},
@@ -338,26 +335,18 @@ COMBO_BAG_CLOSE = frozenset({
     "strangle",
 })
 
-# Realistic net debit/credit for the OPEN example legs (Grok supplies live mids).
-_COMBO_CLOSE_LIMIT: dict[str, float] = {
-    "vertical_spread": 1.25,
-    "calendar_spread": 1.40,
-    "diagonal_spread": 1.55,
-    "iron_condor": 1.10,
-    "iron_butterfly": 2.00,
-    "butterfly": 0.85,
-    "straddle": 8.50,
-    "strangle": 4.75,
-}
+# Clerk-owned optional keys. A number here is copied as if it were a default.
+_CLERK_FILLS_OMIT = frozenset({"price_hint"})
+# New-risk gate hoist — not a pydantic strategy field, still a real ticket key.
+_TAUGHT_HOIST = frozenset({"card"})
 
 
 def combo_close_example(name: str) -> dict[str, Any]:
-    """Same legs as the OPEN example plus closing_position and Grok limit_price."""
+    """Same OPEN legs plus closing_position. Grok supplies live limit_price."""
     if name not in COMBO_BAG_CLOSE:
         raise KeyError(f"{name} is not a taught combo BAG close")
     params = dict(ORDER_EXAMPLES[name])
     params["closing_position"] = True
-    params["limit_price"] = _COMBO_CLOSE_LIMIT[name]
     return params
 
 
@@ -373,7 +362,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
     prompts never teach strategies Act will block.
 
     Combo tickets print an OPEN line (ORDER_EXAMPLES value) then a close sibling
-    with the same legs + closing_position + limit_price — one BAG, not singles.
+    with the same legs + closing_position — Grok adds live limit_price.
     """
     if allowed is None:
         try:
@@ -413,7 +402,11 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
 
 
 def assert_examples_cover_strategies() -> None:
-    """Every STRATEGIES key has an example; set_risk/self_tune are allowed extras."""
+    """Every STRATEGIES key has an example; set_risk/self_tune are allowed extras.
+
+    Examples are the send contract, not clerk defaults. Extra keys (dropped by
+    pydantic) and clerk-filled optionals (live quote / Grok mid) stay out.
+    """
     missing = sorted(set(STRATEGIES) - set(ORDER_EXAMPLES))
     if missing:
         raise AssertionError(f"ORDER_EXAMPLES missing STRATEGIES keys: {missing}")
@@ -421,3 +414,27 @@ def assert_examples_cover_strategies() -> None:
         raise AssertionError("ORDER_EXAMPLES must include set_risk")
     if "self_tune" not in ORDER_EXAMPLES:
         raise AssertionError("ORDER_EXAMPLES must include self_tune")
+    invented: list[str] = []
+    clerk_defaults: list[str] = []
+    for name, params in ORDER_EXAMPLES.items():
+        if name not in STRATEGIES:
+            continue
+        fields = set(STRATEGIES[name][0].model_fields) | _TAUGHT_HOIST
+        extra = sorted(set(params) - fields)
+        if extra:
+            invented.append(f"{name}: {extra}")
+        leaked = sorted(set(params) & _CLERK_FILLS_OMIT)
+        if leaked:
+            clerk_defaults.append(f"{name}: {leaked}")
+    if invented:
+        raise AssertionError(f"ORDER_EXAMPLES invented fields: {invented}")
+    if clerk_defaults:
+        raise AssertionError(
+            f"ORDER_EXAMPLES must not teach clerk-filled fields: {clerk_defaults}"
+        )
+    for name in COMBO_BAG_CLOSE:
+        close = combo_close_example(name)
+        if "limit_price" in close:
+            raise AssertionError(
+                f"combo close example invents limit_price for {name}"
+            )
