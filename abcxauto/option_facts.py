@@ -13,8 +13,6 @@ import asyncio
 import logging
 from typing import Any
 
-from abcxauto.world_state import position_avg_facts
-
 logger = logging.getLogger(__name__)
 
 _MAX_LEGS = 15
@@ -98,33 +96,60 @@ def _premium_sign(row: dict[str, Any], qty: float) -> float | None:
     return -1.0 if qty > 0 else 1.0
 
 
-def _fill_contract_usd(row: dict[str, Any]) -> float | None:
-    """Cash of one contract from fill/avg cost. last / mid / mark are ignored."""
-    has_avg = any(row.get(k) is not None for k in _AVG_COST_KEYS)
-    has_fill = any(row.get(k) is not None for k in _FILL_PX_KEYS)
-    if not has_avg and not has_fill:
-        return None
-    probe = dict(row)
-    sec = str(probe.get("secType") or probe.get("sec_type") or probe.get("sec") or "").upper()
-    if sec not in ("OPT", "FOP"):
-        probe["secType"] = "OPT"
-    cash = position_avg_facts(probe).get("avg_usd")
-    if cash is not None:
-        got = _finite(cash)
-        return abs(got) if got is not None else None
-    px = None
-    for key in _FILL_PX_KEYS:
+def _multiplier(row: dict[str, Any]) -> float:
+    raw = _finite(row.get("multiplier"))
+    if raw is not None and raw > 0:
+        return raw
+    return 100.0
+
+
+def _mark_for_units(row: dict[str, Any]) -> float | None:
+    """Unit hint only. last is not a fill and is not used here."""
+    for key in ("market_price", "marketPrice"):
+        if row.get(key) is None:
+            continue
+        mkt = _finite(row.get(key))
+        if mkt is not None:
+            return mkt
+    return None
+
+
+def _fill_px(row: dict[str, Any]) -> float | None:
+    """Per-share or contract fill. last / mid / mark are not fills."""
+    for key in _AVG_COST_KEYS + _FILL_PX_KEYS:
         if row.get(key) is None:
             continue
         px = _finite(row.get(key))
-        if px is not None:
-            break
-    if px is None or px < 0:
+        if px is not None and px >= 0:
+            return px
+    return None
+
+
+def _avg_cost_is_contract_cash(row: dict[str, Any], px: float) -> bool:
+    # IBKR OPT averageCost is usually contract cash when it dwarfs the mark.
+    if not any(row.get(k) is not None for k in _AVG_COST_KEYS):
+        return False
+    mkt = _mark_for_units(row)
+    return abs(px) >= 5.0 and (mkt is None or abs(px) > abs(mkt) * 3)
+
+
+def _fill_contract_usd(row: dict[str, Any]) -> float | None:
+    """Cash of one contract from fill/avg cost. last / mid / mark are ignored."""
+    px = _fill_px(row)
+    if px is None:
         return None
-    mult = _finite(row.get("multiplier"))
-    if mult is None or mult <= 0:
-        mult = 100.0
-    return abs(px) * mult
+    if _avg_cost_is_contract_cash(row, px):
+        return abs(px)
+    return abs(px) * _multiplier(row)
+
+
+def _fill_px_per_share(row: dict[str, Any]) -> float | None:
+    px = _fill_px(row)
+    if px is None:
+        return None
+    if _avg_cost_is_contract_cash(row, px):
+        return px / _multiplier(row)
+    return px
 
 
 def signed_fill_premium_usd(row: dict[str, Any] | None) -> float | None:
@@ -221,18 +246,9 @@ def _leg_base(p: dict[str, Any]) -> dict[str, Any]:
     cash = signed_fill_premium_usd(p)
     if cash is not None:
         out["fill_premium_usd"] = cash
-        probe = dict(p)
-        sec = str(probe.get("secType") or probe.get("sec_type") or "").upper()
-        if sec not in ("OPT", "FOP"):
-            probe["secType"] = "OPT"
-        avg = position_avg_facts(probe).get("avg")
-        if avg is None:
-            for key in _FILL_PX_KEYS:
-                avg = _finite(p.get(key))
-                if avg is not None:
-                    break
-        if avg is not None:
-            out["fill_px"] = avg
+        fill_px = _fill_px_per_share(p)
+        if fill_px is not None:
+            out["fill_px"] = fill_px
     return out
 
 
