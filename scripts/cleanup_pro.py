@@ -1,4 +1,8 @@
-"""Kill stale ABCXAUTO / Flet desktop processes and clear project Python caches.
+"""Kill leftover Flet / orphan processes and clear project Python caches.
+
+Does not kill a live paper Pro on 7497, does not flatten, and does not treat
+Start as flatten. ``python -m abcxauto --cleanup`` still marks operator stop
+in ``__main__``; this script will not SIGKILL that desk.
 
 Usage:
   python scripts/cleanup_pro.py
@@ -10,13 +14,27 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
+
+# Same launchers the supervisor uses to see a lockless _start_pro. Not cleanup
+# itself — Start is not flatten.
+_PRO_CMDLINE_MARKERS = (
+    "-m abcxauto",
+    "-mabcxauto",
+    "abcxauto.pro_desktop",
+    "pro_desktop.py",
+    "_start_pro.py",
+    "pro_launch",
+)
+_PRO_CMDLINE_SKIP = ("cleanup_pro", "--cleanup", "pytest")
 
 
 def _ps(cmd: str) -> str:
@@ -29,25 +47,83 @@ def _ps(cmd: str) -> str:
     return ((r.stdout or "") + (r.stderr or "")).strip()
 
 
-def kill_stale(
+def cmdline_is_pro(cmd: Any) -> bool:
+    """True for a Pro / supervisor launcher, never for cleanup or pytest."""
+    if isinstance(cmd, (list, tuple)):
+        blob = " ".join(str(part) for part in cmd)
+    else:
+        blob = str(cmd or "")
+    low = blob.lower().replace("\\", "/")
+    if any(skip in low for skip in _PRO_CMDLINE_SKIP):
+        return False
+    return any(mark in low for mark in _PRO_CMDLINE_MARKERS)
+
+
+def _desk_lock_pid() -> int:
+    raw = (os.environ.get("ABCXAUTO_DESK_LOCK_PATH") or "").strip()
+    path = Path(raw) if raw else REPO / "data" / "state" / "desk.lock"
+    if not path.is_file():
+        return 0
+    try:
+        pid = int((json.loads(path.read_text(encoding="utf-8")) or {}).get("pid") or 0)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return 0
+    return pid if pid > 0 else 0
+
+
+def spare_live_paper_pids() -> tuple[set[int], bool]:
+    """PIDs of the live paper Pro on 7497 (and its tree).
+
+    ``scan_ok`` is False when we cannot see processes — fail closed: do not
+    kill python launchers, flet.exe, or ABCXAUTO Pro titles. A desk that is
+    still connecting has no 7497 socket yet; spare every Pro launcher.
+    """
+    spare: set[int] = set()
+    owner = _desk_lock_pid()
+    if owner:
+        spare.add(owner)
+    skip = {os.getpid()}
+    try:
+        parent = int(os.getppid() or 0)
+        if parent > 0:
+            skip.add(parent)
+    except Exception:
+        pass
+    try:
+        import psutil
+    except Exception:
+        return {p for p in spare if p > 0}, False
+    try:
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            info = proc.info or {}
+            pid = int(info.get("pid") or 0)
+            if pid <= 0 or pid in skip or not cmdline_is_pro(info.get("cmdline") or []):
+                continue
+            spare.add(pid)
+        extra: set[int] = set()
+        for pid in list(spare):
+            try:
+                extra.update(int(c.pid) for c in psutil.Process(pid).children(recursive=True))
+            except Exception:
+                pass
+        spare.update(extra)
+        return {p for p in spare if p > 0}, True
+    except Exception:
+        return {p for p in spare if p > 0}, False
+
+
+def kill_policy(
     *,
     aggressive: bool = False,
     exclude_pids: set[int] | None = None,
     python_targets: bool = True,
-) -> None:
-    """Kill stale Pro/Flet processes, never the caller or its parent chain.
-
-    ``python_targets=False`` only clears flet.exe and windows titled
-    ABCXAUTO Pro / Working… — safe for pre-launch cleanup so the brand-new
-    ``python -m abcxauto`` process is never matched and killed.
-    """
+) -> tuple[set[int], bool, bool, bool]:
+    """Return (exclude, kill_python, kill_flet, kill_pro_title). Never flatten."""
     exclude: set[int] = {os.getpid(), os.getppid()}
     if exclude_pids:
         exclude.update(int(p) for p in exclude_pids if int(p) > 0)
-    # Walk a few parent levels so nested python -m abcxauto -> cleanup -> powershell
-    # never suicides the launcher.
     try:
-        import psutil  # optional
+        import psutil
 
         proc = psutil.Process(os.getpid())
         for _ in range(4):
@@ -58,13 +134,43 @@ def kill_stale(
             proc = parent
     except Exception:
         pass
+    spared, scan_ok = spare_live_paper_pids()
+    exclude.update(spared)
+    # Fail closed when we cannot see the live paper desk: do not SIGKILL it.
+    kill_python = bool(python_targets) and scan_ok
+    kill_flet = scan_ok
+    kill_pro_title = scan_ok
+    return {p for p in exclude if p > 0}, kill_python, kill_flet, kill_pro_title
 
+
+def kill_stale(
+    *,
+    aggressive: bool = False,
+    exclude_pids: set[int] | None = None,
+    python_targets: bool = True,
+) -> None:
+    """Kill stale Flet leftovers. Never the live paper Pro on 7497. Never flatten.
+
+    ``python_targets=False`` skips python launchers. Live paper PIDs (desk lock,
+    ``-m abcxauto``, ``_start_pro.py``, and their children) are always excluded.
+    If the process scan fails, python / flet / ABCXAUTO Pro titles are left alone.
+    """
+    exclude, kill_python, kill_flet, kill_pro_title = kill_policy(
+        aggressive=aggressive,
+        exclude_pids=exclude_pids,
+        python_targets=python_targets,
+    )
     flag = "true" if aggressive else "false"
-    kill_py = "true" if python_targets else "false"
+    kill_py = "true" if kill_python else "false"
+    kill_flet_s = "true" if kill_flet else "false"
+    kill_title_s = "true" if kill_pro_title else "false"
     exclude_csv = ",".join(str(p) for p in sorted(exclude) if p > 0) or "0"
+    # Precise Pro markers — not ``_pro_``, which also matches cleanup_pro.py.
     script = f"""
 $aggressive = '{flag}'
 $killPy = '{kill_py}'
+$killFlet = '{kill_flet_s}'
+$killProTitle = '{kill_title_s}'
 $exclude = @({exclude_csv}) | ForEach-Object {{ [int]$_ }}
 $excludeSet = @{{}}
 foreach ($p in $exclude) {{ $excludeSet[$p] = $true }}
@@ -89,17 +195,20 @@ Get-CimInstance Win32_Process | Where-Object {{
   $procId = [int]$_.ProcessId
   if ($excludeSet.ContainsKey($procId)) {{ return }}
   $cmd = $_.CommandLine
-  $isFlet = $_.Name -eq 'flet.exe'
-  # Match Pro app launches, not every path that merely contains the folder name
-  # (e.g. cleanup_pro.py lives under ABCXAUTO\\scripts).
-  $isPro = ($killPy -eq 'true') -and $cmd -and (
-    $cmd -match '(-m\\s+abcxauto(\\s|$))|(abcxauto\\.pro_desktop)|(pro_desktop\\.py)|(pro_launch)|(_pro_)'
+  $isFlet = ($killFlet -eq 'true') -and ($_.Name -eq 'flet.exe')
+  $isCleanup = $cmd -and ($cmd -match 'cleanup_pro|--cleanup|pytest')
+  $isPro = ($killPy -eq 'true') -and $cmd -and (-not $isCleanup) -and (
+    $cmd -match '(-m\\s+abcxauto(\\s|$))|-mabcxauto|abcxauto\\.pro_desktop|pro_desktop\\.py|_start_pro\\.py|pro_launch'
   )
   $isOrphanPy = ($aggressive -eq 'true') -and ($_.Name -match '^pythonw?\\.exe$') -and (-not $cmd)
   if ($isFlet -or $isPro -or $isOrphanPy) {{ Kill-Pid $procId "$($_.Name)" }}
 }}
 Get-Process -ErrorAction SilentlyContinue | Where-Object {{
-  $_.MainWindowTitle -match 'ABCXAUTO Pro|Working\\.\\.\\.'
+  if ($killProTitle -eq 'true') {{
+    $_.MainWindowTitle -match 'ABCXAUTO Pro|Working\\.\\.\\.'
+  }} else {{
+    $_.MainWindowTitle -match 'Working\\.\\.\\.'
+  }}
 }} | ForEach-Object {{
   Kill-Pid ([int]$_.Id) "$($_.ProcessName) title=$($_.MainWindowTitle)"
 }}
@@ -160,12 +269,12 @@ def main() -> int:
     ap.add_argument(
         "--kill-only",
         action="store_true",
-        help="only kill stale processes (skip pycache / probe prints)",
+        help="only kill stale leftovers (never the live paper Pro; skip pycache)",
     )
     ap.add_argument(
         "--ui-only",
         action="store_true",
-        help="only kill flet.exe / titled Pro windows (never python -m abcxauto)",
+        help="only kill orphan flet.exe / leftover titles (never python -m abcxauto)",
     )
     args = ap.parse_args()
     os.chdir(REPO)
