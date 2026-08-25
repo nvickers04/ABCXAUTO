@@ -2,6 +2,9 @@
 
 Fact only. Shell does not recommend structures or rank legs.
 MDA bid/ask/mid/last are stripped — send geometry is IBKR live only.
+
+Open-leg cash is signed fill premium from avg cost: debit negative, credit
+positive. last / mid / mark are not fills. Qty-blind premium is not cash.
 """
 
 from __future__ import annotations
@@ -17,6 +20,16 @@ _MDA_GREEK_KEYS = (
     "delta", "gamma", "theta", "vega", "iv",
     "dte", "open_interest", "volume",
 )
+_AVG_COST_KEYS = ("avgCost", "avg_cost", "averageCost", "average_cost")
+_FILL_PX_KEYS = (
+    "avg_fill_price",
+    "fill_price",
+    "avgFillPrice",
+    "avgPrice",
+    "avg_price",
+)
+_BUY = frozenset({"BUY", "BOT"})
+_SELL = frozenset({"SELL", "SLD"})
 
 
 def occ_symbol(symbol: str, expiration: str, right: str, strike: float) -> str | None:
@@ -51,7 +64,146 @@ def mda_greeks_only(oq: dict[str, Any] | None, *, occ: str | None = None) -> dic
     for k in _MDA_GREEK_KEYS:
         if oq.get(k) is not None:
             out[k] = oq.get(k)
+    from abcxauto.prints import asof_fields
+
+    out.update(asof_fields(oq.get("asof") or oq.get("updated")))
     return out if len(out) > 3 else {}
+
+
+def _finite(raw: Any) -> float | None:
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
+
+
+def _qty(row: dict[str, Any]) -> float | None:
+    raw = row.get("quantity") if row.get("quantity") is not None else row.get("position")
+    if raw is None:
+        raw = row.get("qty")
+    return _finite(raw) if raw is not None else None
+
+
+def _premium_sign(row: dict[str, Any], qty: float) -> float | None:
+    side = str(row.get("side") or row.get("action") or "").upper()
+    if side in _BUY:
+        return -1.0
+    if side in _SELL:
+        return 1.0
+    if abs(qty) <= 1e-9:
+        return None
+    # Open lot: IBKR quantity is signed. +long debit, -short credit.
+    return -1.0 if qty > 0 else 1.0
+
+
+def _multiplier(row: dict[str, Any]) -> float:
+    raw = _finite(row.get("multiplier"))
+    if raw is not None and raw > 0:
+        return raw
+    return 100.0
+
+
+def _mark_for_units(row: dict[str, Any]) -> float | None:
+    """Unit hint only. last is not a fill and is not used here."""
+    for key in ("market_price", "marketPrice"):
+        if row.get(key) is None:
+            continue
+        mkt = _finite(row.get(key))
+        if mkt is not None:
+            return mkt
+    return None
+
+
+def _fill_px(row: dict[str, Any]) -> float | None:
+    """Per-share or contract fill. last / mid / mark are not fills."""
+    for key in _AVG_COST_KEYS + _FILL_PX_KEYS:
+        if row.get(key) is None:
+            continue
+        px = _finite(row.get(key))
+        if px is not None and px >= 0:
+            return px
+    return None
+
+
+def _avg_cost_is_contract_cash(row: dict[str, Any], px: float) -> bool:
+    # IBKR OPT averageCost is usually contract cash when it dwarfs the mark.
+    if not any(row.get(k) is not None for k in _AVG_COST_KEYS):
+        return False
+    mkt = _mark_for_units(row)
+    return abs(px) >= 5.0 and (mkt is None or abs(px) > abs(mkt) * 3)
+
+
+def _fill_contract_usd(row: dict[str, Any]) -> float | None:
+    """Cash of one contract from fill/avg cost. last / mid / mark are ignored."""
+    px = _fill_px(row)
+    if px is None:
+        return None
+    if _avg_cost_is_contract_cash(row, px):
+        return abs(px)
+    return abs(px) * _multiplier(row)
+
+
+def _fill_px_per_share(row: dict[str, Any]) -> float | None:
+    px = _fill_px(row)
+    if px is None:
+        return None
+    if _avg_cost_is_contract_cash(row, px):
+        return px / _multiplier(row)
+    return px
+
+
+def signed_fill_premium_usd(row: dict[str, Any] | None) -> float | None:
+    """Open-leg cash from fill/avg cost. Debit negative, credit positive.
+
+    Requires qty and a fill price. A last-only row is not cash.
+    """
+    if not isinstance(row, dict):
+        return None
+    qty = _qty(row)
+    if qty is None or abs(qty) <= 1e-9:
+        return None
+    cash = _fill_contract_usd(row)
+    if cash is None:
+        return None
+    sign = _premium_sign(row, qty)
+    if sign is None:
+        return None
+    return sign * abs(qty) * cash
+
+
+def net_fill_premium_usd(legs: list[Any] | None) -> float | None:
+    """Net cash of a vertical / combo. Each wing must be a fill, not a last."""
+    total = 0.0
+    n = 0
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            return None
+        cash = _finite(leg.get("fill_premium_usd"))
+        if cash is None:
+            cash = signed_fill_premium_usd(leg)
+        if cash is None:
+            return None
+        total += cash
+        n += 1
+    return total if n >= 2 else None
+
+
+def _attach_combo_net(facts: list[dict[str, Any]]) -> None:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for fact in facts:
+        sym = str(fact.get("symbol") or "").upper()
+        if not sym:
+            continue
+        groups.setdefault(sym, []).append(fact)
+    for group in groups.values():
+        net = net_fill_premium_usd(group)
+        if net is None:
+            continue
+        for fact in group:
+            fact["combo_net_usd"] = net
 
 
 def _opt_rows(positions: list[dict] | None) -> list[dict]:
@@ -82,13 +234,8 @@ def _leg_base(p: dict[str, Any]) -> dict[str, Any]:
         strike = float(p.get("strike"))
     except (TypeError, ValueError):
         strike = None
-    try:
-        qty = float(
-            p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0
-        )
-    except (TypeError, ValueError):
-        qty = 0.0
-    return {
+    qty = _qty(p) or 0.0
+    out: dict[str, Any] = {
         "conId": p.get("conId") or p.get("con_id"),
         "symbol": sym,
         "sec": "OPT",
@@ -99,6 +246,13 @@ def _leg_base(p: dict[str, Any]) -> dict[str, Any]:
         "source": "book",
         "freshness": "broker_position",
     }
+    cash = signed_fill_premium_usd(p)
+    if cash is not None:
+        out["fill_premium_usd"] = cash
+        fill_px = _fill_px_per_share(p)
+        if fill_px is not None:
+            out["fill_px"] = fill_px
+    return out
 
 
 async def _ibkr_leg_quote(connector: Any, base: dict[str, Any]) -> dict[str, Any]:
@@ -190,6 +344,7 @@ async def fetch_option_facts(
                 fact["source"] = "ibkr_legs+mda_greeks"
                 fact["freshness"] = "greeks_delayed_15m"
         facts.append(fact)
+    _attach_combo_net(facts)
     return facts
 
 

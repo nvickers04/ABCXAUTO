@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Quote:
-    """Real-time quote (MarketData.app)."""
+    """Delayed/hybrid MDA quote. Not send geometry."""
 
     symbol: str
     last: Optional[float]
@@ -31,7 +31,8 @@ class Quote:
     ask: Optional[float]
     volume: int
     change_pct: Optional[float]
-    source: str = "marketdata"
+    source: str = "mda"
+    freshness: str = "delayed_15m"
 
     @property
     def mid(self) -> Optional[float]:
@@ -63,6 +64,8 @@ class DataProvider:
             ask=raw.get("ask"),
             volume=int(raw.get("volume") or 0),
             change_pct=raw.get("change_pct"),
+            source=str(raw.get("source") or "mda"),
+            freshness=str(raw.get("freshness") or "delayed_15m"),
         )
 
 

@@ -168,25 +168,110 @@ def test_playbook_facts_compare_write_to_now(tmp_path, monkeypatch):
     assert "stale" not in facts
 
 
+def _flush_card(when_on: str = ">=6% earnings-miss gap") -> dict:
+    return {
+        "name": "mega-cap earnings-flush bounce",
+        "thesis": "gap retrace after an earnings miss",
+        "when_on": when_on,
+        "scan": "most_active + top_losers",
+        "shape": "LONG STK market_bracket",
+        "invalidation": "stop through opening low",
+        "status": "testing",
+        "retire_if": {"sample": 8, "condition": "hit rate below 40%"},
+    }
+
+
+def test_playbook_age_follows_the_live_card_not_a_diary_stamp(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    save_lab(
+        {
+            "mode": "explore",
+            "instructions": "Explore the flush card.",
+            "types": {"market_bracket": {"cards": [_flush_card()]}},
+            "ready_to_promote": False,
+        }
+    )
+    lab = load_lab()
+    card_clock = datetime(2026, 8, 20, 16, 4, tzinfo=timezone.utc)
+    lab["written_at"] = datetime(2026, 8, 25, 15, 14, tzinfo=timezone.utc).isoformat()
+    lab["types"]["market_bracket"]["cards"][0]["written_at"] = card_clock.isoformat()
+    (tmp_path / "lab.json").write_text(json.dumps(lab), encoding="utf-8")
+    now = datetime(2026, 8, 25, 15, 24, tzinfo=timezone.utc)
+    age = playbook_age_hours(lab, now=now)
+    assert age is not None
+    assert age > 24.0
+    assert playbook_is_stale(lab, now=now) is True
+
+
+def test_playbook_age_follows_the_newest_testing_card(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    sibling = dict(_flush_card())
+    sibling["name"] = "large-cap 3pct gap hold"
+    sibling["when_on"] = ">=3% open gap"
+    save_lab(
+        {
+            "mode": "explore",
+            "instructions": "Two cards.",
+            "types": {"market_bracket": {"cards": [_flush_card(), sibling]}},
+            "ready_to_promote": False,
+        }
+    )
+    lab = load_lab()
+    lab["types"]["market_bracket"]["cards"][0]["written_at"] = (
+        datetime(2026, 8, 20, 16, 4, tzinfo=timezone.utc).isoformat()
+    )
+    lab["types"]["market_bracket"]["cards"][1]["written_at"] = (
+        datetime(2026, 8, 25, 16, 9, tzinfo=timezone.utc).isoformat()
+    )
+    (tmp_path / "lab.json").write_text(json.dumps(lab), encoding="utf-8")
+    now = datetime(2026, 8, 25, 16, 32, tzinfo=timezone.utc)
+    age = playbook_age_hours(lab, now=now)
+    assert age is not None
+    assert age < 1.0
+    assert playbook_is_stale(lab, now=now) is False
+
+
 def test_save_lab_appends_scored_ledger(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     save_lab(
         {
             "mode": "explore",
             "instructions": "First card.",
-            "do_more": "try size",
-            "stop_doing": "lottery",
+            "types": {"market_bracket": {"cards": [_flush_card()]}},
             "ready_to_promote": False,
             "lots_at_write": ["SPY 260918C500 x1"],
         },
         scorecard={"beating_model": False, "edge_usd": -100.0},
     )
+    diary = save_lab(
+        {
+            "mode": "explore",
+            "instructions": "Same book, 10:50 rescan — no trigger.",
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            **_flush_card(),
+                            "note": "10:50 rescan none >=6%",
+                            "evidence": {"scan": "deepest ALB -3.8%"},
+                        }
+                    ]
+                }
+            },
+            "ready_to_promote": False,
+        },
+        scorecard={"beating_model": False, "edge_usd": -90.0},
+    )
+    assert diary.get("revision_held") is True
+    assert load_lab()["revision"] == 1
+    assert [row["revision"] for row in load_lab()["ledger"]] == [1]
     save_lab(
         {
             "mode": "explore",
-            "instructions": "Second card sizes to the envelope.",
-            "do_more": "size",
-            "stop_doing": "1 lot",
+            "instructions": "Widen the gap floor.",
+            "types": {"market_bracket": {"cards": [_flush_card(">=4% earnings-miss gap")]}},
             "ready_to_promote": False,
         },
         scorecard={"beating_model": False, "edge_usd": -80.0},
@@ -209,14 +294,69 @@ def test_save_lab_appends_scored_ledger(tmp_path, monkeypatch):
     assert "notebook: playbook tool" in block
     assert "stale=" not in block
     payload = playbook_payload()
-    assert "Second card" in payload["current"]["instructions"]
-    assert payload["current"]["instructions_n"] == len("Second card sizes to the envelope.")
-    assert "Second card" in playbook_payload(full=True)["current"]["instructions"]
+    assert ">=4% earnings-miss gap" in payload["tree"]
+    assert int(payload["current"]["instructions_n"] or 0) > 0
+    assert ">=4% earnings-miss gap" in playbook_payload(full=True)["tree"]
     old = playbook_payload(1)["revision"]
     assert old["edge_usd"] == -100.0
     assert old["closed_edge"] == -80.0
     assert "instructions" not in old
     assert "First card" not in json.dumps(old)
+
+
+def test_save_lab_holds_revision_when_only_the_look_diary_changes(
+    tmp_path, monkeypatch
+):
+    from abcxauto.lab_playbook import book_fingerprint
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    first = save_lab(
+        {
+            "mode": "explore",
+            "instructions": "Explore the flush card.",
+            "types": {"market_bracket": {"cards": [_flush_card()]}},
+            "ready_to_promote": False,
+        },
+        scorecard={"beating_model": False, "edge_usd": -12.0},
+    )
+    assert first["revision"] == 1
+    assert first.get("revision_held") is not True
+    out = apply_from_judgment(
+        {
+            "lab_playbook": {
+                "mode": "explore",
+                "instructions": "10:50 rescan. Still no >=6% flush.",
+                "types": {
+                    "market_bracket": {
+                        "note": "flat; rescan losers",
+                        "cards": [
+                            {
+                                **_flush_card(),
+                                "note": "10:50 none >=6%",
+                                "evidence": {
+                                    "scan": "ALB -3.8%",
+                                    "news": "only DKS own miss",
+                                },
+                                "next_look_s": 300,
+                            }
+                        ],
+                    }
+                },
+            }
+        }
+    )
+    assert out is not None
+    assert out.get("revision_held") is True
+    assert out.get("revision") == 1
+    lab = load_lab()
+    assert lab["revision"] == 1
+    assert lab.get("written_at") == first.get("written_at")
+    assert [row["revision"] for row in lab["ledger"]] == [1]
+    assert lab.get("instructions") == first.get("instructions")
+    assert "10:50 rescan" not in (lab.get("instructions") or "")
+    assert book_fingerprint(first) == book_fingerprint(lab)
+    assert "revision_held" not in lab
 
 
 def test_playbook_payload_score_is_now_not_the_write_stamp(tmp_path, monkeypatch):
@@ -247,7 +387,7 @@ def test_playbook_payload_score_is_now_not_the_write_stamp(tmp_path, monkeypatch
     assert payload["facts"]["now_edge"] == -1000.0
     assert payload["facts"]["at_write_edge"] == -550.0
     assert payload["score"]["lots_at_write"] == ["XLF 260828C58.5 x1 -41%"]
-    assert "Defined-risk debit" in payload["current"]["instructions"]
+    assert "Defined-risk debit" in payload["tree"]
     assert "XLF 260828C58.5" in format_block()
 
 
@@ -485,7 +625,7 @@ def test_write_keeps_pct_gate_only_when_floors_on_and_n_is_knob(tmp_path, monkey
 
 
 def test_new_risk_until_prose_stays_notes_not_a_clock(tmp_path, monkeypatch):
-    """Not a screen-window text parser — prose is notebook, set_wake parks."""
+    """Not a screen-window text parser — prose is notebook, clerk parks."""
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     prose = "No new risk until 10:30 ET. Park until open."
@@ -544,4 +684,60 @@ def test_playbook_revision_strips_old_essay_on_disk(tmp_path, monkeypatch):
     assert "instructions" not in old
     assert "do_more" not in old
     assert "Hold forbidden" not in json.dumps(old)
-    assert playbook_payload()["current"]["instructions"] == "Live notes."
+    assert playbook_payload()["tree"] == "Live notes."
+
+
+def test_card_next_look_s_clamps_and_feeds_clerk(tmp_path, monkeypatch):
+    from abcxauto.lab_playbook import playbook_next_look_s
+    from abcxauto.wake_bus import MIN_LOOK_S, NEXT_LOOK_S_MAX
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    apply_from_judgment(
+        {
+            "lab_playbook": {
+                "types": {
+                    "market_bracket": {
+                        "cards": [
+                            {
+                                "name": "flush bounce",
+                                "thesis": "gap retrace",
+                                "retire_if": {
+                                    "sample": 8,
+                                    "condition": "hit rate below 40%",
+                                },
+                                "next_look_s": 5,
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    card = load_lab()["types"]["market_bracket"]["cards"][0]
+    assert card["next_look_s"] == MIN_LOOK_S
+    assert playbook_next_look_s() == MIN_LOOK_S
+
+    apply_from_judgment(
+        {
+            "lab_playbook": {
+                "types": {
+                    "market_bracket": {
+                        "cards": [
+                            {
+                                "name": "flush bounce",
+                                "thesis": "gap retrace",
+                                "retire_if": {
+                                    "sample": 8,
+                                    "condition": "hit rate below 40%",
+                                },
+                                "next_look_s": 9 * 3600,
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    assert load_lab()["types"]["market_bracket"]["cards"][0]["next_look_s"] == NEXT_LOOK_S_MAX
+    assert playbook_next_look_s() == NEXT_LOOK_S_MAX

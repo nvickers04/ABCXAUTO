@@ -38,6 +38,22 @@ def test_working_entries_reserve_capacity():
     assert held["allows_new_risk"] is True
 
 
+def test_invented_reserved_slots_does_not_change_bag_capacity():
+    """reserved_slots is not an IBKR/ticket field — legs decide the charge."""
+    four_legs = {
+        "symbol": "IWM",
+        "sec_type": "BAG",
+        "action": "BUY",
+        "order_type": "LMT",
+        "quantity": 1,
+        "combo_legs": [{}, {}, {}, {}],
+        "reserved_slots": 1,
+    }
+    assert working_entry_slots([four_legs], []) == 4
+    one_leg = dict(four_legs, combo_legs=[{}], reserved_slots=8)
+    assert working_entry_slots([one_leg], []) == 1
+
+
 def test_capacity_allows_and_blocks():
     open_ok = SimpleNamespace(
         capacity={

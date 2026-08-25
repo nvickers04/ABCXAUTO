@@ -1,7 +1,9 @@
-"""Reality Pulse — situational awareness heart of ABCXAUTO Pro.
+"""Reality Pulse — desktop clock + session view of the IBKR snap.
 
-Built fresh every Pro cycle from IBKR + market hours + quote freshness.
-Injected at the start of every Grok reasoning turn.
+Built fresh every snap from IBKR + market hours + quote freshness.
+Feeds the Market Clock and WorldState.session_status. Not a Grok tool
+and not injected as a think. Countdown / freshness / tradable_now ride
+on the status tool.
 """
 
 from __future__ import annotations
@@ -33,37 +35,10 @@ def _fmt_countdown(seconds: int | None) -> str:
 
 
 def _parse_ts(value: Any) -> datetime | None:
-    """Parse MDA/IBKR timestamps.
+    """Parse MDA/IBKR timestamps (unix, ISO, IBKR bar stamps)."""
+    from abcxauto.prints import parse_asof
 
-    MarketData.app returns ``updated`` as a Unix epoch (seconds). ISO strings
-    and datetime objects are also accepted.
-    """
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, (int, float)):
-        # MDA uses seconds; treat values that look like ms as milliseconds.
-        n = float(value)
-        if n > 1e12:
-            n /= 1000.0
-        try:
-            return datetime.fromtimestamp(n, tz=timezone.utc)
-        except (OSError, OverflowError, ValueError):
-            return None
-    text = str(value).strip()
-    if not text:
-        return None
-    # Numeric string → Unix epoch (MDA often serializes updated as int/str).
-    try:
-        return _parse_ts(float(text))
-    except (TypeError, ValueError):
-        pass
-    try:
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        return None
+    return parse_asof(value)
 
 
 def _age_s(ts: datetime | None, now: datetime) -> float | None:
@@ -269,7 +244,13 @@ def build_reality_pulse(
     sess = _session_block(now, market_hours)
     spy = spy_quote or {}
     spy_src = str(spy.get("source") or "").lower()
-    quote_ts = _parse_ts(spy.get("timestamp") or spy.get("updated") or spy.get("time"))
+    quote_ts = _parse_ts(
+        spy.get("asof")
+        or spy.get("asof_iso")
+        or spy.get("timestamp")
+        or spy.get("updated")
+        or spy.get("time")
+    )
     mda_age = _age_s(quote_ts, now)
     ibkr_spy = spy_src.startswith("ibkr")
     snapshot_ts = _parse_ts(taken_at) or now

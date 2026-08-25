@@ -1,31 +1,17 @@
-"""Pro cycle — drives shipped snap/run_cycle on real code paths."""
-
-import json
-from types import SimpleNamespace
+"""Cycle shim — inventory helpers stay; launcher / sit-loop / hunt-window do not."""
 
 import pytest
 
 from abcxauto.cycle import (
     ALLOWED_ACTIONS,
     equity_of,
+    format_position_inventory,
     normalize_action,
     pnl_of,
     risk_label,
     run_cycle,
     snap,
 )
-
-
-@pytest.fixture(autouse=True)
-def _card_gate_off(monkeypatch):
-    """These cover the dispatch spine, not card attribution.
-
-    New risk must name a playbook card; that gate and its rejection message are
-    covered in ``test_playbook_two_layers``.
-    """
-    monkeypatch.setattr(
-        "abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: ""
-    )
 
 
 class FakeConnector:
@@ -47,516 +33,110 @@ class FakeConnector:
         return []
 
 
-async def _fake_tool(_c, name: str, _a=None):
-    return {
-        "account_summary": {"netliquidation": 1000, "unrealizedpnl": 5},
-        "positions": [],
-        "open_orders": [],
-        "market_hours": {"session": "regular"},
-        "quote": {"symbol": "SPY", "last": 500},
-    }.get(name, {})
-
-
-async def _fake_tool_closed(_c, name: str, _a=None):
-    return {
-        "account_summary": {"netliquidation": 1000, "unrealizedpnl": 5},
-        "positions": [],
-        "open_orders": [],
-        "market_hours": {"session": "closed"},
-        "quote": {"symbol": "SPY", "last": 500},
-    }.get(name, {})
-
-
-async def _fake_tool_session(session: str, minutes_to_open: int = 80):
-    async def _tool(_c, name: str, _a=None):
-        return {
-            "account_summary": {"netliquidation": 1000, "unrealizedpnl": 5},
-            "positions": [],
-            "open_orders": [],
-            "market_hours": {"session": session, "minutes_to_open": minutes_to_open},
-            "quote": {"symbol": "SPY", "last": 500},
-        }.get(name, {})
-
-    return _tool
-
-
-def _cfg(**overrides):
-    """Minimal config stub for cycle cadence tests."""
-    base = dict(
-        max_risk_per_trade_pct=1.0,
-        max_position_pct=10.0,
-        max_open_positions=6,
-        marketdata_token="",
-        trading_mode="paper",
-        is_paper=True,
-        risk_posture="balanced",
-    )
-    base.update(overrides)
-    return SimpleNamespace(**base)
-
-
-def _judgment_for_act(act: dict, **extra) -> dict:
-    """Build a coherent Judge payload for a given Act dict."""
-    strat = str(act.get("strategy") or act.get("action") or "hold").lower()
-    params = act.get("params") or {}
-    if strat in ("bracket", "market_bracket"):
-        stance, kind = "new_entry", "new_entry"
-    elif strat in ("oca", "modify_stop", "modify_target", "market_order", "close_option"):
-        stance, kind = "protect", "protect"
-    elif strat in ("set_risk", "self_tune"):
-        stance, kind = "idle", "idle"
-    elif strat == "hold":
-        stance, kind = "idle", "idle"
-    else:
-        stance, kind = "manage", "manage"
-    j = {
-        "stance": stance,
-        "thesis": str(act.get("rationale") or "test thesis"),
-        "focus": "test focus",
-        "dismissed": "",
-        "intent": {
-            "kind": kind,
-            "symbol": params.get("symbol"),
-            "direction": params.get("direction"),
-            "urgency": "med",
-        },
-        "risk_budget_pct": 2.0,
-        "regime_fit": True,
-        "setup_grade": "A",
-    }
-    j.update(extra)
-    return j
-
-
-def _pja_grok(act: dict, judgment: dict | None = None, prompts: list | None = None):
-    """Return grok_turn stub that sends ``act`` through the clerk."""
-    from tests.conftest import fake_grok_turn
-
-    return fake_grok_turn(act, wakes=prompts)
-
-
-def _no_send_grok(prompts: list | None = None, **kwargs):
-    """Yield: tools/text only, no send()."""
-    from abcxauto.brain import BrainTurn
-
-    async def grok_turn(_g, *, connector, world, snap, wake=""):
-        if prompts is not None:
-            prompts.append(wake)
-        return BrainTurn(**kwargs)
-
-    return grok_turn
-
-
-@pytest.fixture(autouse=True)
-def _reset_cadence(monkeypatch, tmp_path):
-    stub = _cfg()
-    monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: stub)
-    monkeypatch.setattr("abcxauto.world_state.get_config", lambda: stub)
-    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
-    monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
-    monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "review.json"))
-    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "journal.db"))
-    monkeypatch.setenv("ABCXAUTO_PREMARKET_WAKE_PATH", str(tmp_path / "pm.json"))
-    from abcxauto.memory import reset_journal
-
-    reset_journal(path=str(tmp_path / "journal.db"), enabled=True)
-
-    async def _no_opps(*_a, **_k):
-        return []
-
-    async def _no_news(*_a, **_k):
-        return []
-
-    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _no_news)
-    yield
-
-
 @pytest.mark.asyncio
-async def test_snap_with_fake_connector(monkeypatch):
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    out = await snap(FakeConnector())
-    assert {
-        "taken_at", "account", "positions", "open_orders", "market_hours",
-        "spy_quote", "protection", "reality_pulse", "vix_quote", "portfolio_state",
-    }.issubset(out.keys())
-    assert out["account"]["netliquidation"] == 1000
-    assert "narrative" in out["reality_pulse"]
-    assert out["reality_pulse"]["session"]["status"] == "regular"
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_paper_flat_rth_no_send_is_yield(monkeypatch):
-    """Paper RTH flat: no send() is yield, not a hold ticket."""
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(is_paper=True),
-    )
-    send_calls: list[dict] = []
-    prompts: list[str] = []
-
-    async def record_send(action, conn):
-        send_calls.append(action)
-        return {"status": "executed"}
-
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _no_send_grok(prompts, tool_trace=["book"], text="watching"),
-    )
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
-    hist = []
-    out = await run_cycle(1, FakeConnector(), None, hist, 0.0)
-    assert out["strat"] != "hold"
-    assert out["strat"] != "blocked"
-    assert send_calls == []
-    assert prompts  # Grok woke
-    from abcxauto.brain import brain_system_prompt
-
-    assert "ORDER EXAMPLES" in brain_system_prompt()
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_live_no_send_when_flat(monkeypatch):
-    """Live follower: no send() is yield, not a hold ticket."""
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(
-            trading_mode="live",
-            is_paper=False,
-        ),
-    )
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
-    send_calls: list[dict] = []
-
-    async def record_send(action, conn):
-        send_calls.append(action)
-        return {"status": "executed"}
-
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _no_send_grok(tool_trace=["book"], text="watching"),
-    )
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] != "hold"
-    assert out["strat"] != "blocked"
-    assert send_calls == []
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_rth_always_calls_grok(monkeypatch):
-    """RTH decision cycles always call Grok."""
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(),
-    )
-    grok_calls: list[str] = []
-    act = {
-        "action": "market_bracket",
-        "strategy": "market_bracket",
-        "params": {
-            "symbol": "SPY",
-            "quantity": 1,
-            "direction": "LONG",
-            "stop_price": 490.0,
-            "target_price": 520.0,
-            "price_hint": 500.0,
-            "entry_price": 500.0,
-        },
-        "rationale": "active entry",
-    }
-
-    async def _ok_send(a, c):
-        return {"status": "executed", "strategy": a.get("strategy")}
-
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _pja_grok(act, prompts=grok_calls),
-    )
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", _ok_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert len(grok_calls) >= 1
-    from tests.conftest import assert_no_cycle_counter
-
-    assert any("session=" in p for p in grok_calls)
-    for p in grok_calls:
-        assert_no_cycle_counter(p)
-    assert out["strat"] in ("market_bracket", "blocked")
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_protection_blocks_hold(monkeypatch):
-    """Unprotected STK → protection Grok; hold response is blocked (no retry)."""
-    async def _fake_unprotected(_c, name: str, _a=None):
-        return {
-            "account_summary": {"netliquidation": 1000, "unrealizedpnl": 5},
-            "positions": [
-                {
-                    "symbol": "SPY",
-                    "quantity": 5,
-                    "sec_type": "STK",
-                    "secType": "STK",
-                    "conId": 42,
-                    "unrealized_pnl": 1.0,
-                }
-            ],
-            "open_orders": [],
-            "market_hours": {"session": "regular"},
-            "quote": {"symbol": "SPY", "last": 500},
-        }.get(name, {})
-
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_unprotected)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(),
-    )
-    grok_calls: list[str] = []
-    act = {
-        "action": "hold",
-        "strategy": "hold",
-        "rationale": "protection review hold",
-    }
-    judgment = _judgment_for_act(
-        {"strategy": "oca", "params": {"symbol": "SPY"}},
-        stance="protect",
-        thesis="Must protect SPY",
-        focus="unprotected SPY",
-    )
-
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _pja_grok(act, judgment=judgment, prompts=grok_calls),
-    )
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert len(grok_calls) == 1
-    assert any("unprotected" in p.lower() for p in grok_calls)
-    assert out["strat"] == "blocked"
-    assert "hold_forbidden" in str(out["result"].get("note") or "")
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_agent_decides_with_journal_memory(monkeypatch):
-    """Default path: Grok decides; portfolio + journal + examples in prompt."""
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(),
-    )
-    grok_calls: list[str] = []
-    calls: list[dict] = []
-
-    async def record_send(action, conn):
-        calls.append(action)
-        return {"status": "executed", "strategy": action.get("strategy")}
-
-    act = {
-        "action": "market_bracket",
-        "strategy": "market_bracket",
-        "params": {
-            "symbol": "SPY",
-            "quantity": 1,
-            "direction": "LONG",
-            "stop_price": 490.0,
-            "target_price": 520.0,
-            "price_hint": 500.0,
-            "entry_price": 500.0,
-        },
-        "rationale": "intelligent entry",
-    }
-
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _pja_grok(act, prompts=grok_calls),
-    )
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert len(grok_calls) == 1
-    joined = "\n".join(grok_calls)
-    from abcxauto.brain import brain_system_prompt
-
-    from tests.conftest import assert_no_cycle_counter
-
-    assert "ORDER EXAMPLES" in brain_system_prompt()
-    assert "session=" in joined
-    assert_no_cycle_counter(joined)
-    assert "MARKET HINTS" not in joined
-    assert out["strat"] == "market_bracket"
-    assert len(calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_prompt_flags_naked_stk(monkeypatch):
-    """Unprotected STK + zero orders → REALITY CHECK in prompt."""
-
-    async def _fake_naked(_c, name: str, _a=None):
-        return {
-            "account_summary": {
-                "netliquidation": 37000,
-                "unrealizedpnl": -1,
-                "totalcashvalue": 34000,
-            },
-            "positions": [
-                {
-                    "symbol": "SPY",
-                    "quantity": 3,
-                    "sec_type": "STK",
-                    "secType": "STK",
-                    "conId": 756733,
-                    "unrealized_pnl": -1.0,
-                }
-            ],
-            "open_orders": [],
-            "market_hours": {"session": "regular"},
-            "quote": {"symbol": "SPY", "last": 751},
-        }.get(name, {})
-
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_naked)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(),
-    )
-    prompts: list[str] = []
-    act = {
-        "action": "oca",
-        "strategy": "oca",
-        "params": {
-            "symbol": "SPY",
-            "quantity": 3,
-            "direction": "LONG",
-            "stop_price": 749.0,
-            "target_price": 755.0,
-        },
-        "rationale": "protect naked SPY",
-    }
-
-    async def _noop_send(action, conn):
-        return {"status": "executed", "strategy": action.get("strategy")}
-
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _pja_grok(act, prompts=prompts),
-    )
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert prompts
-    joined = "\n".join(prompts)
-    assert "unprotected" in joined.lower()
-    assert "GATE: unprotected" not in joined
-    assert "stance MUST be protect" not in joined
-    assert out["strat"] == "oca"
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_market_closed_skips_grok(monkeypatch):
-    """Closed session + no unprotected positions → skipped (not hold), no Grok."""
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool_closed)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.get_config",
-        lambda: _cfg(),
-    )
-    grok_calls: list[int] = []
-
-    async def tracking_grok(_g, _p: str) -> str:
-        grok_calls.append(1)
-        return json.dumps({"action": "market_bracket", "strategy": "market_bracket"})
-
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", tracking_grok)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert grok_calls == []
-    assert out["strat"] == "skipped"
-    assert "session_closed" in (out.get("validation") or "")
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_premarket_last_hour_wakes_grok(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.agent_loop._tool", await _fake_tool_session("premarket", minutes_to_open=40)
-    )
-    wakes: list[str] = []
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _no_send_grok(wakes, tool_trace=["book"], text="premarket tape"),
-    )
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert wakes
-    assert "session=premarket" in wakes[0]
-    assert out["strat"] != "hold"
-    assert out["strat"] != "blocked"
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_premarket_wakes_grok(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.agent_loop._tool", await _fake_tool_session("premarket")
-    )
-    wakes: list[str] = []
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _no_send_grok(wakes, tool_trace=["book"], text="premarket tape"),
-    )
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert wakes
-    assert "session=premarket" in wakes[0]
-    assert out["strat"] != "hold"
-    assert out["strat"] != "blocked"
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_postmarket_skips_grok(monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.agent_loop._tool", await _fake_tool_session("postmarket")
-    )
-    called: list[int] = []
+async def test_snap_is_retired_noop(monkeypatch):
+    """cycle.snap must not launch a book look or arm a wake clock."""
+    started: list[str] = []
 
     async def boom(*_a, **_k):
-        called.append(1)
-        raise AssertionError("grok must not run in postmarket")
+        started.append("async")
+        raise AssertionError("cycle.snap must not look or send")
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", boom)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert called == []
-    assert out["strat"] == "skipped"
-    assert "session_extended" in (out.get("validation") or "")
+    def boom_sync(*_a, **_k):
+        started.append("sync")
+        raise AssertionError("cycle.snap must not arm a nap clock")
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", boom)
+    monkeypatch.setattr("abcxauto.agent_loop.snap", boom)
+    monkeypatch.setattr("abcxauto.wake_bus.set_wake", boom_sync)
+    monkeypatch.setattr("abcxauto.wake_bus.ensure_next_look", boom_sync)
+
+    out = await snap(FakeConnector())
+    assert started == []
+    assert out.get("book_unreliable") is True
+    assert "cycle_snap_retired" in str(out.get("validation") or "")
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_does_not_write_jsonl(monkeypatch, tmp_path):
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    act = {
-        "action": "market_bracket",
-        "strategy": "market_bracket",
-        "params": {
-            "symbol": "SPY",
-            "quantity": 1,
-            "direction": "LONG",
-            "stop_price": 490.0,
-            "target_price": 520.0,
-            "price_hint": 500.0,
-            "entry_price": 500.0,
-        },
-        "rationale": "active",
-    }
+async def test_run_cycle_is_retired_noop(monkeypatch):
+    """Import-safe leftover: must not start a think cycle or a nap clock."""
+    started: list[str] = []
 
-    async def _noop_send(action, conn):
-        return {"status": "executed"}
+    async def boom(*_a, **_k):
+        started.append("async")
+        raise AssertionError("cycle shim must not start think, snap, or send")
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", _noop_send)
-    monkeypatch.chdir(tmp_path)
-    await run_cycle(1, FakeConnector(), None, [], 0.0)
-    logs = tmp_path / "logs"
-    if logs.exists():
-        names = {p.name for p in logs.iterdir()}
-        for banned in (
-            "cycle.log",
-            "improvements.log",
-            "order_lab.log",
-            "order_suite.log",
-            "decision_space.log",
-        ):
-            assert banned not in names
+    def boom_sync(*_a, **_k):
+        started.append("sync")
+        raise AssertionError("cycle shim must not arm a nap clock")
+
+    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", boom)
+    monkeypatch.setattr("abcxauto.agent_loop.snap", boom)
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", boom)
+    monkeypatch.setattr("abcxauto.brain.grok_turn", boom)
+    monkeypatch.setattr("abcxauto.wake_bus.set_wake", boom_sync)
+    monkeypatch.setattr("abcxauto.wake_bus.ensure_next_look", boom_sync)
+    monkeypatch.setattr("abcxauto.pacing.wait_for_pace", boom)
+    monkeypatch.setattr("asyncio.sleep", boom)
+
+    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    assert started == []
+    assert out["strat"] == "skipped"
+    assert out["sends"] == 0
+    assert out["result"]["status"] == "skipped"
+    assert "cycle_shim_retired" in str(out["result"].get("note") or "")
+    assert out["inventory"] == format_position_inventory([])
+
+
+def test_cycle_has_no_sit_loop_or_hunt_window():
+    from abcxauto import cycle
+
+    for name in (
+        "sit_loop",
+        "run_sit",
+        "hunt_window",
+        "SYSTEM_PROMPT",
+        "apply_tweak",
+        "TWEAKS",
+        "grok",
+        "grok_turn",
+        "execute_ticket",
+        "safe_execute",
+        "gate_ticket",
+    ):
+        assert not hasattr(cycle, name)
+    assert "run_cycle" in cycle.__all__
+    assert "format_position_inventory" in cycle.__all__
+    assert cycle.run_cycle is not None
+
+
+def test_format_position_inventory_export():
+    assert format_position_inventory([]) == "LIVE POSITION LEDGER: (none)\n"
+    text = format_position_inventory(
+        [
+            {
+                "conId": 42,
+                "symbol": "SPY",
+                "sec_type": "STK",
+                "quantity": 3,
+            },
+            {
+                "con_id": 99,
+                "symbol": "SPY",
+                "secType": "OPT",
+                "quantity": -1,
+                "expiration": "20260828",
+                "strike": 500,
+                "right": "C",
+            },
+        ]
+    )
+    assert "conId=42" in text
+    assert "SPY STK" in text
+    assert "pos=+3" in text
+    assert "conId=99" in text
+    assert "expiry=20260828" in text
+    assert "right=C" in text
 
 
 def test_normalize_action_rejects_unknown():
@@ -583,177 +163,6 @@ def test_normalize_action_hold_not_in_allowlist():
     assert forced is None
 
 
-@pytest.mark.asyncio
-async def test_run_cycle_blocks_invalid_strategy(monkeypatch):
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    # Valid idle judgment, then invalid act strategy → blocked at normalize.
-    act = {"action": "hold_existing", "strategy": "hold_existing"}
-    judgment = _judgment_for_act({"strategy": "hold"})
-
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _pja_grok(act, judgment=judgment),
-    )
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "blocked"
-    assert out["result"]["status"] == "blocked"
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_allows_trade_without_kahneman(monkeypatch):
-    """Incomplete System 2 is scaffolding only — not a soft block."""
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    calls: list[dict] = []
-
-    async def record_send(action, conn):
-        calls.append(action)
-        return {"status": "executed"}
-
-    act = {
-        "action": "bracket",
-        "strategy": "bracket",
-        "params": {
-            "symbol": "SPY",
-            "quantity": 1,
-            "direction": "LONG",
-            "entry_price": 500.0,
-            "stop_price": 490.0,
-            "target_price": 510.0,
-        },
-        "rationale": "no system2",
-    }
-
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "bracket"
-    assert len(calls) == 1
-    assert "system2_gate" not in str(out.get("validation", "")).lower()
-
-
-@pytest.mark.asyncio
-async def test_cycle_smoke_run_cycle_bracket_dispatch(monkeypatch, tmp_path):
-    """Shipped run_cycle path: snapshot + bracket action + send_action."""
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    calls: list[dict] = []
-
-    async def record_send(action, conn):
-        calls.append(action)
-        return {"status": "executed", "strategy": action.get("strategy")}
-
-    act = {
-        "action": "bracket", "strategy": "bracket",
-        "params": {
-            "symbol": "SPY", "quantity": 1, "direction": "LONG",
-            "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
-        },
-        "rationale": "Current reality: RTH; smoke",
-    }
-
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
-    snap_out = await snap(FakeConnector())
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    payload = {
-        "snapshot_keys": list(snap_out.keys()),
-        "strat": out["strat"],
-        "result": out["result"],
-        "send_action_calls": len(calls),
-        "dispatched_strategy": calls[0]["strategy"] if calls else None,
-    }
-    text = json.dumps(payload, indent=2)
-    (tmp_path / "cycle_smoke.json").write_text(text, encoding="utf-8")
-    assert "protection" in payload["snapshot_keys"]
-    assert out["strat"] == "bracket"
-    assert payload["send_action_calls"] == 1
-
-
-@pytest.mark.asyncio
-async def test_no_suite_gate_on_autonomous_path(monkeypatch):
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    calls: list[dict] = []
-
-    async def record_send(action, conn):
-        calls.append(action)
-        return {"status": "executed"}
-
-    act = {
-        "action": "bracket",
-        "strategy": "bracket",
-        "params": {
-            "symbol": "SPY",
-            "quantity": 1,
-            "direction": "LONG",
-            "entry_price": 500.0,
-            "stop_price": 490.0,
-            "target_price": 510.0,
-        },
-        "rationale": "try entry",
-    }
-
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "bracket"
-    assert len(calls) == 1
-    assert "low_pass_rate" not in out.get("validation", "")
-
-
-@pytest.mark.asyncio
-async def test_no_prefer_bracket_only_playbook(monkeypatch):
-    """prefer_bracket_only is removed — agent chooses structure; gates constrain."""
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    calls: list[dict] = []
-
-    async def record_send(action, conn):
-        calls.append(action)
-        return {"status": "executed"}
-
-    act = {
-        "action": "trailing_stop",
-        "strategy": "trailing_stop",
-        "params": {"symbol": "SPY", "quantity": 1, "direction": "LONG", "trail_percent": 1.0},
-        "rationale": "trail",
-    }
-    judgment = _judgment_for_act(act, stance="manage")
-
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _pja_grok(act, judgment=judgment),
-    )
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert "prefer_bracket_only" not in (out.get("validation") or "")
-    assert out["strat"] == "trailing_stop"
-    assert len(calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_dispatches_bracket_to_send_action(monkeypatch):
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    calls: list[dict] = []
-
-    async def record_send(action, conn):
-        calls.append(action)
-        return {"status": "executed", "strategy": action.get("strategy")}
-
-    act = {
-        "action": "bracket", "strategy": "bracket",
-        "params": {
-            "symbol": "SPY", "quantity": 1, "direction": "LONG",
-            "entry_price": 500.0, "stop_price": 490.0, "target_price": 510.0,
-        },
-        "rationale": "test bracket dispatch",
-    }
-
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", _pja_grok(act))
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", record_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "bracket"
-    assert len(calls) == 1
-    assert calls[0]["strategy"] == "bracket"
-
-
 def test_no_dead_operator_tweak_surface():
     from abcxauto import agent_loop, cycle
 
@@ -774,9 +183,9 @@ def test_risk_label_compliant():
     assert risk_label({"protection": {"unprotected_symbols": []}}) == "COMPLIANT"
 
 
-def test_config_has_no_metronome_fields(monkeypatch):
+def test_config_has_no_metronome_fields():
     from abcxauto import wake_bus
-    from abcxauto.config import Config, get_config
+    from abcxauto.config import CAPACITY_KEYS, Config, get_config
 
     get_config.cache_clear()
     cfg = get_config()
@@ -786,7 +195,5 @@ def test_config_has_no_metronome_fields(monkeypatch):
     assert not hasattr(wake_bus, "MAX_LOOK_OPEN_S")
     assert not hasattr(wake_bus, "max_look_s")
     assert not hasattr(cfg, "idle_streak")
-    from abcxauto.config import CAPACITY_KEYS
-
     assert CAPACITY_KEYS == frozenset({"max_open_positions"})
     get_config.cache_clear()

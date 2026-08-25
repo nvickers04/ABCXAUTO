@@ -4,23 +4,84 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from abcxauto.broker.connection import safe_sleep as _safe_sleep
+from abcxauto.prints import bar_time_fields
 
 logger = logging.getLogger(__name__)
 
 
+def normalize_resolution(resolution: str) -> str:
+    """Grok writes 5, 5m, 5min, 5-min — they all mean the same IBKR hist."""
+    key = str(resolution or "").strip().upper().replace(" ", "").replace("-", "")
+    aliases = {
+        "5": "5",
+        "5M": "5",
+        "5MIN": "5",
+        "5MINS": "5",
+        "5MINUTE": "5",
+        "5MINUTES": "5",
+        "15": "15",
+        "15M": "15",
+        "15MIN": "15",
+        "15MINS": "15",
+        "15MINUTE": "15",
+        "15MINUTES": "15",
+        "60": "60",
+        "60M": "60",
+        "60MIN": "60",
+        "60MINS": "60",
+        "1H": "60",
+        "H": "60",
+        "1HOUR": "60",
+        "D": "D",
+        "1D": "D",
+        "1DAY": "D",
+        "DAY": "D",
+        "DAILY": "D",
+    }
+    return aliases.get(key, key or "D")
+
+
 def hist_spec(resolution: str) -> tuple[str, str]:
     """IBKR (barSizeSetting, durationStr) for a Grok candles resolution."""
-    key = str(resolution or "D").strip().upper()
-    if key in ("60", "60M", "1H", "H"):
+    key = normalize_resolution(resolution)
+    if key == "60":
         return "1 hour", "10 D"
-    if key in ("15", "15M"):
+    if key == "15":
         return "15 mins", "5 D"
-    if key in ("5", "5M"):
+    if key == "5":
         return "5 mins", "3 D"
     return "1 day", "6 M"
+
+
+def session_countback(
+    resolution: str,
+    *,
+    n_symbols: int = 1,
+    now: datetime | None = None,
+) -> int:
+    """Keep enough intraday bars to include today's 09:30 ET print.
+
+    A multi-symbol 40-bar cap at 15:00 ET starts at 11:40 — hold-above-open
+    then uses a midday print as the session open.
+    """
+    key = normalize_resolution(resolution)
+    width = {"5": 5, "15": 15, "60": 60}.get(key)
+    default = 40 if n_symbols > 1 else 80
+    if width is None:
+        return default
+    clock = now if isinstance(now, datetime) else datetime.now(ZoneInfo("America/New_York"))
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=ZoneInfo("America/New_York"))
+    else:
+        clock = clock.astimezone(ZoneInfo("America/New_York"))
+    elapsed = max(0, clock.hour * 60 + clock.minute - (9 * 60 + 30))
+    need = elapsed // width + 6
+    return max(default, min(120, int(need)))
 
 
 def _bar_stamp(bar: Any) -> str:
@@ -43,7 +104,9 @@ def bars_from_ibkr(raw: Any) -> list[dict[str, Any]]:
     """Normalize ib_insync BarData / RealTimeBar list to {t,o,h,l,c,v}."""
     out: list[dict[str, Any]] = []
     for bar in raw or []:
-        stamp = _bar_stamp(bar)
+        stamp = getattr(bar, "date", None)
+        if stamp is None:
+            stamp = getattr(bar, "time", None)
         try:
             close = float(getattr(bar, "close"))
         except (TypeError, ValueError):
@@ -52,7 +115,9 @@ def bars_from_ibkr(raw: Any) -> list[dict[str, Any]]:
             vol = int(getattr(bar, "volume", 0) or 0)
         except (TypeError, ValueError):
             vol = 0
-        row: dict[str, Any] = {"t": stamp, "c": close, "v": vol}
+        row: dict[str, Any] = {**bar_time_fields(stamp), "c": close, "v": vol}
+        if not row.get("t"):
+            row["t"] = _bar_stamp(bar)
         for src, key in (("high", "h"), ("low", "l")):
             try:
                 row[key] = float(getattr(bar, src))
@@ -67,7 +132,7 @@ def bars_from_ibkr(raw: Any) -> list[dict[str, Any]]:
 
 
 def ibkr_bar_freshness(resolution: str) -> str:
-    key = str(resolution or "D").strip().upper()
+    key = normalize_resolution(resolution)
     if key in ("5S", "RT", "RT5"):
         return "ibkr_rt_5s"
     if key in ("D", "1D", "1DAY", "DAY"):
@@ -131,13 +196,20 @@ class IBKRBarsMixin:
         if not bars:
             logger.warning("IBKR hist empty for %s %s/%s", sym, bar_size, duration)
             return {"error": "no IBKR bars", "source": "ibkr", "symbol": sym}
-        return {
+        last_bar = bars[-1]
+        out: dict[str, Any] = {
             "symbol": sym,
             "bars": bars,
             "source": "ibkr",
             "freshness": ibkr_bar_freshness(resolution),
             "resolution": str(resolution or "D").strip() or "D",
+            "use": "ibkr_rth_structure",
         }
+        if last_bar.get("t_unix"):
+            out["asof"] = last_bar["t_unix"]
+            if last_bar.get("t_iso"):
+                out["asof_iso"] = last_bar["t_iso"]
+        return out
 
     RT_BAR_S = 5
     RT_BUF = 120

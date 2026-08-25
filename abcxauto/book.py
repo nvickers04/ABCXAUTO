@@ -32,14 +32,37 @@ def _account_float(account: dict, *keys: str) -> Optional[float]:
     return None
 
 
+def _position_qty(pos: dict) -> float:
+    raw = pos.get("quantity")
+    if raw is None:
+        raw = pos.get("position")
+    if raw is None:
+        raw = pos.get("qty")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_open_lot(pos: object) -> bool:
+    """Broker lot with nonzero qty. A bare ticker is not a lot."""
+    if not isinstance(pos, dict):
+        return False
+    return abs(_position_qty(pos)) > 1e-9
+
+
 def _slim_positions(positions: list, limit: int = 12, net_liq: float | None = None) -> List[dict]:
+    """Compact open lots only. Never pad with SPY/QQQ/IWM/DIA or a tape seed."""
     from abcxauto.world_state import compact_position
 
     out: List[dict] = []
-    for p in positions[:limit]:
-        if not isinstance(p, dict):
+    cap = max(0, int(limit))
+    for p in positions or []:
+        if not _is_open_lot(p):
             continue
         out.append(compact_position(p, net_liq=net_liq))
+        if len(out) >= cap:
+            break
     return out
 
 

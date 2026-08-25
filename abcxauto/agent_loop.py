@@ -600,6 +600,44 @@ async def execute_ticket(
     """Normalize, gate, geometry, then send_action. Never bypass the clerk."""
     positions = list(snap.get("positions") or world.positions or [])
     asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
+    try:
+        from abcxauto.lab_playbook import apply_hunt_send_sketch
+
+        apply_hunt_send_sketch(act, snap)
+    except Exception:
+        logger.debug("hunt send sketch apply failed", exc_info=True)
+    try:
+        from abcxauto.lab_playbook import live_card_session_error
+
+        params = act.get("params") if isinstance(act.get("params"), dict) else {}
+        store = snap.get("session_range") if isinstance(snap, dict) else None
+        session = None
+        if isinstance(store, dict):
+            sym = str(params.get("symbol") or "").upper()
+            row = store.get(sym) if sym else None
+            if isinstance(row, dict):
+                session = row
+            elif not sym:
+                for rng in store.values():
+                    if isinstance(rng, dict) and rng.get("today") is True:
+                        session = rng
+                        break
+        sess_note = ""
+        if is_new_risk(asked, params):
+            sess_note = live_card_session_error(params, session)
+            if not sess_note:
+                from abcxauto.lab_playbook import live_card_book_error, live_card_tape_error
+
+                sess_note = live_card_book_error(params, positions)
+                if not sess_note:
+                    sess_note = live_card_tape_error(params, session, snap)
+        if sess_note:
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            act["rationale"] = sess_note
+            _record_clerk_block(act, asked, sess_note, stage="card_session")
+            return {"status": "blocked", "note": sess_note}
+    except Exception:
+        logger.debug("card session gate failed", exc_info=True)
     strat, forced = gate_ticket(act, world)
     if forced is not None:
         act["strategy"] = act["action"] = BLOCKED_STRAT
@@ -655,6 +693,17 @@ async def execute_ticket(
     act["_live_positions"], act["_impact"] = positions, impact
 
     quote_last = await _quote_for_action(act, snap, connector)
+    params = act.get("params") if isinstance(act.get("params"), dict) else {}
+    if (
+        is_new_risk(strat, params)
+        and strat in ("market_bracket", "oca", "bracket")
+        and quote_last is None
+    ):
+        note = "card needs IBKR live last — quote first"
+        act["strategy"] = act["action"] = BLOCKED_STRAT
+        act["rationale"] = note
+        _record_clerk_block(act, asked, note, stage="live_quote")
+        return {"status": "blocked", "note": note}
     if quote_last is not None:
         act["_quote_last"] = quote_last
         params = act.setdefault("params", {})
@@ -667,6 +716,14 @@ async def execute_ticket(
         cfg = get_config()
     except Exception:
         cfg = None
+    session = None
+    store = snap.get("session_range") if isinstance(snap, dict) else None
+    if isinstance(store, dict):
+        sym = str((act.get("params") or {}).get("symbol") or "").upper()
+        row = store.get(sym)
+        if isinstance(row, dict):
+            session = row
+    act["_session"] = session
     fill_missing_protection(
         act,
         quote_last=quote_last,
@@ -674,9 +731,23 @@ async def execute_ticket(
         posture=str(act["_posture"] or "balanced"),
         cfg=cfg,
         positions=positions,
+        session=session,
     )
     strat = str(act.get("strategy") or act.get("action") or strat).strip().lower()
     chosen_strat = strat
+    params = act.get("params") if isinstance(act.get("params"), dict) else {}
+    if is_new_risk(strat, params) and strat in ("market_bracket", "oca", "bracket"):
+        raw_qty = params.get("quantity")
+        try:
+            qty_ok = int(float(raw_qty)) >= 1
+        except (TypeError, ValueError):
+            qty_ok = False
+        if not qty_ok:
+            note = "card off — size won't fit written risk at this stop"
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            act["rationale"] = note
+            _record_clerk_block(act, asked, note, stage="card_size")
+            return {"status": "blocked", "note": note}
 
     if strat in ("market_bracket", "oca", "bracket"):
         from abcxauto.structure_grade import (
@@ -690,6 +761,8 @@ async def execute_ticket(
             act.get("params") or {},
             quote_last=quote_last,
             posture=str(act["_posture"] or "balanced"),
+            session=session,
+            require_live=is_new_risk(strat, act.get("params") or {}),
         )
         act["_structure_grade"] = code
         if not ok_g:
@@ -831,6 +904,10 @@ def _result_dict(
         "ibkr_live_last": (world or {}).get("ibkr_live_last"),
         "ibkr_live_symbol": (world or {}).get("ibkr_live_symbol") or "",
         "scan_fetched": list((world or {}).get("scan_fetched") or []),
+        "scan_hits": s.get("scan_hits") if isinstance(s.get("scan_hits"), dict) else {},
+        "session_range": (
+            s.get("session_range") if isinstance(s.get("session_range"), dict) else {}
+        ),
         "book_unreliable": bool(s.get("book_unreliable")),
     }
 
@@ -1041,16 +1118,11 @@ async def run_cycle(
     think_emit("say", "Book snap done — Grok has the tools.\n")
 
     try:
-        thesis_hint = ""
-        try:
-            thesis_hint = get_journal().get_working_thesis() or ""
-        except Exception:
-            thesis_hint = ""
         sync_open_risk(
             positions,
             s.get("open_orders") or [],
-            thesis=thesis_hint,
-            bump=bool(positions),
+            thesis="",
+            bump=False,
         )
     except Exception:
         logger.exception("open risk sync failed")
@@ -1058,6 +1130,12 @@ async def run_cycle(
     s.setdefault("news_items", [])
     s.setdefault("option_facts", [])
     s.setdefault("opportunities", [])
+    try:
+        from abcxauto.think_stream import seed_snap_from_last_turn
+
+        seed_snap_from_last_turn(s)
+    except Exception:
+        pass
     world = build_world_state(
         cycle=n, snap=s, opportunities=[], news_items=[],
     )
@@ -1091,6 +1169,10 @@ async def run_cycle(
             "sends": 0,
             "positions": list(world.positions or []),
             "reality_pulse": s.get("reality_pulse") or {},
+            "scan_hits": s.get("scan_hits") if isinstance(s.get("scan_hits"), dict) else {},
+            "session_range": (
+                s.get("session_range") if isinstance(s.get("session_range"), dict) else {}
+            ),
             "world_state": world_dict,
         })
     except Exception:
@@ -1158,9 +1240,10 @@ async def run_cycle(
 
 
 def _extract_last(q: dict | None) -> float | None:
+    """IBKR live last / mid. Prior close is not a last — it rejects a gap ticket."""
     if not isinstance(q, dict):
         return None
-    for k in ("last", "price", "close", "c", "mark"):
+    for k in ("last", "price", "mid", "mark"):
         if q.get(k) is not None:
             try:
                 v = float(q[k])
@@ -1205,6 +1288,13 @@ async def _quote_for_action(act: dict, snap: dict, connector: Any = None) -> flo
                     live = v
             except (TypeError, ValueError):
                 pass
+    if live is None and sym:
+        try:
+            from abcxauto.lab_playbook import ibkr_live_last
+
+            live = ibkr_live_last(sym, snap=snap)
+        except Exception:
+            live = None
     if live is None and sym in ("", "SPY"):
         live = _extract_last(snap.get("spy_quote") or {})
     if live is not None:
@@ -1313,7 +1403,7 @@ async def _post_act_structure_and_plan(
                 )
                 close_trade_plan("scrape_wrong_side_stop")
             else:
-                plan = plan_from_bracket_action(act, str(judgment.get("thesis") or ""))
+                plan = plan_from_bracket_action(act, "")
                 if plan:
                     if fill_px is not None:
                         plan.entry_price = fill_px
@@ -1394,7 +1484,7 @@ async def _post_act_structure_and_plan(
                         sync_open_risk(
                             positions,
                             orders,
-                            thesis=str(judgment.get("thesis") or ""),
+                            thesis="",
                             bump=False,
                             allow_flat_close=False,
                         )

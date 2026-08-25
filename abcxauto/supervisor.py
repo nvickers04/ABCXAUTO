@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_REAL_POPEN = subprocess.Popen
 
 _REPO = Path(__file__).resolve().parents[1]
 STOP_PATH = _REPO / "data" / "state" / "operator_stop.json"
@@ -223,6 +224,76 @@ def release_desk_lock() -> None:
         logger.debug("desk lock release failed", exc_info=True)
 
 
+# Same launchers cleanup_pro matches. Not cleanup itself — Start is not flatten.
+_PRO_CMDLINE_MARKERS = (
+    "-m abcxauto",
+    "-mabcxauto",
+    "abcxauto.pro_desktop",
+    "pro_desktop.py",
+    "_start_pro.py",
+    "pro_launch",
+)
+_PRO_CMDLINE_SKIP = ("cleanup_pro", "--cleanup", "pytest")
+
+
+def _cmdline_is_pro(cmd: Any) -> bool:
+    """True for a Pro / supervisor launcher, never for cleanup or pytest."""
+    if isinstance(cmd, (list, tuple)):
+        blob = " ".join(str(part) for part in cmd)
+    else:
+        blob = str(cmd or "")
+    low = blob.lower().replace("\\", "/")
+    if any(skip in low for skip in _PRO_CMDLINE_SKIP):
+        return False
+    return any(mark in low for mark in _PRO_CMDLINE_MARKERS)
+
+
+def live_pro_pids(*, exclude: set[int] | None = None) -> list[int]:
+    """PIDs of already-running Pro desks. Read-only — never signals them."""
+    skip = {os.getpid()}
+    try:
+        parent = int(os.getppid() or 0)
+        if parent > 0:
+            skip.add(parent)
+    except Exception:
+        pass
+    if exclude:
+        skip.update(int(pid) for pid in exclude if int(pid) > 0)
+    found: list[int] = []
+    try:
+        import psutil
+
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            info = proc.info or {}
+            pid = int(info.get("pid") or 0)
+            if pid <= 0 or pid in skip:
+                continue
+            if _cmdline_is_pro(info.get("cmdline") or []):
+                found.append(pid)
+    except Exception:
+        logger.debug("live Pro scan failed", exc_info=True)
+    return found
+
+
+def foreign_desk_pid(*, exclude: set[int] | None = None) -> int:
+    """A live paper Pro that is not this process, or 0.
+
+    The desk lock is the supervisor wrapper's pid. ``_start_pro.py`` never
+    writes it, and a dead wrapper heals the lock while its child still holds
+    client id 42 on 7497. Spawning then is Error 326 — or a stolen session
+    that looks like Start flattened the book.
+    """
+    skip = {os.getpid()}
+    if exclude:
+        skip.update(int(pid) for pid in exclude if int(pid) > 0)
+    owner = desk_owner_pid()
+    if owner and owner not in skip:
+        return owner
+    for pid in live_pro_pids(exclude=skip):
+        return pid
+    return 0
+
+
 def note(msg: str, *, warn: bool = False) -> None:
     """Record a lifecycle decision durably.
 
@@ -234,6 +305,84 @@ def note(msg: str, *, warn: bool = False) -> None:
         _desk_out_logger().info(msg)
     except Exception:
         pass
+
+
+def orphan_flet_pids(
+    rows: list[dict[str, Any]],
+    *,
+    repo: str = "",
+    pid_alive: Any = None,
+) -> list[int]:
+    """Flet windows for this repo whose python parent is already dead."""
+    root = str(repo or _REPO)
+    alive = _pid_alive if pid_alive is None else pid_alive
+    out: list[int] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("Name") or "").lower()
+        if name != "flet.exe":
+            continue
+        cmd = str(row.get("cmd") or row.get("CommandLine") or "")
+        if root.lower() not in cmd.lower():
+            continue
+        try:
+            parent = int(row.get("parent") or row.get("ParentProcessId") or 0)
+            pid = int(row.get("pid") or row.get("ProcessId") or 0)
+        except (TypeError, ValueError):
+            continue
+        if pid <= 0:
+            continue
+        if parent > 0 and alive(parent):
+            continue
+        out.append(pid)
+    return out
+
+
+def sweep_orphan_flet_windows() -> list[int]:
+    """Stop leftover ABCXAUTO windows after a python-only kill/reload."""
+    if os.name != "nt":
+        return []
+    try:
+        proc = _REAL_POPEN(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='flet.exe'\" | "
+                "Select-Object ProcessId,ParentProcessId,Name,CommandLine | "
+                "ConvertTo-Json -Compress",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        raw, _ = proc.communicate(timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    try:
+        parsed = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    killed = orphan_flet_pids(
+        [r for r in parsed if isinstance(r, dict)],
+        repo=str(_REPO),
+    )
+    for pid in killed:
+        try:
+            killer = _REAL_POPEN(
+                ["taskkill", "/F", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            killer.communicate(timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+    if killed:
+        note(f"supervisor: swept orphan flet {killed}")
+    return killed
 
 
 def supervise(child_env: dict[str, str] | None = None) -> int:
@@ -249,7 +398,16 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
         env.update(child_env)
     env["ABCXAUTO_SUPERVISED"] = "1"
     backoff = 15.0
+    child_pid = 0
     while True:
+        try:
+            sweep_orphan_flet_windows()
+        except Exception:
+            logger.debug("orphan flet sweep skipped", exc_info=True)
+        held = foreign_desk_pid(exclude={child_pid})
+        if held:
+            note(f"supervisor: Pro already up (pid {held}) — stay down")
+            return 0
         proc = subprocess.Popen(
             [sys.executable, "-m", "abcxauto"],
             env=env,
@@ -260,18 +418,25 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
             text=True,
             errors="replace",
         )
+        child_pid = int(getattr(proc, "pid", 0) or 0)
         stream = getattr(proc, "stdout", None)
         if stream is not None:
             threading.Thread(
                 target=tee_child_output, args=(stream,), daemon=True
             ).start()
-        note(f"supervisor: child pid {getattr(proc, 'pid', 0)} up")
+        note(f"supervisor: child pid {child_pid} up")
         code = proc.wait()
         if int(code or 0) == 0:
             note("supervisor: clean exit — operator closed the window, stay down")
             return 0
         if operator_stopped():
             note("supervisor: operator stop — stay down")
+            return int(code or 0)
+        held = foreign_desk_pid(exclude={child_pid})
+        if held:
+            note(
+                f"supervisor: Pro still up (pid {held}) after child exit {code} — stay down"
+            )
             return int(code or 0)
         if not useful_hours():
             note("supervisor: outside useful hours — stay down")

@@ -1,16 +1,26 @@
 import io
 import logging
+import os
 import threading
 from datetime import datetime
+
+import pytest
 
 import abcxauto.supervisor as sup
 from abcxauto.supervisor import (
     clear_operator_stop,
+    live_pro_pids as _real_live_pro_pids,
     mark_operator_stop,
     operator_stopped,
     supervise,
     useful_hours,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_foreign_pro(monkeypatch):
+    """Unit tests must not see a leftover desk on the machine running pytest."""
+    monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: [])
 
 
 class _Proc:
@@ -19,6 +29,32 @@ class _Proc:
 
     def wait(self) -> int:
         return self._code
+
+
+def test_orphan_flet_pids_keeps_a_live_parent():
+    from abcxauto.supervisor import orphan_flet_pids
+
+    rows = [
+        {
+            "Name": "flet.exe",
+            "ProcessId": 11,
+            "ParentProcessId": 99,
+            "CommandLine": r"C:\flet\flet.exe C:\Users\nvick\ABCXAUTO\assets",
+        },
+        {
+            "Name": "flet.exe",
+            "ProcessId": 22,
+            "ParentProcessId": 88,
+            "CommandLine": r"C:\flet\flet.exe C:\Users\nvick\ABCXAUTO\assets",
+        },
+        {
+            "Name": "flet.exe",
+            "ProcessId": 33,
+            "ParentProcessId": 77,
+            "CommandLine": r"C:\flet\flet.exe C:\other\project\assets",
+        },
+    ]
+    assert orphan_flet_pids(rows, repo=r"C:\Users\nvick\ABCXAUTO", pid_alive=lambda p: p == 99) == [22]
 
 
 def test_operator_stop_roundtrip(tmp_path, monkeypatch):
@@ -176,3 +212,111 @@ def test_useful_hours_rth_and_weekend():
     assert useful_hours(now=early) is False
     sat = datetime(2026, 8, 15, 10, 0)
     assert useful_hours(now=sat) is False
+
+
+def test_live_pro_pids_skips_self_and_does_not_signal(monkeypatch):
+    """The scan is how we see a lockless _start_pro. It must not be a kill list."""
+    import psutil
+
+    class _P:
+        def __init__(self, pid: int, cmd: list[str]) -> None:
+            self.info = {"pid": pid, "cmdline": cmd}
+
+    monkeypatch.setattr(
+        psutil,
+        "process_iter",
+        lambda _attrs: [
+            _P(os.getpid(), ["python", "-m", "abcxauto"]),
+            _P(4242, ["python", "logs/_start_pro.py"]),
+            _P(8, ["python", "scripts/cleanup_pro.py"]),
+        ],
+    )
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(sup.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    assert _real_live_pro_pids() == [4242]
+    assert killed == []
+
+
+def test_cmdline_is_pro_matches_launchers_not_cleanup():
+    assert sup._cmdline_is_pro(["python", "-m", "abcxauto"]) is True
+    assert sup._cmdline_is_pro(r"C:\Users\nvick\ABCXAUTO\logs\_start_pro.py") is True
+    assert sup._cmdline_is_pro(["python", "abcxauto/pro_desktop.py"]) is True
+    assert sup._cmdline_is_pro(["python", "scripts/cleanup_pro.py"]) is False
+    assert sup._cmdline_is_pro(["python", "-m", "abcxauto", "--cleanup"]) is False
+    assert sup._cmdline_is_pro(["pytest", "tests/test_supervisor.py"]) is False
+
+
+def test_supervise_does_not_spawn_over_a_live_pro(monkeypatch, tmp_path):
+    """_start_pro (or a leftover child) already holds 7497. A second Start is 326."""
+    monkeypatch.setenv("ABCXAUTO_DESK_OUT_PATH", str(tmp_path / "desk.out"))
+    launches: list[int] = []
+    killed: list[tuple[int, int]] = []
+
+    def _popen(*_a, **_kw):
+        launches.append(1)
+        return _Proc(0)
+
+    monkeypatch.setattr(sup.subprocess, "Popen", _popen)
+    monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: [4242])
+    monkeypatch.setattr(sup.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(sup, "useful_hours", lambda **_kw: True)
+    monkeypatch.setattr(sup, "tws_listening", lambda *_a, **_kw: True)
+    monkeypatch.setattr(sup, "operator_stopped", lambda: False)
+    assert supervise() == 0
+    assert launches == []
+    assert killed == []
+    for h in logging.getLogger("abcxauto.desk_out").handlers:
+        h.flush()
+    body = (tmp_path / "desk.out").read_text(encoding="utf-8")
+    assert "already up" in body
+    assert "4242" in body
+    assert "flatten" not in body.lower()
+
+
+def test_supervise_does_not_relaunch_into_a_live_pro(monkeypatch, tmp_path):
+    """Child lost Error 326; the other Pro still owns the client id — stay down."""
+    monkeypatch.setenv("ABCXAUTO_DESK_OUT_PATH", str(tmp_path / "desk.out"))
+    launches: list[int] = []
+    live: list[int] = []
+
+    def _popen(*_a, **_kw):
+        launches.append(1)
+        live[:] = [99]
+        return _Proc(1)
+
+    monkeypatch.setattr(sup.subprocess, "Popen", _popen)
+    monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: list(live))
+    monkeypatch.setattr(sup, "useful_hours", lambda **_kw: True)
+    monkeypatch.setattr(sup, "tws_listening", lambda *_a, **_kw: True)
+    monkeypatch.setattr(sup, "operator_stopped", lambda: False)
+    slept: list[float] = []
+    monkeypatch.setattr(sup.time, "sleep", slept.append)
+    assert supervise() == 1
+    assert launches == [1]
+    assert slept == []
+
+
+def test_foreign_desk_pid_uses_lock_owner_without_killing(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_DESK_LOCK_PATH", str(tmp_path / "desk.lock"))
+    (tmp_path / "desk.lock").write_text('{"pid": 7}', encoding="utf-8")
+    monkeypatch.setattr(sup, "_pid_alive", lambda pid: pid == 7)
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(sup.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    assert sup.foreign_desk_pid() == 7
+    assert killed == []
+
+
+def test_start_over_a_live_pro_is_not_flatten(monkeypatch):
+    """Second Start must not cleanup, panic, or flatten the book that is already live."""
+    calls: list[str] = []
+
+    def _popen(*_a, **_kw):
+        calls.append("popen")
+        return _Proc(0)
+
+    monkeypatch.setattr(sup.subprocess, "Popen", _popen)
+    monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: [77])
+    monkeypatch.setattr(sup, "release_desk_lock", lambda: calls.append("release"))
+    monkeypatch.setattr(sup, "mark_operator_stop", lambda: calls.append("stop"))
+    assert supervise() == 0
+    assert calls == []
