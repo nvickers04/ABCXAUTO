@@ -13,6 +13,8 @@ from typing import Any
 
 from abcxauto.think_stream import ascii_text
 
+logger = logging.getLogger(__name__)
+
 _SKIP_TYPES = frozenset({"monitor_snapshot", "ibkr_account", "trading_mode", "conn"})
 
 
@@ -133,6 +135,21 @@ def _quiet_ibkr_scanner_noise() -> None:
         logging.getLogger(name).addFilter(_Drop162())
 
 
+def apply_kill_switch(engine: Any) -> None:
+    """Stop the agent and the IBKR link. Positions stay at the broker.
+
+    Never flatten, panic, or send. ``stop_engine`` is the only teardown.
+    """
+    print("\nKill switch — stopping agent (positions stay at IBKR).", flush=True)
+    stop = getattr(engine, "stop_engine", None)
+    if not callable(stop):
+        return
+    try:
+        stop()
+    except Exception:
+        logger.exception("headless stop failed")
+
+
 def run_headless() -> int:
     """Connect paper IBKR and run autonomous cycles until SIGINT/SIGTERM."""
     from abcxauto.config import get_config, setup_file_logging
@@ -166,11 +183,7 @@ def run_headless() -> int:
         if stopping["done"]:
             return
         stopping["done"] = True
-        print("\nKill switch — stopping agent (positions stay at IBKR).", flush=True)
-        try:
-            engine.stop_engine()
-        except Exception:
-            logger.exception("headless stop failed")
+        apply_kill_switch(engine)
 
     signal.signal(signal.SIGINT, _stop)
     if hasattr(signal, "SIGTERM"):

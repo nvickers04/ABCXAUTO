@@ -15,6 +15,8 @@ from abcxauto.risk_gates import (
     is_exit_or_management,
     reset_risk_gate,
     risk_base_usd,
+    sizing_floors_active,
+    symbol_exposure_usd,
 )
 from tests.test_proposals import RATIONALE, VALID_PAYLOADS
 
@@ -127,13 +129,31 @@ async def test_halt_blocks_entries_not_exits(gate):
     assert ok is True
 
 
-def _lot(symbol="NVDA", mv=10_000.0, qty=100, sec_type="STK"):
-    return {
+def _lot(symbol="NVDA", mv=10_000.0, qty=100, sec_type="STK", **extra):
+    row = {
         "symbol": symbol,
         "secType": sec_type,
         "quantity": qty,
         "marketValue": mv,
     }
+    row.update(extra)
+    return row
+
+
+def _vertical(symbol="SPY", qty=1, limit=2.0):
+    return validate_proposal(
+        "vertical_spread",
+        {
+            "symbol": symbol,
+            "expiration": "20260718",
+            "long_strike": 500.0,
+            "short_strike": 505.0,
+            "right": "C",
+            "quantity": qty,
+            "limit_price": limit,
+        },
+        RATIONALE,
+    )
 
 
 @pytest.mark.asyncio
@@ -217,6 +237,137 @@ async def test_symbol_concentration_is_inert_while_floors_are_off(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_symbol_concentration_option_ticket_stacks_on_stock_book(monkeypatch):
+    """SPEC: one name across every lot. An option ticket sees the stock book."""
+    g = reset_risk_gate()
+    cfg = _cfg(max_position_pct=25.0, max_symbol_concentration_pct=25.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    # 24k stock = 24% NL. Vertical 6 contracts * $2 * 100 = $1,200 → 25.2%.
+    conn = FakeConnector(positions=[_lot("SPY", mv=24_000.0)])
+    ok, reason = await g.pre_trade_check(_vertical(qty=6, limit=2.0), conn)
+    assert ok is False
+    assert "size_symbol_concentration" in reason
+
+    ok, _ = await g.pre_trade_check(_vertical(qty=1, limit=2.0), conn)
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_symbol_concentration_counts_occ_symbol_via_underlying(monkeypatch):
+    """Option lots that keep OCC in symbol still belong to the underlying."""
+    g = reset_risk_gate()
+    cfg = _cfg(max_position_pct=25.0, max_symbol_concentration_pct=25.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    conn = FakeConnector(
+        positions=[
+            _lot("SPY   260918C00600000", mv=20_000.0, qty=2, sec_type="OPT",
+                 underlying="SPY"),
+        ]
+    )
+    ok, reason = await g.pre_trade_check(
+        _bracket(qty=80, entry=100.0, symbol="SPY"), conn
+    )
+    assert ok is False
+    assert "size_symbol_concentration" in reason
+
+
+@pytest.mark.asyncio
+async def test_symbol_concentration_uses_live_ibkr_market_value_key(monkeypatch):
+    """IBKRConnector emits market_value, not marketValue."""
+    g = reset_risk_gate()
+    cfg = _cfg(max_position_pct=25.0, max_symbol_concentration_pct=25.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    conn = FakeConnector(
+        positions=[
+            {
+                "symbol": "NVDA",
+                "sec_type": "STK",
+                "quantity": 100,
+                "market_value": 20_000.0,
+            }
+        ]
+    )
+    ok, reason = await g.pre_trade_check(_bracket(qty=80, entry=100.0), conn)
+    assert ok is False
+    assert "size_symbol_concentration" in reason
+
+
+@pytest.mark.asyncio
+async def test_symbol_concentration_fail_closed_on_unreadable_lot_mark(monkeypatch):
+    """ib_insync NaN marketValue must not make nan > cap evaluate False."""
+    g = reset_risk_gate()
+    cfg = _cfg(max_position_pct=25.0, max_symbol_concentration_pct=25.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    conn = FakeConnector(positions=[_lot("NVDA", mv=float("nan"))])
+    ok, reason = await g.pre_trade_check(_bracket(qty=80, entry=100.0), conn)
+    assert ok is False
+    assert "size_symbol_concentration unknown" in reason
+
+
+def test_symbol_exposure_usd_fail_closed_on_nan_mark():
+    lots = [_lot("NVDA", mv=float("nan"))]
+    assert symbol_exposure_usd(lots, "NVDA") is None
+    assert symbol_exposure_usd([_lot("NVDA", mv=12_500.0)], "NVDA") == 12_500.0
+    occ = _lot(
+        "SPY   260918C00600000",
+        mv=9_000.0,
+        qty=2,
+        sec_type="OPT",
+        underlying="SPY",
+    )
+    assert symbol_exposure_usd([occ], "SPY") == 9_000.0
+
+
+@pytest.mark.asyncio
+async def test_live_port_paper_mode_still_enforces_concentration(monkeypatch):
+    """Live TWS port + TRADING_MODE paper must still apply the name cap."""
+    g = reset_risk_gate()
+    cfg = _cfg(
+        trading_mode="paper",
+        sizing_floors=False,
+        ibkr_port=7496,
+        max_position_pct=10.0,
+        max_symbol_concentration_pct=25.0,
+    )
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    order = _bracket(qty=80, entry=100.0, symbol="NVDA")
+    ok, _ = await g.pre_trade_check(order, FakeConnector())
+    assert ok is True
+
+    heavy = FakeConnector(positions=[_lot("NVDA", mv=20_000.0)])
+    ok, reason = await g.pre_trade_check(order, heavy)
+    assert ok is False
+    assert "size_symbol_concentration" in reason
+
+
+@pytest.mark.asyncio
+async def test_positions_error_dict_fail_closed(monkeypatch):
+    g = reset_risk_gate()
+    cfg = _cfg(max_position_pct=25.0, max_symbol_concentration_pct=25.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    class ErrBook(FakeConnector):
+        async def get_positions(self):
+            return {"error": "portfolio timeout"}
+
+    ok, reason = await g.pre_trade_check(_bracket(), ErrBook())
+    assert ok is False
+    assert "fail-closed" in reason.lower()
+    assert "positions" in reason.lower()
+
+
+@pytest.mark.asyncio
 async def test_daily_loss_breach_trips_halt(gate):
     # 2% of 100k = 2000; daily pnl -2500 trips
     conn = FakeConnector(account={"netliquidation": 100_000.0, "dailypnl": -2500.0})
@@ -251,6 +402,26 @@ def test_risk_base_usd_is_full_net_liq():
     assert risk_base_usd(100_000.0) == 100_000.0
     assert risk_base_usd(1_000.0) == 1_000.0
     assert risk_base_usd(1_000_000.0) == 1_000_000.0
+
+
+def test_paper_ports_follow_sizing_floors_flag():
+    """7497 / 4002 stay clerk-controlled. Live send is not involved."""
+    for port in (7497, 4002):
+        off = _cfg(trading_mode="paper", sizing_floors=False, ibkr_port=port)
+        assert off.is_paper is True
+        assert sizing_floors_active(off) is False
+        on = _cfg(trading_mode="paper", sizing_floors=True, ibkr_port=port)
+        assert sizing_floors_active(on) is True
+
+
+def test_live_ports_force_floors_even_when_trading_mode_is_paper():
+    """7496 / 4001 are the live socket family — floors stay on. Send stays gated."""
+    for port in (7496, 4001):
+        cfg = _cfg(trading_mode="paper", sizing_floors=False, ibkr_port=port)
+        assert cfg.trading_mode == "paper"
+        assert cfg.sizing_floors is False
+        assert cfg.is_paper is False
+        assert sizing_floors_active(cfg) is True
 
 
 @pytest.mark.asyncio
@@ -334,11 +505,33 @@ async def test_fail_closed_on_missing_account_data(gate):
     assert ok is False
     assert "fail-closed" in reason.lower()
 
+    conn4 = FakeConnector(account={"netliquidation": float("nan"), "dailypnl": 0.0})
+    ok, reason = await gate.pre_trade_check(_bracket(), conn4)
+    assert ok is False
+    assert "fail-closed" in reason.lower()
+
 
 @pytest.mark.asyncio
 async def test_missing_dailypnl_treated_as_flat(gate):
     """IBKR often omits DailyPnL early session — do not block entries."""
     conn = FakeConnector(account={"netliquidation": 100_000.0, "TotalCashValue": 100_000.0})
+    ok, reason = await gate.pre_trade_check(_bracket(), conn)
+    assert ok is True, reason
+
+
+@pytest.mark.asyncio
+async def test_unreadable_dailypnl_fail_closed_does_not_latch(gate):
+    """Present-but-NaN DailyPnL is unknown. Reject the ticket; do not halt."""
+    conn = FakeConnector(
+        account={"netliquidation": 100_000.0, "dailypnl": float("nan")}
+    )
+    ok, reason = await gate.pre_trade_check(_bracket(), conn)
+    assert ok is False
+    assert "fail-closed" in reason.lower()
+    assert "dailypnl" in reason.lower()
+    assert gate.is_halted is False
+
+    conn.account = {"netliquidation": 100_000.0, "dailypnl": 0.0}
     ok, reason = await gate.pre_trade_check(_bracket(), conn)
     assert ok is True, reason
 

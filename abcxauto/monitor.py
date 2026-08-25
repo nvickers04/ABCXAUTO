@@ -78,10 +78,42 @@ def _qty(obj: Dict[str, Any] | None) -> float:
     raw = p.get("quantity")
     if raw is None:
         raw = p.get("position")
+    if raw is None:
+        raw = p.get("totalQuantity")
     try:
         return float(raw or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+# Same slack as trade_plan stacked-stop cover: a crumb short still covers.
+_COVER_QTY_SLACK = 0.51
+
+
+def _leg_ratio(leg: Dict[str, Any] | None) -> float:
+    raw = (leg or {}).get("ratio")
+    try:
+        ratio = float(raw if raw is not None else 1)
+    except (TypeError, ValueError):
+        ratio = 1.0
+    return ratio if ratio > 0 else 1.0
+
+
+def _covers_held_qty(
+    held: float,
+    order: Dict[str, Any],
+    *,
+    ratio: float = 1.0,
+) -> bool:
+    """True when order size (× BAG ratio) covers the open lot."""
+    try:
+        r = float(ratio)
+    except (TypeError, ValueError):
+        r = 1.0
+    if r <= 0:
+        r = 1.0
+    cover = abs(_qty(order)) * r
+    return cover + 1e-9 >= abs(held) - _COVER_QTY_SLACK
 
 
 def _order_id(order: Dict[str, Any] | None) -> Optional[int]:
@@ -150,7 +182,7 @@ def _bag_covers_lot(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
             continue
         act = str(leg.get("action") or "").upper()
         if act == want or (not act and parent == want):
-            return True
+            return _covers_held_qty(qty, order, ratio=_leg_ratio(leg))
     return False
 
 
@@ -175,7 +207,7 @@ def _contract_matches(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
 
 
 def _covers_lot(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
-    """True when the working order is a closing ticket for this lot (incl. BAG)."""
+    """True when the working order fully closes this lot (incl. BAG)."""
     if _bag_covers_lot(position, order):
         return True
     if _sec_type(order) == "BAG":
@@ -187,7 +219,9 @@ def _covers_lot(position: Dict[str, Any], order: Dict[str, Any]) -> bool:
         return False
     exit_action = "SELL" if qty > 0 else "BUY"
     action = str(order.get("action") or "").upper()
-    return action == exit_action
+    if action != exit_action:
+        return False
+    return _covers_held_qty(qty, order)
 
 
 def covering_exits(
@@ -220,8 +254,9 @@ def build_protection_report(
 ) -> Dict[str, Any]:
     """Match each lot with covering stop/target orders at IBKR.
 
-    Unprotected is STK without a working last-stop. Option covering exits are
-    facts only — they do not force hold or flatten. Combos close as one BAG.
+    Unprotected is STK without a working last-stop that covers the held qty.
+    Option covering exits are facts only — they do not force hold or flatten.
+    Combos close as one BAG; a short combo is not a full cover.
     ``orphaned_protection`` is the mirror image: exits with no lot left to
     cover, which the unprotected test cannot see because the book looks clean.
     """

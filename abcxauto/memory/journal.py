@@ -182,6 +182,91 @@ def _utc_iso(value: Any) -> Optional[str]:
     )
 
 
+def _row_ts(value: Any = None) -> str:
+    """Canonical UTC stamp for a journal row. Unparseable caller text is kept."""
+    return _utc_iso(value) or _utc_now_iso()
+
+
+def _ts_bound(value: Any) -> str:
+    """Canonical UTC bound for string compares against stored ``ts`` values."""
+    return _utc_iso(value) or str(value)
+
+
+def _et_calendar_date(value: Any = None) -> Optional[str]:
+    """America/New_York calendar date. IBKR DailyPnL resets on this day."""
+    if value is None:
+        dt = datetime.now(timezone.utc)
+    elif isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text[:10] if len(text) >= 10 else None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        return dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        return dt.astimezone(timezone.utc).date().isoformat()
+
+
+# ib_insync can hand over TWS UTC digits as local time. The fill then sits one
+# US offset in the future — 4h EDT / 5h CDT in summer, up to 8h PT.
+_FILL_TZ_OFFSETS_H = (4, 5, 6, 7, 8)
+_FILL_TZ_SLACK = timedelta(minutes=20)
+_DISPATCH_GRACE = timedelta(seconds=90)
+
+
+def _parse_ts(raw: Any) -> Optional[datetime]:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        dt = raw
+    else:
+        text = str(raw).strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _align_fill_ts_to_dispatch(fill_ts: str, dispatch_ts: Optional[str]) -> str:
+    """Keep a fill on the same UTC clock as the ticket that caused it.
+
+    A +5h CDT shift of 20:13Z becomes 01:13Z the next UTC day — daily and
+    session rows keyed on fill ts then belong to the wrong day. Only a
+    whole-hour US offset near the dispatch is rewritten; a later real stop
+    is left alone.
+    """
+    if not dispatch_ts:
+        return fill_ts
+    fill_dt = _parse_ts(fill_ts)
+    disp_dt = _parse_ts(dispatch_ts)
+    if fill_dt is None or disp_dt is None:
+        return fill_ts
+    delta = fill_dt - disp_dt
+    if delta <= _FILL_TZ_SLACK:
+        return fill_ts
+    for hours in _FILL_TZ_OFFSETS_H:
+        target = timedelta(hours=hours)
+        if abs(delta - target) <= _FILL_TZ_SLACK:
+            shifted = fill_dt - target
+            if shifted + _DISPATCH_GRACE >= disp_dt:
+                return _utc_iso(shifted) or fill_ts
+    return fill_ts
+
+
 def _json_dumps(obj: Any) -> str:
     return json.dumps(obj, default=str)
 
@@ -289,6 +374,8 @@ class TradeJournal:
         self._timeout = float(timeout)
         self._init_lock = threading.Lock()
         self._initialized = False
+        # (model, ts) waiting for a real NetLiq. Never persist NL=None.
+        self._pending_session: Optional[tuple[str, Optional[str]]] = None
         if self.enabled:
             try:
                 self._ensure_schema()
@@ -369,7 +456,7 @@ class TradeJournal:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        ts or _utc_now_iso(),
+                        _row_ts(ts),
                         source,
                         strategy,
                         symbol,
@@ -405,7 +492,7 @@ class TradeJournal:
                     VALUES (?, ?, ?, ?)
                     """,
                     (
-                        ts or _utc_now_iso(),
+                        _row_ts(ts),
                         proposal_id,
                         1 if allowed else 0,
                         reason or None,
@@ -435,7 +522,7 @@ class TradeJournal:
                     VALUES (?, ?, ?, ?)
                     """,
                     (
-                        ts or _utc_now_iso(),
+                        _row_ts(ts),
                         proposal_id,
                         1 if ok else 0,
                         result_json,
@@ -462,7 +549,7 @@ class TradeJournal:
                     INSERT INTO halts (ts, reason, kind)
                     VALUES (?, ?, ?)
                     """,
-                    (ts or _utc_now_iso(), reason or None, kind or "halt"),
+                    (_row_ts(ts), reason or None, kind or "halt"),
                 )
                 conn.commit()
         except Exception:
@@ -486,6 +573,7 @@ class TradeJournal:
             total_cash = _account_float(
                 account, "totalcashvalue", "TotalCashValue", "total_cash", "TotalCash"
             )
+            stamp = _row_ts(ts)
             with self._connect() as conn:
                 conn.execute(
                     """
@@ -495,7 +583,7 @@ class TradeJournal:
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        ts or _utc_now_iso(),
+                        stamp,
                         net_liq,
                         daily_pnl,
                         total_cash,
@@ -504,6 +592,15 @@ class TradeJournal:
                     ),
                 )
                 conn.commit()
+            if net_liq is not None and self._pending_session:
+                model, pending_ts = self._pending_session
+                self._pending_session = None
+                try:
+                    self.ensure_model_session(
+                        model, net_liquidation=net_liq, ts=pending_ts or stamp
+                    )
+                except Exception:
+                    logger.exception("journal.record_snapshot session stamp failed")
         except Exception:
             logger.exception("journal.record_snapshot failed")
 
@@ -515,6 +612,17 @@ class TradeJournal:
             self._ensure_schema()
             inserted = 0
             with self._connect() as conn:
+                anchors: dict = {}
+                for row in conn.execute(
+                    "SELECT ts, result_json FROM dispatches WHERE result_json IS NOT NULL"
+                ).fetchall():
+                    dts = str(row["ts"] or "")
+                    if not dts:
+                        continue
+                    for oid in _order_ids_from_result_json(row["result_json"]):
+                        prev = anchors.get(oid)
+                        if prev is None or dts < prev:
+                            anchors[oid] = dts
                 for fill in fills or []:
                     if not isinstance(fill, dict):
                         continue
@@ -522,6 +630,11 @@ class TradeJournal:
                     if exec_id is None or str(exec_id).strip() == "":
                         continue
                     try:
+                        oid = _coerce_order_id(fill.get("order_id"))
+                        fill_ts = _align_fill_ts_to_dispatch(
+                            _row_ts(fill.get("ts")),
+                            anchors.get(oid) if oid is not None else None,
+                        )
                         cur = conn.execute(
                             """
                             INSERT OR IGNORE INTO fills (
@@ -530,9 +643,9 @@ class TradeJournal:
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
-                                _utc_iso(fill.get("ts")) or _utc_now_iso(),
+                                fill_ts,
                                 str(exec_id),
-                                _coerce_order_id(fill.get("order_id")),
+                                oid,
                                 fill.get("symbol"),
                                 fill.get("sec_type"),
                                 fill.get("side"),
@@ -584,7 +697,7 @@ class TradeJournal:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        ts or _utc_now_iso(),
+                        _row_ts(ts),
                         cycle_int,
                         action or None,
                         strategy or None,
@@ -619,7 +732,7 @@ class TradeJournal:
                     VALUES (1, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET ts = excluded.ts, text = excluded.text
                     """,
-                    (ts or _utc_now_iso(), body[:2000]),
+                    (_row_ts(ts), body[:2000]),
                 )
                 conn.commit()
         except Exception:
@@ -657,7 +770,7 @@ class TradeJournal:
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        ts or _utc_now_iso(),
+                        _row_ts(ts),
                         cycle_int,
                         stance or None,
                         (thesis or None),
@@ -971,6 +1084,35 @@ class TradeJournal:
                     daily_f = float(daily) if daily is not None else None
                 except (TypeError, ValueError):
                     daily_f = None
+                latest_ts = str(latest["ts"] or "")
+                snap_day = _et_calendar_date(latest_ts)
+                today = _et_calendar_date(now)
+                if daily_f is not None and (
+                    not snap_day or not today or snap_day != today
+                ):
+                    # Yesterday's IBKR DailyPnL is not today's daily figure.
+                    daily_f = None
+                if daily_f is not None:
+                    try:
+                        marker = self.last_session_marker()
+                    except Exception:
+                        marker = None
+                    if isinstance(marker, dict) and marker.get("ts"):
+                        if _ts_bound(latest_ts) < _ts_bound(marker.get("ts")):
+                            # Snapshot is from before this session — leftover.
+                            daily_f = None
+
+                as_of_dt = now
+                if latest_ts:
+                    try:
+                        parsed = datetime.fromisoformat(
+                            latest_ts.replace("Z", "+00:00")
+                        )
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=timezone.utc)
+                        as_of_dt = parsed
+                    except ValueError:
+                        as_of_dt = now
 
                 oldest = conn.execute(
                     """
@@ -993,7 +1135,7 @@ class TradeJournal:
                         history_days = None
 
                 def _baseline(days: int) -> float | None:
-                    cutoff = (now - timedelta(days=days)).isoformat()
+                    cutoff = _ts_bound(as_of_dt - timedelta(days=days))
                     row = conn.execute(
                         """
                         SELECT net_liquidation FROM snapshots
@@ -1273,6 +1415,12 @@ class TradeJournal:
     ) -> Optional[int]:
         if not self.enabled:
             return None
+        inn = int(input_tokens or 0)
+        out = int(output_tokens or 0)
+        cached = int(cached_tokens or 0)
+        if inn <= 0 and out <= 0 and cached <= 0:
+            # Empty token row with a leftover $0.18 is not cost truth.
+            return None
         try:
             self._ensure_schema()
             with self._connect() as conn:
@@ -1284,12 +1432,12 @@ class TradeJournal:
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        ts or _utc_now_iso(),
+                        _row_ts(ts),
                         stage or None,
                         (model or None),
-                        int(input_tokens or 0),
-                        int(output_tokens or 0),
-                        int(cached_tokens or 0),
+                        inn,
+                        out,
+                        cached,
                         float(cost_usd or 0.0),
                     ),
                 )
@@ -1328,22 +1476,51 @@ class TradeJournal:
         net_liquidation: Optional[float] = None,
         ts: Optional[str] = None,
     ) -> Optional[dict]:
-        """Stamp a session when ABCXAUTO_MODEL changes (or on first run)."""
+        """Stamp a session when the model changes (or on first real NetLiq).
+
+        A boot call with no book print must not persist ``net_liquidation=None``.
+        Wait for a snapshot NL, or skip the stamp.
+        """
         name = str(model or "").strip()
         if not name or not self.enabled:
             return self.last_session_marker()
         last = self.last_session_marker()
-        if last and str(last.get("model") or "") == name:
+        nl: Optional[float] = None
+        if net_liquidation is not None:
+            try:
+                nl = float(net_liquidation)
+            except (TypeError, ValueError):
+                nl = None
+        same = bool(last and str(last.get("model") or "") == name)
+        if same and last is not None and last.get("net_liquidation") is not None:
+            self._pending_session = None
             return last
+        if nl is None:
+            self._pending_session = (name, ts)
+            return last if same else None
+        self._pending_session = None
         try:
             self._ensure_schema()
-            stamp = ts or _utc_now_iso()
-            nl = None
-            if net_liquidation is not None:
-                try:
-                    nl = float(net_liquidation)
-                except (TypeError, ValueError):
-                    nl = None
+            if same and last is not None and last.get("net_liquidation") is None:
+                with self._connect() as conn:
+                    conn.execute(
+                        """
+                        UPDATE session_markers
+                        SET net_liquidation = ?
+                        WHERE id = (
+                            SELECT id FROM session_markers ORDER BY id DESC LIMIT 1
+                        )
+                          AND net_liquidation IS NULL
+                        """,
+                        (nl,),
+                    )
+                    conn.commit()
+                return {
+                    "ts": str(last.get("ts") or ""),
+                    "model": name,
+                    "net_liquidation": nl,
+                }
+            stamp = _row_ts(ts)
             with self._connect() as conn:
                 conn.execute(
                     """
@@ -1363,23 +1540,33 @@ class TradeJournal:
             return last
 
     def closed_fill_stats_since(self, since_iso: str) -> dict:
+        """Closed-fill stats for tickets this desk dispatched.
+
+        Fills whose order_id is missing or not in a dispatch result are
+        leftover TWS / other-client rows — they cannot be tied back to a
+        ticket, so they are not this run's ledger.
+        """
         empty = {"n": 0, "wins": 0, "sum": 0.0}
         try:
             self._ensure_schema()
+            placed = self.dispatched_order_ids()
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    SELECT realized_pnl FROM fills
+                    SELECT order_id, realized_pnl FROM fills
                     WHERE realized_pnl IS NOT NULL
                       AND ABS(realized_pnl) > 1e-9
                       AND ts >= ?
                     """,
-                    (str(since_iso),),
+                    (_ts_bound(since_iso),),
                 ).fetchall()
             n = 0
             wins = 0
             total = 0.0
             for row in rows:
+                oid = _coerce_order_id(row["order_id"])
+                if oid is None or oid not in placed:
+                    continue
                 try:
                     pnl = float(row["realized_pnl"])
                 except (TypeError, ValueError, KeyError):
@@ -1415,7 +1602,7 @@ class TradeJournal:
                     FROM model_usage
                     WHERE ts >= ?
                     """,
-                    (str(since_iso),),
+                    (_ts_bound(since_iso),),
                 ).fetchone()
             if not row:
                 return empty
@@ -1443,7 +1630,7 @@ class TradeJournal:
                       AND ts <= ?
                     ORDER BY id DESC LIMIT 1
                     """,
-                    (str(before_iso),),
+                    (_ts_bound(before_iso),),
                 ).fetchone()
             if not row or row["net_liquidation"] is None:
                 return None, None
@@ -1452,13 +1639,39 @@ class TradeJournal:
             logger.exception("journal.nav_at_or_before failed")
             return None, None
 
+    def nav_at_or_after(self, after_iso: str) -> tuple[Optional[float], Optional[str]]:
+        """Earliest NetLiq at or after ``after_iso``. (None, None) if none.
+
+        This is the first observation in a session. ``nav_at_or_before``
+        would reach into leftover snapshots from the previous run.
+        """
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT ts, net_liquidation FROM snapshots
+                    WHERE net_liquidation IS NOT NULL
+                      AND net_liquidation > 0
+                      AND ts >= ?
+                    ORDER BY id ASC LIMIT 1
+                    """,
+                    (_ts_bound(after_iso),),
+                ).fetchone()
+            if not row or row["net_liquidation"] is None:
+                return None, None
+            return float(row["net_liquidation"]), str(row["ts"] or "") or None
+        except Exception:
+            logger.exception("journal.nav_at_or_after failed")
+            return None, None
+
     def snapshot_count_since(self, since_iso: str) -> int:
         try:
             self._ensure_schema()
             with self._connect() as conn:
                 row = conn.execute(
                     "SELECT COUNT(*) AS n FROM snapshots WHERE ts >= ?",
-                    (str(since_iso),),
+                    (_ts_bound(since_iso),),
                 ).fetchone()
             return int((row["n"] if row else 0) or 0)
         except Exception:
@@ -1543,7 +1756,7 @@ class TradeJournal:
                     VALUES (?, ?, ?, ?, ?)
                     """,
                     (
-                        ts or _utc_now_iso(),
+                        _row_ts(ts),
                         _json_dumps(applied or {}),
                         _json_dumps(clamped or {}),
                         _json_dumps(rejected or {}),
