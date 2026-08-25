@@ -371,8 +371,9 @@ async def test_execute_ticket_refuses_omitted_stop_even_with_session_low(monkeyp
             },
         },
     )
-    assert result.get("status") == "blocked"
+    assert result.get("status") in ("blocked", "rejected")
     assert sent == []
+    assert "stop_price" in str(result.get("error") or result.get("note") or "")
     p = act.get("params") or {}
     assert p["quantity"] == 10
     assert p.get("stop_price") not in (88.0, 90.59)  # session low / ~1% band
