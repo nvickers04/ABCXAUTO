@@ -204,8 +204,6 @@ def _window_row(
         book_pnl = float(current) - float(start_nl)
         book_return_pct = (book_pnl / float(start_nl)) * 100.0
     cost = float(usage.get("cost_usd") or 0.0)
-    edge = None if book_pnl is None else (book_pnl - cost)
-    beating = None if edge is None else (edge > 0)
     span_s = None
     if start_ts:
         try:
@@ -224,6 +222,20 @@ def _window_row(
         coverage = "none"
     elif span_s is not None and span_s < 0.5 * float(horizon_s):
         coverage = "thin"
+    elif span_s is not None and span_s > 1.5 * float(horizon_s):
+        # Snapshot is older than the window. Using it as start_nl would
+        # label leftover ΔNL (and % of that leftover base) as this horizon.
+        coverage = "stale"
+        book_pnl = None
+        book_return_pct = None
+    if coverage in ("none", "stale"):
+        edge = None
+        beating = None
+        pct_base = None
+    else:
+        edge = None if book_pnl is None else (book_pnl - cost)
+        beating = None if edge is None else (edge > 0)
+        pct_base = float(start_nl) if start_nl else None
     hours = (span_s / 3600.0) if span_s and span_s > 0 else None
     edge_per_hour = (edge / hours) if edge is not None and hours else None
     base = float(start_nl) if start_nl else None
@@ -237,10 +249,10 @@ def _window_row(
         "book_pnl": book_pnl,
         "book_return_pct": book_return_pct,
         "model_cost_usd": cost,
-        "model_cost_pct": _pct_of_start(cost, base),
+        "model_cost_pct": _pct_of_start(cost, pct_base),
         "model_calls": int(usage.get("calls") or 0),
         "edge_usd": edge,
-        "edge_pct": _pct_of_start(edge, base),
+        "edge_pct": _pct_of_start(edge, pct_base),
         "edge_per_hour": edge_per_hour,
         "beating_model": beating,
         "snaps": int(snaps or 0),
@@ -381,20 +393,21 @@ def compute_scorecard(
                 marker = journal.last_session_marker()
         except Exception:
             marker = None
-        if (
-            isinstance(marker, dict)
-            and model_name
-            and str(marker.get("model") or "")
-            and str(marker.get("model") or "") != model_name
-        ):
-            marker = None
+        if isinstance(marker, dict):
+            marker_model = str(marker.get("model") or "")
+            if model_name and marker_model and marker_model != model_name:
+                marker = None
+            elif marker_model and not model_name:
+                # No current model — do not inherit a leftover named session.
+                marker = None
         if isinstance(marker, dict) and marker.get("ts"):
             start_nl = marker.get("net_liquidation")
             start_ts = str(marker.get("ts") or "")
-            if start_nl is None:
+            if start_nl is None and start_ts:
                 try:
-                    if hasattr(journal, "nav_at_or_before"):
-                        start_nl, _ts = journal.nav_at_or_before(start_ts)
+                    # First NL in this session — never a leftover snap from before.
+                    if hasattr(journal, "nav_at_or_after"):
+                        start_nl, _ts = journal.nav_at_or_after(start_ts)
                 except Exception:
                     start_nl = None
             sess_usage = {
