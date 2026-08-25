@@ -441,15 +441,28 @@ def stacked_stop_cancel_ids(
     return to_cancel
 
 
+def _per_order_stop_qty(
+    open_orders: list[dict] | None, symbol: str, direction: str, held: float
+) -> tuple[float | None, bool]:
+    """One working STP/TRAIL qty vs held. Stacked crumbs that sum are not a cover."""
+    qtys = [q for _o, q in iter_working_stops(open_orders, symbol, direction)]
+    if not qtys:
+        return None, False
+    covering = [q for q in qtys if q + 1e-9 >= held - 0.51]
+    if covering:
+        return min(covering), True
+    return max(qtys), False
+
+
 def stop_qty_mismatch_fact(
     positions: list[dict] | None,
     open_orders: list[dict] | None,
     plan: ActiveTradePlan | None = None,
 ) -> dict[str, Any] | None:
-    """Fact: working stop qty vs STK held (after trim, stop may be oversized).
+    """Fact: one working stop's qty vs STK held (after trim, stop may be oversized).
 
-    Checks every open plan (or ``plan`` if given). First mismatch wins for
-    prompt Fact; ``all`` lists every plan checked.
+    Per order — same 0.51 slack as ``stacked_stop_cancel_ids``. Stacked crumbs
+    that sum to held are not a match. ``match`` is the wake-line key.
     """
     plans = [plan] if plan is not None else load_trade_plans()
     if plan is not None and not plans:
@@ -464,29 +477,37 @@ def stop_qty_mismatch_fact(
         held = abs(stk_qty_for_symbol(positions, p.symbol))
         if held < 1e-9:
             continue
-        stop_q = working_stop_qty(open_orders, p.symbol, p.direction)
+        stop_q, covers = _per_order_stop_qty(
+            open_orders, p.symbol, p.direction, held
+        )
         if stop_q is None:
             row = {
                 "symbol": p.symbol,
                 "held_qty": held,
                 "stop_order_qty": None,
                 "mismatch": True,
+                "match": False,
                 "note": "no working stop qty found",
                 "heuristic": "stop_qty vs held — heuristic ≠ recommendation",
             }
         else:
-            mismatch = abs(stop_q - held) > 0.51
+            mismatch = (not covers) or abs(stop_q - held) > 0.51
             row = {
                 "symbol": p.symbol,
                 "held_qty": held,
                 "stop_order_qty": stop_q,
                 "mismatch": mismatch,
+                "match": not mismatch,
                 "heuristic": "stop_qty vs held — heuristic ≠ recommendation",
             }
             if mismatch:
                 row["note"] = (
-                    "stop order qty ≠ held — after trim, resize stop "
-                    "(modify/oca/cancel+replace)"
+                    "no single stop covers held"
+                    if not covers
+                    else (
+                        "stop order qty ≠ held — after trim, resize stop "
+                        "(modify/oca/cancel+replace)"
+                    )
                 )
         checked.append(row)
         if row.get("mismatch") and first_bad is None:
@@ -911,12 +932,8 @@ def working_entry_slots(
                 continue
             seen.add(key)
             legs = o.get("combo_legs") or o.get("comboLegs") or []
-            try:
-                n = int(o.get("reserved_slots") or 0)
-            except (TypeError, ValueError):
-                n = 0
-            if n <= 0:
-                n = len(legs) if isinstance(legs, list) and legs else 2
+            # combo_legs only — ignore invented reserved_slots on the ticket.
+            n = len(legs) if isinstance(legs, list) and legs else 2
             slots += max(1, n)
             continue
         strike = o.get("strike")
