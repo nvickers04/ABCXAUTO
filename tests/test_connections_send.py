@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -52,3 +52,56 @@ async def test_send_action_noop_held():
     connector.connected = True
     result = await send_action({"action": "noop"}, connector)
     assert result["status"] == "held"
+
+
+def _tape_seed_boom(*_a, **_k):
+    raise AssertionError("snapshot_positions must not seed tape / universe names")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_positions_returns_broker_rows_only(monkeypatch):
+    from abcxauto.connections import snapshot_positions
+
+    broker = [
+        {"symbol": "AAPL", "quantity": 5, "conId": 1, "secType": "STK"},
+        {"symbol": "XLE", "quantity": -1, "conId": 2, "secType": "OPT"},
+    ]
+    connector = MagicMock()
+    connector.get_positions = AsyncMock(return_value=list(broker))
+    monkeypatch.setattr("abcxauto.opportunity_scan.tape_seed_symbols", _tape_seed_boom)
+    monkeypatch.setattr("abcxauto.universe.legal_symbols", _tape_seed_boom)
+
+    rows = await snapshot_positions(connector)
+    assert rows == broker
+    connector.get_positions.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_positions_empty_broker_stays_empty(monkeypatch):
+    from abcxauto.connections import snapshot_positions
+
+    connector = MagicMock()
+    connector.get_positions = AsyncMock(return_value=[])
+    monkeypatch.setattr("abcxauto.opportunity_scan.tape_seed_symbols", _tape_seed_boom)
+    monkeypatch.setattr("abcxauto.universe.legal_symbols", _tape_seed_boom)
+
+    rows = await snapshot_positions(connector)
+    assert rows == []
+    symbols = [r.get("symbol") for r in rows]
+    for name in ("SPY", "QQQ", "IWM", "DIA"):
+        assert name not in symbols
+
+
+@pytest.mark.asyncio
+async def test_snapshot_positions_non_list_is_empty():
+    from abcxauto.connections import snapshot_positions
+
+    connector = MagicMock()
+    connector.get_positions = AsyncMock(return_value={"error": "no book"})
+    assert await snapshot_positions(connector) == []
+
+    connector.get_positions = AsyncMock(return_value=None)
+    assert await snapshot_positions(connector) == []
+
+    connector.get_positions = None
+    assert await snapshot_positions(connector) == []
