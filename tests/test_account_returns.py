@@ -34,6 +34,23 @@ def test_compute_overlays_live_equity(tmp_path):
     assert perf["history_days"] >= 9
 
 
+def test_stale_journal_daily_pnl_is_not_current(tmp_path):
+    db = tmp_path / "stale.db"
+    j = TradeJournal(path=str(db), enabled=True)
+    now = datetime.now(timezone.utc)
+    j.record_snapshot(
+        account={"NetLiquidation": 100_000.0, "DailyPnL": 88.0},
+        positions=[],
+        open_orders=[],
+        ts=(now - timedelta(days=1)).isoformat(),
+    )
+    perf = compute_account_returns(equity=100_000.0, journal=j)
+    assert perf["net_liquidation"] == 100_000.0
+    assert perf["daily_pnl"] is None
+    over = compute_account_returns(equity=100_000.0, daily_pnl=12.0, journal=j)
+    assert over["daily_pnl"] == 12.0
+
+
 def test_compute_empty_journal(tmp_path):
     db = tmp_path / "empty.db"
     j = TradeJournal(path=str(db), enabled=True)

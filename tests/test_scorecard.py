@@ -333,3 +333,123 @@ def test_live_scorecard_does_not_split_paper_vs_real(monkeypatch):
     assert "book_return=+10.00% of starting NetLiq (+100.00$)" in text
     assert "model_cost=0.0010% ($0.0100)" in text  # session line, both real
     assert sc["beating_model"] is True
+
+
+def test_scorecard_session_does_not_inherit_pre_session_nav(monkeypatch):
+    """A marker with no NL must not steal leftover NAV from before this run."""
+    from datetime import datetime, timezone
+
+    class J:
+        def startup_cash(self):
+            return 36638.0
+
+        def first_snapshot(self):
+            return 36638.0, "2026-07-28T00:00:00Z"
+
+        def model_usage_totals(self):
+            return {"calls": 1, "cost_usd": 0.1, "input_tokens": 0, "output_tokens": 0}
+
+        def last_session_marker(self):
+            return {
+                "ts": "2026-08-25T13:00:00.000Z",
+                "model": "grok-4.6",
+                "net_liquidation": None,
+            }
+
+        def model_usage_since(self, _ts):
+            return {"calls": 1, "cost_usd": 0.1, "input_tokens": 0, "output_tokens": 0}
+
+        def closed_fill_stats_since(self, _ts):
+            return {"n": 0, "wins": 0, "sum": 0.0}
+
+        def nav_at_or_before(self, _ts):
+            return 36638.0, "2026-07-28T00:00:00Z"
+
+        def nav_at_or_after(self, _ts):
+            return 35000.0, "2026-08-25T13:00:05.000Z"
+
+        def snapshot_count_since(self, _ts):
+            return 1
+
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: type("C", (), {"model": "grok-4.6"})(),
+    )
+    sc = compute_scorecard(
+        equity=35100.0,
+        journal=J(),
+        now=datetime(2026, 8, 25, 16, 0, tzinfo=timezone.utc),
+    )
+    assert sc["session"]["startup_nl"] == 35000.0
+    assert sc["session"]["book_pnl"] == 100.0
+    assert abs(sc["session"]["model_cost_pct"] - (0.1 / 35000.0 * 100.0)) < 1e-9
+    assert abs(sc["session"]["edge_pct"] - (99.9 / 35000.0 * 100.0)) < 1e-9
+    # Inception still uses the first snap. Session must not.
+    assert sc["startup_cash"] == 36638.0
+    assert sc["book_pnl"] == 35100.0 - 36638.0
+
+
+def test_scorecard_empty_model_does_not_inherit_named_session(monkeypatch):
+    class J:
+        def startup_cash(self):
+            return 1000.0
+
+        def first_snapshot(self):
+            return 1000.0, "2026-08-01T00:00:00Z"
+
+        def model_usage_totals(self):
+            return {"calls": 0, "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0}
+
+        def last_session_marker(self):
+            return {
+                "ts": "2026-08-19T12:00:00Z",
+                "model": "grok-4.6",
+                "net_liquidation": 900.0,
+            }
+
+        def model_usage_since(self, _ts):
+            return {"calls": 4, "cost_usd": 1.0, "input_tokens": 0, "output_tokens": 0}
+
+        def closed_fill_stats_since(self, _ts):
+            return {"n": 3, "wins": 1, "sum": 50.0}
+
+        def snapshot_count_since(self, _ts):
+            return 2
+
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: type("C", (), {"model": ""})(),
+    )
+    sc = compute_scorecard(equity=1100.0, journal=J())
+    assert sc["session"] is None
+    assert sc["book_pnl"] == 100.0
+
+
+def test_scorecard_stale_window_does_not_use_leftover_nl():
+    """A 3-day-old snap is not the 15m NetLiq base."""
+    from datetime import datetime, timedelta, timezone
+
+    j = get_journal()
+    now = datetime(2026, 8, 25, 16, 0, tzinfo=timezone.utc)
+
+    def iso(dt):
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    j.record_snapshot(
+        account={"NetLiquidation": 1000.0, "DailyPnL": 0.0},
+        ts=iso(now - timedelta(days=3)),
+    )
+    j.record_snapshot(
+        account={"NetLiquidation": 1300.0, "DailyPnL": 50.0},
+        ts=iso(now),
+    )
+    sc = compute_scorecard(equity=1300.0, journal=j, now=now)
+    h15 = sc["windows"]["15m"]
+    assert h15["coverage"] == "stale"
+    assert h15["book_pnl"] is None
+    assert h15["book_return_pct"] is None
+    assert h15["model_cost_pct"] is None
+    assert h15["edge_pct"] is None
+    assert sc["book_pnl"] == 300.0
+    text = format_scorecard_block(equity=1300.0, journal=j, sc=sc)
+    assert "15m:n/a/n/a/stale" in text

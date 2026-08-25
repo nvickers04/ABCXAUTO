@@ -790,6 +790,18 @@ def test_dispatched_order_ids_and_closing_fills_split_manual_exits(journal):
 
 def test_closed_fill_stats_since(journal):
     day = "2026-08-14"
+    pid_win = journal.record_proposal(
+        strategy="market_order", symbol="QQQ", validation_ok=True, ts=f"{day}T13:00:00.000Z"
+    )
+    journal.record_dispatch(
+        pid_win, True, {"success": True, "order_id": 2}, ts=f"{day}T13:00:00.000Z"
+    )
+    pid_loss = journal.record_proposal(
+        strategy="market_order", symbol="IWM", validation_ok=True, ts=f"{day}T13:01:00.000Z"
+    )
+    journal.record_dispatch(
+        pid_loss, True, {"success": True, "order_id": 3}, ts=f"{day}T13:01:00.000Z"
+    )
     journal.record_fills(
         [
             {
@@ -832,12 +844,115 @@ def test_closed_fill_stats_since(journal):
                 "price": 300.0,
                 "realized_pnl": 0.0,  # ignored (not a closed PnL)
             },
+            {
+                "ts": f"{day}T16:30:00.000Z",
+                "exec_id": "cf-manual",
+                "order_id": 99,
+                "symbol": "WMT",
+                "side": "SLD",
+                "quantity": 1,
+                "price": 104.0,
+                "realized_pnl": 100.0,  # no ticket — must not count
+            },
         ]
     )
     stats = journal.closed_fill_stats_since(f"{day}T12:00:00.000Z")
     assert stats["n"] == 2
     assert stats["wins"] == 1
     assert abs(stats["sum"] - 9.0) < 1e-9
+
+
+def test_closed_fill_stats_since_ignores_fills_without_a_ticket(journal):
+    journal.record_fills(
+        [
+            {
+                "ts": "2026-08-14T14:00:00.000Z",
+                "exec_id": "orphan",
+                "order_id": 77,
+                "symbol": "SPY",
+                "side": "SLD",
+                "quantity": 1,
+                "price": 500.0,
+                "realized_pnl": 12.0,
+            }
+        ]
+    )
+    stats = journal.closed_fill_stats_since("2026-08-14T00:00:00.000Z")
+    assert stats == {"n": 0, "wins": 0, "sum": 0.0}
+
+
+def test_nav_at_or_after_is_this_run_not_leftover(journal):
+    journal.record_snapshot(
+        account={"NetLiquidation": 36638.0}, ts="2026-07-28T00:00:00.000Z"
+    )
+    journal.record_snapshot(
+        account={"NetLiquidation": 35000.0}, ts="2026-08-25T13:00:05.000Z"
+    )
+    journal.record_snapshot(
+        account={"NetLiquidation": 35100.0}, ts="2026-08-25T16:00:00.000Z"
+    )
+    nl, ts = journal.nav_at_or_after("2026-08-25T13:00:00.000Z")
+    assert nl == 35000.0
+    assert ts == "2026-08-25T13:00:05.000Z"
+    leftover, leftover_ts = journal.nav_at_or_before("2026-08-25T13:00:00.000Z")
+    assert leftover == 36638.0
+    assert leftover_ts == "2026-07-28T00:00:00.000Z"
+    none_nl, none_ts = journal.nav_at_or_after("2026-08-25T17:00:00.000Z")
+    assert none_nl is None and none_ts is None
+
+
+def test_snapshot_ts_is_stored_as_utc_z(journal, tmp_path):
+    journal.record_snapshot(
+        account={"NetLiquidation": 1.0, "DailyPnL": 0.0},
+        ts="2026-08-25T12:00:00-04:00",
+    )
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        ts = conn.execute("SELECT ts FROM snapshots").fetchone()[0]
+    finally:
+        conn.close()
+    assert ts == "2026-08-25T16:00:00.000Z"
+    nl, stored = journal.nav_at_or_before("2026-08-25T16:00:00Z")
+    assert nl == 1.0
+    assert stored == "2026-08-25T16:00:00.000Z"
+
+
+def test_account_performance_daily_pnl_does_not_survive_yesterday(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    db = tmp_path / "day.db"
+    j = TradeJournal(path=str(db), enabled=True)
+    now = datetime.now(timezone.utc)
+    j.record_snapshot(
+        account={"NetLiquidation": 100_000.0, "DailyPnL": 88.0},
+        ts=(now - timedelta(days=1)).isoformat(),
+    )
+    perf = j.account_performance()
+    assert perf["net_liquidation"] == 100_000.0
+    assert perf["daily_pnl"] is None
+
+
+def test_account_performance_daily_pnl_does_not_survive_new_session(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    db = tmp_path / "sess.db"
+    j = TradeJournal(path=str(db), enabled=True)
+    now = datetime.now(timezone.utc)
+    j.record_snapshot(
+        account={"NetLiquidation": 100_000.0, "DailyPnL": 88.0},
+        ts=now.isoformat(),
+    )
+    j.ensure_model_session(
+        "grok-4.6",
+        net_liquidation=100_000.0,
+        ts=(now + timedelta(seconds=2)).isoformat(),
+    )
+    assert j.account_performance()["daily_pnl"] is None
+    j.record_snapshot(
+        account={"NetLiquidation": 100_050.0, "DailyPnL": 12.0},
+        ts=(now + timedelta(seconds=4)).isoformat(),
+    )
+    assert j.account_performance()["daily_pnl"] == 12.0
 
 
 def test_legacy_journal_without_session_markers_is_upgraded(tmp_path, monkeypatch):
