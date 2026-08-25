@@ -197,65 +197,26 @@ def test_paper_premarket_set_wake_writes_a_real_clock(tmp_path, monkeypatch):
     assert load_alarm().wake_at == alarm.wake_at
 
 
-def test_an_idle_lab_cannot_be_napped_through(tmp_path, monkeypatch):
-    """A park is Grok's clock, not a way to skip building the book."""
-    from abcxauto.wake_bus import (
-        LAB_IDLE_PARK_CAP_S,
-        _parse_iso,
-        _utc_now,
-        lab_idle_park_cap_s,
-        set_wake,
-    )
+def test_set_wake_honors_a_long_park_on_an_idle_lab(tmp_path, monkeypatch):
+    """The 300s idle cap was a hunt clock. Grok asked for 4h and got 5m."""
+    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     idle = {"resolved_trades": 0, "entry_trunks_untried": ["vertical_spread"]}
     monkeypatch.setattr("abcxauto.lab_playbook.lab_facts", lambda *_a, **_k: idle)
 
-    assert lab_idle_park_cap_s(flat=True, session="regular") == LAB_IDLE_PARK_CAP_S
     alarm = set_wake(wake_in_s=4 * 3600, session="regular", flat=True)
     at = _parse_iso(alarm.wake_at or "")
     assert at is not None
-    assert (at - _utc_now()).total_seconds() <= LAB_IDLE_PARK_CAP_S + 5
-
-    # A long nap is the right answer when there is no lab work to do: holding
-    # risk, or outside the open session. Premarket is exempt on purpose — a card
-    # that triggers on the opening print cannot be tested before the bell, so
-    # parking to the open is judgement rather than avoidance.
-    assert lab_idle_park_cap_s(flat=False, session="regular") is None
-    assert lab_idle_park_cap_s(flat=True, session="premarket") is None
-    assert lab_idle_park_cap_s(flat=True, session="closed") is None
-    assert lab_idle_park_cap_s(flat=True, session="postmarket") is None
+    assert (at - _utc_now()).total_seconds() > 3 * 3600
 
 
-def test_a_running_lab_keeps_its_full_clock(tmp_path, monkeypatch):
-    """One resolved trade, or a card under every entry structure, lifts the cap."""
-    from abcxauto.wake_bus import _parse_iso, _utc_now, lab_idle_park_cap_s, set_wake
-
-    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    monkeypatch.setattr(
-        "abcxauto.lab_playbook.lab_facts",
-        lambda *_a, **_k: {"resolved_trades": 3, "entry_trunks_untried": ["butterfly"]},
-    )
-    assert lab_idle_park_cap_s(flat=True, session="regular") is None
-    alarm = set_wake(wake_in_s=3600, session="regular", flat=True)
-    at = _parse_iso(alarm.wake_at or "")
-    assert at is not None
-    assert (at - _utc_now()).total_seconds() > 1800
-
-    monkeypatch.setattr(
-        "abcxauto.lab_playbook.lab_facts",
-        lambda *_a, **_k: {"resolved_trades": 0, "entry_trunks_untried": []},
-    )
-    assert lab_idle_park_cap_s(flat=True, session="regular") is None
-
-
-def test_set_wake_offered_in_every_session():
+def test_set_wake_offered_in_no_session():
     from abcxauto.wake_bus import set_wake_offered
 
     for sess in ("regular", "premarket", "postmarket", "closed", ""):
-        assert set_wake_offered(session=sess) is True, sess
+        assert set_wake_offered(session=sess) is False, sess
 
 
 def test_set_wake_live_premarket_allows_long_park(tmp_path, monkeypatch):
@@ -355,3 +316,159 @@ def test_failed_look_backoff_honors_the_pinned_cadence(monkeypatch):
 
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.25")
     assert failed_look_backoff_s(1) == 0.25
+
+
+def test_clerk_look_s_open_book_is_short(monkeypatch):
+    from abcxauto.wake_bus import DEFAULT_LOOK_OPEN_S, clerk_look_s
+
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
+    assert clerk_look_s(flat=False, session="regular") == DEFAULT_LOOK_OPEN_S
+
+
+def test_clerk_look_s_flat_rth_is_a_hunt(monkeypatch):
+    from abcxauto.wake_bus import DEFAULT_LOOK_HUNT_S, clerk_look_s
+
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
+    assert clerk_look_s(flat=True, session="regular", next_look_s=None) == DEFAULT_LOOK_HUNT_S
+
+
+def test_clerk_look_s_honors_card_hint(monkeypatch):
+    from abcxauto.wake_bus import clerk_look_s
+
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
+    assert clerk_look_s(flat=False, session="regular", next_look_s=120) == 300
+    assert clerk_look_s(flat=True, session="regular", next_look_s=300) == 300
+
+
+def test_clerk_look_s_last_hour_to_open(monkeypatch):
+    from abcxauto.wake_bus import LAST_HOUR_LOOK_S, clerk_look_s
+
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    assert clerk_look_s(
+        flat=True, session="premarket", minutes_to_open=45
+    ) == LAST_HOUR_LOOK_S
+
+
+def test_clerk_look_s_session_card_wakes_at_the_open(monkeypatch):
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.wake_bus import OPEN_PRINT_S, clerk_look_s, min_look_s
+
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "when_on": "mega/large ≥6% earnings-miss gap, hold above the opening low",
+                            "shape": "LONG STK. Stop under opening low.",
+                            "next_look_s": 1800,
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    assert clerk_look_s(
+        flat=True,
+        session="premarket",
+        minutes_to_open=32,
+        next_look_s=1800,
+    ) == max(min_look_s(), 32 * 60.0 + OPEN_PRINT_S)
+
+
+def test_ensure_next_look_nudges_a_premarket_undershoot(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.wake_bus import (
+        OPEN_PRINT_S,
+        GrokAlarm,
+        ensure_next_look,
+        save_alarm,
+    )
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "when_on": "hold above the opening low",
+                            "shape": "stop under opening low",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    save_alarm(GrokAlarm(wake_at=soon, set_at=soon))
+    alarm = ensure_next_look(
+        session="premarket",
+        flat=True,
+        minutes_to_open=5,
+    )
+    until = alarm.seconds_until()
+    assert until is not None
+    assert until >= 5 * 60.0 + OPEN_PRINT_S - 2
+
+
+def test_clamp_next_look_s_floors_and_caps():
+    from abcxauto.wake_bus import MIN_LOOK_S, NEXT_LOOK_S_MAX, clamp_next_look_s
+
+    assert clamp_next_look_s(1) == MIN_LOOK_S
+    assert clamp_next_look_s(9 * 3600) == NEXT_LOOK_S_MAX
+    assert clamp_next_look_s("nope") is None
+
+
+def test_ensure_next_look_spent_alarm_is_replaced(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.wake_bus import ensure_next_look, load_alarm, save_alarm, GrokAlarm
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "30")
+    past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    save_alarm(GrokAlarm(wake_at=past, set_at=past))
+    alarm = ensure_next_look(session="regular", flat=True)
+    assert alarm.wake_at
+    assert alarm.wake_at != past
+    assert load_alarm().wake_at == alarm.wake_at
+
+
+def test_ensure_next_look_replace_reseeds_a_standing_clock(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.wake_bus import (
+        DEFAULT_LOOK_HUNT_S,
+        GrokAlarm,
+        ensure_next_look,
+        save_alarm,
+    )
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    save_alarm(GrokAlarm(wake_at=soon, set_at=soon))
+    kept = ensure_next_look(session="regular", flat=True)
+    assert kept.seconds_until() is not None
+    assert kept.seconds_until() < 90
+    replaced = ensure_next_look(session="regular", flat=True, replace=True)
+    assert replaced.seconds_until() >= DEFAULT_LOOK_HUNT_S - 2

@@ -22,8 +22,6 @@ from typing import Dict, Any, List, Optional, Tuple
 from ib_insync import Order, Option, ComboLeg, Contract
 from ib_insync.contract import Stock
 
-from abcxauto.marketdata.provider import get_data_provider
-
 logger = logging.getLogger(__name__)
 
 
@@ -59,14 +57,24 @@ class IBKROptionsMixin:
     # ========== HELPER METHODS ==========
 
     async def _get_underlying_price(self, symbol: str) -> Optional[float]:
-        """IBKR live last/mid for send geometry; MDA only if IBKR has no tick."""
+        """IBKR live last/mid for send geometry. No MDA fallback."""
         fn = getattr(self, "get_live_quote", None)
         if callable(fn):
             try:
-                q = await fn(symbol)
+                q = await fn(symbol, fresh=True)
+            except TypeError:
+                try:
+                    q = await fn(symbol)
+                except Exception:
+                    q = None
             except Exception:
                 q = None
             if isinstance(q, dict):
+                from abcxauto.prints import live_limit_px
+
+                px = live_limit_px(q)
+                if px is not None:
+                    return float(px)
                 for key in ("last", "mid", "bid", "ask"):
                     try:
                         price = float(q.get(key) or 0)
@@ -74,18 +82,6 @@ class IBKROptionsMixin:
                         continue
                     if price > 0:
                         return price
-        try:
-            dp = get_data_provider()
-            q = dp.get_quote(symbol)
-            if q is None:
-                logger.debug(f"_get_underlying_price({symbol}): MDA returned None")
-                return None
-            price = q.mid or q.last
-            if price and price > 0:
-                return float(price)
-            logger.debug(f"_get_underlying_price({symbol}): no valid price in quote")
-        except Exception as e:
-            logger.debug(f"_get_underlying_price({symbol}) failed: {e}")
         return None
 
     async def _check_riskless_spread(
@@ -977,25 +973,25 @@ class IBKROptionsMixin:
             # Use external market data app (user subscription) for safe limit price to avoid wide MKT fills + IBKR subscription errors
             if limit_price is None:
                 try:
-                    from abcxauto.marketdata.client import get_marketdata_client
-
-                    exp = contract.lastTradeDateOrContractMonth  # YYYYMMDD
-                    occ = (
-                        f"{contract.symbol}{exp[2:]}"
-                        f"{contract.right.upper()[0]}"
-                        f"{int(round(contract.strike * 1000)):08d}"
-                    )
-                    q = await get_marketdata_client().get_option_quote(occ)
-                    if q:
-                        bid, ask = q.get('bid'), q.get('ask')
-                        limit_price = q.get('mid') or q.get('last') or (
-                            (bid + ask) / 2 if bid and ask else None
+                    fn = getattr(self, "get_live_option_quote", None)
+                    if callable(fn):
+                        live = await fn(
+                            contract.symbol,
+                            contract.lastTradeDateOrContractMonth,
+                            contract.strike,
+                            contract.right,
                         )
+                        from abcxauto.prints import live_limit_px
+
+                        limit_price = live_limit_px(live if isinstance(live, dict) else None)
                         if limit_price:
-                            limit_price = round(float(limit_price), 2)
-                            logger.info(f"External mid for close {occ}: {limit_price}")
+                            logger.info(
+                                "IBKR mid for close %s: %s",
+                                getattr(contract, "conId", None),
+                                limit_price,
+                            )
                 except Exception as e:
-                    logger.debug(f"External price fallback failed for {symbol}: {e}")
+                    logger.debug(f"IBKR close quote failed for {symbol}: {e}")
                 if not limit_price:
                     limit_price = None  # MKT fallback only as last resort
 
@@ -1249,47 +1245,43 @@ class IBKROptionsMixin:
             return {'error': 'Not connected'}
 
         try:
-            from abcxauto.marketdata.client import get_marketdata_client
+            from abcxauto.option_facts import mda_greeks_only, occ_symbol
 
-            # Build OCC option symbol: SYMBOL + YYMMDD + C/P + strike*1000 (8 digits)
-            exp = contract.lastTradeDateOrContractMonth  # YYYYMMDD
-            occ = (
-                f"{contract.symbol}"
-                f"{exp[2:]}"  # YYMMDD
-                f"{contract.right}"
-                f"{int(contract.strike * 1000):08d}"
+            exp = contract.lastTradeDateOrContractMonth
+            occ = occ_symbol(
+                contract.symbol,
+                str(exp or ""),
+                str(contract.right or ""),
+                contract.strike,
             )
+            live = {}
+            fn = getattr(self, "get_live_option_quote", None)
+            if callable(fn):
+                try:
+                    live = await fn(
+                        contract.symbol,
+                        str(exp or ""),
+                        contract.strike,
+                        str(contract.right or ""),
+                    ) or {}
+                except Exception:
+                    live = {}
+            underlying_price = await self._get_underlying_price(contract.symbol)
+            mda = {}
+            if occ:
+                from abcxauto.marketdata.client import get_marketdata_client
 
-            mda = get_marketdata_client()
-            oq = await mda.get_option_quote(occ)
-
-            if oq is None:
-                return {'error': f'No MDA option quote for {occ}'}
-
-            # Also get underlying price from MDA
-            underlying_price = None
-            try:
-                dp = get_data_provider()
-                uq = dp.get_quote(contract.symbol)
-                if uq:
-                    underlying_price = uq.mid or uq.last
-            except Exception:
-                pass
-
+                oq = await get_marketdata_client().get_option_quote(occ)
+                mda = mda_greeks_only(oq if isinstance(oq, dict) else None, occ=occ)
             return {
-                'symbol': contract.symbol,
-                'strike': contract.strike,
-                'right': contract.right,
-                'expiration': exp,
-                'delta': oq.get('delta'),
-                'gamma': oq.get('gamma'),
-                'theta': oq.get('theta'),
-                'vega': oq.get('vega'),
-                'iv': oq.get('iv'),
-                'underlying_price': underlying_price,
-                'option_price': oq.get('mid') or oq.get('last'),
-                'bid': oq.get('bid'),
-                'ask': oq.get('ask'),
+                "symbol": contract.symbol,
+                "strike": contract.strike,
+                "right": contract.right,
+                "expiration": exp,
+                "ibkr": live or None,
+                "mda": mda or None,
+                "underlying_price": underlying_price,
+                "use": "ibkr_live_for_decisions; mda_greeks_delayed",
             }
 
         except Exception as e:

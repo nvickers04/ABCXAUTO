@@ -160,6 +160,36 @@ def test_run_btn_uses_text_not_content(headless_pro):
     assert headless_pro.btn_run.text == "Start"
 
 
+def test_playbook_line_paints_run_next(headless_pro):
+    from abcxauto.lab_playbook import clamp_update, save_lab
+
+    update = clamp_update(
+        {
+            "instructions": "stay flat when the card gate is off",
+            "types": {
+                "market_bracket": {
+                    "tool_order": ["scan", "news", "quote", "candles", "send"],
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "when_on": "mega/large ≥6% earnings-miss gap",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ],
+                }
+            },
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    headless_pro.engine.state.flat = True
+    headless_pro._sync_widgets()
+    line = headless_pro.lbl_playbook.value or ""
+    assert "Playbook [" in line
+    assert "next=scan" in line
+
+
 def test_book_strip_sync(headless_pro):
     s = headless_pro.engine.state
     s.equity = 100_000.0
@@ -598,6 +628,44 @@ def test_notebook_viewer_reads_lab_not_think(headless_pro, monkeypatch):
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
     assert "look at options" not in (headless_pro.think_live.value or "")
+
+
+def test_notebook_paints_nested_lab_cards(headless_pro):
+    from abcxauto.lab_playbook import clamp_update, save_lab
+
+    update = clamp_update(
+        {
+            "instructions": "stay flat when the card gate is off",
+            "types": {
+                "market_bracket": {
+                    "tool_order": ["scan", "news", "quote", "candles", "send"],
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "when_on": "mega/large ≥6% earnings-miss gap",
+                            "scan": "most_active + top_losers; mega/large only",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ],
+                }
+            },
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    headless_pro.engine.state.flat = True
+    headless_pro._sync_notebook_page(force=True)
+    text = " ".join(
+        str(getattr(ctrl, "value", "") or "")
+        for ctrl in _walk(headless_pro.col_notebook_cards)
+    )
+    assert "flush bounce" in text
+    assert "next=scan" in text
+    assert "No setup cards yet" not in text
+    assert "≥6%" in text or "6%" in text
+
+
 def test_risk_settings_surface_hidden_metrics_stay_hidden(headless_pro, monkeypatch):
     calls = []
 

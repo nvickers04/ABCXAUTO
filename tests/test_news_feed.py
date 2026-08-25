@@ -19,7 +19,7 @@ def test_format_news_for_prompt_items():
     assert "[AAPL] Apple supplier" in text
 
 
-def test_universe_prefers_book_then_sandbox(tmp_path, monkeypatch):
+def test_universe_is_book_then_index_not_sandbox(tmp_path, monkeypatch):
     from abcxauto.universe import reset_universe_cache, save_allowlist
 
     monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(tmp_path / "universe.json"))
@@ -28,11 +28,16 @@ def test_universe_prefers_book_then_sandbox(tmp_path, monkeypatch):
             "enabled_arenas": ["index_etfs"],
             "custom_symbols": ["NVDA"],
             "exclude_symbols": [],
-            "legal_symbols": ["SPY", "QQQ", "NVDA"],
+            "legal_symbols": ["SNXX", "AAOX", "NVDA"],
         }
     )
     reset_universe_cache()
     syms = _universe([{"symbol": "CRM"}, {"symbol": "crm"}])
     assert syms[0] == "CRM"
-    assert "NVDA" in syms
+    assert "SPY" in syms
+    assert "SNXX" not in syms
+    assert "AAOX" not in syms
     assert len(syms) <= 14
+    flat = _universe([])
+    assert flat[0] == "SPY"
+    assert "SNXX" not in flat

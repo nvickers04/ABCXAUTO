@@ -161,18 +161,25 @@ def test_merge_filters_into_arena_spec():
     assert applied["usdMarketCapAbove"] == "50000"
 
 
-def test_both_selectors_keeps_arena_so_the_first_scan_is_the_one_that_works():
-    """resolve_screen hard-errors on both. The model sent both every wake then
-    retried with arena alone — four dead scans a look it could never learn from,
-    because the chat is dropped. Normalize to the selector the retry proves works.
+def test_both_selectors_compose_universe_and_sort():
+    """arena is the universe; scan_code is the sort. Dropping the sort made
+    mega_cap+TOP_PERC_LOSE run HOT_BY_VOLUME and the look spent itself retrying.
     """
     from abcxauto.tool_args import normalize_tool_call
+    from abcxauto.universe import resolve_screen
 
     _name, args = normalize_tool_call(
-        "scan", {"arena": "most_active", "scan_code": "TOP_PERC_LOSE"}
+        "scan", {"arena": "mega_cap", "scan_code": "TOP_PERC_LOSE"}
     )
-    assert args.get("arena") == "most_active"
-    assert "scan_code" not in args
+    assert args.get("arena") == "mega_cap"
+    assert args.get("scan_code") == "TOP_PERC_LOSE"
+
+    composed = resolve_screen(arena="mega_cap", scan_code="TOP_PERC_LOSE")
+    assert composed["ok"] is True
+    assert composed["arena_id"] == "mega_cap"
+    assert composed["scan_code"] == "TOP_PERC_LOSE"
+    assert composed["ibkr"]["scanCode"] == "TOP_PERC_LOSE"
+    assert composed["ibkr"]["marketCapAbove"] == 200_000_000_000
 
     # One selector on its own is untouched, either way round.
     _n2, only_code = normalize_tool_call("scan", {"scan_code": "TOP_PERC_LOSE"})
@@ -409,12 +416,44 @@ async def test_ibkr_scan_passes_native_and_tag_filters(monkeypatch):
     assert sub.abovePrice == 5.0
     assert sub.belowPrice == 100.0
     assert sub.aboveVolume == 1_000_000
-    assert sub.marketCapAbove == 1e10
+    # 1e10 raw USD → 10000 million. Native 1e10 was an impossible cap.
+    assert sub.marketCapAbove == 10_000.0
     assert sub.averageOptionVolumeAbove == 500
     tags = {t.tag: t.value for t in captured["filter_opts"]}
     assert tags["usdMarketCapAbove"] == "10000"
+    assert tags["marketCapAbove1e6"] == "10000"
     assert tags["optVolumeAbove"] == "1000"
     assert tags["avgVolumeAbove"] == "500000"
+
+
+def test_usd_cap_converts_to_ibkr_millions():
+    from abcxauto.universe import _usd_to_scanner_millions, resolve_screen
+
+    assert _usd_to_scanner_millions(200_000_000_000) == 200_000.0
+    assert _usd_to_scanner_millions(10_000_000_000) == 10_000.0
+    mega = resolve_screen(arena="mega_cap", scan_code="TOP_PERC_LOSE")
+    assert mega["ibkr"]["marketCapAbove"] == 200_000_000_000
+    assert _usd_to_scanner_millions(mega["ibkr"]["marketCapAbove"]) == 200_000.0
+
+
+@pytest.mark.asyncio
+async def test_empty_mega_screen_echoes_the_cap_filter(monkeypatch):
+    """An empty mega sort must still show the $200B floor so it is not a silent miss."""
+    from abcxauto.universe import pull_one_screen
+
+    async def empty(_connector, spec):
+        assert spec["marketCapAbove"] == 200_000_000_000
+        return {"ok": True, "symbols": [], "rows": []}
+
+    monkeypatch.setattr("abcxauto.universe._ibkr_scan", empty)
+
+    class Conn:
+        connected = True
+
+    out = await pull_one_screen(Conn(), arena="mega_cap", scan_code="TOP_PERC_LOSE")
+    assert out["ok"] is True
+    assert out["source"] == "empty"
+    assert out["applied"]["market_cap_above"] == 200_000_000_000
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,9 @@ def mda_greeks_only(oq: dict[str, Any] | None, *, occ: str | None = None) -> dic
     for k in _MDA_GREEK_KEYS:
         if oq.get(k) is not None:
             out[k] = oq.get(k)
+    from abcxauto.prints import asof_fields
+
+    out.update(asof_fields(oq.get("asof") or oq.get("updated")))
     return out if len(out) > 3 else {}
 
 

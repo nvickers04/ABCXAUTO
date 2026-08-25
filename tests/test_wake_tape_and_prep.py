@@ -161,7 +161,7 @@ def test_format_wake_no_tape_keeps_lots_and_minutes():
     assert "session_prep" not in text
     assert "estimate" not in text.lower()
     assert "you must" not in text.lower()
-    assert text.rstrip().split()[-1] in ("send.", "send|set_wake.")
+    assert text.rstrip().split()[-1] == "send."
 
 
 def test_format_wake_rth_fill_delta_no_tape_when_flat():
@@ -200,8 +200,8 @@ def test_format_wake_rth_fill_delta_no_tape_when_flat():
     assert "Cycle 6." not in text
     assert "you must" not in text.lower()
     assert "chain" not in text.lower()
-    assert text.rstrip().endswith("send|set_wake.")
-    assert "set_wake" in text  # offered in every session now
+    assert text.rstrip().endswith("send.")
+    assert "set_wake" not in text
 
 
 @pytest.mark.parametrize("kind", ["fill", "order_change", "book_move"])
@@ -284,7 +284,7 @@ def test_format_wake_open_lots_and_mix_still_print():
     assert "risk/trade=" not in text
     assert "mix=" in text
     assert "tape=" not in text
-    assert text.rstrip().endswith("send|set_wake.")
+    assert text.rstrip().endswith("send.")
 
 
 def test_format_wake_non_rth_fill_delta_omits_tape_and_options():

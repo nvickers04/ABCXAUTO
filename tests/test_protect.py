@@ -201,3 +201,1087 @@ async def test_execute_ticket_completes_thin_idea(monkeypatch):
     p = ticket["params"]
     assert p["stop_price"] < 500.0 < p["target_price"]
     assert int(p["quantity"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_fills_omitted_fields_from_hunt_sketch(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.world_state import WorldState
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: SimpleNamespace(
+            is_paper=True,
+            trading_mode="paper",
+            max_risk_per_trade_pct=1.0,
+            max_position_pct=20.0,
+        ),
+    )
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {"card": "flush bounce"},
+        "rationale": "",
+    }
+    snap = {
+        "account": {"netliquidation": 37000.0},
+        "positions": [],
+        "open_orders": [],
+        "ibkr_live_quotes": {"SNDK": 91.5},
+        "session_range": {
+            "SNDK": {
+                "today": True,
+                "low": 88.0,
+                "high": 92.0,
+                "last": 91.5,
+                "retrace_30": 93.0,
+                "ticket": {
+                    "strategy": "market_bracket",
+                    "card": "flush bounce",
+                    "direction": "LONG",
+                    "stop_price": 88.0,
+                    "target_price": 93.0,
+                    "quantity": 10,
+                },
+            }
+        },
+    }
+    result = await execute_ticket(act, object(), world, snap)
+    assert result.get("status") == "ok"
+    assert sent
+    p = sent[0]["params"]
+    assert p["symbol"] == "SNDK"
+    assert p["card"] == "flush bounce"
+    assert p["stop_price"] == 88.0
+    assert p["target_price"] == 93.0
+    assert int(p["quantity"]) == 10
+    assert "card=flush bounce" in str(sent[0].get("rationale") or "")
+
+
+def test_fill_uses_today_session_low_and_retrace():
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {"symbol": "SNDK", "direction": "LONG"},
+    }
+    filled = fill_missing_protection(
+        act,
+        quote_last=91.5,
+        equity=37000.0,
+        posture="balanced",
+        cfg=_cfg(),
+        session={
+            "low": 88.0,
+            "high": 92.0,
+            "retrace_30": 93.0,
+            "today": True,
+        },
+    )
+    p = act["params"]
+    assert "stop_price" in filled
+    assert "target_price" in filled
+    assert p["stop_price"] == 88.0
+    assert p["target_price"] == 93.0
+    ok, code, _ = check_live_geometry(
+        "market_bracket",
+        p,
+        quote_last=91.5,
+        posture="balanced",
+        session={"low": 88.0, "high": 92.0, "today": True},
+    )
+    assert ok is True
+    assert code == "ok"
+
+
+def test_fill_ignores_prior_day_session():
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {"symbol": "SNDK", "direction": "LONG"},
+    }
+    fill_missing_protection(
+        act,
+        quote_last=91.5,
+        equity=37000.0,
+        posture="balanced",
+        cfg=_cfg(),
+        session={"low": 88.0, "high": 92.0, "retrace_30": 93.0, "today": False},
+    )
+    p = act["params"]
+    assert p["stop_price"] != 88.0
+    assert p["target_price"] != 93.0
+
+
+def test_size_if_stop_is_knob_math_not_a_ticket():
+    from abcxauto.protect import size_if_stop
+
+    cfg = _cfg(max_risk_per_trade_pct=1.0, max_position_pct=50.0)
+    out = size_if_stop(last=91.5, stop=88.0, equity=37000.0, cfg=cfg)
+    assert out["qty"] == 105
+    assert out["stop"] == 88.0
+    assert out["risk_per_share"] == pytest.approx(3.5)
+    assert size_if_stop(last=91.5, stop=91.5, equity=37000.0, cfg=cfg) == {}
+
+
+def _save_gap_card():
+    from abcxauto.lab_playbook import clamp_update, save_lab
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "shape": "LONG STK. Stop under opening low.",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+
+
+def test_gap_card_does_not_invent_a_percent_stop():
+    _save_gap_card()
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {"symbol": "SNDK", "direction": "LONG"},
+    }
+    filled = fill_missing_protection(
+        act,
+        quote_last=91.5,
+        equity=37000.0,
+        posture="balanced",
+        cfg=_cfg(),
+    )
+    assert "stop_price" not in filled
+    assert "target_price" not in filled
+    assert act["params"].get("stop_price") in (None, "")
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_without_session_blocks_gap_card(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.world_state import WorldState
+
+    _save_gap_card()
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {"card": "flush bounce"},
+        "rationale": "",
+    }
+    result = await execute_ticket(
+        act,
+        object(),
+        world,
+        {"account": {"netliquidation": 37000.0}, "positions": [], "open_orders": []},
+    )
+    assert result.get("status") == "blocked"
+    assert "candles" in str(result.get("note") or "")
+    assert sent == []
+
+    act2 = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {
+            "card": "flush bounce",
+            "symbol": "SNDK",
+            "direction": "LONG",
+            "stop_price": 88.0,
+            "target_price": 93.0,
+            "quantity": 10,
+        },
+        "rationale": "card=flush bounce SNDK",
+    }
+    result2 = await execute_ticket(
+        act2,
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {"SNDK": 91.5},
+        },
+    )
+    assert result2.get("status") == "ok"
+    assert sent and sent[0]["params"]["stop_price"] == 88.0
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_blocks_when_last_is_on_opening_low(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.world_state import WorldState
+
+    _save_gap_card()
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {
+            "card": "flush bounce",
+            "symbol": "SNDK",
+            "direction": "LONG",
+            "stop_price": 88.0,
+            "target_price": 93.0,
+            "quantity": 10,
+        },
+        "rationale": "card=flush bounce SNDK",
+    }
+    result = await execute_ticket(
+        act,
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {"SNDK": 88.0},
+            "session_range": {
+                "SNDK": {
+                    "today": True,
+                    "low": 88.0,
+                    "last": 88.0,
+                    "above_low": False,
+                    "retrace_30": 93.0,
+                }
+            },
+        },
+    )
+    assert result.get("status") == "blocked"
+    assert "opening low" in str(result.get("note") or "")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_blocks_when_gap_is_under_the_card_floor(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.world_state import WorldState
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "shape": "LONG STK. Stop under opening low.",
+                            "when_on": "mega/large ≥6% earnings-miss gap",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {
+            "card": "flush bounce",
+            "symbol": "MU",
+            "direction": "LONG",
+            "stop_price": 900.0,
+            "target_price": 920.0,
+            "quantity": 5,
+        },
+        "rationale": "card=flush bounce MU",
+    }
+    result = await execute_ticket(
+        act,
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {"MU": 910.0},
+            "session_range": {
+                "MU": {
+                    "today": True,
+                    "low": 900.0,
+                    "last": 910.0,
+                    "above_low": True,
+                    "open_gap_pct": -3.3,
+                    "retrace_30": 920.0,
+                }
+            },
+        },
+    )
+    assert result.get("status") == "blocked"
+    assert "gap under 6%" in str(result.get("note") or "")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_blocks_when_last_is_under_card_price_floor(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.world_state import WorldState
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "shape": "LONG STK. Stop under opening low.",
+                            "scan": "most_active + top_losers; mega/large only; skip levered ETFs and sub-$15 names",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    result = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {
+                "card": "flush bounce",
+                "symbol": "AAOI",
+                "direction": "LONG",
+                "stop_price": 11.0,
+                "target_price": 14.0,
+                "quantity": 100,
+            },
+            "rationale": "card=flush bounce AAOI",
+        },
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {"AAOI": 12.0},
+            "session_range": {
+                "AAOI": {
+                    "today": True,
+                    "low": 11.0,
+                    "last": 12.0,
+                    "above_low": True,
+                    "open_gap_pct": -8.0,
+                }
+            },
+        },
+    )
+    assert result.get("status") == "blocked"
+    assert "last under $15" in str(result.get("note") or "")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_blocks_wide_spread_on_tight_spread_card(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.world_state import WorldState
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "review": "do not re-enter that name the same session",
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "shape": "LONG STK. Stop under opening low.",
+                            "when_on": "tight live spread, hold above the opening low",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ],
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    act = {
+        "action": "market_bracket",
+        "strategy": "market_bracket",
+        "params": {
+            "card": "flush bounce",
+            "symbol": "SNDK",
+            "direction": "LONG",
+            "stop_price": 88.0,
+            "target_price": 93.0,
+            "quantity": 10,
+        },
+        "rationale": "card=flush bounce SNDK",
+    }
+    snap = {
+        "account": {"netliquidation": 37000.0},
+        "positions": [],
+        "open_orders": [],
+        "ibkr_live_quotes": {"SNDK": 91.5},
+        "session_range": {
+            "SNDK": {
+                "today": True,
+                "low": 88.0,
+                "last": 91.5,
+                "above_low": True,
+                "bid": 89.0,
+                "ask": 93.0,
+                "spread": 4.0,
+                "open_gap_pct": -6.5,
+            }
+        },
+    }
+    result = await execute_ticket(act, object(), world, snap)
+    assert result.get("status") == "blocked"
+    assert "spread wider than the stop" in str(result.get("note") or "")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_does_not_apply_hunt_hold_to_manage(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.world_state import WorldState
+
+    _save_gap_card()
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=False,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[{"symbol": "SNDK", "sec_type": "STK", "quantity": 10, "conId": 1}],
+        open_orders=[{"order_id": 42, "symbol": "SNDK"}],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    result = await execute_ticket(
+        {
+            "action": "cancel",
+            "strategy": "cancel",
+            "params": {"order_id": 42},
+            "rationale": "cancel child",
+        },
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": world.positions,
+            "open_orders": world.open_orders,
+            "session_range": {
+                "SNDK": {
+                    "today": True,
+                    "low": 88.0,
+                    "last": 88.0,
+                    "above_low": False,
+                    "open_gap_pct": -6.5,
+                }
+            },
+        },
+    )
+    assert "opening low" not in str(result.get("note") or "")
+    assert "gap under" not in str(result.get("note") or "")
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_uses_scan_hit_last_when_quote_map_misses(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.world_state import WorldState
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: SimpleNamespace(
+            is_paper=True,
+            trading_mode="paper",
+            max_risk_per_trade_pct=1.0,
+            max_position_pct=20.0,
+        ),
+    )
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    result = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {"card": "flush bounce"},
+            "rationale": "",
+        },
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {},
+            "scan_hits": {
+                "quoted": 1,
+                "rows": [{"symbol": "SNDK", "last": 91.5}],
+            },
+            "session_range": {
+                "SNDK": {
+                    "today": True,
+                    "low": 88.0,
+                    "high": 92.0,
+                    "last": 91.5,
+                    "retrace_30": 93.0,
+                    "ticket": {
+                        "strategy": "market_bracket",
+                        "card": "flush bounce",
+                        "direction": "LONG",
+                        "stop_price": 88.0,
+                        "target_price": 93.0,
+                        "quantity": 10,
+                    },
+                }
+            },
+        },
+    )
+    assert result.get("status") == "ok"
+    assert sent
+    assert sent[0]["params"]["symbol"] == "SNDK"
+    assert sent[0]["_quote_last"] == 91.5
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_blocks_no_add_on_an_open_name(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.world_state import WorldState
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "shape": "LONG STK. One name, no add.",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=False,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[{"symbol": "SNDK", "sec_type": "STK", "quantity": 10, "conId": 1}],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    result = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {
+                "card": "flush bounce",
+                "symbol": "SNDK",
+                "direction": "LONG",
+                "stop_price": 88.0,
+                "target_price": 93.0,
+                "quantity": 5,
+            },
+            "rationale": "add",
+        },
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": world.positions,
+            "open_orders": [],
+            "ibkr_live_quotes": {"SNDK": 91.5},
+            "session_range": {
+                "SNDK": {
+                    "today": True,
+                    "low": 88.0,
+                    "last": 91.5,
+                    "above_low": True,
+                    "open_gap_pct": -6.5,
+                }
+            },
+        },
+    )
+    assert result.get("status") == "blocked"
+    assert "no add SNDK" in str(result.get("note") or "")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_blocks_new_risk_on_a_price_hint(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.world_state import WorldState
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "bounce",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    result = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {
+                "card": "flush bounce",
+                "symbol": "SNDK",
+                "direction": "LONG",
+                "stop_price": 88.0,
+                "target_price": 93.0,
+                "quantity": 10,
+                "price_hint": 91.5,
+            },
+            "rationale": "hint only",
+        },
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {},
+        },
+    )
+    assert result.get("status") == "blocked"
+    assert "IBKR live last" in str(result.get("note") or "")
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_blocks_when_one_share_blows_card_risk(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.world_state import WorldState
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "bounce",
+                            "shape": "LONG STK. Qty so dollar risk ≤1% NL.",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: SimpleNamespace(
+            is_paper=True,
+            trading_mode="paper",
+            max_risk_per_trade_pct=1.0,
+            max_position_pct=20.0,
+        ),
+    )
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    result = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {
+                "card": "flush bounce",
+                "symbol": "BKNG",
+                "direction": "LONG",
+                "stop_price": 100.0,
+                "target_price": 520.0,
+            },
+            "rationale": "card=flush bounce BKNG",
+        },
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {"BKNG": 500.0},
+        },
+    )
+    assert result.get("status") == "blocked"
+    assert "size won't fit" in str(result.get("note") or "")
+    assert sent == []

@@ -346,16 +346,16 @@ class IBKROrdersMixin:
                 except Exception as _cancel_err:
                     logger.debug(f"Cancel unfilled entry failed (may already be cancelled): {_cancel_err}")
 
-                # Fetch current bid/ask from MDA so caller can make informed retry decision
+                # Fetch current bid/ask from IBKR so caller can retry on live tape
                 current_bid, current_ask = None, None
                 try:
-                    from abcxauto.marketdata.provider import get_data_provider
-                    _q = get_data_provider().get_quote(symbol)
-                    if _q:
-                        current_bid = _q.bid if _q.bid and _q.bid > 0 else None
-                        current_ask = _q.ask if _q.ask and _q.ask > 0 else None
+                    fn = getattr(self, "get_live_quote", None)
+                    _q = await fn(symbol, fresh=True) if callable(fn) else None
+                    if isinstance(_q, dict) and not _q.get("error"):
+                        current_bid = _q.get("bid") if _q.get("bid") and float(_q.get("bid") or 0) > 0 else None
+                        current_ask = _q.get("ask") if _q.get("ask") and float(_q.get("ask") or 0) > 0 else None
                 except Exception as _mkt_err:
-                    logger.debug(f"MDA quote fetch failed for {symbol}: {_mkt_err}")
+                    logger.debug(f"IBKR quote fetch failed for {symbol}: {_mkt_err}")
 
                 result = {
                     'success': False,
@@ -1395,25 +1395,25 @@ class IBKROrdersMixin:
 
             if limit_price is None:
                 try:
-                    from abcxauto.marketdata.client import get_marketdata_client
-
-                    exp = contract.lastTradeDateOrContractMonth  # YYYYMMDD
-                    occ = (
-                        f"{contract.symbol}{exp[2:]}"
-                        f"{contract.right.upper()[0]}"
-                        f"{int(round(contract.strike * 1000)):08d}"
-                    )
-                    q = await get_marketdata_client().get_option_quote(occ)
-                    if q:
-                        bid, ask = q.get('bid'), q.get('ask')
-                        limit_price = q.get('mid') or q.get('last') or (
-                            (bid + ask) / 2 if bid and ask else None
+                    fn = getattr(self, "get_live_option_quote", None)
+                    if callable(fn):
+                        live = await fn(
+                            contract.symbol,
+                            contract.lastTradeDateOrContractMonth,
+                            contract.strike,
+                            contract.right,
                         )
+                        from abcxauto.prints import live_limit_px
+
+                        limit_price = live_limit_px(live if isinstance(live, dict) else None)
                         if limit_price:
-                            limit_price = round(float(limit_price), 2)
-                            logger.info(f"External mid for close {occ}: {limit_price}")
+                            logger.info(
+                                "IBKR mid for close %s: %s",
+                                getattr(contract, "conId", None),
+                                limit_price,
+                            )
                 except Exception as e:
-                    logger.debug(f"External price fallback failed for {symbol}: {e}")
+                    logger.debug(f"IBKR close quote failed for {symbol}: {e}")
                 if not limit_price:
                     limit_price = None  # MKT fallback only as last resort
 

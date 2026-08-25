@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from abcxauto.aio import safe_sleep as _safe_sleep
+from abcxauto.prints import asof_fields, bar_time_fields, note_mda_miss, stamp
 
 logger = logging.getLogger(__name__)
 
@@ -381,14 +382,23 @@ class MarketDataClient:
         if isinstance(realtime, Exception) or not realtime:
             return None
 
-        # Enrich with delayed bid/ask/volume if available
+        out = dict(realtime)
+        out["last_is"] = "realtime_mid"
+        # Delayed bid/ask/volume sit beside the realtime mid — never as one last.
         if not isinstance(delayed, Exception) and delayed:
-            realtime['bid'] = delayed.get('bid')
-            realtime['ask'] = delayed.get('ask')
-            realtime['volume'] = delayed.get('volume')
-            realtime['source'] = 'marketdata_hybrid'
-
-        return realtime
+            out["bid"] = delayed.get("bid")
+            out["ask"] = delayed.get("ask")
+            out["volume"] = delayed.get("volume")
+            out["bid_freshness"] = "delayed_15m"
+            out["ask_freshness"] = "delayed_15m"
+            out["volume_freshness"] = "delayed_15m"
+        return stamp(
+            out,
+            source="mda",
+            freshness="hybrid_realtime_mid_delayed_bidask",
+            use="mda_context_not_send_geometry",
+            asof=out.get("updated"),
+        )
 
     async def _get_delayed_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get delayed quote (bid/ask/volume) from /quotes endpoint."""
@@ -462,17 +472,24 @@ class MarketDataClient:
                 return arr[0] if isinstance(arr, list) and arr else arr
 
             mid = first(data.get('mid'))
-            return {
-                'symbol': symbol,
-                'mid': mid,
-                'last': mid,  # Use mid as last for compatibility
-                'bid': None,  # Not provided by /prices endpoint
-                'ask': None,
-                'change': first(data.get('change')),
-                'change_pct': first(data.get('changepct')),
-                'updated': first(data.get('updated')),
-                'source': 'marketdata_realtime'
-            }
+            updated = first(data.get('updated'))
+            return stamp(
+                {
+                    'symbol': symbol,
+                    'mid': mid,
+                    'last': mid,
+                    'last_is': 'realtime_mid',
+                    'bid': None,
+                    'ask': None,
+                    'change': first(data.get('change')),
+                    'change_pct': first(data.get('changepct')),
+                    'updated': updated,
+                },
+                source='mda',
+                freshness='realtime_mid',
+                use='mda_context_not_send_geometry',
+                asof=updated,
+            )
         except asyncio.TimeoutError:
             logger.warning(f"Price request timed out for {symbol}")
             return None
@@ -527,18 +544,24 @@ class MarketDataClient:
             def first(arr):
                 return arr[0] if isinstance(arr, list) and arr else arr
 
-            return {
-                'symbol': symbol,
-                'bid': first(data.get('bid')),
-                'ask': first(data.get('ask')),
-                'last': first(data.get('last')),
-                'mid': first(data.get('mid')),
-                'volume': first(data.get('volume')),
-                'change': first(data.get('change')),
-                'change_pct': first(data.get('changepct')),
-                'updated': first(data.get('updated')),
-                'source': 'marketdata'
-            }
+            updated = first(data.get('updated'))
+            return stamp(
+                {
+                    'symbol': symbol,
+                    'bid': first(data.get('bid')),
+                    'ask': first(data.get('ask')),
+                    'last': first(data.get('last')),
+                    'mid': first(data.get('mid')),
+                    'volume': first(data.get('volume')),
+                    'change': first(data.get('change')),
+                    'change_pct': first(data.get('changepct')),
+                    'updated': updated,
+                },
+                source='mda',
+                freshness='delayed_15m',
+                use='mda_context_not_send_geometry',
+                asof=updated,
+            )
         except asyncio.TimeoutError:
             logger.warning(f"Quote request timed out for {symbol}")
             return None
@@ -596,27 +619,31 @@ class MarketDataClient:
             def first(arr):
                 return arr[0] if isinstance(arr, list) and arr else arr
 
-            result: Dict[str, Any] = {
-                'option_symbol': option_symbol,
-                'underlying': first(data.get('underlying')),
-                'strike': first(data.get('strike')),
-                'side': first(data.get('side')),
-                'expiration': first(data.get('expiration')),
-                'bid': first(data.get('bid')),
-                'ask': first(data.get('ask')),
-                'mid': first(data.get('mid')),
-                'last': first(data.get('last')),
-                'volume': first(data.get('volume')) or 0,
-                'open_interest': first(data.get('openInterest')) or 0,
-                'delta': first(data.get('delta')),
-                'gamma': first(data.get('gamma')),
-                'theta': first(data.get('theta')),
-                'vega': first(data.get('vega')),
-                'iv': first(data.get('iv')),
-                'dte': first(data.get('dte')),
-                'source': 'marketdata',
-                'is_historical': bool(date or from_date or to_date),
-            }
+            result: Dict[str, Any] = stamp(
+                {
+                    'option_symbol': option_symbol,
+                    'underlying': first(data.get('underlying')),
+                    'strike': first(data.get('strike')),
+                    'side': first(data.get('side')),
+                    'expiration': first(data.get('expiration')),
+                    'bid': first(data.get('bid')),
+                    'ask': first(data.get('ask')),
+                    'mid': first(data.get('mid')),
+                    'last': first(data.get('last')),
+                    'volume': first(data.get('volume')) or 0,
+                    'open_interest': first(data.get('openInterest')) or 0,
+                    'delta': first(data.get('delta')),
+                    'gamma': first(data.get('gamma')),
+                    'theta': first(data.get('theta')),
+                    'vega': first(data.get('vega')),
+                    'iv': first(data.get('iv')),
+                    'dte': first(data.get('dte')),
+                    'is_historical': bool(date or from_date or to_date),
+                },
+                source='mda',
+                freshness='delayed_15m',
+                use='greeks_only_not_send_geometry',
+            )
             if date:
                 result['as_of_date'] = date
             return result
@@ -661,7 +688,10 @@ class MarketDataClient:
             )
             if resp is None or resp.status_code >= 400:
                 if resp is not None:
-                    self._log_http_denied(resp, f"candles {sym}")
+                    if resp.status_code == 404:
+                        note_mda_miss(sym)
+                    else:
+                        self._log_http_denied(resp, f"candles {sym}")
                 return []
             self._parse_rate_headers(resp)
             data = resp.json()
@@ -675,14 +705,17 @@ class MarketDataClient:
             v = data.get("v") or []
             rows: list[dict] = []
             for i, tval in enumerate(ts):
-                rows.append({
-                    "t": tval,
+                row = bar_time_fields(tval)
+                row.update({
                     "o": o[i] if i < len(o) else None,
                     "h": h[i] if i < len(h) else None,
                     "l": low[i] if i < len(low) else None,
                     "c": c[i] if i < len(c) else None,
                     "v": v[i] if i < len(v) else None,
                 })
+                if row.get("t") in (None, "") and tval is not None:
+                    row["t"] = tval
+                rows.append(row)
             return rows
         except Exception:
             logger.exception("get_stock_candles failed for %s", symbol)
@@ -710,11 +743,16 @@ class MarketDataClient:
             if resp is None:
                 return []
             self._parse_rate_headers(resp)
+            if resp.status_code == 404:
+                note_mda_miss(sym)
+                return []
             if resp.status_code >= 400:
                 self._log_http_denied(resp, f"news {sym}")
                 return []
             data = resp.json()
             if not isinstance(data, dict) or str(data.get("s") or "").lower() != "ok":
+                if isinstance(data, dict) and str(data.get("s") or "").lower() in ("no_data", "error"):
+                    note_mda_miss(sym)
                 return []
             headlines = data.get("headline") or []
             sources = data.get("source") or []
@@ -724,12 +762,21 @@ class MarketDataClient:
             for i, hl in enumerate(headlines):
                 if not hl:
                     continue
-                out.append({
+                pub = pubs[i] if i < len(pubs) else None
+                item = {
                     "symbol": (symbols[i] if i < len(symbols) else sym) or sym,
                     "headline": str(hl).strip(),
-                    "source": str(sources[i]) if i < len(sources) and sources[i] else "",
-                    "published": pubs[i] if i < len(pubs) else None,
-                })
+                    "publisher": str(sources[i]) if i < len(sources) and sources[i] else "",
+                    "published": pub,
+                }
+                item.update(asof_fields(pub))
+                out.append(stamp(
+                    item,
+                    source="mda",
+                    freshness="delayed_15m",
+                    use="context_not_live_last",
+                    asof=pub,
+                ))
             return out
         except Exception:
             logger.exception("get_stock_news failed for %s", symbol)
@@ -780,7 +827,9 @@ class MarketDataClient:
         return {
             "statuses": statuses,
             "count": n,
-            "source": "marketdata",
+            "source": "mda",
+            "freshness": "calendar",
+            "use": "session_not_last",
         }
 
 

@@ -318,6 +318,7 @@ def validate_proposal(
     *,
     quote_last: Optional[float] = None,
     posture: Optional[str] = None,
+    session: Any = None,
 ) -> OrderProposal:
     """Validate a raw propose_order payload into an OrderProposal.
 
@@ -362,7 +363,11 @@ def validate_proposal(
         hint = getattr(parsed, "price_hint", None)
         q = quote_last if quote_last is not None else hint
         ok_g, code, msg = check_live_geometry(
-            strategy, raw_params, quote_last=q, posture=eff or "balanced",
+            strategy,
+            raw_params,
+            quote_last=q,
+            posture=eff or "balanced",
+            session=session,
         )
         if not ok_g:
             raise ProposalValidationError(f"{code}: {msg}")

@@ -261,7 +261,16 @@ def test_scan_quote_sweep_stamps_live_last():
         async def get_live_quotes(self, syms, **_k):
             return {
                 "quotes": [
-                    {"symbol": "NVDA", "last": 181.5, "bid": 181.4, "ask": 181.6},
+                    {
+                        "symbol": "NVDA",
+                        "last": 181.5,
+                        "bid": 181.4,
+                        "ask": 181.6,
+                        "open": 190.0,
+                        "close": 200.0,
+                        "change_pct": -9.25,
+                        "open_gap_pct": -5.0,
+                    },
                     {"symbol": "AMD", "last": 0},
                 ]
             }
@@ -271,7 +280,11 @@ def test_scan_quote_sweep_stamps_live_last():
     assert n == 1
     assert rows[0]["last"] == 181.5
     assert rows[0]["bid"] == 181.4
+    assert rows[0]["open_gap_pct"] == -5.0
+    assert rows[0]["change_pct"] == -9.25
     assert rows[0]["quote_source"] == "ibkr_live"
+    assert rows[0]["ibkr"]["source"] == "ibkr"
+    assert rows[0]["ibkr"]["last"] == 181.5
     # A zero/absent last is not a price.
     assert "last" not in rows[1]
 
@@ -436,6 +449,60 @@ def test_book_payload_carries_cards_and_structure_lessons(monkeypatch, tmp_path)
     lessons = payload["world"]["structure_lessons"]
     assert lessons[0]["reason_code"] == "geometry_rejected"
     assert lessons[0]["symbol"] == "NVDA"
+    assert "types" not in pb
+
+
+def test_book_payload_carries_last_look_scan(monkeypatch, tmp_path):
+    from abcxauto.brain import _book_payload
+    from abcxauto.think_stream import write_desk_brief
+
+    write_desk_brief({
+        "strat": "",
+        "sends": 0,
+        "send_calls": 0,
+        "tool_trace": ["book", "playbook", "scan", "set_wake"],
+        "rationale": "Flat. Gate OFF. SNDK open_gap -6.5 memory-rally.",
+        "scan_hits": {
+            "arena": "mega_cap",
+            "scan_code": "TOP_PERC_LOSE",
+            "rows": [{"symbol": "SNDK", "open_gap_pct": -6.5}],
+        },
+    })
+    payload = _book_payload(_world())
+    look = payload["last_look"]
+    assert look["send_calls"] == 0
+    assert "scan" in look["tools"]
+    assert look["scan_hits"]["rows"][0]["symbol"] == "SNDK"
+    assert look["scan_hits"]["rows"][0]["open_gap_pct"] == -6.5
+    assert "SNDK" in look["rationale"]
+    assert look.get("fresh") is True
+
+
+def test_book_last_look_drops_overnight_scan_hits(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.brain import _book_payload
+    from abcxauto.think_stream import write_desk_brief
+
+    write_desk_brief({
+        "strat": "",
+        "sends": 0,
+        "send_calls": 0,
+        "ts": (datetime.now(timezone.utc) - timedelta(hours=18)).isoformat(),
+        "tool_trace": ["book", "scan"],
+        "rationale": "Flat. Gate OFF. SNDK open_gap -6.5 memory-rally.",
+        "scan_hits": {
+            "arena": "mega_cap",
+            "scan_code": "TOP_PERC_LOSE",
+            "rows": [{"symbol": "SNDK", "open_gap_pct": -6.5}],
+        },
+    })
+    payload = _book_payload(_world())
+    look = payload["last_look"]
+    assert look["fresh"] is False
+    assert not look.get("scan_hits")
+    assert look.get("tools") == []
+    assert "Gate OFF" not in str(look.get("rationale") or "")
 
 
 # --- one desk -----------------------------------------------------------------
