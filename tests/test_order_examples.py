@@ -73,11 +73,16 @@ def test_format_order_examples():
     assert '"closing_position":true' in text
     assert "Never close_option / oca / trailing a combo leg" in text
     assert "Clerk will not invent the close price" in text
+    assert "price_hint" not in text
     assert "ratio_spread close:" not in text
     assert "jade_lizard close:" not in text
     # OPEN dict values stay free of closing_position (assert_examples 1:1).
     for name in COMBO_BAG_CLOSE:
         assert "closing_position" not in ORDER_EXAMPLES[name]
+    for line in text.splitlines():
+        if " close:" in line:
+            assert '"limit_price"' not in line
+            assert '"closing_position":true' in line
     text_narrow = format_order_examples(allowed=frozenset({"market_bracket"}))
     assert "market_bracket" in text_narrow
     assert "vertical_spread" not in text_narrow
@@ -90,14 +95,23 @@ def test_combo_close_example_same_legs_plus_close_fields(strategy):
     open_params = ORDER_EXAMPLES[strategy]
     close = combo_close_example(strategy)
     assert close["closing_position"] is True
-    assert isinstance(close["limit_price"], (int, float))
-    assert close["limit_price"] > 0
+    assert "limit_price" not in close
     for key, value in open_params.items():
         assert close[key] == value
     proposal = validate_proposal(strategy, close, RATIONALE)
     assert proposal.strategy == strategy
     assert proposal.params.closing_position is True
-    assert proposal.params.limit_price == close["limit_price"]
+    assert proposal.params.limit_price is None
+
+
+def test_examples_are_not_clerk_defaults_or_invented_fields():
+    assert_examples_cover_strategies()
+    for name, params in ORDER_EXAMPLES.items():
+        if name not in STRATEGIES:
+            continue
+        fields = set(STRATEGIES[name][0].model_fields)
+        assert set(params) <= fields, name
+        assert "price_hint" not in params, name
 
 
 def test_combo_bag_close_excludes_unlimited_shapes():
