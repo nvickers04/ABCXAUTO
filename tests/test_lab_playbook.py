@@ -640,7 +640,7 @@ def test_new_risk_until_prose_stays_notes_not_a_clock(tmp_path, monkeypatch):
     assert "10:30" not in block
     assert "notebook: playbook tool" in block
     # Playbook write must not arm a sit-clock.
-    from abcxauto.wake_bus import load_alarm
+    from abcxauto.park_clock import load_alarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     before = load_alarm()
@@ -689,7 +689,7 @@ def test_playbook_revision_strips_old_essay_on_disk(tmp_path, monkeypatch):
 
 def test_card_next_look_s_clamps_and_feeds_clerk(tmp_path, monkeypatch):
     from abcxauto.lab_playbook import playbook_next_look_s
-    from abcxauto.wake_bus import MIN_LOOK_S, NEXT_LOOK_S_MAX
+    from abcxauto.park_clock import MIN_LOOK_S, NEXT_LOOK_S_MAX
 
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)

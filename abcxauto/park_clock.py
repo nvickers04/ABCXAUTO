@@ -1,7 +1,9 @@
-"""Standing IBKR + on-demand Grok. No clerk decision checklist.
+"""Overnight / after-close park clock. Clerk is not a runner.
 
-Book events are facts. The clerk owns the next look (playbook cadence +
-defaults). Hard interrupts are gates.
+Book events are facts. Hard interrupts poke the open think.
+Paper RTH and premarket stay up on the same process — no grok_wake.json
+sit clock after a finished look. Overnight / postmarket park until
+premarket.
 """
 
 from __future__ import annotations
@@ -39,9 +41,10 @@ DEFAULT_LOOK_HUNT_S = 600.0
 LAST_HOUR_LOOK_S = 90.0
 MIN_LOOK_S = 30.0
 NEXT_LOOK_S_MAX = 4 * 3600.0
-# Closed / postmarket skip Grok (unprotected still interrupts). Premarket stays up.
-PARK_SESSIONS = frozenset({"premarket", "closed", "postmarket"})
-PAPER_STAY_UP_SESSIONS = frozenset({"regular", "premarket"})
+# Overnight / after-close only. Premarket stay-up is not a park.
+PARK_SESSIONS = frozenset({"closed", "postmarket"})
+STAY_UP_SESSIONS = frozenset({"regular", "premarket"})
+PAPER_STAY_UP_SESSIONS = STAY_UP_SESSIONS
 # 04:00 ET premarket start is 5.5h before the 09:30 bell.
 PREMARKET_MINUTES_TO_OPEN = 5.5 * 60.0
 # Pacing class: a 30-minute remaining-to-bell wait is a park, not a look.
@@ -197,6 +200,68 @@ def save_alarm(alarm: GrokAlarm) -> GrokAlarm:
     return alarm
 
 
+def clear_park() -> GrokAlarm:
+    """Drop the overnight file. RTH / premarket must not sit on a leftover clock."""
+    p = _path()
+    try:
+        if p.is_file():
+            p.unlink()
+    except OSError:
+        logger.debug("grok_wake clear failed", exc_info=True)
+    return GrokAlarm()
+
+
+def _is_park_session(
+    session: str = "",
+    minutes_to_open: float | None = None,
+) -> bool:
+    """Overnight / after-close only. Regular and premarket have no sit clock."""
+    sess = str(session or "").lower()
+    if sess in STAY_UP_SESSIONS:
+        return False
+    if sess in PARK_SESSIONS:
+        return True
+    mins = minutes_to_open
+    if mins is not None:
+        try:
+            mins = float(mins)
+        except (TypeError, ValueError):
+            mins = None
+        if mins is not None and mins != mins:
+            mins = None
+    if mins is not None and mins > PREMARKET_MINUTES_TO_OPEN:
+        return True
+    if mins is not None and mins > 0:
+        # Caller already placed us before the bell, inside premarket hours.
+        return False
+    inferred, inferred_mins = infer_session_before_open()
+    if inferred == "closed":
+        return True
+    _ = inferred_mins
+    return False
+
+
+def paper_stay_up(session: str = "") -> bool:
+    """Paper RTH and premarket keep looking on this process. Not a sit clock."""
+    if str(session or "").lower() not in PAPER_STAY_UP_SESSIONS:
+        return False
+    try:
+        from abcxauto.config import get_config
+
+        return bool(get_config().is_paper)
+    except Exception:
+        return False
+
+
+def honor_park(
+    *,
+    session: str = "",
+    minutes_to_open: float | None = None,
+) -> bool:
+    """True only for overnight / after-close. RTH and premarket have no sit clock."""
+    return _is_park_session(session, minutes_to_open)
+
+
 def _env_float(name: str, default: float, *, lo: float = 1.0) -> float:
     raw = (os.environ.get(name) or "").strip()
     if not raw:
@@ -326,11 +391,12 @@ def start_looks_now(
     *,
     minutes_to_open: float | None = None,
     now: datetime | None = None,
+    session: str = "",
 ) -> bool:
-    """Operator Start / AUTOSTART thinks now when a remaining-to-bell park is up.
+    """Operator Start thinks now unless an overnight / after-close park is standing.
 
-    Premarket stay-up looks through to the bell. Overnight closed parks stand.
-    A leftover RTH clock still stands so a restart does not burn a look.
+    Premarket stay-up and RTH have no sit clock — leftover grok_wake.json does
+    not block Start. Overnight closed parks stand until due.
     """
     al = alarm or load_alarm()
     if not al.wake_at or al.due(now=now):
@@ -338,15 +404,7 @@ def start_looks_now(
     mins = minutes_to_open
     if mins is None:
         mins = et_minutes_to_rth_open(now=now)
-    if mins is None:
-        return False
-    try:
-        mins = float(mins)
-    except (TypeError, ValueError):
-        return False
-    if mins > PREMARKET_MINUTES_TO_OPEN:
-        return False
-    return remaining_to_bell_s(al.seconds_until(now=now), mins)
+    return not _is_park_session(session, mins)
 
 
 def minutes_to_open_from_snap(snap: dict[str, Any] | None) -> float | None:
@@ -412,11 +470,10 @@ def clerk_look_s(
     minutes_to_open: float | None = None,
     next_look_s: float | None = None,
 ) -> float:
-    """Clerk next-look seconds. Playbook card may tighten or stretch inside the floor.
+    """Overnight park seconds. Stay-up sessions do not sit on this clock.
 
     Session-card opening-print wait is a send gate, not this clock. Premarket
-    stays on hunt / last-hour cadence. Overnight closed still parks to the
-    last hour before the open.
+    stays up. Overnight closed parks until premarket (4:00 ET).
     """
     sess = str(session or "").lower()
     mins = minutes_to_open
@@ -432,7 +489,9 @@ def clerk_look_s(
         and 0 < mins <= 60
         and sess in ("premarket", "closed", "postmarket")
     )
-    if sess in ("closed", "postmarket") and mins is not None and mins > 60:
+    if sess in PARK_SESSIONS and mins is not None and mins > PREMARKET_MINUTES_TO_OPEN:
+        return max(min_look_s(), (mins - PREMARKET_MINUTES_TO_OPEN) * 60.0)
+    if sess in PARK_SESSIONS and mins is not None and mins > 60:
         return max(min_look_s(), (mins - 60.0) * 60.0)
     cap = _stay_up_look_cap_s(sess, mins)
     if next_look_s is None:
@@ -470,11 +529,11 @@ def ensure_next_look(
     minutes_to_open: float | None = None,
     replace: bool = False,
 ) -> GrokAlarm:
-    """Seed a clerk clock when none is standing. Never leave a spent or empty alarm.
+    """Overnight / after-close park only. RTH and premarket write no sit clock.
 
-    ``replace`` reseeds after a look so a leftover manage clock cannot fire
-    a second hunt a minute after flatten. Launch / begin_run keep a future
-    clock. ``previous_set_at`` is unused — Grok no longer owns the clock.
+    A finished stay-up look must not leave grok_wake.json — that launcher
+    killed the think and started the next look cold. ``previous_set_at`` is
+    unused. ``replace`` still reseeds a standing overnight park.
     """
     _ = previous_set_at
     sess = str(session or "").lower()
@@ -483,11 +542,10 @@ def ensure_next_look(
         inferred, mins = infer_session_before_open()
         if not sess:
             sess = inferred
+    if not _is_park_session(sess, mins):
+        return clear_park()
     alarm = load_alarm()
     if alarm.wake_at and not alarm.due() and not replace:
-        pulled = _pull_in_stay_up_wake(alarm, sess, mins)
-        if pulled is not None:
-            return pulled
         return alarm
     return set_wake(
         wake_in_s=clerk_look_s(
@@ -497,29 +555,6 @@ def ensure_next_look(
         ),
         flat=flat,
         session=sess,
-    )
-
-
-def _pull_in_stay_up_wake(
-    alarm: GrokAlarm,
-    session: str,
-    minutes_to_open: float | None,
-) -> GrokAlarm | None:
-    """A remaining-to-bell clock cannot park premarket. Overnight closed stands."""
-    sess = str(session or "").lower()
-    if sess not in ("premarket",):
-        return None
-    until = alarm.seconds_until()
-    if not remaining_to_bell_s(until, minutes_to_open):
-        return None
-    return set_wake(
-        wake_in_s=clerk_look_s(
-            session=sess,
-            minutes_to_open=minutes_to_open,
-            flat=True,
-        ),
-        session=sess,
-        flat=True,
     )
 
 
@@ -545,7 +580,10 @@ def set_wake(
     flat: bool | None = None,
     session: str = "",
 ) -> GrokAlarm:
-    """Clerk park. Always writes a wake_at so the desk is never clockless."""
+    """Overnight / after-close park. Stay-up sessions write no sit clock."""
+    sess = str(session or "").lower()
+    if sess in STAY_UP_SESSIONS:
+        return clear_park()
     clean = _clean_wake_if(wake_if)
     at = str(wake_at or "").strip() or None
     sec: float | None = None

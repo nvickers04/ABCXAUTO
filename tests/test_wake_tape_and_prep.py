@@ -127,7 +127,7 @@ def test_day_facts_flat_book_still_seeds_legal_tape(legal_tape):
 
 
 def test_format_wake_no_tape_keeps_lots_and_minutes():
-    from abcxauto.wake_bus import note_wake
+    from abcxauto.park_clock import note_wake
 
     note_wake(None)
     text = format_wake(
@@ -167,7 +167,7 @@ def test_format_wake_no_tape_keeps_lots_and_minutes():
 def test_format_wake_rth_fill_delta_no_tape_when_flat():
     """After flatten, kind=fill keeps book facts — no leftover / substitute name dump."""
     from abcxauto.think_stream import write_desk_brief
-    from abcxauto.wake_bus import BookEvent, note_wake
+    from abcxauto.park_clock import BookEvent, note_wake
 
     write_desk_brief({"strat": "market_bracket", "sends": 2})
     note_wake(BookEvent(kind="fill", detail="AAPL target filled"))
@@ -206,7 +206,7 @@ def test_format_wake_rth_fill_delta_no_tape_when_flat():
 
 @pytest.mark.parametrize("kind", ["fill", "order_change", "book_move"])
 def test_format_wake_rth_delta_kinds_no_tape(kind):
-    from abcxauto.wake_bus import BookEvent, note_wake
+    from abcxauto.park_clock import BookEvent, note_wake
 
     note_wake(BookEvent(kind=kind, detail="marks"))
     try:
@@ -232,7 +232,7 @@ def test_format_wake_rth_delta_kinds_no_tape(kind):
 
 @pytest.mark.parametrize("kind", ["alarm", "boot", "operator"])
 def test_format_wake_alarm_boot_operator_no_tape_no_options_live(kind):
-    from abcxauto.wake_bus import BookEvent, note_wake
+    from abcxauto.park_clock import BookEvent, note_wake
 
     note_wake(BookEvent(kind=kind, detail="wake"))
     try:
@@ -258,7 +258,7 @@ def test_format_wake_alarm_boot_operator_no_tape_no_options_live(kind):
 
 
 def test_format_wake_open_lots_and_mix_still_print():
-    from abcxauto.wake_bus import note_wake
+    from abcxauto.park_clock import note_wake
 
     note_wake(None)
     text = format_wake(
@@ -288,7 +288,7 @@ def test_format_wake_open_lots_and_mix_still_print():
 
 
 def test_format_wake_non_rth_fill_delta_omits_tape_and_options():
-    from abcxauto.wake_bus import BookEvent, note_wake
+    from abcxauto.park_clock import BookEvent, note_wake
 
     note_wake(BookEvent(kind="fill", detail="AAPL filled"))
     try:

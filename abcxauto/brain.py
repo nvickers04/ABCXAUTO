@@ -9,6 +9,7 @@ live 5s stream (error if both miss); news is ~15 min delayed.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -1526,7 +1527,7 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
     reason = "ok"
     while True:
         try:
-            from abcxauto.wake_bus import peek_interrupt
+            from abcxauto.park_clock import peek_interrupt
 
             if peek_interrupt() is not None:
                 reason = "interrupt"
@@ -1671,7 +1672,7 @@ async def _inject_live_poke(
     turn: BrainTurn,
 ) -> bool:
     """Apply fill/order_change/unprotected to the open think — same chat, same wake."""
-    from abcxauto.wake_bus import note_wake, take_interrupt
+    from abcxauto.park_clock import note_wake, take_interrupt
     from abcxauto.world_state import day_facts, format_wake
 
     ev = take_interrupt()
@@ -2908,11 +2909,46 @@ async def grok_turn(
     world: WorldState,
     snap: dict[str, Any],
     wake: str,
+    resume: bool = False,
 ) -> BrainTurn:
-    """One Grok tool loop. send() is the only broker path."""
+    """One Grok tool loop. send() is the only broker path.
+
+    ``resume`` is optional so older grok_turn mocks keep working. Stay-up
+    may pass it; this look still starts a fresh BrainTurn so a rejected
+    clerk ticket cannot ride into the next look.
+    """
+    _ = resume
     return await _grok_turn_impl(
         g, connector=connector, world=world, snap=snap, wake=wake, turn=BrainTurn()
     )
+
+
+def grok_turn_kwargs(
+    fn: Any,
+    *,
+    connector: Any,
+    world: WorldState,
+    snap: dict[str, Any],
+    wake: str,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Keyword args for grok_turn. Omit resume when the callee does not accept it."""
+    kwargs: dict[str, Any] = {
+        "connector": connector,
+        "world": world,
+        "snap": snap,
+        "wake": wake,
+    }
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if "resume" in params:
+        kwargs["resume"] = resume
+        return kwargs
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        kwargs["resume"] = resume
+    return kwargs
 
 
 def _parse_tool_call(
@@ -2961,7 +2997,7 @@ async def _invoke_named_tool(
     think_emit("say", f"\n[{name}]\n")
     turn.tool_trace.append(name)
     try:
-        from abcxauto.wake_bus import peek_interrupt
+        from abcxauto.park_clock import peek_interrupt
 
         tool_task = asyncio.create_task(
             _run_tool(
@@ -3122,7 +3158,7 @@ async def _dispatch_tool_calls(
 
     Returns True when a live poke is waiting for the think.
     """
-    from abcxauto.wake_bus import peek_interrupt
+    from abcxauto.park_clock import peek_interrupt
 
     parsed = [_parse_tool_call(tc, world=world, snap=snap) for tc in calls]
     reads = [p for p in parsed if p[0] not in _MUTATING_TOOLS]
@@ -3198,6 +3234,11 @@ async def _grok_turn_impl(
     turn: BrainTurn | None = None,
 ) -> BrainTurn:
     turn = turn or BrainTurn()
+    # Rejected clerk tickets must not ride to the next look.
+    turn.last_act = {}
+    turn.last_result = {}
+    turn.last_strat = ""
+    turn.sends = []
     if g is None:
         turn.last_act = {}
         turn.last_result = {"status": "error", "note": "no_grok_client"}
@@ -3217,7 +3258,7 @@ async def _grok_turn_impl(
     while turn.steps < MAX_TOOL_STEPS:
         turn.steps += 1
         try:
-            from abcxauto.wake_bus import peek_interrupt
+            from abcxauto.park_clock import peek_interrupt
 
             if peek_interrupt() is not None:
                 await _inject_live_poke(

@@ -442,8 +442,9 @@ def begin_run() -> dict[str, Any]:
     else:
         mark_review_stale(archive_tail=True)
     try:
-        from abcxauto.wake_bus import ensure_next_look
+        from abcxauto.park_clock import ensure_next_look
 
+        # Overnight / after-close only. RTH and premarket write no sit clock.
         ensure_next_look(previous_set_at="")
     except Exception:
         logger.debug("grok_wake seed on begin_run failed", exc_info=True)

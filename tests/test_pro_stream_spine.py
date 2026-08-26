@@ -320,7 +320,8 @@ def test_health_strip_calls_out_silence(pro):
     s.status = "On"
     pro.engine._last_grok_mono = time.monotonic() - 2000
     pro._sync_health_strip()
-    assert pro.lbl_hs_state.value == "waiting"
+    # Stay-up has no sit clock, so the strip stays "on". Age going red is the call-out.
+    assert pro.lbl_hs_state.value == "on"
     assert "last look" in (pro.lbl_hs_age.value or "")
     assert pro.lbl_hs_age.color == RED
 
@@ -337,8 +338,8 @@ def test_health_strip_shows_the_backoff_streak_and_wait(pro):
     assert "360s" in (pro.lbl_hs_next.value or "")
 
 
-def test_health_strip_falls_back_to_the_wake_bus_backoff(pro):
-    """No note landed yet — the wait still comes from wake_bus, jitter and all."""
+def test_health_strip_falls_back_to_the_park_clock_backoff(pro):
+    """No note landed yet — the wait still comes from park_clock, jitter and all."""
     import re
 
     s = pro.engine.state

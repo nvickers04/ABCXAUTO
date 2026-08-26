@@ -1,4 +1,4 @@
-"""Pulse sleep helper. Live Grok cadence is wake_bus, not a nap ladder.
+"""Pulse sleep helper. Overnight park is park_clock, not a nap ladder.
 
 Stay-up / retry may wait tens of seconds. A 30-minute window or a
 remaining-to-bell clock (9:03 → 9:33) is a park — pacing will not sit it out.
