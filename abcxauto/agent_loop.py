@@ -688,6 +688,23 @@ async def execute_ticket(
         if isinstance(row, dict):
             session = row
     act["_session"] = session
+    if is_new_risk(strat, params):
+        from abcxauto.lab_playbook import session_card_open_print_error
+
+        print_note = session_card_open_print_error(
+            params,
+            session,
+            market_session=str(getattr(world, "session_status", "") or ""),
+        )
+        if print_note:
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            act["rationale"] = print_note
+            _record_clerk_block(act, asked, print_note, stage="opening_print")
+            return {
+                "status": "blocked",
+                "note": print_note,
+                "reason_code": "opening_print",
+            }
     fill_missing_protection(
         act,
         quote_last=quote_last,

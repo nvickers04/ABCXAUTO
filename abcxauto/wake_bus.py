@@ -38,13 +38,14 @@ DEFAULT_LOOK_OPEN_S = 300.0
 DEFAULT_LOOK_HUNT_S = 600.0
 LAST_HOUR_LOOK_S = 90.0
 MIN_LOOK_S = 30.0
-# First RTH print after 09:30. A session-card look one minute before the
-# bell cannot pin an opening low; a 30-minute park after that look misses it.
-OPEN_PRINT_S = 20.0
 NEXT_LOOK_S_MAX = 4 * 3600.0
 # Closed / postmarket skip Grok (unprotected still interrupts). Premarket stays up.
 PARK_SESSIONS = frozenset({"premarket", "closed", "postmarket"})
 PAPER_STAY_UP_SESSIONS = frozenset({"regular", "premarket"})
+# 04:00 ET premarket start is 5.5h before the 09:30 bell.
+PREMARKET_MINUTES_TO_OPEN = 5.5 * 60.0
+# Pacing class: a 30-minute remaining-to-bell wait is a park, not a look.
+REMAINING_TO_BELL_S = 30 * 60.0
 STAY_UP_RETRY_MIN_S = 20.0
 STAY_UP_RETRY_MAX_S = 45.0
 # Consecutive failed looks escalate. A provider capacity error is not a
@@ -288,39 +289,64 @@ def et_minutes_to_rth_open(*, now: datetime | None = None) -> float | None:
     return (bell - clock).total_seconds() / 60.0
 
 
-def session_card_open_s(
-    session: str = "",
-    minutes_to_open: float | None = None,
-) -> float | None:
-    """Seconds until the RTH open plus a first-print buffer.
+def infer_session_before_open(*, now: datetime | None = None) -> tuple[str, float | None]:
+    """Session label before the RTH bell. Overnight is closed, not premarket."""
+    mins = et_minutes_to_rth_open(now=now)
+    if mins is None:
+        return "", None
+    if mins > PREMARKET_MINUTES_TO_OPEN:
+        return "closed", mins
+    return "premarket", mins
 
-    Only for a live card whose stop is today's opening low. Premarket looks
-    cannot implement that card; the clerk clock must land after the bell.
+
+def remaining_to_bell_s(
+    until_s: float | None,
+    minutes_to_open: float | None = None,
+) -> bool:
+    """True when this wait sits out until the open, or is a 30-minute park."""
+    try:
+        until = float(until_s)
+    except (TypeError, ValueError):
+        return False
+    if until != until or until <= 0:
+        return False
+    if until + 1.0 >= float(REMAINING_TO_BELL_S):
+        return True
+    try:
+        bell = float(minutes_to_open) * 60.0
+    except (TypeError, ValueError):
+        return False
+    if bell != bell or bell <= 0:
+        return False
+    return until + 1.0 >= bell
+
+
+def start_looks_now(
+    alarm: GrokAlarm | None = None,
+    *,
+    minutes_to_open: float | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Operator Start / AUTOSTART thinks now when a remaining-to-bell park is up.
+
+    Premarket stay-up looks through to the bell. Overnight closed parks stand.
+    A leftover RTH clock still stands so a restart does not burn a look.
     """
-    sess = str(session or "").lower()
+    al = alarm or load_alarm()
+    if not al.wake_at or al.due(now=now):
+        return True
     mins = minutes_to_open
     if mins is None:
-        mins = et_minutes_to_rth_open()
-        if mins is not None and not sess:
-            sess = "premarket"
-    if sess not in ("premarket", "closed"):
-        return None
+        mins = et_minutes_to_rth_open(now=now)
     if mins is None:
-        return None
+        return False
     try:
         mins = float(mins)
     except (TypeError, ValueError):
-        return None
-    if mins != mins or mins <= 0:
-        return None
-    try:
-        from abcxauto.lab_playbook import live_card_needs_session
-
-        if not live_card_needs_session():
-            return None
-    except Exception:
-        return None
-    return max(min_look_s(), mins * 60.0 + float(OPEN_PRINT_S))
+        return False
+    if mins > PREMARKET_MINUTES_TO_OPEN:
+        return False
+    return remaining_to_bell_s(al.seconds_until(now=now), mins)
 
 
 def minutes_to_open_from_snap(snap: dict[str, Any] | None) -> float | None:
@@ -353,6 +379,32 @@ def clamp_next_look_s(raw: Any) -> float | None:
     return max(min_look_s(), min(float(NEXT_LOOK_S_MAX), sec))
 
 
+def _stay_up_look_cap_s(
+    session: str,
+    minutes_to_open: float | None,
+) -> float | None:
+    """Premarket cadence cap. Card hints may tighten this, not stretch to the bell."""
+    sess = str(session or "").lower()
+    mins = None
+    if minutes_to_open is not None:
+        try:
+            mins = float(minutes_to_open)
+        except (TypeError, ValueError):
+            mins = None
+        if mins is not None and mins != mins:
+            mins = None
+    last_hour = (
+        mins is not None
+        and 0 < mins <= 60
+        and sess in ("premarket", "closed", "postmarket")
+    )
+    if last_hour:
+        return float(LAST_HOUR_LOOK_S)
+    if sess == "premarket":
+        return float(DEFAULT_LOOK_HUNT_S)
+    return None
+
+
 def clerk_look_s(
     *,
     flat: bool | None = None,
@@ -360,7 +412,12 @@ def clerk_look_s(
     minutes_to_open: float | None = None,
     next_look_s: float | None = None,
 ) -> float:
-    """Clerk next-look seconds. Playbook card may tighten or stretch inside the floor."""
+    """Clerk next-look seconds. Playbook card may tighten or stretch inside the floor.
+
+    Session-card opening-print wait is a send gate, not this clock. Premarket
+    stays on hunt / last-hour cadence. Overnight closed still parks to the
+    last hour before the open.
+    """
     sess = str(session or "").lower()
     mins = minutes_to_open
     if mins is not None:
@@ -375,9 +432,9 @@ def clerk_look_s(
         and 0 < mins <= 60
         and sess in ("premarket", "closed", "postmarket")
     )
-    open_s = session_card_open_s(sess, mins)
-    if open_s is not None:
-        return open_s
+    if sess in ("closed", "postmarket") and mins is not None and mins > 60:
+        return max(min_look_s(), (mins - 60.0) * 60.0)
+    cap = _stay_up_look_cap_s(sess, mins)
     if next_look_s is None:
         try:
             from abcxauto.lab_playbook import playbook_next_look_s
@@ -390,6 +447,8 @@ def clerk_look_s(
         if clamped is not None:
             if sess == "regular" and flat is False:
                 return max(clamped, float(DEFAULT_LOOK_OPEN_S))
+            if cap is not None:
+                return max(min_look_s(), min(clamped, cap))
             return clamped
     raw = (os.environ.get("ABCXAUTO_DEFAULT_LOOK_S") or "").strip()
     if raw:
@@ -398,8 +457,6 @@ def clerk_look_s(
         return max(min_look_s(), float(LAST_HOUR_LOOK_S))
     if sess == "regular" and flat is False:
         return max(min_look_s(), float(DEFAULT_LOOK_OPEN_S))
-    if sess in ("closed", "postmarket") and mins is not None and mins > 60:
-        return max(min_look_s(), (mins - 60.0) * 60.0)
     if sess in ("regular", "premarket") and flat is not False:
         return max(min_look_s(), float(DEFAULT_LOOK_HUNT_S))
     return default_look_s(flat=flat, session=session)
@@ -423,17 +480,14 @@ def ensure_next_look(
     sess = str(session or "").lower()
     mins = minutes_to_open
     if mins is None:
-        mins = et_minutes_to_rth_open()
-        if mins is not None and not sess:
-            sess = "premarket"
+        inferred, mins = infer_session_before_open()
+        if not sess:
+            sess = inferred
     alarm = load_alarm()
     if alarm.wake_at and not alarm.due() and not replace:
-        # A clock from an earlier look that has not come round yet still stands
-        # unless it would think before the bell — or skip the open entirely —
-        # on a card that needs today's opening low.
-        nudged = _nudge_session_card_wake(alarm, sess, mins)
-        if nudged is not None:
-            return nudged
+        pulled = _pull_in_stay_up_wake(alarm, sess, mins)
+        if pulled is not None:
+            return pulled
         return alarm
     return set_wake(
         wake_in_s=clerk_look_s(
@@ -446,26 +500,27 @@ def ensure_next_look(
     )
 
 
-def _nudge_session_card_wake(
+def _pull_in_stay_up_wake(
     alarm: GrokAlarm,
     session: str,
     minutes_to_open: float | None,
 ) -> GrokAlarm | None:
-    open_s = session_card_open_s(session, minutes_to_open)
-    if open_s is None:
+    """A remaining-to-bell clock cannot park premarket. Overnight closed stands."""
+    sess = str(session or "").lower()
+    if sess not in ("premarket",):
         return None
     until = alarm.seconds_until()
-    if until is None:
+    if not remaining_to_bell_s(until, minutes_to_open):
         return None
-    try:
-        bell = float(minutes_to_open) * 60.0
-    except (TypeError, ValueError):
-        bell = None
-    if bell is not None and until + 1.0 < bell:
-        return set_wake(wake_in_s=open_s, session=session)
-    if until > open_s + 120.0:
-        return set_wake(wake_in_s=open_s, session=session)
-    return None
+    return set_wake(
+        wake_in_s=clerk_look_s(
+            session=sess,
+            minutes_to_open=minutes_to_open,
+            flat=True,
+        ),
+        session=sess,
+        flat=True,
+    )
 
 
 def _clean_wake_if(wake_if: list[str] | str | None) -> list[str]:

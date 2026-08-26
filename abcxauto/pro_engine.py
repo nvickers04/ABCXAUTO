@@ -320,12 +320,14 @@ class ProEngine:
         self._think_parked = False
         self._resume_think = True
         try:
-            from abcxauto.wake_bus import load_alarm
+            from abcxauto.wake_bus import load_alarm, start_looks_now
 
             alarm = load_alarm()
-            if alarm.wake_at and not alarm.due():
-                # Fresh launch: honor Grok's leftover park. Operator Start
-                # on a live worker still pokes (already=True returned above).
+            if alarm.wake_at and not alarm.due() and not start_looks_now(alarm):
+                # Fresh launch: honor Grok's leftover park, except a
+                # remaining-to-bell / session-card clock — that is a send
+                # gate, not a think shutdown. Operator Start on a live
+                # worker still pokes (already=True returned above).
                 self._resume_think = False
                 self.state.status = "Waiting"
         except Exception:
