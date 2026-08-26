@@ -1899,6 +1899,23 @@ def test_run_sheet_follows_parent_tool_order_instead_of_rescan():
         {"stop_price": 88.0, "target_price": 93.0},
         {"low": 88.0, "today": True},
     ) == ""
+    from abcxauto.lab_playbook import session_card_open_print_error
+
+    assert session_card_open_print_error(
+        {"card": "flush bounce"},
+        None,
+        market_session="premarket",
+    ) == "session card needs today's opening print"
+    assert session_card_open_print_error(
+        {"card": "flush bounce"},
+        {"today": True, "open": 90.0, "low": 88.0},
+        market_session="premarket",
+    ) == ""
+    assert session_card_open_print_error(
+        {"card": "flush bounce"},
+        None,
+        market_session="regular",
+    ) == ""
 
     from abcxauto.lab_playbook import lab_wake_bit, live_card_scan_arenas, live_card_scan_screens
 

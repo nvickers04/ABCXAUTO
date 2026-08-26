@@ -3584,6 +3584,38 @@ def live_card_session_error(
     return ""
 
 
+def session_card_open_print_error(
+    params: dict[str, Any] | None,
+    session: Any = None,
+    book: dict[str, Any] | None = None,
+    *,
+    market_session: str = "",
+) -> str:
+    """Refuse session-card new risk until today's RTH open print exists.
+
+    Tape fact, not card prose. Hold / gap / candles / sitting on the low
+    still cannot invent a refuse. ``live_card_session_error`` stays a no-op.
+    """
+    p = params if isinstance(params, dict) else {}
+    try:
+        if not live_card_needs_session(book, card=p.get("card")):
+            return ""
+    except Exception:
+        return ""
+    try:
+        from abcxauto.structure_grade import session_usable
+    except Exception:
+        def session_usable(s: Any) -> bool:
+            return isinstance(s, dict) and s.get("today") is True
+    if session_usable(session):
+        return ""
+    sess = str(market_session or "").lower()
+    prior_day = isinstance(session, dict) and session.get("today") is False
+    if sess == "regular" and not prior_day:
+        return ""
+    return "session card needs today's opening print"
+
+
 def _live_card_prose(
     book: dict[str, Any] | None,
     keys: tuple[str, ...],

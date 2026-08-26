@@ -343,20 +343,9 @@ def test_clerk_look_s_honors_card_hint(monkeypatch):
     assert clerk_look_s(flat=True, session="regular", next_look_s=300) == 300
 
 
-def test_clerk_look_s_last_hour_to_open(monkeypatch):
-    from abcxauto.wake_bus import LAST_HOUR_LOOK_S, clerk_look_s
-
-    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
-    assert clerk_look_s(
-        flat=True, session="premarket", minutes_to_open=45
-    ) == LAST_HOUR_LOOK_S
-
-
-def test_clerk_look_s_session_card_wakes_at_the_open(monkeypatch):
+def _save_session_card():
     from abcxauto.lab_playbook import clamp_update, save_lab
-    from abcxauto.wake_bus import OPEN_PRINT_S, clerk_look_s, min_look_s
 
-    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
     update = clamp_update(
         {
             "types": {
@@ -377,46 +366,58 @@ def test_clerk_look_s_session_card_wakes_at_the_open(monkeypatch):
     )
     assert update is not None
     save_lab(update)
+
+
+def test_clerk_look_s_last_hour_to_open(monkeypatch):
+    from abcxauto.wake_bus import LAST_HOUR_LOOK_S, clerk_look_s
+
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    assert clerk_look_s(
+        flat=True, session="premarket", minutes_to_open=45
+    ) == LAST_HOUR_LOOK_S
+
+
+def test_clerk_look_s_session_card_does_not_park_until_the_open(monkeypatch):
+    """Gap cards cannot sit the think loop until 9:30. Hunt / last-hour cadence."""
+    from abcxauto.wake_bus import DEFAULT_LOOK_HUNT_S, LAST_HOUR_LOOK_S, clerk_look_s
+
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    _save_session_card()
     assert clerk_look_s(
         flat=True,
         session="premarket",
         minutes_to_open=32,
         next_look_s=1800,
-    ) == max(min_look_s(), 32 * 60.0 + OPEN_PRINT_S)
+    ) == LAST_HOUR_LOOK_S
+    assert clerk_look_s(
+        flat=True,
+        session="premarket",
+        minutes_to_open=90,
+        next_look_s=1800,
+    ) == DEFAULT_LOOK_HUNT_S
 
 
-def test_ensure_next_look_nudges_a_premarket_undershoot(tmp_path, monkeypatch):
+def test_clerk_look_s_overnight_closed_still_parks(monkeypatch):
+    from abcxauto.wake_bus import clerk_look_s
+
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    _save_session_card()
+    assert clerk_look_s(
+        flat=True,
+        session="closed",
+        minutes_to_open=5 * 60,
+        next_look_s=1800,
+    ) == (5 * 60 - 60.0) * 60.0
+
+
+def test_ensure_next_look_keeps_a_short_premarket_clock(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    from abcxauto.lab_playbook import clamp_update, save_lab
-    from abcxauto.wake_bus import (
-        OPEN_PRINT_S,
-        GrokAlarm,
-        ensure_next_look,
-        save_alarm,
-    )
+    from abcxauto.wake_bus import GrokAlarm, ensure_next_look, save_alarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "when_on": "hold above the opening low",
-                            "shape": "stop under opening low",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
+    _save_session_card()
     soon = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
     save_alarm(GrokAlarm(wake_at=soon, set_at=soon))
     alarm = ensure_next_look(
@@ -426,7 +427,99 @@ def test_ensure_next_look_nudges_a_premarket_undershoot(tmp_path, monkeypatch):
     )
     until = alarm.seconds_until()
     assert until is not None
-    assert until >= 5 * 60.0 + OPEN_PRINT_S - 2
+    assert until < 90
+
+
+def test_ensure_next_look_pulls_in_a_remaining_to_bell_park(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.wake_bus import (
+        LAST_HOUR_LOOK_S,
+        GrokAlarm,
+        ensure_next_look,
+        save_alarm,
+    )
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    _save_session_card()
+    bell = (datetime.now(timezone.utc) + timedelta(minutes=32)).isoformat()
+    save_alarm(GrokAlarm(wake_at=bell, set_at=bell))
+    alarm = ensure_next_look(
+        session="premarket",
+        flat=True,
+        minutes_to_open=32,
+    )
+    until = alarm.seconds_until()
+    assert until is not None
+    assert until <= LAST_HOUR_LOOK_S + 2
+    assert until < 10 * 60
+
+
+def test_remaining_to_bell_and_start_looks_now(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.wake_bus import (
+        GrokAlarm,
+        remaining_to_bell_s,
+        save_alarm,
+        start_looks_now,
+    )
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    assert remaining_to_bell_s(32 * 60, 32) is True
+    assert remaining_to_bell_s(90, 32) is False
+    assert remaining_to_bell_s(30 * 60, 90) is True
+    assert remaining_to_bell_s(600, 90) is False
+
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+    save_alarm(GrokAlarm(wake_at=soon, set_at=soon))
+    assert start_looks_now(minutes_to_open=32) is False
+    bell = (datetime.now(timezone.utc) + timedelta(minutes=32)).isoformat()
+    save_alarm(GrokAlarm(wake_at=bell, set_at=bell))
+    assert start_looks_now(minutes_to_open=32) is True
+    assert start_looks_now(minutes_to_open=6 * 60) is False
+
+
+def test_infer_session_before_open_splits_overnight_from_premarket():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from abcxauto.wake_bus import infer_session_before_open
+
+    et = ZoneInfo("America/New_York")
+    sess, mins = infer_session_before_open(
+        now=datetime(2026, 8, 26, 3, 0, tzinfo=et)
+    )
+    assert sess == "closed"
+    assert mins is not None and mins > 5.5 * 60
+    sess, mins = infer_session_before_open(
+        now=datetime(2026, 8, 26, 8, 32, tzinfo=et)
+    )
+    assert sess == "premarket"
+    assert mins is not None and 50 < mins < 65
+
+
+def test_begin_run_premarket_session_cards_seed_a_short_look(tmp_path, monkeypatch):
+    from abcxauto import think_stream as ts
+    from abcxauto.wake_bus import LAST_HOUR_LOOK_S, load_alarm
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    monkeypatch.setattr(
+        "abcxauto.wake_bus.et_minutes_to_rth_open", lambda **_k: 58.0
+    )
+    _save_session_card()
+    ts._run = {}
+    ts.begin_run()
+    until = load_alarm().seconds_until()
+    assert until is not None
+    assert until <= LAST_HOUR_LOOK_S + 2
+    assert until < 15 * 60
 
 
 def test_clamp_next_look_s_floors_and_caps():
