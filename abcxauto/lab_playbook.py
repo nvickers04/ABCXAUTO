@@ -17,6 +17,12 @@ One tree, two layers, both written by Grok::
 * the **branches** are that type's ``cards``: disposable hypotheses, each
   carrying its thesis, the evidence that produced it, and the falsification it
   declares for itself (``retire_if``). Numerous, tested, retired.
+* **locked OPEN starters** fill a trunk that has no live hypothesis so the book
+  is not three flush cards plus empty slots. Seeded on lab load/save only.
+  Live snapshots are never seeded. ``locked`` is clerk seed identity — not a
+  hunt floor, not a send stamp, not a freeze. Grok rewrites the same name;
+  a named write drops ``locked`` so the upgrade can hunt. Virgin starters stay
+  in the ``playbook()`` catalog and off the run sheet.
 
 A card's position in the tree *is* its ticket, so a winning card sits inside
 the type entry it is supposed to improve â€” promoting what it learned is a move
@@ -80,7 +86,8 @@ _TYPE_SCHEMA_ECHO = (
 )
 # Cards are the book. A card lives *under* its type, so the parent key is the
 # ticket and identity is (type, name). Shape lives in ``_norm_card``.
-_MAX_CARDS = 24
+# Room for Grok's live cards plus one locked starter per OPEN type.
+_MAX_CARDS = 48
 _MAX_CARDS_PER_TYPE = 12
 # Legacy cards that named no type at all. Never dropped, never sendable (they
 # have no ticket to send), surfaced as owing a parent.
@@ -130,6 +137,400 @@ PLAYBOOK_TYPE_KEYS = (
     "covered_call",
     "cash_secured_put",
 )
+# Entry trunks that should hold a hypothesis. Exits, knobs, and
+# defined_risk_only rejects are not slots. buy_option is skip-only.
+OPEN_PLAYBOOK_TYPES = (
+    "market_bracket",
+    "bracket",
+    "vertical_spread",
+    "iron_condor",
+    "iron_butterfly",
+    "butterfly",
+    "calendar_spread",
+    "diagonal_spread",
+    "straddle",
+    "strangle",
+    "covered_call",
+    "cash_secured_put",
+    "collar",
+    "protective_put",
+)
+# Grok's live flush book and retired skip cards. Seed never replaces these.
+PROTECTED_CARD_NAMES = frozenset(
+    {
+        "mega-cap earnings-flush bounce",
+        "large-cap 3pct gap hold",
+        "news-miss large-cap flush",
+        "levered-crypto and micro gap chase",
+        "naked / short-dated option spray",
+        "defined-risk flush debit",
+    }
+)
+_STK_HUNT = ("scan", "news", "quote", "candles", "send")
+_OPT_HUNT = ("scan", "news", "option_chain", "option_facts", "option_quote", "send")
+_OVERLAY_HUNT = ("book", "quote", "option_chain", "option_facts", "send")
+# One short locked starter per OPEN type. Structure, not a ticker.
+# Seeded on lab load/save when the trunk has no live hypothesis (and, for
+# vertical_spread, when the generic debit/credit card is missing).
+OPEN_TYPE_STARTERS: dict[str, dict[str, Any]] = {
+    "market_bracket": {
+        "name": "generic STK market bracket",
+        "thesis": (
+            "Defined-risk stock structure: marketable parent with resting "
+            "stop and target children. Risk is stop distance times quantity, "
+            "not a narrative."
+        ),
+        "when_on": (
+            "Liquid large/mega name on the live IBKR book where a stop can "
+            "rest on the wrong side of last. No thin or levered chase."
+        ),
+        "scan": (
+            "most_active plus top losers or gainers; large/mega only; skip "
+            "levered products and illiquid names"
+        ),
+        "shape": (
+            "market_bracket: symbol, direction, quantity, stop_price, "
+            "target_price. LONG or SHORT (cash-only rejects SHORT stock). "
+            "Children rest at IBKR. Close: child stop/target fill, "
+            "modify_stop / modify_target, or an exit ticket. Defined risk = "
+            "|entry-stop| * qty."
+        ),
+        "invalidation": (
+            "Stop through the written level; wide live spread; unprotected "
+            "STK; do not move the stop away from risk."
+        ),
+        "tool_order": list(_STK_HUNT),
+    },
+    "bracket": {
+        "name": "limit-entry STK bracket",
+        "thesis": (
+            "Same defined-risk stock structure as a market bracket, but the "
+            "parent rests as a limit. Risk is still the stop, not the limit."
+        ),
+        "when_on": (
+            "Wanted price is away from last so a limit can rest. Liquid "
+            "large/mega. After fill, stop must still rest on the wrong side "
+            "of last."
+        ),
+        "scan": (
+            "most_active plus high or low open gap; large/mega; skip levered "
+            "and illiquid names"
+        ),
+        "shape": (
+            "bracket: symbol, direction, quantity, entry_price, stop_price, "
+            "target_price. Parent limit plus child stop/target. Cancel the "
+            "parent if it never fills. Close path same as market_bracket "
+            "children. cash-only rejects SHORT stock."
+        ),
+        "invalidation": (
+            "Limit hanging through the move; stop cannot rest; spread too "
+            "wide to define risk."
+        ),
+        "tool_order": list(_STK_HUNT),
+    },
+    "vertical_spread": {
+        "name": "defined-risk debit/credit vertical",
+        "thesis": (
+            "One expiry, same right, two strikes. Debit buys direction with "
+            "max loss = debit paid. Credit sells defined width. Not a name "
+            "list."
+        ),
+        "when_on": (
+            "Liquid optionable name, listed strikes, a width you can price. "
+            "Use debit for expansion or credit for crush — not both on one "
+            "ticket."
+        ),
+        "scan": (
+            "most_active optionable large/mega; option_chain then "
+            "option_facts on the two strikes, not a name dump"
+        ),
+        "shape": (
+            "vertical_spread: long_strike, short_strike, right, expiration, "
+            "quantity. Defined risk = width*100 minus credit, or debit paid. "
+            "Close: same strategy + closing_position + live limit_price "
+            "(one BAG). Never close_option a wing."
+        ),
+        "invalidation": (
+            "Unpriceable width, one-sided market, or a debit with the short "
+            "strike on the wrong side of the long."
+        ),
+        "tool_order": list(_OPT_HUNT),
+    },
+    "iron_condor": {
+        "name": "defined-risk iron condor",
+        "thesis": (
+            "Short a call spread and a put spread, same expiry, long wings "
+            "cap the loss. Collects if the name stays inside the shorts."
+        ),
+        "when_on": (
+            "Range-bound tape, no binary event into the body, both wings "
+            "listed and tight enough to define risk."
+        ),
+        "scan": (
+            "most_active optionable large/mega with two-sided listed wings; "
+            "option_facts on the four strikes, not a name dump"
+        ),
+        "shape": (
+            "iron_condor: put_long_strike < put_short_strike < "
+            "call_short_strike < call_long_strike, same expiration, "
+            "quantity. Defined risk = wing width minus credit. Close: same "
+            "strategy + closing_position + live limit_price (one BAG)."
+        ),
+        "invalidation": (
+            "A missing wing, a binary event into the body, or credit too "
+            "small versus width."
+        ),
+        "tool_order": list(_OPT_HUNT),
+    },
+    "iron_butterfly": {
+        "name": "defined-risk iron butterfly",
+        "thesis": (
+            "Short the ATM body both rights, long equidistant wings. Defined "
+            "at the wings; wants a pin, not a trend."
+        ),
+        "when_on": (
+            "Expected pin at a listed center, wings exist at that width, no "
+            "event that should blow through the body."
+        ),
+        "scan": (
+            "optionable large/mega; option_chain around ATM; option_facts on "
+            "center and wings"
+        ),
+        "shape": (
+            "iron_butterfly: center_strike, wing_width, expiration, "
+            "quantity. Defined risk = wing_width minus credit. Close: same "
+            "strategy + closing_position + live limit_price (one BAG)."
+        ),
+        "invalidation": (
+            "No listed wings at that width, center not the pin, or event "
+            "risk through the body."
+        ),
+        "tool_order": list(_OPT_HUNT),
+    },
+    "butterfly": {
+        "name": "defined-risk butterfly",
+        "thesis": (
+            "Long the wings, short twice the body, one right, one expiry. "
+            "Debit paid is max loss. Wants a pin at the body."
+        ),
+        "when_on": (
+            "A listed equal-width three-strike ladder on one right, a debit "
+            "you can define, pin thesis not a trend thesis."
+        ),
+        "scan": (
+            "optionable large/mega; option_chain for equal-width strikes; "
+            "option_facts on the three legs"
+        ),
+        "shape": (
+            "butterfly: lower_strike, middle_strike, upper_strike (equal "
+            "width), right, expiration, quantity. Defined risk = debit paid. "
+            "Close: same strategy + closing_position + live limit_price "
+            "(one BAG)."
+        ),
+        "invalidation": (
+            "Uneven width, missing body, or a debit that does not cap loss."
+        ),
+        "tool_order": list(_OPT_HUNT),
+    },
+    "calendar_spread": {
+        "name": "defined-risk calendar",
+        "thesis": (
+            "Same strike, two expiries, one right. Long the far, short the "
+            "near. Debit paid is defined risk. Harvests near-term decay "
+            "against the back month."
+        ),
+        "when_on": (
+            "Near expiry has decay to sell, far month listed, no blow-through "
+            "event that wrecks the term structure you just bought."
+        ),
+        "scan": (
+            "optionable large/mega; option_chain across two expiries at one "
+            "strike; option_facts on both legs"
+        ),
+        "shape": (
+            "calendar_spread: strike, near_expiration, far_expiration, "
+            "right, quantity. Defined risk = debit. Close: same strategy + "
+            "closing_position + live limit_price (one BAG)."
+        ),
+        "invalidation": (
+            "Far month missing, inverted debit you cannot define, or an "
+            "event that reprices the back month against you."
+        ),
+        "tool_order": list(_OPT_HUNT),
+    },
+    "diagonal_spread": {
+        "name": "defined-risk diagonal",
+        "thesis": (
+            "Different strike and expiry, one right. Long the far, short the "
+            "near. The debit (long far) keeps the structure closed-risk."
+        ),
+        "when_on": (
+            "Term structure plus a strike roll you can price; both legs "
+            "listed."
+        ),
+        "scan": (
+            "optionable large/mega; two-expiry chain; option_facts on near "
+            "and far strikes"
+        ),
+        "shape": (
+            "diagonal_spread: near_strike, far_strike, near_expiration, "
+            "far_expiration, right, quantity. Defined risk = debit paid "
+            "(do not naked-short the near). Close: same strategy + "
+            "closing_position + live limit_price (one BAG)."
+        ),
+        "invalidation": (
+            "Near short without a long far, unpriceable diagonal, or a "
+            "missing expiry."
+        ),
+        "tool_order": list(_OPT_HUNT),
+    },
+    "straddle": {
+        "name": "long defined-risk straddle",
+        "thesis": (
+            "Long both rights at one strike, one expiry. Debit paid is max "
+            "loss. Short straddles are a defined_risk_only reject."
+        ),
+        "when_on": (
+            "A move large enough to outrun the debit is plausible; listed "
+            "ATM; action=BUY only."
+        ),
+        "scan": (
+            "optionable large/mega around an event or a realized-vol vacuum; "
+            "option_facts on the ATM pair, not a name dump"
+        ),
+        "shape": (
+            "straddle: action=BUY, strike, expiration, quantity. Defined "
+            "risk = debit. Close: same strategy + closing_position + live "
+            "limit_price (one BAG). Never SELL to open."
+        ),
+        "invalidation": (
+            "action would be SELL; debit does not cap loss; one right missing."
+        ),
+        "tool_order": list(_OPT_HUNT),
+    },
+    "strangle": {
+        "name": "long defined-risk strangle",
+        "thesis": (
+            "Long an OTM put and an OTM call, same expiry. Debit paid is "
+            "max loss. Short strangles are a defined_risk_only reject."
+        ),
+        "when_on": (
+            "A wider move than the straddle debit, both OTMs listed, "
+            "action=BUY only."
+        ),
+        "scan": (
+            "optionable large/mega; option_chain for the OTM pair; "
+            "option_facts on both strikes"
+        ),
+        "shape": (
+            "strangle: action=BUY, put_strike, call_strike, expiration, "
+            "quantity. Defined risk = debit. Close: same strategy + "
+            "closing_position + live limit_price (one BAG). Never SELL to open."
+        ),
+        "invalidation": (
+            "action would be SELL; a missing wing; debit does not cap loss."
+        ),
+        "tool_order": list(_OPT_HUNT),
+    },
+    "covered_call": {
+        "name": "covered call on long shares",
+        "thesis": (
+            "Short a call against long shares already in the book. Upside "
+            "is capped at the strike; the share lot is the cover. Clerk "
+            "does not invent shares."
+        ),
+        "when_on": (
+            "Long STK/ETF already on the book, listed call, willing to cap "
+            "the lot. Not an uncovered short call."
+        ),
+        "scan": (
+            "book first for long share lots; then option_chain on those "
+            "names. Do not scan a fresh name to naked-short."
+        ),
+        "shape": (
+            "covered_call: expiration, strike, shares (shares required). "
+            "Cover must exist. Close: buy back the call or roll_option; "
+            "stock exit is a separate stock ticket."
+        ),
+        "invalidation": (
+            "No long shares, shares omitted, or a call that does not cover "
+            "the lot."
+        ),
+        "tool_order": list(_OVERLAY_HUNT),
+    },
+    "cash_secured_put": {
+        "name": "cash-secured put",
+        "thesis": (
+            "Short put with cash to buy the shares at strike. Defined risk "
+            "is assignment at the strike, not a naked short put."
+        ),
+        "when_on": (
+            "Cash to secure the strike, listed put, willing to own the name "
+            "at that strike."
+        ),
+        "scan": (
+            "most_active optionable large/mega you would own at the strike; "
+            "option_facts on the put, not a name dump"
+        ),
+        "shape": (
+            "cash_secured_put: expiration, strike, contracts. Defined risk "
+            "is strike * 100 * contracts. Close: buy back the put, or take "
+            "assignment and then a stock exit or protect."
+        ),
+        "invalidation": (
+            "Cash cannot secure the strike; put not listed; treating it as "
+            "naked premium."
+        ),
+        "tool_order": list(_OPT_HUNT),
+    },
+    "collar": {
+        "name": "collar on long shares",
+        "thesis": (
+            "Long shares already in the book, long a put and short a call. "
+            "Defined floor and cap. Clerk does not invent shares."
+        ),
+        "when_on": (
+            "Long STK/ETF on the book that needs a floor, listed put/call "
+            "pair, willing to cap the lot."
+        ),
+        "scan": (
+            "book first for long share lots; option_chain on those names only"
+        ),
+        "shape": (
+            "collar: expiration, put_strike, call_strike, shares (shares "
+            "required). Close the option pair (or roll); stock is a "
+            "separate ticket."
+        ),
+        "invalidation": (
+            "No long shares, shares omitted, or a missing put (that is just "
+            "a covered call)."
+        ),
+        "tool_order": list(_OVERLAY_HUNT),
+    },
+    "protective_put": {
+        "name": "protective put on long shares",
+        "thesis": (
+            "Long shares already in the book plus a long put. Floor is the "
+            "put strike; debit is the cost of the floor. Clerk does not "
+            "invent shares."
+        ),
+        "when_on": (
+            "Long STK/ETF on the book that needs an options floor; listed put."
+        ),
+        "scan": (
+            "book first for long share lots; option_chain on those names only"
+        ),
+        "shape": (
+            "protective_put: expiration, strike, shares (shares required). "
+            "Defined floor = put. Close the put; stock is a separate ticket."
+        ),
+        "invalidation": (
+            "No long shares, shares omitted, or a put that does not cover "
+            "the lot."
+        ),
+        "tool_order": list(_OVERLAY_HUNT),
+    },
+}
 _TYPE_META_KEYS = frozenset(
     {
         "mode",
@@ -250,6 +651,38 @@ def _drop_dead_lab_keys(state: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _named_card_in(cards: Any, name: str) -> dict[str, Any] | None:
+    want = str(name or "").strip().lower()
+    if not want:
+        return None
+    for card in cards or []:
+        if isinstance(card, dict) and str(card.get("name") or "").strip().lower() == want:
+            return card
+    return None
+
+
+def _upsert_named_card(
+    branch: list[Any],
+    row: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Replace a same-name card in place; append if the name is new."""
+    key = str(row.get("name") or "").strip().lower()
+    out: list[dict[str, Any]] = []
+    found = False
+    for card in branch:
+        if not isinstance(card, dict) or not card.get("name"):
+            continue
+        if str(card.get("name") or "").strip().lower() == key:
+            if not found:
+                out.append(row)
+                found = True
+            continue
+        out.append(card)
+    if not found:
+        out.append(row)
+    return out
+
+
 def _file_cards_into_tree(
     types: Any,
     cards: list[Any],
@@ -258,7 +691,8 @@ def _file_cards_into_tree(
 
     A card is never dropped for want of a stanza. One that names nothing
     sendable cannot be placed, so it lands in ``unfiled_cards`` where it is
-    still visible and still owed a parent.
+    still visible and still owed a parent. Same-name writes merge against the
+    stored card and keep siblings — a one-card flat list is not a wipe.
     """
     allowed = set(playbook_type_keys())
     tree: dict[str, Any] = {
@@ -266,11 +700,11 @@ def _file_cards_into_tree(
     } if isinstance(types, dict) else {}
     unfiled: list[dict[str, Any]] = []
     for raw in cards:
-        row = _norm_card(raw)
-        if row is None:
-            continue
         ticket = card_ticket_of(raw)
         if not ticket or ticket not in allowed:
+            row = _norm_card(raw)
+            if row is None:
+                continue
             if ticket:
                 # Unsendable, so it has no parent — but keep what it claimed so
                 # the cockpit can still say which ticket does not exist.
@@ -279,14 +713,15 @@ def _file_cards_into_tree(
                 unfiled.append(row)
             continue
         stanza = dict(tree.get(ticket) or {})
+        prev_card = _named_card_in(stanza.get("cards"), _incoming_card_name(raw))
+        row = _norm_card(raw, prev=prev_card)
+        if row is None:
+            continue
         branch = [
-            c
-            for c in (stanza.get("cards") or [])
-            if isinstance(c, dict)
-            and str(c.get("name") or "").lower() != row["name"].lower()
+            c for c in (stanza.get("cards") or [])
+            if isinstance(c, dict) and c.get("name")
         ]
-        branch.append(row)
-        stanza["cards"] = branch
+        stanza["cards"] = _upsert_named_card(branch, row)
         tree[ticket] = stanza
     return tree, unfiled
 
@@ -319,10 +754,12 @@ def _migrate_book(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_lab() -> dict[str, Any]:
-    return _migrate_book(_read(_lab_path()))
+    """Lab notebook. Missing OPEN types gain locked starters; live cards stay."""
+    return _seed_open_type_starters(_migrate_book(_read(_lab_path())))
 
 
 def load_live() -> dict[str, Any]:
+    """Promoted snapshot only. Never seed untested starters onto live."""
     return _migrate_book(_read(_live_path()))
 
 
@@ -347,6 +784,12 @@ def playbook_type_keys() -> tuple[str, ...]:
 
     skip = _SKIP_PLAYBOOK_TYPES | NOT_TICKETS
     return tuple(k for k in PLAYBOOK_TYPE_KEYS if k in ORDER_EXAMPLES and k not in skip)
+
+
+def open_playbook_types() -> tuple[str, ...]:
+    """Entry trunks that take a locked starter when they have no live card."""
+    allowed = set(playbook_type_keys())
+    return tuple(k for k in OPEN_PLAYBOOK_TYPES if k in allowed)
 
 
 def type_coverage(book: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -384,11 +827,11 @@ def type_coverage(book: dict[str, Any] | None = None) -> list[dict[str, Any]]:
 
 
 def empty_type_catalog() -> dict[str, Any]:
-    """No stanzas. A type exists in the book once Grok has learned something.
+    """No schema stanzas. Hypothesis cards seed via ``OPEN_TYPE_STARTERS``.
 
-    The old catalog seeded every sendable key with ``open_shape`` /
-    ``close_tp_sl`` copied out of ORDER_EXAMPLES, which is already in the
-    prompt. Seeding nothing is the fix.
+    The old catalog copied ``open_shape`` / ``close_tp_sl`` out of
+    ORDER_EXAMPLES. That stays empty. Locked OPEN-type starters are a
+    different path: ``_seed_open_type_starters`` on lab load/save.
     """
     return {}
 
@@ -464,9 +907,10 @@ def _walk_text(obj: Any) -> str:
 def _norm_type_row(row: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any]:
     """One trunk: learned execution plus its cards.
 
-    Schema echoes are dropped, never merged forward. ``cards`` is a full
-    replace when present and keeps the previous branch list when omitted, so
-    a note-only write does not silently prune the hypotheses under it.
+    Schema echoes are dropped, never merged forward. ``cards`` omitted keeps
+    the previous branch list. A non-empty ``cards`` list merges by name —
+    one upgraded card does not wipe siblings. ``cards: []`` is the explicit
+    clear of this type.
     """
     prev = prev if isinstance(prev, dict) else {}
     src = row if isinstance(row, dict) else {}
@@ -696,11 +1140,13 @@ def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any
     """One card. Its parent type is the ticket, so no ``ticket`` is stored.
 
     A card already on the tree keeps its declarations and gate fields when a
-    write omits them. ``cards`` is a full replace, so an evidence-only rewrite
-    used to delete the ``retire_if`` / ``when_on`` it did not restate: the clerk
-    then reported the card as owing a declaration, and the next look re-hunted
-    a gate that was still on disk until the wipe. Observations still replace
+    write omits them. Named writes merge, so an evidence-only rewrite must not
+    delete the ``retire_if`` / ``when_on`` it did not restate: the clerk then
+    reported the card as owing a declaration, and the next look re-hunted a
+    gate that was still on disk until the wipe. Observations still replace
     when Grok sends them; omitted fields persist until Grok changes them.
+    ``locked`` is clerk seed identity. Re-norm of a stored starter keeps it;
+    a named rewrite drops it so Grok's upgrade is not frozen off the hunt.
     """
     carried = prev if isinstance(prev, dict) else {}
     if isinstance(raw, str):
@@ -790,6 +1236,101 @@ def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any
             clamped = None
         if clamped is not None:
             out["next_look_s"] = clamped
+    order = _norm_recipe(raw.get("tool_order") or raw.get("default_tool_recipe"))
+    if not order:
+        order = _norm_recipe(
+            carried.get("tool_order") or carried.get("default_tool_recipe")
+        )
+    if order:
+        out["tool_order"] = order
+    # Pinning locked from ``carried`` froze upgrades off the hunt. Seed and
+    # re-norm of a stored starter pass no prev, so the flag on the row sticks.
+    # A named rewrite (prev is the stored card) drops it even if Grok copies
+    # locked=true — lock is not a freeze.
+    if prev is None and raw.get("locked") is True:
+        out["locked"] = True
+    return out
+
+
+def _card_name_key(card: Any) -> str:
+    if isinstance(card, dict):
+        return str(card.get("name") or "").strip().lower()
+    return ""
+
+
+def _non_retired_cards(cards: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for card in cards or []:
+        if not isinstance(card, dict) or not card.get("name"):
+            continue
+        if str(card.get("status") or "").strip().lower() == "retired":
+            continue
+        out.append(card)
+    return out
+
+
+def _starter_row(type_name: str) -> dict[str, Any] | None:
+    spec = OPEN_TYPE_STARTERS.get(type_name)
+    if not isinstance(spec, dict) or not spec.get("name"):
+        return None
+    row = _norm_card({**spec, "status": "testing", "locked": True})
+    return row
+
+
+def _seed_open_type_starters(state: dict[str, Any] | None) -> dict[str, Any]:
+    """Fill missing OPEN types with one locked starter. Never clobber live cards.
+
+    Lab only. A 3-type book gains the missing trunks on load; Grok's flush
+    cards and retired skip cards keep their fields. Empty ``{}`` stays empty.
+    Live snapshots must not call this.
+    """
+    if not isinstance(state, dict) or not state:
+        return state if isinstance(state, dict) else {}
+    types = state.get("types") if isinstance(state.get("types"), dict) else {}
+    if not types and not state.get("cards") and not state.get(UNFILED_KEY):
+        return state
+    tree: dict[str, Any] = {k: dict(v) for k, v in types.items() if isinstance(v, dict)}
+    changed = False
+    for type_name in open_playbook_types():
+        starter = _starter_row(type_name)
+        if starter is None:
+            continue
+        stanza = dict(tree.get(type_name) or {})
+        cards = [
+            c for c in (stanza.get("cards") or [])
+            if isinstance(c, dict) and c.get("name")
+        ]
+        names = {_card_name_key(c) for c in cards}
+        starter_key = _card_name_key(starter)
+        if starter_key in names:
+            rec = _norm_recipe(starter.get("tool_order"))
+            if rec and not stanza.get("tool_order"):
+                stanza["tool_order"] = rec
+                tree[type_name] = stanza
+                changed = True
+            continue
+        live = _non_retired_cards(cards)
+        # market_bracket already has the live flush book — keep it.
+        # vertical_spread keeps defined-risk flush debit and still needs the
+        # generic debit/credit starter when that name is missing.
+        if type_name == "market_bracket" and live:
+            continue
+        if type_name != "vertical_spread" and live:
+            continue
+        rec = _norm_recipe(starter.get("tool_order"))
+        if rec and not stanza.get("tool_order"):
+            stanza["tool_order"] = rec
+        cards = cards + [starter]
+        stanza["cards"] = cards[:_MAX_CARDS_PER_TYPE]
+        tree[type_name] = stanza
+        changed = True
+    if not changed:
+        return state
+    out = dict(state)
+    out["types"] = _clean_types(tree)
+    projected = _flat_card_projection(out)
+    if projected or "cards" in out:
+        out["cards"] = projected
     return out
 
 
@@ -854,30 +1395,51 @@ def _norm_cards(
     cap: int = _MAX_CARDS,
     prev: Any = None,
 ) -> list[dict[str, Any]]:
-    """Normalize one card list. Last write of a name wins within the list.
+    """Normalize one card list. Named writes merge; an empty list clears.
 
-    ``prev`` is the branch list already on the tree. A card that reappears is
-    merged against its stored self so declarations survive a partial rewrite;
-    a card left out of the list is still dropped, so retiring one still works.
+    ``prev`` is the branch list already on the tree. A name that reappears is
+    merged against its stored self so declarations survive a partial rewrite.
+    Names left out stay — the replace-list was the wipe that collapsed the
+    book to three flush cards. Drop a card with ``status=retired`` (stays on
+    the book, off the hunt) or ``cards: []`` (explicit clear of this type).
+    Last write of a name wins within the incoming list. Sibling order is
+    previous order, then new names.
     """
     if not isinstance(raw, list):
         return []
+    if not raw:
+        return []
     carried: dict[str, dict[str, Any]] = {}
+    prev_rows: list[dict[str, Any]] = []
     for row in prev or []:
         if isinstance(row, dict) and row.get("name"):
             carried[str(row["name"]).strip().lower()] = row
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
+            prev_rows.append(row)
+    incoming_by_key: dict[str, dict[str, Any]] = {}
+    incoming_order: list[str] = []
     for item in raw:
         row = _norm_card(item, prev=carried.get(_incoming_card_name(item).lower()))
         if not row:
             continue
         key = row["name"].lower()
+        if key not in incoming_by_key:
+            incoming_order.append(key)
+        incoming_by_key[key] = row
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in prev_rows:
+        key = str(row["name"]).strip().lower()
         if key in seen:
-            out = [r for r in out if r["name"].lower() != key]
-        else:
-            seen.add(key)
-        out.append(row)
+            continue
+        seen.add(key)
+        out.append(incoming_by_key[key] if key in incoming_by_key else row)
+        if len(out) >= cap:
+            return out
+    for key in incoming_order:
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(incoming_by_key[key])
         if len(out) >= cap:
             break
     return out
@@ -910,11 +1472,16 @@ def render_cards(cards: list[dict[str, Any]] | None, *, indent: str = "") -> str
         status = str(card.get("status") or "").strip()
         if status:
             head += f"  [{status}]"
+        if card.get("locked") is True:
+            head += "  [locked]"
         lines.append(head)
         for key in ("thesis", "when_on", "scan", "shape", "invalidation", "note"):
             val = str(card.get(key) or "").strip()
             if val:
                 lines.append(f"{indent}  {key}: {val}")
+        order = _norm_recipe(card.get("tool_order") or card.get("default_tool_recipe"))
+        if order:
+            lines.append(f"{indent}  tool_order: {', '.join(str(x) for x in order)}")
         look = card.get("next_look_s")
         if look is not None:
             lines.append(f"{indent}  next_look_s: {look}")
@@ -1181,21 +1748,27 @@ def _merge_type_catalog(
 
 
 def _cards_update(raw: dict[str, Any], prev: dict[str, Any]) -> dict[str, Any] | None:
-    """Incoming loose ``cards`` list refiled under the tree, or None if absent.
+    """Incoming loose ``cards`` list filed under the tree, or None if absent.
 
-    The flat list is the legacy write shape and still means *replace the whole
-    card set*, so it is applied to a tree stripped of its branches. Nested
-    ``types[*].cards`` then wins for any trunk that declared one.
+    A non-empty flat list updates those names and keeps every sibling and
+    every other trunk — the old strip-then-file is how a one-card write
+    wiped the book. ``cards: []`` is the explicit clear of every branch.
+    Nested ``types[*].cards`` then wins for any trunk that declared one.
     """
     if "cards" not in raw:
         return None
-    bare = {
-        name: {k: v for k, v in row.items() if k != "cards"}
-        for name, row in _clean_types(prev.get("types")).items()
-        if isinstance(row, dict)
-    }
-    tree, _unfiled = _file_cards_into_tree(bare, list(raw.get("cards") or []))
-    return tree
+    incoming = list(raw.get("cards") or [])
+    tree = _clean_types(prev.get("types"))
+    if not incoming:
+        bare = {
+            name: {k: v for k, v in row.items() if k != "cards"}
+            for name, row in tree.items()
+            if isinstance(row, dict)
+        }
+        filed, _unfiled = _file_cards_into_tree(bare, [])
+        return filed
+    filed, _unfiled = _file_cards_into_tree(tree, incoming)
+    return filed
 
 
 def gate_rejects(raw: Any) -> dict[str, str]:
@@ -1243,8 +1816,8 @@ def clamp_update(raw: Any) -> dict[str, Any] | None:
         return None
     prev = load_lab()
 
-    # A loose cards[] list replaces the whole card set; nested types[*].cards
-    # then wins for any trunk that named one.
+    # A loose cards[] list merges by name into the tree; nested types[*].cards
+    # then wins for any trunk that named one. cards: [] still clears.
     base = _cards_update(raw, prev)
     cards_given = base is not None
     staged = dict(prev)
@@ -1879,18 +2452,20 @@ def card_verdict(
     resolved_pnl = float(sc.get("resolved_pnl") or 0.0)
     losses = int(sc.get("resolved_losses") or 0)
     anchored = str(row.get("type") or row.get("ticket") or sc.get("type") or "")
+    locked = row.get("locked") is True
     out: dict[str, Any] = {
         "anchored_type": anchored or None,
         "status": status or None,
         "retire_if": dict(retire) or None,
         "declared_sample": sample or None,
-        "needs_retire_if": bool(row) and not retire,
-        "needs_thesis": bool(row) and not thesis,
+        "needs_retire_if": bool(row) and not retire and not locked,
+        "needs_thesis": bool(row) and not thesis and not locked,
         "sample_left": max(0, sample - resolved) if sample else None,
         "calibration": card_calibration(sc, row),
         "graduated": False,
         "tripped": False,
         "trip_reason": "",
+        "locked": locked,
     }
     out.update(card_waiting(sc, row))
     if status == "retired":
@@ -1946,6 +2521,7 @@ def card_facts(book: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         if not str(stamped.get("written_at") or "").strip():
             stamped["written_at"] = _card_clock({}, state)
         row.update(card_verdict(row, stamped))
+        row["locked"] = card.get("locked") is True
         stray = unresolved.get(str(card.get("name") or "").lower())
         if stray is not None:
             # Same name under two types: those sends belong to neither.
@@ -2176,6 +2752,7 @@ def _card_book_tuple(card: dict[str, Any]) -> tuple[Any, ...]:
         _norm_book_text(card.get("shape")),
         _norm_book_text(card.get("invalidation")),
         _norm_book_text(card.get("status")).lower(),
+        card.get("locked") is True,
         json.dumps(retire, sort_keys=True, default=str),
         _norm_book_text(card.get("expect_hit_rate")),
     )
@@ -2269,11 +2846,13 @@ def save_lab(
         except Exception:
             lots_at = list(prev.get("lots_at_write") or [])
     staged = _strip_projection(
-        _migrate_book(
-            {
-                **_strip_projection(prev),
-                **update,
-            }
+        _seed_open_type_starters(
+            _migrate_book(
+                {
+                    **_strip_projection(prev),
+                    **update,
+                }
+            )
         )
     )
     prev_rev = int(prev.get("revision") or 0)
@@ -2297,16 +2876,22 @@ def save_lab(
     if ledger and scorecard:
         ledger[-1] = _close_card(ledger[-1], scorecard, now)
     # A caller may still hand us the flat shape, so file ``update``'s cards into
-    # the tree. ``prev``'s derived list is dropped first: replaying it would
-    # resurrect a card this write just deleted.
-    state = _strip_projection(_migrate_book({
-        **_strip_projection(prev),
-        **update,
-        "revision": rev,
-        "written_at": now,
-        "promoted": False,
-        "lots_at_write": [str(x) for x in (lots_at or [])][:32],
-    }))
+    # the tree. ``prev``'s derived list is dropped first so a projection replay
+    # does not double-file. Named writes merge; they do not wipe siblings.
+    state = _strip_projection(
+        _seed_open_type_starters(
+            _migrate_book(
+                {
+                    **_strip_projection(prev),
+                    **update,
+                    "revision": rev,
+                    "written_at": now,
+                    "promoted": False,
+                    "lots_at_write": [str(x) for x in (lots_at or [])][:32],
+                }
+            )
+        )
+    )
     _ensure_card_clocks(state, prev, now)
     if scorecard:
         state["paper_score"] = _score_snap(scorecard)
@@ -2627,7 +3212,7 @@ def _hypothesis_clock(lab: dict[str, Any] | None) -> str:
     best = ""
     best_dt: datetime | None = None
     for _type_name, card in walk_cards(state):
-        if str(card.get("status") or "").strip().lower() == "retired":
+        if not _is_live_hypothesis(card):
             continue
         clock = str(card.get("written_at") or "").strip()
         dt = _parse_card_clock(clock)
@@ -2841,6 +3426,17 @@ def live_card_gap_floors(
     return out
 
 
+def _is_live_hypothesis(card: Any) -> bool:
+    """Grok's testing card. Virgin locked starters are catalog, not a hunt."""
+    if not isinstance(card, dict) or not card.get("name"):
+        return False
+    if str(card.get("status") or "testing").strip().lower() == "retired":
+        return False
+    if card.get("locked") is True:
+        return False
+    return True
+
+
 def _testing_card(
     book: dict[str, Any] | None,
     card_name: Any = None,
@@ -2852,7 +3448,7 @@ def _testing_card(
     for type_name, card in walk_cards(state):
         if not type_name:
             continue
-        if str(card.get("status") or "testing").strip().lower() == "retired":
+        if not _is_live_hypothesis(card):
             continue
         if first is None:
             first = card
@@ -2881,7 +3477,7 @@ def _walk_testing(
     for type_name, card in walk_cards(state):
         if not type_name:
             continue
-        if str(card.get("status") or "testing").strip().lower() == "retired":
+        if not _is_live_hypothesis(card):
             continue
         out.append((type_name, card))
     return out
@@ -2927,7 +3523,7 @@ def live_card_min_gap_pct(
     for type_name, row in walk_cards(state):
         if not type_name:
             continue
-        if str(row.get("status") or "testing").strip().lower() == "retired":
+        if not _is_live_hypothesis(row):
             continue
         gap = _card_min_gap_pct(row)
         if gap is not None:
@@ -2998,7 +3594,7 @@ def _live_card_prose(
     for type_name, card in walk_cards(state):
         if not type_name:
             continue
-        if str(card.get("status") or "testing").strip().lower() == "retired":
+        if not _is_live_hypothesis(card):
             continue
         bits = [str(card.get(key) or "") for key in keys]
         stanza = types.get(type_name) if isinstance(types.get(type_name), dict) else {}
@@ -3297,7 +3893,7 @@ def _live_card_scan_line(book: dict[str, Any] | None = None) -> str:
     for type_name, card in walk_cards(state):
         if not type_name:
             continue
-        if str(card.get("status") or "testing").strip().lower() == "retired":
+        if not _is_live_hypothesis(card):
             continue
         return str(card.get("scan") or "")
     return ""
@@ -3340,7 +3936,7 @@ def live_card_scan_screens(
         for type_name, card in walk_cards(state):
             if not type_name:
                 continue
-            if str(card.get("status") or "testing").strip().lower() == "retired":
+            if not _is_live_hypothesis(card):
                 continue
             line = str(card.get("scan") or "").strip()
             if line and line not in lines:
@@ -3762,10 +4358,11 @@ def playbook_run_sheets(
 ) -> list[dict[str, Any]]:
     """Live cards as a run sheet: parent tool_order and the next unused tool.
 
-    Facts only. Clerk does not invent a thesis. After last look already ran
-    scan/news, the next look starts at the first unread hunt tool. A screen
-    that already stamped live last/bid/ask counts as quote. Headlines already
-    nested on that screen count as news.
+    Facts only. Clerk does not invent a thesis. Locked OPEN starters are the
+    notebook catalog, not a parallel hunt — they stay off the run sheet.
+    After last look already ran scan/news, the next look starts at the first
+    unread hunt tool. A screen that already stamped live last/bid/ask counts
+    as quote. Headlines already nested on that screen count as news.
     """
     state = book if isinstance(book, dict) else load_lab()
     types = state.get("types") if isinstance(state.get("types"), dict) else {}
@@ -3785,12 +4382,15 @@ def playbook_run_sheets(
     for type_name, card in walk_cards(state):
         if not type_name:
             continue
-        status = str(card.get("status") or "testing").strip().lower()
-        if status == "retired":
+        if not _is_live_hypothesis(card):
             continue
+        status = str(card.get("status") or "testing").strip().lower()
         stanza = types.get(type_name) if isinstance(types.get(type_name), dict) else {}
         parent_order = _norm_recipe(
             stanza.get("tool_order") or stanza.get("default_tool_recipe")
+        )
+        card_order = _norm_recipe(
+            card.get("tool_order") or card.get("default_tool_recipe")
         )
         review = str(stanza.get("review") or card.get("review") or "").strip()
         if managing:
@@ -3798,7 +4398,7 @@ def playbook_run_sheets(
             # must not hide fills/quote/candles.
             order = list(_DEFAULT_MANAGE_ORDER)
         else:
-            order = parent_order or list(_DEFAULT_HUNT_ORDER)
+            order = card_order or parent_order or list(_DEFAULT_HUNT_ORDER)
         score = scored.get(card_key(type_name, card.get("name"))) or {}
         nxt = _next_in_order(order, done)
         if (
@@ -3922,8 +4522,12 @@ def lab_facts(
     The other half of ``strategy_scores``. That key reports what already traded
     and what it earned, so on its own the only breadth signal on this surface is
     the P&L of what ran — which reads as a reason to run it again. This reports
-    what has never been tried.     Counts and names only: which structure to test is
+    what has never been tried. Counts and names only: which structure to test is
     the notebook's business, not the clerk's.
+
+    Locked OPEN starters fill empty trunks so the book is not three flush
+    cards plus blank slots. They count in ``cards`` but are not the wake —
+    Grok's own hypotheses stay on ``cards_awaiting_first_trade``.
 
     Only entry structures count as untried. ``modify_stop`` and ``cancel_order``
     adjust risk that already exists, so listing them as gaps would invite a
@@ -3942,6 +4546,8 @@ def lab_facts(
         n = int(row.get("resolved") or 0)
         resolved_total += n
         if status == "retired":
+            continue
+        if row.get("locked") is True:
             continue
         wait_row = {
             "card": _card_label(row),

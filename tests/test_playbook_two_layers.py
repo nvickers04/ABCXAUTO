@@ -221,17 +221,34 @@ def test_a_rewritten_declaration_still_replaces_the_old_one():
     assert card["retire_if"] == {"sample": 3, "condition": "b"}
 
 
-def test_a_card_left_out_of_the_list_is_still_dropped():
-    """Merge is per re-sent card, so retiring by omission still works."""
+def test_a_named_write_keeps_siblings_left_out_of_the_list():
+    """The replace-list was the wipe. One-card write must not drop siblings."""
     _save(market_bracket=[_card("flush bounce"), _card("opening drive")])
-    _save(market_bracket=[_card("flush bounce")])
+    _save(market_bracket=[_card("flush bounce", thesis="flush into support still bounces")])
     names = [c["name"] for c in type_cards(load_lab()["types"], "market_bracket")]
-    assert names == ["flush bounce"]
+    assert names == ["flush bounce", "opening drive"]
+    by_name = {c["name"]: c for c in type_cards(load_lab()["types"], "market_bracket")}
+    assert by_name["flush bounce"]["thesis"] == "flush into support still bounces"
+    assert by_name["opening drive"]["thesis"] == "flush into support bounces"
+
+
+def test_status_retired_drops_a_card_from_the_hunt_not_by_omission():
+    _save(market_bracket=[_card("flush bounce"), _card("opening drive")])
+    _save(market_bracket=[_card("opening drive", status="retired")])
+    lab = load_lab()
+    by_name = {c["name"]: c for c in type_cards(lab["types"], "market_bracket")}
+    assert by_name["flush bounce"]["status"] == "testing"
+    assert by_name["opening drive"]["status"] == "retired"
+    from abcxauto.lab_playbook import playbook_run_sheets
+
+    assert [row["card"] for row in playbook_run_sheets(lab, flat=True)] == [
+        "flush bounce"
+    ]
 
 
 def test_lab_facts_reports_what_is_untried_not_only_what_scored():
     """strategy_scores says what ran; this says what never has."""
-    from abcxauto.lab_playbook import lab_facts, playbook_payload
+    from abcxauto.lab_playbook import lab_facts, open_playbook_types, playbook_payload
 
     _save(
         market_bracket={"cards": [_card("flush bounce"), _card("opening drive")]},
@@ -239,21 +256,21 @@ def test_lab_facts_reports_what_is_untried_not_only_what_scored():
         vertical_spread={"gotchas": "BAG close is one ticket"},
     )
     facts = lab_facts(load_lab())
-    assert facts["cards"] == {"testing": 2, "working": 0, "retired": 1}
+    assert facts["cards"]["testing"] >= 2
+    assert facts["cards"]["retired"] == 1
     assert facts["resolved_trades"] == 0
     awaiting = {r["card"]: r for r in facts["cards_awaiting_first_trade"]}
-    assert set(awaiting) == {
-        "flush bounce [market_bracket]",
-        "opening drive [market_bracket]",
-    }
+    assert "flush bounce [market_bracket]" in awaiting
+    assert "opening drive [market_bracket]" in awaiting
     for row in awaiting.values():
         assert row["sends"] == 0
         assert row["days"] is not None
-    assert facts["trunks_with_cards"] == ["market_bracket", "buy_option"]
+    assert "market_bracket" in facts["trunks_with_cards"]
+    assert "buy_option" in facts["trunks_with_cards"]
     untried = facts["entry_trunks_untried"]
-    # A trunk holding only a learning still carries no hypothesis.
-    assert "vertical_spread" in untried
-    assert "iron_condor" in untried
+    # OPEN types get a locked starter — they are no longer empty slots.
+    for name in open_playbook_types():
+        assert name not in untried, name
     assert "market_bracket" not in untried
     # Management trunks are not gaps: they adjust risk that already exists, so
     # "untried" must not invite a hypothesis about cancelling an order.
@@ -271,7 +288,6 @@ def test_lab_facts_reports_what_is_untried_not_only_what_scored():
     assert "0sends" in bit
     # A live card under test is the wake — untried trunks stay on playbook().
     assert "untried=" not in bit
-    assert facts["entry_trunks_untried"]
 
 
 def test_playbook_clip_keeps_lab_ahead_of_the_essay():
@@ -292,11 +308,22 @@ def test_playbook_clip_keeps_lab_ahead_of_the_essay():
     parsed = json.loads(wide)
     assert parsed["cards"][0]["name"] == "flush bounce"
     assert "TYPE market_bracket" in parsed["tree"]
+    tight = json.loads(_clip(raw, max_chars=24_000))
+    names = {c["name"] for c in (tight.get("cards") or [])}
+    assert "flush bounce" in names
+    from abcxauto.lab_playbook import OPEN_TYPE_STARTERS
+
+    assert OPEN_TYPE_STARTERS["iron_condor"]["name"] in names
 
 
-def test_type_coverage_lists_every_trunk_without_seeding_one():
-    """Operator sees all sendable types; the book still stores only what Grok wrote."""
-    from abcxauto.lab_playbook import playbook_type_keys, type_coverage
+def test_type_coverage_lists_every_trunk_without_seeding_schema():
+    """Operator sees all sendable types. OPEN trunks get a hypothesis card, not schema."""
+    from abcxauto.lab_playbook import (
+        open_playbook_types,
+        playbook_type_keys,
+        type_coverage,
+        type_schema_echo_keys,
+    )
 
     _save(
         market_bracket={
@@ -314,20 +341,19 @@ def test_type_coverage_lists_every_trunk_without_seeding_one():
     assert mb["cards"] == 1
     assert "gotchas" in mb["learned"]
 
-    # A learning with no card still earns the trunk; a list field counts.
     vs = rows["vertical_spread"]
     assert vs["touched"] is True
-    assert vs["cards"] == 0
-    assert vs["learned"] == ["tool_order"]
+    assert vs["cards"] >= 1
+    assert "tool_order" in vs["learned"]
 
-    untouched = [k for k, r in rows.items() if not r["touched"]]
-    assert "iron_condor" in untouched
-    assert rows["iron_condor"]["cards"] == 0
-    assert rows["iron_condor"]["learned"] == []
+    for name in open_playbook_types():
+        assert rows[name]["cards"] >= 1, name
+        assert rows[name]["touched"] is True
 
-    # The view is derived. Nothing seeded an empty stanza onto disk.
-    assert set(lab["types"]) == {"market_bracket", "vertical_spread"}
-    assert "iron_condor" not in json.dumps(lab)
+    # Schema echoes stay out. Hypothesis cards are not ORDER EXAMPLES copies.
+    assert type_schema_echo_keys(lab["types"]) == []
+    assert "open_shape" not in json.dumps(lab)
+    assert "close_tp_sl" not in json.dumps(lab)
 
 
 def test_clerk_never_writes_order_examples_into_the_type_layer():
@@ -338,8 +364,7 @@ def test_clerk_never_writes_order_examples_into_the_type_layer():
     assert empty_type_catalog() == {}
     save_lab(clamp_update({"types": {"bracket": {"gotchas": "limit entry can hang"}}}))
     types = load_lab()["types"]
-    # Only what Grok touched, and no key derived from the ticket schema.
-    assert list(types) == ["bracket"]
+    assert types["bracket"]["gotchas"] == "limit entry can hang"
     assert type_schema_echo_keys(types) == []
     blob = json.dumps(types)
     for key in ORDER_EXAMPLES["bracket"]:
@@ -365,9 +390,11 @@ def test_a_note_only_write_does_not_prune_the_cards_under_that_type():
     assert [c["name"] for c in type_cards(lab["types"], "market_bracket")] == [
         "flush bounce"
     ]
-    # An explicit empty list is still how a type's cards are dropped.
+    # An explicit empty list drops Grok's cards; the locked OPEN starter returns.
     save_lab(clamp_update(_book(market_bracket={"cards": []})))
-    assert type_cards(load_lab()["types"], "market_bracket") == []
+    names = [c["name"] for c in type_cards(load_lab()["types"], "market_bracket")]
+    assert "flush bounce" not in names
+    assert names == ["generic STK market bracket"]
 
 
 # --- the tree: cards branch underneath their order type ----------------------
@@ -383,22 +410,24 @@ def test_cards_branch_under_their_order_type():
         "flush bounce",
         "opening-range continuation",
     ]
-    assert [c["name"] for c in type_cards(lab["types"], "vertical_spread")] == [
-        "post-earnings IV crush"
-    ]
-    assert [t for t, _c in walk_cards(lab)] == [
-        "market_bracket",
-        "market_bracket",
-        "vertical_spread",
-    ]
+    vs_names = [c["name"] for c in type_cards(lab["types"], "vertical_spread")]
+    assert vs_names[0] == "post-earnings IV crush"
+    assert "defined-risk debit/credit vertical" in vs_names
+    pairs = [t for t, _c in walk_cards(lab)]
+    assert pairs.count("market_bracket") == 2
+    assert "vertical_spread" in pairs
 
 
 def test_the_parent_type_is_the_ticket():
     """Nothing stores a ticket; the read-side projection stamps the parent on."""
     _save(vertical_spread=[_card("post-earnings IV crush")])
     stored = type_cards(load_lab()["types"], "vertical_spread")[0]
+    assert stored["name"] == "post-earnings IV crush"
     assert "ticket" not in stored
-    flat = load_lab()["cards"]
+    flat = [
+        c for c in load_lab()["cards"]
+        if c.get("name") == "post-earnings IV crush"
+    ]
     assert flat[0]["ticket"] == "vertical_spread"
     assert flat[0]["type"] == "vertical_spread"
 
@@ -447,10 +476,8 @@ def test_two_types_can_hold_the_same_card_name():
         vertical_spread=[_card("earnings flush")],
     )
     pairs = [(t, c["name"]) for t, c in walk_cards(load_lab())]
-    assert pairs == [
-        ("market_bracket", "earnings flush"),
-        ("vertical_spread", "earnings flush"),
-    ]
+    assert ("market_bracket", "earnings flush") in pairs
+    assert ("vertical_spread", "earnings flush") in pairs
 
 
 # --- cards carry thesis, evidence, and their own falsification ----------------
@@ -975,7 +1002,7 @@ def test_a_legacy_name_only_row_is_attributed_to_neither_twin(monkeypatch):
             )
         ]
     )
-    facts = card_facts()
+    facts = [r for r in card_facts() if r.get("card") == "earnings flush"]
     assert [r["realized_pnl"] for r in facts] == [0.0, 0.0]
     # Not silently dropped either — both candidates are told it is unattributed.
     assert [r["ambiguous_sends"] for r in facts] == [1, 1]
@@ -1584,7 +1611,7 @@ def test_migration_never_drops_a_card_it_cannot_file():
     assert lab["unfiled_cards"][0]["note"] == "keep me"
     # It is visible in the render and in the scores. Unfiled is not a send gate.
     assert "UNFILED" in notebook_text(lab)
-    assert {r["card"] for r in card_facts(lab)} == {"filed", "homeless"}
+    assert {"filed", "homeless"} <= {r["card"] for r in card_facts(lab)}
     assert new_risk_card_error("homeless") == ""
 
 
@@ -1607,8 +1634,15 @@ def test_legacy_type_schema_echo_is_dropped_on_read():
         },
     )
     types = load_lab()["types"]
-    assert types["market_bracket"] == {"gotchas": "the one line worth keeping"}
+    assert types["market_bracket"]["gotchas"] == "the one line worth keeping"
     assert type_schema_echo_keys(types) == []
+    assert "open_shape" not in types["market_bracket"]
+    assert "close_tp_sl" not in types["market_bracket"]
+    assert "defined_risk" not in types["market_bracket"]
+    # Empty trunk gets the locked STK starter; schema echoes stay gone.
+    assert [c["name"] for c in type_cards(types, "market_bracket")] == [
+        "generic STK market bracket"
+    ]
 
 
 def test_a_write_after_migration_keeps_the_migrated_cards():
@@ -1618,7 +1652,11 @@ def test_a_write_after_migration_keeps_the_migrated_cards():
     _write(_lab_path(), {"revision": 1, "cards": REV_1_CARDS, "types": {}})
     save_lab(clamp_update({"types": {"market_bracket": {"gotchas": "stop side of last"}}}))
     lab = load_lab()
-    assert len(walk_cards(lab)) == 3
+    names = {(t, c["name"]) for t, c in walk_cards(lab)}
+    assert ("market_bracket", "mega-cap earnings-flush bounce") in names
+    assert ("market_bracket", "levered-crypto and micro gap chase") in names
+    assert ("buy_option", "naked / short-dated option spray") in names
+    assert len(walk_cards(lab)) >= 3
     assert lab["types"]["market_bracket"]["gotchas"] == "stop side of last"
 
 
@@ -1764,7 +1802,9 @@ def test_run_sheet_follows_parent_tool_order_instead_of_rescan():
     )
     lab = load_lab()
     first = playbook_run_sheets(lab, flat=True)
-    assert [row["card"] for row in first] == ["flush bounce"]
+    by_name = {row["card"]: row for row in first}
+    assert "flush bounce" in by_name
+    assert first[0]["card"] == "flush bounce"
     assert first[0]["next"] == "scan"
     assert first[0]["sends"] == 0
     assert first[0]["resolved"] == 0
