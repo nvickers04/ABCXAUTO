@@ -1496,7 +1496,7 @@ def format_wake(
     max_n = cap.get("max_open_positions", cap.get("max"))
     ev = None
     try:
-        from abcxauto.wake_bus import last_wake
+        from abcxauto.park_clock import last_wake
 
         ev = last_wake()
     except Exception:
@@ -1566,7 +1566,21 @@ def format_wake(
             parts.append(f"mix={mix_s}.")
         if ev is not None:
             parts.append(f"event={ev.kind} {ev.detail}.".strip())
+        ride_prev = False
         if live_lots and prev_strat:
+            try:
+                from abcxauto.think_stream import ticket_rides_to_next_look
+
+                ride_prev = ticket_rides_to_next_look(
+                    {
+                        "strat": prev_strat,
+                        "sends": prev_sends,
+                        "result": brief.get("result"),
+                    }
+                )
+            except Exception:
+                ride_prev = True
+        if ride_prev:
             parts.append(f"prev={prev_strat} sends={prev_sends}.")
         try:
             from abcxauto.think_stream import last_look_wake_bit

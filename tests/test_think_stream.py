@@ -130,12 +130,12 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     assert live["ibkr_connected"] is True
     assert live["open_lots"] == ["QQQ 260821C735 long 1"]
     assert live["mix"].get("long_c") == 1
-    assert live.get("previous_strat") == "skipped"
+    assert not live.get("previous_strat")
     brief = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
     from tests.conftest import assert_no_cycle_keys
 
     assert_no_cycle_keys(brief)
-    assert brief["strat"] == "skipped"
+    assert not brief.get("strat")
     assert brief["open_lots"] == ["IWM 260821C306 long 1"]
 
 
@@ -609,7 +609,83 @@ def test_last_turn_operator_paint_omits_cycle(tmp_path, monkeypatch):
     brief = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
     assert_no_cycle_keys(last)
     assert_no_cycle_keys(brief)
-    assert last["strat"] == "hold"
+    assert last["strat"] == ""
+
+
+def test_rejected_clerk_ticket_does_not_ride_to_the_next_look(tmp_path, monkeypatch):
+    """A clerk block/reject must not become prev= on the next look."""
+    from abcxauto import think_stream as ts
+    from abcxauto.think_stream import ticket_rides_to_next_look
+    from abcxauto.world_state import format_wake
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
+    monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
+    ts._run = {"run_id": "r1", "pid": 1}
+    lots = ["SPY STK 11"]
+    assert ticket_rides_to_next_look({
+        "strat": "market_bracket",
+        "sends": 1,
+        "result": {"status": "blocked", "reason_code": "opening_print"},
+    }) is False
+    assert ticket_rides_to_next_look({
+        "strat": "blocked",
+        "sends": 1,
+        "result": {"status": "rejected"},
+    }) is False
+    assert ticket_rides_to_next_look({
+        "strat": "market_bracket",
+        "sends": 1,
+        "result": {"status": "submitted", "success": True},
+    }) is True
+
+    ts.write_last_turn({
+        "strat": "market_bracket",
+        "sends": 1,
+        "result": {
+            "status": "blocked",
+            "note": "opening print",
+            "reason_code": "opening_print",
+        },
+        "tool_trace": ["book", "send"],
+        "open_lots": lots,
+        "world_state": {"flat": False, "net_liquidation": 35310.1, "open_lots": lots},
+    })
+    last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert last["strat"] == ""
+    assert last["sends"] == 1
+    day = {
+        "nl": 35310.1,
+        "names": 1,
+        "lots": 1,
+        "open_lots": lots,
+        "capacity": {"open_count": 1, "max_open_positions": 15},
+    }
+    text = format_wake(
+        cycle=2,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day=day,
+    )
+    assert "prev=" not in text
+    assert "market_bracket" not in text
+
+    ts.write_desk_brief({
+        "strat": "blocked",
+        "sends": 1,
+        "open_lots": lots,
+    })
+    text = format_wake(
+        cycle=2,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day=day,
+    )
+    assert "prev=" not in text
 
 
 def test_run_identity_stale_last_turn(tmp_path, monkeypatch):

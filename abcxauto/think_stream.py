@@ -442,7 +442,7 @@ def begin_run() -> dict[str, Any]:
     else:
         mark_review_stale(archive_tail=True)
     try:
-        from abcxauto.wake_bus import ensure_next_look
+        from abcxauto.park_clock import ensure_next_look
 
         ensure_next_look(previous_set_at="")
     except Exception:
@@ -910,6 +910,33 @@ def write_last_turn_after_send(
     })
 
 
+def ticket_rides_to_next_look(out: dict[str, Any] | None) -> bool:
+    """True when a send actually dispatched. Clerk blocks must not become prev=."""
+    row = out if isinstance(out, dict) else {}
+    strat = str(row.get("strat") or "").strip().lower()
+    if strat in ("", "blocked", "rejected", "skipped", "hold", "in_progress"):
+        return False
+    result = row.get("result") if isinstance(row.get("result"), dict) else {}
+    status = str(result.get("status") or "").lower()
+    if status in (
+        "blocked",
+        "rejected",
+        "error",
+        "failed",
+        "validated_block",
+        "held",
+        "hold",
+    ):
+        return False
+    if result.get("success") is False:
+        return False
+    try:
+        sends = int(row.get("sends") or 0)
+    except (TypeError, ValueError):
+        sends = 0
+    return sends > 0
+
+
 def write_last_turn(out: dict[str, Any]) -> None:
     """Clerk snapshot of the last Grok turn for the Cursor review loop.
 
@@ -953,8 +980,11 @@ def write_last_turn(out: dict[str, Any]) -> None:
             skip = skip or str(out.get("strat") or "")
         else:
             skip = ""
+        ride_strat = out.get("strat") if ticket_rides_to_next_look(out) else ""
+        if str(out.get("strat") or "") == "in_progress":
+            ride_strat = "in_progress"
         payload = {
-            "strat": out.get("strat"),
+            "strat": ride_strat,
             "rationale": (out.get("rationale") or "")[:1200],
             "validation": (out.get("validation") or "")[:400],
             "tool_trace": list(out.get("tool_trace") or []),

@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Iterate the product, not only the clerk
 
-The stream review is a build loop. Read the think stream and last turn. If anything in the repo is blocking the desired result — tools, facts, gates, desktop, tests, wake bus, scorecard, persist, observability, IBKR/MDA split — **change it and test** (paper only). Do not wait for a “clerk bug” label. Same class as batch `option_quote`, full-book `option_facts`, lever snapshots, BAG, fill-lag ≠ flat, named `open_lots` on wake/last-turn.
+The stream review is a build loop. Read the think stream and last turn. If anything in the repo is blocking the desired result — tools, facts, gates, desktop, tests, park clock, scorecard, persist, observability, IBKR/MDA split — **change it and test** (paper only). Do not wait for a “clerk bug” label. Same class as batch `option_quote`, full-book `option_facts`, lever snapshots, BAG, fill-lag ≠ flat, named `open_lots` on wake/last-turn.
 
 Restart Pro only when the operator wants it on or RTH is useful. If Grok is looping tools or TWS is down, **kill** first — do not relaunch into a token burn.
 

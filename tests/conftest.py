@@ -117,7 +117,8 @@ def fake_grok_turn(act: dict, *, wakes: list | None = None):
     from abcxauto.agent_loop import BLOCKED_STRAT, execute_ticket
     from abcxauto.brain import BrainTurn
 
-    async def grok_turn(g, *, connector, world, snap, wake=""):
+    async def grok_turn(g, *, connector, world, snap, wake="", resume=False):
+        _ = resume
         if wakes is not None:
             wakes.append(wake)
         ticket = dict(act)
@@ -147,7 +148,8 @@ def grok_json_as_turn(fake_grok):
     """Adapt a ticket JSON stub to grok_turn."""
     import json as _json
 
-    async def grok_turn(g, *, connector, world, snap, wake=""):
+    async def grok_turn(g, *, connector, world, snap, wake="", resume=False):
+        _ = resume
         raw = await fake_grok(g, wake, stage="act")
         try:
             payload = _json.loads(raw) if isinstance(raw, str) else dict(raw)

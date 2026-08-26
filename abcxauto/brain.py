@@ -9,6 +9,7 @@ live 5s stream (error if both miss); news is ~15 min delayed.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -36,6 +37,20 @@ from abcxauto.tool_args import (
 from abcxauto.world_state import WorldState
 
 logger = logging.getLogger(__name__)
+
+
+def bind_optional_kw(fn: Any, kwargs: dict[str, Any] | None = None, **maybe: Any) -> dict[str, Any]:
+    """Keep kwargs ``fn`` accepts so stay-up ``resume=`` does not break older mocks."""
+    out = dict(kwargs or {})
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return out
+    var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    for key, val in maybe.items():
+        if var_kw or key in params:
+            out[key] = val
+    return out
 
 # One wake = one linear think. This ceiling is a runaway-spend guard, not a
 # budget the model should feel — repeated reads are answered from the ledger
@@ -1526,7 +1541,7 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
     reason = "ok"
     while True:
         try:
-            from abcxauto.wake_bus import peek_interrupt
+            from abcxauto.park_clock import peek_interrupt
 
             if peek_interrupt() is not None:
                 reason = "interrupt"
@@ -1671,7 +1686,7 @@ async def _inject_live_poke(
     turn: BrainTurn,
 ) -> bool:
     """Apply fill/order_change/unprotected to the open think — same chat, same wake."""
-    from abcxauto.wake_bus import note_wake, take_interrupt
+    from abcxauto.park_clock import note_wake, take_interrupt
     from abcxauto.world_state import day_facts, format_wake
 
     ev = take_interrupt()
@@ -2908,10 +2923,20 @@ async def grok_turn(
     world: WorldState,
     snap: dict[str, Any],
     wake: str,
+    resume: bool = False,
 ) -> BrainTurn:
-    """One Grok tool loop. send() is the only broker path."""
+    """One Grok tool loop. send() is the only broker path.
+
+    ``resume`` is optional so older grok_turn mocks that omit it still run.
+    """
     return await _grok_turn_impl(
-        g, connector=connector, world=world, snap=snap, wake=wake, turn=BrainTurn()
+        g,
+        connector=connector,
+        world=world,
+        snap=snap,
+        wake=wake,
+        turn=BrainTurn(),
+        resume=resume,
     )
 
 
@@ -2961,7 +2986,7 @@ async def _invoke_named_tool(
     think_emit("say", f"\n[{name}]\n")
     turn.tool_trace.append(name)
     try:
-        from abcxauto.wake_bus import peek_interrupt
+        from abcxauto.park_clock import peek_interrupt
 
         tool_task = asyncio.create_task(
             _run_tool(
@@ -3122,7 +3147,7 @@ async def _dispatch_tool_calls(
 
     Returns True when a live poke is waiting for the think.
     """
-    from abcxauto.wake_bus import peek_interrupt
+    from abcxauto.park_clock import peek_interrupt
 
     parsed = [_parse_tool_call(tc, world=world, snap=snap) for tc in calls]
     reads = [p for p in parsed if p[0] not in _MUTATING_TOOLS]
@@ -3196,6 +3221,7 @@ async def _grok_turn_impl(
     snap: dict[str, Any],
     wake: str,
     turn: BrainTurn | None = None,
+    resume: bool = False,
 ) -> BrainTurn:
     turn = turn or BrainTurn()
     if g is None:
@@ -3205,7 +3231,15 @@ async def _grok_turn_impl(
         return turn
     session = str(getattr(world, "session_status", "") or "")
     try:
-        chat = _open_wake(g, wake, session=session)
+        if resume and getattr(g, "chat", None) is not None:
+            chat = g.chat
+            try:
+                chat.append(developer(wake))
+            except Exception:
+                logger.debug("resume append failed; new chat", exc_info=True)
+                chat = _open_wake(g, wake, session=session)
+        else:
+            chat = _open_wake(g, wake, session=session)
     except Exception as exc:
         logger.exception("chat start failed")
         turn.last_act = {}
@@ -3217,7 +3251,7 @@ async def _grok_turn_impl(
     while turn.steps < MAX_TOOL_STEPS:
         turn.steps += 1
         try:
-            from abcxauto.wake_bus import peek_interrupt
+            from abcxauto.park_clock import peek_interrupt
 
             if peek_interrupt() is not None:
                 await _inject_live_poke(
@@ -3273,7 +3307,8 @@ async def _grok_turn_impl(
         if _look_text_is_junk(turn.text):
             turn.failed = True
             logger.warning("look failed: empty or junk assistant text")
-    _reset_chat(g)
+    if turn.parked or turn.failed:
+        _reset_chat(g)
     if not turn.sends:
         if str(turn.last_strat or "").lower() == "hold":
             turn.last_strat = ""

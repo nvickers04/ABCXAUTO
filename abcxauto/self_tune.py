@@ -3,7 +3,7 @@
 Immutable floor (code): daily-loss halt, max position size, max open positions,
 defined-risk, cash-only, auto-panic, fail-closed, exits never blocked, live gated.
 The agent may *tighten* risk. It cannot weaken the immutable risk floor.
-Cadence is wake_bus; process % dials do not exist.
+Overnight park is park_clock; process % dials do not exist.
 """
 
 from __future__ import annotations

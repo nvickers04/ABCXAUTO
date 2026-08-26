@@ -18,7 +18,7 @@ import pytest
 from abcxauto import brain
 from abcxauto.brain import BrainTurn, _dispatch_tool_calls, _inject_live_poke
 from abcxauto.memory import get_journal
-from abcxauto.wake_bus import (
+from abcxauto.park_clock import (
     BookEvent,
     clear_interrupt,
     note_interrupt,

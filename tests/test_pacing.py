@@ -1,4 +1,4 @@
-"""Wake-bus pulse: debounce + interruptible sleep."""
+"""Overnight park clock + book-event pulse. RTH has no sit clock."""
 
 from __future__ import annotations
 
