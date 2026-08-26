@@ -194,6 +194,7 @@ def _isolate_desk_state(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "playbook_lab.json"))
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "playbook_live.json"))
+    monkeypatch.setenv("ABCXAUTO_CARD_LOG_PATH", str(tmp_path / "card_sends.jsonl"))
     from abcxauto import think_stream as ts
 
     monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
