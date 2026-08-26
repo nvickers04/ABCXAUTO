@@ -498,7 +498,9 @@ def clerk_look_s(
         return max(min_look_s(), (mins - 60.0) * 60.0)
     if sess in ("closed", "postmarket") and mins is not None and 0 < mins <= 60:
         return max(min_look_s(), float(LAST_HOUR_LOOK_S))
-    return default_look_s(flat=flat, session=session)
+    # RTH / premarket do not sit. Unused fallback is not DEFAULT_LOOK_OPEN_S.
+    _ = flat
+    return default_look_s()
 
 
 def ensure_park(
