@@ -1,6 +1,6 @@
 # Asset Balancing Control X Auto (ABCXAUTO)
 
-**Grok owns a paper IBKR book. The clerk is facts, hard gates, and the next-look clock.**
+**Grok owns a paper IBKR book. The clerk is facts, hard gates, and an overnight park clock.**
 
 Grok (the `model` knob, default grok-4.6) invents tickets and standing notes. Live (TWS **7496**, confirm phrase, a different client id) only follows a **promoted paper playbook**. It never copies paper fills.
 
@@ -11,7 +11,7 @@ Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of
 | Owner | Job |
 |-------|-----|
 | **Grok** | Tickets (`send`), risk/watchlist knobs (`self_tune`), lab notebook (`write_lab_playbook`, optional card `next_look_s`) |
-| **Clerk (code)** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, next-look clock from playbook + defaults |
+| **Clerk (code)** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, overnight/after-close park |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No approval step. |
 
 Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` persists to `risk_settings.json`, which beats the `ABCXAUTO_MODEL` env form. Keep the clerk.
@@ -33,9 +33,9 @@ Grok may retune knobs immediately. No proposal step.
 ## Loop
 
 ```
-WAKE     Clerk clock (playbook next_look_s, or hunt/open/last-hour default)
-         fill / order_change / mark move / unprotected can come sooner
-         pulse ~10s; closed/postmarket does not call Grok (unprotected still does)
+WAKE     Book event / Start / stay-up. Overnight park_clock until the last hour.
+         fill / order_change / unprotected poke the open think.
+         closed/postmarket does not call Grok (unprotected still does)
     |
 SNAP     IBKR book, orders, protection
     |
@@ -43,7 +43,7 @@ GROK     tools (facts + send). Wake is a short line — Grok fetches what it nee
     |
 CLERK    send → gates → IBKR. Journal write is clerk, not a Grok tool.
     |
-LOOK     ensure_next_look so the desk is never parked
+LOOK     RTH has no sit clock. Clerk is not a runner. Overnight parks.
 ```
 
 `python -m abcxauto` wraps Pro in a supervisor: useful hours are weekdays **8:30–16:00 ET**, TWS **7497** must be listening, crash relaunches, clean window close stays down. `--cleanup` marks operator stop.
@@ -127,7 +127,7 @@ Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** 
 | `ABCXAUTO_MAX_SYMBOL_CONCENTRATION_PCT` | `25` | Max one underlying, all lots, vs NetLiq |
 | `ABCXAUTO_DEFINED_RISK_ONLY` | `true` | Locked on |
 | `ABCXAUTO_JOURNAL_PATH` | `journal.db` | Clerk SQLite journal |
-| `ABCXAUTO_DEFAULT_LOOK_S` | `90` (`60` open-book; `600` flat hunt) | Clerk look when a card has no `next_look_s` |
+| `ABCXAUTO_DEFAULT_LOOK_S` | `90` | Overnight park default when minutes-to-open is unknown |
 
 See `.env.template` for the rest. Live: `TRADING_MODE=live`, port **7496**, `ABCXAUTO_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING_RISK`, and a promoted playbook.
 
@@ -139,7 +139,7 @@ Priority: **risk > execution > monitoring > thin UI**.
 abcxauto/
   __main__.py           Pro + supervisor; --cleanup = operator stop
   supervisor.py         Useful hours + TWS probe; relaunch on crash
-  wake_bus.py           Clerk alarm + playbook cadence + book-event pulse
+  park_clock.py         Overnight / after-close park + book-event pulse. RTH has no sit clock
   agent_loop.py         Snap → Grok tools → clerk send
   brain.py              Tool loop (facts + send + self_tune + playbook)
   llm.py                Short system prompt; no prompt_extra

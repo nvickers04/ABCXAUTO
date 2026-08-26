@@ -1229,7 +1229,7 @@ def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any
         look = carried.get("next_look_s")
     if look is not None:
         try:
-            from abcxauto.wake_bus import clamp_next_look_s
+            from abcxauto.park_clock import clamp_next_look_s
 
             clamped = clamp_next_look_s(look)
         except Exception:
@@ -2997,7 +2997,7 @@ def playbook_mode() -> str:
 def playbook_next_look_s() -> float | None:
     """Smallest next_look_s on a live (non-retired) card, if any."""
     try:
-        from abcxauto.wake_bus import clamp_next_look_s
+        from abcxauto.park_clock import clamp_next_look_s
     except Exception:
         return None
     found: list[float] = []

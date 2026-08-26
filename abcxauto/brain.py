@@ -9,6 +9,7 @@ live 5s stream (error if both miss); news is ~15 min delayed.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -1292,6 +1293,38 @@ def _look_text_is_junk(text: str) -> bool:
     return smashed.strip("?") == ""
 
 
+def _forget_unsent_ticket(turn: BrainTurn) -> None:
+    """Rejected clerk tickets and holds must not ride as the next look's last act."""
+    last_ok: dict[str, Any] | None = None
+    for item in turn.sends or []:
+        row = item if isinstance(item, dict) else {}
+        if _send_succeeded(row.get("result")):
+            last_ok = row
+    if last_ok is not None:
+        turn.last_act = dict(last_ok.get("act") or {})
+        turn.last_result = dict(last_ok.get("result") or {})
+        turn.last_strat = str(last_ok.get("strat") or "")
+        return
+    turn.last_act = {}
+    turn.last_strat = ""
+
+
+def invoke_grok_turn(fn: Any, g: Any, **kwargs: Any) -> Any:
+    """Call grok_turn. ``resume=`` is optional so older mocks keep working."""
+    if "resume" in kwargs:
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            sig = None
+        if sig is not None:
+            params = sig.parameters
+            if "resume" not in params and not any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            ):
+                kwargs.pop("resume", None)
+    return fn(g, **kwargs)
+
+
 def _send_succeeded(result: dict[str, Any] | None) -> bool:
     """True when send() actually dispatched — not a clerk block/reject."""
     if not isinstance(result, dict):
@@ -1526,7 +1559,7 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
     reason = "ok"
     while True:
         try:
-            from abcxauto.wake_bus import peek_interrupt
+            from abcxauto.park_clock import peek_interrupt
 
             if peek_interrupt() is not None:
                 reason = "interrupt"
@@ -1653,10 +1686,16 @@ def _ensure_chat(g: GrokClient, *, kind: str = "", session: str = "") -> Any:
 
 
 def _open_wake(
-    g: GrokClient, wake: str, *, reset: bool = False, session: str = ""
+    g: GrokClient, wake: str, *, reset: bool = False, session: str = "", resume: bool = False
 ) -> Any:
-    """Start this look's think. The wake line is the only developer turn."""
-    _ = reset
+    """Start this look's think. Resume keeps the open xAI episode when present."""
+    chat = getattr(g, "chat", None) if resume and not reset else None
+    if chat is not None:
+        try:
+            chat.append(developer(wake))
+            return chat
+        except Exception:
+            logger.debug("resume append failed", exc_info=True)
     chat = _new_chat(g, session=session)
     chat.append(developer(wake))
     return chat
@@ -1671,7 +1710,7 @@ async def _inject_live_poke(
     turn: BrainTurn,
 ) -> bool:
     """Apply fill/order_change/unprotected to the open think — same chat, same wake."""
-    from abcxauto.wake_bus import note_wake, take_interrupt
+    from abcxauto.park_clock import note_wake, take_interrupt
     from abcxauto.world_state import day_facts, format_wake
 
     ev = take_interrupt()
@@ -2908,10 +2947,21 @@ async def grok_turn(
     world: WorldState,
     snap: dict[str, Any],
     wake: str,
+    resume: bool = False,
 ) -> BrainTurn:
-    """One Grok tool loop. send() is the only broker path."""
+    """One Grok tool loop. send() is the only broker path.
+
+    ``resume`` is optional — older grok_turn mocks that omit it still work
+    when called through ``invoke_grok_turn``.
+    """
     return await _grok_turn_impl(
-        g, connector=connector, world=world, snap=snap, wake=wake, turn=BrainTurn()
+        g,
+        connector=connector,
+        world=world,
+        snap=snap,
+        wake=wake,
+        turn=BrainTurn(),
+        resume=resume,
     )
 
 
@@ -2961,7 +3011,7 @@ async def _invoke_named_tool(
     think_emit("say", f"\n[{name}]\n")
     turn.tool_trace.append(name)
     try:
-        from abcxauto.wake_bus import peek_interrupt
+        from abcxauto.park_clock import peek_interrupt
 
         tool_task = asyncio.create_task(
             _run_tool(
@@ -3122,7 +3172,7 @@ async def _dispatch_tool_calls(
 
     Returns True when a live poke is waiting for the think.
     """
-    from abcxauto.wake_bus import peek_interrupt
+    from abcxauto.park_clock import peek_interrupt
 
     parsed = [_parse_tool_call(tc, world=world, snap=snap) for tc in calls]
     reads = [p for p in parsed if p[0] not in _MUTATING_TOOLS]
@@ -3196,6 +3246,7 @@ async def _grok_turn_impl(
     snap: dict[str, Any],
     wake: str,
     turn: BrainTurn | None = None,
+    resume: bool = False,
 ) -> BrainTurn:
     turn = turn or BrainTurn()
     if g is None:
@@ -3205,7 +3256,7 @@ async def _grok_turn_impl(
         return turn
     session = str(getattr(world, "session_status", "") or "")
     try:
-        chat = _open_wake(g, wake, session=session)
+        chat = _open_wake(g, wake, session=session, resume=resume)
     except Exception as exc:
         logger.exception("chat start failed")
         turn.last_act = {}
@@ -3217,7 +3268,7 @@ async def _grok_turn_impl(
     while turn.steps < MAX_TOOL_STEPS:
         turn.steps += 1
         try:
-            from abcxauto.wake_bus import peek_interrupt
+            from abcxauto.park_clock import peek_interrupt
 
             if peek_interrupt() is not None:
                 await _inject_live_poke(
@@ -3273,11 +3324,7 @@ async def _grok_turn_impl(
         if _look_text_is_junk(turn.text):
             turn.failed = True
             logger.warning("look failed: empty or junk assistant text")
-    _reset_chat(g)
-    if not turn.sends:
-        if str(turn.last_strat or "").lower() == "hold":
-            turn.last_strat = ""
-        if str((turn.last_act or {}).get("strategy") or "").lower() == "hold":
-            turn.last_act = {}
-            turn.last_result = {}
+    if turn.parked:
+        _reset_chat(g)
+    _forget_unsent_ticket(turn)
     return turn

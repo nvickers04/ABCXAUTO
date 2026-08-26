@@ -1,6 +1,6 @@
 # ABCXAUTO spec
 
-Grok owns a paper IBKR book. The clerk is facts, hard gates, and the next-look clock.
+Grok owns a paper IBKR book. The clerk is facts, hard gates, and an overnight park clock.
 Brain is the `model` knob (default grok-4.6). Mainline is `master`.
 
 Paper (TWS **7497**) is the lab. Live (TWS **7496**, confirm phrase, a different
@@ -14,7 +14,7 @@ the cost of the model. Same rules at $1k, $100k, or $1M.
 | Owner | Job |
 |-------|-----|
 | **Grok** | Tickets (`send`), knobs (`self_tune`), lab notebook (`write_lab_playbook`) |
-| **Clerk** | Live facts, `ORDER EXAMPLES`, hard gates, next-look clock from playbook + defaults |
+| **Clerk** | Live facts, `ORDER EXAMPLES`, hard gates, overnight park_clock |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No strategy card. |
 
 Do not grow the system prompt. Do not inject strategy menus or a Judge/Act form.
@@ -44,8 +44,8 @@ Paper operator may turn % floors off (`sizing_floors`); live cannot (forced ON);
 ## Loop
 
 See [`docs/CYCLE.md`](docs/CYCLE.md). Short form: wake → snap → Grok tools →
-clerk `send` → `ensure_next_look`. Pulse ~10s. Closed/postmarket does not call
-Grok (unprotected still does).
+clerk `send`. RTH has no sit clock. Closed/postmarket parks (`park_clock`).
+Unprotected still interrupts.
 
 ## Priority
 

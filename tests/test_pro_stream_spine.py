@@ -337,8 +337,8 @@ def test_health_strip_shows_the_backoff_streak_and_wait(pro):
     assert "360s" in (pro.lbl_hs_next.value or "")
 
 
-def test_health_strip_falls_back_to_the_wake_bus_backoff(pro):
-    """No note landed yet — the wait still comes from wake_bus, jitter and all."""
+def test_health_strip_falls_back_to_the_park_clock_backoff(pro):
+    """No note landed yet — the wait still comes from park_clock, jitter and all."""
     import re
 
     s = pro.engine.state

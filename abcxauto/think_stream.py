@@ -442,11 +442,11 @@ def begin_run() -> dict[str, Any]:
     else:
         mark_review_stale(archive_tail=True)
     try:
-        from abcxauto.wake_bus import ensure_next_look
+        from abcxauto.park_clock import ensure_park
 
-        ensure_next_look(previous_set_at="")
+        ensure_park(previous_set_at="")
     except Exception:
-        logger.debug("grok_wake seed on begin_run failed", exc_info=True)
+        logger.debug("park_clock seed on begin_run failed", exc_info=True)
     _run = {
         "run_id": uuid.uuid4().hex,
         "pid": os.getpid(),

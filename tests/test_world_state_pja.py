@@ -283,7 +283,7 @@ def test_day_facts_carry_edge_and_clones():
 
 
 def test_format_wake_includes_day_facts():
-    from abcxauto.wake_bus import note_wake
+    from abcxauto.park_clock import note_wake
 
     note_wake(None)
     text = format_wake(
@@ -363,7 +363,7 @@ def test_format_wake_includes_day_facts():
 
 
 def test_format_wake_prints_lab_waiting_when_the_glance_has_it():
-    from abcxauto.wake_bus import note_wake
+    from abcxauto.park_clock import note_wake
 
     note_wake(None)
     text = format_wake(
@@ -394,7 +394,7 @@ def test_format_wake_prints_lab_waiting_when_the_glance_has_it():
 
 
 def test_format_wake_floors_on_still_paints_max_risk():
-    from abcxauto.wake_bus import note_wake
+    from abcxauto.park_clock import note_wake
 
     note_wake(None)
     text = format_wake(
@@ -494,7 +494,7 @@ def test_format_wake_omits_candles_none():
 
 def test_format_wake_fill_is_delta_not_discovery():
     from abcxauto.think_stream import write_desk_brief
-    from abcxauto.wake_bus import BookEvent, note_wake
+    from abcxauto.park_clock import BookEvent, note_wake
 
     write_desk_brief({
         "cycle": 1,
@@ -550,7 +550,7 @@ def test_format_wake_fill_is_delta_not_discovery():
 
 def test_format_wake_spy_stk11_overrides_stale_last_turn_flat():
     """Aug 19: last_turn.flat is not the book. SPY STK 11 / NL 35339.16 stays live."""
-    from abcxauto.wake_bus import note_wake
+    from abcxauto.park_clock import note_wake
 
     note_wake(None)
     world = type("W", (), {})()
@@ -584,7 +584,7 @@ def test_format_wake_spy_stk11_overrides_stale_last_turn_flat():
 
 
 def test_format_wake_wiped_playbook_omits_glance_and_ledger():
-    from abcxauto.wake_bus import note_wake
+    from abcxauto.park_clock import note_wake
 
     note_wake(None)
     text = format_wake(
@@ -624,7 +624,7 @@ def test_format_wake_wiped_playbook_omits_glance_and_ledger():
 
 def test_format_wake_flat_empty_omits_leftover_prev():
     from abcxauto.think_stream import write_desk_brief
-    from abcxauto.wake_bus import note_wake
+    from abcxauto.park_clock import note_wake
 
     write_desk_brief({
         "strat": "market_bracket",

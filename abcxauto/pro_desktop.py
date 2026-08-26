@@ -3597,7 +3597,7 @@ class ProTerminal:
             wait = float(getattr(s, "backoff_wait_s", 0) or 0)
             if wait <= 0:
                 try:
-                    from abcxauto.wake_bus import failed_look_backoff_s
+                    from abcxauto.park_clock import failed_look_backoff_s
 
                     wait = float(failed_look_backoff_s(streak))
                 except Exception:

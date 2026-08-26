@@ -1,8 +1,8 @@
-"""Event push + Grok-set alarm. No clerk decision checklist."""
+"""Overnight / after-close park clock. RTH has no sit clock."""
 
 from datetime import datetime, timedelta, timezone
 
-from abcxauto.wake_bus import (
+from abcxauto.park_clock import (
     BookEvent,
     GrokAlarm,
     book_fingerprint,
@@ -83,44 +83,38 @@ def test_diff_detects_fill_and_session():
     assert "session_change" in kinds
 
 
-def test_ensure_next_look_if_grok_silent(tmp_path, monkeypatch):
-    from abcxauto.wake_bus import ensure_next_look, load_alarm
+def test_ensure_park_overnight_silent_seeds(tmp_path, monkeypatch):
+    from abcxauto.park_clock import ensure_park, load_alarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "30")
-    # Overnight silent still seeds a look. Paper premarket stays up (no sit clock).
-    alarm = ensure_next_look(previous_set_at="", session="closed")
+    alarm = ensure_park(previous_set_at="", session="closed")
     assert alarm.wake_at
     assert load_alarm().wake_at == alarm.wake_at
 
 
-def test_ensure_next_look_rth_silent_gets_a_backstop_not_a_spin(tmp_path, monkeypatch):
-    """A silent RTH turn must leave a clock behind.
-
-    With no clock the alarm stays past-due, ``due()`` is instantly true, and the
-    engine thinks again with no gap. The backstop is what makes "Grok owns the
-    cadence" safe when Grok declines to choose one.
-    """
-    from abcxauto.wake_bus import ensure_next_look, load_alarm
+def test_ensure_park_rth_writes_no_sit_clock(tmp_path, monkeypatch):
+    """A finished RTH look must not leave grok_wake.json. Clerk is not a runner."""
+    from abcxauto.park_clock import ensure_park, load_alarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "30")
-    alarm = ensure_next_look(
+    alarm = ensure_park(
         previous_set_at="",
         flat=False,
         session="regular",
     )
-    assert alarm.wake_at
-    assert load_alarm().wake_at == alarm.wake_at
+    assert alarm.wake_at is None
+    assert load_alarm().wake_at is None
 
 
-def test_ensure_next_look_keeps_grok_alarm(tmp_path, monkeypatch):
-    from abcxauto.wake_bus import ensure_next_look, load_alarm, set_wake
+def test_ensure_park_keeps_overnight_alarm(tmp_path, monkeypatch):
+    from abcxauto.park_clock import ensure_park, load_alarm, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     set_wake(wake_in_s=120, wake_if=["fill"], session="closed")
     before = load_alarm()
-    out = ensure_next_look(previous_set_at="", session="closed")
+    out = ensure_park(previous_set_at="", session="closed")
     assert out.wake_if == ["fill"]
     assert out.set_at == before.set_at
     assert out.wake_at
@@ -128,7 +122,7 @@ def test_ensure_next_look_keeps_grok_alarm(tmp_path, monkeypatch):
 
 def test_set_wake_still_parks_overnight(tmp_path, monkeypatch):
     """set_wake park outside RTH is a real shutdown clock (new think next session)."""
-    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
+    from abcxauto.park_clock import _parse_iso, _utc_now, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
@@ -140,7 +134,7 @@ def test_set_wake_still_parks_overnight(tmp_path, monkeypatch):
 
 
 def test_live_interrupt_note_and_take():
-    from abcxauto.wake_bus import (
+    from abcxauto.park_clock import (
         BookEvent,
         clear_interrupt,
         note_interrupt,
@@ -162,89 +156,70 @@ def test_live_interrupt_note_and_take():
     clear_interrupt()
 
 
-def test_paper_rth_set_wake_writes_a_real_clock(tmp_path, monkeypatch):
-    """Grok owns the cadence in every session.
-
-    Withholding the clock in paper RTH left the engine re-arming a think the
-    instant the last one ended — a hunt treadmill for a setup that only appears
-    in the opening window.
-    """
-    from abcxauto.wake_bus import _parse_iso, _utc_now, load_alarm, set_wake
+def test_paper_rth_set_wake_writes_no_sit_clock(tmp_path, monkeypatch):
+    """RTH has no sit clock. set_wake in regular is a no-op."""
+    from abcxauto.park_clock import load_alarm, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    # A running lab, so the idle-nap cap is not what is under test here.
-    monkeypatch.setattr(
-        "abcxauto.lab_playbook.lab_facts",
-        lambda *_a, **_k: {"resolved_trades": 4, "entry_trunks_untried": []},
-    )
     alarm = set_wake(wake_in_s=600, session="regular", flat=True, wake_if=["fill"])
-    assert alarm.wake_at
-    assert load_alarm().wake_at == alarm.wake_at
-    assert alarm.wake_if == ["fill"]
-    at = _parse_iso(alarm.wake_at or "")
-    assert at is not None
-    assert 540 <= (at - _utc_now()).total_seconds() <= 660
+    assert alarm.wake_at is None
+    assert load_alarm().wake_at is None
 
 
-def test_paper_premarket_set_wake_writes_a_real_clock(tmp_path, monkeypatch):
-    from abcxauto.wake_bus import load_alarm, set_wake
+def test_paper_premarket_set_wake_writes_no_sit_clock(tmp_path, monkeypatch):
+    from abcxauto.park_clock import load_alarm, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     alarm = set_wake(wake_in_s=3600, session="premarket", flat=True)
-    assert alarm.wake_at
-    assert load_alarm().wake_at == alarm.wake_at
+    assert alarm.wake_at is None
+    assert load_alarm().wake_at is None
 
 
-def test_set_wake_honors_a_long_park_on_an_idle_lab(tmp_path, monkeypatch):
-    """The 300s idle cap was a hunt clock. Grok asked for 4h and got 5m."""
-    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
+def test_set_wake_honors_a_long_overnight_park(tmp_path, monkeypatch):
+    from abcxauto.park_clock import _parse_iso, _utc_now, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     idle = {"resolved_trades": 0, "entry_trunks_untried": ["vertical_spread"]}
     monkeypatch.setattr("abcxauto.lab_playbook.lab_facts", lambda *_a, **_k: idle)
 
-    alarm = set_wake(wake_in_s=4 * 3600, session="regular", flat=True)
+    alarm = set_wake(wake_in_s=4 * 3600, session="closed", flat=True)
     at = _parse_iso(alarm.wake_at or "")
     assert at is not None
     assert (at - _utc_now()).total_seconds() > 3 * 3600
 
 
 def test_set_wake_offered_in_no_session():
-    from abcxauto.wake_bus import set_wake_offered
+    from abcxauto.park_clock import set_wake_offered
 
     for sess in ("regular", "premarket", "postmarket", "closed", ""):
         assert set_wake_offered(session=sess) is False, sess
 
 
-def test_set_wake_live_premarket_allows_long_park(tmp_path, monkeypatch):
-    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
+def test_set_wake_live_premarket_writes_no_sit_clock(tmp_path, monkeypatch):
+    from abcxauto.park_clock import load_alarm, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     alarm = set_wake(wake_in_s=3600, session="premarket", flat=True)
-    at = _parse_iso(alarm.wake_at or "")
-    assert at is not None
-    remaining = (at - _utc_now()).total_seconds()
-    assert 3590 <= remaining <= 3610
+    assert alarm.wake_at is None
+    assert load_alarm().wake_at is None
 
 
-def test_set_wake_live_honors_long_nap(tmp_path, monkeypatch):
-    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
+def test_set_wake_live_rth_writes_no_sit_clock(tmp_path, monkeypatch):
+    from abcxauto.park_clock import load_alarm, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     alarm = set_wake(wake_in_s=3600, session="regular", flat=False)
-    at = _parse_iso(alarm.wake_at or "")
-    assert at is not None
-    remaining = (at - _utc_now()).total_seconds()
-    assert 3590 <= remaining <= 3610
+    assert alarm.wake_at is None
+    assert load_alarm().wake_at is None
 
 
-def test_set_wake_paper_halted_honors_long_nap(tmp_path, monkeypatch):
-    from abcxauto.wake_bus import _parse_iso, _utc_now, set_wake
+def test_set_wake_paper_halted_rth_writes_no_sit_clock(tmp_path, monkeypatch):
+    from abcxauto.park_clock import load_alarm, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
@@ -253,14 +228,12 @@ def test_set_wake_paper_halted_honors_long_nap(tmp_path, monkeypatch):
         lambda: type("G", (), {"is_halted": True})(),
     )
     alarm = set_wake(wake_in_s=3600, session="regular", flat=True)
-    at = _parse_iso(alarm.wake_at or "")
-    assert at is not None
-    remaining = (at - _utc_now()).total_seconds()
-    assert 3590 <= remaining <= 3610
+    assert alarm.wake_at is None
+    assert load_alarm().wake_at is None
 
 
 def test_set_wake_floors_tiny_nap(tmp_path, monkeypatch):
-    from abcxauto.wake_bus import MIN_LOOK_S, _parse_iso, _utc_now, set_wake
+    from abcxauto.park_clock import MIN_LOOK_S, _parse_iso, _utc_now, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     alarm = set_wake(wake_in_s=1, session="closed", flat=False)
@@ -271,7 +244,7 @@ def test_set_wake_floors_tiny_nap(tmp_path, monkeypatch):
 
 
 def test_book_move_wakes_on_mark_bucket(monkeypatch):
-    from abcxauto.wake_bus import book_fingerprint, events_from_diff
+    from abcxauto.park_clock import book_fingerprint, events_from_diff
 
     monkeypatch.setenv("ABCXAUTO_MTM_BUCKET_PCT", "8")
     a = book_fingerprint({
@@ -302,7 +275,7 @@ def test_should_wake_grok_is_what_the_engine_asks_now(tmp_path, monkeypatch):
     Nothing changed on the book and no clock is due, so the answer is None and
     the engine sleeps instead of thinking again.
     """
-    from abcxauto.wake_bus import GrokAlarm, load_alarm, should_wake_grok
+    from abcxauto.park_clock import GrokAlarm, load_alarm, should_wake_grok
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     quiet = GrokAlarm(wake_at=None, wake_if=[], set_at="")
@@ -312,35 +285,21 @@ def test_should_wake_grok_is_what_the_engine_asks_now(tmp_path, monkeypatch):
 
 def test_failed_look_backoff_honors_the_pinned_cadence(monkeypatch):
     """ABCXAUTO_STAY_UP_RETRY_S still floors the failed-look backoff."""
-    from abcxauto.wake_bus import failed_look_backoff_s
+    from abcxauto.park_clock import failed_look_backoff_s
 
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.25")
     assert failed_look_backoff_s(1) == 0.25
 
 
-def test_clerk_look_s_open_book_is_short(monkeypatch):
-    from abcxauto.wake_bus import DEFAULT_LOOK_OPEN_S, clerk_look_s
+def test_clerk_look_s_rth_is_not_a_sit_clock(monkeypatch):
+    """RTH clerk_look_s is unused as a launcher. Overnight still parks."""
+    from abcxauto.park_clock import DEFAULT_LOOK_S, clerk_look_s
 
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
     monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
-    assert clerk_look_s(flat=False, session="regular") == DEFAULT_LOOK_OPEN_S
-
-
-def test_clerk_look_s_flat_rth_is_a_hunt(monkeypatch):
-    from abcxauto.wake_bus import DEFAULT_LOOK_HUNT_S, clerk_look_s
-
-    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
-    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
-    assert clerk_look_s(flat=True, session="regular", next_look_s=None) == DEFAULT_LOOK_HUNT_S
-
-
-def test_clerk_look_s_honors_card_hint(monkeypatch):
-    from abcxauto.wake_bus import clerk_look_s
-
-    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
-    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
-    assert clerk_look_s(flat=False, session="regular", next_look_s=120) == 300
-    assert clerk_look_s(flat=True, session="regular", next_look_s=300) == 300
+    assert clerk_look_s(flat=False, session="regular") == DEFAULT_LOOK_S
+    assert clerk_look_s(flat=True, session="regular", next_look_s=None) == DEFAULT_LOOK_S
+    assert clerk_look_s(flat=False, session="regular", next_look_s=120) == DEFAULT_LOOK_S
 
 
 def _save_session_card():
@@ -368,18 +327,22 @@ def _save_session_card():
     save_lab(update)
 
 
-def test_clerk_look_s_last_hour_to_open(monkeypatch):
-    from abcxauto.wake_bus import LAST_HOUR_LOOK_S, clerk_look_s
+def test_clerk_look_s_last_hour_to_open_is_overnight_only(monkeypatch):
+    from abcxauto.park_clock import LAST_HOUR_LOOK_S, DEFAULT_LOOK_S, clerk_look_s
 
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    # Premarket stay-up: not a park duration.
     assert clerk_look_s(
         flat=True, session="premarket", minutes_to_open=45
+    ) == DEFAULT_LOOK_S
+    assert clerk_look_s(
+        flat=True, session="closed", minutes_to_open=45
     ) == LAST_HOUR_LOOK_S
 
 
-def test_clerk_look_s_session_card_does_not_park_until_the_open(monkeypatch):
-    """Gap cards cannot sit the think loop until 9:30. Hunt / last-hour cadence."""
-    from abcxauto.wake_bus import DEFAULT_LOOK_HUNT_S, LAST_HOUR_LOOK_S, clerk_look_s
+def test_clerk_look_s_session_card_does_not_park_premarket(monkeypatch):
+    """Gap cards cannot sit the think loop until 9:30. Premarket has no sit clock."""
+    from abcxauto.park_clock import DEFAULT_LOOK_S, clerk_look_s
 
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
     _save_session_card()
@@ -388,17 +351,17 @@ def test_clerk_look_s_session_card_does_not_park_until_the_open(monkeypatch):
         session="premarket",
         minutes_to_open=32,
         next_look_s=1800,
-    ) == LAST_HOUR_LOOK_S
+    ) == DEFAULT_LOOK_S
     assert clerk_look_s(
         flat=True,
         session="premarket",
         minutes_to_open=90,
         next_look_s=1800,
-    ) == DEFAULT_LOOK_HUNT_S
+    ) == DEFAULT_LOOK_S
 
 
 def test_clerk_look_s_overnight_closed_still_parks(monkeypatch):
-    from abcxauto.wake_bus import clerk_look_s
+    from abcxauto.park_clock import clerk_look_s
 
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
     _save_session_card()
@@ -410,56 +373,46 @@ def test_clerk_look_s_overnight_closed_still_parks(monkeypatch):
     ) == (5 * 60 - 60.0) * 60.0
 
 
-def test_ensure_next_look_keeps_a_short_premarket_clock(tmp_path, monkeypatch):
+def test_ensure_park_clears_a_premarket_leftover(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    from abcxauto.wake_bus import GrokAlarm, ensure_next_look, save_alarm
+    from abcxauto.park_clock import GrokAlarm, ensure_park, save_alarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
     _save_session_card()
     soon = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
     save_alarm(GrokAlarm(wake_at=soon, set_at=soon))
-    alarm = ensure_next_look(
+    alarm = ensure_park(
         session="premarket",
         flat=True,
         minutes_to_open=5,
     )
-    until = alarm.seconds_until()
-    assert until is not None
-    assert until < 90
+    assert alarm.wake_at is None
 
 
-def test_ensure_next_look_pulls_in_a_remaining_to_bell_park(tmp_path, monkeypatch):
+def test_ensure_park_clears_a_remaining_to_bell_leftover(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    from abcxauto.wake_bus import (
-        LAST_HOUR_LOOK_S,
-        GrokAlarm,
-        ensure_next_look,
-        save_alarm,
-    )
+    from abcxauto.park_clock import GrokAlarm, ensure_park, save_alarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
     _save_session_card()
     bell = (datetime.now(timezone.utc) + timedelta(minutes=32)).isoformat()
     save_alarm(GrokAlarm(wake_at=bell, set_at=bell))
-    alarm = ensure_next_look(
+    alarm = ensure_park(
         session="premarket",
         flat=True,
         minutes_to_open=32,
     )
-    until = alarm.seconds_until()
-    assert until is not None
-    assert until <= LAST_HOUR_LOOK_S + 2
-    assert until < 10 * 60
+    assert alarm.wake_at is None
 
 
 def test_remaining_to_bell_and_start_looks_now(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    from abcxauto.wake_bus import (
+    from abcxauto.park_clock import (
         GrokAlarm,
         remaining_to_bell_s,
         save_alarm,
@@ -474,18 +427,20 @@ def test_remaining_to_bell_and_start_looks_now(tmp_path, monkeypatch):
 
     soon = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
     save_alarm(GrokAlarm(wake_at=soon, set_at=soon))
-    assert start_looks_now(minutes_to_open=32) is False
+    assert start_looks_now(session="closed", minutes_to_open=6 * 60) is False
+    assert start_looks_now(session="premarket", minutes_to_open=32) is True
     bell = (datetime.now(timezone.utc) + timedelta(minutes=32)).isoformat()
     save_alarm(GrokAlarm(wake_at=bell, set_at=bell))
-    assert start_looks_now(minutes_to_open=32) is True
-    assert start_looks_now(minutes_to_open=6 * 60) is False
+    assert start_looks_now(session="closed", minutes_to_open=32) is True
+    assert start_looks_now(session="closed", minutes_to_open=6 * 60) is False
+    assert start_looks_now(session="regular") is True
 
 
 def test_infer_session_before_open_splits_overnight_from_premarket():
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from abcxauto.wake_bus import infer_session_before_open
+    from abcxauto.park_clock import infer_session_before_open
 
     et = ZoneInfo("America/New_York")
     sess, mins = infer_session_before_open(
@@ -500,9 +455,27 @@ def test_infer_session_before_open_splits_overnight_from_premarket():
     assert mins is not None and 50 < mins < 65
 
 
-def test_begin_run_premarket_session_cards_seed_a_short_look(tmp_path, monkeypatch):
+def test_begin_run_overnight_parks(tmp_path, monkeypatch):
     from abcxauto import think_stream as ts
-    from abcxauto.wake_bus import LAST_HOUR_LOOK_S, load_alarm
+    from abcxauto.park_clock import load_alarm
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")
+    monkeypatch.setattr(
+        "abcxauto.park_clock.et_minutes_to_rth_open", lambda **_k: 6 * 60.0
+    )
+    ts._run = {}
+    ts.begin_run()
+    until = load_alarm().seconds_until()
+    assert until is not None
+    assert until > 4 * 3600
+
+
+def test_begin_run_premarket_writes_no_sit_clock(tmp_path, monkeypatch):
+    from abcxauto import think_stream as ts
+    from abcxauto.park_clock import load_alarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
@@ -511,57 +484,91 @@ def test_begin_run_premarket_session_cards_seed_a_short_look(tmp_path, monkeypat
     monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
     monkeypatch.setattr(
-        "abcxauto.wake_bus.et_minutes_to_rth_open", lambda **_k: 58.0
+        "abcxauto.park_clock.et_minutes_to_rth_open", lambda **_k: 58.0
     )
     _save_session_card()
     ts._run = {}
     ts.begin_run()
-    until = load_alarm().seconds_until()
-    assert until is not None
-    assert until <= LAST_HOUR_LOOK_S + 2
-    assert until < 15 * 60
+    assert load_alarm().wake_at is None
 
 
 def test_clamp_next_look_s_floors_and_caps():
-    from abcxauto.wake_bus import MIN_LOOK_S, NEXT_LOOK_S_MAX, clamp_next_look_s
+    from abcxauto.park_clock import MIN_LOOK_S, NEXT_LOOK_S_MAX, clamp_next_look_s
 
     assert clamp_next_look_s(1) == MIN_LOOK_S
     assert clamp_next_look_s(9 * 3600) == NEXT_LOOK_S_MAX
     assert clamp_next_look_s("nope") is None
 
 
-def test_ensure_next_look_spent_alarm_is_replaced(tmp_path, monkeypatch):
+def test_ensure_park_spent_overnight_alarm_is_replaced(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    from abcxauto.wake_bus import ensure_next_look, load_alarm, save_alarm, GrokAlarm
+    from abcxauto.park_clock import ensure_park, load_alarm, save_alarm, GrokAlarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "30")
     past = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
     save_alarm(GrokAlarm(wake_at=past, set_at=past))
-    alarm = ensure_next_look(session="regular", flat=True)
+    alarm = ensure_park(session="closed", flat=True)
     assert alarm.wake_at
     assert alarm.wake_at != past
     assert load_alarm().wake_at == alarm.wake_at
 
 
-def test_ensure_next_look_replace_reseeds_a_standing_clock(tmp_path, monkeypatch):
+def test_ensure_park_rth_clears_a_standing_clock(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    from abcxauto.wake_bus import (
-        DEFAULT_LOOK_HUNT_S,
-        GrokAlarm,
-        ensure_next_look,
-        save_alarm,
-    )
+    from abcxauto.park_clock import GrokAlarm, ensure_park, save_alarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
-    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
-    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
     soon = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
     save_alarm(GrokAlarm(wake_at=soon, set_at=soon))
-    kept = ensure_next_look(session="regular", flat=True)
-    assert kept.seconds_until() is not None
-    assert kept.seconds_until() < 90
-    replaced = ensure_next_look(session="regular", flat=True, replace=True)
-    assert replaced.seconds_until() >= DEFAULT_LOOK_HUNT_S - 2
+    cleared = ensure_park(session="regular", flat=True)
+    assert cleared.wake_at is None
+    replaced = ensure_park(session="regular", flat=True, replace=True)
+    assert replaced.wake_at is None
+
+
+def test_paper_stay_up_sessions(monkeypatch):
+    from abcxauto.park_clock import paper_stay_up, session_parks
+
+    monkeypatch.setattr(
+        "abcxauto.config.Config.is_paper",
+        property(lambda self: True),
+    )
+    assert paper_stay_up(session="regular") is True
+    assert paper_stay_up(session="premarket") is True
+    assert paper_stay_up(session="closed") is False
+    assert paper_stay_up(session="postmarket") is False
+    assert session_parks("closed") is True
+    assert session_parks("postmarket") is True
+    assert session_parks("regular") is False
+    assert session_parks("premarket") is False
+    monkeypatch.setattr(
+        "abcxauto.config.Config.is_paper",
+        property(lambda self: False),
+    )
+    assert paper_stay_up(session="regular") is False
+
+
+def test_no_wake_bus_module_left():
+    import importlib.util
+
+    assert importlib.util.find_spec("abcxauto.wake_bus") is None
+    import abcxauto.park_clock as park_clock
+
+    assert not hasattr(park_clock, "ensure_next_look")
+
+
+def test_et_session_now_splits_the_day():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from abcxauto.park_clock import et_session_now
+
+    et = ZoneInfo("America/New_York")
+    assert et_session_now(now=datetime(2026, 8, 26, 3, 0, tzinfo=et)) == "closed"
+    assert et_session_now(now=datetime(2026, 8, 26, 8, 32, tzinfo=et)) == "premarket"
+    assert et_session_now(now=datetime(2026, 8, 26, 10, 0, tzinfo=et)) == "regular"
+    assert et_session_now(now=datetime(2026, 8, 26, 17, 0, tzinfo=et)) == "postmarket"
+    assert et_session_now(now=datetime(2026, 8, 22, 10, 0, tzinfo=et)) == "closed"

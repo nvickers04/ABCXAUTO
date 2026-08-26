@@ -15,9 +15,9 @@ Grok cannot switch to live or set a dollar sleeve.
 ## The loop
 
 ```
-WAKE     Clerk clock (playbook next_look_s, or hunt/open/last-hour default)
-         fill / order_change / mark move / unprotected can come sooner
-         pulse ~10s; closed/postmarket does not call Grok (unprotected still does)
+WAKE     Stay-up in RTH / premarket. Overnight park_clock until the last hour.
+         fill / order_change / unprotected poke the open think.
+         closed/postmarket does not call Grok (unprotected still does)
     |
 SNAP     IBKR book, orders, protection
     |
@@ -25,21 +25,21 @@ GROK     tools (facts + send + self_tune + write_lab_playbook). Wake is a short 
     |
 CLERK    send → gates → IBKR. Journal write is clerk, not a Grok tool.
     |
-LOOK     ensure_next_look always writes a wake_at so the desk is never parked
+LOOK     Finished RTH look writes no sit clock. Clerk is not a runner.
 ```
 
-One wake is one think: it runs until Grok stops calling tools, then the chat is
-dropped. Repeat reads inside a think are served from cache, cleared on any
+One wake is one think: it runs until Grok stops calling tools. Paper stay-up
+keeps the process (empty / `?` retries on the same process). Overnight parks.
+Repeat reads inside a think are served from cache, cleared on any
 mutating tool or live poke. Stall/loop detectors, a 64-step runaway ceiling, and
 per-tool timeouts stay. There is no stream time box and no max-look ceiling.
-`wait_for_pace` is just the pulse sleep until the next wake.
+`wait_for_pace` is just the stay-up retry sleep.
 
-Clerk cadence after a think (no Grok clock tool):
+Clerk after a think:
 
-- Closed / postmarket: no Grok (unprotected still interrupts)
-- Open risk: book events plus a 60s heartbeat
-- Flat + testing card in RTH / premarket: card `next_look_s`, else ~10 min
-- Last hour to the open: 90s
+- Closed / postmarket: park until the last hour to open (unprotected still interrupts)
+- Paper RTH / premarket: stay up. No sit clock.
+- Session-card opening print is a send gate, not a park
 
 ## Hard (code)
 

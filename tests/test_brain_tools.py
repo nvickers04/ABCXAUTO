@@ -1870,7 +1870,7 @@ def test_ensure_chat_rotates_non_episode():
 def test_every_wake_opens_a_fresh_linear_think():
     """One wake = one think. Continuity is the playbook, not a recycled chat."""
     from abcxauto.brain import _ensure_chat, _open_wake
-    from abcxauto.wake_bus import BookEvent, note_wake
+    from abcxauto.park_clock import BookEvent, note_wake
 
     g, created = _stub_chat_client()
     boot = _ensure_chat(g, kind="boot")
@@ -1889,7 +1889,7 @@ def test_every_wake_opens_a_fresh_linear_think():
 
 
 def test_rth_yield_keeps_chat_park_resets():
-    """End-of-turn keeps chat unless set_wake parked; park → new think next open."""
+    """End-of-turn keeps chat unless parked; park → new think next open."""
     from abcxauto.brain import BrainTurn, _ensure_chat, _reset_chat
 
     g, created = _stub_chat_client()
@@ -1906,6 +1906,83 @@ def test_rth_yield_keeps_chat_park_resets():
     nxt = _ensure_chat(g, kind="alarm")
     assert nxt is not chat
     assert len(created) == 2
+
+
+def test_open_wake_resume_reuses_chat():
+    from abcxauto.brain import _open_wake
+
+    g, created = _stub_chat_client()
+    first = _open_wake(g, "look brief")
+    second = _open_wake(g, "stay-up brief", resume=True)
+    assert second is first
+    assert len(created) == 1
+
+
+def test_invoke_grok_turn_resume_is_optional():
+    from abcxauto.brain import invoke_grok_turn
+
+    seen = {}
+
+    def old_mock(g, *, connector, world, snap, wake=""):
+        seen["ok"] = True
+        return "turn"
+
+    out = invoke_grok_turn(
+        old_mock,
+        object(),
+        connector=None,
+        world=None,
+        snap={},
+        wake="hi",
+        resume=True,
+    )
+    assert out == "turn"
+    assert seen["ok"] is True
+
+
+def test_forget_unsent_rejected_ticket_does_not_ride():
+    from abcxauto.brain import BrainTurn, _forget_unsent_ticket
+
+    turn = BrainTurn(
+        last_act={"strategy": "market_bracket", "params": {"symbol": "SNDK"}},
+        last_result={"status": "blocked", "reason_code": "opening_print"},
+        last_strat="market_bracket",
+        sends=[
+            {
+                "act": {"strategy": "market_bracket"},
+                "result": {"status": "blocked", "reason_code": "opening_print"},
+                "strat": "market_bracket",
+            }
+        ],
+    )
+    _forget_unsent_ticket(turn)
+    assert turn.last_act == {}
+    assert turn.last_strat == ""
+
+
+def test_forget_unsent_keeps_the_last_successful_send():
+    from abcxauto.brain import BrainTurn, _forget_unsent_ticket
+
+    turn = BrainTurn(
+        last_act={"strategy": "market_bracket"},
+        last_result={"status": "blocked"},
+        last_strat="market_bracket",
+        sends=[
+            {
+                "act": {"strategy": "modify_stop"},
+                "result": {"status": "submitted"},
+                "strat": "modify_stop",
+            },
+            {
+                "act": {"strategy": "market_bracket"},
+                "result": {"status": "blocked"},
+                "strat": "market_bracket",
+            },
+        ],
+    )
+    _forget_unsent_ticket(turn)
+    assert turn.last_strat == "modify_stop"
+    assert turn.last_act.get("strategy") == "modify_stop"
 
 
 def test_agent_tools_omit_set_wake_in_every_session():
@@ -1941,7 +2018,7 @@ def test_live_poke_interrupt_skips_reset_chat():
     import asyncio
 
     from abcxauto.brain import BrainTurn, _ensure_chat, _inject_live_poke
-    from abcxauto.wake_bus import BookEvent, clear_interrupt, note_interrupt
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
 
     g, _created = _stub_chat_client()
     _ensure_chat(g, kind="boot")
