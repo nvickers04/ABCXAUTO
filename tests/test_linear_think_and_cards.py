@@ -1,8 +1,9 @@
 """Linear think, screen facts, and the setup-card playbook.
 
-Paper RTH / premarket stay-up keeps the live chat across looks. Overnight
-drops it. Refused send tickets do not ride. Cards carry their own P&L so a
-revision is a decision about evidence rather than about whole-book drift.
+Paper RTH / premarket stay-up keeps the live chat across successful looks.
+Empty / junk / overnight drop it. Refused send tickets do not ride. Cards
+carry their own P&L so a revision is a decision about evidence rather than
+about whole-book drift.
 """
 
 from __future__ import annotations
