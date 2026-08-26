@@ -868,7 +868,7 @@ class ProEngine:
     async def _host_think(
         self, n: int, g: Any, s: dict, *, resume: bool = False
     ) -> dict:
-        """One grok_turn. Book events interrupt the open think."""
+        """One grok_turn. Stay-up resume keeps the live chat; book events poke it."""
         from abcxauto.brain import grok_turn, grok_turn_kwargs
         from abcxauto.world_state import (
             build_world_state,
@@ -1192,13 +1192,19 @@ class ProEngine:
                         )
                     except Exception:
                         self._note("WAKE", "next look seed failed")
+                    try:
+                        from abcxauto.brain import drop_live_chat
+
+                        drop_live_chat(g)
+                    except Exception:
+                        pass
                     self.state.status = "Waiting"
                     self._note("SKIP", f"session={session or 'closed'} — no Grok")
                     continue
 
                 n += 1
                 try:
-                    out = await self._host_think(n, g, s, resume=resume and not poked)
+                    out = await self._host_think(n, g, s, resume=resume)
                     if out.get("_parked"):
                         self.ui.put(("cycle", out))
                         if honor_park(session=session, minutes_to_open=mins_open):

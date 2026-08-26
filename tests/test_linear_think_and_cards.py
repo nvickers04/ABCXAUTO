@@ -1,8 +1,8 @@
 """Linear think, screen facts, and the setup-card playbook.
 
-One wake is one think: Grok uses tools, trades, and stops. Continuity is the
-playbook, not a recycled chat. Cards carry their own P&L so a revision is a
-decision about evidence rather than about whole-book drift.
+Paper RTH / premarket stay-up keeps the live chat across looks. Overnight
+drops it. Refused send tickets do not ride. Cards carry their own P&L so a
+revision is a decision about evidence rather than about whole-book drift.
 """
 
 from __future__ import annotations
@@ -167,6 +167,62 @@ def test_every_wake_is_a_new_chat():
     b = _open_wake(g, "wake two")
     assert a is not b
     assert len(created) == 2
+
+
+def test_stay_up_resume_reuses_live_chat():
+    from types import SimpleNamespace
+
+    from abcxauto.brain import _open_wake
+
+    created: list[object] = []
+    appended: list[object] = []
+
+    class Chat:
+        def append(self, msg, **_k):
+            appended.append(msg)
+
+    class _ChatNS:
+        @staticmethod
+        def create(**_k):
+            chat = Chat()
+            created.append(chat)
+            return chat
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+    )
+    first = _open_wake(g, "session=regular flat=True send.")
+    second = _open_wake(g, "session=regular flat=True send.", resume=True)
+    assert second is first
+    assert len(created) == 1
+    assert len(appended) == 2
+    from xai_sdk.chat import developer, user
+
+    assert appended[1].role == developer("x").role
+    assert appended[1].role != user("x").role
+
+
+def test_drop_refused_send_targets_clears_the_ticket():
+    from abcxauto.brain import BrainTurn, drop_refused_send_targets
+
+    turn = BrainTurn(
+        last_act={"strategy": "market_bracket", "params": {"symbol": "NVDA"}},
+        last_result={"status": "blocked", "note": "clerk_block"},
+        last_strat="market_bracket",
+        sends=[{"act": {"strategy": "market_bracket"}, "result": {"status": "blocked"}}],
+        text="tried NVDA",
+        tool_trace=["book", "send"],
+    )
+    drop_refused_send_targets(turn)
+    assert turn.last_act == {}
+    assert turn.last_result == {}
+    assert turn.last_strat == ""
+    assert turn.sends == []
+    assert turn.text == "tried NVDA"
+    assert turn.tool_trace == ["book", "send"]
 
 
 # --- backoff instead of cycling ----------------------------------------------

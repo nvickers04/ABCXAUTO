@@ -1,9 +1,10 @@
 """Grok owns the book via tools. The shell is facts + send clerk.
 
-One wake = one streamed Grok turn with tools. Tickets go through
-``execute_ticket`` → ``send_action``. IBKR tools are live. scan() is one
-criteria screen this look (hits + on_book); candles are IBKR hist or the
-live 5s stream (error if both miss); news is ~15 min delayed.
+Paper RTH / premarket stay-up continues the live chat across looks.
+Overnight / after-close drops it. Tickets go through ``execute_ticket``
+→ ``send_action``. IBKR tools are live. scan() is one criteria screen
+this look (hits + on_book); candles are IBKR hist or the live 5s stream
+(error if both miss); news is ~15 min delayed.
 """
 
 from __future__ import annotations
@@ -1628,6 +1629,36 @@ def _reset_chat(g: GrokClient) -> None:
     g._wake_n = 0
 
 
+def drop_live_chat(g: Any | None) -> None:
+    """Overnight / park / dead stream: the next think is a new conversation."""
+    if g is None:
+        return
+    _reset_chat(g)
+
+
+def drop_refused_send_targets(turn: BrainTurn) -> None:
+    """Rejected clerk tickets are not live send targets on the next look."""
+    turn.last_act = {}
+    turn.last_result = {}
+    turn.last_strat = ""
+    turn.sends = []
+
+
+def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
+    """Keep the live chat on paper stay-up. Park / overnight / dead stream drop it."""
+    if turn.parked or turn.stream_error:
+        _reset_chat(g)
+        return
+    try:
+        from abcxauto.park_clock import paper_stay_up
+
+        if paper_stay_up(session):
+            return
+    except Exception:
+        logger.debug("stay-up chat keep check failed", exc_info=True)
+    _reset_chat(g)
+
+
 def _new_chat(g: GrokClient, *, session: str = "") -> Any:
     create_kw: dict[str, Any] = {
         "model": g.model,
@@ -1648,16 +1679,38 @@ def _new_chat(g: GrokClient, *, session: str = "") -> Any:
 
 
 def _ensure_chat(g: GrokClient, *, kind: str = "", session: str = "") -> Any:
-    """One wake = one fresh think. Continuity lives in the playbook, not a chat."""
+    """Cold start a think. Stay-up resume uses ``_open_wake(..., resume=True)``."""
     _ = kind
     return _new_chat(g, session=session)
 
 
 def _open_wake(
-    g: GrokClient, wake: str, *, reset: bool = False, session: str = ""
+    g: GrokClient,
+    wake: str,
+    *,
+    reset: bool = False,
+    session: str = "",
+    resume: bool = False,
 ) -> Any:
-    """Start this look's think. The wake line is the only developer turn."""
-    _ = reset
+    """Start this look, or continue the live stay-up chat.
+
+    A cold start is a new chat (system prompt + developer wake). Stay-up
+    resume appends book facts to the existing chat so Grok does not reboot
+    as a new agent. A pending live poke owns the next developer turn.
+    """
+    live = None if reset else getattr(g, "chat", None)
+    if resume and live is not None:
+        pending = False
+        try:
+            from abcxauto.park_clock import peek_interrupt
+
+            pending = peek_interrupt() is not None
+        except Exception:
+            pending = False
+        if not pending:
+            live.append(developer(wake))
+        g._wake_n = int(getattr(g, "_wake_n", 0) or 0) + 1
+        return live
     chat = _new_chat(g, session=session)
     chat.append(developer(wake))
     return chat
@@ -2914,12 +2967,18 @@ async def grok_turn(
     """One Grok tool loop. send() is the only broker path.
 
     ``resume`` is optional so older grok_turn mocks keep working. Stay-up
-    may pass it; this look still starts a fresh BrainTurn so a rejected
-    clerk ticket cannot ride into the next look.
+    continues the live chat (research / book / card context). A fresh
+    BrainTurn still drops refused send tickets so they cannot be the next
+    look's send target.
     """
-    _ = resume
     return await _grok_turn_impl(
-        g, connector=connector, world=world, snap=snap, wake=wake, turn=BrainTurn()
+        g,
+        connector=connector,
+        world=world,
+        snap=snap,
+        wake=wake,
+        turn=BrainTurn(),
+        resume=resume,
     )
 
 
@@ -3232,13 +3291,11 @@ async def _grok_turn_impl(
     snap: dict[str, Any],
     wake: str,
     turn: BrainTurn | None = None,
+    resume: bool = False,
 ) -> BrainTurn:
     turn = turn or BrainTurn()
     # Rejected clerk tickets must not ride to the next look.
-    turn.last_act = {}
-    turn.last_result = {}
-    turn.last_strat = ""
-    turn.sends = []
+    drop_refused_send_targets(turn)
     if g is None:
         turn.last_act = {}
         turn.last_result = {"status": "error", "note": "no_grok_client"}
@@ -3246,7 +3303,7 @@ async def _grok_turn_impl(
         return turn
     session = str(getattr(world, "session_status", "") or "")
     try:
-        chat = _open_wake(g, wake, session=session)
+        chat = _open_wake(g, wake, session=session, resume=resume)
     except Exception as exc:
         logger.exception("chat start failed")
         turn.last_act = {}
@@ -3314,7 +3371,7 @@ async def _grok_turn_impl(
         if _look_text_is_junk(turn.text):
             turn.failed = True
             logger.warning("look failed: empty or junk assistant text")
-    _reset_chat(g)
+    _finish_look_chat(g, turn, session=session)
     if not turn.sends:
         if str(turn.last_strat or "").lower() == "hold":
             turn.last_strat = ""

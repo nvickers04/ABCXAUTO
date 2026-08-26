@@ -1868,7 +1868,7 @@ def test_ensure_chat_rotates_non_episode():
 
 
 def test_every_wake_opens_a_fresh_linear_think():
-    """One wake = one think. Continuity is the playbook, not a recycled chat."""
+    """A cold _open_wake is a new chat. Stay-up resume is the other path."""
     from abcxauto.brain import _ensure_chat, _open_wake
     from abcxauto.park_clock import BookEvent, note_wake
 
@@ -1889,23 +1889,83 @@ def test_every_wake_opens_a_fresh_linear_think():
 
 
 def test_rth_yield_keeps_chat_park_resets():
-    """End-of-turn keeps chat unless set_wake parked; park → new think next open."""
-    from abcxauto.brain import BrainTurn, _ensure_chat, _reset_chat
+    """End-of-turn keeps chat on paper stay-up; park / overnight drop it."""
+    from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
 
     g, created = _stub_chat_client()
     chat = _ensure_chat(g, kind="boot")
-    turn = BrainTurn(parked=False)
-    # Simulate RTH yield: no park → chat survives.
-    if turn.parked:
-        _reset_chat(g)
+    _finish_look_chat(g, BrainTurn(parked=False), session="regular")
     assert getattr(g, "chat", None) is chat
-    turn.parked = True
-    if turn.parked:
-        _reset_chat(g)
+    _finish_look_chat(g, BrainTurn(parked=True), session="regular")
     assert getattr(g, "chat", None) is None
     nxt = _ensure_chat(g, kind="alarm")
     assert nxt is not chat
     assert len(created) == 2
+
+
+def test_finish_look_chat_overnight_and_dead_stream_drop():
+    from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
+
+    g, _created = _stub_chat_client()
+    chat = _ensure_chat(g, kind="boot")
+    _finish_look_chat(g, BrainTurn(), session="premarket")
+    assert getattr(g, "chat", None) is chat
+    _finish_look_chat(g, BrainTurn(), session="closed")
+    assert getattr(g, "chat", None) is None
+    chat = _ensure_chat(g, kind="boot")
+    _finish_look_chat(g, BrainTurn(stream_error="RESOURCE_EXHAUSTED"), session="regular")
+    assert getattr(g, "chat", None) is None
+
+
+def test_finish_look_chat_live_regular_drops(monkeypatch):
+    from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
+
+    monkeypatch.setattr(
+        "abcxauto.config.Config.is_paper",
+        property(lambda self: False),
+    )
+    g, _created = _stub_chat_client()
+    _ensure_chat(g, kind="boot")
+    _finish_look_chat(g, BrainTurn(), session="regular")
+    assert getattr(g, "chat", None) is None
+
+
+def test_stay_up_open_wake_reuses_live_chat():
+    from abcxauto.brain import _open_wake
+
+    g, created = _stub_chat_client()
+    first = _open_wake(g, "session=regular send.")
+    second = _open_wake(g, "session=regular send.", resume=True)
+    assert second is first
+    assert len(created) == 1
+    third = _open_wake(g, "wake", resume=True, reset=True)
+    assert third is not first
+    assert len(created) == 2
+
+
+def test_stay_up_resume_skips_append_when_poke_pending():
+    from abcxauto.brain import _open_wake
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    class Chat:
+        def __init__(self):
+            self.appended: list[object] = []
+
+        def append(self, msg, **_k):
+            self.appended.append(msg)
+
+    g, _created = _stub_chat_client()
+    live = Chat()
+    g.chat = live
+    g._wake_n = 1
+    clear_interrupt()
+    note_interrupt(BookEvent("fill", "QQQ"))
+    try:
+        out = _open_wake(g, "session=regular send.", resume=True)
+        assert out is live
+        assert live.appended == []
+    finally:
+        clear_interrupt()
 
 
 def test_agent_tools_omit_set_wake_in_every_session():
@@ -2828,3 +2888,186 @@ async def test_resource_exhausted_turn_is_failed():
     assert turn.failed is True
     assert turn.look_failed() is True
     assert turn.parked is False
+
+
+def _stay_up_chat_client():
+    created: list[object] = []
+
+    class Chat:
+        def __init__(self):
+            self.appended: list[object] = []
+            self.rounds = 0
+
+        def append(self, msg, **_k):
+            self.appended.append(msg)
+
+        async def stream(self):
+            self.rounds += 1
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="watching the book", reasoning_content=""
+            )
+
+    class _ChatNS:
+        @staticmethod
+        def create(**_k):
+            chat = Chat()
+            created.append(chat)
+            return chat
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=None,
+        _wake_n=0,
+    )
+    return g, created
+
+
+@pytest.mark.asyncio
+async def test_stay_up_resume_keeps_chat_cold_start_does_not():
+    """A finished paper RTH look continues the live chat. A cold look does not."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    g, created = _stay_up_chat_client()
+    first = await grok_turn(
+        g, connector=None, world=_world(), snap={}, wake="session=regular send."
+    )
+    assert first.look_failed() is False
+    assert len(created) == 1
+    live = g.chat
+    assert live is created[0]
+
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake="session=regular send.",
+        resume=True,
+    )
+    assert second.look_failed() is False
+    assert g.chat is live
+    assert len(created) == 1
+
+    third = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake="session=regular send.",
+        resume=False,
+    )
+    assert third.look_failed() is False
+    assert g.chat is not live
+    assert len(created) == 2
+
+
+@pytest.mark.asyncio
+async def test_stay_up_resume_drops_refused_send_keeps_chat(monkeypatch):
+    """Clerk-blocked send is not the next look's send target. Chat stays."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+
+    async def blocked(*_a, **_k):
+        return {"status": "blocked", "note": "clerk_block: no card"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.execute_ticket", blocked)
+
+    created: list[object] = []
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(
+            name="send",
+            arguments=json.dumps(
+                {
+                    "strategy": "market_bracket",
+                    "params": {
+                        "symbol": "NVDA",
+                        "quantity": 1,
+                        "direction": "LONG",
+                        "stop_price": 100.0,
+                    },
+                    "rationale": "flush bounce",
+                }
+            ),
+        )
+
+    class Chat:
+        def __init__(self):
+            self.rounds = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.rounds += 1
+            if self.rounds == 1:
+                yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                    content="sending", reasoning_content=""
+                )
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="blocked; standing down", reasoning_content=""
+                )
+
+    class _ChatNS:
+        @staticmethod
+        def create(**_k):
+            chat = Chat()
+            created.append(chat)
+            return chat
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=None,
+        _wake_n=0,
+    )
+    first = await grok_turn(
+        g, connector=None, world=_world(), snap={}, wake="session=regular send."
+    )
+    assert first.last_act.get("strategy") == "market_bracket"
+    assert first.last_result.get("status") == "blocked"
+    assert first.sends
+    live = g.chat
+    assert live is created[0]
+
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake="session=regular send.",
+        resume=True,
+    )
+    assert g.chat is live
+    assert len(created) == 1
+    assert second.last_act == {}
+    assert second.sends == []
+    assert second.last_strat == ""
+    assert str(second.last_result.get("status") or "") != "blocked"
+
+
+@pytest.mark.asyncio
+async def test_closed_look_drops_chat_after_think():
+    from abcxauto.brain import grok_turn
+
+    g, created = _stay_up_chat_client()
+    await grok_turn(
+        g,
+        connector=None,
+        world=_world(session_status="closed"),
+        snap={},
+        wake="session=closed send.",
+    )
+    assert g.chat is None
+    assert len(created) == 1
