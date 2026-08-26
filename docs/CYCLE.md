@@ -29,11 +29,12 @@ LOOK     Finished RTH look writes no grok_wake.json. Empty/? retries on this pro
          Overnight skip parks. Clerk is not a runner.
 ```
 
-One wake is one think: it runs until Grok stops calling tools, then the chat is
-dropped. Repeat reads inside a think are served from cache, cleared on any
-mutating tool or live poke. Stall/loop detectors, a 64-step runaway ceiling, and
-per-tool timeouts stay. There is no stream time box and no max-look ceiling.
-`wait_for_pace` is just the pulse sleep until the next wake.
+        Paper RTH / premarket stay-up continues the live chat across looks.
+        Overnight / after-close drops the chat. Repeat reads inside a think are
+        served from cache, cleared on any mutating tool or live poke. Stall/loop
+        detectors, a 64-step runaway ceiling, and per-tool timeouts stay. There
+        is no stream time box and no max-look ceiling. `wait_for_pace` is just
+        the pulse sleep until the next wake.
 
 After a think:
 

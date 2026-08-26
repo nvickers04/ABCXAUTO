@@ -692,10 +692,11 @@ async def test_host_think_park_keeps_the_look_for_last_turn(monkeypatch):
 async def test_host_think_resume_sends_book_facts_not_yield_resume(monkeypatch):
     from abcxauto.brain import BrainTurn
 
-    got: dict[str, str] = {}
+    got: dict[str, object] = {}
 
     async def grok_turn(*_a, **k):
         got["wake"] = str(k.get("wake") or "")
+        got["resume"] = k.get("resume")
         return BrainTurn(text="looking")
 
     monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
@@ -707,7 +708,8 @@ async def test_host_think_resume_sends_book_facts_not_yield_resume(monkeypatch):
         _stay_up_snap("regular"),
         resume=True,
     )
-    wake = got.get("wake") or ""
+    wake = str(got.get("wake") or "")
+    assert got.get("resume") is True
     assert wake != "yield resume."
     assert "yield resume" not in wake
     assert "session=" in wake
@@ -751,9 +753,11 @@ async def test_paper_regular_stay_up_looks_without_a_clock(monkeypatch, tmp_path
     """Looks keep coming on this process. Clerk does not write a sit clock."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     stamps: list[float] = []
+    resumes: list[bool] = []
 
     async def think(self, n, g, s, *, resume=False):
         stamps.append(time.monotonic())
+        resumes.append(resume)
         return {
             "cycle": n,
             "pnl": 0,
@@ -772,6 +776,8 @@ async def test_paper_regular_stay_up_looks_without_a_clock(monkeypatch, tmp_path
     eng.stop_engine()
     eng.drain_apply()
     assert len(stamps) >= 3
+    assert resumes
+    assert all(resumes), resumes
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None
@@ -1013,6 +1019,37 @@ async def test_closed_session_skips_grok_and_keeps_a_clock(monkeypatch, tmp_path
     assert load_alarm().wake_at
     eng.stop_engine()
     eng.drain_apply()
+
+
+@pytest.mark.asyncio
+async def test_closed_session_skip_drops_live_chat(monkeypatch, tmp_path):
+    """Overnight skip is a park: the next think must not resume yesterday's chat."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    brains: list[SimpleNamespace] = []
+
+    def make_g():
+        g = SimpleNamespace(chat=object(), _wake_n=1)
+        brains.append(g)
+        return g
+
+    async def think(self, n, g, s, *, resume=False):
+        return {"_parked": True, "cycle": n}
+
+    _wire_stay_up_engine(monkeypatch, session="closed", think=think)
+    monkeypatch.setattr("abcxauto.pro_engine.GrokClient", make_g)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+        if brains and brains[0].chat is None:
+            break
+    eng.stop_engine()
+    eng.drain_apply()
+    assert brains
+    assert brains[0].chat is None
+    assert brains[0]._wake_n == 0
 
 
 @pytest.mark.asyncio

@@ -163,4 +163,6 @@ class GrokClient:
         self.model = cfg.model
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens
+        self.chat = None
+        self._wake_n = 0
         logger.info(f"Grok client ready (model={self.model})")
