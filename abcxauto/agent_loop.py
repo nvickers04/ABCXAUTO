@@ -482,6 +482,9 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
     from abcxauto.protect import promote_naked_entry
 
     promote_naked_entry(act, list(getattr(world, "positions", None) or []))
+    from abcxauto.tool_args import bind_send_card
+
+    bind_send_card(act)
     raw = str(act.get("strategy") or act.get("action") or "").strip().lower()
     needs_prot = bool(getattr(world, "needs_protection", False) or getattr(world, "unprotected", None))
     if raw == "hold" and needs_prot:

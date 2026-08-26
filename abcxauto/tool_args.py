@@ -314,6 +314,32 @@ def hoist_send_params(args: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def bind_send_card(act: dict[str, Any], extra: Any = None) -> str:
+    """Stamp ``params.card`` from top-level ``send.card`` (or ``extra``).
+
+    Hoist already copies the key when Grok nests a params object. Brain
+    send used to build ``act`` from ``args.params`` only, so a top-level
+    card that hoist missed never reached ``gate_ticket`` / the journal.
+    Returns the bound name (empty if none).
+    """
+    if not isinstance(act, dict):
+        return ""
+    params = act.get("params")
+    if not isinstance(params, dict):
+        params = {}
+        act["params"] = params
+    raw = extra
+    if raw in (None, ""):
+        raw = act.get("card")
+    if raw in (None, ""):
+        raw = params.get("card")
+    want = str(raw or "").strip()
+    if want:
+        params["card"] = want
+        act["card"] = want
+    return want
+
+
 def _missing(params: dict[str, Any], key: str) -> bool:
     return params.get(key) in (None, "")
 

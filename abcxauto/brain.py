@@ -28,6 +28,7 @@ from abcxauto.tool_args import (
     CANDLE_CAP,
     CHAIN_CAP,
     OPTION_QUOTE_CAP,
+    bind_send_card,
     fallback_quote_symbols,
     normalize_tool_call,
     option_quote_specs,
@@ -2801,12 +2802,14 @@ async def _run_tool(
             "facts": facts,
         })
     if name == "send":
+        params = args.get("params") if isinstance(args.get("params"), dict) else {}
         act = {
             "action": str(args.get("strategy") or args.get("action") or "").strip(),
             "strategy": str(args.get("strategy") or args.get("action") or "").strip(),
-            "params": args.get("params") if isinstance(args.get("params"), dict) else {},
+            "params": dict(params),
             "rationale": str(args.get("rationale") or ""),
         }
+        bind_send_card(act, extra=args.get("card"))
         if args.get("target_conId"):
             act["target_conId"] = str(args.get("target_conId"))
         result = await execute_ticket(act, connector, world, snap)
