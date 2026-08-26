@@ -1053,10 +1053,13 @@ def test_send_tool_tags_the_card_on_a_successful_dispatch(monkeypatch, tmp_path)
 
     _save(market_bracket=[_card("flush bounce")])
     seen: list[dict] = []
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.execute_ticket",
-        _fake_execute({"status": "submitted", "success": True, "order_ids": [77, 78]}),
-    )
+    acts: list[dict] = []
+
+    async def _run(act, connector, world, snap):
+        acts.append(act)
+        return {"status": "submitted", "success": True, "order_ids": [77, 78]}
+
+    monkeypatch.setattr("abcxauto.agent_loop.execute_ticket", _run)
     monkeypatch.setattr(
         "abcxauto.lab_playbook.record_card_send",
         lambda **kw: seen.append(kw),
@@ -1080,6 +1083,8 @@ def test_send_tool_tags_the_card_on_a_successful_dispatch(monkeypatch, tmp_path)
     )
     assert seen and seen[0]["card"] == "flush bounce"
     assert seen[0]["strategy"] == "market_bracket"
+    assert acts and acts[0]["params"]["card"] == "flush bounce"
+    assert acts[0].get("card") == "flush bounce"
 
 
 def _fake_execute(result):

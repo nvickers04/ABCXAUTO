@@ -7,7 +7,12 @@ from typing import Any, Dict, Optional
 
 from abcxauto.config import get_config
 from abcxauto.memory import get_journal
-from abcxauto.proposals import OrderProposal, ProposalValidationError, validate_proposal
+from abcxauto.proposals import (
+    OrderProposal,
+    ProposalValidationError,
+    params_for_journal,
+    validate_proposal,
+)
 from abcxauto.risk_gates import get_risk_gate, is_exit_or_management
 
 logger = logging.getLogger(__name__)
@@ -518,7 +523,7 @@ async def execute_proposal(
         or getattr(proposal.params, "action", "")
         or "",
         quantity=getattr(proposal.params, "quantity", None),
-        params=proposal.params.model_dump(exclude_none=True),
+        params=params_for_journal(proposal),
         validation_ok=True,
     )
 

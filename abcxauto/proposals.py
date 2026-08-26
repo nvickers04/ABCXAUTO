@@ -115,7 +115,13 @@ class StopLimitParams(BaseModel):
 # Entries + management (cycle allowlist)
 # ---------------------------------------------------------------------------
 
-class BracketParams(BaseModel):
+class TicketCard(BaseModel):
+    """Playbook card name for scorecard/journal. Never a gateway kwarg."""
+
+    card: Optional[str] = Field(default=None, exclude=True)
+
+
+class BracketParams(TicketCard):
     symbol: str
     quantity: int = Field(gt=0)
     direction: Literal["LONG", "SHORT"]
@@ -146,12 +152,13 @@ class BracketParams(BaseModel):
         return self
 
 
-class MarketBracketParams(BaseModel):
+class MarketBracketParams(TicketCard):
     """Market entry, then OCA stop + target sized to the actual fill.
 
     ``price_hint`` is optional sizing/R:R context (excluded from the gateway
     call). When absent, risk gates use a conservative stop/target bound and
     min_reward_risk is skipped (cannot be computed honestly without an entry).
+    ``card`` is scorecard attribution (also excluded from the gateway call).
     """
 
     symbol: str
@@ -292,6 +299,8 @@ class OrderProposal(BaseModel):
     rationale: str
     max_loss: Optional[str] = None
     max_gain: Optional[str] = None
+    # Scorecard label copied from params.card / send.card. Not a gateway kwarg.
+    card: Optional[str] = None
 
     @property
     def gateway_method(self) -> str:
@@ -307,6 +316,25 @@ _id_counter = itertools.count(1)
 
 class ProposalValidationError(Exception):
     """Raised when a propose_order payload fails validation (fed back to Grok)."""
+
+
+def ticket_card_of(params: Any, extra: Any = None) -> str:
+    """Scorecard card name from a params dict / model, else ``extra``."""
+    raw = extra
+    if raw in (None, "") and isinstance(params, dict):
+        raw = params.get("card")
+    if raw in (None, "") and params is not None and not isinstance(params, dict):
+        raw = getattr(params, "card", None)
+    return str(raw or "").strip()
+
+
+def params_for_journal(proposal: OrderProposal) -> dict[str, Any]:
+    """Gateway dump plus the card label. ``card`` is Field(exclude=True)."""
+    dumped = proposal.params.model_dump(exclude_none=True)
+    card = ticket_card_of(proposal.params, extra=getattr(proposal, "card", None))
+    if card:
+        dumped["card"] = card
+    return dumped
 
 
 def validate_proposal(
@@ -379,4 +407,5 @@ def validate_proposal(
         rationale=rationale.strip(),
         max_loss=max_loss,
         max_gain=max_gain,
+        card=ticket_card_of(params) or None,
     )

@@ -227,3 +227,21 @@ class TestMinRewardRiskRemoved:
         assert "side" not in dumped
         assert "secType" not in dumped
         assert "tif" not in dumped
+        assert "card" not in dumped
+
+
+def test_market_bracket_card_is_journaled_not_dispatched():
+    from abcxauto.proposals import params_for_journal
+
+    p = validate_proposal(
+        "market_bracket",
+        {
+            **VALID_PAYLOADS["market_bracket"],
+            "card": "large-cap 3pct gap hold",
+        },
+        RATIONALE,
+        quote_last=100.0,
+    )
+    assert p.card == "large-cap 3pct gap hold"
+    assert "card" not in p.params.model_dump(exclude_none=True)
+    assert params_for_journal(p)["card"] == "large-cap 3pct gap hold"
