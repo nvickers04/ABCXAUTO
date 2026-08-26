@@ -1,10 +1,11 @@
 """Grok owns the book via tools. The shell is facts + send clerk.
 
-Paper RTH / premarket stay-up continues the live chat across looks.
-Overnight / after-close drops it. Tickets go through ``execute_ticket``
-→ ``send_action``. IBKR tools are live. scan() is one criteria screen
-this look (hits + on_book); candles are IBKR hist or the live 5s stream
-(error if both miss); news is ~15 min delayed.
+Paper RTH / premarket stay-up continues the live chat across successful
+looks. Overnight / after-close / empty-junk / dead stream drop it.
+Tickets go through ``execute_ticket`` → ``send_action``. IBKR tools are
+live. scan() is one criteria screen this look (hits + on_book); candles
+are IBKR hist or the live 5s stream (error if both miss); news is ~15
+min delayed.
 """
 
 from __future__ import annotations
@@ -1630,7 +1631,7 @@ def _reset_chat(g: GrokClient) -> None:
 
 
 def drop_live_chat(g: Any | None) -> None:
-    """Overnight / park / dead stream: the next think is a new conversation."""
+    """Overnight / park / junk / dead stream: the next think is a new conversation."""
     if g is None:
         return
     _reset_chat(g)
@@ -1645,8 +1646,12 @@ def drop_refused_send_targets(turn: BrainTurn) -> None:
 
 
 def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
-    """Keep the live chat on paper stay-up. Park / overnight / dead stream drop it."""
-    if turn.parked or turn.stream_error:
+    """Keep the live chat on a successful paper stay-up look.
+
+    Park, overnight, empty/junk, and a dead stream drop it so the next
+    think is a cold start — not append-to-junk.
+    """
+    if turn.parked or turn.stream_error or turn.look_failed():
         _reset_chat(g)
         return
     try:
@@ -2967,9 +2972,9 @@ async def grok_turn(
     """One Grok tool loop. send() is the only broker path.
 
     ``resume`` is optional so older grok_turn mocks keep working. Stay-up
-    continues the live chat (research / book / card context). A fresh
-    BrainTurn still drops refused send tickets so they cannot be the next
-    look's send target.
+    continues the live chat after a good look. Empty / junk / dead stream
+    drop it so the next think is cold. A fresh BrainTurn still drops
+    refused send tickets so they cannot be the next look's send target.
     """
     return await _grok_turn_impl(
         g,
@@ -3310,6 +3315,7 @@ async def _grok_turn_impl(
         turn.last_result = {"status": "error", "note": f"chat_error: {exc}"}
         turn.failed = True
         turn.stream_error = str(exc)
+        _finish_look_chat(g, turn, session=session)
         return turn
     ran_out = True
     while turn.steps < MAX_TOOL_STEPS:
