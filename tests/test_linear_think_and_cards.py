@@ -116,7 +116,7 @@ def test_a_send_invalidates_cached_reads():
 
 def test_a_live_poke_invalidates_cached_reads():
     from abcxauto.brain import _inject_live_poke
-    from abcxauto.wake_bus import BookEvent, clear_interrupt, note_interrupt
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
 
     turn = BrainTurn()
     turn.tool_cache[_tool_key("book", {})] = json.dumps({"flat": True})
@@ -192,7 +192,7 @@ def test_provider_overloaded_ignores_ordinary_errors():
 
 
 def test_failed_look_backoff_escalates_and_caps():
-    from abcxauto.wake_bus import (
+    from abcxauto.park_clock import (
         FAILED_LOOK_BACKOFF_CAP_S,
         PROVIDER_BACKOFF_CAP_S,
         PROVIDER_BACKOFF_MIN_S,

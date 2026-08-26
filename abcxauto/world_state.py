@@ -1496,7 +1496,7 @@ def format_wake(
     max_n = cap.get("max_open_positions", cap.get("max"))
     ev = None
     try:
-        from abcxauto.wake_bus import last_wake
+        from abcxauto.park_clock import last_wake
 
         ev = last_wake()
     except Exception:

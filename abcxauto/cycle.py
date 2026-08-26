@@ -1,9 +1,9 @@
 """Compatibility leftovers from clerk-as-runner.
 
-Think is hosted on ``pro_engine``. The nap clock is ``wake_bus``.
+Think is hosted on ``pro_engine``. Overnight park is ``park_clock``.
 This module keeps inventory / gate helpers that callers still import.
 ``run_cycle`` and ``snap`` stay import-safe but do not look, think, send,
-or arm a wake clock.
+or arm a park clock.
 """
 
 from __future__ import annotations

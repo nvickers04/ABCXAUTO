@@ -15,9 +15,9 @@ Grok cannot switch to live or set a dollar sleeve.
 ## The loop
 
 ```
-WAKE     Clerk clock (playbook next_look_s, or hunt/open/last-hour default)
-         fill / order_change / mark move / unprotected can come sooner
-         pulse ~10s; closed/postmarket does not call Grok (unprotected still does)
+WAKE     Overnight / after-close: park_clock until premarket
+         Paper RTH and premarket stay up on this process — no sit clock
+         fill / order_change / unprotected poke the open think
     |
 SNAP     IBKR book, orders, protection
     |
@@ -25,7 +25,8 @@ GROK     tools (facts + send + self_tune + write_lab_playbook). Wake is a short 
     |
 CLERK    send → gates → IBKR. Journal write is clerk, not a Grok tool.
     |
-LOOK     ensure_next_look always writes a wake_at so the desk is never parked
+LOOK     Finished RTH look writes no grok_wake.json. Empty/? retries on this process.
+         Overnight skip parks. Clerk is not a runner.
 ```
 
 One wake is one think: it runs until Grok stops calling tools, then the chat is
@@ -34,12 +35,12 @@ mutating tool or live poke. Stall/loop detectors, a 64-step runaway ceiling, and
 per-tool timeouts stay. There is no stream time box and no max-look ceiling.
 `wait_for_pace` is just the pulse sleep until the next wake.
 
-Clerk cadence after a think (no Grok clock tool):
+After a think:
 
-- Closed / postmarket: no Grok (unprotected still interrupts)
-- Open risk: book events plus a 60s heartbeat
-- Flat + testing card in RTH / premarket: card `next_look_s`, else ~10 min
-- Last hour to the open: 90s
+- Closed / postmarket: no Grok (unprotected still interrupts); park until premarket
+- Paper RTH / premarket: stay up on this process. Empty / `?` backoff ~20–45s
+- Session-card opening print is a send gate, not a park
+- Last hour to the open is stay-up, not a sit clock
 
 ## Hard (code)
 

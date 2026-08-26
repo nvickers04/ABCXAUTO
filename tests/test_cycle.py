@@ -48,8 +48,8 @@ async def test_snap_is_retired_noop(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop._tool", boom)
     monkeypatch.setattr("abcxauto.agent_loop.snap", boom)
-    monkeypatch.setattr("abcxauto.wake_bus.set_wake", boom_sync)
-    monkeypatch.setattr("abcxauto.wake_bus.ensure_next_look", boom_sync)
+    monkeypatch.setattr("abcxauto.park_clock.set_wake", boom_sync)
+    monkeypatch.setattr("abcxauto.park_clock.ensure_next_look", boom_sync)
 
     out = await snap(FakeConnector())
     assert started == []
@@ -74,8 +74,8 @@ async def test_run_cycle_is_retired_noop(monkeypatch):
     monkeypatch.setattr("abcxauto.agent_loop.snap", boom)
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom)
     monkeypatch.setattr("abcxauto.brain.grok_turn", boom)
-    monkeypatch.setattr("abcxauto.wake_bus.set_wake", boom_sync)
-    monkeypatch.setattr("abcxauto.wake_bus.ensure_next_look", boom_sync)
+    monkeypatch.setattr("abcxauto.park_clock.set_wake", boom_sync)
+    monkeypatch.setattr("abcxauto.park_clock.ensure_next_look", boom_sync)
     monkeypatch.setattr("abcxauto.pacing.wait_for_pace", boom)
     monkeypatch.setattr("asyncio.sleep", boom)
 
@@ -184,7 +184,7 @@ def test_risk_label_compliant():
 
 
 def test_config_has_no_metronome_fields():
-    from abcxauto import wake_bus
+    from abcxauto import park_clock
     from abcxauto.config import CAPACITY_KEYS, Config, get_config
 
     get_config.cache_clear()
@@ -192,8 +192,8 @@ def test_config_has_no_metronome_fields():
     assert not hasattr(cfg, "trading_mandate")
     assert "cycle_sleep_s" not in Config.__dataclass_fields__
     assert "control_budget_pct" not in Config.__dataclass_fields__
-    assert not hasattr(wake_bus, "MAX_LOOK_OPEN_S")
-    assert not hasattr(wake_bus, "max_look_s")
+    assert not hasattr(park_clock, "MAX_LOOK_OPEN_S")
+    assert not hasattr(park_clock, "max_look_s")
     assert not hasattr(cfg, "idle_streak")
     assert CAPACITY_KEYS == frozenset({"max_open_positions"})
     get_config.cache_clear()

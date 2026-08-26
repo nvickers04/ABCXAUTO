@@ -1870,7 +1870,7 @@ def test_ensure_chat_rotates_non_episode():
 def test_every_wake_opens_a_fresh_linear_think():
     """One wake = one think. Continuity is the playbook, not a recycled chat."""
     from abcxauto.brain import _ensure_chat, _open_wake
-    from abcxauto.wake_bus import BookEvent, note_wake
+    from abcxauto.park_clock import BookEvent, note_wake
 
     g, created = _stub_chat_client()
     boot = _ensure_chat(g, kind="boot")
@@ -1941,7 +1941,7 @@ def test_live_poke_interrupt_skips_reset_chat():
     import asyncio
 
     from abcxauto.brain import BrainTurn, _ensure_chat, _inject_live_poke
-    from abcxauto.wake_bus import BookEvent, clear_interrupt, note_interrupt
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
 
     g, _created = _stub_chat_client()
     _ensure_chat(g, kind="boot")
