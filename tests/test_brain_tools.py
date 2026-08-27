@@ -1009,9 +1009,13 @@ async def test_bare_candles_on_session_card_request_five_minute_without_gap_tick
 
 
 @pytest.mark.asyncio
-async def test_candles_stamp_session_range_and_run_next_send():
+async def test_candles_stamp_session_range_and_run_next_send(monkeypatch):
     from abcxauto.lab_playbook import clamp_update, save_lab
 
+    monkeypatch.setattr(
+        "abcxauto.opportunity_scan._et_calendar_day",
+        lambda now=None: "2026-08-25",
+    )
     update = clamp_update(
         {
             "types": {
@@ -1314,6 +1318,10 @@ async def test_multi_name_candles_send_sketch_uses_this_look_session(monkeypatch
     assert update is not None
     save_lab(update)
     monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda *a, **k: {})
+    monkeypatch.setattr(
+        "abcxauto.opportunity_scan._et_calendar_day",
+        lambda now=None: "2026-08-25",
+    )
 
     class Conn:
         async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
