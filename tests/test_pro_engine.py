@@ -752,6 +752,71 @@ def test_rearm_junk_look_starts_immediately():
     assert wait == 0.0
 
 
+def test_rearm_spoken_look_is_resume_not_cold():
+    """A no-send look with a real say keeps stay-up on the same chat."""
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+        },
+        session="regular",
+    )
+    assert eng._resume_think is True
+    assert eng._cold_next is False
+    assert wait == 0.0
+    # A mis-tagged spoken look must not wipe the chat either.
+    wait = eng._rearm_after_think(
+        {
+            "_failed": True,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+        },
+        session="regular",
+    )
+    assert eng._resume_think is True
+    assert eng._cold_next is False
+    assert wait == 0.0
+
+
+@pytest.mark.asyncio
+async def test_spoken_no_send_look_next_look_is_resume(monkeypatch, tmp_path):
+    """A spoken stay-up look keeps the chat. The next look is resume, not cold."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    resumes: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        resumes.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": True,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 3:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) >= 3
+    assert resumes[0] is True
+    assert resumes[1] is True
+    assert resumes[2] is True
+    assert eng._cold_next is False
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is None
+    assert eng._resume_think is True
+
+
 def test_rearm_failed_look_retries_immediately(monkeypatch):
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "30")
     eng = ProEngine()

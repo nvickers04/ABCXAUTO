@@ -829,18 +829,25 @@ class ProEngine:
         """Stay-up next look is immediate. No sit clock.
 
         Paper RTH / premarket re-arm on this process. A good look writes no
-        grok_wake.json. Empty / ? / dead stream drop the chat and start
-        another look now. Overnight park is park_clock after a closed skip.
+        grok_wake.json. A look that already spoke resumes the same chat.
+        True empty / lone '?' / dead stream drop the chat and start another
+        look now. Overnight park is park_clock after a closed skip.
         """
         session = self._resolve_session(session)
         self._last_session = session
         payload = out if isinstance(out, dict) else {}
+        from abcxauto.brain import _look_text_is_junk
         from abcxauto.park_clock import paper_stay_up
 
         stay = paper_stay_up(session)
         failed = bool(payload.get("_failed"))
         parked = bool(payload.get("_parked"))
         stream_err = str(payload.get("_stream_error") or "")
+        # A spoken look is not junk. Do not wipe the stay-up chat.
+        if failed and not stream_err and not _look_text_is_junk(
+            str(payload.get("rationale") or "")
+        ):
+            failed = False
         if parked and not stay:
             self._fail_streak = 0
             self._cold_next = True

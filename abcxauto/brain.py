@@ -1033,11 +1033,13 @@ class BrainTurn:
     tool_cache: dict[str, str] = field(default_factory=dict)
 
     def look_failed(self) -> bool:
-        """True empty / lone '?' / dead stream. A real say is not junk."""
+        """True empty / lone '?' / dead stream. A real say is not junk.
+
+        The ``failed`` stamp is not a runner. A look that already spoke
+        is a finished look — do not wipe the stay-up chat.
+        """
         if self.parked:
             return False
-        if self.failed:
-            return True
         if self.stream_error:
             return True
         if self.sends:
@@ -1590,9 +1592,13 @@ def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
     """Keep the live chat when the look actually said something.
 
     Park, overnight, true empty / lone '?', and a dead stream drop it
-    so the next think is a cold start.
+    so the next think is a cold start. A ``failed`` stamp on a real
+    say is not a drop.
     """
-    if turn.parked or turn.stream_error or turn.look_failed():
+    if turn.parked or turn.stream_error:
+        _reset_chat(g)
+        return
+    if not turn.sends and _look_text_is_junk(turn.text):
         _reset_chat(g)
         return
     try:

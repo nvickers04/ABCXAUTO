@@ -782,20 +782,24 @@ def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def last_turn_look_failed(out: dict[str, Any] | None) -> bool:
-    """True when this persist payload is a junk/empty/failed look, not a completed turn.
+    """True when this persist payload is a junk/empty/dead look, not a completed turn.
 
     ``write_desk_brief`` skips ``strat=="in_progress"`` so the last completed
-    look stays on the brief. ``write_last_turn`` skips ``look_failed()`` the
-    same way so a ``?`` / empty / stream-error look does not blank
-    last_turn.json. Overnight / park still write: ``BrainTurn.look_failed``
-    is false when parked, and ``_host_think`` stamps ``_failed`` only when
-    the look failed and was not parked.
+    look stays on the brief. ``write_last_turn`` skips a true empty / lone
+    ``?`` / dead-stream look so it does not blank last_turn.json. A real
+    say is a finished look — a leftover ``_failed`` stamp does not wipe it.
+    Overnight / park still write.
     """
     if not isinstance(out, dict):
         return False
     if str(out.get("strat") or "") == "in_progress":
         return False
     if out.get("_parked") or out.get("parked"):
+        return False
+    if out.get("_stream_error") or out.get("stream_error"):
+        return True
+    rationale = str(out.get("rationale") or "").strip()
+    if rationale and rationale != "?":
         return False
     return bool(out.get("_failed") or out.get("failed"))
 

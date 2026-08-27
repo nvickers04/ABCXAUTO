@@ -2235,7 +2235,7 @@ def test_finish_look_chat_overnight_and_dead_stream_drop():
 
 
 def test_finish_look_chat_junk_empty_failed_drop():
-    """A stay-up empty/junk/failed look must not keep the live chat."""
+    """True empty / lone '?' drop the live chat. A real say does not."""
     from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
 
     g, created = _stub_chat_client()
@@ -2247,7 +2247,8 @@ def test_finish_look_chat_junk_empty_failed_drop():
         BrainTurn(text=""),
         BrainTurn(text="?"),
         BrainTurn(text="  "),
-        BrainTurn(failed=True, text="watching IWM"),
+        BrainTurn(failed=True, text=""),
+        BrainTurn(failed=True, text="?"),
     ):
         g.chat = chat
         _finish_look_chat(g, dead, session="regular")
@@ -2257,6 +2258,23 @@ def test_finish_look_chat_junk_empty_failed_drop():
     _finish_look_chat(g, BrainTurn(text=""), session="premarket")
     assert getattr(g, "chat", None) is None
     assert len(created) == 1
+
+
+def test_finish_look_chat_spoken_look_keeps_chat():
+    """A no-send look that already spoke stays on the paper stay-up chat."""
+    from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
+
+    g, _created = _stub_chat_client()
+    chat = _ensure_chat(g, kind="boot")
+    for spoken in (
+        BrainTurn(text="Standing down. Watching IWM. No ticket."),
+        BrainTurn(text="I'll inspect the book first.\n?"),
+        BrainTurn(failed=True, text="watching IWM"),
+        BrainTurn(last_result={"status": "error"}, text="standing down"),
+    ):
+        g.chat = chat
+        _finish_look_chat(g, spoken, session="regular")
+        assert getattr(g, "chat", None) is chat, spoken
 
 
 def test_finish_look_chat_refused_send_keeps_chat():
@@ -3152,8 +3170,18 @@ def test_look_failed_question_empty_and_stream_error():
     assert BrainTurn(text="watching IWM").look_failed() is False
     assert BrainTurn(text="?", sends=[{"strat": "buy_option"}]).look_failed() is False
     assert BrainTurn(text="?", parked=True).look_failed() is False
-    assert BrainTurn(failed=True, text="ok").look_failed() is True
+    # A real say is a finished look — failed/error stamps must not wipe it.
+    assert BrainTurn(failed=True, text="ok").look_failed() is False
     assert BrainTurn(last_result={"status": "error"}).look_failed() is True
+    assert BrainTurn(
+        last_result={"status": "error"},
+        text="standing down",
+    ).look_failed() is False
+    assert BrainTurn(stream_error="RESOURCE_EXHAUSTED").look_failed() is True
+    assert BrainTurn(
+        stream_error="RESOURCE_EXHAUSTED",
+        text="watching IWM",
+    ).look_failed() is True
     # A look that said something keeps chat — trailing '?' is not a lone '?'.
     assert BrainTurn(
         text="I'll inspect the book, status, and playbook first.\n?",

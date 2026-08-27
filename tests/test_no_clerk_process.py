@@ -76,6 +76,13 @@ def test_real_say_keeps_chat_empty_question_drops():
 
     _finish_look_chat(
         g,
+        BrainTurn(failed=True, text="watching IWM"),
+        session="regular",
+    )
+    assert getattr(g, "chat", None) is chat
+
+    _finish_look_chat(
+        g,
         BrainTurn(text="I'll inspect the book first.\n?"),
         session="regular",
     )
@@ -97,6 +104,19 @@ def test_real_say_keeps_chat_empty_question_drops():
     assert getattr(g, "chat", None) is None
 
 
+def test_spoken_look_is_not_a_failed_persist():
+    from abcxauto.think_stream import last_turn_look_failed
+
+    assert last_turn_look_failed(
+        {"rationale": "Playbook is explore/testing. Scanning gap-down tape.", "_failed": True}
+    ) is False
+    assert last_turn_look_failed({"rationale": "?", "_failed": True}) is True
+    assert last_turn_look_failed({"rationale": "", "_failed": True}) is True
+    assert last_turn_look_failed(
+        {"rationale": "watching", "_failed": True, "_stream_error": "stalled"}
+    ) is True
+
+
 def test_look_text_junk_is_only_empty_or_lone_question():
     assert _look_text_is_junk("") is True
     assert _look_text_is_junk("?") is True
@@ -105,6 +125,7 @@ def test_look_text_junk_is_only_empty_or_lone_question():
     assert _look_text_is_junk("I'll inspect the book first.\n?") is False
     assert _look_text_is_junk("\u2603") is False
     assert BrainTurn(text="watching IWM").look_failed() is False
+    assert BrainTurn(failed=True, text="watching IWM").look_failed() is False
     assert BrainTurn(text="?").look_failed() is True
     assert BrainTurn(text="").look_failed() is True
 
@@ -123,6 +144,16 @@ def test_rth_failed_look_has_no_sit():
     assert eng._cold_next is True
     wait = eng._rearm_after_think({"_failed": True, "rationale": "?"}, session="regular")
     assert wait == 0.0
+    wait = eng._rearm_after_think(
+        {
+            "_failed": True,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+        },
+        session="regular",
+    )
+    assert wait == 0.0
+    assert eng._resume_think is True
+    assert eng._cold_next is False
     assert clerk_look_s(flat=True, session="regular") == 0.0
     assert clerk_look_s(flat=False, session="premarket", minutes_to_open=45) == 0.0
 
