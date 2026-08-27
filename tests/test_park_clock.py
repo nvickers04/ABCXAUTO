@@ -39,6 +39,10 @@ def test_resolve_stay_up_session_fills_blank_rth_and_premarket(monkeypatch):
     assert resolve_stay_up_session("regular") == "regular"
     assert resolve_stay_up_session("closed") == "closed"
     assert (
+        resolve_stay_up_session("unknown", now=datetime(2026, 8, 27, 10, 16, tzinfo=et))
+        == "regular"
+    )
+    assert (
         resolve_stay_up_session("", now=datetime(2026, 8, 27, 10, 16, tzinfo=et))
         == "regular"
     )

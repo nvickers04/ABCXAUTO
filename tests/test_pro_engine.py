@@ -780,6 +780,34 @@ def test_rearm_spoken_look_is_resume_not_cold():
     assert wait == 0.0
 
 
+def test_rearm_send_or_fill_look_is_resume_not_cold():
+    """A send/fill keeps stay-up on the same chat even if rationale is empty."""
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": True,
+            "rationale": "",
+            "sends": 1,
+        },
+        session="regular",
+    )
+    assert eng._resume_think is True
+    assert eng._cold_next is False
+    assert wait == 0.0
+    wait = eng._rearm_after_think(
+        {
+            "_failed": True,
+            "_stream_error": "stream stalled",
+            "rationale": "6384 was already gone. Iron fly 6834 is working.",
+            "sends": 1,
+        },
+        session="regular",
+    )
+    assert eng._resume_think is True
+    assert eng._cold_next is False
+    assert wait == 0.0
+
+
 @pytest.mark.asyncio
 async def test_spoken_no_send_look_next_look_is_resume(monkeypatch, tmp_path):
     """A spoken stay-up look keeps the chat. The next look is resume, not cold."""
@@ -860,6 +888,33 @@ async def test_host_think_surfaces_question_failed(monkeypatch):
     out = await eng._host_think(1, SimpleNamespace(chat=None), _stay_up_snap("regular"))
     assert out.get("_failed") is True
     assert not out.get("_parked")
+
+
+@pytest.mark.asyncio
+async def test_host_think_send_or_spoken_look_is_not_failed(monkeypatch):
+    from abcxauto.brain import BrainTurn
+
+    async def grok_turn(*_a, **_k):
+        return BrainTurn(
+            text="",
+            sends=[
+                {
+                    "act": {"strategy": "iron_fly", "rationale": ""},
+                    "result": {"status": "submitted", "success": True},
+                    "strat": "iron_fly",
+                }
+            ],
+            last_act={"strategy": "iron_fly", "rationale": ""},
+            last_result={"status": "submitted", "success": True},
+            last_strat="iron_fly",
+        )
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    out = await eng._host_think(1, SimpleNamespace(chat=None), _stay_up_snap("regular"))
+    assert out.get("_failed") is False
+    assert out.get("sends") == 1
 
 
 @pytest.mark.asyncio

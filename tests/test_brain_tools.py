@@ -2272,10 +2272,49 @@ def test_finish_look_chat_spoken_look_keeps_chat():
         BrainTurn(text="I'll inspect the book first.\n?"),
         BrainTurn(failed=True, text="watching IWM"),
         BrainTurn(last_result={"status": "error"}, text="standing down"),
+        BrainTurn(stream_error="RESOURCE_EXHAUSTED", text="watching IWM"),
+        BrainTurn(
+            text="6384 was already gone. Iron fly 6834 is working.",
+            failed=True,
+        ),
     ):
         g.chat = chat
         _finish_look_chat(g, spoken, session="regular")
         assert getattr(g, "chat", None) is chat, spoken
+
+
+def test_finish_look_chat_send_or_fill_keeps_chat():
+    """A successful send/fill keeps the stay-up chat even if the last say is empty."""
+    from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
+
+    g, _created = _stub_chat_client()
+    chat = _ensure_chat(g, kind="boot")
+    for sent in (
+        BrainTurn(
+            text="",
+            sends=[
+                {
+                    "act": {"strategy": "iron_fly"},
+                    "result": {"status": "submitted", "success": True},
+                    "strat": "iron_fly",
+                }
+            ],
+        ),
+        BrainTurn(
+            text="?",
+            sends=[
+                {
+                    "act": {"strategy": "vertical"},
+                    "result": {"status": "filled", "filled": True},
+                    "strat": "vertical",
+                }
+            ],
+        ),
+        BrainTurn(text="", last_result={"status": "filled", "filled": True}),
+    ):
+        g.chat = chat
+        _finish_look_chat(g, sent, session="regular")
+        assert getattr(g, "chat", None) is chat, sent
 
 
 def test_finish_look_chat_refused_send_keeps_chat():
@@ -2298,6 +2337,28 @@ def test_finish_look_chat_refused_send_keeps_chat():
             last_strat="market_bracket",
         ),
         session="regular",
+    )
+    assert getattr(g, "chat", None) is chat
+
+
+def test_finish_look_chat_unknown_session_rth_keeps_spoken(monkeypatch):
+    """Blank/unknown world session during RTH still keeps a spoken look."""
+    from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
+
+    monkeypatch.setattr(
+        "abcxauto.park_clock.infer_session_before_open",
+        lambda **_k: ("", None),
+    )
+    monkeypatch.setattr(
+        "abcxauto.opportunity_scan.rth_now",
+        lambda now=None: True,
+    )
+    g, _created = _stub_chat_client()
+    chat = _ensure_chat(g, kind="boot")
+    _finish_look_chat(
+        g,
+        BrainTurn(text="watching IWM"),
+        session="unknown",
     )
     assert getattr(g, "chat", None) is chat
 
@@ -3170,6 +3231,13 @@ def test_look_failed_question_empty_and_stream_error():
     assert BrainTurn(text="  ").look_failed() is True
     assert BrainTurn(text="watching IWM").look_failed() is False
     assert BrainTurn(text="?", sends=[{"strat": "buy_option"}]).look_failed() is False
+    assert BrainTurn(
+        text="",
+        sends=[{"result": {"status": "filled", "filled": True}, "strat": "vertical"}],
+    ).look_failed() is False
+    assert BrainTurn(
+        last_result={"status": "filled", "filled": True}
+    ).look_failed() is False
     assert BrainTurn(text="?", parked=True).look_failed() is False
     # A real say is a finished look — failed/error stamps must not wipe it.
     assert BrainTurn(failed=True, text="ok").look_failed() is False
@@ -3182,7 +3250,7 @@ def test_look_failed_question_empty_and_stream_error():
     assert BrainTurn(
         stream_error="RESOURCE_EXHAUSTED",
         text="watching IWM",
-    ).look_failed() is True
+    ).look_failed() is False
     # A look that said something keeps chat — trailing '?' is not a lone '?'.
     assert BrainTurn(
         text="I'll inspect the book, status, and playbook first.\n?",
@@ -3424,6 +3492,160 @@ async def test_empty_stay_up_look_drops_chat():
     assert turn.look_failed() is True
     assert g.chat is None
     assert len(created) == 1
+
+
+@pytest.mark.asyncio
+async def test_spoken_say_then_later_empty_round_keeps_chat(monkeypatch):
+    """A later empty assistant turn in the same look is not junk."""
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="book", arguments="{}")
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                    content="6384 was already gone. Iron fly 6834 is working.",
+                    reasoning_content="",
+                )
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: Chat())),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=Chat(),
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert "6384 was already gone" in turn.text
+    assert turn.failed is False
+    assert turn.look_failed() is False
+    assert getattr(g, "chat", None) is not None
+
+
+@pytest.mark.asyncio
+async def test_fill_interrupt_mid_say_keeps_spoken_text():
+    """A fill poke mid-stream must not drop the spoken say from junk/keep."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    clear_interrupt()
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="6384 was already gone. Iron fly 6834 is working.",
+                    reasoning_content="",
+                )
+                note_interrupt(BookEvent("fill", "IWM"))
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: Chat())),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=Chat(),
+        _wake_n=1,
+    )
+    try:
+        turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+        assert "6384 was already gone" in turn.text
+        assert turn.failed is False
+        assert turn.look_failed() is False
+        assert getattr(g, "chat", None) is not None
+    finally:
+        clear_interrupt()
+
+
+@pytest.mark.asyncio
+async def test_send_then_empty_final_keeps_chat(monkeypatch):
+    """A successful send/fill keeps chat when the last assistant turn is empty."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+
+    async def filled(*_a, **_k):
+        return {"status": "filled", "success": True, "filled": True}
+
+    monkeypatch.setattr("abcxauto.agent_loop.execute_ticket", filled)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(
+            name="send",
+            arguments=json.dumps(
+                {
+                    "strategy": "iron_fly",
+                    "params": {"symbol": "IWM", "quantity": 1},
+                    "rationale": "replace 6384 with 6834",
+                }
+            ),
+        )
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: Chat())),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=Chat(),
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert turn.sends
+    assert turn.failed is False
+    assert turn.look_failed() is False
+    assert getattr(g, "chat", None) is not None
 
 
 @pytest.mark.asyncio

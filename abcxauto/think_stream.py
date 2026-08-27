@@ -786,9 +786,9 @@ def last_turn_look_failed(out: dict[str, Any] | None) -> bool:
 
     ``write_desk_brief`` skips ``strat=="in_progress"`` so the last completed
     look stays on the brief. ``write_last_turn`` skips a true empty / lone
-    ``?`` / dead-stream look so it does not blank last_turn.json. A real
-    say is a finished look — a leftover ``_failed`` stamp does not wipe it.
-    Overnight / park still write.
+    ``?`` look so it does not blank last_turn.json. A real say or send/fill
+    is a finished look — leftover ``_failed`` / dead-stream stamps do not
+    wipe it. Overnight / park still write.
     """
     if not isinstance(out, dict):
         return False
@@ -796,11 +796,16 @@ def last_turn_look_failed(out: dict[str, Any] | None) -> bool:
         return False
     if out.get("_parked") or out.get("parked"):
         return False
-    if out.get("_stream_error") or out.get("stream_error"):
-        return True
+    try:
+        if int(out.get("sends") or 0) > 0:
+            return False
+    except (TypeError, ValueError):
+        pass
     rationale = str(out.get("rationale") or "").strip()
     if rationale and rationale != "?":
         return False
+    if out.get("_stream_error") or out.get("stream_error"):
+        return True
     return bool(out.get("_failed") or out.get("failed"))
 
 
