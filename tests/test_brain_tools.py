@@ -608,12 +608,13 @@ async def test_scan_on_a_news_card_fetches_headlines_and_skips_news_step(monkeyp
     monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
     monkeypatch.setattr("abcxauto.brain._mda_news", _news)
     turn = BrainTurn()
+    world = _world()
     data = json.loads(
         await _run_tool(
             "scan",
             {"arena": "mega_cap", "scan_code": "TOP_PERC_LOSE"},
             connector=None,
-            world=_world(),
+            world=world,
             snap={},
             turn=turn,
         )
@@ -621,6 +622,7 @@ async def test_scan_on_a_news_card_fetches_headlines_and_skips_news_step(monkeyp
     assert data["news"][0]["headline"] == "sales miss"
     assert "news" in turn.tool_trace
     assert data["run"]["next"] == "candles"
+    assert world.news_items[0]["headline"] == "sales miss"
 
 
 @pytest.mark.asyncio

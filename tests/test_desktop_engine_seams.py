@@ -202,6 +202,32 @@ def test_scan_hits_survive_the_engine_payload():
     assert [o["symbol"] for o in eng.state.opportunities] == ["SPY"]
 
 
+def test_news_items_survive_the_engine_payload():
+    """Think-fetched headlines must land on engine state even when only on world_state."""
+    from abcxauto.pro_engine import ProEngine
+
+    eng = ProEngine()
+    eng._apply(
+        "cycle",
+        {
+            "cycle": 1,
+            "pnl": 0.0,
+            "equity": 100_000.0,
+            "scan_fetched": ["INTU", "FIG"],
+            "world_state": {
+                "news_items": [
+                    {"symbol": "INTU", "headline": "Intuit beats"},
+                    {"symbol": "FIG", "headline": "Figma tape"},
+                ],
+                "scan_fetched": ["INTU", "FIG"],
+            },
+        },
+    )
+    assert [n["symbol"] for n in eng.state.news_items] == ["INTU", "FIG"]
+    assert eng.state.news_items[0]["headline"] == "Intuit beats"
+    assert eng.state.scan_fetched == ["INTU", "FIG"]
+
+
 def test_scan_tool_stamps_hits_on_the_snap(monkeypatch):
     """The rich rows go to Grok in the tool result; the snap carries them to the UI."""
     import asyncio

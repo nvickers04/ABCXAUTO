@@ -2531,6 +2531,9 @@ async def _run_tool(
             attach_mda_news(hits, out["news"])
             if out["news"]:
                 snap["scan_news_attached"] = True
+                if not world.news_items:
+                    world.news_items = list(out["news"])
+                    snap["news_items"] = list(out["news"])
         snap["scan_hits"] = merge_scan_hits(merged, {**merged, "rows": out["rows"]})
         if _snap_is_rth(snap):
             sessions: dict[str, Any] = {}

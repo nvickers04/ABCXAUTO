@@ -709,7 +709,11 @@ class ProEngine:
             or (d.get("world_state") or {}).get("scan_fetched")
             or []
         )
-        s.news_items = list(d.get("news_items") or [])
+        s.news_items = list(
+            d.get("news_items")
+            or (d.get("world_state") or {}).get("news_items")
+            or []
+        )
         s.risk_posture = str(d.get("risk_posture") or "")
         s.last_params = dict(d.get("params") or (d.get("action_obj") or {}).get("params") or {})
         s.world_state = dict(d.get("world_state") or {})
@@ -948,6 +952,9 @@ class ProEngine:
             "scan_at": str(s.get("scan_at") or ""),
             "session_range": dict(s.get("session_range") or {}),
             "scan_fetched": list(getattr(world, "scan_fetched", None) or []),
+            "news_items": list(
+                getattr(world, "news_items", None) or s.get("news_items") or []
+            ),
             "candle_source": (
                 getattr(world, "candle_source", None) or s.get("candle_source") or ""
             ),
