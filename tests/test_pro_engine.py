@@ -752,6 +752,34 @@ def test_rearm_junk_look_starts_immediately():
     assert wait == 0.0
 
 
+def test_rearm_spoken_look_is_resume_not_cold():
+    """A no-send look with a real say keeps stay-up on the same chat."""
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+        },
+        session="regular",
+    )
+    assert eng._resume_think is True
+    assert eng._cold_next is False
+    assert wait == 0.0
+    # A mis-tagged spoken look must not wipe the chat either.
+    wait = eng._rearm_after_think(
+        {
+            "_failed": True,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+        },
+        session="regular",
+    )
+    assert eng._resume_think is True
+    assert eng._cold_next is False
+    assert wait == 0.0
+
+
 def test_rearm_failed_look_backs_off(monkeypatch):
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "30")
     eng = ProEngine()
@@ -798,7 +826,26 @@ async def test_host_think_surfaces_question_failed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_host_think_surfaces_trailing_question_failed(monkeypatch):
+async def test_host_think_spoken_look_is_not_failed(monkeypatch):
+    from abcxauto.brain import BrainTurn
+
+    async def grok_turn(*_a, **_k):
+        return BrainTurn(
+            text="Standing down. Watching IWM. No ticket.",
+            tool_trace=["book", "status", "playbook"],
+        )
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    out = await eng._host_think(1, SimpleNamespace(chat=None), _stay_up_snap("regular"))
+    assert out.get("_failed") is False
+    assert not out.get("_parked")
+    assert "Standing down" in str(out.get("rationale") or "")
+
+
+@pytest.mark.asyncio
+async def test_host_think_trailing_question_after_say_is_not_failed(monkeypatch):
     from abcxauto.brain import BrainTurn
 
     async def grok_turn(*_a, **_k):
@@ -811,7 +858,7 @@ async def test_host_think_surfaces_trailing_question_failed(monkeypatch):
     eng = ProEngine()
     eng.conn = SimpleNamespace(connected=True)
     out = await eng._host_think(1, SimpleNamespace(chat=None), _stay_up_snap("regular"))
-    assert out.get("_failed") is True
+    assert out.get("_failed") is False
     assert not out.get("_parked")
 
 
@@ -1113,6 +1160,43 @@ async def test_premarket_session_cards_do_not_park_start_until_the_bell(
     eng.stop_engine()
     eng.drain_apply()
     assert load_alarm().wake_at is None
+
+
+@pytest.mark.asyncio
+async def test_spoken_look_next_is_resume_not_cold(monkeypatch, tmp_path):
+    """After a real say the host looks again on the same chat. Not a cold start."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    resumes: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        resumes.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 3:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) >= 3
+    assert resumes[0] is True
+    assert resumes[1] is True
+    assert resumes[2] is True
+    assert eng._cold_next is False
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is None
+    assert eng._resume_think is True
 
 
 @pytest.mark.asyncio

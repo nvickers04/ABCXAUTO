@@ -240,14 +240,15 @@ def test_write_last_turn_skips_junk_failed_look(tmp_path, monkeypatch):
 
     trailing = {
         "strat": "",
-        "rationale": "I'll inspect the book, status, and playbook first.\n?",
-        "tool_trace": ["book", "status", "playbook"],
-        "_failed": True,
+        "rationale": "Standing down. Watching IWM.\n?",
+        "tool_trace": ["book", "status"],
+        "_failed": False,
+        "world_state": {"flat": True, "net_liquidation": 35000},
     }
-    assert last_turn_look_failed(trailing) is True
+    assert last_turn_look_failed(trailing) is False
     ts.write_last_turn(trailing)
     last4 = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
-    assert last4["rationale"] == "Flat. No ticket."
+    assert "Standing down" in last4["rationale"]
 
     ts.write_last_turn({
         "strat": "",

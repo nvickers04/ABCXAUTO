@@ -826,23 +826,30 @@ class ProEngine:
         return resolve_stay_up_session(session)
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
-        """Stay-up next look. Junk/empty/? starts immediately. Not a sit clock.
+        """Stay-up next look. True empty / lone '?' starts immediately, cold.
 
         Paper RTH / premarket re-arm on this process. A good look writes no
-        grok_wake.json. Empty / ? drops the chat (already) and starts another
-        look now — cold start. xAI capacity still backs off. Overnight park
-        is park_clock after a closed-session skip. Clerk is not a runner.
+        grok_wake.json. A look that already spoke keeps the live chat — the
+        next look is resume, not cold. Empty / lone '?' drops the chat
+        (already) and starts another look now — cold start. xAI capacity
+        still backs off. Overnight park is park_clock after a closed-session
+        skip. Clerk is not a runner.
         """
         session = self._resolve_session(session)
         self._last_session = session
         payload = out if isinstance(out, dict) else {}
-        from abcxauto.brain import provider_overloaded
+        from abcxauto.brain import _look_text_is_junk, provider_overloaded
         from abcxauto.park_clock import failed_look_backoff_s, paper_stay_up
 
         stay = paper_stay_up(session)
         failed = bool(payload.get("_failed"))
         parked = bool(payload.get("_parked"))
         stream_err = str(payload.get("_stream_error") or "")
+        # A spoken look is not junk. Do not wipe the stay-up chat.
+        if failed and not stream_err and not _look_text_is_junk(
+            str(payload.get("rationale") or "")
+        ):
+            failed = False
         if parked and not stay:
             self._fail_streak = 0
             self._cold_next = True

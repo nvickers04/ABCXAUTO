@@ -1,7 +1,8 @@
 """Grok owns the book via tools. The shell is facts + send clerk.
 
 Paper RTH / premarket stay-up continues the live chat across successful
-looks. Overnight / after-close / empty-junk / dead stream drop it.
+looks. Overnight / after-close / true empty / lone '?' / dead stream
+drop it. A look that already spoke is not junk.
 Tickets go through ``execute_ticket`` → ``send_action``. IBKR tools are
 live. scan() is one criteria screen this look (hits + on_book); candles
 are IBKR hist or the live 5s stream (error if both miss); news is ~15
@@ -1077,15 +1078,12 @@ class BrainTurn:
     tool_cache: dict[str, str] = field(default_factory=dict)
 
     def look_failed(self) -> bool:
-        """Empty / '?' / stream error — clerk should backoff, not park."""
+        """True empty / lone '?' / dead stream. A real say is a finished look."""
         if self.parked:
             return False
-        if self.failed:
-            return True
         if self.sends:
             return False
-        status = str((self.last_result or {}).get("status") or "").lower()
-        if status == "error":
+        if self.stream_error:
             return True
         return _look_text_is_junk(self.text)
 
@@ -1111,24 +1109,26 @@ def provider_overloaded(err: Any) -> bool:
     return any(m in blob for m in _OVERLOAD_MARKERS)
 
 
+_NOT_A_SAY = frozenset({"", "?", "-", ".", "...", "—", "…"})
+
+
+def _line_is_real_say(line: str) -> bool:
+    """True when one assistant line is a real say, not empty / '?' / punct."""
+    bit = " ".join((line or "").split())
+    if not bit or bit in _NOT_A_SAY:
+        return False
+    smashed = ascii_text(bit).strip()
+    if not smashed or smashed in _NOT_A_SAY:
+        return False
+    return smashed.strip("?") != ""
+
+
 def _look_text_is_junk(text: str) -> bool:
-    """True when the look's last say is empty, '?', or ASCII-smashed to '?'."""
+    """True when the look never produced a real say — empty or lone '?'."""
     raw = (text or "").strip()
     if not raw:
         return True
-    if raw == "?":
-        return True
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    if not lines:
-        return True
-    last = lines[-1]
-    if last == "?":
-        return True
-    smashed = ascii_text(last).strip()
-    if not smashed:
-        return True
-    # encode(ascii, replace) turns each non-ASCII glyph into '?'.
-    return smashed.strip("?") == ""
+    return not any(_line_is_real_say(ln) for ln in raw.splitlines())
 
 
 def _send_succeeded(result: dict[str, Any] | None) -> bool:
@@ -1631,7 +1631,7 @@ def _reset_chat(g: GrokClient) -> None:
 
 
 def drop_live_chat(g: Any | None) -> None:
-    """Overnight / park / junk / dead stream: the next think is a new conversation."""
+    """Overnight / park / true empty / lone '?' / dead stream: next think is cold."""
     if g is None:
         return
     _reset_chat(g)
@@ -1648,10 +1648,13 @@ def drop_refused_send_targets(turn: BrainTurn) -> None:
 def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
     """Keep the live chat on a successful paper stay-up look.
 
-    Park, overnight, empty/junk, and a dead stream drop it so the next
-    think is a cold start — not append-to-junk.
+    Park, overnight, true empty / lone '?', and a dead stream drop it.
+    A look that already spoke is not junk — stay-up resumes the same chat.
     """
-    if turn.parked or turn.stream_error or turn.look_failed():
+    if turn.parked or turn.stream_error:
+        _reset_chat(g)
+        return
+    if not turn.sends and _look_text_is_junk(turn.text):
         _reset_chat(g)
         return
     try:

@@ -2235,7 +2235,7 @@ def test_finish_look_chat_overnight_and_dead_stream_drop():
 
 
 def test_finish_look_chat_junk_empty_failed_drop():
-    """A stay-up empty/junk/failed look must not keep the live chat."""
+    """True empty / lone '?' drop the live chat. A real say does not."""
     from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
 
     g, created = _stub_chat_client()
@@ -2247,8 +2247,8 @@ def test_finish_look_chat_junk_empty_failed_drop():
         BrainTurn(text=""),
         BrainTurn(text="?"),
         BrainTurn(text="  "),
-        BrainTurn(failed=True, text="watching IWM"),
-        BrainTurn(text="I'll inspect the book first.\n?"),
+        BrainTurn(failed=True, text=""),
+        BrainTurn(failed=True, text="?"),
     ):
         g.chat = chat
         _finish_look_chat(g, dead, session="regular")
@@ -2258,6 +2258,23 @@ def test_finish_look_chat_junk_empty_failed_drop():
     _finish_look_chat(g, BrainTurn(text=""), session="premarket")
     assert getattr(g, "chat", None) is None
     assert len(created) == 1
+
+
+def test_finish_look_chat_spoken_look_keeps_chat():
+    """A no-send look that already spoke stays on the paper stay-up chat."""
+    from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
+
+    g, _created = _stub_chat_client()
+    chat = _ensure_chat(g, kind="boot")
+    for spoken in (
+        BrainTurn(text="Standing down. Watching IWM. No ticket."),
+        BrainTurn(text="I'll inspect the book first.\n?"),
+        BrainTurn(failed=True, text="watching IWM"),
+        BrainTurn(last_result={"status": "error"}, text="standing down"),
+    ):
+        g.chat = chat
+        _finish_look_chat(g, spoken, session="regular")
+        assert getattr(g, "chat", None) is chat, spoken
 
 
 def test_finish_look_chat_refused_send_keeps_chat():
@@ -3153,18 +3170,31 @@ def test_look_failed_question_empty_and_stream_error():
     assert BrainTurn(text="watching IWM").look_failed() is False
     assert BrainTurn(text="?", sends=[{"strat": "buy_option"}]).look_failed() is False
     assert BrainTurn(text="?", parked=True).look_failed() is False
-    assert BrainTurn(failed=True, text="ok").look_failed() is True
+    # A real say is a finished look — failed/error flags must not wipe it.
+    assert BrainTurn(failed=True, text="ok").look_failed() is False
     assert BrainTurn(last_result={"status": "error"}).look_failed() is True
-    # First round said something; second round died as '?' — still a failed look.
+    assert BrainTurn(
+        last_result={"status": "error"},
+        text="standing down",
+    ).look_failed() is False
+    assert BrainTurn(stream_error="RESOURCE_EXHAUSTED").look_failed() is True
+    assert BrainTurn(
+        stream_error="RESOURCE_EXHAUSTED",
+        text="watching IWM",
+    ).look_failed() is True
+    # A look that already spoke is not junk, even with a trailing '?'.
     assert BrainTurn(
         text="I'll inspect the book, status, and playbook first.\n?",
         tool_trace=["book", "status", "playbook"],
-    ).look_failed() is True
+    ).look_failed() is False
     assert BrainTurn(
         text="I'll inspect the book, status, and playbook first.",
         tool_trace=["book", "status", "playbook"],
     ).look_failed() is False
-    # Unknown glyphs still smash to '?' and count as a dead last round.
+    assert BrainTurn(
+        text="Standing down. Watching IWM. No ticket.",
+    ).look_failed() is False
+    # Unknown glyphs still smash to '?' and count as no say.
     assert BrainTurn(text="\u2603").look_failed() is True
     assert BrainTurn(text="watching IWM \u2014 wait").look_failed() is False
 
@@ -3198,7 +3228,8 @@ async def test_question_mark_turn_is_failed():
 
 
 @pytest.mark.asyncio
-async def test_trailing_question_after_tools_is_failed(monkeypatch):
+async def test_trailing_question_after_real_say_keeps_chat(monkeypatch):
+    """A look that already spoke is not junk. Stay-up keeps the live chat."""
     from abcxauto import brain
     from abcxauto.brain import grok_turn
 
@@ -3239,10 +3270,10 @@ async def test_trailing_question_after_tools_is_failed(monkeypatch):
     )
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
     assert "book" in turn.tool_trace
-    assert turn.failed is True
-    assert turn.look_failed() is True
+    assert turn.failed is False
+    assert turn.look_failed() is False
     assert turn.parked is False
-    assert getattr(g, "chat", None) is None
+    assert getattr(g, "chat", None) is not None
 
 
 @pytest.mark.asyncio
@@ -3310,6 +3341,39 @@ def _stay_up_chat_client(*, replies: list[str] | None = None):
         _wake_n=0,
     )
     return g, created
+
+
+@pytest.mark.asyncio
+async def test_spoken_nosend_look_keeps_chat_next_is_resume():
+    """No-send stand-down keeps the live chat. The next look is resume, not cold."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    g, created = _stay_up_chat_client(
+        replies=["Standing down. Watching IWM. No ticket.", "still watching"]
+    )
+    first = await grok_turn(
+        g, connector=None, world=_world(), snap={}, wake="session=regular send."
+    )
+    assert first.sends == []
+    assert first.look_failed() is False
+    assert first.failed is False
+    assert len(created) == 1
+    live = g.chat
+    assert live is created[0]
+
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake="session=regular send.",
+        resume=True,
+    )
+    assert second.look_failed() is False
+    assert g.chat is live
+    assert len(created) == 1
 
 
 @pytest.mark.asyncio
