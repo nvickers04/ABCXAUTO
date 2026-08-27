@@ -711,11 +711,12 @@ def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
 _CARD_BRANCH_SCHEMA = {
     "type": "array",
     "description": (
-        "Hypotheses under this order type. A named card updates that name and "
-        "keeps siblings; omit the key to keep the list. cards=[] clears this "
-        "type. status=retired drops it from the hunt. A card that earns its "
-        "sample belongs promoted into this type's gotchas / review / "
-        "tool_order — same stanza, move it up."
+        "Hypotheses under this order type. A named write changes that card "
+        "and keeps siblings; omit the key to keep the list. Do not rewrite a "
+        "name to record a look. cards=[] clears this type. status=retired "
+        "drops it from the hunt. A card that earns its sample belongs "
+        "promoted into this type's gotchas / review / tool_order — same "
+        "stanza, move it up."
     ),
     "items": {
         "type": "object",
@@ -730,7 +731,7 @@ _CARD_BRANCH_SCHEMA = {
             },
             "evidence": {
                 "type": "object",
-                "description": "What you actually used. Fill in what applies.",
+                "description": "Grounds for this card, not a look diary.",
                 "properties": {
                     "scan": {
                         "type": "string",
@@ -1071,9 +1072,10 @@ AGENT_TOOLS = [
             "holds what you learned executing it (durable) and the cards "
             "branching under it (disposable, one hypothesis each). A card's "
             "type is what it sends, so it needs no ticket of its own. "
-            "instructions is free notes. A revision is a card, type, or mode "
-            "change — a same-book rescan note is dropped, not a new revision. "
-            "Not a wake clock."
+            "instructions is free notes. A named rewrite changes the card; "
+            "do not write to record that you looked. A revision is a card, "
+            "type, or mode change — a same-book rescan note is dropped, not "
+            "a new revision. Not a wake clock."
         ),
         parameters=_schema(
             {

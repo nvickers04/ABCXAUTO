@@ -2705,6 +2705,8 @@ def test_playbook_tools_are_a_notebook_not_a_form():
     assert "WHAT_WORKED" not in write
     assert "wake clock" in write.lower()
     assert "next-look-you" not in write
+    assert "record that you looked" in write.lower()
+    assert "named rewrite changes the card" in write.lower()
     fn = _tool_fn("write_lab_playbook")
     params = getattr(fn, "parameters", None) or {}
     if isinstance(params, str):
@@ -2714,6 +2716,7 @@ def test_playbook_tools_are_a_notebook_not_a_form():
     blob = json.dumps(params)
     assert "next_look_s" not in blob
     assert "max_looks_without_trigger" not in blob
+    assert "look diary" in blob.lower()
 
 
 def test_send_tool_says_one_ticket_per_call():

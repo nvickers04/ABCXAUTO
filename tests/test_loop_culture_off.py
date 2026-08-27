@@ -212,11 +212,13 @@ def test_wake_book_playbook_have_no_assignment_paint(tmp_path, monkeypatch):
 def test_playbook_and_write_stay_in_agent_tools_without_cadence_fields():
     names = set()
     write_blob = ""
+    write = ""
     for t in AGENT_TOOLS:
         fn = getattr(t, "function", None)
         name = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
         names.add(name)
         if name == "write_lab_playbook":
+            write = str(getattr(fn, "description", "") or "")
             params = getattr(fn, "parameters", None) or {}
             if hasattr(params, "model_dump"):
                 params = params.model_dump()
@@ -225,6 +227,9 @@ def test_playbook_and_write_stay_in_agent_tools_without_cadence_fields():
     assert "write_lab_playbook" in names
     assert "next_look_s" not in write_blob
     assert "max_looks_without_trigger" not in write_blob
+    assert "look diary" in write_blob.lower()
+    assert "record that you looked" in write.lower()
+    assert "named rewrite changes the card" in write.lower()
 
 
 def test_card_prose_cannot_refuse_and_hunt_sketch_stays_a_noop():
