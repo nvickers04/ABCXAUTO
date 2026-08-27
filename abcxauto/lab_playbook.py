@@ -3205,6 +3205,7 @@ _HUNT_PREFIX = frozenset({
     "status",
     "playbook",
     "write_lab_playbook",
+    "write_desk_lessons",
     "self_tune",
     "set_wake",
 })

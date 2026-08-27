@@ -227,6 +227,7 @@ def test_playbook_and_write_stay_in_agent_tools_without_cadence_fields():
             write_blob = json.dumps(params)
     assert "playbook" in names
     assert "write_lab_playbook" in names
+    assert "write_desk_lessons" in names
     assert "next_look_s" not in write_blob
     assert "max_looks_without_trigger" not in write_blob
     assert "look diary" in write_blob.lower()
