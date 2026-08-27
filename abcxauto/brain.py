@@ -688,48 +688,8 @@ def _attach_run_sheet(
     tool: str,
     quoted: Any = None,
 ) -> None:
-    try:
-        from abcxauto.lab_playbook import playbook_run_sheets
-        from abcxauto.think_stream import last_look_for_hunt
-
-        last_facts = last_look_for_hunt()
-        sess = out.get("session") if isinstance(out.get("session"), dict) else None
-        today = sess.get("today") if sess else None
-        store = last_facts.get("session_range") if isinstance(last_facts, dict) else None
-        snap_store = (
-            quoted.get("session_range")
-            if isinstance(quoted, dict) and isinstance(quoted.get("session_range"), dict)
-            else None
-        )
-        if snap_store:
-            store = snap_store
-        elif sess:
-            sym = str(out.get("symbol") or "").upper()
-            store = {sym: sess} if sym else sess
-        if today is None and isinstance(store, dict):
-            flags = [
-                row.get("today")
-                for row in store.values()
-                if isinstance(row, dict) and "today" in row
-            ]
-            if any(flag is True for flag in flags):
-                today = True
-            elif any(flag is False for flag in flags):
-                today = False
-        sheets = playbook_run_sheets(
-            tool_trace=list(turn.tool_trace or []) + [tool],
-            last_look=list(last_facts.get("tools") or []),
-            flat=getattr(world, "flat", None),
-            quoted=quoted if quoted is not None else out,
-            news=out if tool == "scan" else None,
-            session_today=today,
-            session_range=store,
-            positions=list(getattr(world, "positions", None) or []),
-        )
-        if sheets:
-            out["run"] = sheets[0]
-    except Exception:
-        logger.debug("%s run sheet failed", tool, exc_info=True)
+    _ = (out, turn, world, tool, quoted)
+    return
 
 
 def _attach_scan_run(
@@ -823,13 +783,6 @@ _CARD_BRANCH_SCHEMA = {
                         "type": "integer",
                         "description": "Losing resolved trades that kill it early.",
                     },
-                    "max_looks_without_trigger": {
-                        "type": "integer",
-                        "description": (
-                            "Looks with no send that you treat as a dead "
-                            "trigger. Counted and shown; never trips the card."
-                        ),
-                    },
                 },
                 "required": ["sample", "condition"],
             },
@@ -851,13 +804,6 @@ _CARD_BRANCH_SCHEMA = {
                 ),
             },
             "note": {"type": "string"},
-            "next_look_s": {
-                "type": "number",
-                "description": (
-                    "Clerk cadence hint for this card, seconds. Floor 30s, "
-                    "cap 4h. Not a ticket and not a wake tool."
-                ),
-            },
         },
         "required": ["name", "thesis", "retire_if"],
     },
@@ -964,12 +910,9 @@ AGENT_TOOLS = [
     tool(
         name="scan",
         description=(
-            "Bare scan() runs every live-card screen this look (gap/loser sorts "
-            "first when the card has a min gap), then reuses. arena+scan_code is "
-            "one extra sort only if it is not already in that set. Or symbols[]. "
-            "Hits are the union, down-gap first on a LONG flush card, with "
-            "deepest_open_gap_pct vs the card floor. IBKR live last on the top "
-            "names — triage from these, do not re-quote."
+            "IBKR scanner. arena+scan_code, or symbols[]. Hits are the union "
+            "with IBKR live last on the top names — triage from these, do not "
+            "re-quote."
         ),
         parameters=_schema(
             {
@@ -1191,7 +1134,7 @@ def _send_strategy_names_for_look() -> list[str]:
 
 
 def agent_tools(*, session: str = "") -> list:
-    """Tools this look. Cadence is clerk + playbook, not a Grok clock."""
+    """Tools this look. Cadence is clerk overnight park, not a Grok clock."""
     _ = session
     names = _send_strategy_names_for_look()
     out: list = []
@@ -1538,10 +1481,7 @@ def _clip_candles(data: dict[str, Any], max_chars: int = CANDLES_CLIP_CHARS) -> 
 
 
 def _clip(data: Any, max_chars: int = 24_000) -> str:
-    """Keep the run sheet when hits/news overflow. A tail clip hid next=send.
-
-    Candle bars/series are the tape — never drop them to save run metadata.
-    """
+    """Keep lab/cards when hits/news overflow. Candle bars stay on a tape clip."""
     if _tape_payload(data):
         return _clip_candles(data, max_chars=max_chars)
     if isinstance(data, dict) and data.get("run") is not None:
@@ -2050,7 +1990,6 @@ def _book_payload(
         notebook_text,
         playbook_glance,
         playbook_mode,
-        playbook_run_sheets,
     )
     from abcxauto.self_tune import levers_snapshot
     from abcxauto.world_state import day_facts
@@ -2065,68 +2004,32 @@ def _book_payload(
     facts = _book_facts(world)
     glance = playbook_glance(sc)
     last_look: dict[str, Any] = {}
-    carry: dict[str, Any] = {}
     try:
-        from abcxauto.think_stream import last_look_facts, last_look_for_hunt
+        from abcxauto.think_stream import last_look_facts
 
         last_look = last_look_facts()
-        carry = last_look_for_hunt()
     except Exception:
         last_look = {}
-        carry = {}
-    last_tools = list((carry or {}).get("tools") or [])
-    # The book Grok wrote travels with the book it trades — it should not have
-    # to spend a tool call to remember its own setups.
+    _ = (tool_trace, snap)
     try:
         lab = load_lab()
-        scored = card_facts(lab)
+        scored = [
+            {
+                k: v
+                for k, v in row.items()
+                if k
+                not in (
+                    "looks_without_trigger",
+                    "days_without_trigger",
+                    "max_looks_without_trigger",
+                    "looks",
+                    "days",
+                )
+            }
+            for row in card_facts(lab)
+        ]
         glance = dict(glance)
         glance["mode"] = playbook_mode()
-        # Run sheet first so a 24k clip cannot drop the next unused tool behind
-        # a 4k notebook. Full type stanzas stay on the playbook tool.
-        quoted: dict[str, Any] = dict(carry) if isinstance(carry, dict) else {}
-        this_hits = snap.get("scan_hits") if isinstance(snap, dict) else None
-        if isinstance(this_hits, dict) and (
-            this_hits.get("rows") or this_hits.get("quoted")
-        ):
-            quoted["scan_hits"] = this_hits
-        qmap: dict[str, Any] = {}
-        if isinstance(quoted.get("ibkr_live_quotes"), dict):
-            qmap.update(quoted["ibkr_live_quotes"])
-        live_map = getattr(world, "ibkr_live_quotes", None)
-        if isinstance(live_map, dict):
-            qmap.update(live_map)
-        if isinstance(snap, dict) and isinstance(snap.get("ibkr_live_quotes"), dict):
-            qmap.update(snap["ibkr_live_quotes"])
-        if qmap:
-            quoted["ibkr_live_quotes"] = qmap
-        session = None
-        if isinstance(snap, dict) and isinstance(snap.get("session_range"), dict):
-            session = snap["session_range"]
-        elif isinstance(carry, dict):
-            session = carry.get("session_range")
-        run = playbook_run_sheets(
-            lab,
-            tool_trace=tool_trace,
-            last_look=last_tools,
-            flat=getattr(world, "flat", None),
-            quoted=quoted,
-            session_range=session,
-            positions=list(getattr(world, "positions", None) or []),
-        )
-        hits = quoted.get("scan_hits") if isinstance(quoted.get("scan_hits"), dict) else {}
-        if not isinstance(hits, dict):
-            hits = {}
-        hit_rows = [
-            row
-            for row in (hits.get("rows") or [])
-            if isinstance(row, dict) and row.get("symbol")
-        ][:6]
-        if run and hit_rows:
-            top = dict(run[0])
-            top["hits"] = hit_rows
-            run = [top, *run[1:]]
-        glance["run"] = run
         glance["cards"] = _flat_card_projection(lab)
         glance["unfiled_cards"] = list(lab.get("unfiled_cards") or [])
         glance["card_scores"] = scored
@@ -2933,8 +2836,7 @@ async def _run_tool(
                     payload["session"] = series[0]["session"]
         else:
             payload["series"] = series
-        # A miss is an error, not a run-sheet stub. Attach next=send only
-        # when this look actually has bars.
+        # A miss is an error, not a stub payload.
         if kinds:
             _attach_run_sheet(
                 payload, turn=turn, world=world, tool="candles", quoted=snap

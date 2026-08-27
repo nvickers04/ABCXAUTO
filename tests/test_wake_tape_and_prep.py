@@ -200,7 +200,8 @@ def test_format_wake_rth_fill_delta_no_tape_when_flat():
     assert "Cycle 6." not in text
     assert "you must" not in text.lower()
     assert "chain" not in text.lower()
-    assert text.rstrip().endswith("send.")
+    assert "next=" not in text
+    assert "playbook rev=" not in text
     assert "set_wake" not in text
 
 
@@ -284,7 +285,8 @@ def test_format_wake_open_lots_and_mix_still_print():
     assert "risk/trade=" not in text
     assert "mix=" in text
     assert "tape=" not in text
-    assert text.rstrip().endswith("send.")
+    assert "next=" not in text
+    assert "playbook rev=" not in text
 
 
 def test_format_wake_non_rth_fill_delta_omits_tape_and_options():

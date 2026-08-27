@@ -725,9 +725,7 @@ class ProEngine:
         s.stage_error = str(d.get("stage_error") or "")
         s.tool_trace = list(d.get("tool_trace") or [])
         s.sends_last_look = int(d.get("sends") or 0)
-        s.looks_since_send = (
-            0 if s.sends_last_look else int(getattr(s, "looks_since_send", 0) or 0) + 1
-        )
+        s.looks_since_send = 0
         if not d.get("_failed"):
             s.backoff_wait_s = 0.0
         s.book_unreliable = bool(

@@ -1295,52 +1295,19 @@ def _playbook_day(
     *,
     flat: bool | None = None,
 ) -> dict[str, Any]:
-    """Glance only when the notebook has instructions. Revision alone is not law."""
+    """Unused starter type names only. Not a playbook tour or look tally."""
+    _ = (scorecard, flat)
     try:
-        from abcxauto.lab_playbook import load_lab, playbook_glance
+        from abcxauto.lab_playbook import lab_wake_bit, load_lab
 
         lab = load_lab()
-        if not str(lab.get("instructions") or "").strip():
+        types = lab.get("types") if isinstance(lab.get("types"), dict) else {}
+        if not types and not str(lab.get("instructions") or "").strip():
             return {}
-        glance = playbook_glance(scorecard)
-        glance["has_instructions"] = True
-        try:
-            from abcxauto.lab_playbook import lab_wake_bit
-            from abcxauto.think_stream import last_look_for_hunt
-
-            last_facts = last_look_for_hunt()
-            last_tools = list(last_facts.get("tools") or [])
-            bit = lab_wake_bit(
-                lab,
-                last_look=last_tools,
-                flat=flat,
-                quoted=last_facts,
-                session_range=last_facts.get("session_range"),
-            )
-            if bit:
-                glance["lab_wake"] = bit
-        except Exception:
-            pass
-        return glance
+        bit = lab_wake_bit(lab)
+        return {"lab_wake": bit} if bit else {}
     except Exception:
         return {}
-
-
-def _playbook_is_law(pb: dict[str, Any] | None) -> bool:
-    """Wake glance needs notes. A leftover revision / wipe is not a playbook."""
-    if not isinstance(pb, dict) or not pb:
-        return False
-    if pb.get("has_instructions") is False or pb.get("wiped") is True:
-        return False
-    inst = pb.get("instructions")
-    if inst is not None and not str(inst).strip():
-        return False
-    rev = pb.get("revision")
-    if pb.get("has_instructions") is True:
-        return rev is not None
-    if rev in (None, 0, "0"):
-        return False
-    return True
 
 
 def _wake_has_live_lots(day: dict[str, Any] | None) -> bool:
@@ -1577,21 +1544,9 @@ def format_wake(
         if last_s:
             parts.append(f"{last_s}.")
         pb = day.get("playbook") if isinstance(day.get("playbook"), dict) else {}
-        if _playbook_is_law(pb):
-            parts.append(
-                f"playbook rev={pb.get('revision')} "
-                f"since_write={pb.get('since_write_edge')} "
-                f"now_edge={pb.get('now_edge')} "
-                f"4h={pb.get('win_4h')}."
-            )
-            from abcxauto.lab_playbook import format_ledger_line
-
-            ledger = format_ledger_line(pb)
-            if ledger:
-                parts.append(f"ledger {ledger}.")
-            lab_s = str(pb.get("lab_wake") or "").strip()
-            if lab_s:
-                parts.append(f"{lab_s}.")
+        lab_s = str(pb.get("lab_wake") or "").strip()
+        if lab_s:
+            parts.append(f"{lab_s}.")
     parts.append("send.")
     return " ".join(parts)
 

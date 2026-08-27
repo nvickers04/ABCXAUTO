@@ -290,8 +290,10 @@ def test_save_lab_appends_scored_ledger(tmp_path, monkeypatch):
     assert [row["revision"] for row in facts["ledger"]] == [1, 2]
     block = format_block()
     assert "instructions:" not in block
-    assert "ledger:" in block
-    assert "notebook: playbook tool" in block
+    assert "playbook rev=" not in block
+    assert "write_lab_playbook to set" not in block
+    assert "notebook" in block.lower()
+    assert "playbook tool" in block
     assert "stale=" not in block
     payload = playbook_payload()
     assert ">=4% earnings-miss gap" in payload["tree"]
@@ -388,7 +390,8 @@ def test_playbook_payload_score_is_now_not_the_write_stamp(tmp_path, monkeypatch
     assert payload["facts"]["at_write_edge"] == -550.0
     assert payload["score"]["lots_at_write"] == ["XLF 260828C58.5 x1 -41%"]
     assert "Defined-risk debit" in payload["tree"]
-    assert "XLF 260828C58.5" in format_block()
+    assert "XLF 260828C58.5" in payload["score"]["lots_at_write"][0]
+    assert "playbook rev=" not in format_block()
 
 
 def test_playbook_score_includes_clerk_halt_trip(tmp_path, monkeypatch):
@@ -638,7 +641,9 @@ def test_new_risk_until_prose_stays_notes_not_a_clock(tmp_path, monkeypatch):
     # Wake line still only shows score glance — not the essay as an order.
     block = format_block()
     assert "10:30" not in block
-    assert "notebook: playbook tool" in block
+    assert "playbook rev=" not in block
+    assert "notebook" in block.lower()
+    assert "playbook tool" in block
     # Playbook write must not arm a sit-clock.
     from abcxauto.park_clock import load_alarm
 
@@ -687,9 +692,8 @@ def test_playbook_revision_strips_old_essay_on_disk(tmp_path, monkeypatch):
     assert playbook_payload()["tree"] == "Live notes."
 
 
-def test_card_next_look_s_clamps_and_feeds_clerk(tmp_path, monkeypatch):
+def test_card_next_look_s_is_not_a_clerk_clock(tmp_path, monkeypatch):
     from abcxauto.lab_playbook import playbook_next_look_s
-    from abcxauto.park_clock import MIN_LOOK_S, NEXT_LOOK_S_MAX
 
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
@@ -715,29 +719,5 @@ def test_card_next_look_s_clamps_and_feeds_clerk(tmp_path, monkeypatch):
         }
     )
     card = load_lab()["types"]["market_bracket"]["cards"][0]
-    assert card["next_look_s"] == MIN_LOOK_S
-    assert playbook_next_look_s() == MIN_LOOK_S
-
-    apply_from_judgment(
-        {
-            "lab_playbook": {
-                "types": {
-                    "market_bracket": {
-                        "cards": [
-                            {
-                                "name": "flush bounce",
-                                "thesis": "gap retrace",
-                                "retire_if": {
-                                    "sample": 8,
-                                    "condition": "hit rate below 40%",
-                                },
-                                "next_look_s": 9 * 3600,
-                            }
-                        ]
-                    }
-                }
-            }
-        }
-    )
-    assert load_lab()["types"]["market_bracket"]["cards"][0]["next_look_s"] == NEXT_LOOK_S_MAX
-    assert playbook_next_look_s() == NEXT_LOOK_S_MAX
+    assert "next_look_s" not in card
+    assert playbook_next_look_s() is None

@@ -606,7 +606,7 @@ async def test_third_scan_reuses_an_empty_tape_instead_of_requiring_arena(monkey
     assert third["hits"] == []
     assert third.get("ok") is True
     assert "requires arena" not in str(third.get("error") or "")
-    assert third.get("run", {}).get("gate") == "off"
+    assert "run" not in third
 
 
 @pytest.mark.asyncio
@@ -664,7 +664,7 @@ async def test_scan_on_a_news_card_fetches_headlines_and_skips_news_step(monkeyp
     )
     assert data["news"][0]["headline"] == "sales miss"
     assert "news" in turn.tool_trace
-    assert data["run"]["next"] == "candles"
+    assert "run" not in data
     assert world.news_items[0]["headline"] == "sales miss"
 
 
@@ -1131,10 +1131,7 @@ async def test_candles_stamp_session_range_and_run_next_send(monkeypatch):
     assert data["session"]["ticket"]["strategy"] == "market_bracket"
     assert data["session"]["ticket"]["stop_price"] == 88.0
     assert snap["session_range"]["SNDK"]["low"] == 88.0
-    assert data["run"]["next"] == "send"
-    assert data["run"]["send"]["symbol"] == "SNDK"
-    assert data["run"]["send"]["card"] == "flush bounce"
-    assert data["run"]["send"]["stop_price"] == 88.0
+    assert "run" not in data
 
 
 def test_stamp_session_ticket_skips_when_card_gate_is_off():
@@ -1409,9 +1406,7 @@ async def test_multi_name_candles_send_sketch_uses_this_look_session(monkeypatch
         )
     )
     assert snap["session_range"]["SNDK"]["low"] == 88.0
-    assert data["run"]["next"] == "send"
-    assert data["run"]["send"]["symbol"] == "SNDK"
-    assert data["run"]["send"]["stop_price"] == 88.0
+    assert "run" not in data
 
 
 @pytest.mark.asyncio
@@ -2710,6 +2705,15 @@ def test_playbook_tools_are_a_notebook_not_a_form():
     assert "WHAT_WORKED" not in write
     assert "wake clock" in write.lower()
     assert "next-look-you" not in write
+    fn = _tool_fn("write_lab_playbook")
+    params = getattr(fn, "parameters", None) or {}
+    if isinstance(params, str):
+        params = json.loads(params)
+    elif hasattr(params, "model_dump"):
+        params = params.model_dump()
+    blob = json.dumps(params)
+    assert "next_look_s" not in blob
+    assert "max_looks_without_trigger" not in blob
 
 
 def test_send_tool_says_one_ticket_per_call():

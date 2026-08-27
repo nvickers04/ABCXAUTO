@@ -22,7 +22,7 @@ One tree, two layers, both written by Grok::
   Live snapshots are never seeded. ``locked`` is clerk seed identity — not a
   hunt floor, not a send stamp, not a freeze. Grok rewrites the same name;
   a named write drops ``locked`` so the upgrade can hunt. Virgin starters stay
-  in the ``playbook()`` catalog and off the run sheet.
+  visible as unused type names on the wake and run sheet. Retired stay off.
 
 A card's position in the tree *is* its ticket, so a winning card sits inside
 the type entry it is supposed to improve â€” promoting what it learned is a move
@@ -43,9 +43,9 @@ A flat top-level ``cards`` list is still accepted on a write and is still
 *projected* on a read for the cockpit and older callers, but the tree is the
 only thing stored. See ``_migrate_book`` and ``_flat_card_projection``.
 
-Notebook is not executable, not a standing order. Optional ``next_look_s`` on
-a card is a clerk cadence hint. Clerk validates writes against gates
-(floors / live / sleeve) like self_tune.
+Notebook is not executable, not a standing order. Clerk cadence is
+overnight park only — a card does not set a look clock. Clerk validates
+writes against gates (floors / live / sleeve) like self_tune.
 """
 
 from __future__ import annotations
@@ -1224,18 +1224,6 @@ def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any
     written = str(raw.get("written_at") or carried.get("written_at") or "").strip()
     if written:
         out["written_at"] = written[:48]
-    look = raw.get("next_look_s")
-    if look is None:
-        look = carried.get("next_look_s")
-    if look is not None:
-        try:
-            from abcxauto.park_clock import clamp_next_look_s
-
-            clamped = clamp_next_look_s(look)
-        except Exception:
-            clamped = None
-        if clamped is not None:
-            out["next_look_s"] = clamped
     order = _norm_recipe(raw.get("tool_order") or raw.get("default_tool_recipe"))
     if not order:
         order = _norm_recipe(
@@ -1454,8 +1442,6 @@ def _retire_if_line(retire: Any) -> str:
         bits.append(f"max_loss_usd={row['max_loss_usd']}")
     if row.get("max_losses"):
         bits.append(f"max_losses={row['max_losses']}")
-    if row.get("max_looks_without_trigger"):
-        bits.append(f"max_looks_without_trigger={row['max_looks_without_trigger']}")
     if row.get("condition"):
         bits.append(str(row["condition"]))
     return " ".join(bits)
@@ -1482,9 +1468,6 @@ def render_cards(cards: list[dict[str, Any]] | None, *, indent: str = "") -> str
         order = _norm_recipe(card.get("tool_order") or card.get("default_tool_recipe"))
         if order:
             lines.append(f"{indent}  tool_order: {', '.join(str(x) for x in order)}")
-        look = card.get("next_look_s")
-        if look is not None:
-            lines.append(f"{indent}  next_look_s: {look}")
         evidence = card.get("evidence") if isinstance(card.get("evidence"), dict) else {}
         for key in EVIDENCE_FIELDS:
             if key == "scan":
@@ -1682,8 +1665,7 @@ def book_shape_rejects(raw: Any) -> dict[str, str]:
     last one is the reason this is a reject and not a silent re-filing â€” position
     and ticket disagreeing is exactly the ambiguity nesting removes. Everything
     else — notes, regime reads, per-name observations — saves. The notebook is
-    not a standing order: ``format_block`` never paints notes as tickets, and
-    ``next_look_s`` is a clerk cadence hint, not a send.
+    not a standing order: ``format_block`` never paints notes as tickets.
     """
     if not isinstance(raw, dict):
         return {}
@@ -2995,25 +2977,8 @@ def playbook_mode() -> str:
 
 
 def playbook_next_look_s() -> float | None:
-    """Smallest next_look_s on a live (non-retired) card, if any."""
-    try:
-        from abcxauto.park_clock import clamp_next_look_s
-    except Exception:
-        return None
-    found: list[float] = []
-    try:
-        lab = load_lab()
-    except Exception:
-        return None
-    for _typ, card in walk_cards(lab):
-        if str(card.get("status") or "").strip().lower() == "retired":
-            continue
-        clamped = clamp_next_look_s(card.get("next_look_s"))
-        if clamped is not None:
-            found.append(clamped)
-    if not found:
-        return None
-    return min(found)
+    """Card next_look_s is not a clerk clock. Overnight park is park_clock."""
+    return None
 
 
 def live_has_promoted() -> bool:
@@ -3093,16 +3058,7 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
     facts = card_facts(state)
     if state.get("revision_held"):
         out["revision_held"] = True
-        wait_row = next(
-            (r for r in facts if r.get("looks_without_trigger") is not None),
-            None,
-        )
-        looks = (wait_row or {}).get("looks_without_trigger")
-        note = "book unchanged — revision held"
-        if isinstance(looks, int):
-            note += f"; {looks} looks since last send or write"
-            out["looks_without_trigger"] = looks
-        out.setdefault("note", note)
+        out.setdefault("note", "book unchanged — revision held")
     out["cards"] = _flat_card_projection(state)
     out["graduated_cards"] = [_card_label(r) for r in facts if r.get("graduated")]
     out["tripped_cards"] = [_card_label(r) for r in facts if r.get("tripped")]
@@ -3433,6 +3389,15 @@ def _is_live_hypothesis(card: Any) -> bool:
     if str(card.get("status") or "testing").strip().lower() == "retired":
         return False
     if card.get("locked") is True:
+        return False
+    return True
+
+
+def _is_open_notebook_card(card: Any) -> bool:
+    """Non-retired card. Lock is seed identity, not hide-from-wake."""
+    if not isinstance(card, dict) or not card.get("name"):
+        return False
+    if str(card.get("status") or "testing").strip().lower() == "retired":
         return False
     return True
 
@@ -4388,24 +4353,15 @@ def playbook_run_sheets(
     session_range: Any = None,
     positions: Any = None,
 ) -> list[dict[str, Any]]:
-    """Live cards as a run sheet: parent tool_order and the next unused tool.
+    """Open cards as notes. No next= tool and no hunt send assignment.
 
-    Facts only. Clerk does not invent a thesis. Locked OPEN starters are the
-    notebook catalog, not a parallel hunt — they stay off the run sheet.
-    After last look already ran scan/news, the next look starts at the first
-    unread hunt tool. A screen that already stamped live last/bid/ask counts
-    as quote. Headlines already nested on that screen count as news.
+    Lock is seed identity — a locked starter stays on the sheet as an unused
+    type. Retired stay off. tool_order is notebook, not clerk next=.
     """
+    _ = (tool_trace, last_look, quoted, news, session_today, session_range, positions)
     state = book if isinstance(book, dict) else load_lab()
     types = state.get("types") if isinstance(state.get("types"), dict) else {}
     managing = flat is False
-    done = _effective_tool_trace(tool_trace, last_look, managing=managing)
-    if not managing and _scan_carries_news(news):
-        if "news" not in done:
-            done = list(done) + ["news"]
-    if not managing and _screen_quoted(quoted):
-        if "quote" not in done:
-            done = list(done) + ["quote"]
     scored = {
         card_key(row.get("type"), row.get("card")): row
         for row in card_facts(state)
@@ -4414,7 +4370,7 @@ def playbook_run_sheets(
     for type_name, card in walk_cards(state):
         if not type_name:
             continue
-        if not _is_live_hypothesis(card):
+        if not _is_open_notebook_card(card):
             continue
         status = str(card.get("status") or "testing").strip().lower()
         stanza = types.get(type_name) if isinstance(types.get(type_name), dict) else {}
@@ -4432,91 +4388,22 @@ def playbook_run_sheets(
         else:
             order = card_order or parent_order or list(_DEFAULT_HUNT_ORDER)
         score = scored.get(card_key(type_name, card.get("name"))) or {}
-        nxt = _next_in_order(order, done)
-        if (
-            not managing
-            and isinstance(quoted, dict)
-            and quoted.get("ok") is False
-        ):
-            done = [name for name in done if name != "scan"]
-            nxt = _next_in_order(order, done)
-        elif (
-            not managing
-            and "scan" in done
-            and quoted is not None
-            and _explicit_empty_tape(quoted)
-        ):
-            nxt = ""
-        if not managing and nxt == "send" and (
-            session_today is False or not _has_today_session(session_range)
-        ):
-            nxt = "candles"
         row: dict[str, Any] = {
             "type": type_name,
             "card": card.get("name"),
             "status": status,
             "tool_order": order,
-            "next": nxt,
             "sends": int(score.get("sends") or 0),
             "resolved": int(score.get("resolved") or 0),
         }
-        if session_today is False:
-            row["session_today"] = False
-        min_gap = live_card_min_gap_pct(state, card=card.get("name"))
-        if min_gap:
-            row["min_gap_pct"] = min_gap
-        min_px = live_card_scan_constraints(state, card=card.get("name")).get("min_price")
-        if min_px:
-            row["min_price"] = min_px
-        if not nxt:
-            row["next"] = ""
-            row["gate"] = "off"
-        if nxt == "send":
-            sketch = hunt_send_sketch(
-                session_range, tape=quoted, card=card.get("name")
-            )
-            if sketch:
-                book_note = live_card_book_error(sketch, positions, state)
-                if book_note:
-                    row["next"] = ""
-                    row["gate"] = "off"
-                else:
-                    row["send"] = sketch
-            elif _today_session_on_lows(session_range):
-                nxt = "candles"
-                row["next"] = "candles"
-                row["above_low"] = False
-            elif min_gap and _today_session_under_min_gap(session_range, min_gap):
-                row["next"] = ""
-                row["gate"] = "off"
-            else:
-                row["next"] = ""
-                row["gate"] = "off"
+        if card.get("locked") is True:
+            row["locked"] = True
         if score.get("sample_left") is not None:
             row["sample_left"] = score.get("sample_left")
-        if score.get("looks_without_trigger") is not None:
-            row["looks_without_trigger"] = score.get("looks_without_trigger")
-        if score.get("days_without_trigger") is not None:
-            row["days_without_trigger"] = score.get("days_without_trigger")
-        if managing:
-            if review:
-                row["review"] = review[:240]
-        else:
-            when_on = str(card.get("when_on") or "").strip()
-            scan = str(card.get("scan") or "").strip()
-            if when_on:
-                row["when_on"] = when_on[:200]
-            if scan:
-                row["scan"] = scan[:160]
-            screens = live_card_scan_screens(state)
-            if screens:
-                row["screens"] = [
-                    scan_screen_key(str(s.get("arena") or ""), str(s.get("scan_code") or ""))
-                    for s in screens[:8]
-                    if s.get("arena") or s.get("scan_code")
-                ]
+        if managing and review:
+            row["review"] = review[:240]
         out.append(row)
-        if len(out) >= 6:
+        if len(out) >= 24:
             break
     return out
 
@@ -4579,17 +4466,7 @@ def lab_facts(
         resolved_total += n
         if status == "retired":
             continue
-        if row.get("locked") is True:
-            continue
-        wait_row = {
-            "card": _card_label(row),
-            "sends": int(row.get("sends") or 0),
-            "resolved": n,
-            "looks": row.get("looks_without_trigger"),
-            "days": row.get("days_without_trigger"),
-            "last_send": row.get("last_send"),
-            "max_looks_without_trigger": row.get("max_looks_without_trigger"),
-        }
+        wait_row = {"card": _card_label(row)}
         idle.append(wait_row)
         if n == 0:
             awaiting.append(wait_row)
@@ -4599,12 +4476,34 @@ def lab_facts(
         "resolved_trades": resolved_total,
         "cards_awaiting_first_trade": awaiting[:12],
         "cards_without_trigger": idle[:12],
+        "unused_open_types": unused_open_types(state, rows=card_rows),
         "trunks_with_cards": [r["type"] for r in coverage if r["cards"]],
         "entry_trunks_untried": [
             r["type"] for r in coverage
             if not r["cards"] and r["type"] not in _MANAGEMENT_TRUNKS()
         ],
     }
+
+
+def unused_open_types(
+    book: dict[str, Any] | None = None,
+    *,
+    rows: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """OPEN types with no send. Names only — not a look tally."""
+    card_rows = rows if rows is not None else card_facts(book)
+    sent: set[str] = set()
+    for row in card_rows:
+        try:
+            n = int(row.get("sends") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n <= 0:
+            continue
+        parent = str(row.get("type") or "").strip()
+        if parent:
+            sent.add(parent)
+    return [name for name in open_playbook_types() if name not in sent]
 
 
 def lab_wake_bit(
@@ -4617,86 +4516,15 @@ def lab_wake_bit(
     session_range: Any = None,
     positions: Any = None,
 ) -> str:
-    """One wake-line clause: the waiting card and the next unused tool.
-
-    Counts and the parent tool_order only. Which structure to test is Grok's.
-    """
+    """Unused starter type names. Not a look-count and not the look's job."""
+    _ = (tool_trace, last_look, flat, quoted, session_range, positions)
     try:
-        facts = lab_facts(book)
+        unused = unused_open_types(book)
     except Exception:
         return ""
-    bits: list[str] = []
-    awaiting = facts.get("cards_awaiting_first_trade") or []
-    if awaiting:
-        top = awaiting[0] if isinstance(awaiting[0], dict) else {}
-        name = str(top.get("card") or "").split(" [")[0][:40]
-        wait: list[str] = []
-        looks = top.get("looks")
-        days = top.get("days")
-        if isinstance(looks, int):
-            wait.append(f"{looks}looks")
-        if isinstance(days, (int, float)) and days:
-            wait.append(f"{days:g}d")
-        wait.append("0sends")
-        if name:
-            bits.append(f"lab {name} {'/'.join(wait)}")
-    try:
-        sheets = playbook_run_sheets(
-            book,
-            tool_trace=tool_trace,
-            last_look=last_look,
-            flat=flat,
-            quoted=quoted,
-            session_range=session_range,
-            positions=positions,
-        )
-    except Exception:
-        sheets = []
-    if sheets:
-        sheet = sheets[0]
-        for cand in sheets:
-            send_row = cand.get("send")
-            if cand.get("next") == "send" and isinstance(send_row, dict) and send_row.get("symbol"):
-                sheet = cand
-                break
-        else:
-            for cand in sheets:
-                if cand.get("gate") != "off" and cand.get("next"):
-                    sheet = cand
-                    break
-        if not awaiting:
-            name = str(sheet.get("card") or "").strip()[:40]
-            if name:
-                bits.append(f"lab {name}")
-        nxt = str(sheet.get("next") or "").strip()
-        if sheet.get("gate") == "off":
-            bits.append("gate=off")
-        if nxt:
-            bits.append(f"next={nxt}")
-        looks = sheet.get("looks_without_trigger")
-        if isinstance(looks, int) and looks and not awaiting:
-            bits.append(f"{looks}looks_no_trigger")
-        if nxt == "scan":
-            screens = sheet.get("screens") or []
-            if screens:
-                bits.append(str(screens[0])[:40])
-        send = sheet.get("send") if nxt == "send" else None
-        if isinstance(send, dict) and send.get("symbol"):
-            card = str(send.get("card") or "").strip()
-            bit = f"send {send['symbol']}"
-            if card:
-                bit += f" card={card[:40]}"
-            bits.append(bit)
-    else:
-        untried = facts.get("entry_trunks_untried") or []
-        if untried:
-            bits.append(f"untried={len(untried)}")
-    try:
-        if playbook_is_stale(book):
-            bits.append("book_stale")
-    except Exception:
-        pass
-    return " ".join(bits)
+    if not unused:
+        return ""
+    return "unused=" + "+".join(unused[:14])
 
 
 def playbook_facts(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -4796,39 +4624,17 @@ def _live_scorecard(lab: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def format_block() -> str:
-    """Compact forest for book/wake. Full prose is the playbook tool."""
+    """Notebook pointer. Not a look assignment and not a rev= opener."""
     paper = is_paper()
     lab = load_lab()
     live = load_live()
     if paper:
-        inst = notebook_text(lab)
-        if not inst:
-            return "LAB PLAYBOOK: none. write_lab_playbook to set; playbook tool for full text.\n"
-        live_sc = _live_scorecard(lab)
-        facts = playbook_facts(live_sc)
-        ledger = format_ledger_line(facts)
-        lots = facts.get("lots_at_write") or []
-        lots_s = ",".join(str(x) for x in lots[:8]) if lots else "none"
-        return (
-            "LAB PLAYBOOK:\n"
-            f"- rev={lab.get('revision')} mode={lab.get('mode') or 'explore'} "
-            f"promoted={bool(lab.get('promoted'))}\n"
-            f"- since_write={facts.get('since_write_edge')} "
-            f"now_edge={facts.get('now_edge')} "
-            f"4h={facts.get('win_4h')} age_h={facts.get('age_h')}\n"
-            f"- lots_at_write={lots_s}\n"
-            f"- ledger: {ledger or 'none'}\n"
-            "- notebook: playbook tool; send is the book\n"
-        )
-    inst = notebook_text(live)
-    if not inst:
+        if not notebook_text(lab):
+            return "LAB PLAYBOOK: none.\n"
+        return "LAB PLAYBOOK: notebook. playbook tool for full text.\n"
+    if not notebook_text(live):
         return "LIVE: no promoted paper playbook. New risk blocked until promote (code).\n"
-    return (
-        "LIVE PLAYBOOK (promoted snapshot):\n"
-        f"- promoted_revision={live.get('promoted_revision')} "
-        f"promoted_at={live.get('promoted_at')}\n"
-        "- notebook: playbook tool\n"
-    )
+    return "LIVE PLAYBOOK: notebook. playbook tool\n"
 
 
 def clear_lab(*, reason: str = "") -> dict[str, Any]:
@@ -4872,28 +4678,28 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
         "stale": playbook_is_stale(lab) if paper else False,
     }
     cards = _flat_card_projection(lab)
-    facts_by_card = card_facts(lab)
-    last_facts: dict[str, Any] = {}
-    try:
-        from abcxauto.think_stream import last_look_for_hunt
-
-        last_facts = last_look_for_hunt()
-    except Exception:
-        last_facts = {}
-    last_tools = list(last_facts.get("tools") or [])
+    facts_by_card = [
+        {
+            k: v
+            for k, v in row.items()
+            if k
+            not in (
+                "looks_without_trigger",
+                "days_without_trigger",
+                "max_looks_without_trigger",
+                "looks",
+                "days",
+            )
+        }
+        for row in card_facts(lab)
+    ]
     out: dict[str, Any] = {
         "scope": "lab" if paper else "live",
         # Facts and the notebook before the score tables. Copying types into
         # current plus a trailing tree used to blow the 24k tool clip and
         # return broken JSON — Grok then re-hunted a card it had already
         # written.
-        "lab": lab_facts(lab, rows=facts_by_card),
-        "run": playbook_run_sheets(
-            lab,
-            last_look=last_tools,
-            quoted=last_facts,
-            session_range=last_facts.get("session_range"),
-        ),
+        "lab": lab_facts(lab, rows=card_facts(lab)),
         "score": {
             "revision": facts.get("revision"),
             "age_h": facts.get("age_h"),

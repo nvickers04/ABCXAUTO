@@ -735,45 +735,29 @@ def last_look_for_hunt(brief: dict[str, Any] | None = None) -> dict[str, Any]:
     return facts
 
 
+def _wake_job_say(row: dict[str, Any] | None) -> str:
+    """Last real say on the brief. Clerk markers are not a job."""
+    blob = row if isinstance(row, dict) else {}
+    text = str(blob.get("last_say") or blob.get("rationale") or "").strip()
+    text = " ".join(text.split())
+    if not text or text in {"?", "—", "-", ".", "..."}:
+        return ""
+    low = text.lower()
+    if low == "grok_turn" or low.startswith("skipped_grok"):
+        return ""
+    if low.startswith("wake grok") or "book snap done" in low:
+        return ""
+    if low.startswith("next look:") or "loser screens" in low:
+        return ""
+    return text[:240]
+
+
 def last_look_wake_bit(brief: dict[str, Any] | None = None) -> str:
-    """Last completed look as counts. Not a leftover strategy name on a flat book."""
-    row = brief if isinstance(brief, dict) else {}
-    if not row:
+    """Last real unfinished say if one exists. Not a look diary."""
+    row = brief if isinstance(brief, dict) else load_desk_brief()
+    if not isinstance(row, dict) or not row:
         return ""
-    if not last_look_is_fresh(row):
-        return ""
-    try:
-        n = int(row.get("send_calls") if row.get("send_calls") is not None else row.get("sends") or 0)
-    except (TypeError, ValueError):
-        n = 0
-    tools: list[str] = []
-    for raw in list(row.get("tool_trace") or []):
-        name = str(raw or "").strip()
-        if name and name not in tools:
-            tools.append(name)
-        if len(tools) >= 8:
-            break
-    bits = [f"last_look {n}sends"]
-    if tools:
-        bits.append(",".join(tools))
-    if last_look_is_fresh(row):
-        hits = row.get("scan_hits") if isinstance(row.get("scan_hits"), dict) else {}
-        top = None
-        top_mag = -1.0
-        for item in list(hits.get("rows") or []):
-            if not isinstance(item, dict) or not item.get("symbol"):
-                continue
-            mag = _open_gap_mag(item)
-            if top is None or mag > top_mag:
-                top = item
-                top_mag = mag
-        if isinstance(top, dict):
-            gap = top.get("open_gap_pct")
-            if gap is not None:
-                bits.append(f"last_scan {top.get('symbol')} {gap}")
-            else:
-                bits.append(f"last_scan {top.get('symbol')}")
-    return " ".join(bits)
+    return _wake_job_say(row)
 
 
 def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
