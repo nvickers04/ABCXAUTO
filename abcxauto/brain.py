@@ -1373,10 +1373,180 @@ async def _write_last_turn_after_send(
 
 
 PLAYBOOK_CLIP_CHARS = 48_000
+# Compact 4×80 OHLC bars plus session still fit; the old 24k clip dropped
+# the series to save the run sheet and Grok sized off a metadata stub.
+CANDLES_CLIP_CHARS = 48_000
+
+_CANDLES_LEAD = (
+    "symbol",
+    "source",
+    "freshness",
+    "resolution",
+    "requested_resolution",
+    "use",
+    "error",
+    "hist_error",
+    "rt_error",
+    "last",
+    "bars",
+    "series",
+)
+
+
+def _think_bar(bar: Any) -> dict[str, Any] | None:
+    """OHLC/time for the think. Drop t_unix/t_iso twins that bloat the clip."""
+    if not isinstance(bar, dict):
+        return None
+    out: dict[str, Any] = {}
+    t = bar.get("t")
+    if t in (None, ""):
+        t = bar.get("t_iso") or bar.get("date")
+    if t not in (None, ""):
+        out["t"] = t
+    for key in ("o", "h", "l", "c", "v"):
+        val = bar.get(key)
+        if val is not None:
+            out[key] = val
+    if out.get("c") is None and out.get("o") is None:
+        return None
+    return out
+
+
+def _think_bars(bars: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for bar in bars or []:
+        row = _think_bar(bar)
+        if row:
+            out.append(row)
+    return out
+
+
+def _with_think_bars(data: dict[str, Any]) -> dict[str, Any]:
+    out = dict(data)
+    if isinstance(out.get("bars"), list):
+        out["bars"] = _think_bars(out["bars"])
+    series = out.get("series")
+    if isinstance(series, list):
+        slim: list[Any] = []
+        for row in series:
+            if not isinstance(row, dict):
+                slim.append(row)
+                continue
+            item = dict(row)
+            if isinstance(item.get("bars"), list):
+                item["bars"] = _think_bars(item["bars"])
+            slim.append(item)
+        out["series"] = slim
+    return out
+
+
+def _candles_lead(data: dict[str, Any]) -> dict[str, Any]:
+    lead = {k: data[k] for k in _CANDLES_LEAD if k in data}
+    rest = {k: v for k, v in data.items() if k not in lead}
+    return {**lead, **rest}
+
+
+def _tape_payload(data: Any) -> bool:
+    return isinstance(data, dict) and bool(data.get("bars") or data.get("series"))
+
+
+def _drop_key(row: dict[str, Any], key: str) -> dict[str, Any]:
+    if key not in row:
+        return row
+    out = dict(row)
+    out.pop(key, None)
+    return out
+
+
+def _trim_bar_list(bars: list[Any], keep: int) -> list[Any]:
+    if keep < 1 or len(bars) <= keep:
+        return bars
+    # Keep the open (head) and the live edge (tail). Oldest-only trim
+    # dropped the 09:30 print that session.open is built from.
+    head = max(1, min(keep // 4, 8))
+    tail = keep - head
+    if tail <= 0:
+        return bars[-keep:]
+    return list(bars[:head]) + list(bars[-tail:])
+
+
+def _trim_payload_bars(data: dict[str, Any], keep: int) -> tuple[dict[str, Any], bool]:
+    out = dict(data)
+    trimmed = False
+    if isinstance(out.get("bars"), list) and len(out["bars"]) > keep:
+        out["bars"] = _trim_bar_list(out["bars"], keep)
+        trimmed = True
+    series = out.get("series")
+    if isinstance(series, list):
+        rows: list[Any] = []
+        for row in series:
+            if isinstance(row, dict) and isinstance(row.get("bars"), list) and len(row["bars"]) > keep:
+                item = dict(row)
+                item["bars"] = _trim_bar_list(item["bars"], keep)
+                rows.append(item)
+                trimmed = True
+            else:
+                rows.append(row)
+        out["series"] = rows
+    return out, trimmed
+
+
+def _clip_candles(data: dict[str, Any], max_chars: int = CANDLES_CLIP_CHARS) -> str:
+    """Bars are the payload. Never drop the series to save the run sheet."""
+    payload = _candles_lead(_with_think_bars(dict(data)))
+    text = json.dumps(payload, default=str)
+    if len(text) <= max_chars:
+        return text
+    slim = dict(payload)
+    for key in ("run", "metrics"):
+        dropped = False
+        if key in slim:
+            slim.pop(key)
+            dropped = True
+        if isinstance(slim.get("series"), list):
+            rows: list[Any] = []
+            for row in slim["series"]:
+                if isinstance(row, dict) and key in row:
+                    row = _drop_key(row, key)
+                    dropped = True
+                rows.append(row)
+            slim["series"] = rows
+        if not dropped:
+            continue
+        slim["_clipped"] = key
+        text = json.dumps(_candles_lead(slim), default=str)
+        if len(text) <= max_chars:
+            return text
+    for keep in (80, 60, 40, 24, 16, 8, 5, 1):
+        trial, trimmed = _trim_payload_bars(slim, keep)
+        if not trimmed:
+            continue
+        trial["_clipped"] = "bars_tail"
+        text = json.dumps(_candles_lead(trial), default=str)
+        if len(text) <= max_chars:
+            return text
+        slim = trial
+    kept: dict[str, Any] = {}
+    for key in _CANDLES_LEAD:
+        if key in slim:
+            kept[key] = slim[key]
+    if slim.get("error") and "error" not in kept:
+        kept["error"] = slim["error"]
+    kept["_clipped"] = "payload"
+    text = json.dumps(_candles_lead(kept), default=str)
+    if len(text) <= max_chars:
+        return text
+    kept, _ = _trim_payload_bars(kept, 1)
+    return json.dumps(_candles_lead(kept), default=str)
 
 
 def _clip(data: Any, max_chars: int = 24_000) -> str:
-    """Keep the run sheet when hits/news overflow. A tail clip hid next=send."""
+    """Keep the run sheet when hits/news overflow. A tail clip hid next=send.
+
+    Candle bars/series are the tape — never drop them to save run metadata.
+    """
+    if _tape_payload(data):
+        return _clip_candles(data, max_chars=max_chars)
     if isinstance(data, dict) and data.get("run") is not None:
         lead = {"run": data["run"]}
         rest = {k: v for k, v in data.items() if k != "run"}
@@ -1386,7 +1556,7 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
         return text
     if isinstance(data, dict):
         slim = dict(data)
-        for key in ("hits", "news", "bars", "series", "symbols", "rows", "types"):
+        for key in ("hits", "news", "symbols", "rows", "types"):
             if key not in slim:
                 continue
             slim.pop(key)
@@ -2791,15 +2961,15 @@ async def _run_tool(
                     payload["asof_iso"] = series[0]["asof_iso"]
                 if series[0].get("session"):
                     payload["session"] = series[0]["session"]
+        else:
+            payload["series"] = series
+        # A miss is an error, not a run-sheet stub. Attach next=send only
+        # when this look actually has bars.
+        if kinds:
             _attach_run_sheet(
                 payload, turn=turn, world=world, tool="candles", quoted=snap
             )
-            return _clip(payload)
-        payload["series"] = series
-        _attach_run_sheet(
-            payload, turn=turn, world=world, tool="candles", quoted=snap
-        )
-        return _clip(payload)
+        return _clip(payload, max_chars=CANDLES_CLIP_CHARS)
     if name == "option_chain":
         fn = getattr(connector, "get_option_chain", None)
         if not callable(fn):
@@ -3137,6 +3307,8 @@ def _cached_read(turn: BrainTurn, name: str, args: dict[str, Any]) -> str | None
         return hit
     if isinstance(data, dict):
         data["repeat_of_this_think"] = True
+        if _tape_payload(data):
+            return _clip(data, max_chars=CANDLES_CLIP_CHARS)
         return _clip(data)
     return hit
 

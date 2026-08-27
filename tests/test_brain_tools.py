@@ -1009,9 +1009,13 @@ async def test_bare_candles_on_session_card_request_five_minute_without_gap_tick
 
 
 @pytest.mark.asyncio
-async def test_candles_stamp_session_range_and_run_next_send():
+async def test_candles_stamp_session_range_and_run_next_send(monkeypatch):
     from abcxauto.lab_playbook import clamp_update, save_lab
 
+    monkeypatch.setattr(
+        "abcxauto.opportunity_scan._et_calendar_day",
+        lambda now=None: "2026-08-25",
+    )
     update = clamp_update(
         {
             "types": {
@@ -1196,6 +1200,100 @@ def test_clip_keeps_run_when_hits_overflow():
     assert "hits" not in data or data.get("_clipped")
 
 
+def _fat_session_bars(n: int, *, close: float = 90.0) -> list[dict]:
+    """IBKR-shaped 5m bars with t/t_unix/t_iso — the shape that overflowed 24k."""
+    bars = []
+    for i in range(n):
+        minute = 9 * 60 + 30 + i * 5
+        hh, mm = divmod(minute, 60)
+        bars.append(
+            {
+                "t": f"20260825 {hh:02d}:{mm:02d}:00",
+                "t_unix": 1756133700 + i * 300,
+                "t_iso": f"2026-08-25T{hh + 4:02d}:{mm:02d}:00Z",
+                "o": close + i * 0.01,
+                "h": close + 1 + i * 0.01,
+                "l": close - 2 + i * 0.01,
+                "c": close + 0.5 + i * 0.01,
+                "v": 10000 + i,
+            }
+        )
+    return bars
+
+
+def _assert_think_bars(bars: list) -> None:
+    assert bars, "candles must return OHLC/time, not a metadata stub"
+    assert len(bars) >= 5
+    last = bars[-1]
+    assert last.get("c") is not None
+    assert last.get("t") not in (None, "")
+    assert "t_unix" not in last
+    assert "t_iso" not in last
+
+
+def test_clip_keeps_candle_bars_when_run_overflows():
+    """24k clip used to pop bars and leave run/session. Grok sized off that stub."""
+    bars = _fat_session_bars(120)
+    raw = _clip(
+        {
+            "run": {
+                "next": "send",
+                "card": "flush bounce",
+                "send": {"symbol": "SNDK", "stop_price": 88.0},
+                "when_on": "mega/large " + ("x" * 4000),
+                "scan": "most_active " + ("y" * 4000),
+            },
+            "session": {
+                "n": 120,
+                "open": 90.0,
+                "low": 88.0,
+                "last": 91.0,
+                "today": True,
+            },
+            "metrics": {"sma20": 90.0, "pad": "m" * 4000},
+            "bars": bars,
+            "source": "ibkr",
+            "freshness": "ibkr_rth",
+            "symbol": "SNDK",
+            "resolution": "5",
+        },
+        max_chars=24_000,
+    )
+    data = json.loads(raw)
+    _assert_think_bars(data.get("bars") or [])
+    assert data.get("_clipped") != "bars"
+    assert data["bars"][0]["t"].startswith("20260825 09:30")
+    assert data["bars"][-1]["c"] == pytest.approx(bars[-1]["c"])
+
+
+def test_clip_keeps_batch_series_bars():
+    series = []
+    for sym in ("SPY", "QQQ", "IWM", "DIA"):
+        series.append(
+            {
+                "symbol": sym,
+                "source": "ibkr",
+                "bars": _fat_session_bars(80, close=100.0),
+                "session": {"n": 80, "open": 100.0, "low": 98.0, "today": True},
+                "metrics": {"sma20": 100, "pad": "m" * 2000},
+            }
+        )
+    raw = _clip(
+        {
+            "run": {"next": "send", "when_on": "z" * 8000},
+            "source": "ibkr",
+            "series": series,
+        },
+        max_chars=24_000,
+    )
+    data = json.loads(raw)
+    assert data.get("series")
+    assert data.get("_clipped") != "series"
+    for row in data["series"]:
+        _assert_think_bars(row.get("bars") or [])
+        assert row.get("symbol") in {"SPY", "QQQ", "IWM", "DIA"}
+
+
 @pytest.mark.asyncio
 async def test_multi_name_candles_send_sketch_uses_this_look_session(monkeypatch):
     from abcxauto.lab_playbook import clamp_update, save_lab
@@ -1220,6 +1318,10 @@ async def test_multi_name_candles_send_sketch_uses_this_look_session(monkeypatch
     assert update is not None
     save_lab(update)
     monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda *a, **k: {})
+    monkeypatch.setattr(
+        "abcxauto.opportunity_scan._et_calendar_day",
+        lambda now=None: "2026-08-25",
+    )
 
     class Conn:
         async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
@@ -1516,6 +1618,121 @@ async def test_candles_batch_returns_series(monkeypatch):
     assert data["source"] == "ibkr"
     assert {row["symbol"] for row in data["series"]} == {"SPY", "QQQ", "IWM"}
     assert set(seen) == {"SPY", "QQQ", "IWM"}
+    for row in data["series"]:
+        assert row.get("bars")
+        assert row["bars"][0]["c"] is not None
+
+
+@pytest.mark.asyncio
+async def test_candles_fat_hist_returns_ohlc_not_run_stub():
+    bars = _fat_session_bars(120)
+
+    class Conn:
+        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
+            return {
+                "symbol": symbol,
+                "bars": bars,
+                "source": "ibkr",
+                "freshness": "ibkr_rth",
+                "resolution": resolution,
+            }
+
+        async def get_realtime_bars(self, symbol, **_k):
+            raise AssertionError("hist answered")
+
+    data = json.loads(
+        await _run_tool(
+            "candles",
+            {"symbol": "SNDK", "resolution": "5", "countback": 120},
+            connector=Conn(),
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    _assert_think_bars(data.get("bars") or [])
+    assert data["source"] == "ibkr"
+    assert data.get("_clipped") != "bars"
+    assert data["bars"][-1]["c"] == pytest.approx(bars[-1]["c"])
+
+
+@pytest.mark.asyncio
+async def test_candles_batch_fat_hist_returns_series_bars():
+    class Conn:
+        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
+            return {
+                "symbol": symbol,
+                "bars": _fat_session_bars(80, close=100.0),
+                "source": "ibkr",
+                "freshness": "ibkr_rth",
+            }
+
+        async def get_realtime_bars(self, symbol, **_k):
+            raise AssertionError("hist answered")
+
+    data = json.loads(
+        await _run_tool(
+            "candles",
+            {"symbols": ["SPY", "QQQ", "IWM", "DIA"], "resolution": "5", "countback": 80},
+            connector=Conn(),
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data.get("series")
+    assert data.get("_clipped") != "series"
+    assert {row["symbol"] for row in data["series"]} == {"SPY", "QQQ", "IWM", "DIA"}
+    for row in data["series"]:
+        _assert_think_bars(row.get("bars") or [])
+
+
+@pytest.mark.asyncio
+async def test_candles_miss_is_error_not_clipped_metadata():
+    from abcxauto.lab_playbook import clamp_update, save_lab
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "tool_order": ["scan", "news", "quote", "candles", "send"],
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "gap retrace",
+                            "shape": "LONG STK. Stop under opening low.",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ],
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+
+    class Conn:
+        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
+            return {"error": "no IBKR bars", "source": "ibkr", "symbol": symbol}
+
+        async def get_realtime_bars(self, symbol, **_k):
+            return {"error": "no IBKR realtime bars", "source": "ibkr", "symbol": symbol}
+
+    data = json.loads(
+        await _run_tool(
+            "candles",
+            {"symbol": "SNDK", "resolution": "5", "countback": 60},
+            connector=Conn(),
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data.get("error")
+    assert data.get("freshness") == "ibkr_miss"
+    assert data.get("bars") in (None, [])
+    assert data.get("_clipped") not in ("bars", "series", "payload")
+    assert data.get("source") == "ibkr"
 
 
 @pytest.mark.asyncio
