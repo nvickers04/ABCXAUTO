@@ -833,6 +833,17 @@ def test_floor_gate_cannot_be_disarmed_from_the_ui(real_cfg_pro):
     assert "floor" in (real_cfg_pro.lbl_risk_status.value or "").lower()
 
 
+def test_paper_can_turn_risk_gates_off(real_cfg_pro):
+    from abcxauto.config import get_config
+
+    assert get_config().is_paper is True
+    gate = real_cfg_pro.gates["risk_gates_enabled"]
+    gate.value = False
+    real_cfg_pro._toggle_floor_gate("risk_gates_enabled")
+    assert get_config().risk_gates_enabled is False
+    assert gate.value is False
+
+
 def test_the_stream_dominates_its_surface(headless_pro):
     """It was buried under two stacked sections and the operator could not read it."""
     from abcxauto.pro_desktop import STREAM_FONT_SIZE

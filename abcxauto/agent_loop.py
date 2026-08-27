@@ -720,17 +720,36 @@ async def execute_ticket(
     strat = str(act.get("strategy") or act.get("action") or strat).strip().lower()
     chosen_strat = strat
     params = act.get("params") if isinstance(act.get("params"), dict) else {}
+    if params.get("size_pct_nl") in (None, "") and act.get("size_pct_nl") not in (None, ""):
+        params["size_pct_nl"] = act["size_pct_nl"]
     if is_new_risk(strat, params) and strat in ("market_bracket", "oca", "bracket"):
+        from abcxauto.send import apply_size_pct_nl
+
+        nl = equity_of(snap.get("account") or {}) or float(
+            getattr(world, "net_liquidation", 0) or 0
+        )
+        px = quote_last
+        if px is None:
+            for key in ("entry_price", "limit_price", "price_hint"):
+                raw_px = params.get(key)
+                try:
+                    if raw_px not in (None, "") and float(raw_px) > 0:
+                        px = float(raw_px)
+                        break
+                except (TypeError, ValueError):
+                    continue
+        apply_size_pct_nl(params, net_liq=nl, price=px, strategy=strat)
         raw_qty = params.get("quantity")
         try:
             qty_ok = int(float(raw_qty)) >= 1
         except (TypeError, ValueError):
             qty_ok = False
         if not qty_ok:
-            note = "card off — size won't fit written risk at this stop"
+            # Card prose (a 1% note) is not a refuse. Missing size is.
+            note = "send needs quantity or size_pct_nl"
             act["strategy"] = act["action"] = BLOCKED_STRAT
             act["rationale"] = note
-            _record_clerk_block(act, asked, note, stage="card_size")
+            _record_clerk_block(act, asked, note, stage="size")
             return {"status": "blocked", "note": note}
 
     if strat in ("market_bracket", "oca", "bracket"):

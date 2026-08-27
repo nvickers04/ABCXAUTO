@@ -320,24 +320,34 @@ def _stamp_session_size(session: dict[str, Any], world: WorldState) -> None:
     try:
         from abcxauto.protect import size_if_stop
 
-        card_sized = size_if_stop(
-            last=session.get("last"),
-            stop=session.get("low"),
-            equity=getattr(world, "net_liquidation", None),
-            cfg=SimpleNamespace(
-                max_risk_per_trade_pct=facts.get("risk_pct") or 1.0,
-                max_position_pct=facts.get("notional_pct") or 25.0,
-            ),
-        )
+        risk = facts.get("risk_pct")
+        if risk is None:
+            card_sized = {}
+        else:
+            card_sized = size_if_stop(
+                last=session.get("last"),
+                stop=session.get("low"),
+                equity=getattr(world, "net_liquidation", None),
+                cfg=SimpleNamespace(
+                    max_risk_per_trade_pct=risk,
+                    max_position_pct=(
+                        facts.get("notional_pct")
+                        if facts.get("notional_pct") is not None
+                        else 100.0
+                    ),
+                ),
+            )
     except Exception:
         card_sized = {}
-    if card_sized:
+    if facts.get("risk_pct") is not None or facts.get("notional_pct") is not None:
         session.setdefault("size", {})
-        session["size"]["card_qty"] = card_sized["qty"]
         if facts.get("risk_pct") is not None:
             session["size"]["card_risk_pct"] = facts["risk_pct"]
         if facts.get("notional_pct") is not None:
             session["size"]["card_notional_pct"] = facts["notional_pct"]
+    if card_sized:
+        session.setdefault("size", {})
+        session["size"]["card_qty"] = card_sized["qty"]
 
 
 def _stamp_session_ticket(session: dict[str, Any]) -> None:

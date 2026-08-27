@@ -155,3 +155,28 @@ async def test_live_mode_is_not_enabled_by_send(monkeypatch):
     connector.place_order.assert_not_called()
     # send must not flip the process onto live
     assert get_config().trading_mode == "paper"
+
+
+def test_size_pct_nl_notional_from_current_nl():
+    """Grok's size is % of current NL — not a dollar sleeve or a 1% card law."""
+    from abcxauto.send import (
+        apply_size_pct_nl,
+        notional_from_size_pct_nl,
+        qty_from_size_pct_nl,
+    )
+
+    nl = 100_000.0
+    assert notional_from_size_pct_nl(2.0, nl) == 2000.0
+    assert qty_from_size_pct_nl(2.0, nl, 50.0) == 40
+    assert qty_from_size_pct_nl(1.0, 37_000.0, 500.0) is None  # 370 < 500
+    assert qty_from_size_pct_nl(5.0, 37_000.0, 500.0) == 3
+    params = {"symbol": "AAPL", "size_pct_nl": 2.0}
+    note = apply_size_pct_nl(params, net_liq=nl, price=50.0, strategy="market_bracket")
+    assert note is not None
+    assert note["notional"] == 2000.0
+    assert note["net_liq"] == nl
+    assert params["quantity"] == 40
+    # Valid qty is left alone — Grok already chose contracts.
+    kept = {"quantity": 7, "size_pct_nl": 2.0}
+    assert apply_size_pct_nl(kept, net_liq=nl, price=50.0) is None
+    assert kept["quantity"] == 7

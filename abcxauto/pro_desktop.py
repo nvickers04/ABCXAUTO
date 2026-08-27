@@ -3039,11 +3039,16 @@ class ProTerminal:
             self._field_row(key, label, hint) for key, label, hint in RISK_FIELDS
         ]
         for key, label in FLOOR_GATES:
+            hint = (
+                "paper may turn off; live forced on"
+                if key == "risk_gates_enabled"
+                else "floor — operator may re-arm, never disarm"
+            )
             rows.append(
                 self._field_row(
                     key,
                     label,
-                    "floor — operator may re-arm, never disarm",
+                    hint,
                     control=self.gates[key],
                 )
             )
@@ -3247,11 +3252,25 @@ class ProTerminal:
         self._note_setting(f"{key} → {value}{tail}")
 
     def _toggle_floor_gate(self, key: str) -> None:
-        """Operator may re-arm a gate. Nothing here may disarm one."""
+        """Live floor gates stay armed. Paper may turn risk_gates_enabled off."""
         from abcxauto.config import update_risk_config
 
         sw = self.gates.get(key)
         if sw is None:
+            return
+        cfg = get_config()
+        paper = bool(getattr(cfg, "is_paper", True)) and str(
+            getattr(cfg, "trading_mode", "paper") or ""
+        ).lower() != "live"
+        if key == "risk_gates_enabled" and paper:
+            want = bool(sw.value)
+            try:
+                update_risk_config(risk_gates_enabled=want, persist=True)
+                self._note_setting(f"risk_gates_enabled → {want}")
+            except Exception as exc:
+                self._note_setting(f"{key} failed: {exc}", color=RED)
+            self._sync_risk_page(force=True)
+            self._safe_update()
             return
         if not bool(sw.value):
             sw.value = True
