@@ -1099,7 +1099,7 @@ async def run_cycle(
 
     from abcxauto.think_stream import emit as think_emit
 
-    think_emit("say", "Book snap done — Grok has the tools.\n")
+    think_emit("clerk", "Book snap done — Grok has the tools.\n")
 
     try:
         sync_open_risk(
@@ -1140,7 +1140,7 @@ async def run_cycle(
         ibkr_up=ibkr_up,
         day=day,
     )
-    think_emit("say", "Wake Grok.\n")
+    think_emit("clerk", "Wake Grok.\n")
     try:
         from abcxauto.think_stream import write_last_turn
 

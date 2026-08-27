@@ -730,31 +730,28 @@ async def test_empty_scan_on_a_live_card_runs_the_written_screens(monkeypatch):
         await _run_tool("scan", {}, connector=None, world=world, snap=snap, turn=BrainTurn())
     )
     assert seen == [
-        ("mega_cap", "TOP_OPEN_PERC_LOSE"),
-        ("mega_cap", "TOP_PERC_LOSE"),
         ("mega_cap", "MOST_ACTIVE"),
-        ("large_cap", "TOP_OPEN_PERC_LOSE"),
-        ("large_cap", "TOP_PERC_LOSE"),
+        ("mega_cap", "TOP_PERC_LOSE"),
         ("large_cap", "MOST_ACTIVE"),
+        ("large_cap", "TOP_PERC_LOSE"),
     ]
     assert first.get("screens") == [
-        "mega_cap:TOP_OPEN_PERC_LOSE",
-        "mega_cap:TOP_PERC_LOSE",
         "mega_cap:MOST_ACTIVE",
-        "large_cap:TOP_OPEN_PERC_LOSE",
-        "large_cap:TOP_PERC_LOSE",
+        "mega_cap:TOP_PERC_LOSE",
         "large_cap:MOST_ACTIVE",
+        "large_cap:TOP_PERC_LOSE",
     ]
     assert snap["scan_screens"] == first["screens"]
     assert snap["scan_arenas"] == ["mega_cap", "large_cap"]
-    assert snap["scan_calls"] == 6
+    assert snap["scan_calls"] == 4
     assert first.get("arena") in (None, "")
     assert first.get("scan_code") in (None, "")
     assert first["rows"][0]["symbol"] == "ALB"
     assert first["deepest_symbol"] == "ALB"
     assert first["deepest_open_gap_pct"] == -3.8
-    assert first["card_min_gap_pct"] == 6.0
-    assert first["card_gap_met"] is False
+    assert "card_min_gap_pct" not in first
+    assert "card_gap_met" not in first
+    assert "card_gap_floors" not in first
     reused = json.loads(
         await _run_tool(
             "scan",
@@ -769,15 +766,62 @@ async def test_empty_scan_on_a_live_card_runs_the_written_screens(monkeypatch):
     assert reused.get("note") == "card screens already fetched this look"
     assert reused.get("screens") == first["screens"]
     assert "arena" not in reused or reused.get("arena") in (None, "")
-    assert reused.get("card_gap_met") is False
+    assert "card_gap_met" not in reused
+    assert "card_min_gap_pct" not in reused
     assert seen == [
-        ("mega_cap", "TOP_OPEN_PERC_LOSE"),
-        ("mega_cap", "TOP_PERC_LOSE"),
         ("mega_cap", "MOST_ACTIVE"),
-        ("large_cap", "TOP_OPEN_PERC_LOSE"),
-        ("large_cap", "TOP_PERC_LOSE"),
+        ("mega_cap", "TOP_PERC_LOSE"),
         ("large_cap", "MOST_ACTIVE"),
+        ("large_cap", "TOP_PERC_LOSE"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_scan_one_liner_is_clerk_and_omits_card_gap(monkeypatch):
+    from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
+
+    async def _fake_scan(**kw):
+        return {
+            "ok": True,
+            "source": "ibkr",
+            "arena": kw.get("arena") or "mega_cap",
+            "scan_code": kw.get("scan_code") or "TOP_PERC_LOSE",
+            "symbols": ["SNDK"],
+            "hits": [{"symbol": "SNDK", "last": 91.5, "open_gap_pct": -3.8}],
+            "quoted": 1,
+        }
+
+    async def _no_tags(_conn):
+        return {}
+
+    async def _no_news(*_a, **_k):
+        return []
+
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.brain._mda_news", _no_news)
+    got: list[tuple[str, str]] = []
+
+    def cap(kind: str, text: str, *_a) -> None:
+        got.append((kind, text))
+
+    reset_speaker()
+    subscribe(cap)
+    try:
+        await _run_tool(
+            "scan",
+            {"arena": "mega_cap", "scan_code": "TOP_PERC_LOSE"},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    finally:
+        unsubscribe(cap)
+        reset_speaker()
+    assert any(k == "clerk" and "hits=" in t for k, t in got)
+    assert not any("card_gap=" in t for _k, t in got)
+    assert not any(k == "say" and "hits=" in t for k, t in got)
 
 
 def test_scan_news_asks_the_gap_row_before_the_active_page():
@@ -1127,14 +1171,12 @@ async def test_candles_stamp_session_range_and_run_next_send(monkeypatch):
     assert data["session"]["size"]["risk_per_share"] == pytest.approx(3.5)
     assert data["session"]["size"]["card_qty"] >= 1
     assert data["session"]["size"]["card_risk_pct"] == 1.0
-    assert data["session"]["ticket"]["card"] == "flush bounce"
-    assert data["session"]["ticket"]["strategy"] == "market_bracket"
-    assert data["session"]["ticket"]["stop_price"] == 88.0
+    assert "ticket" not in data["session"]
     assert snap["session_range"]["SNDK"]["low"] == 88.0
     assert "run" not in data
 
 
-def test_stamp_session_ticket_skips_when_card_gate_is_off():
+def test_stamp_session_ticket_does_not_paint_a_playbook_card():
     from abcxauto.brain import _stamp_session_ticket
     from abcxauto.lab_playbook import clamp_update, save_lab
 
@@ -1157,58 +1199,18 @@ def test_stamp_session_ticket_skips_when_card_gate_is_off():
     )
     assert update is not None
     save_lab(update)
-    on_lows = {
-        "today": True,
-        "low": 88.0,
-        "last": 88.0,
-        "above_low": False,
-        "open_gap_pct": -6.5,
-        "ticket": {"card": "stale"},
-    }
-    _stamp_session_ticket(on_lows)
-    assert "ticket" not in on_lows
-    thin_gap = {
-        "today": True,
-        "low": 900.0,
-        "last": 910.0,
-        "above_low": True,
-        "open_gap_pct": -3.3,
-        "ticket": {"card": "stale"},
-    }
-    _stamp_session_ticket(thin_gap)
-    assert "ticket" not in thin_gap
-    missing_gap = {
-        "today": True,
-        "low": 160.0,
-        "last": 165.0,
-        "above_low": True,
-        "ticket": {"card": "stale"},
-    }
-    _stamp_session_ticket(missing_gap)
-    assert "ticket" not in missing_gap
-    through = {
-        "today": True,
-        "low": 88.0,
-        "last": 96.0,
-        "above_low": True,
-        "open_gap_pct": -6.5,
-        "retrace_30": 93.0,
-        "retrace_50": 95.0,
-        "ticket": {"card": "stale"},
-    }
-    _stamp_session_ticket(through)
-    assert "ticket" not in through
     half = {
         "today": True,
         "low": 88.0,
         "last": 94.0,
         "above_low": True,
+        "above_open": True,
         "open_gap_pct": -6.5,
         "retrace_30": 93.0,
         "retrace_50": 95.0,
     }
     _stamp_session_ticket(half)
-    assert half["ticket"]["target_price"] == 95.0
+    assert "ticket" not in half
 
 
 def test_scan_gap_pct_reads_live_quote_when_scan_row_omits_it():

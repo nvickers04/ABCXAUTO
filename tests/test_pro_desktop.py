@@ -190,7 +190,7 @@ def test_playbook_line_paints_run_next(headless_pro):
     assert "next=" not in line
     assert "send SYM" not in line
     assert "Nlooks" not in line
-    assert "unused=" in line
+    assert "unused=" not in line
 
 
 def test_book_strip_sync(headless_pro):

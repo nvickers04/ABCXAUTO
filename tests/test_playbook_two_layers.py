@@ -285,9 +285,10 @@ def test_lab_facts_reports_what_is_untried_not_only_what_scored():
     from abcxauto.lab_playbook import lab_wake_bit
 
     bit = lab_wake_bit(load_lab())
-    assert "unused=" in bit
-    assert "vertical_spread" in bit
-    assert "iron_condor" in bit
+    assert bit == ""
+    assert "unused=" not in bit
+    assert "vertical_spread" not in bit
+    assert "iron_condor" not in bit
     assert "looks" not in bit
     assert "0sends" not in bit
     assert "lab flush bounce" not in bit
@@ -1910,11 +1911,10 @@ def test_run_sheet_follows_parent_tool_order_instead_of_rescan():
         }
     )
     gap_screens = live_card_scan_screens()
-    assert {"arena": "mega_cap", "scan_code": "TOP_OPEN_PERC_LOSE"} in gap_screens
-    assert {"arena": "large_cap", "scan_code": "TOP_OPEN_PERC_LOSE"} in gap_screens
-    assert gap_screens[0] == {"arena": "mega_cap", "scan_code": "TOP_OPEN_PERC_LOSE"}
+    assert {"arena": "mega_cap", "scan_code": "TOP_OPEN_PERC_LOSE"} not in gap_screens
+    assert {"arena": "large_cap", "scan_code": "TOP_OPEN_PERC_LOSE"} not in gap_screens
     bit = lab_wake_bit(load_lab(), flat=True)
-    assert "unused=" in bit
+    assert "unused=" not in bit
     assert "looks" not in bit
     assert "next=scan" not in bit
 
@@ -1978,7 +1978,7 @@ def test_lab_wake_and_book_payload_paint_the_next_tool(monkeypatch):
         last_look=["book", "scan", "news"],
         flat=True,
     )
-    assert "unused=" in bit
+    assert "unused=" not in bit
     assert "lab flush bounce" not in bit
     assert "next=quote" not in bit
     assert "looks" not in bit
@@ -2073,7 +2073,7 @@ def test_run_sheet_and_wake_paint_send_sketch_from_session(monkeypatch):
         flat=True,
         session_range=rng,
     )
-    assert "unused=" in bit
+    assert "unused=" not in bit
     assert "next=send" not in bit
     assert "send SNDK" not in bit
     assert "looks" not in bit
@@ -2491,7 +2491,7 @@ def test_sibling_cards_bind_gap_and_sketch_to_card_name():
     assert hunt_send_sketch({"ALB": alb}, card="defined-risk flush debit") is None
     stamped = dict(alb)
     _stamp_session_ticket(stamped)
-    assert stamped["ticket"]["card"] == "3pct gap hold"
+    assert "ticket" not in stamped
     sheets = playbook_run_sheets(
         load_lab(),
         tool_trace=["book", "scan", "news", "quote", "candles"],

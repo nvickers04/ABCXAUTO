@@ -43,6 +43,9 @@ def test_emit_reaches_subscriber():
 
 
 def test_bind_engine_appends_think_live():
+    from abcxauto.think_stream import reset_speaker
+
+    reset_speaker()
     st = SimpleNamespace(think_live="")
     bind_engine(SimpleNamespace(state=st))
     try:
@@ -52,6 +55,50 @@ def test_bind_engine_appends_think_live():
         bind_engine(None)
     assert "--- GROK ---" in st.think_live
     assert '{"stance":"idle"}' in st.think_live
+
+
+def test_clerk_facts_use_clerk_banner_not_grok():
+    """hits= / book snap / Wake Grok are clerk. [think]/[say] stay Grok."""
+    from abcxauto.think_stream import reset_speaker
+
+    reset_speaker()
+    st = SimpleNamespace(think_live="")
+    bind_engine(SimpleNamespace(state=st))
+    try:
+        emit("clerk", "Book snap done — Grok has the tools.\n")
+        emit("clerk", "Wake Grok.\n")
+        emit("clerk", "[scan]\n")
+        emit("clerk", "hits=3 screens=2 deepest=-6.5% SNDK src=ibkr\n")
+        emit("stage", "grok")
+        emit("say", "\n[think]\n")
+        emit("think", "weigh tape ")
+        emit("say", "\n[say]\n")
+        emit("say", "watching the gap\n")
+    finally:
+        bind_engine(None)
+        reset_speaker()
+    live = st.think_live
+    assert "--- CLERK ---" in live
+    assert "[clerk]" in live
+    assert "Book snap done" in live
+    assert "Wake Grok." in live
+    assert "hits=3 screens=2" in live
+    assert "card_gap=" not in live
+    assert "--- GROK ---" in live
+    assert "[think]" in live
+    assert "[say]" in live
+    assert "watching the gap" in live
+    clerk_at = live.find("--- CLERK ---")
+    grok_at = live.find("--- GROK ---")
+    assert clerk_at >= 0 and grok_at > clerk_at
+    clerk_block = live[clerk_at:grok_at]
+    grok_block = live[grok_at:]
+    assert "hits=3" in clerk_block
+    assert "Wake Grok." in clerk_block
+    assert "[think]" not in clerk_block
+    assert "[say]" not in clerk_block
+    assert "watching the gap" in grok_block
+    assert "hits=3" not in grok_block
 
 
 def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
@@ -377,11 +424,12 @@ def test_merge_scan_hits_keeps_the_gap_row_after_a_junk_screen():
     assert bit == ""
     assert "last_scan" not in bit
     assert last_look_wake_bit({
-        "last_say": "SNDK 6% flush still holding the opening low",
+        "last_say": "still no ticket unless news-miss actually fires",
+        "rationale": "still no ticket unless news-miss actually fires",
         "send_calls": 0,
         "tool_trace": ["scan"],
         "scan_hits": merged,
-    }) == "SNDK 6% flush still holding the opening low"
+    }) == ""
     assert last_look_wake_bit({
         "rationale": "Next look: same mega/large loser screens + news first.",
         "send_calls": 0,
@@ -844,6 +892,9 @@ def test_stop_keeps_think_tail_new_run_archives(tmp_path, monkeypatch):
 
 
 def test_bind_engine_keeps_prior_think_on_new_wake():
+    from abcxauto.think_stream import reset_speaker
+
+    reset_speaker()
     st = SimpleNamespace(think_live="snapping book, then Grok...\n")
     bind_engine(SimpleNamespace(state=st))
     try:
