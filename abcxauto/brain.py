@@ -1366,8 +1366,127 @@ def _clip_candles(data: dict[str, Any], max_chars: int = CANDLES_CLIP_CHARS) -> 
     return json.dumps(_candles_lead(kept), default=str)
 
 
+# Fat scan / sessions / news / playbook essay — never the live book.
+_FAT_CLIP_KEYS = (
+    "hits",
+    "news",
+    "symbols",
+    "rows",
+    "scan_hits",
+    "session_range",
+    "sessions",
+    "scan_tape",
+    "types",
+    "tree",
+    "notes",
+)
+_FAT_NEST_FIRST = ("last_look", "world", "playbook", "day")
+_LIVE_BOOK_ROOTS = frozenset(
+    {"world", "day", "open_lots", "working_orders", "positions", "fills"}
+)
+_LIVE_BOOK_KEEP = (
+    "day",
+    "world",
+    "desk_lessons",
+    "open_lots",
+    "working_orders",
+    "positions",
+    "fills",
+    "ibkr_live_quotes",
+    "sends_this_turn",
+    "ibkr_connected",
+    "trading_mode",
+    "session",
+    "combo",
+    "freshness",
+    "tradable_now",
+    "countdown",
+    "levers",
+    "mode",
+    "ibkr",
+)
+
+
+def _pop_fat_key(container: dict[str, Any]) -> str | None:
+    """Drop the next fat key. Clip marker stays on this container."""
+    for key in _FAT_CLIP_KEYS:
+        if key not in container:
+            continue
+        container.pop(key)
+        container["_clipped"] = key
+        return key
+    return None
+
+
+def _clip_fat_once(data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Pop one fat key: top-level scan first, then last_look / world / playbook."""
+    slim = dict(data)
+    if _pop_fat_key(slim):
+        return slim, True
+    for nest in _FAT_NEST_FIRST:
+        inner = slim.get(nest)
+        if not isinstance(inner, dict):
+            continue
+        inner = dict(inner)
+        if _pop_fat_key(inner):
+            slim[nest] = inner
+            return slim, True
+        for sub_key, sub in list(inner.items()):
+            if sub_key in _LIVE_BOOK_ROOTS or not isinstance(sub, dict):
+                continue
+            sub = dict(sub)
+            if _pop_fat_key(sub):
+                inner[sub_key] = sub
+                slim[nest] = inner
+                return slim, True
+    return slim, False
+
+
+def _is_live_book(data: dict[str, Any]) -> bool:
+    """book() / status shaped payloads — never payload-clip away the book."""
+    if any(key in data for key in _LIVE_BOOK_ROOTS):
+        return True
+    if "desk_lessons" in data and any(
+        key in data
+        for key in (
+            "ibkr_connected",
+            "trading_mode",
+            "session",
+            "levers",
+            "sends_this_turn",
+            "path",
+            "score_windows",
+        )
+    ):
+        return True
+    return False
+
+
+def _keep_live_book(data: dict[str, Any]) -> dict[str, Any]:
+    """Emergency book core. Lots, orders, and desk_lessons stay; fat look does not."""
+    out: dict[str, Any] = {}
+    for key in _LIVE_BOOK_KEEP:
+        if key in data:
+            out[key] = data[key]
+    playbook = data.get("playbook")
+    if isinstance(playbook, dict):
+        kept_pb = {k: playbook[k] for k in ("lab", "cards", "mode") if k in playbook}
+        if playbook.get("_clipped"):
+            kept_pb["_clipped"] = playbook["_clipped"]
+        if kept_pb:
+            out["playbook"] = kept_pb
+    look = data.get("last_look")
+    if isinstance(look, dict) and look.get("_clipped"):
+        out["last_look"] = {
+            k: look[k]
+            for k in ("fresh", "send_calls", "tools", "_clipped")
+            if k in look
+        }
+    return out
+
+
 def _clip(data: Any, max_chars: int = 24_000) -> str:
-    """Keep lab/cards when the payload overflows. Candle bars stay on a tape clip."""
+    """Keep the live book when the payload overflows. Fat scan clips first."""
     if _tape_payload(data):
         return _clip_candles(data, max_chars=max_chars)
     text = json.dumps(data, default=str)
@@ -1375,14 +1494,15 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
         return text
     if isinstance(data, dict):
         slim = dict(data)
-        for key in ("hits", "news", "symbols", "rows", "types", "tree"):
-            if key not in slim:
-                continue
-            slim.pop(key)
-            slim["_clipped"] = key
+        while len(json.dumps(slim, default=str)) > max_chars:
+            slim, changed = _clip_fat_once(slim)
+            if not changed:
+                break
             text = json.dumps(slim, default=str)
             if len(text) <= max_chars:
                 return text
+        if _is_live_book(slim):
+            return json.dumps(_keep_live_book(slim), default=str)
         kept: dict[str, Any] = {}
         if "lab" in slim:
             kept["lab"] = slim["lab"]
@@ -2169,6 +2289,17 @@ async def _run_tool(
             st["levers"] = {}
         st["combo"] = COMBO_FACT
         st["sends_this_turn"] = len(turn.sends)
+        try:
+            from abcxauto.world_state import compact_working_orders, lot_labels
+
+            st["open_lots"] = lot_labels(getattr(world, "positions", None))
+            st["working_orders"] = compact_working_orders(
+                getattr(world, "open_orders", None),
+                positions=getattr(world, "positions", None),
+            )
+        except Exception:
+            st["open_lots"] = []
+            st["working_orders"] = []
         try:
             from abcxauto.desk_lessons import desk_lessons_payload
 
