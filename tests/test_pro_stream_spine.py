@@ -133,8 +133,10 @@ BUFFER = "\n".join(
 def test_stream_line_kind_classifies_every_marker_the_desk_emits():
     assert stream_line_kind("--- GROK ---") == "banner"
     assert stream_line_kind("--- GROK JUDGE ---") == "banner"
+    assert stream_line_kind("--- CLERK ---") == "banner"
     assert stream_line_kind("[think]") == "think"
     assert stream_line_kind("[say]") == "say"
+    assert stream_line_kind("[clerk]") == "clerk"
     assert stream_line_kind("[book]") == "tool"
     assert stream_line_kind("[send]") == "send"
     assert stream_line_kind("[quote = already have it]") == "cached"
@@ -159,6 +161,29 @@ def test_spine_paints_every_marker_verbatim(pro):
     for raw in BUFFER.splitlines():
         if raw.strip():
             assert raw in painted, f"{raw!r} was not painted verbatim"
+
+
+def test_spine_makes_clerk_and_grok_banners_distinct(pro):
+    pro.engine.state.think_live = "\n".join(
+        [
+            "--- CLERK ---",
+            "[clerk]",
+            "Wake Grok.",
+            "hits=1 screens=1 deepest=-3.8% SNDK src=ibkr",
+            "--- GROK ---",
+            "[think]",
+            "weigh tape",
+            "[say]",
+            "watching the gap",
+            "",
+        ]
+    )
+    pro._sync_think_stream()
+    assert _line(pro, "--- CLERK ---").color == MUTED
+    assert _line(pro, "[clerk]").color == MUTED
+    assert _line(pro, "--- GROK ---").color != MUTED
+    assert _line(pro, "[say]").color != MUTED
+    assert _line(pro, "watching the gap").color == TEXT
 
 
 def test_spine_makes_think_and_say_visually_distinct(pro):

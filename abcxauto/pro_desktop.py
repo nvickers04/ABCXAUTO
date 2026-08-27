@@ -145,12 +145,14 @@ def stream_line_kind(line: str) -> str:
     s = (line or "").strip()
     if not s:
         return "blank"
-    if s.startswith("--- GROK"):
+    if s.startswith("--- GROK") or s.startswith("--- CLERK"):
         return "banner"
     if s == "[think]":
         return "think"
     if s == "[say]":
         return "say"
+    if s == "[clerk]":
+        return "clerk"
     if s in STREAM_POKE:
         return "poke"
     if any(frag in s for frag in STREAM_ALARM):
@@ -167,10 +169,20 @@ def stream_line_kind(line: str) -> str:
 
 
 def current_look_text(buf: str) -> str:
-    """The live look: text after the last --- GROK banner, or the whole tail."""
+    """The live look: from Wake Grok / last look banner, not only the last GROK."""
     text = buf or ""
-    idx = text.rfind("--- GROK")
-    return text[idx:] if idx >= 0 else text
+    wake = text.rfind("Wake Grok.")
+    if wake >= 0:
+        head = text[:wake]
+        clerk = head.rfind("--- CLERK ---")
+        grok = head.rfind("--- GROK")
+        idx = max(clerk, grok)
+        return text[idx:] if idx >= 0 else text[wake:]
+    clerk = text.rfind("--- CLERK ---")
+    grok = text.rfind("--- GROK")
+    if clerk >= 0 and clerk >= grok:
+        return text[clerk:]
+    return text[grok:] if grok >= 0 else text
 
 
 def think_tail_tool_chips(buf: str) -> list[str]:
@@ -3537,8 +3549,12 @@ class ProTerminal:
                 continue
             if kind == "think":
                 mode = "think"
-            elif kind in ("say", "banner"):
+            elif kind == "clerk":
+                mode = "clerk"
+            elif kind == "say":
                 mode = "say"
+            elif kind == "banner":
+                mode = "clerk" if "CLERK" in raw else "say"
             controls.append(self._stream_line(raw, kind, mode))
             if i == scan_at:
                 controls.append(self._scan_inline())
@@ -3548,7 +3564,12 @@ class ProTerminal:
         color: str = TEXT
         weight: Any = None
         if kind == "banner":
-            color, weight = BLUE, ft.FontWeight.BOLD
+            if "CLERK" in raw:
+                color, weight = MUTED, ft.FontWeight.BOLD
+            else:
+                color, weight = BLUE, ft.FontWeight.BOLD
+        elif kind == "clerk":
+            color, weight = MUTED, ft.FontWeight.W_600
         elif kind == "send":
             color, weight = GREEN, ft.FontWeight.BOLD
         elif kind == "tool":
@@ -3988,7 +4009,7 @@ class ProTerminal:
         self._sync_lessons_line()
         self._sync_tabs()
         try:
-            from abcxauto.lab_playbook import is_paper, lab_wake_bit, load_lab, load_live
+            from abcxauto.lab_playbook import is_paper, load_lab, load_live
 
             pb = load_lab() if is_paper() else load_live()
             pb = pb if isinstance(pb, dict) else {}
@@ -4007,13 +4028,6 @@ class ProTerminal:
                 f"Playbook [{tag}] rev={rev} edge={edge_s}"
                 if inst else f"Playbook [{tag}]: none"
             )
-            if inst and is_paper():
-                try:
-                    bit = lab_wake_bit(pb)
-                    if bit:
-                        line = f"{line} · {bit}"
-                except Exception:
-                    pass
             self.lbl_playbook.value = line
             self.lbl_playbook.tooltip = str(pb.get("instructions") or "")[:600] or None
             self.lbl_playbook.color = TEXT if inst else MUTED

@@ -1295,19 +1295,9 @@ def _playbook_day(
     *,
     flat: bool | None = None,
 ) -> dict[str, Any]:
-    """Unused starter type names only. Not a playbook tour or look tally."""
+    """Playbook is notes. Clerk does not assign unused= or a leftover say."""
     _ = (scorecard, flat)
-    try:
-        from abcxauto.lab_playbook import lab_wake_bit, load_lab
-
-        lab = load_lab()
-        types = lab.get("types") if isinstance(lab.get("types"), dict) else {}
-        if not types and not str(lab.get("instructions") or "").strip():
-            return {}
-        bit = lab_wake_bit(lab)
-        return {"lab_wake": bit} if bit else {}
-    except Exception:
-        return {}
+    return {}
 
 
 def _wake_has_live_lots(day: dict[str, Any] | None) -> bool:
@@ -1535,18 +1525,7 @@ def format_wake(
             parts.append(f"event={ev.kind} {ev.detail}.".strip())
         if live_lots and prev_strat:
             parts.append(f"prev={prev_strat} sends={prev_sends}.")
-        try:
-            from abcxauto.think_stream import last_look_wake_bit
-
-            last_s = last_look_wake_bit(brief)
-        except Exception:
-            last_s = ""
-        if last_s:
-            parts.append(f"{last_s}.")
-        pb = day.get("playbook") if isinstance(day.get("playbook"), dict) else {}
-        lab_s = str(pb.get("lab_wake") or "").strip()
-        if lab_s:
-            parts.append(f"{lab_s}.")
+        # Clerk does not assign the look. leftover say / unused= stay off wake.
     parts.append("send.")
     return " ".join(parts)
 

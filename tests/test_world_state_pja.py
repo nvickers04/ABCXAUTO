@@ -385,7 +385,8 @@ def test_format_wake_prints_lab_waiting_when_the_glance_has_it():
             },
         },
     )
-    assert "unused=bracket+vertical_spread+iron_condor" in text
+    assert "unused=" not in text
+    assert "unused=bracket+vertical_spread+iron_condor" not in text
     assert "147looks" not in text
     assert "playbook rev=" not in text
     assert "next=" not in text

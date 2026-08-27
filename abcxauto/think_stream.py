@@ -22,6 +22,7 @@ Listener = Callable[[str, str], None]
 _lock = threading.Lock()
 _listeners: list[Listener] = []
 _engine: Any = None
+_speaker = ""  # "grok" | "clerk" — last banner in the live stream
 _STATE_DIR = Path(__file__).resolve().parents[1] / "data" / "state"
 THINK_TAIL_PATH = _STATE_DIR / "think_tail.txt"
 THINK_PREV_PATH = _STATE_DIR / "think_prev.txt"
@@ -80,41 +81,75 @@ def bind_engine(engine: Any | None) -> None:
     _engine = engine
 
 
+def reset_speaker() -> None:
+    """New look / new run starts with no banner so the next emit names who spoke."""
+    global _speaker
+    with _lock:
+        _speaker = ""
+
+
+def _paint(kind: str, text: str) -> str:
+    """Turn one emit into stream text. [think]/[say] stay Grok; clerk facts get [clerk]."""
+    global _speaker
+    if kind == "stage":
+        label = ascii_text(text).strip().upper()
+        if label == "CLERK":
+            _speaker = "clerk"
+            return "\n--- CLERK ---\n"
+        _speaker = "grok"
+        if label in ("", "GROK", "JUDGE", "ACT"):
+            return "\n--- GROK ---\n"
+        return f"\n--- GROK {label} ---\n"
+    if kind == "stage_end":
+        return "\n"
+    if kind == "clerk":
+        body = ascii_text(text)
+        if not body:
+            return ""
+        if _speaker != "clerk":
+            _speaker = "clerk"
+            return "\n--- CLERK ---\n[clerk]\n" + body
+        return body
+    return ascii_text(text)
+
+
 def emit(kind: str, text: str) -> None:
-    if not text:
+    if kind not in ("stage", "stage_end", "clerk") and not text:
+        return
+    if kind == "clerk" and not text:
         return
     with _lock:
         fns = list(_listeners)
         eng = _engine
-    if eng is not None:
+        piece = _paint(kind, text)
+    if eng is not None and piece:
         try:
-            _append_engine(eng, kind, text)
+            _append_engine_piece(eng, piece)
         except Exception:
             logger.debug("think_stream engine append failed", exc_info=True)
     for fn in fns:
         try:
-            fn(kind, text)
+            fn(kind, text, piece)
+        except TypeError:
+            try:
+                fn(kind, text)
+            except Exception:
+                logger.debug("think_stream listener failed", exc_info=True)
         except Exception:
             logger.debug("think_stream listener failed", exc_info=True)
 
 
-def _append_engine(eng: Any, kind: str, text: str) -> None:
+def _append_engine_piece(eng: Any, piece: str) -> None:
     s = getattr(eng, "state", None)
-    if s is None:
+    if s is None or not piece:
         return
-    if kind == "stage":
-        label = ascii_text(text).strip().upper()
-        if label in ("", "GROK", "JUDGE", "ACT"):
-            piece = "\n--- GROK ---\n"
-        else:
-            piece = f"\n--- GROK {label} ---\n"
-    elif kind == "stage_end":
-        piece = "\n"
-    else:
-        piece = ascii_text(text)
     cur = getattr(s, "think_live", "") or ""
     s.think_live = (cur + piece)[-24000:]
     _write_think_tail(s.think_live)
+
+
+def _append_engine(eng: Any, kind: str, text: str) -> None:
+    _append_engine_piece(eng, _paint(kind, text))
 
 
 def _write_think_tail(buf: str, *, force: bool = False) -> None:
@@ -441,6 +476,7 @@ def begin_run() -> dict[str, Any]:
             logger.debug("think_tail clear failed", exc_info=True)
     else:
         mark_review_stale(archive_tail=True)
+    reset_speaker()
     try:
         from abcxauto.park_clock import ensure_next_look
 
@@ -735,29 +771,10 @@ def last_look_for_hunt(brief: dict[str, Any] | None = None) -> dict[str, Any]:
     return facts
 
 
-def _wake_job_say(row: dict[str, Any] | None) -> str:
-    """Last real say on the brief. Clerk markers are not a job."""
-    blob = row if isinstance(row, dict) else {}
-    text = str(blob.get("last_say") or blob.get("rationale") or "").strip()
-    text = " ".join(text.split())
-    if not text or text in {"?", "—", "-", ".", "..."}:
-        return ""
-    low = text.lower()
-    if low == "grok_turn" or low.startswith("skipped_grok"):
-        return ""
-    if low.startswith("wake grok") or "book snap done" in low:
-        return ""
-    if low.startswith("next look:") or "loser screens" in low:
-        return ""
-    return text[:240]
-
-
 def last_look_wake_bit(brief: dict[str, Any] | None = None) -> str:
-    """Last real unfinished say if one exists. Not a look diary."""
-    row = brief if isinstance(brief, dict) else load_desk_brief()
-    if not isinstance(row, dict) or not row:
-        return ""
-    return _wake_job_say(row)
+    """Clerk does not assign the next look. Leftover say is not a job."""
+    _ = brief
+    return ""
 
 
 def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1030,15 +1047,9 @@ def write_last_turn(out: dict[str, Any]) -> None:
         logger.debug("last_turn write failed", exc_info=True)
 
 
-def stdout_printer(kind: str, text: str) -> None:
-    t = ascii_text(text)
-    if kind == "stage":
-        label = t.strip().upper()
-        banner = "GROK" if label in ("", "GROK", "JUDGE", "ACT") else f"GROK {label}"
-        print(f"\n--- {banner} ---", flush=True)
-        return
-    if kind == "stage_end":
-        print("", flush=True)
+def stdout_printer(kind: str, text: str, piece: str = "") -> None:
+    t = piece if piece else _paint(kind, text)
+    if not t:
         return
     sys.stdout.write(t)
     sys.stdout.flush()

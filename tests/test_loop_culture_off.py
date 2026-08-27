@@ -1,7 +1,7 @@
 """Grok surfaces are not a look-assignment engine.
 
-Unused starter type names may appear. Look tallies, next= tool hops,
-playbook rev= openers, and hunt send sketches do not.
+Playbook is notes. leftover say, unused=, and card_gap floors do not
+assign the look. Look tallies, next= tool hops, and hunt sketches do not.
 """
 
 from __future__ import annotations
@@ -104,8 +104,8 @@ def test_unused_type_names_survive_a_flush_send_and_carry_no_look_tally(
     assert "bracket" in unused
     assert "vertical_spread" in unused
     bit = lab_wake_bit(lab)
-    assert bit.startswith("unused=")
-    assert "bracket" in bit
+    assert bit == ""
+    assert "unused=" not in bit
     assert "looks" not in bit
     assert "0sends" not in bit
     assert "next=" not in bit
@@ -125,8 +125,8 @@ def test_unused_type_names_survive_a_flush_send_and_carry_no_look_tally(
     assert "market_bracket" not in after
     assert "bracket" in after
     after_bit = lab_wake_bit()
-    assert "market_bracket" not in after_bit
-    assert "bracket" in after_bit
+    assert after_bit == ""
+    assert "unused=" not in after_bit
     assert "looks" not in after_bit
 
 
@@ -170,11 +170,13 @@ def test_wake_book_playbook_have_no_assignment_paint(tmp_path, monkeypatch):
             "playbook": {"lab_wake": lab_wake_bit(load_lab())},
         },
     )
-    assert "SNDK still holding the opening low" in text
+    assert "SNDK still holding the opening low" not in text
+    assert "still no ticket unless news-miss" not in text
+    assert "unused=" not in text
     assert "Next look:" not in text
     assert last_look_wake_bit(
-        {"last_say": "hold the opening low and send the bracket"}
-    ) == "hold the opening low and send the bracket"
+        {"last_say": "still no ticket unless news-miss actually fires"}
+    ) == ""
     assert "loser screens" not in text
     assert "playbook rev=" not in text
     assert "next=" not in text
@@ -237,6 +239,72 @@ def test_card_prose_cannot_refuse_and_hunt_sketch_stays_a_noop():
     assert live_card_book_error({"symbol": "SNDK"}, []) == ""
     assert live_card_tape_error({"card": "flush bounce"}, {"spread": 2.0, "last": 90.0}) == ""
     assert apply_hunt_send_sketch({"strategy": "market_bracket"}, {"SNDK": {}}) is None
+
+
+def test_wake_and_scan_do_not_assign_card_floors(tmp_path, monkeypatch):
+    """Clerk does not tell Grok 'no ticket unless news-miss' or paint card_gap=."""
+    from abcxauto.brain import _scan_gate_facts
+    from abcxauto.lab_playbook import live_card_scan_screens
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
+    monkeypatch.setenv("ABCXAUTO_CARD_LOG_PATH", str(tmp_path / "cards.jsonl"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    save_lab(
+        clamp_update(
+            {
+                "types": {
+                    "market_bracket": {
+                        "cards": [
+                            _flush(
+                                when_on="mega/large >=6% earnings-miss gap",
+                                scan="most_active + top_losers; mega/large only",
+                            )
+                        ]
+                    }
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
+    write_desk_brief(
+        {
+            "last_say": "still no ticket unless news-miss actually fires",
+            "rationale": "still no ticket unless news-miss actually fires",
+            "tool_trace": ["scan"],
+            "send_calls": 0,
+        }
+    )
+    note_wake(None)
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "names": 0,
+            "lots": 0,
+            "open_lots": [],
+            "capacity": {"open_count": 0, "max_open_positions": 5},
+            "max_risk_per_trade_pct": 25.0,
+            "playbook": {"lab_wake": lab_wake_bit(load_lab())},
+        },
+    )
+    assert "still no ticket unless news-miss" not in text
+    assert "unused=" not in text
+    assert last_look_wake_bit(
+        {"last_say": "still no ticket unless news-miss actually fires"}
+    ) == ""
+    screens = live_card_scan_screens()
+    assert all(row.get("scan_code") != "TOP_OPEN_PERC_LOSE" for row in screens)
+    gate = _scan_gate_facts(
+        [{"symbol": "SNDK", "open_gap_pct": -3.8}, {"symbol": "MU", "open_gap_pct": -1.2}]
+    )
+    assert gate["deepest_symbol"] == "SNDK"
+    assert "card_gap_floors" not in gate
+    assert "card_min_gap_pct" not in gate
+    assert "card_gap_met" not in gate
 
 
 def test_lab_facts_awaiting_is_names_only(tmp_path, monkeypatch):

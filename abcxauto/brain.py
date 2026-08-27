@@ -208,7 +208,7 @@ def _record_scan_screen(snap: dict[str, Any], arena: str, scan_code: str) -> Non
 
 
 def _scan_gate_facts(rows: list[Any] | None) -> dict[str, Any]:
-    """Card gap floor vs this look's deepest flush-side open gap. Not a send."""
+    """Deepest flush-side open gap on this tape. Playbook when_on is not a floor."""
     try:
         from abcxauto.think_stream import _card_wants_down_gaps, _signed_open_gap
     except Exception:
@@ -232,26 +232,10 @@ def _scan_gate_facts(rows: list[Any] | None) -> dict[str, Any]:
             deepest = mag
             deepest_signed = signed
             deepest_sym = str(row.get("symbol") or "").upper()
-    out: dict[str, Any] = {
+    return {
         "deepest_open_gap_pct": deepest_signed,
         "deepest_symbol": deepest_sym or None,
     }
-    try:
-        from abcxauto.lab_playbook import live_card_gap_floors, live_card_min_gap_pct
-
-        floor = live_card_min_gap_pct()
-        floors = live_card_gap_floors(deepest=deepest)
-    except Exception:
-        floor = None
-        floors = []
-    if floors:
-        out["card_gap_floors"] = floors
-    if floor:
-        out["card_min_gap_pct"] = floor
-        out["card_gap_met"] = bool(
-            deepest is not None and deepest + 1e-9 >= float(floor)
-        )
-    return out
 
 
 def _quote_last(raw: Any) -> float | None:
@@ -410,88 +394,9 @@ def _stamp_session_size(session: dict[str, Any], world: WorldState) -> None:
 
 
 def _stamp_session_ticket(session: dict[str, Any]) -> None:
-    """Card + tape numbers Grok can hoist into send. Clerk does not send."""
-    if not isinstance(session, dict) or session.get("today") is False:
-        return
-    try:
-        from abcxauto.lab_playbook import (
-            _session_gap_mag,
-            _tightest_matching_card,
-            live_card_send_facts,
-        )
-
-        mag = _session_gap_mag(session)
-        picked = _tightest_matching_card(None, mag)
-        if not picked:
-            session.pop("ticket", None)
-            return
-        _type_name, row = picked
-        facts = live_card_send_facts(card=row.get("name"))
-    except Exception:
-        return
-    if not facts.get("card") or not facts.get("type"):
-        return
-    if facts.get("direction") != "SHORT" and session.get("above_low") is False:
-        session.pop("ticket", None)
-        return
-    try:
-        from abcxauto.lab_playbook import live_card_needs_hold_above_open
-
-        if (
-            facts.get("direction") != "SHORT"
-            and live_card_needs_hold_above_open(card=facts.get("card"))
-            and session.get("above_open") is False
-        ):
-            session.pop("ticket", None)
-            return
-    except Exception:
-        pass
-    try:
-        from abcxauto.lab_playbook import (
-            _card_min_gap_pct,
-            live_card_scan_constraints,
-        )
-
-        min_gap = _card_min_gap_pct(row)
-        mag = _session_gap_mag(session)
-        if min_gap and (mag is None or mag + 1e-9 < min_gap):
-            session.pop("ticket", None)
-            return
-        min_px = live_card_scan_constraints(card=facts.get("card")).get("min_price")
-        if min_px is not None and session.get("last") is not None:
-            if float(session["last"]) + 1e-9 < float(min_px):
-                session.pop("ticket", None)
-                return
-    except Exception:
-        pass
-    size = session.get("size") if isinstance(session.get("size"), dict) else {}
-    ticket: dict[str, Any] = {
-        "strategy": facts["type"],
-        "card": facts["card"],
-    }
-    if facts.get("direction"):
-        ticket["direction"] = facts["direction"]
-    if facts.get("direction") != "SHORT" and session.get("low") is not None:
-        ticket["stop_price"] = session["low"]
-    elif facts.get("direction") == "SHORT" and session.get("high") is not None:
-        ticket["stop_price"] = session["high"]
-    try:
-        from abcxauto.lab_playbook import session_target
-
-        tgt = session_target(session, facts.get("direction") or "LONG")
-    except Exception:
-        tgt = session.get("retrace_30") or session.get("retrace_50")
-    if tgt is None and (
-        session.get("retrace_30") is not None or session.get("retrace_50") is not None
-    ):
-        session.pop("ticket", None)
-        return
-    if tgt is not None:
-        ticket["target_price"] = tgt
-    qty = size.get("card_qty") or size.get("qty")
-    if qty:
-        ticket["quantity"] = qty
-    session["ticket"] = ticket
+    """Playbook is notes. Clerk does not stamp a card onto candles as a ticket."""
+    _ = session
+    return
 
 
 def _snap_is_rth(snap: dict[str, Any] | None) -> bool:
@@ -1649,7 +1554,7 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
         except asyncio.TimeoutError:
             idle += 1
             if idle >= STREAM_IDLE_LIMIT:
-                think_emit("say", "\n[stream stalled]\n")
+                think_emit("clerk", "\n[stream stalled]\n")
                 reason = "stalled"
                 break
             continue
@@ -1673,7 +1578,7 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
                 o += say_piece
                 think_emit("say", say_piece)
         if stream_is_looping(think_acc) or stream_is_looping(o):
-            think_emit("say", "\n[stream loop]\n")
+            think_emit("clerk", "\n[stream loop]\n")
             reason = "loop"
             break
     try:
@@ -1683,7 +1588,7 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
             raw_fr = getattr(choices[0], "finish_reason", None) if choices else None
             fr = str(getattr(raw_fr, "name", None) or raw_fr or "")
         if "LENGTH" in fr.upper() or "MAX_TOKEN" in fr.upper():
-            think_emit("say", "\n[truncated: max_tokens]\n")
+            think_emit("clerk", "\n[truncated: max_tokens]\n")
     except Exception:
         logger.debug("finish_reason probe failed", exc_info=True)
     think_emit("stage_end", stage)
@@ -1846,7 +1751,7 @@ async def _inject_live_poke(
     turn.interrupted = True
     # A fill / order change / unprotected lot means the book moved under us.
     turn.tool_cache.clear()
-    think_emit("say", f"\n[{ev.kind}]\n")
+    think_emit("clerk", f"\n[{ev.kind}]\n")
     # Refresh book facts when we can — thin poke, not a second wake dump.
     day: dict[str, Any] | None = None
     try:
@@ -2416,7 +2321,7 @@ async def _run_tool(
                 snap["scan_hits"] = painted
             _attach_scan_run(reused, turn=turn, world=world)
             think_emit(
-                "say",
+                "clerk",
                 f"hits={len(reused['symbols'])} reused screens={calls}\n",
             )
             return _clip(reused)
@@ -2602,13 +2507,10 @@ async def _run_tool(
         gate = _scan_gate_facts(out.get("rows"))
         deepest = gate.get("deepest_open_gap_pct")
         deep_s = f"{deepest:+.1f}%" if isinstance(deepest, (int, float)) else "n/a"
-        met = gate.get("card_gap_met")
-        met_s = "on" if met is True else ("off" if met is False else "")
         think_emit(
-            "say",
+            "clerk",
             f"hits={len(syms)} screens={len(out.get('screens') or [])} "
             f"deepest={deep_s} {gate.get('deepest_symbol') or ''} "
-            f"{'card_gap=' + met_s if met_s else ''} "
             f"src={out.get('source') or 'empty'}\n",
         )
         return _clip(out)
@@ -3099,7 +3001,7 @@ async def _invoke_named_tool(
     snap: dict[str, Any],
     turn: BrainTurn,
 ) -> str:
-    think_emit("say", f"\n[{name}]\n")
+    think_emit("clerk", f"\n[{name}]\n")
     turn.tool_trace.append(name)
     try:
         from abcxauto.park_clock import peek_interrupt
@@ -3275,7 +3177,7 @@ async def _dispatch_tool_calls(
         name, args, tc, timeout = item
         cached = _cached_read(turn, name, args)
         if cached is not None:
-            think_emit("say", f"\n[{name} = already have it]\n")
+            think_emit("clerk", f"\n[{name} = already have it]\n")
             turn.tool_trace.append(name)
             return tc, cached
         result = await _invoke_named_tool(
@@ -3294,7 +3196,7 @@ async def _dispatch_tool_calls(
     def _defer_reads(why: str) -> None:
         for name, args, tc, _timeout in reads:
             _record_tool_deferred(name, why, args=args)
-            think_emit("say", f"\n[{name} deferred: book moved]\n")
+            think_emit("clerk", f"\n[{name} deferred: book moved]\n")
             _append_tool_result(chat, tc, _deferred_read_result(name))
 
     if reads:
@@ -3376,7 +3278,7 @@ async def _grok_turn_impl(
             # A dead stream ends the look. The clerk backs off; it does not
             # restart the same think and pay for the context twice.
             logger.exception("stream_round failed")
-            think_emit("say", f"\n[stream failed: {exc}]\n")
+            think_emit("clerk", f"\n[stream failed: {exc}]\n")
             turn.failed = True
             turn.stream_error = str(exc)
             ran_out = False
@@ -3415,7 +3317,7 @@ async def _grok_turn_impl(
             )
     if ran_out:
         turn.tool_budget_hit = True
-        think_emit("say", "\n[think stopped: step ceiling]\n")
+        think_emit("clerk", "\n[think stopped: step ceiling]\n")
     if not turn.parked and not turn.failed and not turn.sends:
         if _look_text_is_junk(turn.text):
             turn.failed = True

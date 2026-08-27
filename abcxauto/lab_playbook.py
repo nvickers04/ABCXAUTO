@@ -3954,25 +3954,6 @@ def live_card_scan_screens(
             sorts.append(token)
         elif meta.get("group") == "caps" and token not in caps:
             caps.append(token)
-    # A ≥N% gap card is not a MOST_ACTIVE page. IBKR's open-gap loser
-    # screen is the sort that surfaces a -20% name the %change ranks miss.
-    min_gap = bool(scan is None and live_card_min_gap_pct(book))
-    if (
-        min_gap
-        and "top_open_perc_lose" not in sorts
-        and "low_open_gap" not in sorts
-    ):
-        sorts.append("top_open_perc_lose")
-    if min_gap:
-        gap_first = (
-            "top_open_perc_lose",
-            "low_open_gap",
-            "top_losers",
-            "top_perc_lose",
-        )
-        sorts = [s for s in gap_first if s in sorts] + [
-            s for s in sorts if s not in gap_first
-        ]
     screens: list[dict[str, str]] = []
     if caps and sorts:
         pairs = ((cap, sort) for cap in caps for sort in sorts)
@@ -4516,15 +4497,9 @@ def lab_wake_bit(
     session_range: Any = None,
     positions: Any = None,
 ) -> str:
-    """Unused starter type names. Not a look-count and not the look's job."""
-    _ = (tool_trace, last_look, flat, quoted, session_range, positions)
-    try:
-        unused = unused_open_types(book)
-    except Exception:
-        return ""
-    if not unused:
-        return ""
-    return "unused=" + "+".join(unused[:14])
+    """Clerk does not assign unused types as the look. Names stay on playbook()."""
+    _ = (book, tool_trace, last_look, flat, quoted, session_range, positions)
+    return ""
 
 
 def playbook_facts(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
