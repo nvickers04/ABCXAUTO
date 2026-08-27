@@ -1209,6 +1209,11 @@ async def run_cycle(
     )
     out["tool_trace"] = list(turn.tool_trace or [])
     out["sends"] = len(turn.sends or [])
+    parked = bool(getattr(turn, "parked", False))
+    look_fn = getattr(turn, "look_failed", None)
+    failed = bool(look_fn()) if callable(look_fn) else bool(getattr(turn, "failed", False))
+    out["_parked"] = parked
+    out["_failed"] = failed and not parked
     if turn.sends:
         for item in turn.sends:
             _journal_stages(

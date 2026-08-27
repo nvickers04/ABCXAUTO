@@ -139,6 +139,141 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     assert brief["open_lots"] == ["IWM 260821C306 long 1"]
 
 
+def test_write_last_turn_skips_junk_failed_look(tmp_path, monkeypatch):
+    """A failed empty/? look must not blank last_turn / desk_brief."""
+    from abcxauto import think_stream as ts
+    from abcxauto.think_stream import last_turn_look_failed
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
+    ts._run = {"run_id": "r1", "pid": 1}
+
+    good = {
+        "strat": "",
+        "rationale": "Flat. No ticket.",
+        "tool_trace": ["book", "status", "playbook"],
+        "world_state": {"flat": True, "net_liquidation": 35000},
+        "_failed": False,
+    }
+    ts.write_last_turn(good)
+    last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    brief = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+    assert last["rationale"] == "Flat. No ticket."
+    assert last["tool_trace"] == ["book", "status", "playbook"]
+    assert brief["rationale"] == "Flat. No ticket."
+    assert last_turn_look_failed(good) is False
+
+    empty_fail = {
+        "strat": "",
+        "rationale": "",
+        "tool_trace": [],
+        "_failed": True,
+        "world_state": {"flat": True, "net_liquidation": 35000},
+    }
+    assert last_turn_look_failed(empty_fail) is True
+    ts.write_last_turn(empty_fail)
+    last2 = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    brief2 = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+    assert last2["rationale"] == "Flat. No ticket."
+    assert last2["tool_trace"] == ["book", "status", "playbook"]
+    assert brief2["rationale"] == "Flat. No ticket."
+    assert last2["ts"] == last["ts"]
+
+    q_fail = {
+        "strat": "",
+        "rationale": "?",
+        "tool_trace": [],
+        "_failed": True,
+    }
+    assert last_turn_look_failed(q_fail) is True
+    ts.write_last_turn(q_fail)
+    last3 = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert last3["rationale"] == "Flat. No ticket."
+    assert last3["tool_trace"] == ["book", "status", "playbook"]
+
+    trailing = {
+        "strat": "",
+        "rationale": "I'll inspect the book, status, and playbook first.\n?",
+        "tool_trace": ["book", "status", "playbook"],
+        "_failed": True,
+    }
+    assert last_turn_look_failed(trailing) is True
+    ts.write_last_turn(trailing)
+    last4 = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert last4["rationale"] == "Flat. No ticket."
+
+    ts.write_last_turn({
+        "strat": "",
+        "rationale": "Watching IWM. No ticket.",
+        "tool_trace": ["book", "scan"],
+        "_failed": False,
+        "world_state": {"flat": True, "net_liquidation": 35100},
+    })
+    last5 = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    brief5 = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+    assert last5["rationale"] == "Watching IWM. No ticket."
+    assert last5["tool_trace"] == ["book", "scan"]
+    assert brief5["rationale"] == "Watching IWM. No ticket."
+
+
+def test_write_last_turn_park_and_overnight_still_write(tmp_path, monkeypatch):
+    """Overnight skip and park are completed looks — they still persist."""
+    from abcxauto import think_stream as ts
+    from abcxauto.think_stream import last_turn_look_failed
+
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
+    ts._run = {"run_id": "r1", "pid": 1}
+    ts.write_last_turn({
+        "strat": "",
+        "rationale": "Flat. No ticket.",
+        "tool_trace": ["book"],
+        "world_state": {"flat": True, "net_liquidation": 1},
+    })
+
+    park = {
+        "strat": "",
+        "rationale": "Gate off. Parking.",
+        "tool_trace": ["playbook", "book", "scan", "set_wake"],
+        "_parked": True,
+        "_failed": False,
+        "world_state": {"flat": True, "net_liquidation": 1},
+    }
+    assert last_turn_look_failed(park) is False
+    ts.write_last_turn(park)
+    last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    brief = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+    assert "Parking" in last["rationale"]
+    assert last["tool_trace"] == ["playbook", "book", "scan", "set_wake"]
+    assert "Parking" in brief["rationale"]
+
+    overnight = {
+        "strat": "skipped",
+        "rationale": "skipped_grok: session_closed",
+        "validation": "skipped_grok: session_closed",
+        "_failed": False,
+        "world_state": {"flat": True, "net_liquidation": 1},
+    }
+    assert last_turn_look_failed(overnight) is False
+    ts.write_last_turn(overnight)
+    last2 = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert last2["skip_reason"] == "session_closed"
+    assert last2["strat"] == "skipped"
+
+    in_progress = {
+        "strat": "in_progress",
+        "rationale": "grok_turn",
+        "_failed": True,
+        "world_state": {"flat": True, "net_liquidation": 1},
+    }
+    assert last_turn_look_failed(in_progress) is False
+    ts.write_last_turn(in_progress)
+    last3 = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert last3["strat"] == "in_progress"
+    brief3 = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+    assert brief3["strat"] == "skipped"
+
+
 def test_last_turn_reads_scan_fetched_from_world(tmp_path, monkeypatch):
     """Pro _host_think used to omit the top-level key; last_turn then said []."""
     from abcxauto import think_stream as ts

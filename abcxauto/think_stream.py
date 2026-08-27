@@ -824,6 +824,25 @@ def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
     return out if (tools or hits or n or why) else {}
 
 
+def last_turn_look_failed(out: dict[str, Any] | None) -> bool:
+    """True when this persist payload is a junk/empty/failed look, not a completed turn.
+
+    ``write_desk_brief`` skips ``strat=="in_progress"`` so the last completed
+    look stays on the brief. ``write_last_turn`` skips ``look_failed()`` the
+    same way so a ``?`` / empty / stream-error look does not blank
+    last_turn.json. Overnight / park still write: ``BrainTurn.look_failed``
+    is false when parked, and ``_host_think`` stamps ``_failed`` only when
+    the look failed and was not parked.
+    """
+    if not isinstance(out, dict):
+        return False
+    if str(out.get("strat") or "") == "in_progress":
+        return False
+    if out.get("_parked") or out.get("parked"):
+        return False
+    return bool(out.get("_failed") or out.get("failed"))
+
+
 def write_desk_brief(payload: dict[str, Any]) -> None:
     if str(payload.get("strat") or "") == "in_progress":
         return
@@ -915,7 +934,11 @@ def write_last_turn(out: dict[str, Any]) -> None:
     """Clerk snapshot of the last Grok turn for the Cursor review loop.
 
     Operator paint has no sit-loop counter. Journal/logs keep the clerk increment.
+    A junk / empty / failed look is not a completed turn — keep the last
+    real say/tools until a real look finishes. Overnight / park still write.
     """
+    if last_turn_look_failed(out):
+        return
     try:
         LAST_TURN_PATH.parent.mkdir(parents=True, exist_ok=True)
         pulse = out.get("reality_pulse") or {}
