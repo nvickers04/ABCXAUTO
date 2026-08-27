@@ -29,6 +29,29 @@ def test_paper_stay_up_and_honor_park(monkeypatch):
     assert paper_stay_up("regular") is False
 
 
+def test_resolve_stay_up_session_fills_blank_rth_and_premarket(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from abcxauto.park_clock import resolve_stay_up_session
+
+    et = ZoneInfo("America/New_York")
+    assert resolve_stay_up_session("regular") == "regular"
+    assert resolve_stay_up_session("closed") == "closed"
+    assert (
+        resolve_stay_up_session("", now=datetime(2026, 8, 27, 10, 16, tzinfo=et))
+        == "regular"
+    )
+    assert (
+        resolve_stay_up_session("", now=datetime(2026, 8, 27, 9, 7, tzinfo=et))
+        == "premarket"
+    )
+    assert (
+        resolve_stay_up_session("", now=datetime(2026, 8, 27, 17, 0, tzinfo=et))
+        == ""
+    )
+
+
 def test_first_boot_wakes_once():
     ev = should_wake_grok([], first_boot=True)
     assert ev is not None

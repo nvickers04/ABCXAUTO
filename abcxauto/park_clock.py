@@ -253,6 +253,33 @@ def paper_stay_up(session: str = "") -> bool:
         return False
 
 
+def resolve_stay_up_session(
+    session: str = "",
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Fill a blank snap label from the ET clock. Closed / postmarket stay parked.
+
+    A junk look must not sit the desk because IBKR omitted session=. Weekday
+    RTH becomes regular; last-hour-to-open becomes premarket. After the close
+    an empty label stays empty so overnight park can still shut down.
+    """
+    sess = str(session or "").strip().lower()
+    if sess:
+        return sess
+    inferred, _mins = infer_session_before_open(now=now)
+    if inferred:
+        return inferred
+    try:
+        from abcxauto.opportunity_scan import rth_now
+
+        if rth_now(now=now):
+            return "regular"
+    except Exception:
+        logger.debug("rth_now for empty session failed", exc_info=True)
+    return ""
+
+
 def honor_park(
     *,
     session: str = "",
