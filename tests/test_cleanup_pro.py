@@ -71,12 +71,12 @@ def test_spare_live_paper_pids_uses_desk_lock(tmp_path, monkeypatch):
     assert 77 in spared
 
 
-def test_kill_policy_excludes_live_paper_pro(monkeypatch):
+def test_kill_policy_excludes_self_not_live_pro(monkeypatch):
     monkeypatch.setattr(cleanup, "spare_live_paper_pids", lambda: ({4242, 77}, True))
     exclude, kill_python, kill_flet, kill_title = cleanup.kill_policy()
-    assert 4242 in exclude
-    assert 77 in exclude
     assert os.getpid() in exclude
+    assert 4242 not in exclude
+    assert 77 not in exclude
     assert kill_python is True
     assert kill_flet is True
     assert kill_title is True
@@ -90,14 +90,20 @@ def test_kill_policy_fails_closed_when_scan_misses(monkeypatch):
     assert kill_title is False
 
 
-def test_kill_stale_puts_live_paper_pids_in_powershell_exclude(monkeypatch):
+def test_kill_stale_does_not_spare_live_start_pro(monkeypatch):
+    import re
+
     seen: dict[str, str] = {}
     monkeypatch.setattr(cleanup, "spare_live_paper_pids", lambda: ({4242, 77}, True))
     monkeypatch.setattr(cleanup, "_ps", lambda script: seen.setdefault("script", script) or "killed none")
     cleanup.kill_stale()
     script = seen["script"]
-    assert "4242" in script
-    assert "77" in script
+    excluded = ""
+    match = re.search(r"\$exclude = @\((.*?)\)", script)
+    if match:
+        excluded = match.group(1)
+    assert "4242" not in excluded
+    assert "77" not in excluded
     assert "_start_pro.py" in script or "_start_pro\\.py" in script
     assert "(_pro_)" not in script
     assert "flatten" not in script.lower()

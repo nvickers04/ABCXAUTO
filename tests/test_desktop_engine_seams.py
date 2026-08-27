@@ -420,6 +420,8 @@ def test_cleanup_releases_the_desk_lock(monkeypatch, tmp_path):
     lock = tmp_path / "desk.lock"
     monkeypatch.setenv("ABCXAUTO_DESK_LOCK_PATH", str(lock))
     monkeypatch.setattr(supervisor, "mark_operator_stop", lambda: None)
+    monkeypatch.setattr(supervisor, "reap_leftover_desk", lambda **_k: [])
+    monkeypatch.setattr(supervisor, "kill_descendant_flet", lambda **_k: [])
     monkeypatch.setattr("abcxauto.__main__._cleanup", lambda **_kw: 0)
     lock.write_text(json.dumps({"pid": os.getpid(), "ts": "now"}), encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["abcxauto", "--cleanup"])

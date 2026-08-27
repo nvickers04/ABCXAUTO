@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -215,13 +216,30 @@ def claim_desk_lock() -> bool:
         return True
 
 
-def release_desk_lock() -> None:
+def release_desk_lock(*, force: bool = False) -> None:
     p = _lock_path()
     try:
-        if p.is_file() and desk_owner_pid() in (0, os.getpid()):
+        if not p.is_file():
+            return
+        if force or desk_owner_pid() in (0, os.getpid()):
             p.unlink()
     except OSError:
         logger.debug("desk lock release failed", exc_info=True)
+
+
+def clear_stale_desk_lock() -> bool:
+    """Drop desk.lock when the owner pid is already dead. Live owners stay."""
+    p = _lock_path()
+    if not p.is_file():
+        return False
+    if desk_owner_pid() != 0:
+        return False
+    try:
+        p.unlink()
+        return True
+    except OSError:
+        logger.debug("stale desk lock clear failed", exc_info=True)
+        return False
 
 
 # Same launchers cleanup_pro matches. Not cleanup itself — Start is not flatten.
@@ -294,6 +312,267 @@ def foreign_desk_pid(*, exclude: set[int] | None = None) -> int:
     return 0
 
 
+_TWS_NAME_MARKERS = ("tws.exe", "ibgateway", "twslaunch")
+
+
+def ancestor_pids() -> set[int]:
+    """Parent chain of this process. Flet re-entry must not kill the desk."""
+    found: set[int] = set()
+    try:
+        import psutil
+
+        proc = psutil.Process(os.getpid())
+        for _ in range(12):
+            parent = proc.parent()
+            if parent is None:
+                break
+            pid = int(parent.pid or 0)
+            if pid <= 0 or pid in found:
+                break
+            found.add(pid)
+            proc = parent
+    except Exception:
+        pass
+    try:
+        ppid = int(os.getppid() or 0)
+        if ppid > 0:
+            found.add(ppid)
+    except Exception:
+        pass
+    return found
+
+
+def protected_pids(*, extra: set[int] | None = None) -> set[int]:
+    """PIDs start/stop must never signal: this process, parents, extras."""
+    skip = {os.getpid()}
+    skip.update(ancestor_pids())
+    if extra:
+        skip.update(int(pid) for pid in extra if int(pid) > 0)
+    return {pid for pid in skip if pid > 1}
+
+
+def ancestor_holds_desk() -> bool:
+    """True when a live lock owner is in our parent chain (Flet re-entry)."""
+    owner = desk_owner_pid()
+    if not owner or owner == os.getpid():
+        return False
+    return owner in ancestor_pids()
+
+
+def _is_in_tree(root: int, target: int) -> bool:
+    if root <= 0 or target <= 0:
+        return False
+    if root == target:
+        return True
+    try:
+        import psutil
+
+        return any(int(c.pid) == target for c in psutil.Process(int(root)).children(recursive=True))
+    except Exception:
+        return False
+
+
+def _pid_is_tws(pid: int) -> bool:
+    """TWS / Gateway stay up. Never part of the Pro tree."""
+    try:
+        import psutil
+
+        proc = psutil.Process(int(pid))
+        blob = f"{proc.name() or ''} {' '.join(str(p) for p in (proc.cmdline() or []))}"
+    except Exception:
+        return False
+    low = blob.lower().replace("\\", "/")
+    return any(mark in low for mark in _TWS_NAME_MARKERS)
+
+
+def process_tree_pids(root: int, *, exclude: set[int] | None = None) -> list[int]:
+    """Descendants first, then root. Protected pids are omitted."""
+    skip = protected_pids(extra=exclude)
+    root = int(root or 0)
+    if root <= 1 or root in skip or _pid_is_tws(root):
+        return []
+    kids: list[int] = []
+    try:
+        import psutil
+
+        kids = [int(c.pid) for c in psutil.Process(root).children(recursive=True)]
+    except Exception:
+        kids = []
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for pid in [*kids, root]:
+        if pid <= 1 or pid in skip or pid in seen or _pid_is_tws(pid):
+            continue
+        seen.add(pid)
+        ordered.append(pid)
+    return ordered
+
+
+def kill_pid(pid: int, *, tree: bool = False) -> bool:
+    """Kill one ABCXAUTO pid. Never TWS. Never this process / parents."""
+    pid = int(pid or 0)
+    if pid <= 1 or pid in protected_pids() or _pid_is_tws(pid):
+        return False
+    if os.name == "nt":
+        cmd = ["taskkill", "/F", "/PID", str(pid)]
+        if tree:
+            cmd.insert(2, "/T")
+        try:
+            killer = _REAL_POPEN(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            killer.communicate(timeout=5)
+            return int(killer.returncode or 0) == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            return True
+        except OSError:
+            return False
+
+
+def kill_pid_tree(root: int, *, exclude: set[int] | None = None) -> list[int]:
+    """Kill a leftover Pro python and its flet children. No orphan window."""
+    skip = protected_pids(extra=exclude)
+    root = int(root or 0)
+    if root <= 1 or root in skip:
+        return []
+    tree = process_tree_pids(root, exclude=skip)
+    if len(tree) <= 1 and os.name == "nt":
+        if kill_pid(root, tree=True):
+            return [root]
+        return []
+    killed: list[int] = []
+    for pid in tree:
+        if kill_pid(pid):
+            killed.append(pid)
+    return killed
+
+
+def leftover_pro_pids(*, exclude: set[int] | None = None) -> list[int]:
+    """Other ABCXAUTO python launchers. Never self, parents, or our own tree."""
+    skip = protected_pids(extra=exclude)
+    me = os.getpid()
+    found: list[int] = []
+    for pid in live_pro_pids(exclude=skip):
+        if pid in skip or _pid_is_tws(pid):
+            continue
+        if _is_in_tree(pid, me):
+            continue
+        found.append(pid)
+    return found
+
+
+def flet_descendant_pids(root: int | None = None) -> list[int]:
+    """flet.exe / flet children of a python so Stop can close the window."""
+    if root is None:
+        root = os.getpid()
+    root = int(root or 0)
+    if root <= 1:
+        return []
+    out: list[int] = []
+    try:
+        import psutil
+
+        for child in psutil.Process(root).children(recursive=True):
+            name = str(child.name() or "").lower()
+            if name in ("flet.exe", "flet"):
+                out.append(int(child.pid))
+    except Exception:
+        return []
+    return out
+
+
+def kill_descendant_flet(*, root: int | None = None) -> list[int]:
+    """Window close / child exit: drop this python's flet, leave TWS alone."""
+    killed: list[int] = []
+    for pid in flet_descendant_pids(root):
+        if kill_pid(pid):
+            killed.append(pid)
+    return killed
+
+
+def list_flet_rows() -> list[dict[str, Any]]:
+    """Windows flet.exe snapshot. Empty on other hosts."""
+    if os.name != "nt":
+        return []
+    try:
+        proc = _REAL_POPEN(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='flet.exe'\" | "
+                "Select-Object ProcessId,ParentProcessId,Name,CommandLine | "
+                "ConvertTo-Json -Compress",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        raw, _ = proc.communicate(timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    try:
+        parsed = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    return [row for row in parsed if isinstance(row, dict)]
+
+
+def reap_leftover_desk(*, exclude: set[int] | None = None) -> list[int]:
+    """Kill leftover _start_pro / Pro python and ABCXAUTO flet from a dead parent.
+
+    Start is not flatten: positions stay at IBKR. TWS is not in this set.
+    """
+    skip = protected_pids(extra=exclude)
+    killed: list[int] = []
+    seen: set[int] = set()
+    for pid in leftover_pro_pids(exclude=skip):
+        for dead in kill_pid_tree(pid, exclude=skip):
+            if dead not in seen:
+                seen.add(dead)
+                killed.append(dead)
+    for pid in orphan_flet_pids(list_flet_rows(), repo=str(_REPO)):
+        if pid in skip or pid in seen:
+            continue
+        if kill_pid(pid):
+            seen.add(pid)
+            killed.append(pid)
+    if killed:
+        note(f"supervisor: reaped leftover Pro/flet {killed}")
+    # Lock owner may have been the leftover python we just killed.
+    clear_stale_desk_lock()
+    return killed
+
+
+def prepare_desk_start(*, exclude: set[int] | None = None) -> list[int]:
+    """One tree on Start: drop stale lock/stop, reap leftovers, then launch."""
+    clear_stale_desk_lock()
+    clear_operator_stop()
+    return reap_leftover_desk(exclude=exclude)
+
+
+def stop_desk(*, exclude: set[int] | None = None) -> list[int]:
+    """One tree on Stop: latch stop, kill Pro python + flet, drop the lock."""
+    mark_operator_stop()
+    killed = reap_leftover_desk(exclude=exclude)
+    killed.extend(kill_descendant_flet())
+    release_desk_lock(force=True)
+    return killed
+
+
 def note(msg: str, *, warn: bool = False) -> None:
     """Record a lifecycle decision durably.
 
@@ -341,45 +620,10 @@ def orphan_flet_pids(
 
 def sweep_orphan_flet_windows() -> list[int]:
     """Stop leftover ABCXAUTO windows after a python-only kill/reload."""
-    if os.name != "nt":
-        return []
-    try:
-        proc = _REAL_POPEN(
-            [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                "Get-CimInstance Win32_Process -Filter \"Name='flet.exe'\" | "
-                "Select-Object ProcessId,ParentProcessId,Name,CommandLine | "
-                "ConvertTo-Json -Compress",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        raw, _ = proc.communicate(timeout=8)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    try:
-        parsed = json.loads(raw or "[]")
-    except json.JSONDecodeError:
-        return []
-    if isinstance(parsed, dict):
-        parsed = [parsed]
-    killed = orphan_flet_pids(
-        [r for r in parsed if isinstance(r, dict)],
-        repo=str(_REPO),
-    )
-    for pid in killed:
-        try:
-            killer = _REAL_POPEN(
-                ["taskkill", "/F", "/PID", str(pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            killer.communicate(timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            continue
+    killed: list[int] = []
+    for pid in orphan_flet_pids(list_flet_rows(), repo=str(_REPO)):
+        if kill_pid(pid):
+            killed.append(pid)
     if killed:
         note(f"supervisor: swept orphan flet {killed}")
     return killed
@@ -401,9 +645,15 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
     child_pid = 0
     while True:
         try:
-            sweep_orphan_flet_windows()
+            # Reap leftover _start_pro / Pro python and orphan flet before spawn.
+            # Do not clear operator_stop here — a crash loop must still honor Stop.
+            reap_leftover_desk(exclude={child_pid} if child_pid else None)
         except Exception:
-            logger.debug("orphan flet sweep skipped", exc_info=True)
+            logger.debug("leftover Pro reap skipped", exc_info=True)
+            try:
+                sweep_orphan_flet_windows()
+            except Exception:
+                logger.debug("orphan flet sweep skipped", exc_info=True)
         held = foreign_desk_pid(exclude={child_pid})
         if held:
             note(f"supervisor: Pro already up (pid {held}) — stay down")
@@ -426,6 +676,11 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
             ).start()
         note(f"supervisor: child pid {child_pid} up")
         code = proc.wait()
+        try:
+            kill_descendant_flet(root=child_pid)
+            reap_leftover_desk(exclude={child_pid})
+        except Exception:
+            logger.debug("post-exit Pro reap skipped", exc_info=True)
         if int(code or 0) == 0:
             note("supervisor: clean exit — operator closed the window, stay down")
             return 0

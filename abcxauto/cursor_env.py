@@ -8,15 +8,23 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 START_PRO_PATH = _REPO / "logs" / "_start_pro.py"
 
-# Supported one-shot start. No cleanup call: pre-launch kills match the launcher's
-# own command line and can suicide the desk that is starting (commit 8eb97ce).
+# Supported one-shot start. No cleanup_pro call: that script used to match the
+# launcher's own command line and suicide the desk (commit 8eb97ce). Leftover
+# _start_pro / Pro python and orphan ABCXAUTO flet are reaped in supervisor.
 START_PRO_SOURCE = """import os
 os.environ["ABCXAUTO_AUTOSTART"] = "1"
 os.environ.pop("ABCXAUTO_LAUNCH_PROBE", None)
+from abcxauto.supervisor import prepare_desk_start, claim_desk_lock, release_desk_lock
+prepare_desk_start()
+if not claim_desk_lock():
+    raise SystemExit(0)
 from abcxauto.think_stream import begin_run
 begin_run()
 from abcxauto.pro_desktop import run_app
-run_app()
+try:
+    run_app()
+finally:
+    release_desk_lock()
 """
 
 
