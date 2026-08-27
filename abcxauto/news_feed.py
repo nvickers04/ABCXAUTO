@@ -13,6 +13,11 @@ _CACHE: dict[str, Any] = {"ts": 0.0, "items": [], "symbols": []}
 _CACHE_TTL_S = 90.0
 _UNIVERSE_CAP = 14
 
+# Per-symbol prints the What's-happening rail already painted. A 2s MDA
+# stall is not "no headline" when this memory still has the print.
+_HEADLINES: dict[str, dict[str, Any]] = {}
+_HEADLINE_TTL_S = 15 * 60.0
+
 # Fail fast. MDA's HTTP client allows 30s and a 12s per-symbol wait_for was
 # the whole look: Grok sat through empty news() batches (HEI/WDAY/…) instead
 # of a miss the think can skip. One try; a stall is a hard miss.
@@ -22,6 +27,119 @@ NEWS_TRIES = 1
 
 def reset_news_cache() -> None:
     _CACHE.update(ts=0.0, items=[], symbols=[])
+    _HEADLINES.clear()
+
+
+def is_real_headline(item: Any) -> bool:
+    """True for a print. Timeout/error placeholders are not headlines."""
+    if not isinstance(item, dict) or item.get("error"):
+        return False
+    hl = str(item.get("headline") or "").strip()
+    if not hl:
+        return False
+    return not hl.startswith("(unavailable")
+
+
+def remember_headlines(items: list[dict] | None) -> None:
+    """Keep rail / think prints so news() can return them after a 2s miss."""
+    now = time.monotonic()
+    for it in items or []:
+        if not is_real_headline(it):
+            continue
+        sym = str(it.get("symbol") or "").upper().strip()
+        if not sym:
+            continue
+        bucket = _HEADLINES.setdefault(sym, {"ts": now, "items": []})
+        bucket["ts"] = now
+        rows = list(bucket.get("items") or [])
+        seen = {str(x.get("headline") or "").strip() for x in rows}
+        hl = str(it.get("headline") or "").strip()
+        if hl and hl not in seen:
+            rows.append(it)
+        bucket["items"] = rows[:8]
+
+
+def remembered_headlines(symbols: list[str] | None = None) -> list[dict]:
+    """Headlines the rail or a prior fetch already has. Expired names drop."""
+    now = time.monotonic()
+    want: set[str] | None = None
+    if symbols is not None:
+        want = {
+            str(s or "").upper().strip()
+            for s in symbols
+            if str(s or "").strip()
+        }
+    dead: list[str] = []
+    out: list[dict] = []
+    for sym, bucket in list(_HEADLINES.items()):
+        age = now - float(bucket.get("ts") or 0.0)
+        if age > _HEADLINE_TTL_S:
+            dead.append(sym)
+            continue
+        if want is not None and sym not in want:
+            continue
+        for it in bucket.get("items") or []:
+            if is_real_headline(it):
+                out.append(it)
+    for sym in dead:
+        _HEADLINES.pop(sym, None)
+    cache_age = now - float(_CACHE.get("ts") or 0.0)
+    if _CACHE.get("items") and cache_age < _CACHE_TTL_S:
+        for it in _CACHE["items"]:
+            if not is_real_headline(it):
+                continue
+            su = str(it.get("symbol") or "").upper().strip()
+            if want is not None and su not in want:
+                continue
+            out.append(it)
+    return _dedupe_headlines(out)
+
+
+def remember_look_news(world: Any = None, snap: dict[str, Any] | None = None) -> None:
+    """Ingest prints this look already fetched (scan nest, world, snap)."""
+    remember_headlines(getattr(world, "news_items", None) if world is not None else None)
+    blob = snap if isinstance(snap, dict) else {}
+    remember_headlines(blob.get("news_items") if isinstance(blob.get("news_items"), list) else None)
+    hits = blob.get("scan_hits") if isinstance(blob.get("scan_hits"), dict) else {}
+    remember_headlines(hits.get("news") if isinstance(hits.get("news"), list) else None)
+    for row in hits.get("rows") or []:
+        if not isinstance(row, dict):
+            continue
+        remember_headlines(row.get("news") if isinstance(row.get("news"), list) else None)
+        mda = row.get("mda") if isinstance(row.get("mda"), dict) else {}
+        remember_headlines(mda.get("news") if isinstance(mda.get("news"), list) else None)
+
+
+def coalesce_news(
+    items: list[dict] | None,
+    symbols: list[str] | None = None,
+) -> list[dict]:
+    """Keep real prints. A timeout is not no-print when memory has that name."""
+    real: list[dict] = []
+    misses: list[dict] = []
+    have: set[str] = set()
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        su = str(it.get("symbol") or "").upper().strip()
+        if is_real_headline(it):
+            real.append(it)
+            if su:
+                have.add(su)
+            continue
+        if it.get("error"):
+            misses.append(it)
+    for it in remembered_headlines(symbols):
+        su = str(it.get("symbol") or "").upper().strip()
+        if su and su not in have:
+            real.append(it)
+            have.add(su)
+    leftover = [
+        m
+        for m in misses
+        if str(m.get("symbol") or "").upper().strip() not in have
+    ]
+    return _dedupe_headlines(real) + leftover
 
 
 def _universe(positions: list[dict] | None) -> list[str]:
@@ -107,13 +225,21 @@ async def _fetch_symbol_news(
                 client.get_stock_news(sym, countback=per_symbol),
                 timeout=timeout_s,
             )
-            return list(rows or []), None
+            landed = list(rows or [])
+            remember_headlines(landed)
+            if landed:
+                return landed, None
+            cached = remembered_headlines([sym])
+            return (cached, None) if cached else ([], None)
         except asyncio.TimeoutError:
             reason = "timed out"
             logger.warning("news %s timed out after %.0fs", sym, timeout_s)
         except Exception:
             reason = "error"
             logger.exception("news fetch failed for %s", sym)
+    cached = remembered_headlines([sym])
+    if cached:
+        return cached, None
     return [], reason
 
 
@@ -146,16 +272,20 @@ async def fetch_symbols_news(
         )
         for sym, (batch, err) in zip(out, batches):
             if err:
-                misses.append(_miss(sym, err))
+                cached = remembered_headlines([sym])
+                if cached:
+                    items.extend(cached)
+                else:
+                    misses.append(_miss(sym, err))
             else:
                 items.extend(batch)
     except Exception:
         logger.exception("fetch_symbols_news failed")
-        return [_miss(s, "error") for s in out]
+        cached = remembered_headlines(out)
+        return cached or [_miss(s, "error") for s in out]
 
-    unique = _dedupe_headlines(items)
-    if misses:
-        return unique + misses
+    remember_headlines(items)
+    unique = coalesce_news(_dedupe_headlines(items) + misses, out)
     return unique
 
 
@@ -178,12 +308,15 @@ async def fetch_agent_news(
         and (now - float(_CACHE["ts"])) < _CACHE_TTL_S
         and _CACHE.get("symbols") == symbols
     ):
+        remember_headlines(_CACHE["items"])
         return list(_CACHE["items"])
 
     if not symbols:
         return []
 
     unique = await fetch_symbols_news(symbols, per_symbol=per_symbol)
+    remember_headlines(unique)
+    unique = coalesce_news(unique, symbols)
     if any(isinstance(it, dict) and it.get("error") for it in unique):
         return unique
 

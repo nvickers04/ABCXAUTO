@@ -346,7 +346,9 @@ async def test_news_tool_slow_source_is_fast_hard_miss(monkeypatch):
     import asyncio as _asyncio
     import time as _time
 
-    from abcxauto.news_feed import NEWS_SYMBOL_S
+    from abcxauto.news_feed import NEWS_SYMBOL_S, reset_news_cache
+
+    reset_news_cache()
 
     class MDA:
         is_configured = True
@@ -378,6 +380,43 @@ async def test_news_tool_slow_source_is_fast_hard_miss(monkeypatch):
         and not it.get("error")
         for it in data["items"]
     )
+
+
+@pytest.mark.asyncio
+async def test_news_tool_returns_rail_headline_after_timeout(monkeypatch):
+    """What's happening already had HPQ Q3. news HPQ must not talk like no print."""
+    import asyncio as _asyncio
+
+    from abcxauto.news_feed import remember_headlines, reset_news_cache
+
+    reset_news_cache()
+    remember_headlines(
+        [{"symbol": "HPQ", "headline": "HPQ Q3 earnings miss", "source": "mda"}]
+    )
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+
+    class MDA:
+        is_configured = True
+
+        async def get_stock_news(self, symbol, countback=4):
+            await _asyncio.sleep(30)
+            return [{"symbol": symbol, "headline": "should not land"}]
+
+    monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
+    data = json.loads(
+        await _run_tool(
+            "news",
+            {"symbols": ["HPQ"]},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert "error" not in data
+    assert data["items"][0]["headline"] == "HPQ Q3 earnings miss"
+    assert not data["items"][0].get("error")
+    reset_news_cache()
 
 
 @pytest.mark.asyncio
@@ -752,22 +791,37 @@ async def test_empty_scan_on_a_live_card_runs_the_written_screens(monkeypatch):
     assert "card_min_gap_pct" not in first
     assert "card_gap_met" not in first
     assert "card_gap_floors" not in first
-    reused = json.loads(
-        await _run_tool(
-            "scan",
-            {"arena": "large_cap", "scan_code": "TOP_PERC_LOSE"},
-            connector=None,
-            world=world,
-            snap=snap,
-            turn=BrainTurn(),
+    from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
+
+    painted: list[tuple[str, str]] = []
+
+    def cap(kind: str, text: str, *_a) -> None:
+        painted.append((kind, text))
+
+    reset_speaker()
+    subscribe(cap)
+    try:
+        reused = json.loads(
+            await _run_tool(
+                "scan",
+                {"arena": "large_cap", "scan_code": "TOP_PERC_LOSE"},
+                connector=None,
+                world=world,
+                snap=snap,
+                turn=BrainTurn(),
+            )
         )
-    )
+    finally:
+        unsubscribe(cap)
     assert reused.get("reused") is True
     assert reused.get("note") == "card screens already fetched this look"
     assert reused.get("screens") == first["screens"]
     assert "arena" not in reused or reused.get("arena") in (None, "")
     assert "card_gap_met" not in reused
     assert "card_min_gap_pct" not in reused
+    assert any("already have it" in text for _kind, text in painted)
+    assert not any("reused screens=" in text for _kind, text in painted)
+    assert not any(text.strip().startswith("hits=") for _kind, text in painted)
     assert seen == [
         ("mega_cap", "MOST_ACTIVE"),
         ("mega_cap", "TOP_PERC_LOSE"),

@@ -176,17 +176,6 @@ def _news_symbols_this_look(
     for row in hits.get("rows") or []:
         if isinstance(row, dict):
             _add(row.get("symbol"))
-    if not order:
-        try:
-            from abcxauto.think_stream import last_look_for_hunt
-
-            last = last_look_for_hunt()
-            last_hits = last.get("scan_hits") if isinstance(last.get("scan_hits"), dict) else {}
-            for row in last_hits.get("rows") or []:
-                if isinstance(row, dict):
-                    _add(row.get("symbol"))
-        except Exception:
-            pass
     return [s for s in order[:12] if mda_worth_asking(s)]
 
 
@@ -2217,14 +2206,23 @@ async def _run_tool(
         rows = await fn()
         return _clip({"source": "ibkr", "freshness": "live", "fills": list(rows or [])[:40]})
     if name == "news":
-        from abcxauto.news_feed import fetch_agent_news, news_hard_miss
+        from abcxauto.news_feed import (
+            coalesce_news,
+            fetch_agent_news,
+            news_hard_miss,
+            remember_headlines,
+            remember_look_news,
+        )
 
+        remember_look_news(world, snap)
         asked = normalize_tickers(args.get("symbols"))
         tape = _news_symbols_this_look(world, snap, asked)
         if tape:
             items = await _mda_news(tape)
         else:
             items = await fetch_agent_news(world.positions or snap.get("positions") or [])
+        items = coalesce_news(items, tape or asked or None)
+        remember_headlines(items)
         world.news_items = list(items)
         snap["news_items"] = list(items)
         payload = {
@@ -2320,10 +2318,7 @@ async def _run_tool(
                 painted["rows"] = rows
                 snap["scan_hits"] = painted
             _attach_scan_run(reused, turn=turn, world=world)
-            think_emit(
-                "clerk",
-                f"hits={len(reused['symbols'])} reused screens={calls}\n",
-            )
+            think_emit("clerk", "\n[scan = already have it]\n")
             return _clip(reused)
         if written:
             jobs = written[:leftover]

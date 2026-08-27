@@ -1458,15 +1458,6 @@ def format_wake(
         ev = last_wake()
     except Exception:
         ev = None
-    brief: dict[str, Any] = {}
-    try:
-        from abcxauto.think_stream import load_desk_brief
-
-        brief = load_desk_brief()
-    except Exception:
-        brief = {}
-    prev_strat = brief.get("strat") or brief.get("previous_strat") or ""
-    prev_sends = brief.get("sends") if brief.get("sends") is not None else 0
     pnl_bits = _pnl_wake_bits(day)
     port_bits = _portfolio_wake_bits(day)
     live_lots = _wake_has_live_lots(day)
@@ -1523,9 +1514,7 @@ def format_wake(
             parts.append(f"mix={mix_s}.")
         if ev is not None:
             parts.append(f"event={ev.kind} {ev.detail}.".strip())
-        if live_lots and prev_strat:
-            parts.append(f"prev={prev_strat} sends={prev_sends}.")
-        # Clerk does not assign the look. leftover say / unused= stay off wake.
+        # Clerk does not assign the look. leftover say / prev= / unused= stay off wake.
     parts.append("send.")
     return " ".join(parts)
 

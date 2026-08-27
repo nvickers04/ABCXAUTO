@@ -10,10 +10,12 @@ from abcxauto.news_feed import (
     NEWS_TRIES,
     _CACHE,
     _universe,
+    coalesce_news,
     fetch_agent_news,
     fetch_symbols_news,
     format_news_for_prompt,
     news_hard_miss,
+    remember_headlines,
     reset_news_cache,
 )
 
@@ -247,3 +249,38 @@ async def test_completed_empty_fetch_is_still_empty(monkeypatch):
     assert items == []
     assert format_news_for_prompt(items).count("no headlines") == 1
     assert client.calls == ["PANW"]
+
+
+@pytest.mark.asyncio
+async def test_timeout_returns_rail_headline_not_no_print(monkeypatch):
+    """2026-08-27: HPQ Q3 was on What's happening while news HPQ timed out at 2s."""
+
+    async def hang(_symbol, _countback):
+        await asyncio.sleep(30)
+        return [{"symbol": "HPQ", "headline": "should not land"}]
+
+    remember_headlines(
+        [{"symbol": "HPQ", "headline": "HPQ Q3 earnings miss", "source": "mda"}]
+    )
+    client = _MDA(hang)
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["HPQ"])
+    assert news_hard_miss(items) is None
+    assert items[0]["headline"] == "HPQ Q3 earnings miss"
+    assert not items[0].get("error")
+    assert "unavailable" not in str(items[0].get("headline"))
+    text = format_news_for_prompt(items)
+    assert "HPQ Q3 earnings miss" in text
+    assert "no headlines" not in text
+    assert "timed out" not in text
+
+
+def test_coalesce_news_replaces_timeout_with_rail_print():
+    remember_headlines([{"symbol": "HPQ", "headline": "HPQ Q3 earnings miss"}])
+    out = coalesce_news(
+        [{"symbol": "HPQ", "headline": "(unavailable - timed out)", "error": "timed out"}],
+        ["HPQ"],
+    )
+    assert out[0]["headline"] == "HPQ Q3 earnings miss"
+    assert not any(it.get("error") for it in out)

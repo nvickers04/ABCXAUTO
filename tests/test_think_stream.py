@@ -646,7 +646,9 @@ def test_seed_snap_from_in_progress_keeps_today_session(tmp_path, monkeypatch):
     assert snap["session_range"]["SNDK"]["low"] == 88.0
 
 
-def test_seed_snap_reuses_card_screens_inside_three_minutes(tmp_path, monkeypatch):
+def test_seed_snap_keeps_hits_but_does_not_reuse_last_look_screens(
+    tmp_path, monkeypatch
+):
     from datetime import datetime, timezone
 
     from abcxauto import think_stream as ts
@@ -669,8 +671,8 @@ def test_seed_snap_reuses_card_screens_inside_three_minutes(tmp_path, monkeypatc
     )
     snap: dict = {"candle_source": "none"}
     ts.seed_snap_from_last_turn(snap)
-    assert snap["scan_screens"][0] == "mega_cap:LOW_OPEN_GAP"
-    assert snap["scan_calls"] == 2
+    assert "scan_screens" not in snap
+    assert "scan_calls" not in snap
     assert snap["scan_hits"]["rows"][0]["symbol"] == "ALB"
 
 
@@ -727,7 +729,7 @@ def test_seed_snap_does_not_reuse_when_row_asof_is_stale(tmp_path, monkeypatch):
     assert "scan_screens" not in snap
 
 
-def test_seed_snap_reuses_manage_screens_past_the_hunt_window(tmp_path, monkeypatch):
+def test_seed_snap_does_not_reuse_manage_screens_as_this_look(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     from abcxauto import think_stream as ts
@@ -739,16 +741,20 @@ def test_seed_snap_reuses_manage_screens_past_the_hunt_window(tmp_path, monkeypa
         "ts": age.isoformat(),
         "scan_screens": ["mega_cap:LOW_OPEN_GAP"],
         "scan_calls": 1,
+        "scan_hits": {"rows": [{"symbol": "NKE", "open_gap_pct": -2.1}]},
     }
     (tmp_path / "last_turn.json").write_text(json.dumps(row), encoding="utf-8")
     hunt: dict = {"candle_source": "none"}
     ts.seed_snap_from_last_turn(hunt)
     assert "scan_screens" not in hunt
+    assert "scan_calls" not in hunt
     row["flat"] = False
     (tmp_path / "last_turn.json").write_text(json.dumps(row), encoding="utf-8")
     manage: dict = {"candle_source": "none"}
     ts.seed_snap_from_last_turn(manage)
-    assert manage["scan_screens"] == ["mega_cap:LOW_OPEN_GAP"]
+    assert "scan_screens" not in manage
+    assert "scan_calls" not in manage
+    assert manage["scan_hits"]["rows"][0]["symbol"] == "NKE"
 
 
 def test_last_look_for_hunt_drops_an_overnight_brief():
@@ -783,6 +789,33 @@ def test_last_look_for_hunt_drops_an_overnight_brief():
     recent["ts"] = (now - timedelta(minutes=10)).isoformat()
     assert last_look_facts(recent)["fresh"] is True
     assert last_look_for_hunt(recent)["tools"][:3] == ["book", "scan", "news"]
+
+
+def test_last_look_facts_omit_leftover_say():
+    from datetime import datetime, timezone
+
+    from abcxauto.think_stream import last_look_facts
+
+    now = datetime.now(timezone.utc)
+    facts = last_look_facts(
+        {
+            "ts": now.isoformat(),
+            "rationale": "loser-scan — only send if a card has room",
+            "tool_trace": ["scan"],
+            "send_calls": 0,
+            "scan_hits": {"rows": [{"symbol": "HPQ", "open_gap_pct": -4.2}]},
+        }
+    )
+    assert facts.get("fresh") is True
+    assert "rationale" not in facts
+    assert "only send if a card has room" not in str(facts)
+    assert "loser-scan" not in str(facts)
+    assert last_look_facts(
+        {
+            "ts": now.isoformat(),
+            "rationale": "only send if a card has room",
+        }
+    ) == {}
 
 
 def test_last_turn_operator_paint_omits_cycle(tmp_path, monkeypatch):

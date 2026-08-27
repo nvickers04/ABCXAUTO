@@ -629,25 +629,8 @@ def seed_snap_from_last_turn(snap: dict[str, Any] | None) -> None:
     scan_at = str(data.get("scan_at") or "").strip()
     if scan_at:
         snap["scan_at"] = scan_at
-    age = scan_tape_age_s(data)
-    screens = [str(x) for x in (data.get("scan_screens") or []) if str(x).strip()]
-    if (
-        fresh
-        and screens
-        and age is not None
-        and age <= (
-            SCAN_REUSE_MANAGE_S if data.get("flat") is False else SCAN_REUSE_S
-        )
-        and not snap.get("scan_screens")
-    ):
-        snap["scan_screens"] = screens
-        try:
-            calls = int(data.get("scan_calls") or 0)
-        except (TypeError, ValueError):
-            calls = 0
-        snap["scan_calls"] = max(calls, len(screens))
-        if hits and not snap.get("scan_hits"):
-            snap["scan_hits"] = hits
+    # Hits stay for send geometry. Screens/calls are this look's work —
+    # seeding them made the next look paint hits=N reused as if Grok scanned.
 
 
 def last_turn_is_live(payload: dict[str, Any] | None = None) -> bool:
@@ -819,10 +802,8 @@ def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
             "session_range": {},
             "ibkr_live_quotes": {},
         }
-    why = str(row.get("rationale") or "").strip()
-    if why:
-        out["rationale"] = why[:240]
-    return out if (tools or hits or n or why) else {}
+    # Leftover say is not the next job. Facts only.
+    return out if (tools or hits or n) else {}
 
 
 def last_turn_look_failed(out: dict[str, Any] | None) -> bool:
