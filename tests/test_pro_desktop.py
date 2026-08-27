@@ -1065,3 +1065,114 @@ def test_status_strip_shows_thinking_and_book_money(headless_pro):
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
 
+
+def _news_text(pro) -> str:
+    bits: list[str] = []
+    for ctrl in _walk(pro.news_list):
+        val = getattr(ctrl, "value", None)
+        if val:
+            bits.append(str(val))
+    return " ".join(bits)
+
+
+def test_clock_paints_chicago_ct(headless_pro):
+    from abcxauto.reality_pulse import build_reality_pulse
+
+    pulse = build_reality_pulse(
+        market_hours={"session": "regular", "is_trading_day": True, "minutes_to_close": 80}
+    )
+    headless_pro._apply_clock(pulse)
+    clock = headless_pro.lbl_clock.value or ""
+    assert clock.endswith(" CT")
+    assert "EDT" not in clock
+    assert "EST" not in clock
+
+
+def test_flat_book_sync_paints_think_scan_headlines(headless_pro):
+    """What's happening must not stay 'No headlines yet' when the think fetched scan names."""
+    s = headless_pro.engine.state
+    s.positions = []
+    s.world_state = {"open_lots": [], "flat": True}
+    s.scan_fetched = ["INTU", "FIG"]
+    s.scan_hits = {"rows": [{"symbol": "INTU"}, {"symbol": "FIG"}]}
+    s.news_items = [
+        {"symbol": "INTU", "headline": "Intuit beats estimates"},
+        {"symbol": "FIG", "headline": "Figma gap tape"},
+    ]
+    headless_pro._sync_widgets()
+    text = _news_text(headless_pro)
+    assert "Intuit beats estimates" in text
+    assert "Figma gap tape" in text
+    assert "No headlines yet" not in text
+
+
+def test_flat_book_does_not_invent_headlines(headless_pro):
+    s = headless_pro.engine.state
+    s.positions = []
+    s.scan_fetched = ["INTU"]
+    s.news_items = []
+    headless_pro._news_cache = []
+    headless_pro._render_news_list([])
+    text = _news_text(headless_pro)
+    assert "No headlines yet" in text
+    assert "Intuit" not in text
+
+
+@pytest.mark.asyncio
+async def test_flat_book_news_rail_fetches_scan_names(headless_pro, monkeypatch):
+    seen: dict[str, list] = {}
+
+    async def _fake_fetch(positions, **_kw):
+        seen["pos"] = list(positions or [])
+        return [{"symbol": "INTU", "headline": "Intuit beats estimates"}]
+
+    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _fake_fetch)
+    s = headless_pro.engine.state
+    s.positions = []
+    s.world_state = {"open_lots": []}
+    s.scan_fetched = ["INTU", "FIG"]
+    s.scan_hits = {"rows": [{"symbol": "INTU"}, {"symbol": "FIG"}]}
+    s.news_items = []
+    await headless_pro._refresh_news(force=True)
+    names = [str((p or {}).get("symbol") or "").upper() for p in seen.get("pos") or []]
+    assert names[:2] == ["INTU", "FIG"]
+    assert "Intuit beats estimates" in _news_text(headless_pro)
+    assert "No headlines yet" not in _news_text(headless_pro)
+
+
+@pytest.mark.asyncio
+async def test_flat_book_news_rail_uses_think_items_when_fetch_empty(
+    headless_pro, monkeypatch
+):
+    async def _fake_fetch(positions, **_kw):
+        return []
+
+    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _fake_fetch)
+    s = headless_pro.engine.state
+    s.positions = []
+    s.scan_fetched = ["INTU", "FIG"]
+    s.news_items = [{"symbol": "FIG", "headline": "Figma gap tape"}]
+    await headless_pro._refresh_news(force=True)
+    assert "Figma gap tape" in _news_text(headless_pro)
+    assert "No headlines yet" not in _news_text(headless_pro)
+
+
+@pytest.mark.asyncio
+async def test_open_book_news_rail_stays_on_positions(headless_pro, monkeypatch):
+    seen: dict[str, list] = {}
+
+    async def _fake_fetch(positions, **_kw):
+        seen["pos"] = list(positions or [])
+        return [{"symbol": "AAPL", "headline": "Apple print"}]
+
+    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _fake_fetch)
+    s = headless_pro.engine.state
+    s.positions = [{"symbol": "AAPL", "quantity": 1, "sec_type": "STK"}]
+    s.scan_fetched = ["INTU", "FIG"]
+    s.news_items = [{"symbol": "INTU", "headline": "Intuit beats estimates"}]
+    await headless_pro._refresh_news(force=True)
+    names = [str((p or {}).get("symbol") or "").upper() for p in seen.get("pos") or []]
+    assert names == ["AAPL"]
+    assert "INTU" not in names
+    assert "Apple print" in _news_text(headless_pro)
+

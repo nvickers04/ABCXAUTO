@@ -63,6 +63,27 @@ def test_pulse_clock_view_compact():
     assert view["session_status"] == "premarket"
     assert "countdown" in view
     assert view["narrative"]
+    assert str(view["clock"]).endswith(" CT")
+    assert "EDT" not in str(view["clock"])
+    assert "EST" not in str(view["clock"])
+
+
+def test_desk_clock_is_chicago_ct_not_edt():
+    """Glass 2026-08-26 12:46 CT was painted 1:46pm EDT. Desk is America/Chicago."""
+    from datetime import datetime, timezone
+
+    from abcxauto.reality_pulse import format_desk_clock
+
+    now = datetime(2026, 8, 26, 17, 46, tzinfo=timezone.utc)
+    assert format_desk_clock(now) == "12:46pm CT"
+    pulse = build_reality_pulse(
+        now=now,
+        market_hours={"session": "regular", "is_trading_day": True, "minutes_to_close": 83},
+    )
+    assert pulse["time"]["local_clock"] == "12:46pm CT"
+    assert pulse["time"]["timezone"] == "America/Chicago"
+    assert "EDT" not in pulse["time"]["local_clock"]
+    assert "1:46" not in pulse["time"]["local_clock"]
 
 
 def test_mda_unix_updated_yields_age_not_na():

@@ -22,7 +22,7 @@ import flet as ft
 from abcxauto.broker.connection import LIVE_CONFIRM_PHRASE
 from abcxauto.config import get_config, setup_file_logging
 from abcxauto.pro_engine import ProEngine
-from abcxauto.reality_pulse import build_reality_pulse, pulse_clock_view
+from abcxauto.reality_pulse import build_reality_pulse, format_desk_clock, pulse_clock_view
 
 logger = logging.getLogger(__name__)
 
@@ -4086,6 +4086,7 @@ class ProTerminal:
                 self._apply_clock(pulse)
         except Exception:
             pass
+        self._paint_think_news_if_flat()
 
     @staticmethod
     def _format_result_status(res: object) -> str:
@@ -4166,7 +4167,7 @@ class ProTerminal:
 
     def _apply_clock(self, pulse: dict) -> None:
         view = pulse_clock_view(pulse)
-        self.lbl_clock.value = view.get("clock") or "—"
+        self.lbl_clock.value = format_desk_clock() or view.get("clock") or "—"
         status = (view.get("session_status") or "closed").lower()
         self.lbl_session_badge.value = view.get("session") or "—"
         self.lbl_session_badge.color = (
@@ -4254,6 +4255,100 @@ class ProTerminal:
             self.lbl_ret_source.value = "IBKR NAV — error"
             self.lbl_ret_source.color = MUTED
 
+    def _open_lots_empty(self) -> bool:
+        if self.engine.state.positions:
+            return False
+        lots = (self.engine.state.world_state or {}).get("open_lots")
+        if lots:
+            return False
+        return True
+
+    def _flat_book_news_names(self) -> list[str]:
+        """Last scan/think names when the book is flat. Not a sandbox pad."""
+        order: list[str] = []
+
+        def _add(raw: Any) -> None:
+            su = str(raw or "").upper().strip()
+            if su and su not in order:
+                order.append(su)
+
+        s = self.engine.state
+        for name in s.scan_fetched or []:
+            _add(name)
+        hits = s.scan_hits if isinstance(s.scan_hits, dict) else {}
+        for row in hits.get("rows") or []:
+            if isinstance(row, dict):
+                _add(row.get("symbol"))
+        for it in s.news_items or []:
+            if isinstance(it, dict):
+                _add(it.get("symbol"))
+        try:
+            from abcxauto.think_stream import last_look_for_hunt
+
+            last = last_look_for_hunt()
+            last_hits = last.get("scan_hits") if isinstance(last.get("scan_hits"), dict) else {}
+            for row in last_hits.get("rows") or []:
+                if isinstance(row, dict):
+                    _add(row.get("symbol"))
+            for name in last.get("scan_fetched") or []:
+                _add(name)
+        except Exception:
+            pass
+        return order[:14]
+
+    def _news_rail_universe(self) -> list[dict]:
+        """Positions when the book is open; scan/think names when it is flat."""
+        pos = [
+            p
+            for p in (self.engine.state.positions or [])
+            if isinstance(p, dict) and str(p.get("symbol") or "").strip()
+        ]
+        if pos:
+            return pos
+        return [{"symbol": s} for s in self._flat_book_news_names()]
+
+    def _think_news_items(self) -> list[dict]:
+        """Headlines the think already fetched. Never invented."""
+        items: list[dict] = []
+        seen: set[str] = set()
+
+        def _take(it: Any) -> None:
+            if not isinstance(it, dict):
+                return
+            hl = str(it.get("headline") or "").strip()
+            if not hl or hl in seen:
+                return
+            seen.add(hl)
+            items.append(it)
+
+        for it in self.engine.state.news_items or []:
+            _take(it)
+        hits = self.engine.state.scan_hits if isinstance(self.engine.state.scan_hits, dict) else {}
+        top = hits.get("news")
+        if isinstance(top, list):
+            for it in top:
+                _take(it)
+        for row in hits.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            mda = row.get("mda") if isinstance(row.get("mda"), dict) else {}
+            news = mda.get("news") if isinstance(mda, dict) else None
+            if isinstance(news, list):
+                for it in news:
+                    _take(it)
+        return items
+
+    def _paint_think_news_if_flat(self) -> None:
+        if not self._open_lots_empty():
+            return
+        if self._news_cache:
+            return
+        items = self._think_news_items()
+        if not items:
+            return
+        self._news_cache = items
+        self._render_news_list(items)
+
     def _render_news_list(self, items: list[dict], *, fallback: str = "") -> None:
         rows: list[ft.Control] = []
         for it in (items or [])[:10]:
@@ -4305,14 +4400,17 @@ class ProTerminal:
         if not force and self._news_last_fetch and (now - self._news_last_fetch) < 60.0:
             return
         self._news_last_fetch = now
+        think_items = self._think_news_items()
         try:
             from abcxauto.news_feed import fetch_agent_news
 
             unique = await fetch_agent_news(
-                self.engine.state.positions, force=force, per_symbol=5
+                self._news_rail_universe(), force=force, per_symbol=5
             )
         except Exception:
             unique = []
+        if not unique:
+            unique = think_items
         self._news_cache = unique
         self._render_news_list(unique)
 

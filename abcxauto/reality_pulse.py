@@ -13,6 +13,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
+# Desk clock. NYSE session math stays ET; the painted clock is the operator.
+CT = ZoneInfo("America/Chicago")
+DESK_TZ_LABEL = "CT"
 
 SESSION_LABELS = {
     "premarket": "Pre-market",
@@ -20,6 +23,15 @@ SESSION_LABELS = {
     "postmarket": "Post-market",
     "closed": "Closed",
 }
+
+
+def format_desk_clock(now: datetime | None = None) -> str:
+    """Operator wall clock: America/Chicago, labeled CT (not EDT)."""
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    local = clock.astimezone(CT)
+    return local.strftime("%I:%M%p").lstrip("0").lower() + f" {DESK_TZ_LABEL}"
 
 
 def _fmt_countdown(seconds: int | None) -> str:
@@ -237,10 +249,13 @@ def build_reality_pulse(
     protection: dict | None = None,
     ibkr_connected: bool | None = None,
     taken_at: str | None = None,
+    now: datetime | None = None,
 ) -> dict:
     """Assemble the Reality Pulse JSON — heart of every decision cycle."""
-    now = datetime.now(timezone.utc)
-    et = now.astimezone(ET)
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    ct = now.astimezone(CT)
     sess = _session_block(now, market_hours)
     spy = spy_quote or {}
     spy_src = str(spy.get("source") or "").lower()
@@ -273,13 +288,11 @@ def build_reality_pulse(
     pulse: dict[str, Any] = {
         "time": {
             "utc": now.isoformat(),
-            "local": et.isoformat(),
-            "local_clock": et.strftime("%I:%M%p").lstrip("0").lower() + " EDT"
-            if et.dst()
-            else et.strftime("%I:%M%p").lstrip("0").lower() + " EST",
-            "timezone": "America/New_York",
-            "day_of_week": et.strftime("%A"),
-            "date": et.date().isoformat(),
+            "local": ct.isoformat(),
+            "local_clock": format_desk_clock(now),
+            "timezone": "America/Chicago",
+            "day_of_week": ct.strftime("%A"),
+            "date": ct.date().isoformat(),
         },
         "calendar": {
             "is_trading_day": sess.get("is_trading_day"),
@@ -346,7 +359,7 @@ def pulse_clock_view(pulse: dict | None) -> dict:
     to = s.get("countdown_to")
     human = s.get("countdown_human")
     return {
-        "clock": t.get("local_clock") or "—",
+        "clock": format_desk_clock() or t.get("local_clock") or "—",
         "day": t.get("day_of_week") or "—",
         "session": s.get("label") or "—",
         "session_status": s.get("status") or "closed",

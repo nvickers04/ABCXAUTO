@@ -799,6 +799,7 @@ async def test_host_think_park_keeps_the_look_for_last_turn(monkeypatch):
     assert "equity" in out
     assert "pnl" in out
     assert "scan_fetched" in out
+    assert "news_items" in out
 
 
 @pytest.mark.asyncio
