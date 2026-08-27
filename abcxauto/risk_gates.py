@@ -371,6 +371,7 @@ class RiskGate:
         self._trade_date: Optional[str] = None
         self._daily_trades = 0
         self._peak_equity: Optional[float] = None
+        self._riskless_combo_202 = False
 
     # ------------------------------------------------------------------
     # Halt latch
@@ -479,6 +480,29 @@ class RiskGate:
         with self._lock:
             self._trade_date = date.today().isoformat()
             self._daily_trades = 0
+
+    # ------------------------------------------------------------------
+    # IBKR [202] riskless-combo latch (session)
+    # ------------------------------------------------------------------
+
+    def note_riskless_combo_202(self) -> None:
+        """IBKR cancelled a riskless/guaranteed-loss BAG with [202]."""
+        with self._lock:
+            self._riskless_combo_202 = True
+
+    @property
+    def riskless_combo_202(self) -> bool:
+        with self._lock:
+            return self._riskless_combo_202
+
+    def sync_riskless_combo_202(self, orders: Any) -> bool:
+        """Keep the [202] latch only while a working BAG still occupies the cap."""
+        from abcxauto.riskless_combo import working_bag_keeps_202_latch
+
+        with self._lock:
+            if self._riskless_combo_202 and not working_bag_keeps_202_latch(orders):
+                self._riskless_combo_202 = False
+            return self._riskless_combo_202
 
     # ------------------------------------------------------------------
     # Pre-trade check

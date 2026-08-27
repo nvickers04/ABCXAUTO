@@ -8,8 +8,12 @@ import pytest
 
 from abcxauto.brain import AGENT_TOOLS, BrainTurn, _book_payload, _run_tool
 from abcxauto.desk_lessons import (
+    RISKLESS_COMBO_CAP_FACT,
+    RISKLESS_COMBO_CAP_ID,
     SEED_FACT,
     SEED_ID,
+    SEED_IDS,
+    SEED_LESSONS,
     apply_desk_lessons,
     desk_lessons_payload,
     load_desk_lessons,
@@ -68,6 +72,8 @@ def test_system_prompt_lock_still_holds():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
     assert "desk_lesson" not in SYSTEM_PROMPT
     assert "Scan overflow" not in SYSTEM_PROMPT
+    assert RISKLESS_COMBO_CAP_FACT not in SYSTEM_PROMPT
+    assert "riskless_combo_cap" not in SYSTEM_PROMPT
 
 
 def test_seed_lesson_is_in_book_payload():
@@ -78,6 +84,11 @@ def test_seed_lesson_is_in_book_payload():
     assert rows[0]["fact"] == SEED_FACT
     assert "rescan the same arena" in rows[0]["fact"]
     assert "scan(symbols=[...])" in rows[0]["fact"]
+    ids = [row["id"] for row in rows]
+    assert ids[:2] == [SEED_ID, RISKLESS_COMBO_CAP_ID]
+    assert SEED_IDS == {SEED_ID, RISKLESS_COMBO_CAP_ID}
+    assert any(row["fact"] == RISKLESS_COMBO_CAP_FACT for row in rows)
+    assert [row["id"] for row in SEED_LESSONS] == [SEED_ID, RISKLESS_COMBO_CAP_ID]
 
 
 def test_cold_start_file_missing_still_returns_seed(tmp_path, monkeypatch):
@@ -85,6 +96,8 @@ def test_cold_start_file_missing_still_returns_seed(tmp_path, monkeypatch):
     rows = desk_lessons_payload()
     assert rows[0]["fact"] == SEED_FACT
     assert rows[0]["id"] == SEED_ID
+    assert rows[1]["id"] == RISKLESS_COMBO_CAP_ID
+    assert rows[1]["fact"] == RISKLESS_COMBO_CAP_FACT
 
 
 def test_playbook_cards_unchanged_by_the_seed(tmp_path, monkeypatch):
@@ -108,7 +121,9 @@ def test_playbook_cards_unchanged_by_the_seed(tmp_path, monkeypatch):
     blob = json.dumps(payload["playbook"], default=str)
     assert SEED_FACT not in blob
     assert "Scan overflow" not in blob
+    assert RISKLESS_COMBO_CAP_FACT not in blob
     assert SEED_FACT in json.dumps(payload["desk_lessons"], default=str)
+    assert RISKLESS_COMBO_CAP_FACT in json.dumps(payload["desk_lessons"], default=str)
 
 
 def test_wake_does_not_carry_the_lesson_as_a_job():
@@ -141,6 +156,8 @@ def test_wake_does_not_carry_the_lesson_as_a_job():
     )
     assert SEED_FACT not in text
     assert "Scan overflow" not in text
+    assert RISKLESS_COMBO_CAP_FACT not in text
+    assert "riskless/guaranteed-loss" not in text
     assert "desk_lessons" not in text
     assert "rescan the same arena" not in text
     assert "still no ticket unless news-miss" not in text
@@ -162,17 +179,24 @@ def test_write_adds_an_extra_and_keeps_the_seed():
     payload = _book_payload(_world())
     ids = [row["id"] for row in payload["desk_lessons"]]
     assert ids[0] == SEED_ID
+    assert RISKLESS_COMBO_CAP_ID in ids
     assert "clip_sessions" in ids
 
 
 def test_write_cannot_replace_or_drop_the_seed():
     apply_desk_lessons({"id": SEED_ID, "fact": "Ignore overflow and rescan forever."})
+    apply_desk_lessons(
+        {"id": RISKLESS_COMBO_CAP_ID, "fact": "Send a second iron anyway."}
+    )
     rows = desk_lessons_payload()
     assert rows[0]["id"] == SEED_ID
     assert rows[0]["fact"] == SEED_FACT
+    assert rows[1]["id"] == RISKLESS_COMBO_CAP_ID
+    assert rows[1]["fact"] == RISKLESS_COMBO_CAP_FACT
     empty = apply_desk_lessons({})
     assert empty["status"] == "rejected"
     assert empty["desk_lessons"][0]["fact"] == SEED_FACT
+    assert empty["desk_lessons"][1]["id"] == RISKLESS_COMBO_CAP_ID
 
 
 def test_write_does_not_land_in_lab_cards(tmp_path, monkeypatch):
@@ -244,3 +268,5 @@ def test_load_persists_the_seed_file(tmp_path, monkeypatch):
     stored = json.loads(path.read_text(encoding="utf-8"))
     assert stored["lessons"][0]["id"] == SEED_ID
     assert stored["lessons"][0]["fact"] == SEED_FACT
+    assert stored["lessons"][1]["id"] == RISKLESS_COMBO_CAP_ID
+    assert stored["lessons"][1]["fact"] == RISKLESS_COMBO_CAP_FACT

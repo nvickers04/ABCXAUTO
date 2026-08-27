@@ -28,10 +28,25 @@ SEED_FACT = (
     "same arena for the missing list. Use the names you already have, or "
     "scan(symbols=[...]) / candles / quote those names."
 )
+RISKLESS_COMBO_CAP_ID = "riskless_combo_cap"
+RISKLESS_COMBO_CAP_FACT = (
+    "IBKR [202] caps active riskless/guaranteed-loss BAGs (iron condor, "
+    "iron butterfly, butterfly) at one. A second send pops TWS confirm. "
+    "Wait until that working BAG is gone."
+)
+SEED_LESSONS = (
+    {"id": SEED_ID, "fact": SEED_FACT},
+    {"id": RISKLESS_COMBO_CAP_ID, "fact": RISKLESS_COMBO_CAP_FACT},
+)
+SEED_IDS = frozenset(row["id"] for row in SEED_LESSONS)
 
 __all__ = (
+    "RISKLESS_COMBO_CAP_FACT",
+    "RISKLESS_COMBO_CAP_ID",
     "SEED_FACT",
     "SEED_ID",
+    "SEED_IDS",
+    "SEED_LESSONS",
     "apply_desk_lessons",
     "desk_lessons_payload",
     "load_desk_lessons",
@@ -47,8 +62,8 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _seed_row() -> dict[str, str]:
-    return {"id": SEED_ID, "fact": SEED_FACT}
+def _seed_rows() -> list[dict[str, str]]:
+    return [dict(row) for row in SEED_LESSONS]
 
 
 def _read(path: Path) -> dict[str, Any]:
@@ -121,22 +136,31 @@ def _norm_lessons(raw: Any) -> list[dict[str, str]]:
     return out
 
 
+def _seeds_current(stored: list[dict[str, str]]) -> bool:
+    if len(stored) < len(SEED_LESSONS):
+        return False
+    for index, seed in enumerate(SEED_LESSONS):
+        if stored[index].get("id") != seed["id"] or stored[index].get("fact") != seed["fact"]:
+            return False
+    return True
+
+
 def _merge_seed(rows: list[dict[str, str]] | None) -> list[dict[str, str]]:
-    """Code seed always leads. File extras follow. Seed id cannot be replaced."""
+    """Code seeds always lead. File extras follow. Seed ids cannot be replaced."""
     extras: list[dict[str, str]] = []
-    seen: set[str] = {SEED_ID}
+    seen: set[str] = set(SEED_IDS)
     for row in rows or []:
         rid = row.get("id") or ""
-        if rid == SEED_ID:
+        if rid in SEED_IDS:
             continue
         key = rid or (row.get("fact") or "").lower()
         if not key or key in seen:
             continue
         seen.add(key)
         extras.append({"id": rid, "fact": row.get("fact") or ""})
-        if len(extras) >= _MAX_LESSONS - 1:
+        if len(extras) >= _MAX_LESSONS - len(SEED_LESSONS):
             break
-    return [_seed_row(), *extras]
+    return [*_seed_rows(), *extras]
 
 
 def load_desk_lessons() -> dict[str, Any]:
@@ -145,7 +169,7 @@ def load_desk_lessons() -> dict[str, Any]:
     raw = _read(path)
     lessons = _merge_seed(_norm_lessons(raw))
     stored = _norm_lessons(raw)
-    if not raw or not stored or stored[0].get("id") != SEED_ID or stored[0].get("fact") != SEED_FACT:
+    if not raw or not stored or not _seeds_current(stored):
         _write(
             path,
             {
@@ -190,11 +214,11 @@ def apply_desk_lessons(raw: dict[str, Any] | None) -> dict[str, Any]:
         }
     path = _path()
     prior = _norm_lessons(_read(path))
-    extras = [row for row in prior if row.get("id") != SEED_ID]
+    extras = [row for row in prior if row.get("id") not in SEED_IDS]
     by_id: dict[str, dict[str, str]] = {}
     ordered: list[dict[str, str]] = []
     for row in extras + incoming:
-        if row.get("id") == SEED_ID:
+        if row.get("id") in SEED_IDS:
             continue
         key = row.get("id") or row.get("fact", "").lower()
         if not key:

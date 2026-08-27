@@ -236,6 +236,32 @@ class BracketGroup:
         }
 
 
+def combo_legs_from_contract(contract: Any) -> List[Dict[str, Any]]:
+    """Plain dicts for BAG comboLegs so the riskless-combo cap can classify."""
+    raw = getattr(contract, "comboLegs", None) or getattr(contract, "combo_legs", None) or []
+    out: List[Dict[str, Any]] = []
+    for leg in raw:
+        if isinstance(leg, dict):
+            con = leg.get("conId") if leg.get("conId") is not None else leg.get("con_id")
+            out.append({
+                "conId": con,
+                "con_id": con,
+                "ratio": leg.get("ratio", 1),
+                "action": leg.get("action") or "",
+                "exchange": leg.get("exchange") or "",
+            })
+            continue
+        con = getattr(leg, "conId", None)
+        out.append({
+            "conId": con,
+            "con_id": con,
+            "ratio": getattr(leg, "ratio", 1),
+            "action": getattr(leg, "action", "") or "",
+            "exchange": getattr(leg, "exchange", "") or "",
+        })
+    return out
+
+
 class IBKRQueriesMixin:
     """Slim account/position/order query methods (merged from queries.py)."""
 
@@ -393,6 +419,10 @@ class IBKRQueriesMixin:
                         'multiplier': int(t.contract.multiplier or 100),
                         'local_symbol': t.contract.localSymbol,
                     })
+                if sec_type == 'BAG':
+                    legs = combo_legs_from_contract(t.contract)
+                    order_data['combo_legs'] = legs
+                    order_data['comboLegs'] = legs
                 if trail_pct:
                     order_data['trail_percent'] = trail_pct
                 orders.append(order_data)
@@ -794,6 +824,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         self._order_status_listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._local_cancel_requests: Dict[int, Dict[str, Any]] = {}
         self._local_cancel_lock = Lock()
+        self._riskless_combo_202 = False
 
         # Store strong references to event handlers (prevents weakref issues)
         self._disconnect_handler = self._on_disconnect
@@ -941,11 +972,25 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         if errorCode in self._SUPPRESSED_ERROR_CODES:
             logger.debug(f"IBKR [{errorCode}] reqId={reqId}: {errorString}")
         elif errorCode == 202:  # Order cancelled — check attribution
-            attr = self.get_cancel_attribution(reqId)
-            if attr.get('kind') == 'self_cancel':
-                logger.debug(f"IBKR [202] self-cancel confirmed: order {reqId}")
+            from abcxauto.riskless_combo import is_riskless_combo_202
+
+            if is_riskless_combo_202(errorCode, errorString):
+                self._riskless_combo_202 = True
+                try:
+                    from abcxauto.risk_gates import get_risk_gate
+
+                    get_risk_gate().note_riskless_combo_202()
+                except Exception:
+                    logger.debug("riskless_combo_202 latch failed", exc_info=True)
+                logger.warning(
+                    f"IBKR [202] riskless-combo cancel: order {reqId} — {errorString}"
+                )
             else:
-                logger.warning(f"IBKR [202] broker-cancel: order {reqId} — {errorString}")
+                attr = self.get_cancel_attribution(reqId)
+                if attr.get('kind') == 'self_cancel':
+                    logger.debug(f"IBKR [202] self-cancel confirmed: order {reqId}")
+                else:
+                    logger.warning(f"IBKR [202] broker-cancel: order {reqId} — {errorString}")
         elif errorCode in (201, 10198):
             logger.warning(f"IBKR [{errorCode}] order rejected reqId={reqId}: {errorString}")
         else:
