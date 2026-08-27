@@ -241,9 +241,9 @@ def test_status_retired_drops_a_card_from_the_hunt_not_by_omission():
     assert by_name["opening drive"]["status"] == "retired"
     from abcxauto.lab_playbook import playbook_run_sheets
 
-    assert [row["card"] for row in playbook_run_sheets(lab, flat=True)] == [
-        "flush bounce"
-    ]
+    names = [row["card"] for row in playbook_run_sheets(lab, flat=True)]
+    assert "flush bounce" in names
+    assert "opening drive" not in names
 
 
 def test_lab_facts_reports_what_is_untried_not_only_what_scored():
@@ -263,8 +263,9 @@ def test_lab_facts_reports_what_is_untried_not_only_what_scored():
     assert "flush bounce [market_bracket]" in awaiting
     assert "opening drive [market_bracket]" in awaiting
     for row in awaiting.values():
-        assert row["sends"] == 0
-        assert row["days"] is not None
+        assert "looks" not in row
+        assert "days" not in row
+        assert "max_looks_without_trigger" not in row
     assert "market_bracket" in facts["trunks_with_cards"]
     assert "buy_option" in facts["trunks_with_cards"]
     untried = facts["entry_trunks_untried"]
@@ -284,9 +285,12 @@ def test_lab_facts_reports_what_is_untried_not_only_what_scored():
     from abcxauto.lab_playbook import lab_wake_bit
 
     bit = lab_wake_bit(load_lab())
-    assert "lab flush bounce" in bit
-    assert "0sends" in bit
-    # A live card under test is the wake — untried trunks stay on playbook().
+    assert "unused=" in bit
+    assert "vertical_spread" in bit
+    assert "iron_condor" in bit
+    assert "looks" not in bit
+    assert "0sends" not in bit
+    assert "lab flush bounce" not in bit
     assert "untried=" not in bit
 
 
@@ -1279,11 +1283,10 @@ def test_looks_without_a_send_are_counted_and_never_trip(monkeypatch):
     assert verdict["trip_reason"] == ""
 
     facts = lab_facts(load_lab())
-    # Disk stamp is this write, not the 4-day fixture — the count still lands.
     row = facts["cards_awaiting_first_trade"][0]
     assert row["card"] == "flush bounce [market_bracket]"
-    assert row["sends"] == 0
-    assert row["max_looks_without_trigger"] == 12
+    assert "looks" not in row
+    assert "max_looks_without_trigger" not in row
     assert facts["cards_without_trigger"][0]["card"] == row["card"]
 
 
@@ -1809,71 +1812,22 @@ def test_run_sheet_follows_parent_tool_order_instead_of_rescan():
     first = playbook_run_sheets(lab, flat=True)
     by_name = {row["card"]: row for row in first}
     assert "flush bounce" in by_name
-    assert first[0]["card"] == "flush bounce"
-    assert first[0]["next"] == "scan"
-    assert first[0]["sends"] == 0
-    assert first[0]["resolved"] == 0
-    assert first[0]["sample_left"] == 3
-    assert first[0]["tool_order"] == ["scan", "news", "quote", "candles", "send"]
-    assert ">=6%" in first[0]["when_on"]
-    assert "most_active" in first[0]["scan"]
+    flush = by_name["flush bounce"]
+    assert "next" not in flush
+    assert "send" not in flush
+    assert "gate" not in flush
+    assert flush["sends"] == 0
+    assert flush["resolved"] == 0
+    assert flush["sample_left"] == 3
+    assert flush["tool_order"] == ["scan", "news", "quote", "candles", "send"]
+    assert "premium spray" not in by_name
 
     after_news = playbook_run_sheets(
         lab,
         tool_trace=["book", "scan", "scan", "news"],
         flat=True,
     )
-    assert after_news[0]["next"] == "quote"
-
-    carry = playbook_run_sheets(
-        lab,
-        tool_trace=["book"],
-        last_look=[
-            "book",
-            "playbook",
-            "status",
-            "scan",
-            "news",
-            "write_lab_playbook",
-        ],
-        flat=True,
-    )
-    assert carry[0]["next"] == "quote"
-
-    already_live = playbook_run_sheets(
-        lab,
-        tool_trace=["book"],
-        last_look=["book", "scan", "news", "write_lab_playbook"],
-        flat=True,
-        quoted={"quoted": 12, "rows": [{"symbol": "SNDK", "last": 1485.0}]},
-    )
-    assert already_live[0]["next"] == "candles"
-
-    scan_carried_news = playbook_run_sheets(
-        lab,
-        tool_trace=["book", "scan"],
-        news=[{"symbol": "SNDK", "headline": "sales miss"}],
-        flat=True,
-    )
-    assert scan_carried_news[0]["next"] == "quote"
-
-    scan_quoted_and_news = playbook_run_sheets(
-        lab,
-        tool_trace=["book", "scan"],
-        news=[{"symbol": "SNDK", "headline": "sales miss"}],
-        quoted={"quoted": 1, "rows": [{"symbol": "SNDK", "last": 91.5}]},
-        flat=True,
-    )
-    assert scan_quoted_and_news[0]["next"] == "candles"
-
-    prior_day = playbook_run_sheets(
-        lab,
-        tool_trace=["book", "scan", "news", "quote", "candles"],
-        flat=True,
-        session_today=False,
-    )
-    assert prior_day[0]["next"] == "candles"
-    assert prior_day[0]["session_today"] is False
+    assert "next" not in after_news[0]
 
     from abcxauto.lab_playbook import live_card_send_facts
 
@@ -1960,8 +1914,9 @@ def test_run_sheet_follows_parent_tool_order_instead_of_rescan():
     assert {"arena": "large_cap", "scan_code": "TOP_OPEN_PERC_LOSE"} in gap_screens
     assert gap_screens[0] == {"arena": "mega_cap", "scan_code": "TOP_OPEN_PERC_LOSE"}
     bit = lab_wake_bit(load_lab(), flat=True)
-    assert "next=scan" in bit
-    assert "mega_cap:TOP_OPEN_PERC_LOSE" in bit
+    assert "unused=" in bit
+    assert "looks" not in bit
+    assert "next=scan" not in bit
 
     rescanned = playbook_run_sheets(
         lab,
@@ -1969,7 +1924,7 @@ def test_run_sheet_follows_parent_tool_order_instead_of_rescan():
         last_look=["book", "scan", "news"],
         flat=True,
     )
-    assert rescanned[0]["next"] == "news"
+    assert all("next" not in row for row in rescanned)
 
     after_send = playbook_run_sheets(
         lab,
@@ -1977,7 +1932,7 @@ def test_run_sheet_follows_parent_tool_order_instead_of_rescan():
         last_look=["book", "scan", "news", "quote", "candles", "send"],
         flat=True,
     )
-    assert after_send[0]["next"] == "scan"
+    assert all("next" not in row and "send" not in row for row in after_send)
 
 
 def test_run_sheet_manage_uses_review_tools():
@@ -1992,18 +1947,20 @@ def test_run_sheet_manage_uses_review_tools():
     )
     lab = load_lab()
     sheets = playbook_run_sheets(lab, tool_trace=["book"], flat=False)
-    assert sheets[0]["next"] == "fills"
-    assert sheets[0]["tool_order"] == ["book", "fills", "quote", "candles"]
-    assert "fills then book" in sheets[0]["review"]
+    flush = {row["card"]: row for row in sheets}["flush bounce"]
+    assert "next" not in flush
+    assert flush["tool_order"] == ["book", "fills", "quote", "candles"]
+    assert "fills then book" in flush["review"]
     after = playbook_run_sheets(lab, tool_trace=["book", "fills"], flat=False)
-    assert after[0]["next"] == "quote"
+    assert "next" not in after[0]
     default_manage = playbook_run_sheets(
         {"types": {"market_bracket": {"cards": [_card("open lot")]}}},
         tool_trace=["book"],
         flat=False,
     )
-    assert default_manage[0]["next"] == "fills"
-    assert default_manage[0]["tool_order"][:2] == ["book", "fills"]
+    open_lot = {row["card"]: row for row in default_manage}["open lot"]
+    assert "next" not in open_lot
+    assert open_lot["tool_order"][:2] == ["book", "fills"]
 
 
 def test_lab_wake_and_book_payload_paint_the_next_tool(monkeypatch):
@@ -2021,8 +1978,10 @@ def test_lab_wake_and_book_payload_paint_the_next_tool(monkeypatch):
         last_look=["book", "scan", "news"],
         flat=True,
     )
-    assert "lab flush bounce" in bit
-    assert "next=quote" in bit
+    assert "unused=" in bit
+    assert "lab flush bounce" not in bit
+    assert "next=quote" not in bit
+    assert "looks" not in bit
     monkeypatch.setattr(
         "abcxauto.think_stream.last_look_facts",
         lambda: {
@@ -2038,14 +1997,10 @@ def test_lab_wake_and_book_payload_paint_the_next_tool(monkeypatch):
         },
     )
     pb = _book_payload(_world(flat=True, positions=[]), tool_trace=["book"])["playbook"]
-    keys = list(pb)
-    assert keys.index("run") < keys.index("cards")
-    assert pb["run"][0]["next"] == "candles"
-    assert [row["symbol"] for row in pb["run"][0]["hits"]] == ["SNDK", "MU"]
+    assert "run" not in pb
     assert "now_beating" in pb
     payload = playbook_payload()
-    assert payload["run"][0]["next"] == "candles"
-    assert payload["run"][0]["card"] == "flush bounce"
+    assert "run" not in payload
 
 
 def test_book_run_does_not_paint_stale_overnight_hits(monkeypatch):
@@ -2069,8 +2024,7 @@ def test_book_run_does_not_paint_stale_overnight_hits(monkeypatch):
     monkeypatch.setattr("abcxauto.think_stream.last_look_facts", lambda *a, **k: stale)
     monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda *a, **k: {})
     pb = _book_payload(_world(flat=True, positions=[]), tool_trace=["book"])["playbook"]
-    assert "hits" not in pb["run"][0]
-    assert pb["run"][0]["next"] == "scan"
+    assert "run" not in pb
 
 
 def test_run_sheet_and_wake_paint_send_sketch_from_session(monkeypatch):
@@ -2110,20 +2064,19 @@ def test_run_sheet_and_wake_paint_send_sketch_from_session(monkeypatch):
         flat=True,
         session_range=rng,
     )
-    assert sheets[0]["next"] == "send"
-    assert sheets[0]["send"]["symbol"] == "SNDK"
-    assert sheets[0]["send"]["card"] == "flush bounce"
-    assert sheets[0]["send"]["stop_price"] == 88.0
-    assert sheets[0]["send"]["quantity"] == 10
+    flush = {row["card"]: row for row in sheets}["flush bounce"]
+    assert "next" not in flush
+    assert "send" not in flush
     bit = lab_wake_bit(
         lab,
         last_look=["book", "scan", "news", "quote", "candles"],
         flat=True,
         session_range=rng,
     )
-    assert "next=send" in bit
-    assert "send SNDK" in bit
-    assert "card=flush bounce" in bit
+    assert "unused=" in bit
+    assert "next=send" not in bit
+    assert "send SNDK" not in bit
+    assert "looks" not in bit
     hunt = {
         "tools": ["book", "scan", "news", "quote", "candles"],
         "send_calls": 0,
@@ -2134,8 +2087,7 @@ def test_run_sheet_and_wake_paint_send_sketch_from_session(monkeypatch):
     monkeypatch.setattr("abcxauto.think_stream.last_look_facts", lambda *a, **k: hunt)
     monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda *a, **k: hunt)
     pb = _book_payload(_world(flat=True, positions=[]), tool_trace=["book"])["playbook"]
-    assert pb["run"][0]["next"] == "send"
-    assert pb["run"][0]["send"]["symbol"] == "SNDK"
+    assert "run" not in pb
 
 
 def test_apply_hunt_send_sketch_does_not_fill_omitted_ticket_fields():
@@ -2313,8 +2265,10 @@ def test_hunt_send_sketch_skips_a_name_sitting_on_the_opening_low():
         session_today=True,
         session_range={"SNDK": store["SNDK"]},
     )
-    assert sheets[0]["next"] == "candles"
-    assert sheets[0]["above_low"] is False
+    flush = {row["card"]: row for row in sheets}["flush bounce"]
+    assert "next" not in flush
+    assert "send" not in flush
+    assert "above_low" not in flush
     assert live_card_session_error(
         {"card": "flush bounce", "direction": "LONG"},
         store["SNDK"],
@@ -2408,18 +2362,20 @@ def test_hunt_send_sketch_skips_a_gap_under_the_written_floor():
         session_today=True,
         session_range={"MU": store["MU"]},
     )
-    assert sheets[0]["next"] == ""
-    assert sheets[0]["gate"] == "off"
-    assert sheets[0]["min_gap_pct"] == 6.0
-    assert "send" not in sheets[0]
+    flush = {row["card"]: row for row in sheets}["flush bounce"]
+    assert "next" not in flush
+    assert "gate" not in flush
+    assert "min_gap_pct" not in flush
+    assert "send" not in flush
     bit = lab_wake_bit(
         load_lab(),
         tool_trace=["book", "scan", "news", "quote", "candles"],
         flat=True,
         session_range={"MU": store["MU"]},
     )
-    assert "gate=off" in bit
-    assert "next=send" not in bit
+    assert "gate=off" not in bit
+    assert "looks" not in bit
+    assert "0sends" not in bit
     assert live_card_session_error(
         {"card": "flush bounce", "direction": "LONG"},
         store["MU"],
@@ -2544,9 +2500,9 @@ def test_sibling_cards_bind_gap_and_sketch_to_card_name():
         session_range={"ALB": alb},
     )
     by_name = {row["card"]: row for row in sheets}
-    assert by_name["flush bounce"]["min_gap_pct"] == 6.0
-    assert by_name["flush bounce"].get("gate") == "off"
-    assert by_name["3pct gap hold"]["min_gap_pct"] == 3.0
+    assert "next" not in by_name["flush bounce"]
+    assert "gate" not in by_name["flush bounce"]
+    assert "min_gap_pct" not in by_name["flush bounce"]
     assert "send" not in by_name["3pct gap hold"]
     bit = lab_wake_bit(
         load_lab(),
@@ -2739,11 +2695,10 @@ def test_live_card_book_error_is_not_a_send_gate():
         },
         positions=lots,
     )
-    # Hunt sketch is a notebook suggestion. Card prose cannot hide it.
-    assert sheets[0].get("gate") != "off" or "send" in sheets[0]
-    assert live_card_book_error(
-        sheets[0].get("send") or {"symbol": "MU"}, lots, load_lab()
-    ) == ""
+    flush = {row["card"]: row for row in sheets}["flush bounce"]
+    assert "gate" not in flush
+    assert "send" not in flush
+    assert live_card_book_error({"symbol": "MU"}, lots, load_lab()) == ""
 
 
 def test_ibkr_live_last_reads_scan_rows_without_quote_map():
@@ -2782,8 +2737,7 @@ def test_empty_scan_does_not_walk_the_hunt_to_send():
         flat=True,
         quoted={"quoted": 0, "rows": []},
     )
-    assert empty[0]["next"] == ""
-    assert empty[0]["gate"] == "off"
+    assert all("next" not in row and "gate" not in row for row in empty)
 
     failed = playbook_run_sheets(
         lab,
@@ -2791,7 +2745,7 @@ def test_empty_scan_does_not_walk_the_hunt_to_send():
         flat=True,
         quoted={"ok": False, "error": "IBKR scanner timeout"},
     )
-    assert failed[0]["next"] == "scan"
+    assert all("next" not in row for row in failed)
 
     no_sketch = playbook_run_sheets(
         lab,
@@ -2799,8 +2753,7 @@ def test_empty_scan_does_not_walk_the_hunt_to_send():
         flat=True,
         session_range={},
     )
-    assert no_sketch[0]["next"] == "candles"
-    assert no_sketch[0].get("gate") != "off"
+    assert all("next" not in row and "send" not in row for row in no_sketch)
     prior = playbook_run_sheets(
         lab,
         tool_trace=["book", "scan", "news", "quote", "candles"],
@@ -2816,8 +2769,7 @@ def test_empty_scan_does_not_walk_the_hunt_to_send():
             }
         },
     )
-    assert prior[0]["next"] == "candles"
-    assert prior[0].get("gate") != "off"
+    assert all("next" not in row and "send" not in row for row in prior)
 
     spy = {
         "SPY": {

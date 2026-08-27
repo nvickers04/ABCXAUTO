@@ -2612,28 +2612,14 @@ class ProTerminal:
         """Nested type cards first. A leftover flat list is the fallback."""
         out: list[dict] = []
         try:
-            from abcxauto.lab_playbook import playbook_run_sheets, walk_cards
+            from abcxauto.lab_playbook import walk_cards
 
-            sheets: dict[tuple[str, str], dict] = {}
-            try:
-                for row in playbook_run_sheets(lab, flat=True):
-                    if isinstance(row, dict):
-                        sheets[(str(row.get("type") or ""), str(row.get("card") or ""))] = row
-            except Exception:
-                pass
             for type_name, card in walk_cards(lab):
                 if not isinstance(card, dict) or not card.get("name"):
                     continue
                 row = dict(card)
                 if type_name and not row.get("ticket"):
                     row["ticket"] = type_name
-                sheet = sheets.get((str(type_name or ""), str(card.get("name") or ""))) or {}
-                if sheet.get("gate") == "off":
-                    row["_run"] = "gate=off"
-                elif isinstance(sheet.get("send"), dict) and sheet["send"].get("symbol"):
-                    row["_run"] = f"send {sheet['send']['symbol']}"
-                elif sheet.get("next"):
-                    row["_run"] = f"next={sheet['next']}"
                 out.append(row)
         except Exception:
             out = []
@@ -2703,24 +2689,12 @@ class ProTerminal:
         ticket = str(card.get("ticket") or "").strip()
         if ticket:
             head.append(self._chip(ticket, BLUE))
-        run = str(card.get("_run") or "").strip()
-        if run:
-            head.append(self._chip(run, AMBER if "gate" in run else BLUE))
-        # A card nothing was attributed to has not traded flat — say which it is.
         score = (attrib or {}).get(str(card.get("name") or "").lower()) or {}
         sends = int(score.get("sends") or 0)
         fills = int(score.get("attributed_fills") or 0)
         pnl = score.get("realized_pnl")
-        looks = score.get("looks_without_trigger")
-        days = score.get("days_without_trigger")
-        wait_bits: list[str] = []
-        if isinstance(days, (int, float)) and days:
-            wait_bits.append(f"{days:g}d")
-        if isinstance(looks, int) and looks:
-            wait_bits.append(f"{looks} look(s) no trigger")
         if not sends:
-            wait = f"{' / '.join(wait_bits)}, no sends" if wait_bits else "no sends yet"
-            head.append(self._chip(wait, MUTED))
+            head.append(self._chip("no sends yet", MUTED))
         elif not fills or not isinstance(pnl, (int, float)):
             head.append(self._chip(f"{sends} send(s) · no fills yet", MUTED))
         else:
@@ -2729,8 +2703,6 @@ class ProTerminal:
                     f"{sends} send(s) · ${pnl:+,.2f}", GREEN if pnl > 0 else RED if pnl else MUTED
                 )
             )
-        if sends and wait_bits:
-            head.append(self._chip(" / ".join(wait_bits) + " since last send", MUTED))
         rows: list[ft.Control] = [ft.Row(head, spacing=6)]
         for field, label in (
             ("when_on", "when"),
@@ -3677,7 +3649,6 @@ class ProTerminal:
         stage_err = str(getattr(s, "stage_error", "") or "").strip()
         strat = str(getattr(s, "brain_strat", "") or "").strip()
         sends_look = int(getattr(s, "sends_last_look", 0) or 0)
-        looks = int(getattr(s, "looks_since_send", 0) or 0)
         if stage_err:
             self.lbl_last_send.value = f"Block: {stage_err[:240]}"
             self.lbl_last_send.color = AMBER
@@ -3706,10 +3677,6 @@ class ProTerminal:
                 f"({self._brief_age(brief)})"
             )
             self.lbl_last_send.color = MUTED
-            return
-        if looks:
-            self.lbl_last_send.value = f"{looks} look(s) since a ticket"
-            self.lbl_last_send.color = AMBER if looks >= 3 else MUTED
             return
         self.lbl_last_send.value = "—"
         self.lbl_last_send.color = MUTED
@@ -3766,19 +3733,15 @@ class ProTerminal:
         else:
             self.lbl_hs_next.value = ""
             self.lbl_hs_next.color = MUTED
-        looks = int(getattr(s, "looks_since_send", 0) or 0)
         sends = int(getattr(s, "sends_last_look", 0) or 0)
         tools = len(think_tail_tool_chips(buf))
-        burning = looks >= 6
+        burning = False
         if sends:
             self.lbl_hs_burn.value = f"{sends} ticket(s) this look"
             self.lbl_hs_burn.color = GREEN
-        elif not looks:
-            self.lbl_hs_burn.value = "no looks yet"
-            self.lbl_hs_burn.color = MUTED
         else:
-            self.lbl_hs_burn.value = f"{looks} look(s) since a ticket"
-            self.lbl_hs_burn.color = RED if looks >= 6 else (AMBER if looks >= 3 else MUTED)
+            self.lbl_hs_burn.value = ""
+            self.lbl_hs_burn.color = MUTED
         self.lbl_hs_look.value = f"this look: {tools} tool(s) · {sends} send(s)"
         self.lbl_hs_look.color = TEXT if tools else MUTED
         # Only a burn gets a box — the strip is otherwise a plain status bar.
@@ -4046,16 +4009,7 @@ class ProTerminal:
             )
             if inst and is_paper():
                 try:
-                    from abcxauto.think_stream import last_look_for_hunt
-
-                    last_facts = last_look_for_hunt()
-                    bit = lab_wake_bit(
-                        pb,
-                        last_look=list(last_facts.get("tools") or []),
-                        flat=getattr(s, "flat", None),
-                        quoted=last_facts,
-                        session_range=last_facts.get("session_range"),
-                    )
+                    bit = lab_wake_bit(pb)
                     if bit:
                         line = f"{line} · {bit}"
                 except Exception:

@@ -374,7 +374,18 @@ def test_merge_scan_hits_keeps_the_gap_row_after_a_junk_screen():
         "tool_trace": ["scan"],
         "scan_hits": merged,
     })
-    assert "last_scan SNDK -6.5" in bit
+    assert bit == ""
+    assert "last_scan" not in bit
+    assert last_look_wake_bit({
+        "last_say": "SNDK 6% flush still holding the opening low",
+        "send_calls": 0,
+        "tool_trace": ["scan"],
+        "scan_hits": merged,
+    }) == "SNDK 6% flush still holding the opening low"
+    assert last_look_wake_bit({
+        "rationale": "Next look: same mega/large loser screens + news first.",
+        "send_calls": 0,
+    }) == ""
 
 
 def test_merge_scan_hits_puts_the_down_gap_ahead_of_a_green_active_page():

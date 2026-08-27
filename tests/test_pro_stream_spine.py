@@ -381,13 +381,12 @@ def test_health_strip_alarms_on_burn_with_no_tickets(pro):
     s.think_live = "--- GROK ---\n[book]\n[quote]\n[scan]\n"
     s.tool_trace = []
     pro._sync_health_strip()
-    assert "9 look(s) since a ticket" in (pro.lbl_hs_burn.value or "")
-    assert pro.lbl_hs_burn.color == RED
+    assert "9 look(s) since a ticket" not in (pro.lbl_hs_burn.value or "")
+    assert "look(s) since a ticket" not in (pro.lbl_hs_burn.value or "")
     assert "3 tool(s)" in (pro.lbl_hs_look.value or "")
     assert "0 send(s)" in (pro.lbl_hs_look.value or "")
     assert not hasattr(pro, "lbl_hs_cost")
-    # The band itself goes red so it is visible without reading the numbers.
-    assert pro.health_box.border is not None
+    assert pro.health_box.border is None
 
 
 def test_health_strip_credits_a_ticket(pro):
@@ -547,14 +546,14 @@ def test_health_strip_explains_a_quiet_desk_with_link_context(pro):
     assert pro.lbl_hs_link.color == GREEN
 
 
-def test_looks_since_send_counts_looks_that_bought_nothing():
+def test_looks_since_send_is_not_a_tally():
     from abcxauto.pro_engine import ProEngine
 
     eng = ProEngine()
     base = {"cycle": 1, "pnl": 0.0, "equity": 1000.0}
     eng._on_cycle({**base, "sends": 0})
     eng._on_cycle({**base, "sends": 0})
-    assert eng.state.looks_since_send == 2
+    assert eng.state.looks_since_send == 0
     assert eng.state.sends_last_look == 0
     eng._on_cycle({**base, "sends": 1})
     assert eng.state.looks_since_send == 0

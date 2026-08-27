@@ -346,16 +346,18 @@ def test_format_wake_includes_day_facts():
     assert "open=8/15" in text
     assert "open_lots=IWM 260821C306 x1,QQQ 260821C735 x1" in text
     assert "haltAt=" in text
-    assert "playbook rev=51" in text
+    assert "playbook rev=51" not in text
     assert "age=" not in text
     assert "at_write_edge=" not in text
-    assert "since_write=-91.0" in text
-    assert "now_edge=-640.0" in text
-    assert "4h=-12.0" in text
+    assert "since_write=" not in text
+    assert "now_edge=-640.0" not in text
+    assert "4h=-12.0" not in text
     assert "stale=" not in text
     assert "mix=longC:7,shortC:1,vert:1" in text
-    assert "ledger r50:-400.0 r51:-549.0" in text
-    assert text.rstrip().endswith("send.")
+    assert "ledger r50:-400.0 r51:-549.0" not in text
+    assert "looks" not in text
+    assert "0sends" not in text
+    assert "next=" not in text
     assert "set_wake" not in text
     assert "This is a delta" not in text
     assert "no operator" not in text.lower()
@@ -379,18 +381,15 @@ def test_format_wake_prints_lab_waiting_when_the_glance_has_it():
             "capacity": {"open_count": 0, "max_open_positions": 5},
             "max_risk_per_trade_pct": 25.0,
             "playbook": {
-                "revision": 20,
-                "has_instructions": True,
-                "since_write_edge": 0,
-                "now_edge": 0,
-                "win_4h": 0,
-                "lab_wake": "lab flush bounce 147looks/3.9d/0sends untried=13",
+                "lab_wake": "unused=bracket+vertical_spread+iron_condor",
             },
         },
     )
-    assert "lab flush bounce 147looks/3.9d/0sends" in text
-    assert "untried=13" in text
-    assert text.rstrip().endswith("send.")
+    assert "unused=bracket+vertical_spread+iron_condor" in text
+    assert "147looks" not in text
+    assert "playbook rev=" not in text
+    assert "next=" not in text
+    assert "Nlooks" not in text
 
 
 def test_format_wake_floors_on_still_paints_max_risk():
@@ -420,7 +419,8 @@ def test_format_wake_floors_on_still_paints_max_risk():
     assert "risk/trade=" not in text
     assert "open_lots=NVDA STK long 5" in text
     assert "qty=" not in text
-    assert text.rstrip().endswith("send.")
+    assert "next=" not in text
+    assert "playbook rev=" not in text
 
 
 def test_format_working_exits_and_wake_lasts():
@@ -537,7 +537,8 @@ def test_format_wake_fill_is_delta_not_discovery():
     assert "prev=close_option sends=2" in text
     assert "This is a delta" not in text
     assert "yield resume" not in text
-    assert text.rstrip().endswith("send.")
+    assert "next=" not in text
+    assert "playbook rev=" not in text
     assert "set_wake" not in text
     assert "send or set_wake" not in text
     assert "Cycle 2." not in text
@@ -660,8 +661,9 @@ def test_format_wake_flat_empty_omits_leftover_prev():
     assert "open_lots=" not in text
     assert "max_risk=25.0% floors=on" in text
     assert "risk/trade=" not in text
-    assert "last_look 0sends book,playbook,scan,news,set_wake" in text
-    assert "last_scan SNDK -6.5" in text
+    assert "last_look" not in text
+    assert "last_scan" not in text
+    assert "looks" not in text
 
 
 def test_day_facts_wiped_instructions_drop_playbook_glance():

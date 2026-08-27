@@ -187,7 +187,10 @@ def test_playbook_line_paints_run_next(headless_pro):
     headless_pro._sync_widgets()
     line = headless_pro.lbl_playbook.value or ""
     assert "Playbook [" in line
-    assert "next=scan" in line
+    assert "next=" not in line
+    assert "send SYM" not in line
+    assert "Nlooks" not in line
+    assert "unused=" in line
 
 
 def test_book_strip_sync(headless_pro):
@@ -673,7 +676,8 @@ def test_notebook_paints_nested_lab_cards(headless_pro):
         for ctrl in _walk(headless_pro.col_notebook_cards)
     )
     assert "flush bounce" in text
-    assert "next=scan" in text
+    assert "next=scan" not in text
+    assert "next=" not in text
     assert "No setup cards yet" not in text
     assert "≥6%" in text or "6%" in text
 
@@ -1073,7 +1077,8 @@ def test_status_strip_shows_thinking_and_book_money(headless_pro):
     assert headless_pro.lbl_open_upnl not in headless_pro._hidden_metrics.controls
     assert "-41.95" in (headless_pro.lbl_open_upnl.value or "")
     assert headless_pro.lbl_open_upnl.color == "#f4212e"
-    assert "4 look" in (headless_pro.lbl_last_send.value or "")
+    assert "4 look" not in (headless_pro.lbl_last_send.value or "")
+    assert "look(s) since a ticket" not in (headless_pro.lbl_last_send.value or "")
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
 

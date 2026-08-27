@@ -494,13 +494,6 @@ def clerk_look_s(
     if sess in PARK_SESSIONS and mins is not None and mins > 60:
         return max(min_look_s(), (mins - 60.0) * 60.0)
     cap = _stay_up_look_cap_s(sess, mins)
-    if next_look_s is None:
-        try:
-            from abcxauto.lab_playbook import playbook_next_look_s
-
-            next_look_s = playbook_next_look_s()
-        except Exception:
-            next_look_s = None
     if next_look_s is not None:
         clamped = clamp_next_look_s(next_look_s)
         if clamped is not None:
