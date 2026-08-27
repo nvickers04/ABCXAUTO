@@ -22,7 +22,7 @@ Listener = Callable[[str, str], None]
 _lock = threading.Lock()
 _listeners: list[Listener] = []
 _engine: Any = None
-_speaker = ""  # "grok" | "clerk" — last banner in the live stream
+_speaker = ""  # last banner in the live stream ("grok" or "")
 _STATE_DIR = Path(__file__).resolve().parents[1] / "data" / "state"
 THINK_TAIL_PATH = _STATE_DIR / "think_tail.txt"
 THINK_PREV_PATH = _STATE_DIR / "think_prev.txt"
@@ -89,34 +89,21 @@ def reset_speaker() -> None:
 
 
 def _paint(kind: str, text: str) -> str:
-    """Turn one emit into stream text. [think]/[say] stay Grok; clerk facts get [clerk]."""
+    """Turn one emit into stream text. Tool results stay unmarked; no clerk speaker."""
     global _speaker
     if kind == "stage":
         label = ascii_text(text).strip().upper()
-        if label == "CLERK":
-            _speaker = "clerk"
-            return "\n--- CLERK ---\n"
         _speaker = "grok"
-        if label in ("", "GROK", "JUDGE", "ACT"):
+        if label in ("", "GROK", "JUDGE", "ACT", "CLERK"):
             return "\n--- GROK ---\n"
         return f"\n--- GROK {label} ---\n"
     if kind == "stage_end":
         return "\n"
-    if kind == "clerk":
-        body = ascii_text(text)
-        if not body:
-            return ""
-        if _speaker != "clerk":
-            _speaker = "clerk"
-            return "\n--- CLERK ---\n[clerk]\n" + body
-        return body
     return ascii_text(text)
 
 
 def emit(kind: str, text: str) -> None:
-    if kind not in ("stage", "stage_end", "clerk") and not text:
-        return
-    if kind == "clerk" and not text:
+    if kind not in ("stage", "stage_end") and not text:
         return
     with _lock:
         fns = list(_listeners)
@@ -335,21 +322,20 @@ def _signed_open_gap(row: dict[str, Any] | None) -> float:
         return 0.0
 
 
-def _card_wants_down_gaps() -> bool:
+def _open_gap_mag(row: dict[str, Any] | None) -> float:
+    """|open_gap_pct|. Missing gap sorts last. Playbook direction is not a floor."""
+    if not isinstance(row, dict) or row.get("open_gap_pct") is None:
+        return -1.0
     try:
-        from abcxauto.lab_playbook import live_card_send_facts
-
-        return str(live_card_send_facts().get("direction") or "LONG").upper() != "SHORT"
-    except Exception:
-        return True
+        return abs(float(row.get("open_gap_pct")))
+    except (TypeError, ValueError):
+        return -1.0
 
 
 def sort_scan_rows(rows: list[Any] | None) -> list[dict[str, Any]]:
-    """LONG flush cards need the down-gap first, not |gap| (a +4% name is not it)."""
+    """Biggest |gap| first. Playbook does not pick down vs up."""
     clean = [r for r in (rows or []) if isinstance(r, dict)]
-    if _card_wants_down_gaps():
-        return sorted(clean, key=_signed_open_gap)
-    return sorted(clean, key=_signed_open_gap, reverse=True)
+    return sorted(clean, key=_open_gap_mag, reverse=True)
 
 
 def merge_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
@@ -361,7 +347,6 @@ def merge_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
     if not new:
         return {**old, "rows": sort_scan_rows(old.get("rows"))}
     by: dict[str, dict[str, Any]] = {}
-    down = _card_wants_down_gaps()
     for r in list(old.get("rows") or []) + list(new.get("rows") or []):
         if not isinstance(r, dict):
             continue
@@ -373,12 +358,7 @@ def merge_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
             by[sym] = dict(r)
             continue
         keep = dict(prev)
-        better = (
-            _signed_open_gap(r) <= _signed_open_gap(prev)
-            if down
-            else _signed_open_gap(r) >= _signed_open_gap(prev)
-        )
-        if better:
+        if _open_gap_mag(r) > _open_gap_mag(prev):
             keep.update({k: v for k, v in r.items() if v not in (None, "")})
         else:
             for k, v in r.items():
@@ -386,14 +366,9 @@ def merge_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
                     keep[k] = v
         by[sym] = keep
     rows = sort_scan_rows(list(by.values()))
-    if down:
-        new_best = min((_signed_open_gap(r) for r in (new.get("rows") or [])), default=0.0)
-        old_best = min((_signed_open_gap(r) for r in (old.get("rows") or [])), default=0.0)
-        meta = new if new_best <= old_best else old
-    else:
-        new_best = max((_signed_open_gap(r) for r in (new.get("rows") or [])), default=0.0)
-        old_best = max((_signed_open_gap(r) for r in (old.get("rows") or [])), default=0.0)
-        meta = new if new_best >= old_best else old
+    new_best = max((_open_gap_mag(r) for r in (new.get("rows") or [])), default=-1.0)
+    old_best = max((_open_gap_mag(r) for r in (old.get("rows") or [])), default=-1.0)
+    meta = new if new_best >= old_best else old
     return {
         "source": meta.get("source") or new.get("source"),
         "arena": meta.get("arena") or new.get("arena"),
@@ -462,7 +437,7 @@ def _last_turn_is_this_hunt(prev: dict[str, Any] | None) -> bool:
 def begin_run() -> dict[str, Any]:
     """Stamp a new process identity. Call after killing leftovers.
 
-    A fresh completed look stays on disk so a clerk reload does not wipe
+    A fresh completed look stays on disk so a reload does not wipe
     the tape the next wake needs. Overnight and killed mid-turn still stale.
     """
     global _run
@@ -755,7 +730,7 @@ def last_look_for_hunt(brief: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def last_look_wake_bit(brief: dict[str, Any] | None = None) -> str:
-    """Clerk does not assign the next look. Leftover say is not a job."""
+    """No leftover say / unused= / card homework on the next wake."""
     _ = brief
     return ""
 
@@ -807,20 +782,24 @@ def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def last_turn_look_failed(out: dict[str, Any] | None) -> bool:
-    """True when this persist payload is a junk/empty/failed look, not a completed turn.
+    """True when this persist payload is a junk/empty/dead look, not a completed turn.
 
     ``write_desk_brief`` skips ``strat=="in_progress"`` so the last completed
-    look stays on the brief. ``write_last_turn`` skips ``look_failed()`` the
-    same way so a ``?`` / empty / stream-error look does not blank
-    last_turn.json. Overnight / park still write: ``BrainTurn.look_failed``
-    is false when parked, and ``_host_think`` stamps ``_failed`` only when
-    the look failed and was not parked.
+    look stays on the brief. ``write_last_turn`` skips a true empty / lone
+    ``?`` / dead-stream look so it does not blank last_turn.json. A real
+    say is a finished look — a leftover ``_failed`` stamp does not wipe it.
+    Overnight / park still write.
     """
     if not isinstance(out, dict):
         return False
     if str(out.get("strat") or "") == "in_progress":
         return False
     if out.get("_parked") or out.get("parked"):
+        return False
+    if out.get("_stream_error") or out.get("stream_error"):
+        return True
+    rationale = str(out.get("rationale") or "").strip()
+    if rationale and rationale != "?":
         return False
     return bool(out.get("_failed") or out.get("failed"))
 
@@ -913,9 +892,9 @@ def write_last_turn_after_send(
 
 
 def write_last_turn(out: dict[str, Any]) -> None:
-    """Clerk snapshot of the last Grok turn for the Cursor review loop.
+    """Snapshot of the last Grok turn for the Cursor review loop.
 
-    Operator paint has no sit-loop counter. Journal/logs keep the clerk increment.
+    Operator paint has no sit-loop counter. Journal/logs keep the increment.
     A junk / empty / failed look is not a completed turn — keep the last
     real say/tools until a real look finishes. Overnight / park still write.
     """

@@ -1,6 +1,6 @@
 # Asset Balancing Control X Auto (ABCXAUTO)
 
-**Grok owns a paper IBKR book. The clerk is facts, hard gates, and the overnight park.**
+**Grok owns a paper IBKR book. Silent code is facts, hard gates, and the overnight park.**
 
 Grok (the `model` knob, default grok-4.6) invents tickets and standing notes. Live (TWS **7496**, confirm phrase, a different client id) only follows a **promoted paper playbook**. It never copies paper fills.
 
@@ -10,11 +10,11 @@ Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of
 
 | Owner | Job |
 |-------|-----|
-| **Grok** | Tickets (`send`), risk/watchlist knobs (`self_tune`), lab notebook (`write_lab_playbook`, optional card `next_look_s`) |
-| **Clerk (code)** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, overnight / after-close park |
+| **Grok** | Tickets (`send`), risk/watchlist knobs (`self_tune`), lab notebook (`write_lab_playbook`) |
+| **Code** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, overnight / after-close park |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No approval step. |
 
-Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` persists to `risk_settings.json`, which beats the `ABCXAUTO_MODEL` env form. Keep the clerk.
+Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` persists to `risk_settings.json`, which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process. There is no clerk.
 
 ## Hard gates (code)
 
@@ -40,9 +40,9 @@ SNAP     IBKR book, orders, protection
     |
 GROK     tools (facts + send). Wake is a short line — Grok fetches what it needs.
     |
-CLERK    send → gates → IBKR. Journal write is clerk, not a Grok tool.
+SEND     send → gates → IBKR. Journal write is code, not a Grok tool.
     |
-LOOK     Finished RTH look writes no grok_wake.json. Clerk is not a runner.
+LOOK     Finished RTH look writes no grok_wake.json. Stay-up has no sit clock.
 ```
 
 `python -m abcxauto` wraps Pro in a supervisor: useful hours are weekdays **8:30–16:00 ET**, TWS **7497** must be listening, crash relaunches, clean window close stays down. `--cleanup` marks operator stop.
@@ -72,9 +72,9 @@ IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 
 MDA delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
 
-Other: `odds` (Polymarket), `playbook` (notebook + score since last write), `write_lab_playbook` (paper notebook, up to 16000 chars, plus setup `cards` — trigger, ticket shape, invalidation, testing/working/retired, an optional `expect_hit_rate` scored against what the card actually hit, optional `next_look_s` clerk cadence, and looks/days with no send so a trigger that never prints is visible; Grok judges), `send`, `self_tune` (flat knobs; `send self_tune` still works).
+Other: `odds` (Polymarket), `playbook` (notebook + score since last write), `write_lab_playbook` (paper notebook, up to 16000 chars, plus setup `cards` — trigger, ticket shape, invalidation, testing/working/retired; Grok judges), `send`, `self_tune` (flat knobs; `send self_tune` still works).
 
-Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limited to it. Clerk still writes `journal.db`; there is no `journal` tool.
+Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limited to it. Code still writes `journal.db`; there is no `journal` tool.
 
 ## 3. Operator surfaces
 

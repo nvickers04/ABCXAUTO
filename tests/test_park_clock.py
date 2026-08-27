@@ -331,37 +331,14 @@ def test_should_wake_grok_is_what_the_engine_asks_now(tmp_path, monkeypatch):
     assert load_alarm().wake_at is None
 
 
-def test_failed_look_backoff_honors_the_pinned_cadence(monkeypatch):
-    """ABCXAUTO_STAY_UP_RETRY_S still floors the failed-look backoff."""
-    from abcxauto.park_clock import failed_look_backoff_s
-
-    monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.25")
-    assert failed_look_backoff_s(1) == 0.25
-
-
-def test_clerk_look_s_open_book_is_short(monkeypatch):
-    from abcxauto.park_clock import DEFAULT_LOOK_OPEN_S, clerk_look_s
-
-    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
-    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
-    assert clerk_look_s(flat=False, session="regular") == DEFAULT_LOOK_OPEN_S
-
-
-def test_clerk_look_s_flat_rth_is_a_hunt(monkeypatch):
-    from abcxauto.park_clock import DEFAULT_LOOK_HUNT_S, clerk_look_s
-
-    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
-    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
-    assert clerk_look_s(flat=True, session="regular", next_look_s=None) == DEFAULT_LOOK_HUNT_S
-
-
-def test_clerk_look_s_honors_card_hint(monkeypatch):
+def test_clerk_look_s_stay_up_is_zero(monkeypatch):
     from abcxauto.park_clock import clerk_look_s
 
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
-    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
-    assert clerk_look_s(flat=False, session="regular", next_look_s=120) == 300
-    assert clerk_look_s(flat=True, session="regular", next_look_s=300) == 300
+    assert clerk_look_s(flat=False, session="regular") == 0.0
+    assert clerk_look_s(flat=True, session="regular", next_look_s=None) == 0.0
+    assert clerk_look_s(flat=False, session="regular", next_look_s=120) == 0.0
+    assert clerk_look_s(flat=True, session="premarket", minutes_to_open=45) == 0.0
 
 
 def _save_session_card():
@@ -389,18 +366,16 @@ def _save_session_card():
     save_lab(update)
 
 
-def test_clerk_look_s_last_hour_to_open(monkeypatch):
-    from abcxauto.park_clock import LAST_HOUR_LOOK_S, clerk_look_s
+def test_clerk_look_s_last_hour_to_open_is_stay_up(monkeypatch):
+    from abcxauto.park_clock import clerk_look_s
 
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
-    assert clerk_look_s(
-        flat=True, session="premarket", minutes_to_open=45
-    ) == LAST_HOUR_LOOK_S
+    assert clerk_look_s(flat=True, session="premarket", minutes_to_open=45) == 0.0
 
 
 def test_clerk_look_s_session_card_does_not_park_until_the_open(monkeypatch):
-    """Gap cards cannot sit the think loop until 9:30. Hunt / last-hour cadence."""
-    from abcxauto.park_clock import DEFAULT_LOOK_HUNT_S, LAST_HOUR_LOOK_S, clerk_look_s
+    """Gap cards cannot sit the think loop until 9:30. Premarket stay-up is 0."""
+    from abcxauto.park_clock import clerk_look_s
 
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
     _save_session_card()
@@ -409,13 +384,13 @@ def test_clerk_look_s_session_card_does_not_park_until_the_open(monkeypatch):
         session="premarket",
         minutes_to_open=32,
         next_look_s=1800,
-    ) == LAST_HOUR_LOOK_S
+    ) == 0.0
     assert clerk_look_s(
         flat=True,
         session="premarket",
         minutes_to_open=90,
         next_look_s=1800,
-    ) == DEFAULT_LOOK_HUNT_S
+    ) == 0.0
 
 
 def test_clerk_look_s_overnight_closed_still_parks(monkeypatch):

@@ -1295,7 +1295,7 @@ def _playbook_day(
     *,
     flat: bool | None = None,
 ) -> dict[str, Any]:
-    """Playbook is notes. Clerk does not assign unused= or a leftover say."""
+    """Playbook is notes. No unused= or leftover say on the wake."""
     _ = (scorecard, flat)
     return {}
 
@@ -1440,7 +1440,7 @@ def format_wake(
 ) -> str:
     """Desk brief. Live book facts; no canned tape= names. Scan is a tool.
 
-    ``cycle`` is clerk-internal (journal/logs). Not painted on the brief.
+    ``cycle`` is journal/logs. Not painted on the brief.
     """
     _ = cycle
     unprot = ",".join(unprotected) if unprotected else "none"
@@ -1514,7 +1514,7 @@ def format_wake(
             parts.append(f"mix={mix_s}.")
         if ev is not None:
             parts.append(f"event={ev.kind} {ev.detail}.".strip())
-        # Clerk does not assign the look. leftover say / prev= / unused= stay off wake.
+        # leftover say / prev= / unused= stay off wake.
     parts.append("send.")
     return " ".join(parts)
 

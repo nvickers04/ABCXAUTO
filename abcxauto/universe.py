@@ -498,13 +498,6 @@ async def pull_one_screen(
     if not resolved.get("ok"):
         return resolved
     ibkr_spec, applied = merge_scan_filters_into_spec(resolved.get("ibkr"), filters)
-    try:
-        from abcxauto.lab_playbook import apply_card_constraints_to_spec
-
-        ibkr_spec, extra = apply_card_constraints_to_spec(ibkr_spec)
-        applied.update(extra)
-    except Exception:
-        logger.debug("card scan constraints apply failed", exc_info=True)
     applied = _with_spec_cap_applied(ibkr_spec, applied)
     if (filters or {}).get("applied") and ibkr_spec is None:
         return {

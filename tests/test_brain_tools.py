@@ -578,12 +578,24 @@ async def test_third_scan_this_look_reuses_merged_hits(monkeypatch):
             turn=turn,
         )
     )
-    assert n["calls"] == 2
+    assert n["calls"] == 3
     assert first.get("reused") is not True
     assert second.get("reused") is not True
-    assert third["reused"] is True
-    assert "SNDK" in third["symbols"]
-    assert third["screens_this_look"] == 2
+    assert third.get("reused") is not True
+    assert third.get("ok") is True
+    same = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "mega_cap", "scan_code": "TOP_PERC_LOSE"},
+            connector=None,
+            world=world,
+            snap=snap,
+            turn=turn,
+        )
+    )
+    assert n["calls"] == 3
+    assert same["reused"] is True
+    assert "SNDK" in same["symbols"]
 
 
 @pytest.mark.asyncio
@@ -638,18 +650,16 @@ async def test_third_scan_reuses_an_empty_tape_instead_of_requiring_arena(monkey
     third = json.loads(
         await _run_tool("scan", {"scan_code": "LOW_OPEN_GAP"}, connector=None, world=world, snap=snap, turn=turn)
     )
-    assert n["calls"] == 2
+    assert n["calls"] == 3
     assert first.get("reused") is not True
     assert second.get("reused") is not True
-    assert third["reused"] is True
-    assert third["hits"] == []
+    assert third.get("reused") is not True
     assert third.get("ok") is True
-    assert "requires arena" not in str(third.get("error") or "")
     assert "run" not in third
 
 
 @pytest.mark.asyncio
-async def test_scan_on_a_news_card_fetches_headlines_and_skips_news_step(monkeypatch):
+async def test_scan_does_not_auto_fetch_news_from_a_playbook_card(monkeypatch):
     from abcxauto.lab_playbook import clamp_update, save_lab
 
     update = clamp_update(
@@ -701,14 +711,24 @@ async def test_scan_on_a_news_card_fetches_headlines_and_skips_news_step(monkeyp
             turn=turn,
         )
     )
-    assert data["news"][0]["headline"] == "sales miss"
-    assert "news" in turn.tool_trace
+    assert "news" not in data
+    assert "news" not in turn.tool_trace
     assert "run" not in data
-    assert world.news_items[0]["headline"] == "sales miss"
+    asked = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "mega_cap", "scan_code": "TOP_PERC_LOSE", "with": ["news"]},
+            connector=None,
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert asked["news"][0]["headline"] == "sales miss"
 
 
 @pytest.mark.asyncio
-async def test_empty_scan_on_a_live_card_runs_the_written_screens(monkeypatch):
+async def test_empty_scan_on_a_live_card_does_not_run_playbook_screens(monkeypatch):
     from abcxauto.lab_playbook import clamp_update, save_lab
 
     update = clamp_update(
@@ -738,19 +758,13 @@ async def test_empty_scan_on_a_live_card_runs_the_written_screens(monkeypatch):
         arena = str(kw.get("arena") or "")
         code = str(kw.get("scan_code") or "")
         seen.append((arena, code))
-        if code == "MOST_ACTIVE":
-            hits = [{"symbol": "AMD", "last": 472.0, "open_gap_pct": 4.2}]
-        elif arena == "large_cap":
-            hits = [{"symbol": "ALB", "last": 134.0, "open_gap_pct": -3.8}]
-        else:
-            hits = [{"symbol": "XOM", "last": 80.0, "open_gap_pct": -1.5}]
         return {
             "ok": True,
             "source": "ibkr",
             "arena": arena,
             "scan_code": code,
-            "symbols": [hits[0]["symbol"]],
-            "hits": hits,
+            "symbols": ["ALB"],
+            "hits": [{"symbol": "ALB", "last": 134.0, "open_gap_pct": -3.8}],
             "quoted": 1,
         }
 
@@ -768,29 +782,24 @@ async def test_empty_scan_on_a_live_card_runs_the_written_screens(monkeypatch):
     first = json.loads(
         await _run_tool("scan", {}, connector=None, world=world, snap=snap, turn=BrainTurn())
     )
-    assert seen == [
-        ("mega_cap", "MOST_ACTIVE"),
-        ("mega_cap", "TOP_PERC_LOSE"),
-        ("large_cap", "MOST_ACTIVE"),
-        ("large_cap", "TOP_PERC_LOSE"),
-    ]
-    assert first.get("screens") == [
-        "mega_cap:MOST_ACTIVE",
-        "mega_cap:TOP_PERC_LOSE",
-        "large_cap:MOST_ACTIVE",
-        "large_cap:TOP_PERC_LOSE",
-    ]
-    assert snap["scan_screens"] == first["screens"]
-    assert snap["scan_arenas"] == ["mega_cap", "large_cap"]
-    assert snap["scan_calls"] == 4
-    assert first.get("arena") in (None, "")
-    assert first.get("scan_code") in (None, "")
-    assert first["rows"][0]["symbol"] == "ALB"
-    assert first["deepest_symbol"] == "ALB"
-    assert first["deepest_open_gap_pct"] == -3.8
-    assert "card_min_gap_pct" not in first
-    assert "card_gap_met" not in first
-    assert "card_gap_floors" not in first
+    assert seen == []
+    assert first.get("ok") is False
+    assert "arena" in str(first.get("error") or "")
+    pulled = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "large_cap", "scan_code": "TOP_PERC_LOSE"},
+            connector=None,
+            world=world,
+            snap=snap,
+            turn=BrainTurn(),
+        )
+    )
+    assert seen == [("large_cap", "TOP_PERC_LOSE")]
+    assert pulled.get("ok") is True
+    assert "card_min_gap_pct" not in pulled
+    assert "card_gap_met" not in pulled
+    assert "card_gap_floors" not in pulled
     from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
 
     painted: list[tuple[str, str]] = []
@@ -814,24 +823,14 @@ async def test_empty_scan_on_a_live_card_runs_the_written_screens(monkeypatch):
     finally:
         unsubscribe(cap)
     assert reused.get("reused") is True
-    assert reused.get("note") == "card screens already fetched this look"
-    assert reused.get("screens") == first["screens"]
-    assert "arena" not in reused or reused.get("arena") in (None, "")
+    assert reused.get("note") == "this screen already fetched this look"
     assert "card_gap_met" not in reused
-    assert "card_min_gap_pct" not in reused
     assert any("already have it" in text for _kind, text in painted)
-    assert not any("reused screens=" in text for _kind, text in painted)
-    assert not any(text.strip().startswith("hits=") for _kind, text in painted)
-    assert seen == [
-        ("mega_cap", "MOST_ACTIVE"),
-        ("mega_cap", "TOP_PERC_LOSE"),
-        ("large_cap", "MOST_ACTIVE"),
-        ("large_cap", "TOP_PERC_LOSE"),
-    ]
+    assert seen == [("large_cap", "TOP_PERC_LOSE")]
 
 
 @pytest.mark.asyncio
-async def test_scan_one_liner_is_clerk_and_omits_card_gap(monkeypatch):
+async def test_scan_one_liner_is_a_tool_result_and_omits_card_gap(monkeypatch):
     from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
 
     async def _fake_scan(**kw):
@@ -873,9 +872,10 @@ async def test_scan_one_liner_is_clerk_and_omits_card_gap(monkeypatch):
     finally:
         unsubscribe(cap)
         reset_speaker()
-    assert any(k == "clerk" and "hits=" in t for k, t in got)
+    assert any(k == "tool" and "hits=" in t for k, t in got)
     assert not any("card_gap=" in t for _k, t in got)
     assert not any(k == "say" and "hits=" in t for k, t in got)
+    assert not any(k == "clerk" for k, _t in got)
 
 
 def test_scan_news_asks_the_gap_row_before_the_active_page():
@@ -2235,7 +2235,7 @@ def test_finish_look_chat_overnight_and_dead_stream_drop():
 
 
 def test_finish_look_chat_junk_empty_failed_drop():
-    """A stay-up empty/junk/failed look must not keep the live chat."""
+    """True empty / lone '?' drop the live chat. A real say does not."""
     from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
 
     g, created = _stub_chat_client()
@@ -2247,8 +2247,8 @@ def test_finish_look_chat_junk_empty_failed_drop():
         BrainTurn(text=""),
         BrainTurn(text="?"),
         BrainTurn(text="  "),
-        BrainTurn(failed=True, text="watching IWM"),
-        BrainTurn(text="I'll inspect the book first.\n?"),
+        BrainTurn(failed=True, text=""),
+        BrainTurn(failed=True, text="?"),
     ):
         g.chat = chat
         _finish_look_chat(g, dead, session="regular")
@@ -2258,6 +2258,23 @@ def test_finish_look_chat_junk_empty_failed_drop():
     _finish_look_chat(g, BrainTurn(text=""), session="premarket")
     assert getattr(g, "chat", None) is None
     assert len(created) == 1
+
+
+def test_finish_look_chat_spoken_look_keeps_chat():
+    """A no-send look that already spoke stays on the paper stay-up chat."""
+    from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
+
+    g, _created = _stub_chat_client()
+    chat = _ensure_chat(g, kind="boot")
+    for spoken in (
+        BrainTurn(text="Standing down. Watching IWM. No ticket."),
+        BrainTurn(text="I'll inspect the book first.\n?"),
+        BrainTurn(failed=True, text="watching IWM"),
+        BrainTurn(last_result={"status": "error"}, text="standing down"),
+    ):
+        g.chat = chat
+        _finish_look_chat(g, spoken, session="regular")
+        assert getattr(g, "chat", None) is chat, spoken
 
 
 def test_finish_look_chat_refused_send_keeps_chat():
@@ -3029,7 +3046,7 @@ async def test_invoke_write_lab_playbook_emits_marker_only(monkeypatch):
     got: list[str] = []
 
     def cap(kind: str, text: str) -> None:
-        if kind == "clerk":
+        if kind == "tool":
             got.append(text)
 
     note = "Paper: prefer debit verticals on index ETFs."
@@ -3066,7 +3083,7 @@ async def test_invoke_write_lab_playbook_long_notebook_stays_off_stream(monkeypa
     got: list[str] = []
 
     def cap(kind: str, text: str) -> None:
-        if kind == "clerk":
+        if kind == "tool":
             got.append(text)
 
     note = ("AAPL — wait. " * 400) + ("x" * 2000)
@@ -3126,7 +3143,7 @@ async def test_invoke_other_tool_emits_marker_only(monkeypatch):
     got: list[str] = []
 
     def cap(kind: str, text: str) -> None:
-        if kind == "clerk":
+        if kind == "tool":
             got.append(text)
 
     subscribe(cap)
@@ -3153,19 +3170,28 @@ def test_look_failed_question_empty_and_stream_error():
     assert BrainTurn(text="watching IWM").look_failed() is False
     assert BrainTurn(text="?", sends=[{"strat": "buy_option"}]).look_failed() is False
     assert BrainTurn(text="?", parked=True).look_failed() is False
-    assert BrainTurn(failed=True, text="ok").look_failed() is True
+    # A real say is a finished look — failed/error stamps must not wipe it.
+    assert BrainTurn(failed=True, text="ok").look_failed() is False
     assert BrainTurn(last_result={"status": "error"}).look_failed() is True
-    # First round said something; second round died as '?' — still a failed look.
+    assert BrainTurn(
+        last_result={"status": "error"},
+        text="standing down",
+    ).look_failed() is False
+    assert BrainTurn(stream_error="RESOURCE_EXHAUSTED").look_failed() is True
+    assert BrainTurn(
+        stream_error="RESOURCE_EXHAUSTED",
+        text="watching IWM",
+    ).look_failed() is True
+    # A look that said something keeps chat — trailing '?' is not a lone '?'.
     assert BrainTurn(
         text="I'll inspect the book, status, and playbook first.\n?",
         tool_trace=["book", "status", "playbook"],
-    ).look_failed() is True
+    ).look_failed() is False
     assert BrainTurn(
         text="I'll inspect the book, status, and playbook first.",
         tool_trace=["book", "status", "playbook"],
     ).look_failed() is False
-    # Unknown glyphs still smash to '?' and count as a dead last round.
-    assert BrainTurn(text="\u2603").look_failed() is True
+    assert BrainTurn(text="\u2603").look_failed() is False
     assert BrainTurn(text="watching IWM \u2014 wait").look_failed() is False
 
 
@@ -3198,7 +3224,7 @@ async def test_question_mark_turn_is_failed():
 
 
 @pytest.mark.asyncio
-async def test_trailing_question_after_tools_is_failed(monkeypatch):
+async def test_trailing_question_after_tools_keeps_a_real_say(monkeypatch):
     from abcxauto import brain
     from abcxauto.brain import grok_turn
 
@@ -3239,10 +3265,10 @@ async def test_trailing_question_after_tools_is_failed(monkeypatch):
     )
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
     assert "book" in turn.tool_trace
-    assert turn.failed is True
-    assert turn.look_failed() is True
+    assert turn.failed is False
+    assert turn.look_failed() is False
     assert turn.parked is False
-    assert getattr(g, "chat", None) is None
+    assert getattr(g, "chat", None) is not None
 
 
 @pytest.mark.asyncio

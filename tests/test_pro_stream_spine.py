@@ -355,7 +355,7 @@ def test_health_strip_calls_out_silence(pro):
     assert pro.lbl_hs_age.color == RED
 
 
-def test_health_strip_shows_the_backoff_streak_and_wait(pro):
+def test_health_strip_shows_the_fail_streak_without_a_sit(pro):
     s = pro.engine.state
     s.running = True
     s.autonomous = True
@@ -366,13 +366,11 @@ def test_health_strip_shows_the_backoff_streak_and_wait(pro):
     assert pro.lbl_hs_state.value == "look failed"
     assert pro.lbl_desk_sub.value == "look failed"
     assert "x3" in (pro.lbl_hs_next.value or "")
-    assert "360s" in (pro.lbl_hs_next.value or "")
+    assert "next look" not in (pro.lbl_hs_next.value or "")
+    assert "360s" not in (pro.lbl_hs_next.value or "")
 
 
-def test_health_strip_falls_back_to_the_park_clock_backoff(pro):
-    """No note landed yet — the wait still comes from park_clock, jitter and all."""
-    import re
-
+def test_health_strip_does_not_invent_a_park_clock_sit(pro):
     s = pro.engine.state
     s.running = True
     s.autonomous = True
@@ -382,8 +380,7 @@ def test_health_strip_falls_back_to_the_park_clock_backoff(pro):
     pro._sync_health_strip()
     shown = pro.lbl_hs_next.value or ""
     assert "x2" in shown
-    match = re.search(r"next look (\d+)s", shown)
-    assert match and int(match.group(1)) > 0
+    assert "next look" not in shown
 
 
 def test_health_strip_reports_looking(pro):

@@ -248,26 +248,6 @@ def test_provider_overloaded_ignores_ordinary_errors():
     assert provider_overloaded(None) is False
 
 
-def test_failed_look_backoff_escalates_and_caps():
-    from abcxauto.park_clock import (
-        FAILED_LOOK_BACKOFF_CAP_S,
-        PROVIDER_BACKOFF_CAP_S,
-        PROVIDER_BACKOFF_MIN_S,
-        failed_look_backoff_s,
-    )
-
-    # Jitter must never let a later strike come back sooner than an earlier one.
-    for _ in range(50):
-        waits = [failed_look_backoff_s(n) for n in range(1, 6)]
-        assert waits == sorted(waits)
-    assert failed_look_backoff_s(50) <= FAILED_LOOK_BACKOFF_CAP_S
-
-    # Capacity refusals start well above the ordinary retry and cap higher.
-    assert failed_look_backoff_s(1, overloaded=True) >= PROVIDER_BACKOFF_MIN_S
-    assert failed_look_backoff_s(1, overloaded=True) > failed_look_backoff_s(1)
-    assert failed_look_backoff_s(50, overloaded=True) == PROVIDER_BACKOFF_CAP_S
-
-
 def test_engine_streak_resets_after_a_good_look():
     from abcxauto.pro_engine import ProEngine
 
@@ -282,7 +262,8 @@ def test_engine_streak_resets_after_a_good_look():
     second = eng._rearm_after_think(
         {"_failed": True, "_stream_error": "boom"}, session="regular"
     )
-    assert second > first
+    assert first == 0.0
+    assert second == 0.0
     assert eng._fail_streak == 2
 
     assert eng._rearm_after_think({"sends": 1}, session="regular") == 0.0

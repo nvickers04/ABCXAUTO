@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from abcxauto.pro_desktop import NOTE_COLOR, ProTerminal
+from abcxauto.pro_desktop import ProTerminal
 
 
 class _Cfg:
@@ -76,17 +76,18 @@ def _activity_text(pro_ui) -> str:
 # ---------------------------------------------------------------- lifecycle notes
 
 
-def test_retry_note_message_reaches_the_activity_log(pro):
-    """``_note_backoff`` is the only place the operator learns xAI refused."""
+def test_retry_note_is_not_a_sit_clock(pro):
+    """Stay-up does not paint a next-look sit after a failed look."""
     eng = pro.engine
-    eng._fail_streak = 3
-    eng._note_backoff({"_stream_error": "RESOURCE_EXHAUSTED: model at capacity"}, 360.0)
+    wait = eng._rearm_after_think(
+        {"_failed": True, "_stream_error": "RESOURCE_EXHAUSTED: model at capacity"},
+        session="regular",
+    )
+    assert wait == 0.0
     pro._sync_activity()
     blob = _activity_text(pro)
-    assert "RETRY" in blob
-    assert "xAI at capacity (x3)" in blob
-    assert "next look 360s" in blob
-    assert "retry" in NOTE_COLOR
+    assert "next look 360s" not in blob
+    assert "next look 21s" not in blob
 
 
 def test_every_note_kind_paints_its_message(pro):

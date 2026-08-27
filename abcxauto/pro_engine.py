@@ -826,23 +826,28 @@ class ProEngine:
         return resolve_stay_up_session(session)
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
-        """Stay-up next look. Junk/empty/? starts immediately. Not a sit clock.
+        """Stay-up next look is immediate. No sit clock.
 
         Paper RTH / premarket re-arm on this process. A good look writes no
-        grok_wake.json. Empty / ? drops the chat (already) and starts another
-        look now — cold start. xAI capacity still backs off. Overnight park
-        is park_clock after a closed-session skip. Clerk is not a runner.
+        grok_wake.json. A look that already spoke resumes the same chat.
+        True empty / lone '?' / dead stream drop the chat and start another
+        look now. Overnight park is park_clock after a closed skip.
         """
         session = self._resolve_session(session)
         self._last_session = session
         payload = out if isinstance(out, dict) else {}
-        from abcxauto.brain import provider_overloaded
-        from abcxauto.park_clock import failed_look_backoff_s, paper_stay_up
+        from abcxauto.brain import _look_text_is_junk
+        from abcxauto.park_clock import paper_stay_up
 
         stay = paper_stay_up(session)
         failed = bool(payload.get("_failed"))
         parked = bool(payload.get("_parked"))
         stream_err = str(payload.get("_stream_error") or "")
+        # A spoken look is not junk. Do not wipe the stay-up chat.
+        if failed and not stream_err and not _look_text_is_junk(
+            str(payload.get("rationale") or "")
+        ):
+            failed = False
         if parked and not stay:
             self._fail_streak = 0
             self._cold_next = True
@@ -856,38 +861,7 @@ class ProEngine:
         self._fail_streak = int(getattr(self, "_fail_streak", 0) or 0) + 1
         if not stay:
             self._resume_think = False
-            return 0.0
-        # Junk / empty / ? is not a capacity problem — look again now.
-        if not stream_err:
-            return 0.0
-        return failed_look_backoff_s(
-            self._fail_streak,
-            overloaded=provider_overloaded(stream_err),
-        )
-
-    def _note_backoff(self, out: dict | None, wait_s: float) -> None:
-        from abcxauto.brain import provider_overloaded
-
-        err = str((out or {}).get("_stream_error") or "")
-        streak = int(getattr(self, "_fail_streak", 0) or 0)
-        why = "xAI at capacity" if provider_overloaded(err) else "look failed"
-        self.state.backoff_wait_s = float(wait_s)
-        self._note("RETRY", f"{why} (x{streak}) — next look {wait_s:.0f}s")
-
-    async def _wait_stay_up_retry(self, sec: float) -> None:
-        """Backoff after a failed stay-up look. Not a park clock."""
-        wait = max(0.0, float(sec))
-        if wait <= 0:
-            return
-        self.state.status = "On"
-        ev = self._wake_event
-        if ev is None:
-            await asyncio.sleep(wait)
-            return
-        ev.clear()
-        from abcxauto.pacing import wait_for_pace
-
-        await wait_for_pace(wait, ev, chunk_s=min(1.0, max(0.05, wait)))
+        return 0.0
 
     async def _host_think(
         self, n: int, g: Any, s: dict, *, resume: bool = False
@@ -1248,10 +1222,7 @@ class ProEngine:
                                 clear_park()
                             except Exception:
                                 pass
-                            wait_s = self._rearm_after_think(out, session=session)
-                            if wait_s > 0:
-                                self._note_backoff(out, wait_s)
-                                await self._wait_stay_up_retry(wait_s)
+                            self._rearm_after_think(out, session=session)
                         elif honor_park(session=session, minutes_to_open=mins_open):
                             alarm = load_alarm()
                             if not (alarm.wake_at and alarm.seconds_until() is not None):
@@ -1274,9 +1245,8 @@ class ProEngine:
                     self._last_cycle_out = out
                     self.state.status = "On"
                     self.ui.put(("cycle", out))
-                    # Clerk is not a runner. Stay-up writes no sit clock and
-                    # does not call ensure_next_look / set_wake. Overnight
-                    # skip still parks.
+                    # Stay-up writes no sit clock and does not call
+                    # ensure_next_look / set_wake. Overnight skip still parks.
                     if stay:
                         try:
                             clear_park()
@@ -1297,17 +1267,11 @@ class ProEngine:
                                 )
                             except Exception:
                                 self._note("WAKE", "next look seed failed")
-                    wait_s = self._rearm_after_think(out, session=session)
-                    if wait_s > 0:
-                        self._note_backoff(out, wait_s)
-                        await self._wait_stay_up_retry(wait_s)
+                    self._rearm_after_think(out, session=session)
                 except Exception as e:
                     self.ui.put(("error", str(e)))
                     payload = {"_failed": True, "_stream_error": str(e)}
-                    wait_s = self._rearm_after_think(payload, session=session)
-                    if wait_s > 0:
-                        self._note_backoff(payload, wait_s)
-                        await self._wait_stay_up_retry(wait_s)
+                    self._rearm_after_think(payload, session=session)
         finally:
             self._stop_monitor()
             self._worker_loop = None

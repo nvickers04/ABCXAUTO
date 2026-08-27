@@ -1,4 +1,4 @@
-"""Wake loop: snap facts, Grok tools, clerk gates on send.
+"""Wake loop: snap facts, Grok tools, send gates.
 
 ``abcxauto.cycle`` re-exports this API for test/UI compatibility.
 """
@@ -1097,10 +1097,6 @@ async def run_cycle(
         _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
         return _persist_cycle(out)
 
-    from abcxauto.think_stream import emit as think_emit
-
-    think_emit("clerk", "Book snap done — Grok has the tools.\n")
-
     try:
         sync_open_risk(
             positions,
@@ -1140,7 +1136,6 @@ async def run_cycle(
         ibkr_up=ibkr_up,
         day=day,
     )
-    think_emit("clerk", "Wake Grok.\n")
     try:
         from abcxauto.think_stream import write_last_turn
 

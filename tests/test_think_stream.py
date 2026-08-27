@@ -57,18 +57,16 @@ def test_bind_engine_appends_think_live():
     assert '{"stance":"idle"}' in st.think_live
 
 
-def test_clerk_facts_use_clerk_banner_not_grok():
-    """hits= / book snap / Wake Grok are clerk. [think]/[say] stay Grok."""
+def test_tool_facts_are_not_a_clerk_speaker():
+    """hits= / [scan] are tool results. [think]/[say] stay Grok. No clerk banner."""
     from abcxauto.think_stream import reset_speaker
 
     reset_speaker()
     st = SimpleNamespace(think_live="")
     bind_engine(SimpleNamespace(state=st))
     try:
-        emit("clerk", "Book snap done — Grok has the tools.\n")
-        emit("clerk", "Wake Grok.\n")
-        emit("clerk", "[scan]\n")
-        emit("clerk", "hits=3 screens=2 deepest=-6.5% SNDK src=ibkr\n")
+        emit("tool", "[scan]\n")
+        emit("tool", "hits=3 screens=2 deepest=-6.5% SNDK src=ibkr\n")
         emit("stage", "grok")
         emit("say", "\n[think]\n")
         emit("think", "weigh tape ")
@@ -78,27 +76,14 @@ def test_clerk_facts_use_clerk_banner_not_grok():
         bind_engine(None)
         reset_speaker()
     live = st.think_live
-    assert "--- CLERK ---" in live
-    assert "[clerk]" in live
-    assert "Book snap done" in live
-    assert "Wake Grok." in live
+    assert "--- CLERK ---" not in live
+    assert "[clerk]" not in live
     assert "hits=3 screens=2" in live
     assert "card_gap=" not in live
     assert "--- GROK ---" in live
     assert "[think]" in live
     assert "[say]" in live
     assert "watching the gap" in live
-    clerk_at = live.find("--- CLERK ---")
-    grok_at = live.find("--- GROK ---")
-    assert clerk_at >= 0 and grok_at > clerk_at
-    clerk_block = live[clerk_at:grok_at]
-    grok_block = live[grok_at:]
-    assert "hits=3" in clerk_block
-    assert "Wake Grok." in clerk_block
-    assert "[think]" not in clerk_block
-    assert "[say]" not in clerk_block
-    assert "watching the gap" in grok_block
-    assert "hits=3" not in grok_block
 
 
 def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
@@ -243,11 +228,12 @@ def test_write_last_turn_skips_junk_failed_look(tmp_path, monkeypatch):
         "rationale": "I'll inspect the book, status, and playbook first.\n?",
         "tool_trace": ["book", "status", "playbook"],
         "_failed": True,
+        "world_state": {"flat": True, "net_liquidation": 35000},
     }
-    assert last_turn_look_failed(trailing) is True
+    assert last_turn_look_failed(trailing) is False
     ts.write_last_turn(trailing)
     last4 = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
-    assert last4["rationale"] == "Flat. No ticket."
+    assert last4["rationale"] == "I'll inspect the book, status, and playbook first.\n?"
 
     ts.write_last_turn({
         "strat": "",
@@ -436,7 +422,7 @@ def test_merge_scan_hits_keeps_the_gap_row_after_a_junk_screen():
     }) == ""
 
 
-def test_merge_scan_hits_puts_the_down_gap_ahead_of_a_green_active_page():
+def test_merge_scan_hits_puts_the_biggest_gap_first_not_playbook_down():
     from abcxauto.think_stream import merge_scan_hits
 
     merged = merge_scan_hits(
@@ -451,8 +437,9 @@ def test_merge_scan_hits_puts_the_down_gap_ahead_of_a_green_active_page():
             "rows": [{"symbol": "ALB", "last": 134.0, "open_gap_pct": -3.8}],
         },
     )
-    assert merged["rows"][0]["symbol"] == "ALB"
-    assert merged["scan_code"] == "TOP_PERC_LOSE"
+    assert merged["rows"][0]["symbol"] == "AMD"
+    assert merged["scan_code"] == "MOST_ACTIVE"
+    assert {r["symbol"] for r in merged["rows"]} == {"AMD", "ALB"}
 
 
 def test_seed_snap_from_last_turn_skips_none(tmp_path, monkeypatch):
