@@ -1,4 +1,4 @@
-"""Grok owns the book via tools. The shell is facts + send clerk.
+"""Grok owns the book via tools. The shell is facts + send gates.
 
 Paper RTH / premarket stay-up continues the live chat across successful
 looks. Overnight / after-close / empty-junk / dead stream drop it.
@@ -25,7 +25,7 @@ from xai_sdk.chat import developer, system, tool, tool_result, user
 from abcxauto.llm import GrokClient, build_system_prompt
 from abcxauto.opportunity_scan import criteria_scan, normalize_tickers
 from abcxauto.order_examples import format_order_examples, ticket_strategy_names
-from abcxauto.think_stream import ascii_text, emit as think_emit
+from abcxauto.think_stream import emit as think_emit
 from abcxauto.tools import run_readonly_tool
 from abcxauto.tool_args import (
     CANDLE_CAP,
@@ -89,45 +89,6 @@ def _scan_code_keys() -> list[str]:
             "TOP_PERC_LOSE",
             "HOT_BY_VOLUME",
         ]
-
-
-# Default when the live card writes no screens. A compose line
-# ``most_active + top_losers; mega/large`` is four IBKR jobs — one look
-# fetches all of them, then reuses.
-_SCAN_SCREENS_PER_LOOK = 2
-
-
-def _scan_screen_budget() -> int:
-    try:
-        from abcxauto.lab_playbook import live_card_scan_screens
-
-        n = len(live_card_scan_screens())
-    except Exception:
-        n = 0
-    if n <= 0:
-        return _SCAN_SCREENS_PER_LOOK
-    return min(8, n)
-
-
-def _written_scan_jobs(snap: dict[str, Any] | None) -> list[dict[str, str]]:
-    used = [str(x) for x in ((snap or {}).get("scan_screens") or [])]
-    try:
-        from abcxauto.lab_playbook import live_card_scan_screens, scan_screen_key
-
-        screens = live_card_scan_screens()
-    except Exception:
-        return []
-    jobs: list[dict[str, str]] = []
-    for screen in screens:
-        arena = str(screen.get("arena") or "").strip()
-        code = str(screen.get("scan_code") or "").strip()
-        key = scan_screen_key(arena, code)
-        if key and key not in used:
-            job = {"arena": arena}
-            if code:
-                job["scan_code"] = code
-            jobs.append(job)
-    return jobs
 
 
 def _news_symbols_for_scan(
@@ -197,25 +158,20 @@ def _record_scan_screen(snap: dict[str, Any], arena: str, scan_code: str) -> Non
 
 
 def _scan_gate_facts(rows: list[Any] | None) -> dict[str, Any]:
-    """Deepest flush-side open gap on this tape. Playbook when_on is not a floor."""
+    """Deepest |open_gap| on this tape. Playbook when_on is not a floor."""
     try:
-        from abcxauto.think_stream import _card_wants_down_gaps, _signed_open_gap
+        from abcxauto.think_stream import _signed_open_gap
     except Exception:
         return {}
-    down = _card_wants_down_gaps()
     deepest = None
     deepest_sym = ""
     deepest_signed = None
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        signed = _signed_open_gap(row)
         if row.get("open_gap_pct") is None:
             continue
-        if down and signed > 0:
-            continue
-        if (not down) and signed < 0:
-            continue
+        signed = _signed_open_gap(row)
         mag = abs(signed)
         if deepest is None or mag > deepest:
             deepest = mag
@@ -383,7 +339,7 @@ def _stamp_session_size(session: dict[str, Any], world: WorldState) -> None:
 
 
 def _stamp_session_ticket(session: dict[str, Any]) -> None:
-    """Playbook is notes. Clerk does not stamp a card onto candles as a ticket."""
+    """Playbook is notes. Do not stamp a card onto candles as a ticket."""
     _ = session
     return
 
@@ -1030,7 +986,7 @@ def _send_strategy_names_for_look() -> list[str]:
 
 
 def agent_tools(*, session: str = "") -> list:
-    """Tools this look. Cadence is clerk overnight park, not a Grok clock."""
+    """Tools this look. Overnight park is code, not a Grok clock."""
     _ = session
     names = _send_strategy_names_for_look()
     out: list = []
@@ -1077,16 +1033,15 @@ class BrainTurn:
     tool_cache: dict[str, str] = field(default_factory=dict)
 
     def look_failed(self) -> bool:
-        """Empty / '?' / stream error — clerk should backoff, not park."""
+        """True empty / lone '?' / dead stream. A real say is not junk."""
         if self.parked:
             return False
         if self.failed:
             return True
+        if self.stream_error:
+            return True
         if self.sends:
             return False
-        status = str((self.last_result or {}).get("status") or "").lower()
-        if status == "error":
-            return True
         return _look_text_is_junk(self.text)
 
 
@@ -1112,23 +1067,9 @@ def provider_overloaded(err: Any) -> bool:
 
 
 def _look_text_is_junk(text: str) -> bool:
-    """True when the look's last say is empty, '?', or ASCII-smashed to '?'."""
+    """True only for a true empty say or a lone '?'."""
     raw = (text or "").strip()
-    if not raw:
-        return True
-    if raw == "?":
-        return True
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    if not lines:
-        return True
-    last = lines[-1]
-    if last == "?":
-        return True
-    smashed = ascii_text(last).strip()
-    if not smashed:
-        return True
-    # encode(ascii, replace) turns each non-ASCII glyph into '?'.
-    return smashed.strip("?") == ""
+    return (not raw) or raw == "?"
 
 
 def _send_succeeded(result: dict[str, Any] | None) -> bool:
@@ -1543,7 +1484,7 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
         except asyncio.TimeoutError:
             idle += 1
             if idle >= STREAM_IDLE_LIMIT:
-                think_emit("clerk", "\n[stream stalled]\n")
+                think_emit("tool", "\n[stream stalled]\n")
                 reason = "stalled"
                 break
             continue
@@ -1567,7 +1508,7 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
                 o += say_piece
                 think_emit("say", say_piece)
         if stream_is_looping(think_acc) or stream_is_looping(o):
-            think_emit("clerk", "\n[stream loop]\n")
+            think_emit("tool", "\n[stream loop]\n")
             reason = "loop"
             break
     try:
@@ -1577,7 +1518,7 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
             raw_fr = getattr(choices[0], "finish_reason", None) if choices else None
             fr = str(getattr(raw_fr, "name", None) or raw_fr or "")
         if "LENGTH" in fr.upper() or "MAX_TOKEN" in fr.upper():
-            think_emit("clerk", "\n[truncated: max_tokens]\n")
+            think_emit("tool", "\n[truncated: max_tokens]\n")
     except Exception:
         logger.debug("finish_reason probe failed", exc_info=True)
     think_emit("stage_end", stage)
@@ -1631,7 +1572,7 @@ def _reset_chat(g: GrokClient) -> None:
 
 
 def drop_live_chat(g: Any | None) -> None:
-    """Overnight / park / junk / dead stream: the next think is a new conversation."""
+    """Overnight / park / empty/? / dead stream: the next think is a new conversation."""
     if g is None:
         return
     _reset_chat(g)
@@ -1646,10 +1587,10 @@ def drop_refused_send_targets(turn: BrainTurn) -> None:
 
 
 def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
-    """Keep the live chat on a successful paper stay-up look.
+    """Keep the live chat when the look actually said something.
 
-    Park, overnight, empty/junk, and a dead stream drop it so the next
-    think is a cold start — not append-to-junk.
+    Park, overnight, true empty / lone '?', and a dead stream drop it
+    so the next think is a cold start.
     """
     if turn.parked or turn.stream_error or turn.look_failed():
         _reset_chat(g)
@@ -1740,7 +1681,7 @@ async def _inject_live_poke(
     turn.interrupted = True
     # A fill / order change / unprotected lot means the book moved under us.
     turn.tool_cache.clear()
-    think_emit("clerk", f"\n[{ev.kind}]\n")
+    think_emit("tool", f"\n[{ev.kind}]\n")
     # Refresh book facts when we can — thin poke, not a second wake dump.
     day: dict[str, Any] | None = None
     try:
@@ -2259,14 +2200,6 @@ async def _run_tool(
             with_bits = []
         want_news = "news" in with_bits
         want_metrics = any(b in ("metrics", "mda") for b in with_bits)
-        if not with_bits and not snap.get("scan_news_attached"):
-            try:
-                from abcxauto.lab_playbook import hunt_recipe_has
-
-                if hunt_recipe_has("news"):
-                    want_news = True
-            except Exception:
-                pass
         turn_syms: list[str] = []
         for s in list(getattr(world, "scan_fetched", None) or []):
             if s and s not in turn_syms:
@@ -2289,19 +2222,30 @@ async def _run_tool(
             and not str(args.get("scan_code") or "").strip()
             and not normalize_tickers(args.get("symbols") or [])
         )
-        written = _written_scan_jobs(snap) if bare else []
-        calls = int(snap.get("scan_calls") or 0)
+        if bare:
+            err = {
+                "ok": False,
+                "error": "scan requires arena | scan_code | symbols[]",
+            }
+            _attach_scan_run(err, turn=turn, world=world)
+            return _clip(err)
+        from abcxauto.lab_playbook import scan_screen_key
+
+        key = scan_screen_key(
+            str(args.get("arena") or "").strip(),
+            str(args.get("scan_code") or "").strip(),
+        )
+        used = [str(x) for x in (snap.get("scan_screens") or [])]
         prior_hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
-        leftover = max(0, _scan_screen_budget() - calls)
-        if leftover <= 0:
+        if key and key in used:
             rows = _scan_paint_rows(prior_hits, quotes=qmap)
             screens = list(snap.get("scan_screens") or [])
             reused = {
                 "ok": True,
                 "reused": True,
-                "screens_this_look": calls,
+                "screens_this_look": int(snap.get("scan_calls") or 0),
                 "screens": screens,
-                "note": "card screens already fetched this look",
+                "note": "this screen already fetched this look",
                 "source": prior_hits.get("source") or "ibkr",
                 "symbols": [r.get("symbol") for r in rows if r.get("symbol")],
                 "hits": rows,
@@ -2318,20 +2262,15 @@ async def _run_tool(
                 painted["rows"] = rows
                 snap["scan_hits"] = painted
             _attach_scan_run(reused, turn=turn, world=world)
-            think_emit("clerk", "\n[scan = already have it]\n")
+            think_emit("tool", "\n[scan = already have it]\n")
             return _clip(reused)
-        if written:
-            jobs = written[:leftover]
-        elif leftover:
-            jobs = [
-                {
-                    "arena": args.get("arena"),
-                    "scan_code": args.get("scan_code"),
-                    "symbols": args.get("symbols"),
-                }
-            ]
-        else:
-            jobs = []
+        jobs = [
+            {
+                "arena": args.get("arena"),
+                "scan_code": args.get("scan_code"),
+                "symbols": args.get("symbols"),
+            }
+        ]
         last_ok: dict[str, Any] | None = None
         last_err: dict[str, Any] | None = None
         pulled_hits: list[dict[str, Any]] = []
@@ -2503,7 +2442,7 @@ async def _run_tool(
         deepest = gate.get("deepest_open_gap_pct")
         deep_s = f"{deepest:+.1f}%" if isinstance(deepest, (int, float)) else "n/a"
         think_emit(
-            "clerk",
+            "tool",
             f"hits={len(syms)} screens={len(out.get('screens') or [])} "
             f"deepest={deep_s} {gate.get('deepest_symbol') or ''} "
             f"src={out.get('source') or 'empty'}\n",
@@ -2996,7 +2935,7 @@ async def _invoke_named_tool(
     snap: dict[str, Any],
     turn: BrainTurn,
 ) -> str:
-    think_emit("clerk", f"\n[{name}]\n")
+    think_emit("tool", f"\n[{name}]\n")
     turn.tool_trace.append(name)
     try:
         from abcxauto.park_clock import peek_interrupt
@@ -3172,7 +3111,7 @@ async def _dispatch_tool_calls(
         name, args, tc, timeout = item
         cached = _cached_read(turn, name, args)
         if cached is not None:
-            think_emit("clerk", f"\n[{name} = already have it]\n")
+            think_emit("tool", f"\n[{name} = already have it]\n")
             turn.tool_trace.append(name)
             return tc, cached
         result = await _invoke_named_tool(
@@ -3191,7 +3130,7 @@ async def _dispatch_tool_calls(
     def _defer_reads(why: str) -> None:
         for name, args, tc, _timeout in reads:
             _record_tool_deferred(name, why, args=args)
-            think_emit("clerk", f"\n[{name} deferred: book moved]\n")
+            think_emit("tool", f"\n[{name} deferred: book moved]\n")
             _append_tool_result(chat, tc, _deferred_read_result(name))
 
     if reads:
@@ -3270,10 +3209,9 @@ async def _grok_turn_impl(
                 continue
             text, response, stop = await stream_round(chat)
         except Exception as exc:
-            # A dead stream ends the look. The clerk backs off; it does not
-            # restart the same think and pay for the context twice.
+            # A dead stream ends the look. Stay-up retries immediately, cold.
             logger.exception("stream_round failed")
-            think_emit("clerk", f"\n[stream failed: {exc}]\n")
+            think_emit("tool", f"\n[stream failed: {exc}]\n")
             turn.failed = True
             turn.stream_error = str(exc)
             ran_out = False
@@ -3312,7 +3250,7 @@ async def _grok_turn_impl(
             )
     if ran_out:
         turn.tool_budget_hit = True
-        think_emit("clerk", "\n[think stopped: step ceiling]\n")
+        think_emit("tool", "\n[think stopped: step ceiling]\n")
     if not turn.parked and not turn.failed and not turn.sends:
         if _look_text_is_junk(turn.text):
             turn.failed = True

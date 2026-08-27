@@ -1,7 +1,7 @@
 # ABCXAUTO spec
 
-Grok owns a paper IBKR book. The clerk is facts, hard gates, and the overnight park.
-Brain is the `model` knob (default grok-4.6). Mainline is `master`.
+Grok owns a paper IBKR book. Silent code is facts, hard gates, and the overnight park.
+Brain is the `model` knob (default grok-4.6). Mainline is `master`. There is no clerk process.
 
 Paper (TWS **7497**) is the lab. Live (TWS **7496**, confirm phrase, a different
 client id) only follows a **promoted paper playbook**. It never copies paper fills.
@@ -14,12 +14,12 @@ the cost of the model. Same rules at $1k, $100k, or $1M.
 | Owner | Job |
 |-------|-----|
 | **Grok** | Tickets (`send`), knobs (`self_tune`), lab notebook (`write_lab_playbook`) |
-| **Clerk** | Live facts, `ORDER EXAMPLES`, hard gates, overnight / after-close park |
+| **Code** | Live facts, `ORDER EXAMPLES`, hard gates, overnight / after-close park |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No strategy card. |
 
 Do not grow the system prompt. Do not inject strategy menus or a Judge/Act form.
 Switch the brain from Pro Settings — `model` persists to `risk_settings.json`,
-which beats the `ABCXAUTO_MODEL` env form. Keep the clerk.
+which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process.
 
 ## Hard gates (code)
 
@@ -39,12 +39,12 @@ which beats the `ABCXAUTO_MODEL` env form. Keep the clerk.
 
 Walk-away ceilings: **25%** daily-loss, **25%** max position, **25%** risk/trade,
 **25%** per name, defined-risk on, cash-only, full NetLiq (`trading_budget_usd=0`).
-Paper operator may turn % floors off (`sizing_floors`); live cannot (forced ON); 25% walk-away is the live ceiling. `% of NL` review facts live on clerk surfaces (`day_facts` / `book` / wake / `compact_position`), not `brain.py`.
+Paper operator may turn % floors off (`sizing_floors`); live cannot (forced ON); 25% walk-away is the live ceiling. `% of NL` review facts live on `day_facts` / `book` / wake / `compact_position`, not `brain.py`.
 
 ## Loop
 
 See [`docs/CYCLE.md`](docs/CYCLE.md). Short form: snap → Grok tools →
-clerk `send`. Paper RTH / premarket stay up (no sit clock). Closed/postmarket
+`send` gates. Paper RTH / premarket stay up (no sit clock). Closed/postmarket
 does not call Grok (unprotected still does); park_clock until premarket.
 
 ## Priority
@@ -64,7 +64,7 @@ Other: `odds` (Polymarket, not send geometry), `playbook`, `write_lab_playbook`,
 `send`, `self_tune` (flat knobs).
 
 Universe is a watchlist Grok can change via `self_tune`; `send` is not limited
-to it. Clerk writes `journal.db`; there is no `journal` tool.
+to it. Code writes `journal.db`; there is no `journal` tool.
 
 ## Runtime
 

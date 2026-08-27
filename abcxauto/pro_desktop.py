@@ -169,19 +169,9 @@ def stream_line_kind(line: str) -> str:
 
 
 def current_look_text(buf: str) -> str:
-    """The live look: from Wake Grok / last look banner, not only the last GROK."""
+    """The live look: from the last GROK banner, not a clerk speaker."""
     text = buf or ""
-    wake = text.rfind("Wake Grok.")
-    if wake >= 0:
-        head = text[:wake]
-        clerk = head.rfind("--- CLERK ---")
-        grok = head.rfind("--- GROK")
-        idx = max(clerk, grok)
-        return text[idx:] if idx >= 0 else text[wake:]
-    clerk = text.rfind("--- CLERK ---")
     grok = text.rfind("--- GROK")
-    if clerk >= 0 and clerk >= grok:
-        return text[clerk:]
     return text[grok:] if grok >= 0 else text
 
 
@@ -1648,7 +1638,7 @@ class ProTerminal:
                                 ft.Text(
                                     "How often the background monitor polls, reviews "
                                     "and halts on a dead broker link. Scan depth is "
-                                    "self_tune; the clerk owns the next look.",
+                                    "self_tune. Stay-up has no sit clock.",
                                     size=11,
                                     color=MUTED,
                                 ),
@@ -3741,15 +3731,7 @@ class ProTerminal:
                 RED if running and age > 1800 else (AMBER if running and age > 900 else MUTED)
             )
         if streak and not looking:
-            wait = float(getattr(s, "backoff_wait_s", 0) or 0)
-            if wait <= 0:
-                try:
-                    from abcxauto.park_clock import failed_look_backoff_s
-
-                    wait = float(failed_look_backoff_s(streak))
-                except Exception:
-                    wait = 0.0
-            self.lbl_hs_next.value = f"look failed (x{streak}) — next look {wait:.0f}s"
+            self.lbl_hs_next.value = f"look failed (x{streak})"
             self.lbl_hs_next.color = AMBER
         else:
             self.lbl_hs_next.value = ""

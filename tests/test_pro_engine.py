@@ -752,7 +752,7 @@ def test_rearm_junk_look_starts_immediately():
     assert wait == 0.0
 
 
-def test_rearm_failed_look_backs_off(monkeypatch):
+def test_rearm_failed_look_retries_immediately(monkeypatch):
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "30")
     eng = ProEngine()
     wait = eng._rearm_after_think(
@@ -761,7 +761,7 @@ def test_rearm_failed_look_backs_off(monkeypatch):
     )
     assert eng._resume_think is True
     assert eng._cold_next is True
-    assert wait == 30.0
+    assert wait == 0.0
 
 
 def test_rearm_closed_and_live_do_not(monkeypatch):
@@ -798,7 +798,7 @@ async def test_host_think_surfaces_question_failed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_host_think_surfaces_trailing_question_failed(monkeypatch):
+async def test_host_think_keeps_a_real_say_with_trailing_question(monkeypatch):
     from abcxauto.brain import BrainTurn
 
     async def grok_turn(*_a, **_k):
@@ -811,7 +811,7 @@ async def test_host_think_surfaces_trailing_question_failed(monkeypatch):
     eng = ProEngine()
     eng.conn = SimpleNamespace(connected=True)
     out = await eng._host_think(1, SimpleNamespace(chat=None), _stay_up_snap("regular"))
-    assert out.get("_failed") is True
+    assert out.get("_failed") is False
     assert not out.get("_parked")
 
 
@@ -1166,7 +1166,7 @@ async def test_junk_look_starts_another_look_immediately(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_failed_look_backs_off_without_set_wake_clock(monkeypatch, tmp_path):
+async def test_failed_look_retries_immediately_without_set_wake_clock(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.4")
     times: list[float] = []
@@ -1185,14 +1185,15 @@ async def test_failed_look_backs_off_without_set_wake_clock(monkeypatch, tmp_pat
     _wire_stay_up_engine(monkeypatch, session="regular", think=think)
     eng = ProEngine()
     assert eng.start() is None
-    deadline = time.time() + 6
-    while time.time() < deadline and len(times) < 2:
+    deadline = time.time() + 4
+    while time.time() < deadline and len(times) < 3:
         eng.drain_apply()
         await asyncio.sleep(0.05)
     eng.stop_engine()
     eng.drain_apply()
-    assert len(times) >= 2
-    assert times[1] - times[0] >= 0.3
+    assert len(times) >= 3
+    assert times[1] - times[0] < 0.4
+    assert times[2] - times[1] < 0.4
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None

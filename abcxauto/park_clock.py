@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -37,8 +36,6 @@ LIVE_POKE_KINDS = frozenset({"fill", "order_change", "unprotected"})
 PULSE_S = 10.0
 DEFAULT_LOOK_S = 90.0
 DEFAULT_LOOK_OPEN_S = 300.0
-DEFAULT_LOOK_HUNT_S = 600.0
-LAST_HOUR_LOOK_S = 90.0
 MIN_LOOK_S = 30.0
 NEXT_LOOK_S_MAX = 4 * 3600.0
 # Overnight / after-close only. Premarket stay-up is not a park.
@@ -49,13 +46,6 @@ PAPER_STAY_UP_SESSIONS = STAY_UP_SESSIONS
 PREMARKET_MINUTES_TO_OPEN = 5.5 * 60.0
 # Pacing class: a 30-minute remaining-to-bell wait is a park, not a look.
 REMAINING_TO_BELL_S = 30 * 60.0
-STAY_UP_RETRY_MIN_S = 20.0
-STAY_UP_RETRY_MAX_S = 45.0
-# Consecutive failed looks escalate. A provider capacity error is not a
-# 20-second problem — retrying it just re-bills the prompt for nothing.
-FAILED_LOOK_BACKOFF_CAP_S = 600.0
-PROVIDER_BACKOFF_MIN_S = 90.0
-PROVIDER_BACKOFF_CAP_S = 900.0
 MTM_BUCKET_PCT = 8.0
 _last_wake = None
 _pending_interrupt = None  # BookEvent | None — set after BookEvent is defined
@@ -107,7 +97,7 @@ def last_wake() -> BookEvent | None:
 
 
 def note_interrupt(event: BookEvent | None) -> None:
-    """Clerk live event → poke the open xAI episode mid-turn when applicable."""
+    """Fill / order / unprotected poke the open xAI episode mid-turn."""
     global _pending_interrupt
     if event is None:
         return
@@ -316,43 +306,9 @@ def min_look_s() -> float:
 
 
 def set_wake_offered(*, session: str = "") -> bool:
-    """Never. Cadence is clerk + playbook, not a Grok tool."""
+    """Never. Overnight park is code. Stay-up has no sit clock."""
     _ = session
     return False
-
-
-def _retry_base_s() -> tuple[float, bool]:
-    """Floor the escalation doubles from, and whether the operator pinned it.
-
-    A pinned cadence is honored exactly — no jitter on top of an explicit ask.
-    """
-    raw = (os.environ.get("ABCXAUTO_STAY_UP_RETRY_S") or "").strip()
-    if raw:
-        try:
-            return max(0.0, float(raw)), True
-        except ValueError:
-            pass
-    return float(STAY_UP_RETRY_MIN_S), False
-
-
-def failed_look_backoff_s(streak: int, *, overloaded: bool = False) -> float:
-    """Backoff for the Nth consecutive failed look. Doubles, then caps.
-
-    ``overloaded`` is an xAI capacity/rate refusal — start high, cap higher.
-    Jitter rides on top of the step so two desks do not retry in lockstep, and
-    never enough to make a later strike come back sooner than an earlier one.
-    """
-    n = max(1, int(streak or 1))
-    pinned = False
-    if overloaded:
-        base, cap = float(PROVIDER_BACKOFF_MIN_S), float(PROVIDER_BACKOFF_CAP_S)
-    else:
-        base, pinned = _retry_base_s()
-        cap = float(FAILED_LOOK_BACKOFF_CAP_S)
-    step = min(cap, base * (2 ** min(n - 1, 16)))
-    if pinned:
-        return float(step)
-    return float(min(cap, step + random.random() * step * 0.25))
 
 
 def _floor_look_s(sec: float, *, session: str = "") -> float:
@@ -464,32 +420,6 @@ def clamp_next_look_s(raw: Any) -> float | None:
     return max(min_look_s(), min(float(NEXT_LOOK_S_MAX), sec))
 
 
-def _stay_up_look_cap_s(
-    session: str,
-    minutes_to_open: float | None,
-) -> float | None:
-    """Premarket cadence cap. Card hints may tighten this, not stretch to the bell."""
-    sess = str(session or "").lower()
-    mins = None
-    if minutes_to_open is not None:
-        try:
-            mins = float(minutes_to_open)
-        except (TypeError, ValueError):
-            mins = None
-        if mins is not None and mins != mins:
-            mins = None
-    last_hour = (
-        mins is not None
-        and 0 < mins <= 60
-        and sess in ("premarket", "closed", "postmarket")
-    )
-    if last_hour:
-        return float(LAST_HOUR_LOOK_S)
-    if sess == "premarket":
-        return float(DEFAULT_LOOK_HUNT_S)
-    return None
-
-
 def clerk_look_s(
     *,
     flat: bool | None = None,
@@ -497,12 +427,15 @@ def clerk_look_s(
     minutes_to_open: float | None = None,
     next_look_s: float | None = None,
 ) -> float:
-    """Overnight park seconds. Stay-up sessions do not sit on this clock.
+    """Overnight / after-close park seconds. Stay-up sessions return 0.
 
-    Session-card opening-print wait is a send gate, not this clock. Premarket
-    stays up. Overnight closed parks until premarket (4:00 ET).
+    Session-card opening-print wait is a send gate, not this clock.
+    Overnight closed parks until premarket (4:00 ET).
     """
+    _ = next_look_s
     sess = str(session or "").lower()
+    if sess in STAY_UP_SESSIONS:
+        return 0.0
     mins = minutes_to_open
     if mins is not None:
         try:
@@ -511,33 +444,10 @@ def clerk_look_s(
             mins = None
         if mins is not None and mins != mins:
             mins = None
-    last_hour = (
-        mins is not None
-        and 0 < mins <= 60
-        and sess in ("premarket", "closed", "postmarket")
-    )
     if sess in PARK_SESSIONS and mins is not None and mins > PREMARKET_MINUTES_TO_OPEN:
         return max(min_look_s(), (mins - PREMARKET_MINUTES_TO_OPEN) * 60.0)
     if sess in PARK_SESSIONS and mins is not None and mins > 60:
         return max(min_look_s(), (mins - 60.0) * 60.0)
-    cap = _stay_up_look_cap_s(sess, mins)
-    if next_look_s is not None:
-        clamped = clamp_next_look_s(next_look_s)
-        if clamped is not None:
-            if sess == "regular" and flat is False:
-                return max(clamped, float(DEFAULT_LOOK_OPEN_S))
-            if cap is not None:
-                return max(min_look_s(), min(clamped, cap))
-            return clamped
-    raw = (os.environ.get("ABCXAUTO_DEFAULT_LOOK_S") or "").strip()
-    if raw:
-        return default_look_s(flat=flat, session=session)
-    if last_hour:
-        return max(min_look_s(), float(LAST_HOUR_LOOK_S))
-    if sess == "regular" and flat is False:
-        return max(min_look_s(), float(DEFAULT_LOOK_OPEN_S))
-    if sess in ("regular", "premarket") and flat is not False:
-        return max(min_look_s(), float(DEFAULT_LOOK_HUNT_S))
     return default_look_s(flat=flat, session=session)
 
 

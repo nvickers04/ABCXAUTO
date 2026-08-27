@@ -3,7 +3,7 @@
 **Goal:** book return % of starting NetLiq > model cost.
 Size and risk are % of the book. No dollar sleeve. No operator strategy card.
 
-Grok is the trader. The clerk does not teach IBKR. Paper is the lab (TWS 7497).
+Grok is the trader. The shell does not teach IBKR. Paper is the lab (TWS 7497).
 Live only follows a promoted snapshot. Operator = setup + kill switch.
 
 ## Autonomy
@@ -23,10 +23,10 @@ SNAP     IBKR book, orders, protection
     |
 GROK     tools (facts + send + self_tune + write_lab_playbook). Wake is a short line.
     |
-CLERK    send → gates → IBKR. Journal write is clerk, not a Grok tool.
+SEND     send → gates → IBKR. Journal write is code, not a Grok tool.
     |
 LOOK     Finished RTH look writes no grok_wake.json. Empty/? retries on this process.
-         Overnight skip parks. Clerk is not a runner.
+         Overnight skip parks. Stay-up has no sit clock.
 ```
 
         Paper RTH / premarket stay-up continues the live chat across successful
@@ -40,13 +40,13 @@ LOOK     Finished RTH look writes no grok_wake.json. Empty/? retries on this pro
 After a think:
 
 - Closed / postmarket: no Grok (unprotected still interrupts); park until premarket
-- Paper RTH / premarket: stay up on this process. Empty / `?` backoff ~20–45s
+- Paper RTH / premarket: stay up on this process. Empty / `?` retries immediately
 - Session-card opening print is a send gate, not a park
 - Last hour to the open is stay-up, not a sit clock
 
 ## Hard (code)
 
-- Unprotected STK → last-stop first; hold forbidden until it rests at IBKR. Paper RTH + flat + clerk open → hold is not a ticket. Combo close (`closing_position`) is one BAG, not new risk
+- Unprotected STK → last-stop first; hold forbidden until it rests at IBKR. Paper RTH + flat → hold is not a ticket. Combo close (`closing_position`) is one BAG, not new risk
 - Capacity, defined-risk, cash-only, size/loss floors, fail-closed
 - Live new risk without a promoted playbook
 - New risk without params.card naming an existing lab card (label, not law)

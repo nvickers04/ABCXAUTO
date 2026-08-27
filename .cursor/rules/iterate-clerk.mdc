@@ -9,4 +9,4 @@ The stream review is a build loop. Read the think stream and last turn. If anyth
 
 Restart Pro only when the operator wants it on or RTH is useful. If Grok is looping tools or TWS is down, **kill** first — do not relaunch into a token burn.
 
-Grok still owns the book: `send` quantity, `self_tune`, `write_lab_playbook`, `set_wake`. Do not grow the system prompt or inject strategy lectures. Do not flatten, enable live, or commit unless asked.
+Grok still owns the book: `send` quantity, `self_tune`, `write_lab_playbook`. Do not grow the system prompt or inject strategy lectures. Do not flatten, enable live, or commit unless asked. There is no clerk process.
