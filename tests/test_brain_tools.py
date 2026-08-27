@@ -80,6 +80,7 @@ def test_agent_tools_cover_ibkr_and_mda():
         "self_tune",
         "playbook",
         "write_lab_playbook",
+        "write_desk_lessons",
     } <= names
     assert "set_wake" not in names
     assert "journal" not in names

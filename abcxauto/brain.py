@@ -44,7 +44,9 @@ logger = logging.getLogger(__name__)
 # budget the model should feel — repeated reads are answered from the ledger
 # below, so an honest think finishes long before it.
 MAX_TOOL_STEPS = 64
-_MUTATING_TOOLS = frozenset({"send", "self_tune", "write_lab_playbook"})
+_MUTATING_TOOLS = frozenset(
+    {"send", "self_tune", "write_lab_playbook", "write_desk_lessons"}
+)
 STREAM_CHUNK_S = 8.0
 STREAM_IDLE_LIMIT = 6
 STREAM_LOOP_UNIT = 12
@@ -715,7 +717,10 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
 AGENT_TOOLS = [
     tool(
         name="book",
-        description="Live IBKR book: positions, working orders, protection, tape, scorecard.",
+        description=(
+            "Live IBKR book: positions, working orders, protection, tape, "
+            "scorecard, desk lessons."
+        ),
         parameters=_schema({}, []),
     ),
     tool(
@@ -973,6 +978,38 @@ AGENT_TOOLS = [
                 },
                 "mode": {"type": "string", "description": "explore or exploit"},
                 "ready_to_promote": {"type": "boolean"},
+            },
+            [],
+        ),
+    ),
+    tool(
+        name="write_desk_lessons",
+        description=(
+            "Durable tool facts across looks. book() returns the shelf. "
+            "Not a playbook card, not law, not a wake job. A fact is a "
+            "tool mechanic you already hit — no tickers, no skip list."
+        ),
+        parameters=_schema(
+            {
+                "lessons": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "fact": {
+                                "type": "string",
+                                "description": "Tool fact only. Not a card, not law.",
+                            },
+                        },
+                    },
+                    "description": "Upsert extras. The seed lesson stays.",
+                },
+                "fact": {
+                    "type": "string",
+                    "description": "Add or replace one tool fact.",
+                },
+                "id": {"type": "string"},
             },
             [],
         ),
@@ -1346,6 +1383,8 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
             kept["cards"] = slim["cards"]
         if slim.get("run") is not None:
             kept["run"] = slim["run"]
+        if "desk_lessons" in slim:
+            kept["desk_lessons"] = slim["desk_lessons"]
         if kept:
             kept["ok"] = slim.get("ok")
             kept["_clipped"] = "payload"
@@ -1884,6 +1923,13 @@ def _book_payload(
         glance["lab"] = lab_facts(lab, rows=scored)
     except Exception:
         logger.debug("playbook block for book payload failed", exc_info=True)
+    lessons: list[dict[str, str]] = []
+    try:
+        from abcxauto.desk_lessons import desk_lessons_payload
+
+        lessons = desk_lessons_payload()
+    except Exception:
+        logger.debug("desk lessons for book payload failed", exc_info=True)
     out: dict[str, Any] = {
         "day": day_facts(world, sc),
         "world": facts,
@@ -1895,6 +1941,7 @@ def _book_payload(
         },
         "levers": levers_snapshot(cfg),
         "playbook": glance,
+        "desk_lessons": lessons,
         "path": _path_block(world, cfg),
     }
     if last_look:
@@ -2098,6 +2145,12 @@ async def _run_tool(
             st["levers"] = {}
         st["combo"] = COMBO_FACT
         st["sends_this_turn"] = len(turn.sends)
+        try:
+            from abcxauto.desk_lessons import desk_lessons_payload
+
+            st["desk_lessons"] = desk_lessons_payload()
+        except Exception:
+            st["desk_lessons"] = []
         pulse = snap.get("reality_pulse") if isinstance(snap.get("reality_pulse"), dict) else {}
         if not pulse:
             pulse = getattr(world, "pulse", None) or {}
@@ -2840,6 +2893,10 @@ async def _run_tool(
         state = apply_from_judgment(judgment)
         turn.lab_playbook = state
         return _clip(state or {"status": "ignored", "note": "live cannot rewrite lab"})
+    if name == "write_desk_lessons":
+        from abcxauto.desk_lessons import apply_desk_lessons
+
+        return _clip(apply_desk_lessons(args if isinstance(args, dict) else {}))
     return json.dumps({"error": f"unknown tool {name}"})
 
 
