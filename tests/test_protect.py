@@ -1957,5 +1957,99 @@ async def test_execute_ticket_blocks_when_one_share_blows_card_risk(monkeypatch)
         },
     )
     assert result.get("status") == "blocked"
-    assert "size won't fit" in str(result.get("note") or "")
+    assert "quantity or size_pct_nl" in str(result.get("note") or "")
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_size_pct_nl_is_not_a_card_one_pct_refuse(monkeypatch):
+    """A card note of 1% is not a refuse. Grok's % of NL sizes the ticket."""
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.world_state import WorldState
+
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "bounce",
+                            "shape": "LONG STK. Qty so dollar risk ≤1% NL.",
+                            "retire_if": {"sample": 3, "condition": "no bounce"},
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: SimpleNamespace(
+            is_paper=True,
+            trading_mode="paper",
+            max_risk_per_trade_pct=25.0,
+            max_position_pct=25.0,
+        ),
+    )
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    result = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {
+                "card": "flush bounce",
+                "symbol": "BKNG",
+                "direction": "LONG",
+                "stop_price": 490.0,
+                "target_price": 520.0,
+                "size_pct_nl": 5.0,
+            },
+            "rationale": "card=flush bounce BKNG",
+        },
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {"BKNG": 500.0},
+        },
+    )
+    assert result.get("status") == "ok", result
+    assert sent
+    assert sent[0]["params"]["quantity"] == 3
+    assert sent[0]["params"]["size_pct_nl"] == 5.0

@@ -27,13 +27,30 @@ RISK_FLOOR: dict[str, tuple[float, float]] = {
 # Integer capacity: 0 would disable the gate — forbidden. Grok sets N.
 MAX_OPEN_POSITIONS_RANGE = (1, 25)
 
-# Booleans the agent cannot turn off.
+# Booleans the agent cannot turn off. risk_gates_enabled is live-locked;
+# paper honors an operator-off so Grok's chosen % of NL can send.
 LOCKED_TRUE: frozenset[str] = frozenset({
     "risk_gates_enabled",
     "auto_panic_on_breach",
     "defined_risk_only",
     "cash_only",
 })
+# TWS 7496 / Gateway 4001 — live socket family. Paper is 7497 / 4002.
+_LIVE_IBKR_PORTS = frozenset({7496, 4001})
+
+
+def _live_desk(cfg: Any) -> bool:
+    """True when this desk is live (mode, port family, or not-paper)."""
+    mode = str(getattr(cfg, "trading_mode", "paper") or "paper").strip().lower()
+    if mode == "live":
+        return True
+    if getattr(cfg, "is_paper", None) is False:
+        return True
+    try:
+        port = int(getattr(cfg, "ibkr_port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    return port in _LIVE_IBKR_PORTS
 # Mode/port are operator-only. Extra keys here are rejects, not knobs.
 _LIVE_GATED: frozenset[str] = frozenset({
     "trading_mode",
@@ -367,6 +384,9 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
             else hi_p
         )
     for key in LOCKED_TRUE:
+        if key == "risk_gates_enabled" and not _live_desk(cfg):
+            # Paper: operator-off survives start. Live still forces gates on.
+            continue
         if not bool(getattr(cfg, key, False)):
             fixes[key] = True
     cap = _i(getattr(cfg, "scan_fetch_cap", 8))
@@ -425,9 +445,14 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
                 _persist_agent_state(extra_fix)
             except Exception:
                 logger.exception("ensure_floor persist extra failed")
-        # Always persist locked floor so a stale risk_settings.json cannot linger.
+        # Persist the locked floor. Paper keeps operator risk_gates_enabled;
+        # live always writes gates on so a stale file cannot linger.
+        cfg_now = get_config()
         update_risk_config(
-            risk_gates_enabled=True,
+            risk_gates_enabled=(
+                True if _live_desk(cfg_now)
+                else bool(getattr(cfg_now, "risk_gates_enabled"))
+            ),
             auto_panic_on_breach=True,
             defined_risk_only=True,
             cash_only=True,

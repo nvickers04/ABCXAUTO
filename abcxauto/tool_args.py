@@ -100,15 +100,15 @@ _SEND_HOIST = (
     "new_stop_price",
     "new_limit_price",
     "closing_position",
-    # Optional % of NL annotation next to quantity. Clerk hoist only —
-    # qty stays on the wire; never invent shares from %.
+    # Grok's size as % of current NL. Hoist only here — send derives
+    # quantity from this % and live NL when quantity is missing.
     "size_pct_nl",
     # Playbook card this ticket comes from. Hoisted so the new-risk gate and
     # the attribution log read the same key wherever Grok put it.
     "card",
 )
 
-# Clerk-owned send annotation (not brain schema / not ORDER EXAMPLES).
+# Clerk-owned send size: percent of current NetLiquidation (not brain schema).
 SEND_SIZE_PCT_NL = "size_pct_nl"
 
 def _first(args: dict[str, Any], *keys: str) -> Any:

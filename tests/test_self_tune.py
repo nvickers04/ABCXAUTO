@@ -392,6 +392,107 @@ def test_grok_cannot_self_tune_risk_posture(tmp_path, monkeypatch):
     assert out["status"] == "blocked" or not (out.get("applied") or {})
 
 
+def test_paper_start_gates_off_stays_off(tmp_path, monkeypatch):
+    """Operator-off on paper survives get_config + ensure_immutable_floor."""
+    from abcxauto.config import load_risk_settings, update_risk_config
+
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
+    monkeypatch.setenv("TRADING_MODE", "paper")
+    monkeypatch.setenv("IBKR_PORT", "7497")
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    get_config.cache_clear()
+    update_risk_config(risk_gates_enabled=False, persist=True, _skip_clamp=True)
+    assert get_config().risk_gates_enabled is False
+    ensure_immutable_floor(persist=True)
+    assert get_config().risk_gates_enabled is False
+    assert get_config().defined_risk_only is True
+    assert get_config().cash_only is True
+    clear_runtime_overrides()
+    load_risk_settings(path)
+    get_config.cache_clear()
+    assert get_config().risk_gates_enabled is False
+    persisted = path.read_text(encoding="utf-8")
+    assert '"risk_gates_enabled": false' in persisted
+
+
+def test_live_start_gates_off_repaired_on(tmp_path, monkeypatch):
+    """Live start still forces gates, defined-risk, and sizing floors."""
+    from abcxauto.config import load_risk_settings, update_risk_config
+
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
+    monkeypatch.setenv("TRADING_MODE", "live")
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    get_config.cache_clear()
+    update_risk_config(
+        risk_gates_enabled=False,
+        defined_risk_only=False,
+        sizing_floors=False,
+        persist=True,
+        _skip_clamp=True,
+    )
+    ensure_immutable_floor(persist=True)
+    cfg = get_config()
+    assert cfg.risk_gates_enabled is True
+    assert cfg.defined_risk_only is True
+    assert cfg.sizing_floors is True
+
+
+def test_floor_clamp_paper_does_not_force_gates_on():
+    cfg = SimpleNamespace(
+        daily_loss_limit_pct=25.0,
+        max_position_pct=25.0,
+        max_risk_per_trade_pct=25.0,
+        max_peak_drawdown_pct=25.0,
+        max_option_premium_pct=25.0,
+        max_symbol_concentration_pct=25.0,
+        max_open_positions=15,
+        risk_gates_enabled=False,
+        auto_panic_on_breach=True,
+        defined_risk_only=True,
+        cash_only=True,
+        scan_fetch_cap=8,
+        trading_budget_usd=0.0,
+        trading_mode="paper",
+        ibkr_port=7497,
+        is_paper=True,
+        sizing_floors=False,
+    )
+    fixes = floor_clamp_config_fields(cfg)
+    assert "risk_gates_enabled" not in fixes
+
+
+def test_floor_clamp_live_forces_gates_on():
+    cfg = SimpleNamespace(
+        daily_loss_limit_pct=25.0,
+        max_position_pct=25.0,
+        max_risk_per_trade_pct=25.0,
+        max_peak_drawdown_pct=25.0,
+        max_option_premium_pct=25.0,
+        max_symbol_concentration_pct=25.0,
+        max_open_positions=15,
+        risk_gates_enabled=False,
+        auto_panic_on_breach=True,
+        defined_risk_only=False,
+        cash_only=True,
+        scan_fetch_cap=8,
+        trading_budget_usd=0.0,
+        trading_mode="live",
+        ibkr_port=7496,
+        is_paper=False,
+        sizing_floors=False,
+    )
+    fixes = floor_clamp_config_fields(cfg)
+    assert fixes.get("risk_gates_enabled") is True
+    assert fixes.get("defined_risk_only") is True
+    assert fixes.get("sizing_floors") is True
+
+
 def test_ensure_floor_does_not_bounce_operator_posture(tmp_path, monkeypatch):
     from abcxauto.config import update_risk_config
 

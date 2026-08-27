@@ -4,8 +4,9 @@ Agent loops should import dispatch from here only. Validation still runs
 inside ``abcxauto.executor.safe_execute`` via ``proposals.validate_proposal`` —
 this module does not re-validate.
 
-Optional ``size_pct_nl`` is a clerk annotation next to quantity (hoisted by
-``tool_args``). Qty stays on the wire; never invent shares from %.
+``size_pct_nl`` is Grok's size: percent of current NetLiquidation. When
+quantity is missing, the send clerk derives shares/contracts from that %
+and a live price. Hoist still does not invent qty (no NL there).
 
 Paper + a live-family IBKR port (TWS 7496 / Gateway 4001) fails closed here
 and never reaches ``safe_execute``. That mismatch must not place and must not
@@ -15,13 +16,111 @@ this module does not enable it.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict
 
 from abcxauto.config import get_config
 from abcxauto.executor import safe_execute
 from abcxauto.tool_args import SEND_SIZE_PCT_NL
 
-__all__ = ["send_action", "safe_execute", "SEND_SIZE_PCT_NL"]
+__all__ = [
+    "send_action",
+    "safe_execute",
+    "SEND_SIZE_PCT_NL",
+    "notional_from_size_pct_nl",
+    "qty_from_size_pct_nl",
+    "apply_size_pct_nl",
+]
+
+
+def _pos_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(out) or out <= 0:
+        return None
+    return out
+
+
+def notional_from_size_pct_nl(size_pct_nl: Any, net_liq: Any) -> float | None:
+    """Dollars = Grok's % of current NetLiquidation. None if unusable."""
+    pct = _pos_float(size_pct_nl)
+    nl = _pos_float(net_liq)
+    if pct is None or nl is None:
+        return None
+    return nl * (pct / 100.0)
+
+
+def qty_from_size_pct_nl(
+    size_pct_nl: Any,
+    net_liq: Any,
+    price: Any,
+    *,
+    multiplier: float = 1.0,
+) -> int | None:
+    """Whole units from % of current NL and a live price. None if < 1."""
+    notional = notional_from_size_pct_nl(size_pct_nl, net_liq)
+    px = _pos_float(price)
+    try:
+        mult = float(multiplier)
+    except (TypeError, ValueError):
+        return None
+    if notional is None or px is None or not math.isfinite(mult) or mult <= 0:
+        return None
+    qty = int(notional / (px * mult))
+    return qty if qty >= 1 else None
+
+
+def _option_multiplier(strategy: str, params: dict[str, Any]) -> float:
+    from abcxauto.strategy_params import OPTION_STRATEGIES
+
+    st = str(strategy or "").strip().lower()
+    if st in OPTION_STRATEGIES:
+        return 100.0
+    if params.get("expiration") not in (None, "") and params.get("strike") not in (None, ""):
+        return 100.0
+    return 1.0
+
+
+def apply_size_pct_nl(
+    params: dict[str, Any],
+    *,
+    net_liq: Any,
+    price: Any,
+    strategy: str = "",
+) -> dict[str, Any] | None:
+    """Fill ``quantity`` from ``size_pct_nl`` × current NL. None if unused.
+
+    Does not overwrite a valid quantity. Does not bake 1% or 25%.
+    """
+    if not isinstance(params, dict):
+        return None
+    raw_qty = params.get("quantity")
+    try:
+        if int(float(raw_qty)) >= 1:
+            return None
+    except (TypeError, ValueError):
+        pass
+    pct = params.get(SEND_SIZE_PCT_NL)
+    if pct in (None, ""):
+        return None
+    notional = notional_from_size_pct_nl(pct, net_liq)
+    qty = qty_from_size_pct_nl(
+        pct,
+        net_liq,
+        price,
+        multiplier=_option_multiplier(strategy, params),
+    )
+    if qty is None or notional is None:
+        return None
+    params["quantity"] = qty
+    return {
+        "quantity": qty,
+        "notional": notional,
+        "size_pct_nl": float(pct),
+        "net_liq": float(net_liq),
+    }
 
 # TWS 7496 / Gateway 4001 — live socket family. Paper is 7497 / 4002.
 _LIVE_IBKR_PORTS = frozenset({7496, 4001})
