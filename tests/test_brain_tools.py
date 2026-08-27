@@ -1303,6 +1303,225 @@ def test_clip_keeps_run_when_hits_overflow():
     assert "hits" not in data or data.get("_clipped")
 
 
+def _fat_scan_hits(n: int = 80, pad: int = 800) -> dict:
+    return {
+        "arena": "most_active",
+        "rows": [{"symbol": f"X{i}", "pad": "n" * pad} for i in range(n)],
+    }
+
+
+def _fat_session_range(n: int = 40, pad: int = 400) -> dict:
+    return {
+        f"S{i}": {"open": 10.0, "low": 9.0, "today": True, "pad": "s" * pad}
+        for i in range(n)
+    }
+
+
+def _live_book_core() -> dict:
+    return {
+        "day": {
+            "open_lots": [
+                "HPQ 260918C28 long 1",
+                "HPQ 260918C31 short 1",
+                "SPY 260918C650 long 1",
+                "SPY 261216C650 short 1",
+            ],
+            "lots": 4,
+            "names": 2,
+        },
+        "world": {
+            "flat": False,
+            "positions": [
+                {"symbol": "HPQ", "sec": "OPT", "qty": 1, "strike": 28, "right": "C"},
+                {"symbol": "SPY", "sec": "OPT", "qty": 1, "strike": 650, "right": "C"},
+            ],
+            "working_orders": [
+                {"symbol": "HPQ", "type": "LMT", "role": "exit", "order_id": 77},
+            ],
+            "fills": [
+                {"symbol": "HPQ", "sec": "BAG", "side": "BOT", "qty": 1, "px": 1.15},
+            ],
+        },
+        "desk_lessons": [
+            {
+                "id": "scan_overflow",
+                "fact": "Scan overflow drops ranked hits and keeps sessions.",
+            }
+        ],
+        "playbook": {
+            "lab": {"entry_trunks_untried": ["iron_condor"]},
+            "cards": [{"name": "flush bounce"}],
+        },
+    }
+
+
+def test_clip_keeps_live_book_when_last_look_scan_overflows():
+    """Nested last_look fat used to skip hits/news pops, then payload-clip the book."""
+    payload = {
+        **_live_book_core(),
+        "last_look": {
+            "fresh": True,
+            "send_calls": 1,
+            "tools": ["scan", "book"],
+            "scan_hits": _fat_scan_hits(),
+            "session_range": _fat_session_range(),
+        },
+    }
+    assert len(json.dumps(payload)) > 24_000
+    raw = _clip(payload)
+    data = json.loads(raw)
+    assert data.get("_clipped") != "payload"
+    assert data["day"]["open_lots"][0].startswith("HPQ")
+    assert data["day"]["open_lots"][2].startswith("SPY")
+    assert data["world"]["working_orders"][0]["order_id"] == 77
+    assert data["world"]["fills"][0]["symbol"] == "HPQ"
+    assert data["desk_lessons"][0]["id"] == "scan_overflow"
+    look = data.get("last_look") or {}
+    assert "scan_hits" not in look
+    assert look.get("_clipped") in {"scan_hits", "session_range", "rows"}
+    assert data.get("_clipped") not in {"payload", "world", "day", "desk_lessons"}
+
+
+def test_clip_keeps_live_book_when_playbook_notes_overflow():
+    payload = {
+        **_live_book_core(),
+        "playbook": {
+            "lab": {"entry_trunks_untried": ["iron_condor"]},
+            "cards": [{"name": "flush bounce"}],
+            "notes": "x" * 30_000,
+        },
+    }
+    raw = _clip(payload)
+    data = json.loads(raw)
+    assert data.get("_clipped") != "payload"
+    assert "HPQ" in data["day"]["open_lots"][0]
+    assert data["desk_lessons"][0]["id"] == "scan_overflow"
+    assert data["world"]["working_orders"]
+    pb = data.get("playbook") or {}
+    assert "notes" not in pb
+    assert pb.get("_clipped") == "notes"
+
+
+def test_clip_status_keeps_lots_and_lessons_when_news_overflows():
+    payload = {
+        "ibkr_connected": True,
+        "trading_mode": "paper",
+        "session": {"session": "regular"},
+        "sends_this_turn": 0,
+        "open_lots": ["HPQ 260918C28 long 1", "SPY 260918C650 long 1"],
+        "working_orders": [{"symbol": "HPQ", "type": "LMT", "role": "exit"}],
+        "desk_lessons": [{"id": "scan_overflow", "fact": "Do not rescan the same arena."}],
+        "news": [{"headline": "n" * 400} for _ in range(80)],
+    }
+    raw = _clip(payload)
+    data = json.loads(raw)
+    assert data.get("_clipped") == "news"
+    assert data["open_lots"][0].startswith("HPQ")
+    assert data["working_orders"][0]["symbol"] == "HPQ"
+    assert data["desk_lessons"][0]["id"] == "scan_overflow"
+    assert "news" not in data
+
+
+@pytest.mark.asyncio
+async def test_book_tool_clip_keeps_lots_and_desk_lessons(monkeypatch):
+    fat_look = {
+        "fresh": True,
+        "send_calls": 1,
+        "tools": ["scan", "book"],
+        "scan_hits": _fat_scan_hits(),
+        "session_range": _fat_session_range(),
+    }
+    monkeypatch.setattr("abcxauto.think_stream.last_look_facts", lambda *a, **k: fat_look)
+    world = _world(
+        flat=False,
+        positions=[
+            {
+                "symbol": "HPQ",
+                "sec_type": "OPT",
+                "quantity": 1,
+                "expiration": "20260918",
+                "strike": 28.0,
+                "right": "C",
+                "conId": 11,
+            },
+            {
+                "symbol": "SPY",
+                "sec_type": "OPT",
+                "quantity": 1,
+                "expiration": "20260918",
+                "strike": 650.0,
+                "right": "C",
+                "conId": 22,
+            },
+        ],
+        open_orders=[
+            {
+                "symbol": "HPQ",
+                "order_type": "LMT",
+                "action": "SELL",
+                "quantity": 1,
+                "order_id": 77,
+                "sec_type": "OPT",
+                "conId": 11,
+            }
+        ],
+        fills=[{"symbol": "HPQ", "sec_type": "BAG", "side": "BOT", "quantity": 1, "price": 1.15}],
+    )
+    raw = await _run_tool("book", {}, connector=None, world=world, snap={}, turn=BrainTurn())
+    data = json.loads(raw)
+    assert data.get("_clipped") != "payload"
+    lots = (data.get("day") or {}).get("open_lots") or []
+    assert any("HPQ" in str(x) for x in lots)
+    assert any("SPY" in str(x) for x in lots)
+    world_b = data.get("world") or {}
+    assert world_b.get("working_orders")
+    assert world_b.get("fills")
+    assert data.get("desk_lessons")
+    look = data.get("last_look") or {}
+    if look:
+        assert look.get("_clipped") in {"scan_hits", "session_range", "rows"}
+        assert "scan_hits" not in look or look.get("_clipped") == "scan_hits"
+
+
+@pytest.mark.asyncio
+async def test_status_tool_keeps_lots_orders_and_lessons(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.connections.connection_status",
+        lambda *_a, **_k: {"ibkr_connected": True, "trading_mode": "paper"},
+    )
+    monkeypatch.setattr(
+        "abcxauto.marketdata.market_hours.get_session_info",
+        lambda: {"session": "regular"},
+    )
+    world = _world(
+        flat=False,
+        positions=[
+            {
+                "symbol": "HPQ",
+                "sec_type": "OPT",
+                "quantity": 1,
+                "expiration": "20260918",
+                "strike": 28.0,
+                "right": "C",
+            }
+        ],
+        open_orders=[
+            {
+                "symbol": "HPQ",
+                "order_type": "LMT",
+                "action": "SELL",
+                "quantity": 1,
+                "order_id": 77,
+            }
+        ],
+    )
+    raw = await _run_tool("status", {}, connector=None, world=world, snap={}, turn=BrainTurn())
+    data = json.loads(raw)
+    assert any("HPQ" in str(x) for x in (data.get("open_lots") or []))
+    assert data.get("working_orders")
+    assert data.get("desk_lessons")
+
+
 def _fat_session_bars(n: int, *, close: float = 90.0) -> list[dict]:
     """IBKR-shaped 5m bars with t/t_unix/t_iso — the shape that overflowed 24k."""
     bars = []
