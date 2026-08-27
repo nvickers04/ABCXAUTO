@@ -1481,19 +1481,15 @@ def _clip_candles(data: dict[str, Any], max_chars: int = CANDLES_CLIP_CHARS) -> 
 
 
 def _clip(data: Any, max_chars: int = 24_000) -> str:
-    """Keep lab/cards when hits/news overflow. Candle bars stay on a tape clip."""
+    """Keep lab/cards when the payload overflows. Candle bars stay on a tape clip."""
     if _tape_payload(data):
         return _clip_candles(data, max_chars=max_chars)
-    if isinstance(data, dict) and data.get("run") is not None:
-        lead = {"run": data["run"]}
-        rest = {k: v for k, v in data.items() if k != "run"}
-        data = {**lead, **rest}
     text = json.dumps(data, default=str)
     if len(text) <= max_chars:
         return text
     if isinstance(data, dict):
         slim = dict(data)
-        for key in ("hits", "news", "symbols", "rows", "types"):
+        for key in ("hits", "news", "symbols", "rows", "types", "tree"):
             if key not in slim:
                 continue
             slim.pop(key)
@@ -1501,16 +1497,17 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
             text = json.dumps(slim, default=str)
             if len(text) <= max_chars:
                 return text
+        kept: dict[str, Any] = {}
+        if "lab" in slim:
+            kept["lab"] = slim["lab"]
+        # Catalog (including locked starters) so Grok can pick a name to
+        # rewrite after overflow. Tree/types can be huge; cards is the
+        # pick-list and must survive the emergency clip.
+        if "cards" in slim:
+            kept["cards"] = slim["cards"]
         if slim.get("run") is not None:
-            kept: dict[str, Any] = {}
-            if "lab" in slim:
-                kept["lab"] = slim["lab"]
-            # Catalog (including locked starters) so Grok can pick a name to
-            # rewrite after overflow. Tree/types can be huge; cards is the
-            # pick-list and must survive the emergency clip.
-            if "cards" in slim:
-                kept["cards"] = slim["cards"]
             kept["run"] = slim["run"]
+        if kept:
             kept["ok"] = slim.get("ok")
             kept["_clipped"] = "payload"
             return json.dumps(kept, default=str)[:max_chars]
