@@ -255,6 +255,8 @@ def resolve_stay_up_session(
     an empty label stays empty so overnight park can still shut down.
     """
     sess = str(session or "").strip().lower()
+    if sess == "unknown":
+        sess = ""
     if sess:
         return sess
     inferred, _mins = infer_session_before_open(now=now)

@@ -100,6 +100,21 @@ def test_real_say_keeps_chat_empty_question_drops():
     _finish_look_chat(g, BrainTurn(stream_error="RESOURCE_EXHAUSTED"), session="regular")
     assert getattr(g, "chat", None) is None
     g.chat = chat
+    _finish_look_chat(
+        g,
+        BrainTurn(stream_error="RESOURCE_EXHAUSTED", text="watching IWM"),
+        session="regular",
+    )
+    assert getattr(g, "chat", None) is chat
+    _finish_look_chat(
+        g,
+        BrainTurn(
+            text="",
+            sends=[{"result": {"status": "submitted", "success": True}}],
+        ),
+        session="regular",
+    )
+    assert getattr(g, "chat", None) is chat
     _finish_look_chat(g, BrainTurn(parked=True, text="gate off"), session="regular")
     assert getattr(g, "chat", None) is None
 
@@ -114,6 +129,12 @@ def test_spoken_look_is_not_a_failed_persist():
     assert last_turn_look_failed({"rationale": "", "_failed": True}) is True
     assert last_turn_look_failed(
         {"rationale": "watching", "_failed": True, "_stream_error": "stalled"}
+    ) is False
+    assert last_turn_look_failed(
+        {"rationale": "", "sends": 1, "_failed": True}
+    ) is False
+    assert last_turn_look_failed(
+        {"rationale": "", "_failed": True, "_stream_error": "stalled"}
     ) is True
 
 
@@ -126,6 +147,10 @@ def test_look_text_junk_is_only_empty_or_lone_question():
     assert _look_text_is_junk("\u2603") is False
     assert BrainTurn(text="watching IWM").look_failed() is False
     assert BrainTurn(failed=True, text="watching IWM").look_failed() is False
+    assert BrainTurn(
+        text="",
+        sends=[{"result": {"status": "filled", "filled": True}}],
+    ).look_failed() is False
     assert BrainTurn(text="?").look_failed() is True
     assert BrainTurn(text="").look_failed() is True
 

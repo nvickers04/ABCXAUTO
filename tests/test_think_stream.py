@@ -235,6 +235,18 @@ def test_write_last_turn_skips_junk_failed_look(tmp_path, monkeypatch):
     last4 = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
     assert last4["rationale"] == "I'll inspect the book, status, and playbook first.\n?"
 
+    sent = {
+        "strat": "iron_fly",
+        "rationale": "",
+        "sends": 1,
+        "_failed": True,
+        "world_state": {"flat": False, "net_liquidation": 35000},
+    }
+    assert last_turn_look_failed(sent) is False
+    ts.write_last_turn(sent)
+    last_sent = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert last_sent["strat"] == "iron_fly"
+
     ts.write_last_turn({
         "strat": "",
         "rationale": "Watching IWM. No ticket.",

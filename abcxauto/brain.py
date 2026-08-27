@@ -1070,18 +1070,14 @@ class BrainTurn:
     tool_cache: dict[str, str] = field(default_factory=dict)
 
     def look_failed(self) -> bool:
-        """True empty / lone '?' / dead stream. A real say is not junk.
+        """True empty / lone '?' only. A real say or send/fill is not junk.
 
-        The ``failed`` stamp is not a runner. A look that already spoke
-        is a finished look — do not wipe the stay-up chat.
+        A later empty assistant chunk, a leftover ``failed`` stamp, or a
+        dead stream after a spoken/send look must not wipe the stay-up chat.
         """
         if self.parked:
             return False
-        if self.stream_error:
-            return True
-        if self.sends:
-            return False
-        return _look_text_is_junk(self.text)
+        return _look_is_empty_or_question(self)
 
 
 _OVERLOAD_MARKERS = (
@@ -1109,6 +1105,20 @@ def _look_text_is_junk(text: str) -> bool:
     """True only for a true empty say or a lone '?'."""
     raw = (text or "").strip()
     return (not raw) or raw == "?"
+
+
+def _look_has_send_or_fill(turn: "BrainTurn") -> bool:
+    """True when this look dispatched a send (filled or working counts)."""
+    if turn.sends:
+        return True
+    return _send_succeeded(turn.last_result)
+
+
+def _look_is_empty_or_question(turn: "BrainTurn") -> bool:
+    """Junk-drop: true empty assistant text or a lone '?', and no send/fill."""
+    if _look_has_send_or_fill(turn):
+        return False
+    return _look_text_is_junk(turn.text)
 
 
 def _send_succeeded(result: dict[str, Any] | None) -> bool:
@@ -1563,6 +1573,13 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
     except Exception:
         logger.debug("finish_reason probe failed", exc_info=True)
     think_emit("stage_end", stage)
+    if not o:
+        # Some SDK finishes put the spoken say on the completed message only.
+        for obj in (last_ch, last_resp):
+            extra = _piece(obj, "content")
+            if extra:
+                o = extra
+                break
     try:
         from abcxauto.memory import get_journal
         from abcxauto.scorecard import estimate_cost_usd, usage_from_response
@@ -1627,23 +1644,30 @@ def drop_refused_send_targets(turn: BrainTurn) -> None:
     turn.sends = []
 
 
-def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
-    """Keep the live chat when the look actually said something.
+def _stay_up_session_label(session: str) -> str:
+    """Paper stay-up needs regular/premarket. Blank/unknown fill from the clock."""
+    from abcxauto.park_clock import resolve_stay_up_session
 
-    Park, overnight, true empty / lone '?', and a dead stream drop it
-    so the next think is a cold start. A ``failed`` stamp on a real
-    say is not a drop.
+    sess = str(session or "").strip().lower()
+    if sess in ("", "unknown"):
+        return resolve_stay_up_session("")
+    return resolve_stay_up_session(sess)
+
+
+def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
+    """Keep the live chat when the look actually said something or sent.
+
+    Park, overnight, and a true empty / lone '?' drop it so the next
+    think is a cold start. A ``failed`` / dead-stream stamp on a real
+    say or send/fill is not a drop.
     """
-    if turn.parked or turn.stream_error:
-        _reset_chat(g)
-        return
-    if not turn.sends and _look_text_is_junk(turn.text):
+    if turn.parked or _look_is_empty_or_question(turn):
         _reset_chat(g)
         return
     try:
         from abcxauto.park_clock import paper_stay_up
 
-        if paper_stay_up(session):
+        if paper_stay_up(_stay_up_session_label(session)):
             return
     except Exception:
         logger.debug("stay-up chat keep check failed", exc_info=True)
@@ -2912,9 +2936,9 @@ async def grok_turn(
     """One Grok tool loop. send() is the only broker path.
 
     ``resume`` is optional so older grok_turn mocks keep working. Stay-up
-    continues the live chat after a good look. Empty / junk / dead stream
-    drop it so the next think is cold. A fresh BrainTurn still drops
-    refused send tickets so they cannot be the next look's send target.
+    continues the live chat after a spoken say or send/fill. True empty /
+    lone '?' drop it so the next think is cold. A fresh BrainTurn still
+    drops refused send tickets so they cannot be the next look's send target.
     """
     return await _grok_turn_impl(
         g,
@@ -3272,13 +3296,18 @@ async def _grok_turn_impl(
                 continue
             text, response, stop = await stream_round(chat)
         except Exception as exc:
-            # A dead stream ends the look. Stay-up retries immediately, cold.
+            # A dead empty stream ends the look. A look that already spoke
+            # or sent still keeps the stay-up chat.
             logger.exception("stream_round failed")
             think_emit("tool", f"\n[stream failed: {exc}]\n")
             turn.failed = True
             turn.stream_error = str(exc)
             ran_out = False
             break
+        # Keep every spoken chunk, including a later empty/interrupt/loop
+        # stop. Junk is the whole look, not the last assistant turn.
+        if text:
+            turn.text = (turn.text + "\n" + text).strip()
         if stop == "interrupt":
             await _inject_live_poke(
                 chat, connector=connector, world=world, snap=snap, turn=turn
@@ -3287,8 +3316,6 @@ async def _grok_turn_impl(
         if stop == "loop":
             ran_out = False
             break
-        if text:
-            turn.text = (turn.text + "\n" + text).strip()
         if response is not None:
             try:
                 chat.append(response)
@@ -3314,10 +3341,9 @@ async def _grok_turn_impl(
     if ran_out:
         turn.tool_budget_hit = True
         think_emit("tool", "\n[think stopped: step ceiling]\n")
-    if not turn.parked and not turn.failed and not turn.sends:
-        if _look_text_is_junk(turn.text):
-            turn.failed = True
-            logger.warning("look failed: empty or junk assistant text")
+    if not turn.parked and not turn.failed and _look_is_empty_or_question(turn):
+        turn.failed = True
+        logger.warning("look failed: empty or junk assistant text")
     _finish_look_chat(g, turn, session=session)
     if not turn.sends:
         if str(turn.last_strat or "").lower() == "hold":
