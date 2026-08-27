@@ -699,7 +699,29 @@ def test_a_good_paper_look_re_arms_stay_up():
         eng = ProEngine()
         wait = eng._rearm_after_think({"_failed": False}, session=sess)
         assert eng._resume_think is True, sess
+        assert eng._cold_next is False, sess
         assert wait == 0.0
+
+
+def test_rearm_empty_session_during_rth_still_looks(monkeypatch):
+    """A blank snap label in RTH must not sit the desk."""
+    monkeypatch.setattr(
+        "abcxauto.park_clock.infer_session_before_open",
+        lambda **_k: ("", None),
+    )
+    monkeypatch.setattr(
+        "abcxauto.opportunity_scan.rth_now",
+        lambda now=None: True,
+    )
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {"_failed": True, "rationale": "?"},
+        session="",
+    )
+    assert eng._last_session == "regular"
+    assert eng._resume_think is True
+    assert eng._cold_next is True
+    assert wait == 0.0
 
 
 def test_a_good_look_closed_and_live_do_not_rearm(monkeypatch):
@@ -717,11 +739,28 @@ def test_a_good_look_closed_and_live_do_not_rearm(monkeypatch):
     assert wait == 0.0
 
 
+def test_rearm_junk_look_starts_immediately():
+    """Empty / ? is not a sit. Drop chat (cold_next) and look again now."""
+    eng = ProEngine()
+    wait = eng._rearm_after_think({"_failed": True, "rationale": "?"}, session="regular")
+    assert eng._resume_think is True
+    assert eng._cold_next is True
+    assert wait == 0.0
+    wait = eng._rearm_after_think({"_failed": True, "rationale": ""}, session="premarket")
+    assert eng._resume_think is True
+    assert eng._cold_next is True
+    assert wait == 0.0
+
+
 def test_rearm_failed_look_backs_off(monkeypatch):
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "30")
     eng = ProEngine()
-    wait = eng._rearm_after_think({"_failed": True}, session="regular")
+    wait = eng._rearm_after_think(
+        {"_failed": True, "_stream_error": "stream stalled"},
+        session="regular",
+    )
     assert eng._resume_think is True
+    assert eng._cold_next is True
     assert wait == 30.0
 
 
@@ -1077,6 +1116,56 @@ async def test_premarket_session_cards_do_not_park_start_until_the_bell(
 
 
 @pytest.mark.asyncio
+async def test_junk_look_starts_another_look_immediately(monkeypatch, tmp_path):
+    """After empty/? the host looks again now. Cold start. No sit clock."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    times: list[float] = []
+    resumes: list[bool] = []
+    ensure_calls: list[object] = []
+
+    def boom_ensure(*_a, **_k):
+        ensure_calls.append(_k)
+        raise AssertionError("junk RTH look must not call ensure_next_look")
+
+    async def think(self, n, g, s, *, resume=False):
+        times.append(time.monotonic())
+        resumes.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": True,
+            "rationale": "?",
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    monkeypatch.setattr("abcxauto.park_clock.ensure_next_look", boom_ensure)
+    monkeypatch.setattr("abcxauto.park_clock.set_wake", boom_ensure)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(times) < 3:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(times) >= 3
+    assert times[1] - times[0] < 0.4
+    assert times[2] - times[1] < 0.4
+    # First look is a START cold think (resume True, no live chat yet).
+    # After junk, the next look is an explicit cold start.
+    assert resumes[0] is True
+    assert resumes[1] is False
+    assert resumes[2] is False
+    assert ensure_calls == []
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is None
+    assert eng._resume_think is True
+    assert eng._cold_next is True
+
+
+@pytest.mark.asyncio
 async def test_failed_look_backs_off_without_set_wake_clock(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.4")
@@ -1089,6 +1178,7 @@ async def test_failed_look_backs_off_without_set_wake_clock(monkeypatch, tmp_pat
             "pnl": 0,
             "equity": 100000,
             "_failed": True,
+            "_stream_error": "stream stalled",
             "rationale": "?",
         }
 
