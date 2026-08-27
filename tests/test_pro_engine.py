@@ -269,6 +269,119 @@ def test_on_cycle_populates_book_and_mandate(monkeypatch):
     reset_risk_gate()
 
 
+def test_on_cycle_failed_look_does_not_blank_last_turn(tmp_path):
+    """Cycle apply still updates the engine; junk persist does not wipe last_turn."""
+    from abcxauto import think_stream as ts
+
+    ts._run = {"run_id": "r1", "pid": 1}
+    ts.write_last_turn({
+        "strat": "",
+        "rationale": "Flat. No ticket.",
+        "tool_trace": ["book", "status", "playbook"],
+        "world_state": {"flat": True, "net_liquidation": 35000},
+    })
+    before = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    brief_before = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+
+    eng = ProEngine()
+    eng._on_cycle(
+        {
+            "cycle": 2,
+            "pnl": 0.0,
+            "pnl_chg": 0.0,
+            "equity": 35000.0,
+            "strat": "",
+            "rationale": "",
+            "tool_trace": [],
+            "_failed": True,
+            "action_obj": {},
+            "result": {},
+            "impact": {},
+            "reality_pulse": {},
+            "positions": [],
+            "open_orders": [],
+            "unprotected": [],
+            "protection": {"unprotected_symbols": []},
+            "inventory": "",
+            "validation": "ok",
+            "world_state": {"flat": True, "net_liquidation": 35000},
+        }
+    )
+    after = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    brief_after = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
+    assert after["rationale"] == "Flat. No ticket."
+    assert after["tool_trace"] == ["book", "status", "playbook"]
+    assert after["ts"] == before["ts"]
+    assert brief_after["rationale"] == brief_before["rationale"]
+    assert eng.state.equity == 35000.0
+    assert eng.state.tool_trace == []
+
+
+def test_on_cycle_park_and_finished_look_still_write_last_turn(tmp_path):
+    from abcxauto import think_stream as ts
+
+    ts._run = {"run_id": "r1", "pid": 1}
+    ts.write_last_turn({
+        "strat": "",
+        "rationale": "Flat. No ticket.",
+        "tool_trace": ["book"],
+        "world_state": {"flat": True, "net_liquidation": 35000},
+    })
+    eng = ProEngine()
+    eng._on_cycle(
+        {
+            "cycle": 3,
+            "pnl": 0.0,
+            "equity": 35000.0,
+            "strat": "",
+            "rationale": "Gate off. Parking.",
+            "tool_trace": ["playbook", "book", "scan", "set_wake"],
+            "_parked": True,
+            "_failed": False,
+            "action_obj": {},
+            "result": {},
+            "impact": {},
+            "reality_pulse": {},
+            "positions": [],
+            "open_orders": [],
+            "unprotected": [],
+            "protection": {"unprotected_symbols": []},
+            "inventory": "",
+            "validation": "ok",
+            "world_state": {"flat": True, "net_liquidation": 35000},
+        }
+    )
+    parked = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert "Parking" in parked["rationale"]
+    assert parked["tool_trace"] == ["playbook", "book", "scan", "set_wake"]
+
+    eng._on_cycle(
+        {
+            "cycle": 4,
+            "pnl": 0.0,
+            "equity": 35100.0,
+            "strat": "",
+            "rationale": "Watching IWM. No ticket.",
+            "tool_trace": ["book", "scan"],
+            "_failed": False,
+            "action_obj": {},
+            "result": {},
+            "impact": {},
+            "reality_pulse": {},
+            "positions": [],
+            "open_orders": [],
+            "unprotected": [],
+            "protection": {"unprotected_symbols": []},
+            "inventory": "",
+            "validation": "ok",
+            "world_state": {"flat": True, "net_liquidation": 35100},
+        }
+    )
+    done = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert done["rationale"] == "Watching IWM. No ticket."
+    assert done["tool_trace"] == ["book", "scan"]
+
+
 @pytest.mark.asyncio
 async def test_pro_engine_wires_portfolio_monitor(monkeypatch):
     """After IBKR connect, ProEngine starts PortfolioMonitor on the worker loop."""
