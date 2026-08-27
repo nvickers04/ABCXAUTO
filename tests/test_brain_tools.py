@@ -961,9 +961,13 @@ def test_remember_session_keeps_opening_low_over_live_open():
     assert snap["session_range"]["NKE"]["last"] == 39.79
 
 
-def test_candles_pin_scan_open_when_hist_starts_midday():
+def test_candles_pin_scan_open_when_hist_starts_midday(monkeypatch):
     from abcxauto.brain import _apply_candle_session
 
+    monkeypatch.setattr(
+        "abcxauto.opportunity_scan._et_calendar_day",
+        lambda now=None: "2026-08-25",
+    )
     out = {
         "bars": [
             {"t": "2026-08-25T10:15:00", "o": 133.47, "h": 135.81, "l": 132.94, "c": 134.0},
@@ -2971,7 +2975,7 @@ async def test_invoke_write_lab_playbook_emits_marker_only(monkeypatch):
     got: list[str] = []
 
     def cap(kind: str, text: str) -> None:
-        if kind == "say":
+        if kind == "clerk":
             got.append(text)
 
     note = "Paper: prefer debit verticals on index ETFs."
@@ -3008,7 +3012,7 @@ async def test_invoke_write_lab_playbook_long_notebook_stays_off_stream(monkeypa
     got: list[str] = []
 
     def cap(kind: str, text: str) -> None:
-        if kind == "say":
+        if kind == "clerk":
             got.append(text)
 
     note = ("AAPL — wait. " * 400) + ("x" * 2000)
@@ -3068,7 +3072,7 @@ async def test_invoke_other_tool_emits_marker_only(monkeypatch):
     got: list[str] = []
 
     def cap(kind: str, text: str) -> None:
-        if kind == "say":
+        if kind == "clerk":
             got.append(text)
 
     subscribe(cap)
