@@ -13,10 +13,11 @@ _CACHE: dict[str, Any] = {"ts": 0.0, "items": [], "symbols": []}
 _CACHE_TTL_S = 90.0
 _UNIVERSE_CAP = 14
 
-# Per-symbol cap. MDA's client allows 30s, which outlasts the 20s news tool
-# budget; a stall must not look like "no headlines." One retry, then miss.
-NEWS_SYMBOL_S = 12.0
-NEWS_TRIES = 2
+# Fail fast. MDA's HTTP client allows 30s and a 12s per-symbol wait_for was
+# the whole look: Grok sat through empty news() batches (HEI/WDAY/…) instead
+# of a miss the think can skip. One try; a stall is a hard miss.
+NEWS_SYMBOL_S = 2.0
+NEWS_TRIES = 1
 
 
 def reset_news_cache() -> None:
@@ -59,10 +60,36 @@ def _miss(symbol: str, reason: str) -> dict:
     }
 
 
+def news_hard_miss(items: list[dict] | None) -> str | None:
+    """Timeout/error reason when nothing but misses landed. None if headlines or a completed empty."""
+    why: str | None = None
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        if it.get("error"):
+            why = why or str(it.get("error") or "timed out")
+            continue
+        if str(it.get("headline") or "").strip():
+            return None
+    return why
+
+
+def _dedupe_headlines(items: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    unique: list[dict] = []
+    for it in items:
+        hl = str(it.get("headline") or "").strip()
+        if not hl or hl in seen:
+            continue
+        seen.add(hl)
+        unique.append(it)
+    return unique
+
+
 async def _fetch_symbol_news(
     client: Any, sym: str, *, per_symbol: int
 ) -> tuple[list[dict], str | None]:
-    """One symbol: try, retry once on timeout/error. Miss is not empty."""
+    """One symbol: bounded wait. Miss is not empty."""
     try:
         from abcxauto.prints import mda_worth_asking
 
@@ -90,6 +117,48 @@ async def _fetch_symbol_news(
     return [], reason
 
 
+async def fetch_symbols_news(
+    symbols: list[str] | None,
+    *,
+    per_symbol: int = 4,
+) -> list[dict]:
+    """Headlines for an explicit tape. Timeout/error is a miss item, not empty.
+
+    Parallel, one try, per-symbol cap. A slow MDA must not eat a 12s look.
+    """
+    out: list[str] = []
+    for raw in symbols or []:
+        su = str(raw or "").upper().strip()
+        if su and su not in out:
+            out.append(su)
+    if not out:
+        return []
+
+    client = _get_client()
+    if not _configured(client):
+        return []
+
+    items: list[dict] = []
+    misses: list[dict] = []
+    try:
+        batches = await asyncio.gather(
+            *[_fetch_symbol_news(client, s, per_symbol=per_symbol) for s in out]
+        )
+        for sym, (batch, err) in zip(out, batches):
+            if err:
+                misses.append(_miss(sym, err))
+            else:
+                items.extend(batch)
+    except Exception:
+        logger.exception("fetch_symbols_news failed")
+        return [_miss(s, "error") for s in out]
+
+    unique = _dedupe_headlines(items)
+    if misses:
+        return unique + misses
+    return unique
+
+
 async def fetch_agent_news(
     positions: list[dict] | None = None,
     *,
@@ -114,36 +183,9 @@ async def fetch_agent_news(
     if not symbols:
         return []
 
-    items: list[dict] = []
-    misses: list[dict] = []
-    try:
-        client = _get_client()
-        if not _configured(client):
-            return []
-
-        batches = await asyncio.gather(
-            *[_fetch_symbol_news(client, s, per_symbol=per_symbol) for s in symbols]
-        )
-        for _sym, (batch, err) in zip(symbols, batches):
-            if err:
-                misses.append(_miss(_sym, err))
-            else:
-                items.extend(batch)
-    except Exception:
-        logger.exception("fetch_agent_news failed")
-        return [_miss(s, "error") for s in symbols]
-
-    seen: set[str] = set()
-    unique: list[dict] = []
-    for it in items:
-        hl = str(it.get("headline") or "").strip()
-        if not hl or hl in seen:
-            continue
-        seen.add(hl)
-        unique.append(it)
-
-    if misses:
-        return unique + misses
+    unique = await fetch_symbols_news(symbols, per_symbol=per_symbol)
+    if any(isinstance(it, dict) and it.get("error") for it in unique):
+        return unique
 
     _CACHE.update(ts=now, items=unique, symbols=symbols)
     return list(unique)

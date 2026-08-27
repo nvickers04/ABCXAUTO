@@ -1,14 +1,19 @@
 """Shared news feed formatting for agent + UI."""
 
 import asyncio
+import time
 
 import pytest
 
 from abcxauto.news_feed import (
+    NEWS_SYMBOL_S,
+    NEWS_TRIES,
     _CACHE,
     _universe,
     fetch_agent_news,
+    fetch_symbols_news,
     format_news_for_prompt,
+    news_hard_miss,
     reset_news_cache,
 )
 
@@ -108,6 +113,30 @@ class _MDA:
         return await self._impl(symbol, countback)
 
 
+def test_news_wait_is_fail_fast_not_a_12s_look():
+    """2026-08-26: 12s per symbol was the whole look. A stall must miss fast."""
+    assert NEWS_SYMBOL_S * max(1, int(NEWS_TRIES)) <= 2.0
+    assert NEWS_SYMBOL_S < 12.0
+    assert NEWS_TRIES == 1
+
+
+def test_news_hard_miss_only_when_no_headlines():
+    assert news_hard_miss([]) is None
+    assert news_hard_miss([{"symbol": "NKE", "headline": "print"}]) is None
+    assert (
+        news_hard_miss(
+            [
+                {"symbol": "NKE", "headline": "print"},
+                {"symbol": "AG", "headline": "(unavailable - timed out)", "error": "timed out"},
+            ]
+        )
+        is None
+    )
+    assert news_hard_miss(
+        [{"symbol": "HEI", "headline": "(unavailable - timed out)", "error": "timed out"}]
+    ) == "timed out"
+
+
 @pytest.mark.asyncio
 async def test_timeout_is_not_empty_success(monkeypatch):
     async def hang(_symbol, _countback):
@@ -122,7 +151,7 @@ async def test_timeout_is_not_empty_success(monkeypatch):
     assert items
     assert items[0].get("error") == "timed out"
     assert "unavailable" in str(items[0].get("headline"))
-    assert client.calls == ["NKE", "NKE"]
+    assert client.calls == ["NKE"]
     text = format_news_for_prompt(items)
     assert "no headlines" not in text
     assert "timed out" in text
@@ -130,7 +159,7 @@ async def test_timeout_is_not_empty_success(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_timeout_retries_then_lands(monkeypatch):
+async def test_timeout_does_not_retry_into_the_stall(monkeypatch):
     hits = {"n": 0}
 
     async def once_then_ok(symbol, _countback):
@@ -145,10 +174,10 @@ async def test_timeout_retries_then_lands(monkeypatch):
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["AG"])
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_agent_news([{"symbol": "AG"}])
-    assert [it.get("headline") for it in items] == ["AG printed"]
-    assert not any(it.get("error") for it in items)
-    assert client.calls == ["AG", "AG"]
-    assert _CACHE["items"][0]["headline"] == "AG printed"
+    assert items[0].get("error") == "timed out"
+    assert client.calls == ["AG"]
+    assert hits["n"] == 1
+    assert not _CACHE["items"]
 
 
 @pytest.mark.asyncio
@@ -168,7 +197,42 @@ async def test_timeout_does_not_cache_so_next_look_refetches(monkeypatch):
     second = await fetch_agent_news([{"symbol": "BE"}])
     assert first[0].get("error") == "timed out"
     assert second[0].get("error") == "timed out"
-    assert n["hits"] == 4
+    assert n["hits"] == 2
+
+
+@pytest.mark.asyncio
+async def test_slow_source_does_not_eat_a_12s_look(monkeypatch):
+    """Default cap, hanging MDA: miss in the fail-fast window, not 12s empty."""
+
+    async def hang(_symbol, _countback):
+        await asyncio.sleep(30)
+        return [{"symbol": _symbol, "headline": "should not land"}]
+
+    client = _MDA(hang)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    t0 = time.monotonic()
+    items = await fetch_symbols_news(["HEI", "WDAY", "GDDY", "SJM", "ROST"])
+    elapsed = time.monotonic() - t0
+    assert elapsed < 12.0
+    assert elapsed < NEWS_SYMBOL_S + 2.0
+    assert items
+    assert {it.get("error") for it in items} == {"timed out"}
+    assert [it.get("symbol") for it in items] == ["HEI", "WDAY", "GDDY", "SJM", "ROST"]
+    assert news_hard_miss(items) == "timed out"
+    assert client.calls == ["HEI", "WDAY", "GDDY", "SJM", "ROST"]
+
+
+@pytest.mark.asyncio
+async def test_good_fetch_still_returns_items(monkeypatch):
+    async def ok(symbol, _countback):
+        return [{"symbol": symbol, "headline": f"{symbol} printed"}]
+
+    client = _MDA(ok)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["INTU", "FIG"])
+    assert [it.get("headline") for it in items] == ["INTU printed", "FIG printed"]
+    assert news_hard_miss(items) is None
+    assert not any(it.get("error") for it in items)
 
 
 @pytest.mark.asyncio
