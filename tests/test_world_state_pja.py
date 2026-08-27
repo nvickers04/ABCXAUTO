@@ -535,7 +535,8 @@ def test_format_wake_fill_is_delta_not_discovery():
     finally:
         note_wake(None)
     assert "event=fill SPY 260821C780 filled." in text
-    assert "prev=close_option sends=2" in text
+    assert "prev=" not in text
+    assert "close_option" not in text
     assert "This is a delta" not in text
     assert "yield resume" not in text
     assert "next=" not in text

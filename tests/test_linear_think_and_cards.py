@@ -531,7 +531,8 @@ def test_book_payload_carries_last_look_scan(monkeypatch, tmp_path):
     assert "scan" in look["tools"]
     assert look["scan_hits"]["rows"][0]["symbol"] == "SNDK"
     assert look["scan_hits"]["rows"][0]["open_gap_pct"] == -6.5
-    assert "SNDK" in look["rationale"]
+    assert "rationale" not in look
+    assert "Gate OFF" not in str(look)
     assert look.get("fresh") is True
 
 

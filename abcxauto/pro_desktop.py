@@ -4370,18 +4370,32 @@ class ProTerminal:
             return
         self._news_last_fetch = now
         think_items = self._think_news_items()
-        try:
-            from abcxauto.news_feed import fetch_agent_news
+        from abcxauto.news_feed import (
+            coalesce_news,
+            fetch_agent_news,
+            is_real_headline,
+            remember_headlines,
+        )
 
+        remember_headlines(think_items)
+        try:
             unique = await fetch_agent_news(
                 self._news_rail_universe(), force=force, per_symbol=5
             )
         except Exception:
             unique = []
-        if not unique:
-            unique = think_items
-        self._news_cache = unique
-        self._render_news_list(unique)
+        remember_headlines(unique)
+        names = [
+            str((p or {}).get("symbol") or "").upper().strip()
+            for p in self._news_rail_universe()
+            if str((p or {}).get("symbol") or "").strip()
+        ]
+        painted = coalesce_news(unique, names)
+        if not any(is_real_headline(it) for it in painted):
+            painted = think_items or unique
+        self._news_cache = painted
+        remember_headlines(painted)
+        self._render_news_list(painted)
 
     # ----------------------------------------------------------------- loops
 

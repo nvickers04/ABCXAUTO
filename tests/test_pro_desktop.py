@@ -1193,3 +1193,37 @@ async def test_open_book_news_rail_stays_on_positions(headless_pro, monkeypatch)
     assert "INTU" not in names
     assert "Apple print" in _news_text(headless_pro)
 
+
+@pytest.mark.asyncio
+async def test_news_rail_timeout_keeps_the_print_already_on_the_rail(
+    headless_pro, monkeypatch
+):
+    """A 2s MDA miss must not wipe HPQ Q3 from What's happening."""
+    from abcxauto.news_feed import remember_headlines, reset_news_cache
+
+    reset_news_cache()
+    remember_headlines(
+        [{"symbol": "HPQ", "headline": "HPQ Q3 earnings miss", "source": "mda"}]
+    )
+
+    async def _timeout_fetch(_positions, **_kw):
+        return [
+            {
+                "symbol": "HPQ",
+                "headline": "(unavailable - timed out)",
+                "error": "timed out",
+            }
+        ]
+
+    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _timeout_fetch)
+    s = headless_pro.engine.state
+    s.positions = [{"symbol": "HPQ", "quantity": 1, "sec_type": "STK"}]
+    s.news_items = []
+    headless_pro._news_last_fetch = 0.0
+    await headless_pro._refresh_news(force=True)
+    text = _news_text(headless_pro)
+    assert "HPQ Q3 earnings miss" in text
+    assert "unavailable" not in text
+    assert "No headlines yet" not in text
+    reset_news_cache()
+

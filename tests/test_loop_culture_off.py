@@ -269,8 +269,10 @@ def test_wake_and_scan_do_not_assign_card_floors(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
     write_desk_brief(
         {
-            "last_say": "still no ticket unless news-miss actually fires",
-            "rationale": "still no ticket unless news-miss actually fires",
+            "last_say": "only send if a card has room",
+            "rationale": "loser-scan — only send if a card has room",
+            "strat": "loser-scan",
+            "sends": 0,
             "tool_trace": ["scan"],
             "send_calls": 0,
         }
@@ -292,6 +294,10 @@ def test_wake_and_scan_do_not_assign_card_floors(tmp_path, monkeypatch):
         },
     )
     assert "still no ticket unless news-miss" not in text
+    assert "only send if a card has room" not in text
+    assert "loser-scan" not in text
+    assert "loser screens" not in text
+    assert "prev=" not in text
     assert "unused=" not in text
     assert last_look_wake_bit(
         {"last_say": "still no ticket unless news-miss actually fires"}
@@ -318,3 +324,14 @@ def test_lab_facts_awaiting_is_names_only(tmp_path, monkeypatch):
         assert "sends" not in row
         assert "max_looks_without_trigger" not in row
     assert "bracket" in facts["unused_open_types"]
+
+
+def test_system_prompt_is_unchanged():
+    from abcxauto.llm import SYSTEM_PROMPT
+
+    assert SYSTEM_PROMPT == (
+        "You own an Interactive Brokers {mode} book. Strategy is yours.\n"
+        "Live only follows a promoted playbook. Risk is code.\n"
+        "send tickets that match ORDER EXAMPLES.\n"
+        "Size vs max_risk_per_trade_pct of NetLiq.\n"
+    )
