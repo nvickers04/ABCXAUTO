@@ -256,7 +256,7 @@ def attach_mda_news(rows: list[dict[str, Any]], items: list[dict[str, Any]] | No
     """Nest headlines under ``row['mda']['news']`` keyed by symbol."""
     by_sym: dict[str, list[dict[str, Any]]] = {}
     for it in items or []:
-        if not isinstance(it, dict):
+        if not isinstance(it, dict) or it.get("error"):
             continue
         sym = str(it.get("symbol") or "").upper().strip()
         if sym:

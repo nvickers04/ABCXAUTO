@@ -309,10 +309,10 @@ async def test_bare_news_tool_asks_scan_names(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_one_stalled_news_symbol_does_not_sink_the_tool(monkeypatch):
-    """MDA allows 30s per request; the tool budget is 20s. Cap each symbol."""
+    """MDA allows 30s per request; one stall is a miss, the rest still land."""
     import asyncio as _asyncio
 
-    monkeypatch.setattr("abcxauto.brain.NEWS_SYMBOL_S", 0.05)
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
 
     class MDA:
         is_configured = True
@@ -333,8 +333,51 @@ async def test_one_stalled_news_symbol_does_not_sink_the_tool(monkeypatch):
             turn=BrainTurn(),
         )
     )
-    # The stalled symbol is simply absent; the others still land.
-    assert [it["symbol"] for it in data["items"]] == ["SPY", "QQQ"]
+    heads = [it for it in data["items"] if not it.get("error")]
+    miss = [it for it in data["items"] if it.get("error")]
+    assert [it["symbol"] for it in heads] == ["SPY", "QQQ"]
+    assert miss and miss[0]["symbol"] == "HANG" and miss[0]["error"] == "timed out"
+    assert "error" not in data
+
+
+@pytest.mark.asyncio
+async def test_news_tool_slow_source_is_fast_hard_miss(monkeypatch):
+    """Paper 2026-08-26: news() sat 12s then handed back empty. Fail fast."""
+    import asyncio as _asyncio
+    import time as _time
+
+    from abcxauto.news_feed import NEWS_SYMBOL_S
+
+    class MDA:
+        is_configured = True
+
+        async def get_stock_news(self, symbol, countback=4):
+            await _asyncio.sleep(30)
+            return [{"symbol": symbol, "headline": "should not land"}]
+
+    monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
+    t0 = _time.monotonic()
+    data = json.loads(
+        await _run_tool(
+            "news",
+            {"symbols": ["HEI", "WDAY", "GDDY", "SJM", "ROST"]},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    elapsed = _time.monotonic() - t0
+    assert elapsed < 12.0
+    assert elapsed < NEWS_SYMBOL_S + 2.0
+    assert "timed out" in str(data.get("error") or "")
+    assert data["items"]
+    assert all(it.get("error") == "timed out" for it in data["items"])
+    assert not any(
+        str(it.get("headline") or "").strip()
+        and not it.get("error")
+        for it in data["items"]
+    )
 
 
 @pytest.mark.asyncio

@@ -100,6 +100,16 @@ def test_join_mda_metrics_and_news_on_ibkr_hit():
     assert rows[0]["mda"]["source"] == "mda"
 
 
+def test_attach_mda_news_skips_timeout_misses():
+    rows = [{"symbol": "HEI", "last": 240.0}]
+    n = attach_mda_news(
+        rows,
+        [{"symbol": "HEI", "headline": "(unavailable - timed out)", "error": "timed out"}],
+    )
+    assert n == 0
+    assert "mda" not in rows[0]
+
+
 def test_quote_from_ticker_has_asof():
     from abcxauto.broker.quotes import quote_from_ticker
 

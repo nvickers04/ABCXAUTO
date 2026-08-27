@@ -55,9 +55,6 @@ SEND_S = 45.0
 CHAIN_S = 60.0
 CANDLE_S = 35.0
 SCAN_S = 35.0
-# Per-symbol news cap. The MDA client allows 30s per request, which on its own
-# outlasts TOOL_S — one stalled symbol must not spend the whole tool budget.
-NEWS_SYMBOL_S = 12.0
 _QUOTE_SCHEMA = {"type": "string", "description": "Ticker, e.g. AAPL"}
 _SYMBOLS_SCHEMA = {"type": "array", "items": {"type": "string"}}
 
@@ -2093,47 +2090,14 @@ def _compact_chain(raw: dict[str, Any], *, last: float | None = None) -> dict[st
 
 
 async def _mda_news(symbols: list[str], *, per_symbol: int = 4) -> list[dict[str, Any]]:
-    """Headlines for named symbols, fetched in parallel with a per-symbol cap.
-
-    Serial fetching here was the timeout. The MDA client allows 30s per request,
-    which alone exceeds the 20s news budget, and eight of them in sequence also
-    blew the 35s ``scan with=news`` budget this runs inside. Each symbol now gets
-    its own cap and a miss is simply absent rather than fatal to the tool —
-    ``fetch_agent_news`` has gathered its symbols this way all along.
-    """
-    from abcxauto.marketdata.client import get_marketdata_client
-
+    """Headlines for named symbols. Timeout is a miss item, not an empty success."""
+    from abcxauto.news_feed import fetch_symbols_news
     from abcxauto.prints import mda_worth_asking
 
-    client = get_marketdata_client()
-    flag = getattr(client, "is_configured", False)
-    if not (flag() if callable(flag) else flag):
-        return []
     syms = [s for s in symbols[:8] if s and mda_worth_asking(s)]
     if not syms:
         return []
-
-    async def _one(sym: str) -> list[dict[str, Any]]:
-        try:
-            return list(
-                await asyncio.wait_for(
-                    client.get_stock_news(sym, countback=per_symbol),
-                    timeout=NEWS_SYMBOL_S,
-                )
-                or []
-            )
-        except asyncio.TimeoutError:
-            logger.warning("news %s timed out after %.0fs", sym, NEWS_SYMBOL_S)
-            return []
-        except Exception:
-            logger.exception("news failed for %s", sym)
-            return []
-
-    rows: list[dict[str, Any]] = []
-    # gather preserves input order, so headlines stay in the order asked.
-    for batch in await asyncio.gather(*[_one(s) for s in syms]):
-        rows.extend(batch)
-    return rows
+    return await fetch_symbols_news(syms, per_symbol=per_symbol)
 
 
 async def _one_option_quote(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
@@ -2276,7 +2240,7 @@ async def _run_tool(
         rows = await fn()
         return _clip({"source": "ibkr", "freshness": "live", "fills": list(rows or [])[:40]})
     if name == "news":
-        from abcxauto.news_feed import fetch_agent_news
+        from abcxauto.news_feed import fetch_agent_news, news_hard_miss
 
         asked = normalize_tickers(args.get("symbols"))
         tape = _news_symbols_this_look(world, snap, asked)
@@ -2292,6 +2256,9 @@ async def _run_tool(
             "use": "context_not_live_last",
             "items": items[:24],
         }
+        miss = news_hard_miss(items)
+        if miss:
+            payload["error"] = f"news unavailable - {miss}"
         _attach_run_sheet(payload, turn=turn, world=world, tool="news", quoted=snap)
         return _clip(payload)
     if name == "odds":
