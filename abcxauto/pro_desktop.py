@@ -166,6 +166,106 @@ def stream_line_kind(line: str) -> str:
     return "prose"
 
 
+def current_look_text(buf: str) -> str:
+    """The live look: text after the last --- GROK banner, or the whole tail."""
+    text = buf or ""
+    idx = text.rfind("--- GROK")
+    return text[idx:] if idx >= 0 else text
+
+
+def think_tail_tool_chips(buf: str) -> list[str]:
+    """Tool names from this look's [chip] lines, not last_turn.tool_trace."""
+    names: list[str] = []
+    for raw in current_look_text(buf).splitlines():
+        if stream_line_kind(raw) != "tool":
+            continue
+        inner = raw.strip()[1:-1].strip()
+        if inner:
+            names.append(inner.split()[0])
+    return names
+
+
+def _say_is_real(text: str) -> bool:
+    t = " ".join((text or "").split())
+    return bool(t) and t not in {"?", "—", "-", ".", "…"}
+
+
+def think_tail_last_say(buf: str) -> str:
+    """Last real assistant [say] in the tail. Junk '?' does not wipe an earlier say."""
+    found: list[str] = []
+    lines = (buf or "").splitlines()
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() != "[say]":
+            i += 1
+            continue
+        i += 1
+        parts: list[str] = []
+        while i < len(lines):
+            kind = stream_line_kind(lines[i])
+            if kind not in ("prose", "blank"):
+                break
+            bit = lines[i].strip()
+            if bit:
+                parts.append(bit)
+            i += 1
+        text = " ".join(parts).strip()
+        if _say_is_real(text):
+            found.append(text)
+    return found[-1] if found else ""
+
+
+def last_card_send_label(rows: list[dict[str, Any]] | None = None) -> str:
+    """Last real card_sends.jsonl row. Does not invent a card."""
+    if rows is None:
+        try:
+            from abcxauto.lab_playbook import _card_sends
+
+            rows = _card_sends(limit=40)
+        except Exception:
+            return ""
+    if not rows:
+        return ""
+    row = rows[-1] if isinstance(rows[-1], dict) else {}
+    card = str(row.get("card") or "").strip()
+    if not card:
+        return ""
+    symbol = str(row.get("symbol") or "").strip()
+    return f"{symbol} · {card}" if symbol else card
+
+
+def grok_sub_state(
+    *,
+    running: bool,
+    status: str = "",
+    fail_streak: int = 0,
+    parked: bool = False,
+    tail_moved: bool = False,
+) -> str:
+    """Grok sub: looking | sat | look failed. fail_streak cannot hide a live think."""
+    if not running:
+        return "off"
+    st = (status or "").lower()
+    looking = (not parked and st != "parked") and (
+        st.startswith("thinking") or st.startswith("grok") or bool(tail_moved)
+    )
+    if looking:
+        return "looking"
+    if int(fail_streak or 0) > 0:
+        return "look failed"
+    return "sat"
+
+
+def grok_sub_color(state: str) -> str:
+    if state == "looking":
+        return GREEN
+    if state == "look failed":
+        return AMBER
+    if state == "sat":
+        return TEXT
+    return MUTED
+
+
 class ProTerminal:
     def __init__(self, page: ft.Page):
         self.page = page
@@ -271,7 +371,7 @@ class ProTerminal:
         self._prev_text: str | None = None
         self.lbl_risk = ft.Text("—", size=12, color=MUTED, selectable=True)
         self.lbl_pace = ft.Text("Pace: —", size=12, color=MUTED, selectable=True)
-        self.lbl_last_send = ft.Text("Last send: —", size=12, color=MUTED, selectable=True)
+        self.lbl_last_send = ft.Text("—", size=12, color=MUTED, selectable=True)
         self.lbl_result = ft.Text("Result: —", size=12, color=MUTED, selectable=True)
         self.lbl_why = ft.Text("Why: —", size=12, color=MUTED, selectable=True)
         self.lbl_focus = ft.Text("Focus: —", size=12, color=MUTED, selectable=True)
@@ -292,10 +392,11 @@ class ProTerminal:
         self.lbl_hs_next = ft.Text("", size=11, color=MUTED, selectable=True)
         self.lbl_hs_burn = ft.Text("no looks yet", size=12, weight=ft.FontWeight.W_600, color=MUTED)
         self.lbl_hs_look = ft.Text("this look: —", size=11, color=MUTED, selectable=True)
-        self.lbl_hs_cost = ft.Text("model —", size=11, color=MUTED, selectable=True)
         self.lbl_hs_link = ft.Text("link —", size=11, color=MUTED, selectable=True)
         self.health_box = ft.Container(padding=0)
         self._sc_last: dict = {}
+        self._tail_len: int | None = None
+        self._tail_moved_mono = 0.0
         # ---- Book strip: context for reading the stream, not a risk panel.
         self.lbl_book_strip = ft.Text("No open lots", size=12, color=MUTED, selectable=True)
         self.col_book_strip = ft.Column(spacing=2, tight=True)
@@ -948,9 +1049,9 @@ class ProTerminal:
     def _status_strip(self) -> ft.Control:
         """One thin pinned band on every surface, small type.
 
-        Only facts that change what the operator does now: is Grok on, is the desk
-        halted, what is exposed, what the last ticket did, and whether the looks are
-        costing more than they earn.
+        Only facts that change what the operator does now: is Grok looking, is the
+        desk halted, what is exposed, the last say or card, and whether looks are
+        burning with no ticket. Model/edge lives on Scorecard, not here.
         """
         self.health_box.content = ft.Row(
             [
@@ -959,7 +1060,6 @@ class ProTerminal:
                 self.lbl_hs_next,
                 self.lbl_hs_burn,
                 self.lbl_hs_look,
-                self.lbl_hs_cost,
                 self.lbl_hs_link,
             ],
             spacing=12,
@@ -1751,7 +1851,6 @@ class ProTerminal:
             self._sc_last = {}
             self._sync_edge_stat({})
             return
-        # The health strip reads this instead of scoring again every tick.
         self._sc_last = sc if isinstance(sc, dict) else {}
         self._sync_edge_stat(sc)
         self._sync_session_score(sc)
@@ -3555,6 +3654,65 @@ class ProTerminal:
             return f"{sec / 60:.0f}m"
         return f"{sec / 3600:.1f}h"
 
+    def _think_tail_moved(self, buf: str) -> bool:
+        """True when think_live grew since the last paint. First paint is not motion."""
+        n = len(buf or "")
+        prev = self._tail_len
+        self._tail_len = n
+        now = time.monotonic()
+        if prev is None:
+            return False
+        if n > prev:
+            self._tail_moved_mono = now
+            return True
+        age = now - float(self._tail_moved_mono or 0)
+        return bool(self._tail_moved_mono) and age < 2.5
+
+    def _sync_last_line(self) -> None:
+        """Last say in the tail, else last real card send. Never Last send: — after a look."""
+        s = self.engine.state
+        buf = str(getattr(s, "think_live", "") or "")
+        say = think_tail_last_say(buf)
+        stage_err = str(getattr(s, "stage_error", "") or "").strip()
+        strat = str(getattr(s, "brain_strat", "") or "").strip()
+        sends_look = int(getattr(s, "sends_last_look", 0) or 0)
+        looks = int(getattr(s, "looks_since_send", 0) or 0)
+        if stage_err:
+            self.lbl_last_send.value = f"Block: {stage_err[:240]}"
+            self.lbl_last_send.color = AMBER
+            return
+        if say:
+            self.lbl_last_send.value = say[:240]
+            self.lbl_last_send.color = TEXT
+            return
+        card = last_card_send_label()
+        if card:
+            self.lbl_last_send.value = card[:240]
+            self.lbl_last_send.color = TEXT
+            return
+        if strat and strat not in ("—",):
+            self.lbl_last_send.value = f"Last send: {strat}"
+            self.lbl_last_send.color = TEXT
+            return
+        if sends_look:
+            self.lbl_last_send.value = f"Last look: {sends_look} send(s)"
+            self.lbl_last_send.color = TEXT
+            return
+        if not s.equity and self._brief().get("strat"):
+            brief = self._brief()
+            self.lbl_last_send.value = (
+                f"Last send: {brief.get('strat')} · {brief.get('sends') or 0} sends "
+                f"({self._brief_age(brief)})"
+            )
+            self.lbl_last_send.color = MUTED
+            return
+        if looks:
+            self.lbl_last_send.value = f"{looks} look(s) since a ticket"
+            self.lbl_last_send.color = AMBER if looks >= 3 else MUTED
+            return
+        self.lbl_last_send.value = "—"
+        self.lbl_last_send.color = MUTED
+
     def _sync_health_strip(self) -> None:
         """Silence, burn, link — the three things that make the operator step in.
 
@@ -3566,18 +3724,18 @@ class ProTerminal:
         last = float(getattr(eng, "_last_grok_mono", 0.0) or 0.0)
         status = str(getattr(s, "status", "") or "")
         st = status.lower()
-        if not running:
-            state, color = "off", MUTED
-        elif streak:
-            state, color = "backing off", AMBER
-        elif getattr(eng, "_think_parked", False) or st == "parked":
-            state, color = "parked", AMBER
-        elif st.startswith("thinking") or st.startswith("grok"):
-            state, color = "thinking now", GREEN
-        elif st.startswith("wait"):
-            state, color = "waiting", TEXT
-        else:
-            state, color = (st or "on"), TEXT
+        buf = str(getattr(s, "think_live", "") or "")
+        parked = bool(getattr(eng, "_think_parked", False) or st == "parked")
+        tail_moved = self._think_tail_moved(buf)
+        state = grok_sub_state(
+            running=running,
+            status=status,
+            fail_streak=streak,
+            parked=parked,
+            tail_moved=tail_moved,
+        )
+        color = grok_sub_color(state)
+        looking = state == "looking"
         self.lbl_hs_state.value = state
         self.lbl_hs_state.color = color
         # Grok tile mirrors the strip so "On" alone never hides a think or a wait.
@@ -3593,7 +3751,7 @@ class ProTerminal:
             self.lbl_hs_age.color = (
                 RED if running and age > 1800 else (AMBER if running and age > 900 else MUTED)
             )
-        if streak:
+        if streak and not looking:
             wait = float(getattr(s, "backoff_wait_s", 0) or 0)
             if wait <= 0:
                 try:
@@ -3609,11 +3767,8 @@ class ProTerminal:
             self.lbl_hs_next.color = MUTED
         looks = int(getattr(s, "looks_since_send", 0) or 0)
         sends = int(getattr(s, "sends_last_look", 0) or 0)
-        tools = len(getattr(s, "tool_trace", None) or [])
-        cost = self._sc_last.get("model_cost_usd")
-        edge = self._sc_last.get("edge_usd")
-        beat = self._sc_last.get("beating_model")
-        burning = looks >= 6 and isinstance(cost, (int, float)) and cost > 0
+        tools = len(think_tail_tool_chips(buf))
+        burning = looks >= 6
         if sends:
             self.lbl_hs_burn.value = f"{sends} ticket(s) this look"
             self.lbl_hs_burn.color = GREEN
@@ -3625,18 +3780,6 @@ class ProTerminal:
             self.lbl_hs_burn.color = RED if looks >= 6 else (AMBER if looks >= 3 else MUTED)
         self.lbl_hs_look.value = f"this look: {tools} tool(s) · {sends} send(s)"
         self.lbl_hs_look.color = TEXT if tools else MUTED
-        cost_s = f"${cost:,.2f}" if isinstance(cost, (int, float)) else "—"
-        edge_s = f"${edge:+,.2f}" if isinstance(edge, (int, float)) else "—"
-        mark = "BEAT" if beat is True else ("behind" if beat is False else "…")
-        self.lbl_hs_cost.value = f"model {cost_s} · edge {edge_s} {mark}"
-        if burning:
-            self.lbl_hs_cost.color = RED
-        elif beat is True:
-            self.lbl_hs_cost.color = GREEN
-        elif beat is False:
-            self.lbl_hs_cost.color = AMBER
-        else:
-            self.lbl_hs_cost.color = MUTED
         # Only a burn gets a box — the strip is otherwise a plain status bar.
         self.health_box.border = ft.Border.all(1, RED) if burning else None
         pulse = getattr(s, "reality_pulse", None) or {}
@@ -3645,6 +3788,7 @@ class ProTerminal:
         link = str(self.lbl_ibkr_status.value or "")
         self.lbl_hs_link.value = f"{link} · {sess}" if sess else link
         self.lbl_hs_link.color = GREEN if bool(getattr(s, "connected", False)) else RED
+        self._sync_last_line()
 
     def _sync_book_strip(self) -> None:
         """Three lots and three working orders — context for reading the stream."""
@@ -3813,33 +3957,6 @@ class ProTerminal:
         self._refresh_alert(unprot)
         self._refresh_service_status()
         self._sync_think_stream()
-        strat = str(getattr(s, "brain_strat", "") or "").strip()
-        stage_err = str(getattr(s, "stage_error", "") or "").strip()
-        sends_look = int(getattr(s, "sends_last_look", 0) or 0)
-        if stage_err:
-            self.lbl_last_send.value = f"Block: {stage_err[:240]}"
-            self.lbl_last_send.color = AMBER
-        elif strat and strat not in ("—",):
-            self.lbl_last_send.value = f"Last send: {strat}"
-            self.lbl_last_send.color = TEXT
-        elif sends_look:
-            self.lbl_last_send.value = f"Last look: {sends_look} send(s)"
-            self.lbl_last_send.color = TEXT
-        elif not s.equity and self._brief().get("strat"):
-            brief = self._brief()
-            self.lbl_last_send.value = (
-                f"Last send: {brief.get('strat')} · {brief.get('sends') or 0} sends "
-                f"({self._brief_age(brief)})"
-            )
-            self.lbl_last_send.color = MUTED
-        else:
-            looks = int(getattr(s, "looks_since_send", 0) or 0)
-            if looks:
-                self.lbl_last_send.value = f"Last send: — · {looks} look(s) since"
-                self.lbl_last_send.color = AMBER if looks >= 3 else MUTED
-            else:
-                self.lbl_last_send.value = "Last send: —"
-                self.lbl_last_send.color = MUTED
         result = s.last_result or {}
         status = self._format_result_status(result)
         self.lbl_result.value = f"Result: {status}"
@@ -3869,6 +3986,7 @@ class ProTerminal:
         skip = str(getattr(s, "skip_reason", "") or getattr(s, "stage_error", "") or "")
         if getattr(s, "book_unreliable", False) and "unreliable" not in skip:
             skip = skip or "book_unreliable"
+        strat = str(getattr(s, "brain_strat", "") or "").strip()
         if skip:
             self.lbl_banner.value = skip
             self.lbl_banner.visible = True

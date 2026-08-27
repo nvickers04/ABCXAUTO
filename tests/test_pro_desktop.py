@@ -374,7 +374,7 @@ def test_pro_desk_operator_paint_omits_cycle(headless_pro):
     assert_no_cycle_counter(headless_pro.page.title or "")
     assert_no_cycle_counter(headless_pro.lbl_desk_sub.value or "")
     assert_no_cycle_counter(headless_pro.think_live.value or "")
-    assert headless_pro.lbl_desk_sub.value == ""
+    assert headless_pro.lbl_desk_sub.value == "looking"
     assert (headless_pro.page.title or "") == "ABCXAUTO"
     assert "wakes" not in (headless_pro.page.title or "").lower()
     src = PRO_SRC.read_text(encoding="utf-8")
@@ -863,14 +863,14 @@ def test_the_status_strip_is_a_bar_not_a_hero_panel(headless_pro):
         headless_pro.col_book_strip,
     ):
         assert kept in painted
-    # Cut: repeats of the rail pill and the Account card.
+    # Cut: repeats of the rail pill. Open MTM lives on the Account card.
     for cut in (
         headless_pro.lbl_status,
-        headless_pro.lbl_open_upnl,
         headless_pro.lbl_pace,
     ):
         assert cut not in painted
         assert cut in list(_walk(headless_pro._hidden_metrics))
+    assert headless_pro.lbl_open_upnl not in painted
 
 
 def test_cut_metrics_still_sync_so_nothing_goes_stale(headless_pro):
@@ -1056,8 +1056,8 @@ def test_status_strip_shows_thinking_and_book_money(headless_pro):
     s.looks_since_send = 4
     s.brain_strat = ""
     headless_pro._sync_widgets()
-    assert headless_pro.lbl_hs_state.value == "thinking now"
-    assert "thinking" in (headless_pro.lbl_desk_sub.value or "").lower()
+    assert headless_pro.lbl_hs_state.value == "looking"
+    assert "looking" in (headless_pro.lbl_desk_sub.value or "").lower()
     assert headless_pro.lbl_open_upnl not in headless_pro._hidden_metrics.controls
     assert "-41.95" in (headless_pro.lbl_open_upnl.value or "")
     assert headless_pro.lbl_open_upnl.color == "#f4212e"

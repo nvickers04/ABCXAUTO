@@ -18,7 +18,11 @@ from abcxauto.pro_desktop import (
     NAV,
     NAV_TITLES,
     ProTerminal,
+    grok_sub_state,
+    last_card_send_label,
     stream_line_kind,
+    think_tail_last_say,
+    think_tail_tool_chips,
 )
 
 
@@ -320,8 +324,8 @@ def test_health_strip_calls_out_silence(pro):
     s.status = "On"
     pro.engine._last_grok_mono = time.monotonic() - 2000
     pro._sync_health_strip()
-    # Stay-up has no sit clock, so the strip stays "on". Age going red is the call-out.
-    assert pro.lbl_hs_state.value == "on"
+    # Stay-up has no sit clock, so the strip stays "sat". Age going red is the call-out.
+    assert pro.lbl_hs_state.value == "sat"
     assert "last look" in (pro.lbl_hs_age.value or "")
     assert pro.lbl_hs_age.color == RED
 
@@ -330,10 +334,12 @@ def test_health_strip_shows_the_backoff_streak_and_wait(pro):
     s = pro.engine.state
     s.running = True
     s.autonomous = True
+    s.status = "On"
     pro.engine._fail_streak = 3
     s.backoff_wait_s = 360.0
     pro._sync_health_strip()
-    assert pro.lbl_hs_state.value == "backing off"
+    assert pro.lbl_hs_state.value == "look failed"
+    assert pro.lbl_desk_sub.value == "look failed"
     assert "x3" in (pro.lbl_hs_next.value or "")
     assert "360s" in (pro.lbl_hs_next.value or "")
 
@@ -345,6 +351,7 @@ def test_health_strip_falls_back_to_the_park_clock_backoff(pro):
     s = pro.engine.state
     s.running = True
     s.autonomous = True
+    s.status = "On"
     pro.engine._fail_streak = 2
     s.backoff_wait_s = 0.0
     pro._sync_health_strip()
@@ -354,14 +361,15 @@ def test_health_strip_falls_back_to_the_park_clock_backoff(pro):
     assert match and int(match.group(1)) > 0
 
 
-def test_health_strip_reports_thinking_now(pro):
+def test_health_strip_reports_looking(pro):
     s = pro.engine.state
     s.running = True
     s.autonomous = True
     s.status = "Grok"
     pro._sync_health_strip()
-    assert pro.lbl_hs_state.value == "thinking now"
+    assert pro.lbl_hs_state.value == "looking"
     assert pro.lbl_hs_state.color == GREEN
+    assert pro.lbl_desk_sub.value == "looking"
 
 
 def test_health_strip_alarms_on_burn_with_no_tickets(pro):
@@ -370,15 +378,14 @@ def test_health_strip_alarms_on_burn_with_no_tickets(pro):
     s.autonomous = True
     s.looks_since_send = 9
     s.sends_last_look = 0
-    s.tool_trace = ["book", "quote", "scan"]
-    pro._sc_last = {"model_cost_usd": 0.84, "edge_usd": -0.84, "beating_model": False}
+    s.think_live = "--- GROK ---\n[book]\n[quote]\n[scan]\n"
+    s.tool_trace = []
     pro._sync_health_strip()
     assert "9 look(s) since a ticket" in (pro.lbl_hs_burn.value or "")
     assert pro.lbl_hs_burn.color == RED
     assert "3 tool(s)" in (pro.lbl_hs_look.value or "")
     assert "0 send(s)" in (pro.lbl_hs_look.value or "")
-    assert "$0.84" in (pro.lbl_hs_cost.value or "")
-    assert pro.lbl_hs_cost.color == RED
+    assert not hasattr(pro, "lbl_hs_cost")
     # The band itself goes red so it is visible without reading the numbers.
     assert pro.health_box.border is not None
 
@@ -392,6 +399,141 @@ def test_health_strip_credits_a_ticket(pro):
     pro._sync_health_strip()
     assert "1 ticket(s) this look" in (pro.lbl_hs_burn.value or "")
     assert pro.lbl_hs_burn.color == GREEN
+
+
+# ------------------------------------------------- slice 1 strip paints
+
+
+LIVE_LOOK = "\n".join(
+    [
+        "--- GROK ---",
+        "[think]",
+        "mega-cap earnings-flush bounce",
+        "[say]",
+        "BSX already hit 48.43 today; SCHW already scratched.",
+        "large-cap 3pct gap hold",
+        "--- GROK ---",
+        "[think]",
+        "Book is stale and the book is flat.",
+        "[book]",
+        "[status]",
+        "[playbook]",
+        "[scan]",
+        "",
+    ]
+)
+
+
+def test_strip_looking_beats_fail_streak_on_a_live_stream(pro):
+    """Paint 1: Grok sub is looking while think is in flight, even with a junk fail_streak."""
+    s = pro.engine.state
+    s.running = True
+    s.autonomous = True
+    s.status = "Thinking"
+    s.think_live = LIVE_LOOK
+    s.tool_trace = []
+    pro.engine._fail_streak = 1
+    s.backoff_wait_s = 23.0
+    pro._sync_health_strip()
+    assert grok_sub_state(
+        running=True, status="Thinking", fail_streak=1, tail_moved=False
+    ) == "looking"
+    assert pro.lbl_hs_state.value == "looking"
+    assert pro.lbl_desk_sub.value == "looking"
+    assert pro.lbl_hs_state.color == GREEN
+    assert "look failed" not in (pro.lbl_hs_next.value or "")
+    assert "backing off" not in (pro.lbl_hs_state.value or "")
+
+
+def test_strip_looking_when_think_tail_moves_while_status_lags(pro):
+    s = pro.engine.state
+    s.running = True
+    s.autonomous = True
+    s.status = "On"
+    pro.engine._fail_streak = 1
+    s.think_live = "--- GROK ---\n[think]\n"
+    pro._tail_len = len(s.think_live)
+    pro._tail_moved_mono = 0.0
+    pro._sync_health_strip()
+    assert pro.lbl_hs_state.value == "look failed"
+    s.think_live += "[book]\n[status]\n[playbook]\n[scan]\n"
+    pro._sync_health_strip()
+    assert pro.lbl_hs_state.value == "looking"
+    assert pro.lbl_desk_sub.value == "looking"
+
+
+def test_strip_last_line_is_last_say_or_real_card_send(pro, monkeypatch):
+    """Paint 2: last line is the last [say] (or card_sends), never Last send: — after a look."""
+    s = pro.engine.state
+    s.running = True
+    s.autonomous = True
+    s.status = "Thinking"
+    s.think_live = LIVE_LOOK
+    s.brain_strat = ""
+    s.sends_last_look = 0
+    s.looks_since_send = 20
+    s.tool_trace = []
+    pro.engine._fail_streak = 1
+    pro._sync_health_strip()
+    line = pro.lbl_last_send.value or ""
+    assert "BSX already hit 48.43 today" in line
+    assert "Last send: —" not in line
+    assert think_tail_last_say("\n[say]\n?\n--- GROK ---\n[think]\n") == ""
+    assert think_tail_last_say(LIVE_LOOK).startswith("BSX already hit")
+
+    s.think_live = "--- GROK ---\n[think]\nweighing\n"
+    s.looks_since_send = 2
+    assert last_card_send_label(
+        [{"card": "large-cap 3pct gap hold", "symbol": "SCHW"}]
+    ) == "SCHW · large-cap 3pct gap hold"
+    monkeypatch.setattr(
+        "abcxauto.pro_desktop.last_card_send_label",
+        lambda rows=None: "SCHW · large-cap 3pct gap hold",
+    )
+    pro._sync_last_line()
+    assert "large-cap 3pct gap hold" in (pro.lbl_last_send.value or "")
+    assert "Last send: —" not in (pro.lbl_last_send.value or "")
+
+
+def test_strip_this_look_tools_come_from_think_tail_chips(pro):
+    """Paint 3: this look N tools from [book][status][playbook][scan], not empty last_turn.tool_trace."""
+    s = pro.engine.state
+    s.running = True
+    s.autonomous = True
+    s.status = "Thinking"
+    s.think_live = LIVE_LOOK
+    s.tool_trace = []
+    s.sends_last_look = 0
+    pro.engine._fail_streak = 1
+    pro._sync_health_strip()
+    chips = think_tail_tool_chips(LIVE_LOOK)
+    assert chips == ["book", "status", "playbook", "scan"]
+    assert "4 tool(s)" in (pro.lbl_hs_look.value or "")
+    assert "0 send(s)" in (pro.lbl_hs_look.value or "")
+    assert pro.lbl_hs_look.color == TEXT
+
+
+def test_strip_has_no_model_edge_cost(pro):
+    """Paint 4: leftover model $ / edge $ behind is gone from the thin strip."""
+    s = pro.engine.state
+    s.running = True
+    s.autonomous = True
+    s.status = "Thinking"
+    s.think_live = LIVE_LOOK
+    pro._sc_last = {"model_cost_usd": 64.39, "edge_usd": -1531.90, "beating_model": False}
+    pro._sync_health_strip()
+    strip = pro._status_strip()
+    painted = " | ".join(_texts(strip))
+    assert not hasattr(pro, "lbl_hs_cost")
+    assert "model $" not in painted
+    assert "behind" not in painted
+    assert "$-1,531" not in painted
+    # Path / Tools / Why / Focus / Pace stay out of the strip.
+    assert pro.lbl_path not in list(_walk(strip))
+    assert pro.lbl_tools not in list(_walk(strip))
+    assert pro.lbl_why not in list(_walk(strip))
+    assert pro.lbl_focus not in list(_walk(strip))
+    assert pro.lbl_pace not in list(_walk(strip))
 
 
 def test_health_strip_explains_a_quiet_desk_with_link_context(pro):
