@@ -873,9 +873,10 @@ class ProTerminal:
                 # the supervisor's next launch of the real Pro.
                 logger.info("probe window closed — operator stop not latched")
             else:
-                from abcxauto.supervisor import mark_operator_stop
+                from abcxauto.supervisor import kill_descendant_flet, mark_operator_stop
 
                 mark_operator_stop()
+                kill_descendant_flet()
         except Exception:
             logger.debug("operator stop on window close failed", exc_info=True)
         finally:

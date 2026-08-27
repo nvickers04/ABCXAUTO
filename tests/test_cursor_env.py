@@ -146,7 +146,8 @@ def test_supervisor_wrapper_does_not_cleanup(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["abcxauto"])
     cleanups: list[dict] = []
     monkeypatch.setattr(m, "_cleanup", lambda **k: cleanups.append(k) or 0)
-    monkeypatch.setattr("abcxauto.supervisor.clear_operator_stop", lambda: None)
+    monkeypatch.setattr("abcxauto.supervisor.prepare_desk_start", lambda **_k: None)
+    monkeypatch.setattr("abcxauto.supervisor.ancestor_holds_desk", lambda: False)
     monkeypatch.setattr("abcxauto.supervisor.supervise", lambda: 0)
     with pytest.raises(SystemExit) as exc:
         m.main()
@@ -198,8 +199,13 @@ def test_start_pro_script_autostarts_pro(monkeypatch, tmp_path):
     monkeypatch.delenv("ABCXAUTO_AUTOSTART", raising=False)
     path = write_start_pro_script(tmp_path / "logs" / "_start_pro.py")
     src = path.read_text(encoding="utf-8-sig")
+    assert "prepare_desk_start" in src
+    assert src.index("prepare_desk_start") < src.index("run_app")
     assert "_cleanup" not in src
     assert "cleanup_pro" not in src
+    monkeypatch.setattr("abcxauto.supervisor.prepare_desk_start", lambda **_k: [])
+    monkeypatch.setattr("abcxauto.supervisor.claim_desk_lock", lambda: True)
+    monkeypatch.setattr("abcxauto.supervisor.release_desk_lock", lambda **_k: None)
     runpy.run_path(str(path), run_name="abcxauto_start_pro")
     assert os.environ.get("ABCXAUTO_AUTOSTART") == "1"
     assert called.get("think") is True
@@ -251,6 +257,8 @@ def _arm_launch(monkeypatch, *, supervised=False, probe=False, claimed=True):
         monkeypatch.setattr(supervisor, "desk_owner_pid", lambda: 4242)
     calls: list[str] = []
     monkeypatch.setattr(supervisor, "supervise", lambda: calls.append("supervise") or 0)
+    monkeypatch.setattr(supervisor, "prepare_desk_start", lambda **_k: [])
+    monkeypatch.setattr(supervisor, "ancestor_holds_desk", lambda: False)
     monkeypatch.setattr("abcxauto.think_stream.begin_run", lambda: None)
     monkeypatch.setattr("abcxauto.pro_desktop.run_app", lambda: calls.append("run_app"))
     monkeypatch.setattr("abcxauto.cursor_env.should_autostart", lambda: False)

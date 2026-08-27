@@ -69,17 +69,15 @@ def _cleanup(
 
 def main() -> None:
     if "--cleanup" in sys.argv:
-        from abcxauto.supervisor import mark_operator_stop, release_desk_lock
+        from abcxauto.supervisor import stop_desk
 
-        mark_operator_stop()
+        # Stop is one tree: latch operator_stop, kill Pro python + flet, drop lock.
+        stop_desk()
         code = _cleanup(
             aggressive="--aggressive" in sys.argv,
             flet_cache="--flet-cache" in sys.argv,
             kill_only="--kill-only" in sys.argv,
         )
-        # The killed desk cannot drop its own lock. A stale pid heals on liveness
-        # check, but pid reuse would refuse the next launch.
-        release_desk_lock()
         raise SystemExit(code)
     if "--desktop" in sys.argv or "--web" in sys.argv:
         print(
@@ -106,16 +104,26 @@ def main() -> None:
     probe = bool(os.environ.get("ABCXAUTO_LAUNCH_PROBE"))
     if not probe and not supervised:
         from abcxauto.supervisor import (
+            ancestor_holds_desk,
             claim_desk_lock,
-            clear_operator_stop,
             desk_owner_pid,
+            prepare_desk_start,
             release_desk_lock,
             supervise,
         )
 
-        # Flet re-enters __main__ in its own process and loses ABCXAUTO_SUPERVISED,
-        # so without this the app child becomes a second supervisor: two desks,
-        # two think loops, two IBKR sessions fighting for one client id.
+        # Flet re-enters __main__ in its own process and loses ABCXAUTO_SUPERVISED.
+        # The lock owner is our ancestor — bounce off, never reap the live desk.
+        if ancestor_holds_desk():
+            print(
+                f"desk already running (pid {desk_owner_pid()}). "
+                "python -m abcxauto --cleanup to stop it first.",
+                flush=True,
+            )
+            raise SystemExit(0)
+        # Start is one tree: kill leftover _start_pro / Pro python and orphan
+        # ABCXAUTO flet, drop a stale lock/stop from a dead pid, then launch.
+        prepare_desk_start()
         if not claim_desk_lock():
             print(
                 f"desk already running (pid {desk_owner_pid()}). "
@@ -123,10 +131,8 @@ def main() -> None:
                 flush=True,
             )
             raise SystemExit(0)
-        clear_operator_stop()
         # Only the process that won the lock is "the launch": the supervised child
-        # skips this block, and the Flet re-entry loses ABCXAUTO_SUPERVISED but
-        # bounces off the claim above. Once per launch, never on --cleanup.
+        # skips this block, and the Flet re-entry bounces off ancestor_holds_desk.
         _ensure_start_pro_script()
         print("supervisor: launching Pro child", flush=True)
         try:

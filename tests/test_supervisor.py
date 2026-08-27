@@ -26,6 +26,7 @@ def _no_foreign_pro(monkeypatch):
 class _Proc:
     def __init__(self, code: int) -> None:
         self._code = code
+        self.pid = 501
 
     def wait(self) -> int:
         return self._code
@@ -246,8 +247,38 @@ def test_cmdline_is_pro_matches_launchers_not_cleanup():
     assert sup._cmdline_is_pro(["pytest", "tests/test_supervisor.py"]) is False
 
 
-def test_supervise_does_not_spawn_over_a_live_pro(monkeypatch, tmp_path):
-    """_start_pro (or a leftover child) already holds 7497. A second Start is 326."""
+def test_supervise_reaps_leftover_pro_then_spawns(monkeypatch, tmp_path):
+    """Bounce leftover _start_pro (30744) + orphan flet (27184) then one new pair."""
+    monkeypatch.setenv("ABCXAUTO_DESK_OUT_PATH", str(tmp_path / "desk.out"))
+    launches: list[int] = []
+    killed: list[int] = []
+    live: list[int] = [30744]
+
+    def _popen(*_a, **_kw):
+        launches.append(1)
+        return _Proc(0)
+
+    def _reap(*, exclude=None):
+        dead = [*live, 27184]
+        killed.extend(dead)
+        live.clear()
+        return dead
+
+    monkeypatch.setattr(sup.subprocess, "Popen", _popen)
+    monkeypatch.setattr(sup, "reap_leftover_desk", _reap)
+    monkeypatch.setattr(sup, "kill_descendant_flet", lambda **_k: [])
+    monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: list(live))
+    monkeypatch.setattr(sup, "useful_hours", lambda **_kw: True)
+    monkeypatch.setattr(sup, "tws_listening", lambda *_a, **_kw: True)
+    monkeypatch.setattr(sup, "operator_stopped", lambda: False)
+    assert supervise() == 0
+    assert 30744 in killed
+    assert 27184 in killed
+    assert launches == [1]
+
+
+def test_supervise_stays_down_when_leftover_survives_reap(monkeypatch, tmp_path):
+    """If the other Pro is still up after reap, a second Start is 326 — stay down."""
     monkeypatch.setenv("ABCXAUTO_DESK_OUT_PATH", str(tmp_path / "desk.out"))
     launches: list[int] = []
     killed: list[tuple[int, int]] = []
@@ -257,6 +288,7 @@ def test_supervise_does_not_spawn_over_a_live_pro(monkeypatch, tmp_path):
         return _Proc(0)
 
     monkeypatch.setattr(sup.subprocess, "Popen", _popen)
+    monkeypatch.setattr(sup, "reap_leftover_desk", lambda **_k: [])
     monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: [4242])
     monkeypatch.setattr(sup.os, "kill", lambda pid, sig: killed.append((pid, sig)))
     monkeypatch.setattr(sup, "useful_hours", lambda **_kw: True)
@@ -307,16 +339,25 @@ def test_foreign_desk_pid_uses_lock_owner_without_killing(tmp_path, monkeypatch)
 
 
 def test_start_over_a_live_pro_is_not_flatten(monkeypatch):
-    """Second Start must not cleanup, panic, or flatten the book that is already live."""
+    """Second Start may reap a leftover tree; it must not flatten or latch stop."""
     calls: list[str] = []
+    live: list[int] = [77]
 
     def _popen(*_a, **_kw):
         calls.append("popen")
         return _Proc(0)
 
+    def _reap(*, exclude=None):
+        live.clear()
+        return [77]
+
     monkeypatch.setattr(sup.subprocess, "Popen", _popen)
-    monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: [77])
-    monkeypatch.setattr(sup, "release_desk_lock", lambda: calls.append("release"))
+    monkeypatch.setattr(sup, "reap_leftover_desk", _reap)
+    monkeypatch.setattr(sup, "kill_descendant_flet", lambda **_k: [])
+    monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: list(live))
+    monkeypatch.setattr(sup, "release_desk_lock", lambda **_k: calls.append("release"))
     monkeypatch.setattr(sup, "mark_operator_stop", lambda: calls.append("stop"))
     assert supervise() == 0
-    assert calls == []
+    assert "popen" in calls
+    assert "stop" not in calls
+    assert "release" not in calls

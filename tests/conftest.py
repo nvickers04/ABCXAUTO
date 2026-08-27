@@ -62,6 +62,14 @@ def _drop_repo_log_handlers() -> list[str]:
 
 
 @pytest.fixture(autouse=True)
+def _no_os_desk_kills(monkeypatch):
+    """Unit tests must not taskkill / SIGKILL the operator's paper Pro."""
+    import abcxauto.supervisor as supervisor
+
+    monkeypatch.setattr(supervisor, "kill_pid", lambda *_a, **_k: False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_desk_evidence_and_latches(tmp_path, monkeypatch):
     """A test run must not touch what the live desk reads and writes.
 

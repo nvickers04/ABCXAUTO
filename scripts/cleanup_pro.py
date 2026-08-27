@@ -1,8 +1,8 @@
-"""Kill leftover Flet / orphan processes and clear project Python caches.
+"""Kill leftover Flet / Pro python and clear project Python caches.
 
-Does not kill a live paper Pro on 7497, does not flatten, and does not treat
-Start as flatten. ``python -m abcxauto --cleanup`` still marks operator stop
-in ``__main__``; this script will not SIGKILL that desk.
+Operator stop (``python -m abcxauto --cleanup``) kills the paper Pro tree
+(python + flet). Start reaps leftovers in ``supervisor.prepare_desk_start``
+and does not call this script — Start is not flatten. Never TWS. Never flatten.
 
 Usage:
   python scripts/cleanup_pro.py
@@ -134,9 +134,9 @@ def kill_policy(
             proc = parent
     except Exception:
         pass
-    spared, scan_ok = spare_live_paper_pids()
-    exclude.update(spared)
-    # Fail closed when we cannot see the live paper desk: do not SIGKILL it.
+    _, scan_ok = spare_live_paper_pids()
+    # Stop must kill that python and its flet. Self / parents stay excluded.
+    # Fail closed when we cannot see processes — do not spray SIGKILL.
     kill_python = bool(python_targets) and scan_ok
     kill_flet = scan_ok
     kill_pro_title = scan_ok
@@ -149,11 +149,10 @@ def kill_stale(
     exclude_pids: set[int] | None = None,
     python_targets: bool = True,
 ) -> None:
-    """Kill stale Flet leftovers. Never the live paper Pro on 7497. Never flatten.
+    """Kill leftover Pro python + flet. Never flatten. Never TWS.
 
-    ``python_targets=False`` skips python launchers. Live paper PIDs (desk lock,
-    ``-m abcxauto``, ``_start_pro.py``, and their children) are always excluded.
-    If the process scan fails, python / flet / ABCXAUTO Pro titles are left alone.
+    ``python_targets=False`` skips python launchers. Self / parent / exclude_pids
+    stay spared. If the process scan fails, python / flet / titles are left alone.
     """
     exclude, kill_python, kill_flet, kill_pro_title = kill_policy(
         aggressive=aggressive,

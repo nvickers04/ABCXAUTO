@@ -459,6 +459,18 @@ def test_stream_paints_tail_not_full_buffer(headless_pro):
     assert str(len(blob)) in (headless_pro.lbl_stream_status.value or "").replace(",", "")
 
 
+def test_window_close_kills_descendant_flet(headless_pro, monkeypatch):
+    """Closing the window must not leave an orphan flet.exe."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "abcxauto.supervisor.kill_descendant_flet",
+        lambda **_k: calls.append("flet") or [],
+    )
+    monkeypatch.delenv("ABCXAUTO_UI_PROBE", raising=False)
+    headless_pro._on_window_event(type("E", (), {"type": "close"})())
+    assert calls == ["flet"]
+
+
 def test_window_close_marks_operator_stop(headless_pro, tmp_path, monkeypatch):
     from abcxauto.supervisor import operator_stopped
 
