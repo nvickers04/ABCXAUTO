@@ -565,6 +565,39 @@ class IBKROptionsMixin:
 
     # ========== IRON CONDOR ==========
 
+    async def _refuse_second_riskless_combo(self, strategy: str) -> Optional[Dict[str, Any]]:
+        """Hard cap: one working iron/fly BAG. Does not call placeOrder."""
+        get = getattr(self, "get_open_orders", None)
+        if not callable(get):
+            return None
+        try:
+            orders = await get()
+        except Exception as exc:
+            return {
+                "error": f"riskless_combo_cap: cannot read open orders ({exc})",
+                "status": "rejected",
+                "reason_code": "riskless_combo_cap",
+            }
+        if not isinstance(orders, list):
+            return {
+                "error": "riskless_combo_cap: cannot read open orders",
+                "status": "rejected",
+                "reason_code": "riskless_combo_cap",
+            }
+        from abcxauto.risk_gates import get_risk_gate
+        from abcxauto.riskless_combo import (
+            riskless_combo_block_reason,
+            riskless_combo_reject,
+        )
+
+        gate = get_risk_gate()
+        reason = riskless_combo_block_reason(
+            strategy,
+            orders,
+            cancel_202=gate.sync_riskless_combo_202(orders),
+        )
+        return riskless_combo_reject(reason) if reason else None
+
     async def place_iron_condor(
         self, symbol: str, expiration: str,
         put_long_strike: float, put_short_strike: float,
@@ -573,6 +606,9 @@ class IBKROptionsMixin:
         closing_position: bool = False,
     ) -> Dict[str, Any]:
         """Place an Iron Condor. Profit if underlying stays between short strikes."""
+        blocked = await self._refuse_second_riskless_combo("iron_condor")
+        if blocked:
+            return blocked
         if not (put_long_strike < put_short_strike < call_short_strike < call_long_strike):
             return {'error': 'Invalid strike order: put_long < put_short < call_short < call_long'}
 
@@ -612,6 +648,9 @@ class IBKROptionsMixin:
         closing_position: bool = False,
     ) -> Dict[str, Any]:
         """Place an Iron Butterfly (ATM). Max profit at center strike."""
+        blocked = await self._refuse_second_riskless_combo("iron_butterfly")
+        if blocked:
+            return blocked
         combo_action = _flip_buy_sell('SELL') if closing_position else 'SELL'
         limit_price, err = _combo_close_limit(
             closing_position, limit_price, "iron_butterfly"
@@ -688,6 +727,9 @@ class IBKROptionsMixin:
         closing_position: bool = False,
     ) -> Dict[str, Any]:
         """Place a Butterfly spread. Max profit at middle strike."""
+        blocked = await self._refuse_second_riskless_combo("butterfly")
+        if blocked:
+            return blocked
         strategy = f"{'Call' if right == 'C' else 'Put'} Butterfly"
         combo_action = _flip_buy_sell('BUY') if closing_position else 'BUY'
         limit_price, err = _combo_close_limit(

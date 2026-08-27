@@ -506,6 +506,47 @@ def _dispatch_succeeded(result: Dict[str, Any]) -> bool:
     return True
 
 
+async def _verify_riskless_combo_cap(
+    proposal: OrderProposal, connector: Any
+) -> Optional[Dict[str, Any]]:
+    """Refuse a second iron/fly BAG so TWS never sees the IBKR [202] confirm.
+
+    One working riskless combo is allowed. Closes use the same place path, so
+    this is not an exit bypass. Verticals and calendars are not this cap.
+    """
+    from abcxauto.riskless_combo import (
+        REASON_CODE,
+        is_riskless_combo_strategy,
+        riskless_combo_block_reason,
+        riskless_combo_reject,
+    )
+
+    if not is_riskless_combo_strategy(proposal.strategy):
+        return None
+    get = getattr(connector, "get_open_orders", None)
+    if not callable(get):
+        return riskless_combo_reject(
+            f"{REASON_CODE}: cannot read open orders"
+        )
+    try:
+        orders = await get()
+    except Exception as e:
+        return riskless_combo_reject(
+            f"{REASON_CODE}: cannot read open orders ({e})"
+        )
+    if not isinstance(orders, list):
+        return riskless_combo_reject(
+            f"{REASON_CODE}: cannot read open orders"
+        )
+    gate = get_risk_gate()
+    reason = riskless_combo_block_reason(
+        proposal.strategy,
+        orders,
+        cancel_202=gate.sync_riskless_combo_202(orders),
+    )
+    return riskless_combo_reject(reason) if reason else None
+
+
 async def execute_proposal(
     proposal: OrderProposal, connector: Any, *, source: str = "agent"
 ) -> Dict[str, Any]:
@@ -526,6 +567,12 @@ async def execute_proposal(
         params=params_for_journal(proposal),
         validation_ok=True,
     )
+
+    rejection = await _verify_riskless_combo_cap(proposal, connector)
+    if rejection:
+        logger.warning(f"Proposal #{proposal.id} blocked: {rejection['error']}")
+        journal.record_dispatch(journal_id, False, rejection)
+        return rejection
 
     cfg = get_config()
     if cfg.risk_gates_enabled and not is_exit_or_management(proposal):
