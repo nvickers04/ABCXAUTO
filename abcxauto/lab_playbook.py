@@ -196,6 +196,14 @@ PROTECTED_CARD_NAMES = frozenset(
         "defined-risk flush debit",
     }
 )
+# Retired skip-class cards. Presence demotes levered/micro names from scan
+# ``deepest`` ranking. Not a send gate; card prose is not a refuse.
+SKIP_CARD_NAMES = frozenset(
+    {
+        "levered-crypto and micro gap chase",
+        "naked / short-dated option spray",
+    }
+)
 _STK_HUNT = ("scan", "news", "quote", "candles", "send")
 _OPT_HUNT = ("scan", "news", "option_chain", "option_facts", "option_quote", "send")
 _OVERLAY_HUNT = ("book", "quote", "option_chain", "option_facts", "send")
@@ -1021,6 +1029,21 @@ def walk_cards(state: Any) -> list[tuple[str, dict[str, Any]]]:
         if isinstance(card, dict) and card.get("name"):
             out.append(("", card))
     return out
+
+
+def skip_cards_on_book(book: dict[str, Any] | None = None) -> bool:
+    """True when a skip-class card is on the book, including retired.
+
+    Ranking only: levered/micro names are not pinned as scan ``deepest``.
+    Not a send refuse and not a parse of card when_on / retrace prose.
+    """
+    state = book if isinstance(book, dict) else load_lab()
+    want = {n.lower() for n in SKIP_CARD_NAMES}
+    for _type_name, card in walk_cards(state):
+        name = str((card or {}).get("name") or "").strip().lower()
+        if name in want:
+            return True
+    return False
 
 
 def card_key(type_name: Any, card_name: Any) -> tuple[str, str]:
