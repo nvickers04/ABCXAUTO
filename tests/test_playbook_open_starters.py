@@ -521,6 +521,25 @@ def test_one_upgraded_card_keeps_siblings_and_locked_starter_rewrites(
         "Short listed wings around a range-bound large-cap; defined at the "
         "width, not a narrative."
     )
+    # Three live flush cards already fill the book cap. Retire one first.
+    room = apply_from_judgment(
+        {
+            "lab_playbook": {
+                "types": {
+                    "market_bracket": {
+                        "cards": [
+                            {
+                                "name": "news-miss large-cap flush",
+                                "status": "retired",
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+    )
+    assert room is not None
+    assert room.get("status") != "rejected"
     out = apply_from_judgment(
         {
             "lab_playbook": {

@@ -620,6 +620,13 @@ _CARD_BRANCH_SCHEMA = {
                     "actually hit; never gates graduation."
                 ),
             },
+            "fill_assumption": {
+                "type": "string",
+                "description": (
+                    "How fills are assumed. paper_mid is stored and cannot "
+                    "graduate. Graduation needs full_spread or conservative."
+                ),
+            },
             "retire_if": {
                 "type": "object",
                 "description": (
@@ -2075,7 +2082,10 @@ def _book_payload(
         glance["needs_declaration"] = [
             _card_label(r)
             for r in scored
-            if r.get("needs_retire_if") or r.get("needs_thesis")
+            if r.get("needs_retire_if")
+            or r.get("needs_thesis")
+            or r.get("needs_numeric_kill")
+            or r.get("needs_conservative_fill")
         ]
         glance["notes"] = notebook_text(lab)[:4000]
         glance["lab"] = lab_facts(lab, rows=scored)
