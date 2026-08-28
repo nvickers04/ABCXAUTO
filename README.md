@@ -25,6 +25,7 @@ Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro S
 - Unprotected STK: last-stop at IBKR; hold is blocked until it exists. Combo close (`closing_position` on the matching multi-leg send) is one BAG, not new risk
 - Live new risk needs a promoted playbook
 - Ticket geometry uses **IBKR last**, not MDA
+- Ticket last / IV / credit / width must be in this look's `quote` / `option_quote` / `book` cache
 - Exits are never blocked; fail-closed if the book is unknown
 - Agent may **tighten** floors via `self_tune`; it cannot weaken them or switch to live
 

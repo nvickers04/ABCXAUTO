@@ -1910,6 +1910,12 @@ async def _inject_live_poke(
     turn.interrupted = True
     # A fill / order change / unprotected lot means the book moved under us.
     turn.tool_cache.clear()
+    try:
+        from abcxauto.look_snapshot import begin_look
+
+        begin_look(snap)
+    except Exception:
+        logger.debug("look snapshot reset on poke failed", exc_info=True)
     think_emit("tool", f"\n[{ev.kind}]\n")
     # Refresh book facts when we can — thin poke, not a second wake dump.
     day: dict[str, Any] | None = None
@@ -2366,6 +2372,12 @@ async def _run_tool(
         world_facts = payload.get("world")
         if isinstance(world_facts, dict):
             world_facts["sends_this_turn"] = len(turn.sends)
+        try:
+            from abcxauto.look_snapshot import record_look_tool
+
+            record_look_tool(snap, "book", payload)
+        except Exception:
+            logger.debug("look snapshot book record failed", exc_info=True)
         return _clip(payload)
     if name == "status":
         from abcxauto.connections import connection_status
@@ -2450,6 +2462,12 @@ async def _run_tool(
                     tape=data,
                 )
                 raw = _clip(data)
+        try:
+            from abcxauto.look_snapshot import record_look_tool
+
+            record_look_tool(snap, "quote", data)
+        except Exception:
+            logger.debug("look snapshot quote record failed", exc_info=True)
         return raw if isinstance(raw, str) else _clip(raw)
     if name == "fills":
         fn = getattr(connector, "get_fills", None) or getattr(connector, "get_recent_executions", None)
@@ -3036,6 +3054,22 @@ async def _run_tool(
         for row in rows:
             _stash_vol_option_quote(snap, row)
         _publish_vol(world, snap)
+        try:
+            from abcxauto.look_snapshot import record_look_tool
+
+            if len(rows) == 1:
+                record_look_tool(snap, "option_quote", rows[0])
+            else:
+                record_look_tool(
+                    snap,
+                    "option_quote",
+                    {
+                        "quotes": list(rows),
+                        "use": "ibkr_live_for_decisions; mda_greeks_delayed",
+                    },
+                )
+        except Exception:
+            logger.debug("look snapshot option_quote record failed", exc_info=True)
         if len(rows) == 1:
             return _clip(rows[0])
         return _clip({
@@ -3505,6 +3539,12 @@ async def _grok_turn_impl(
     turn = turn or BrainTurn()
     # Rejected clerk tickets must not ride to the next look.
     drop_refused_send_targets(turn)
+    try:
+        from abcxauto.look_snapshot import begin_look
+
+        begin_look(snap)
+    except Exception:
+        logger.debug("look snapshot begin failed", exc_info=True)
     if g is None:
         turn.last_act = {}
         turn.last_result = {"status": "error", "note": "no_grok_client"}
@@ -3521,6 +3561,9 @@ async def _grok_turn_impl(
         turn.stream_error = str(exc)
         _finish_look_chat(g, turn, session=session)
         return turn
+    lead = str(wake or "").splitlines()[0].strip() if wake else ""
+    if lead:
+        think_emit("tool", f"{lead}\n")
     ran_out = True
     while turn.steps < MAX_TOOL_STEPS:
         turn.steps += 1

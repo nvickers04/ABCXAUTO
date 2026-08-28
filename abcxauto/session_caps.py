@@ -7,7 +7,8 @@ park-ready. Chat is kept. No sit clock. Overnight park stays park_clock.
 Session key is ET date + market label (premarket / regular). Premarket
 and RTH each get a budget so stay-up through the open still trades.
 Grok may tighten the knobs via self_tune; it cannot raise them.
-Usage is operator-visible, not a wake / system-prompt tally.
+Remaining looks/tokens feed the wake worst-fact line. Knob names stay off
+the system prompt.
 """
 
 from __future__ import annotations
@@ -176,7 +177,7 @@ def billed_tokens_now() -> int:
 
 
 def usage(session: str = "", *, now: datetime | None = None) -> dict[str, Any]:
-    """Operator snapshot. Not for the wake line."""
+    """Operator snapshot plus remaining counts for the wake worst-fact line."""
     look_cap, token_cap = _caps()
     state = _state_for(session, now=now)
     looks = int(state.get("looks") or 0)
@@ -193,6 +194,8 @@ def usage(session: str = "", *, now: datetime | None = None) -> dict[str, Any]:
         "tokens": tokens,
         "look_cap": look_cap,
         "token_cap": token_cap,
+        "looks_left": max(0, look_cap - looks),
+        "tokens_left": max(0, token_cap - tokens),
         "hit": hit,
         "why": why,
     }

@@ -1235,6 +1235,7 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     pulse = getattr(world, "pulse", None) if isinstance(getattr(world, "pulse", None), dict) else {}
     sess_block = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
     vol_rows = _day_vol(world)
+    alarms = _wake_lot_alarms(world)
     return {
         "nl": nl,
         "ibkr_daily_pnl": daily,
@@ -1276,9 +1277,13 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "halt_trips_at_pct_of_nl": pct_of_nl(halt_at, nl),
         "ibkr_day_vs_halt": day_vs,
         "ibkr_day_vs_halt_pct_of_nl": pct_of_nl(day_vs, nl),
+        "clerk_halted": halt.get("clerk_halted"),
         "candle_source": candle_source,
         "vol": vol_rows,
         "vol_bit": _vol_wake_bit(vol_rows),
+        "session_cap": _session_cap_day(world),
+        "stop_dist": alarms.get("stop_dist"),
+        "working_order_missing": alarms.get("working_order_missing"),
         "sizing_floors": floors,
         # Soft concentration / liquidity % of NL (from WorldState._portfolio_risk).
         "portfolio_risk": port,
@@ -1291,6 +1296,111 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "countdown_human": sess_block.get("countdown_human"),
         "tradable_now": pulse.get("tradable_now"),
     }
+
+
+def _session_cap_day(world: Any) -> dict[str, Any]:
+    """Looks/tokens left this session. Empty when the counter is dark."""
+    try:
+        from abcxauto.session_caps import usage
+
+        session = str(getattr(world, "session_status", "") or "")
+        u = usage(session)
+    except Exception:
+        return {}
+    if not isinstance(u, dict):
+        return {}
+    return {
+        "looks_left": u.get("looks_left"),
+        "tokens_left": u.get("tokens_left"),
+        "look_cap": u.get("look_cap"),
+        "token_cap": u.get("token_cap"),
+        "hit": u.get("hit"),
+    }
+
+
+def _order_stop_px(order: dict[str, Any]) -> float | None:
+    for key in ("aux_price", "auxPrice", "stop_price", "stopPrice", "stop"):
+        raw = order.get(key)
+        if raw in (None, "", 0, 0.0, "0"):
+            continue
+        try:
+            px = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if px > 0:
+            return px
+    return None
+
+
+def _lot_last_px(pos: dict[str, Any], quotes: dict[str, Any]) -> float | None:
+    row = compact_position(pos, extra=True)
+    for raw in (row.get("mkt"), pos.get("market_price"), pos.get("marketPrice"), pos.get("last")):
+        try:
+            px = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            px = None
+        if px is not None and px > 0:
+            return px
+    sym = str(pos.get("symbol") or "").upper().strip()
+    if not sym:
+        return None
+    hit = quotes.get(sym)
+    if isinstance(hit, dict):
+        hit = hit.get("last") if hit.get("last") is not None else hit.get("mid")
+    try:
+        px = float(hit) if hit is not None else None
+    except (TypeError, ValueError):
+        return None
+    return px if px is not None and px > 0 else None
+
+
+def _wake_lot_alarms(world: Any) -> dict[str, Any]:
+    """Distance to written stop + lots with no covering working order."""
+    positions = list(getattr(world, "positions", None) or [])
+    orders = list(getattr(world, "open_orders", None) or [])
+    quotes = getattr(world, "ibkr_live_quotes", None) or {}
+    if not isinstance(quotes, dict):
+        quotes = {}
+    try:
+        from abcxauto.broker.order_types import is_stop_order
+        from abcxauto.monitor import covering_exits
+    except Exception:
+        return {"stop_dist": None, "working_order_missing": []}
+    missing: list[str] = []
+    closest: dict[str, Any] | None = None
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        qty = _row_signed_qty(p)
+        if abs(qty) < 1e-9:
+            continue
+        ident = lot_ident(p)
+        exits = covering_exits(p, orders)
+        stops = [
+            o
+            for o in exits
+            if is_stop_order(str(o.get("order_type") or o.get("orderType") or ""))
+        ]
+        if not exits:
+            missing.append(ident)
+        last = _lot_last_px(p, quotes)
+        stop_px = None
+        for o in stops or exits:
+            stop_px = _order_stop_px(o)
+            if stop_px is not None:
+                break
+        if last is None or stop_px is None:
+            continue
+        dist = abs(float(last) - float(stop_px))
+        row = {
+            "ident": ident,
+            "last": last,
+            "stop": stop_px,
+            "dist": round(dist, 4),
+        }
+        if closest is None or dist < float(closest.get("dist") or 1e18):
+            closest = row
+    return {"stop_dist": closest, "working_order_missing": missing}
 
 
 def _day_vol(world: Any) -> list[dict[str, Any]]:
@@ -1451,6 +1561,103 @@ def _portfolio_wake_bits(day: dict[str, Any]) -> str:
     return " ".join(bits)
 
 
+def _halt_is_tight(day: dict[str, Any]) -> bool:
+    if day.get("clerk_halted"):
+        return True
+    try:
+        trips = float(day["halt_trips_at_usd"])
+        vs = float(day["ibkr_day_vs_halt"])
+    except (TypeError, ValueError, KeyError):
+        return False
+    if trips >= 0:
+        return vs <= 0
+    budget = abs(trips)
+    if budget <= 0:
+        return vs <= 0
+    return vs <= 0 or (vs / budget) <= 0.25
+
+
+def _session_cap_line(cap: Any) -> str:
+    if not isinstance(cap, dict) or not cap:
+        return ""
+    looks_left = cap.get("looks_left")
+    tokens_left = cap.get("tokens_left")
+    bits: list[str] = []
+    if looks_left is not None:
+        bits.append(f"{int(looks_left)} looks")
+    if tokens_left is not None:
+        bits.append(f"{int(tokens_left)} tokens")
+    if not bits:
+        return ""
+    return "session_cap remaining=" + ", ".join(bits)
+
+
+def _session_cap_from_counter(session: str) -> dict[str, Any]:
+    try:
+        from abcxauto.session_caps import usage
+
+        u = usage(session)
+    except Exception:
+        return {}
+    if not isinstance(u, dict):
+        return {}
+    return {
+        "looks_left": u.get("looks_left"),
+        "tokens_left": u.get("tokens_left"),
+        "look_cap": u.get("look_cap"),
+        "token_cap": u.get("token_cap"),
+        "hit": u.get("hit"),
+    }
+
+
+def worst_wake_fact(
+    *,
+    unprotected: list[str] | None,
+    day: dict[str, Any] | None = None,
+    session: str = "",
+) -> str:
+    """One leading fact: unprotected, stop distance, missing working order, halt, cap.
+
+    Not a strategy menu. Unprotected STK already fail-closes — publish it first.
+    """
+    day = day if isinstance(day, dict) else {}
+    unprot = [str(x).strip() for x in (unprotected or []) if str(x).strip()]
+    if unprot:
+        return "unprotected=" + ",".join(unprot)
+    stop = day.get("stop_dist") if isinstance(day.get("stop_dist"), dict) else None
+    if stop and stop.get("ident"):
+        ident = stop.get("ident")
+        dist = stop.get("dist")
+        px = stop.get("stop")
+        last = stop.get("last")
+        if dist is not None and px is not None:
+            bit = f"stop_dist={ident} {dist} to {px}"
+            if last is not None:
+                bit += f" last={last}"
+            return bit
+    missing = [
+        str(x).strip()
+        for x in (day.get("working_order_missing") or [])
+        if str(x).strip()
+    ]
+    if missing:
+        return "working_order_missing=" + ",".join(missing[:6])
+    if _halt_is_tight(day):
+        dp = day.get("ibkr_daily_pnl")
+        if dp is None:
+            dp = day.get("daily_pnl")
+        halt_at = day.get("halt_trips_at_usd")
+        vs = day.get("ibkr_day_vs_halt")
+        bits = [f"ibkrDay={dp}", f"vs haltAt={halt_at}"]
+        if vs is not None:
+            bits.append(f"room={vs}")
+        return " ".join(str(b) for b in bits)
+    cap = day.get("session_cap")
+    if not isinstance(cap, dict) or not cap:
+        cap = _session_cap_from_counter(session)
+    return _session_cap_line(cap)
+
+
 def format_wake(
     *,
     cycle: int,
@@ -1548,7 +1755,13 @@ def format_wake(
             parts.append(f"event={ev.kind} {ev.detail}.".strip())
         # leftover say / prev= / unused= stay off wake.
     parts.append("send.")
-    return " ".join(parts)
+    body = " ".join(parts)
+    lead = worst_wake_fact(unprotected=unprotected, day=day, session=session)
+    if lead:
+        if not lead.endswith("."):
+            lead = lead + "."
+        return f"{lead}\n{body}"
+    return body
 
 
 def _session_phase(session_status: str, current_et: str | None = None) -> str:
@@ -1700,8 +1913,6 @@ def _portfolio_risk(
         "exposure": exposure,
         "capital_liquidity": capital_liquidity,
     }
-
-
 
 
 @dataclass

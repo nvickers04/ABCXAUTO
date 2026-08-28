@@ -650,6 +650,22 @@ async def execute_ticket(
             return {"status": "blocked", "note": sh_msg, "reason_code": sh_code}
 
     _prepare_close_params(act, positions)
+    params = act.get("params") if isinstance(act.get("params"), dict) else {}
+    try:
+        from abcxauto.look_snapshot import check_ticket_numbers
+
+        ok_n, n_code, n_msg = check_ticket_numbers(strat, params, snap)
+    except Exception:
+        logger.debug("look-number gate failed closed", exc_info=True)
+        ok_n, n_code, n_msg = False, "stale_or_invented_number", (
+            "stale_or_invented_number: unverifiable this-look quote/option_quote/book"
+        )
+    if not ok_n:
+        act["strategy"] = act["action"] = BLOCKED_STRAT
+        act["rationale"] = n_msg
+        _record_clerk_block(act, asked, n_msg, stage="look_numbers")
+        return {"status": "blocked", "note": n_msg, "reason_code": n_code}
+
     try:
         ok, vmsg = validate_action_against_inventory(act, positions)
         if not ok and strat not in (BLOCKED_STRAT, "skipped", "set_risk", "self_tune", "hold"):
