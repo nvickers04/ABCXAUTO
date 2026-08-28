@@ -171,6 +171,45 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     assert brief["open_lots"] == ["IWM 260821C306 long 1"]
 
 
+def test_think_session_keeps_looks_the_tail_window_drops(tmp_path, monkeypatch):
+    """Two looks stay on disk after the 8kb glass tail has forgotten the first."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 0.0)
+    monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    ts.reset_speaker()
+    st = SimpleNamespace(think_live="")
+    ts.bind_engine(SimpleNamespace(state=st))
+    try:
+        ts.emit("stage", "grok")
+        ts.emit("say", "LOOK_ONE " + ("a" * 20000))
+        ts.emit("stage", "grok")
+        ts.emit("say", "LOOK_TWO " + ("b" * 6000))
+    finally:
+        ts.bind_engine(None)
+
+    tail = (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert len(tail) <= 8000
+    assert len(st.think_live) <= 24000
+    assert "LOOK_ONE" not in tail
+    assert "LOOK_TWO" in tail
+    assert "LOOK_ONE" not in st.think_live
+    assert "LOOK_TWO" in st.think_live
+    assert "LOOK_ONE" in session
+    assert "LOOK_TWO" in session
+    assert session.count("LOOK_ONE") == 1
+    assert session.count("LOOK_TWO") == 1
+
+    ts._run = {}
+    ts.begin_run()
+    after = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert "LOOK_ONE" in after
+    assert "LOOK_TWO" in after
+    assert (tmp_path / "think_tail.txt").read_text(encoding="utf-8") == ""
+
+
 def test_write_last_turn_skips_junk_failed_look(tmp_path, monkeypatch):
     """A failed empty/? look must not blank last_turn / desk_brief."""
     from abcxauto import think_stream as ts

@@ -2,6 +2,7 @@
 
 Headless prints to stdout (ASCII). ProEngine binds so the UI can show the same buffer.
 A short tail file lets Cursor review the stream without the window.
+An append-only per-ET-day file under data/state/think_session/ keeps the full stream.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 Listener = Callable[[str, str], None]
 
@@ -26,6 +28,7 @@ _speaker = ""  # last banner in the live stream ("grok" or "")
 _STATE_DIR = Path(__file__).resolve().parents[1] / "data" / "state"
 THINK_TAIL_PATH = _STATE_DIR / "think_tail.txt"
 THINK_PREV_PATH = _STATE_DIR / "think_prev.txt"
+THINK_SESSION_DIR = _STATE_DIR / "think_session"
 LAST_TURN_PATH = _STATE_DIR / "last_turn.json"
 DESK_BRIEF_PATH = _STATE_DIR / "desk_brief.json"
 RUN_PATH = _STATE_DIR / "run.json"
@@ -132,11 +135,32 @@ def _append_engine_piece(eng: Any, piece: str) -> None:
         return
     cur = getattr(s, "think_live", "") or ""
     s.think_live = (cur + piece)[-24000:]
+    _append_think_session(piece)
     _write_think_tail(s.think_live)
 
 
 def _append_engine(eng: Any, kind: str, text: str) -> None:
     _append_engine_piece(eng, _paint(kind, text))
+
+
+def _et_session_day() -> str:
+    return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
+
+def _think_session_path() -> Path:
+    return THINK_SESSION_DIR / f"{_et_session_day()}.txt"
+
+
+def _append_think_session(piece: str) -> None:
+    """Append this emit to today's ET file. The glass tail stays a short overwrite."""
+    if not piece:
+        return
+    try:
+        THINK_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        with _think_session_path().open("a", encoding="utf-8") as fh:
+            fh.write(piece)
+    except OSError:
+        logger.debug("think_session append failed", exc_info=True)
 
 
 def _write_think_tail(buf: str, *, force: bool = False) -> None:
