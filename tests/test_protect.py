@@ -1866,7 +1866,8 @@ async def test_execute_ticket_blocks_new_risk_on_a_price_hint(monkeypatch):
         },
     )
     assert result.get("status") == "blocked"
-    assert "IBKR live last" in str(result.get("note") or "")
+    assert result.get("reason_code") == "stale_or_invented_number"
+    assert "91.5" in str(result.get("note") or "")
     assert sent == []
 
 

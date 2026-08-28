@@ -34,6 +34,8 @@ which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process.
 - Live new risk needs a promoted playbook
 - New risk must name an existing lab playbook card (scorecard label; prose is not law)
 - Ticket geometry uses **IBKR last**, not MDA
+- Ticket last / IV / credit / width must appear in this look's `quote` /
+  `option_quote` / `book` cache (`stale_or_invented_number`; unverifiable kills)
 - Exits never blocked; fail-closed if the book is unknown
 - Agent may tighten floors via `self_tune`; it cannot weaken them or switch to live
 - Session look and token caps (Settings). Hit stays idle / park-ready; chat is

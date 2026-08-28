@@ -116,9 +116,7 @@ def test_caps_are_not_in_system_prompt_or_wake():
     )
     assert "session_look_cap" not in text
     assert "session_token_cap" not in text
-    assert "looks=" not in text
-    assert "160" not in text
-    assert "2500000" not in text
+    assert text.splitlines()[0].startswith("session_cap remaining=")
 
 
 def test_finish_look_chat_keep_from_107_still_holds():

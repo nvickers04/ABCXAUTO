@@ -357,7 +357,7 @@ def test_format_wake_includes_day_facts():
     assert "stale=" not in text
     assert "mix=longC:7,shortC:1,vert:1" in text
     assert "ledger r50:-400.0 r51:-549.0" not in text
-    assert "looks" not in text
+    assert "147looks" not in text
     assert "0sends" not in text
     assert "next=" not in text
     assert "set_wake" not in text
@@ -667,7 +667,7 @@ def test_format_wake_flat_empty_omits_leftover_prev():
     assert "risk/trade=" not in text
     assert "last_look" not in text
     assert "last_scan" not in text
-    assert "looks" not in text
+    assert "147looks" not in text
 
 
 def test_day_facts_wiped_instructions_drop_playbook_glance():

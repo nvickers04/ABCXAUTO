@@ -53,6 +53,7 @@ After a think:
 - Live new risk without a promoted playbook
 - New risk without params.card naming an existing lab card (label, not law)
 - IBKR live last for ticket geometry (not MDA)
+- Ticket last / IV / credit / width must be in this look's quote / option_quote / book cache (`stale_or_invented_number`)
 - `candles`: IBKR hist, else live 5s stream; error if both miss (not MDA)
 - Two books = two processes, two client ids
 
