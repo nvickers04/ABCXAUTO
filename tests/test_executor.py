@@ -18,7 +18,7 @@ def _disable_risk_gates(monkeypatch):
     base = get_config()
     monkeypatch.setattr(
         "abcxauto.executor.get_config",
-        lambda: Config(**{**base.__dict__, "risk_gates_enabled": False}),
+        lambda: Config(**{**base.__dict__, "risk_gates_enabled": False, "max_arena_concentration_pct": 0}),
     )
     # Proposal validation still runs for payload construction — relax Sprint-2
     # defined-risk / R:R so every strategy in VALID_PAYLOADS remains constructible.

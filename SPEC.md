@@ -30,6 +30,11 @@ which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process.
 - One name across every lot vs `max_symbol_concentration_pct`. `max_position_pct`
   only sees the ticket in front of it, so N orders in a name could stack past it.
   Stock and its options sum — same underlying, one bet
+- One sector/theme arena vs `max_arena_concentration_pct` of NL. Per-name cannot
+  see NVDA+SMCI+ARM+AVGO as four names. Catalog arenas we already scan (industry /
+  cap / ETF / commodity), not scan sorts. Send still fires when paper gates are off
+- Open ticket past `retire_if.max_hold_sessions` / `max_hold_hours` trips the card
+  and flattens that lot. Independent of paper gates
 - Unprotected STK: last-stop; hold blocked until it rests at IBKR. Combo close is one BAG (`closing_position`), not new risk
 - Live new risk needs a promoted playbook
 - New risk must name an existing lab playbook card (scorecard label; prose is not law)

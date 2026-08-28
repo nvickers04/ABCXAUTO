@@ -187,6 +187,9 @@ ARENA_CATALOG: dict[str, dict[str, Any]] = {
 }
 
 _DEFAULT_ENABLED = ("most_active", "index_etfs", "mega_cap")
+# Sector / theme / cap screens. Scan sorts (most_active, top_losers, …) are not
+# a concentration bucket — every active name would clump.
+_BUCKET_GROUPS = frozenset({"industries", "caps", "etfs", "commodities"})
 
 
 def _build_known_scan_codes() -> dict[str, dict[str, Any]]:
@@ -947,6 +950,41 @@ def universe_glance_line() -> str:
     src = al.get("source") or "n/a"
     short_src = src if len(src) <= 72 else src[:69] + "…"
     return f"Universe: {n} legal · arenas={arenas} · {short_src} · {ts}"
+
+
+def is_bucket_arena(arena_id: str) -> bool:
+    meta = ARENA_CATALOG.get(str(arena_id or "").strip()) or {}
+    return meta.get("group") in _BUCKET_GROUPS
+
+
+def arenas_for_symbol(
+    symbol: str,
+    *,
+    membership: list[dict[str, str]] | None = None,
+) -> set[str]:
+    """Sector/theme/cap arenas this name belongs to. Scan sorts are omitted."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return set()
+    out: set[str] = set()
+    rows = membership if membership is not None else membership_rows()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("symbol") or "").strip().upper() != sym:
+            continue
+        arena = str(row.get("arena") or "").strip()
+        if is_bucket_arena(arena):
+            out.add(arena)
+    for arena_id, meta in ARENA_CATALOG.items():
+        if meta.get("group") not in _BUCKET_GROUPS:
+            continue
+        seeds = {
+            str(s).strip().upper() for s in (meta.get("mda_fallback") or [])
+        }
+        if sym in seeds:
+            out.add(str(arena_id))
+    return out
 
 
 def reset_universe_cache() -> None:

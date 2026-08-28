@@ -361,6 +361,7 @@ class PortfolioMonitor:
         self._prev_fill_keys: set[str] = set()
         self._prev_halted: bool = False
         self._prev_had_plan: bool | None = None
+        self._age_out_sent: set[str] = set()
         self.reconciler: Any = None
 
     # ------------------------------------------------------------------
@@ -487,6 +488,7 @@ class PortfolioMonitor:
 
         await self._sweep_orphaned_protection(snapshot)
         await self._maybe_auto_panic(snapshot)
+        await self._maybe_age_out(snapshot)
         self._detect_pace_wakes(snapshot)
 
         now = time.monotonic()
@@ -602,6 +604,62 @@ class PortfolioMonitor:
             await self.session.inject(message, source="monitor")
         except Exception as e:
             logger.warning(f"AUTO-PANIC inject failed: {e}")
+
+    async def _maybe_age_out(self, snapshot: Dict[str, Any]) -> None:
+        """Flatten lots whose card declared max_hold_* and the ticket is still open.
+
+        Card trip is lab_playbook.card_verdict. This is the lot kill. Silent.
+        Runs with paper risk_gates_enabled off — same as auto-panic.
+        """
+        positions = snapshot.get("positions") or []
+        if not isinstance(positions, list):
+            return
+        try:
+            from abcxauto.lab_playbook import age_out_open_lots
+            from abcxauto.risk_gates import _lot_names
+
+            targets = age_out_open_lots()
+        except Exception:
+            logger.debug("age-out lookup failed", exc_info=True)
+            return
+        held: set[str] = set()
+        lots_by_sym: dict[str, list] = {}
+        for p in positions:
+            if not isinstance(p, dict):
+                continue
+            try:
+                qty = float(p.get("quantity") or p.get("position") or 0)
+            except (TypeError, ValueError):
+                continue
+            if abs(qty) < 1e-9:
+                continue
+            names = _lot_names(p)
+            held |= names
+            for name in names:
+                lots_by_sym.setdefault(name, []).append(p)
+        self._age_out_sent &= held
+        flatten = getattr(self.connector, "_flatten_one_position", None)
+        if not callable(flatten):
+            return
+        for row in targets:
+            sym = str(row.get("symbol") or "").upper()
+            if not sym or sym in self._age_out_sent:
+                continue
+            lots = lots_by_sym.get(sym) or []
+            if not lots:
+                continue
+            for lot in lots:
+                try:
+                    await flatten(lot)
+                except Exception:
+                    logger.error("age-out flatten failed %s", sym, exc_info=True)
+                    continue
+            self._age_out_sent.add(sym)
+            logger.warning(
+                "age-out flatten %s: %s",
+                sym,
+                row.get("reason") or "max_hold",
+            )
 
     def _market_active(self) -> bool:
         try:

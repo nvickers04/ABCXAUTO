@@ -405,3 +405,86 @@ async def test_stub_session_skips_grok_review_keeps_panic(monkeypatch):
     assert get_risk_gate().is_halted
     assert any("AUTO-PANIC" in t or "auto-panic" in t.lower() for t in injects) or injects
     reset_risk_gate()
+
+
+@pytest.mark.asyncio
+async def test_age_out_flattens_only_the_stale_lot(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+
+    from abcxauto.lab_playbook import clamp_update, save_lab
+    from abcxauto.monitor import PortfolioMonitor
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
+    monkeypatch.setenv("ABCXAUTO_CARD_LOG_PATH", str(tmp_path / "cards.jsonl"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    update = clamp_update(
+        {
+            "types": {
+                "market_bracket": {
+                    "cards": [
+                        {
+                            "name": "flush bounce",
+                            "thesis": "flush into support bounces",
+                            "retire_if": {
+                                "sample": 8,
+                                "condition": "no bounce",
+                                "max_hold_sessions": 1,
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    )
+    assert update is not None
+    save_lab(update)
+    (tmp_path / "cards.jsonl").write_text(
+        '{"ts":"2026-08-20T14:00:00+00:00","card":"flush bounce",'
+        '"type":"market_bracket","strategy":"market_bracket",'
+        '"symbol":"WMT","order_ids":[1],"new_risk":true}\n',
+        encoding="utf-8",
+    )
+
+    class _Sess:
+        def emit(self, *_a, **_k):
+            pass
+
+        async def inject(self, *_a, **_k):
+            pass
+
+    class _Conn:
+        def __init__(self):
+            self.flat = []
+
+        async def _flatten_one_position(self, pos):
+            self.flat.append(str(pos.get("symbol") or "").upper())
+            return {"success": True}
+
+    conn = _Conn()
+    mon = PortfolioMonitor(_Sess(), conn)
+    frozen = datetime(2026, 8, 28, 14, 0, tzinfo=timezone.utc)
+    from abcxauto.lab_playbook import age_out_open_lots as _real_age
+
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.age_out_open_lots",
+        lambda now=None, book=None: _real_age(now=now or frozen, book=book),
+    )
+    await mon._maybe_age_out(
+        {
+            "positions": [
+                {"symbol": "WMT", "quantity": 10, "secType": "STK"},
+                {"symbol": "NVDA", "quantity": 4, "secType": "STK"},
+            ]
+        }
+    )
+    assert conn.flat == ["WMT"]
+    await mon._maybe_age_out(
+        {
+            "positions": [
+                {"symbol": "WMT", "quantity": 10, "secType": "STK"},
+                {"symbol": "NVDA", "quantity": 4, "secType": "STK"},
+            ]
+        }
+    )
+    assert conn.flat == ["WMT"]

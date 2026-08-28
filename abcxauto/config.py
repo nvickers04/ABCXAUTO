@@ -29,6 +29,7 @@ RISK_CONFIG_KEYS = frozenset({
     "max_option_premium_pct",
     "max_risk_per_trade_pct",
     "max_symbol_concentration_pct",
+    "max_arena_concentration_pct",
 })
 # Knobs Grok may retune via self_tune (clamped to the walk-away floor).
 SET_RISK_KEYS = frozenset({
@@ -38,6 +39,7 @@ SET_RISK_KEYS = frozenset({
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
     "max_symbol_concentration_pct",
+    "max_arena_concentration_pct",
 })
 # Book capacity. Disjoint from risk capital keys.
 CAPACITY_KEYS = frozenset({
@@ -156,6 +158,9 @@ class Config:
     # Cap on one underlying across every lot. max_position_pct only sees the
     # order in front of it, so N orders in the same name could stack past it.
     max_symbol_concentration_pct: float = 25.0
+    # One sector/theme/cap arena (catalog we already scan), all names in it.
+    # Per-name cap cannot see NVDA+SMCI+ARM+AVGO as one bet.
+    max_arena_concentration_pct: float = 25.0
     max_open_positions: int = 15
 
     @property
@@ -279,6 +284,9 @@ def _load_env_config() -> Config:
         max_risk_per_trade_pct=float(_env("ABCXAUTO_MAX_RISK_PER_TRADE_PCT", "25")),
         max_symbol_concentration_pct=float(
             _env("ABCXAUTO_MAX_SYMBOL_CONCENTRATION_PCT", "25")
+        ),
+        max_arena_concentration_pct=float(
+            _env("ABCXAUTO_MAX_ARENA_CONCENTRATION_PCT", "25")
         ),
     )
 
