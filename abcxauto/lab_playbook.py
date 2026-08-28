@@ -2814,6 +2814,14 @@ def new_risk_card_error(
             f"new risk card {want!r} is not on the playbook; "
             f"cards: {_card_names_blob(names)}"
         )
+    try:
+        from abcxauto.mode_size import exploit_learning_card_error
+
+        exploit_note = exploit_learning_card_error(want, type=type, book=state)
+    except Exception:
+        exploit_note = ""
+    if exploit_note:
+        return exploit_note
     return ""
 
 
@@ -3189,7 +3197,7 @@ def promote_beating(scorecard: dict[str, Any] | None) -> bool | None:
 
 
 def playbook_mode() -> str:
-    """explore = widen the search, keep size small. exploit = trade the winners."""
+    """explore | exploit. Size is ``mode_size`` — this is the bit, not a label."""
     mode = str((load_lab() or {}).get("mode") or "explore").strip().lower()
     return mode if mode in ("explore", "exploit") else "explore"
 
@@ -4676,7 +4684,7 @@ def playbook_run_sheets(
 def playbook_glance(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
     """Score since the last write. Not the notebook text â€” Grok asks playbook() for that."""
     facts = playbook_facts(scorecard)
-    return {
+    out = {
         "revision": facts.get("revision"),
         "age_h": facts.get("age_h"),
         "since_write_edge": facts.get("since_write_edge"),
@@ -4687,6 +4695,14 @@ def playbook_glance(scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
         "lots_at_write": list(facts.get("lots_at_write") or [])[:16],
         "stale": playbook_is_stale(),
     }
+    try:
+        from abcxauto.mode_size import mode_size_band
+
+        out["mode"] = playbook_mode()
+        out["mode_size"] = mode_size_band()
+    except Exception:
+        pass
+    return out
 
 
 def _MANAGEMENT_TRUNKS() -> frozenset[str]:

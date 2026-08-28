@@ -722,7 +722,8 @@ async def execute_ticket(
     params = act.get("params") if isinstance(act.get("params"), dict) else {}
     if params.get("size_pct_nl") in (None, "") and act.get("size_pct_nl") not in (None, ""):
         params["size_pct_nl"] = act["size_pct_nl"]
-    if is_new_risk(strat, params) and strat in ("market_bracket", "oca", "bracket"):
+    if is_new_risk(strat, params):
+        from abcxauto.mode_size import mode_size_ticket_error
         from abcxauto.send import apply_size_pct_nl
 
         nl = equity_of(snap.get("account") or {}) or float(
@@ -739,18 +740,27 @@ async def execute_ticket(
                 except (TypeError, ValueError):
                     continue
         apply_size_pct_nl(params, net_liq=nl, price=px, strategy=strat)
-        raw_qty = params.get("quantity")
-        try:
-            qty_ok = int(float(raw_qty)) >= 1
-        except (TypeError, ValueError):
-            qty_ok = False
-        if not qty_ok:
-            # Card prose (a 1% note) is not a refuse. Missing size is.
-            note = "send needs quantity or size_pct_nl"
+        size_note = mode_size_ticket_error(
+            params, net_liq=nl, price=px, strategy=strat
+        )
+        if size_note:
             act["strategy"] = act["action"] = BLOCKED_STRAT
-            act["rationale"] = note
-            _record_clerk_block(act, asked, note, stage="size")
-            return {"status": "blocked", "note": note}
+            act["rationale"] = size_note
+            _record_clerk_block(act, asked, size_note, stage="mode_size")
+            return {"status": "blocked", "note": size_note}
+        if strat in ("market_bracket", "oca", "bracket"):
+            raw_qty = params.get("quantity")
+            try:
+                qty_ok = int(float(raw_qty)) >= 1
+            except (TypeError, ValueError):
+                qty_ok = False
+            if not qty_ok:
+                # Card prose (a 1% note) is not a refuse. Missing size is.
+                note = "send needs quantity or size_pct_nl"
+                act["strategy"] = act["action"] = BLOCKED_STRAT
+                act["rationale"] = note
+                _record_clerk_block(act, asked, note, stage="size")
+                return {"status": "blocked", "note": note}
 
     if strat in ("market_bracket", "oca", "bracket"):
         from abcxauto.structure_grade import (
