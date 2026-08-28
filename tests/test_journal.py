@@ -1182,3 +1182,46 @@ def test_journal_missing_session_markers_table_fails_hard(tmp_path):
         conn.close()
     assert "session_markers" not in tables
     assert "model_usage" in tables
+
+
+def test_realized_by_order_id_subtracts_commissions(journal):
+    journal.record_fills(
+        [
+            {
+                "ts": "2026-08-20T14:00:01.000Z",
+                "exec_id": "entry",
+                "order_id": 10,
+                "symbol": "WMT",
+                "sec_type": "STK",
+                "side": "BOT",
+                "quantity": 10,
+                "price": 100.0,
+                "commission": 1.0,
+                "realized_pnl": 0.0,
+            },
+            {
+                "ts": "2026-08-20T15:00:00.000Z",
+                "exec_id": "exit",
+                "order_id": 11,
+                "symbol": "WMT",
+                "sec_type": "STK",
+                "side": "SLD",
+                "quantity": 10,
+                "price": 105.0,
+                "commission": 1.0,
+                "realized_pnl": 50.0,
+                "bid": 104.90,
+                "ask": 105.10,
+            },
+        ]
+    )
+    by_oid = journal.realized_by_order_id()
+    assert by_oid[10] == -1.0
+    assert by_oid[11] == 49.0
+    listed = journal.listed_fills()
+    assert len(listed) == 2
+    assert listed[0]["price"] == 100.0
+    assert listed[0]["commission"] == 1.0
+    closers = journal.closing_fills()
+    assert closers[0]["realized_pnl"] == 50.0
+    assert closers[0]["commission"] == 1.0

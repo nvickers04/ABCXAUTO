@@ -129,6 +129,108 @@ def signed_premium_usd(row: dict[str, Any] | None) -> float | None:
     return sign * abs(qty) * px * _multiplier(row)
 
 
+_BID_KEYS = ("bid", "nbbo_bid", "bid_at_send", "send_bid")
+_ASK_KEYS = ("ask", "nbbo_ask", "ask_at_send", "send_ask")
+
+
+def commission_cost(row: dict[str, Any] | None) -> float:
+    """Broker fee as a positive cost. Missing is 0, not a guess."""
+    if not isinstance(row, dict):
+        return 0.0
+    raw = _finite(row.get("commission"))
+    if raw is None:
+        return 0.0
+    return abs(raw)
+
+
+def net_realized_usd(row: dict[str, Any] | None) -> float | None:
+    """IBKR realized minus commission. None when realized is missing."""
+    if not isinstance(row, dict):
+        return None
+    pnl = _finite(row.get("realized_pnl"))
+    if pnl is None:
+        return None
+    return pnl - commission_cost(row)
+
+
+def _quote_px(row: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        px = _finite(row.get(key))
+        if px is not None and px > 0:
+            return px
+    return None
+
+
+def quote_bid_ask(row: dict[str, Any] | None) -> tuple[float | None, float | None]:
+    """NBBO / send-side quotes on a fill or send row. Missing stays None."""
+    if not isinstance(row, dict):
+        return None, None
+    return _quote_px(row, _BID_KEYS), _quote_px(row, _ASK_KEYS)
+
+
+def conservative_px(row: dict[str, Any] | None) -> float | None:
+    """Debit at ask / credit at bid, or the worse of fill vs that NBBO.
+
+    A mid fill inside the spread marks to the far side. A fill already
+    through the far side keeps the fill. No quote side means None — a
+    paper TWS mid is not a conservative print.
+    """
+    if not isinstance(row, dict):
+        return None
+    qty = _row_qty(row)
+    sign = _side_sign(row, qty if qty is not None else 1.0)
+    if sign is None:
+        return None
+    fill = _fill_price(row)
+    bid, ask = quote_bid_ask(row)
+    if sign < 0:
+        if ask is None:
+            return None
+        return max(fill, ask) if fill is not None else ask
+    if bid is None:
+        return None
+    return min(fill, bid) if fill is not None else bid
+
+
+def conservative_premium_usd(row: dict[str, Any] | None) -> float | None:
+    """Signed cash at the conservative print. Debit negative, credit positive."""
+    if not isinstance(row, dict):
+        return None
+    qty = _row_qty(row)
+    if qty is None or abs(qty) <= 1e-9:
+        return None
+    px = conservative_px(row)
+    if px is None:
+        return None
+    sign = _side_sign(row, qty)
+    if sign is None:
+        return None
+    return round(sign * abs(qty) * px * _multiplier(row), 4)
+
+
+def conservative_trade_pnl(fills: list[Any] | None) -> float | None:
+    """Round-trip conservative cash minus commissions.
+
+    Needs at least two qty-bearing fills (entry and exit), each with a
+    quote side. A single closer is not a mark. Missing quotes return None
+    rather than falling back to a paper mid.
+    """
+    total = 0.0
+    n = 0
+    for raw in fills or []:
+        if not isinstance(raw, dict):
+            continue
+        qty = _row_qty(raw)
+        if qty is None or abs(qty) <= 1e-9:
+            continue
+        prem = conservative_premium_usd(raw)
+        if prem is None:
+            return None
+        total += prem - commission_cost(raw)
+        n += 1
+    return round(total, 4) if n >= 2 else None
+
+
 def net_signed_premium(legs: list[Any] | None) -> float | None:
     """Net cash of a vertical / combo. Each wing must be a fill, not a last."""
     total = 0.0

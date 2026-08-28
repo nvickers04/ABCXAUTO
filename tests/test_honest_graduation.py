@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from abcxauto.lab_playbook import (
     CONSERVATIVE_FILL_ASSUMPTIONS,
@@ -16,6 +19,7 @@ from abcxauto.lab_playbook import (
     card_facts,
     card_verdict,
     clamp_update,
+    classify_card_trades,
     fill_assumption_of,
     hypothesis_cap_reject,
     live_hypothesis_count,
@@ -107,6 +111,12 @@ def test_paper_mid_cannot_set_graduated():
     assert verdict["live_evidence"] is False
     assert verdict["paper_resolved_pnl"] == 900.0
     assert verdict["live_resolved_pnl"] is None
+    marked = card_verdict(
+        {"resolved": 3, "resolved_pnl": 900.0, "conservative_pnl": 120.0},
+        card,
+    )
+    assert marked["graduated"] is False
+    assert marked["cannot_graduate_reason"] == "paper_mid cannot graduate"
 
 
 def test_conservative_fill_can_graduate_when_sample_and_kill_met():
@@ -114,12 +124,21 @@ def test_conservative_fill_can_graduate_when_sample_and_kill_met():
         **_card("flush bounce", fill_assumption="conservative"),
         "type": "market_bracket",
     }
-    verdict = card_verdict({"resolved": 3, "resolved_pnl": 120.0}, card)
+    sticker_only = card_verdict({"resolved": 3, "resolved_pnl": 120.0}, card)
+    assert sticker_only["graduated"] is False
+    assert sticker_only["cannot_graduate_reason"] == "no conservative_pnl"
+
+    verdict = card_verdict(
+        {"resolved": 3, "resolved_pnl": 900.0, "conservative_pnl": 120.0},
+        card,
+    )
     assert verdict["graduated"] is True
     assert verdict["fill_assumption"] == FILL_ASSUMPTION_CONSERVATIVE
     assert verdict["cannot_graduate_reason"] == ""
     assert verdict["live_evidence"] is False
     assert verdict["live_resolved_pnl"] is None
+    assert verdict["conservative_pnl"] == 120.0
+    assert verdict["paper_resolved_pnl"] == 900.0
 
 
 def test_full_spread_is_a_conservative_fill_assumption():
@@ -127,7 +146,10 @@ def test_full_spread_is_a_conservative_fill_assumption():
         **_card("flush bounce", fill_assumption="full_spread"),
         "type": "market_bracket",
     }
-    verdict = card_verdict({"resolved": 3, "resolved_pnl": 40.0}, card)
+    verdict = card_verdict(
+        {"resolved": 3, "resolved_pnl": 900.0, "conservative_pnl": 40.0},
+        card,
+    )
     assert verdict["graduated"] is True
     assert verdict["fill_assumption"] == FILL_ASSUMPTION_FULL_SPREAD
 
@@ -141,7 +163,10 @@ def test_graduation_requires_numeric_kill():
         ),
         "type": "market_bracket",
     }
-    verdict = card_verdict({"resolved": 3, "resolved_pnl": 900.0}, card)
+    verdict = card_verdict(
+        {"resolved": 3, "resolved_pnl": 900.0, "conservative_pnl": 900.0},
+        card,
+    )
     assert verdict["graduated"] is False
     assert verdict["needs_numeric_kill"] is True
     assert "numeric kill" in verdict["cannot_graduate_reason"]
@@ -176,7 +201,12 @@ def test_promote_needs_sample_and_kill_and_conservative_fill(
         return [
             {
                 **card_verdict(
-                    {"resolved": 3, "resolved_pnl": 80.0, "card": "flush bounce"},
+                    {
+                        "resolved": 3,
+                        "resolved_pnl": 80.0,
+                        "conservative_pnl": 80.0,
+                        "card": "flush bounce",
+                    },
                     {**card, "type": "market_bracket"},
                 ),
                 "card": "flush bounce",
@@ -415,3 +445,250 @@ def test_fill_assumption_survives_a_partial_rewrite(tmp_path, monkeypatch):
     card = type_cards(load_lab()["types"], "market_bracket")[0]
     assert card["fill_assumption"] == FILL_ASSUMPTION_CONSERVATIVE
     assert card["retire_if"]["max_losses"] == 2
+
+
+def _send_row(card, oids, *, ts, symbol="WMT", **extra):
+    row = {
+        "ts": ts,
+        "card": card,
+        "type": "market_bracket",
+        "strategy": "market_bracket",
+        "symbol": symbol,
+        "order_ids": list(oids),
+        "new_risk": True,
+    }
+    row.update(extra)
+    return row
+
+
+def _write_sends(rows):
+    path = Path(os.environ["ABCXAUTO_CARD_LOG_PATH"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def _stk_round_trip(
+    entry_oid,
+    exit_oid,
+    *,
+    ts_open,
+    ts_close,
+    symbol="WMT",
+    realized=50.0,
+    entry_px=100.0,
+    exit_px=105.0,
+    qty=10,
+    entry_bid=99.90,
+    entry_ask=100.10,
+    exit_bid=104.90,
+    exit_ask=105.10,
+    entry_comm=1.0,
+    exit_comm=1.0,
+):
+    entry = {
+        "ts": ts_open,
+        "exec_id": f"e-{entry_oid}",
+        "order_id": entry_oid,
+        "symbol": symbol,
+        "sec_type": "STK",
+        "side": "BOT",
+        "quantity": qty,
+        "price": entry_px,
+        "commission": entry_comm,
+        "realized_pnl": 0.0,
+        "bid": entry_bid,
+        "ask": entry_ask,
+    }
+    closer = {
+        "ts": ts_close,
+        "exec_id": f"x-{exit_oid}",
+        "order_id": exit_oid,
+        "symbol": symbol,
+        "sec_type": "STK",
+        "side": "SLD",
+        "quantity": qty,
+        "price": exit_px,
+        "commission": exit_comm,
+        "realized_pnl": realized,
+        "bid": exit_bid,
+        "ask": exit_ask,
+    }
+    return entry, closer
+
+
+class _Journal:
+    def __init__(self, fills, placed, realized=None):
+        self._fills = fills
+        self._placed = set(placed)
+        self._realized = realized
+
+    def listed_fills(self, **_k):
+        return list(self._fills)
+
+    def closing_fills(self, **_k):
+        return [
+            f
+            for f in self._fills
+            if f.get("realized_pnl") is not None and abs(float(f["realized_pnl"])) > 1e-9
+        ]
+
+    def dispatched_order_ids(self, **_k):
+        return set(self._placed)
+
+    def realized_by_order_id(self, **_k):
+        if self._realized is not None:
+            return dict(self._realized)
+        out = {}
+        for f in self._fills:
+            oid = f.get("order_id")
+            if oid is None:
+                continue
+            pnl = float(f.get("realized_pnl") or 0.0)
+            fee = abs(float(f.get("commission") or 0.0))
+            out[oid] = out.get(oid, 0.0) + pnl - fee
+        return out
+
+
+def test_paper_tws_realized_is_not_the_verdict_input(tmp_path, monkeypatch):
+    """A conservative sticker plus a fat paper TWS close cannot graduate."""
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    save_lab(
+        clamp_update(
+            _book(
+                "flush bounce",
+                fill_assumption="conservative",
+                retire_if={"sample": 1, "condition": "x", "max_losses": 2},
+            )
+        )
+    )
+    closer = {
+        "ts": "2026-08-20T15:00:00Z",
+        "order_id": 102,
+        "symbol": "WMT",
+        "side": "SLD",
+        "quantity": 10,
+        "price": 105.0,
+        "commission": 0.0,
+        "realized_pnl": 900.0,
+    }
+    monkeypatch.setattr(
+        "abcxauto.memory.get_journal",
+        lambda: _Journal([closer], {101, 102}, realized={102: 900.0}),
+    )
+    _write_sends(
+        [_send_row("flush bounce", [101, 102], ts="2026-08-20T14:00:00+00:00")]
+    )
+    row = card_facts()[0]
+    assert row["resolved"] == 1
+    assert row["resolved_pnl"] == 900.0
+    assert row["conservative_pnl"] is None
+    assert row["graduated"] is False
+    assert row["cannot_graduate_reason"] == "no conservative_pnl"
+    assert row["paper_resolved_pnl"] == 900.0
+
+
+def test_conservative_pnl_path_can_graduate(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    save_lab(
+        clamp_update(
+            _book(
+                "flush bounce",
+                fill_assumption="conservative",
+                retire_if={"sample": 1, "condition": "x", "max_losses": 2},
+            )
+        )
+    )
+    entry, closer = _stk_round_trip(
+        101,
+        102,
+        ts_open="2026-08-20T14:00:01Z",
+        ts_close="2026-08-20T15:00:00Z",
+        realized=50.0,
+    )
+    monkeypatch.setattr(
+        "abcxauto.memory.get_journal",
+        lambda: _Journal([entry, closer], {101, 102}),
+    )
+    _write_sends(
+        [_send_row("flush bounce", [101, 102], ts="2026-08-20T14:00:00+00:00")]
+    )
+    row = card_facts()[0]
+    # Paper TWS mid close is +50; fees 2; conservative far-side is +46.
+    assert row["resolved_pnl"] == 48.0
+    assert row["conservative_pnl"] == 46.0
+    assert row["conservative_pnl"] != row["resolved_pnl"]
+    assert row["graduated"] is True
+    assert row["cannot_graduate_reason"] == ""
+
+
+def test_commissions_move_resolved_and_conservative_pnl():
+    entry, closer = _stk_round_trip(
+        10,
+        11,
+        ts_open="2026-08-20T14:00:01Z",
+        ts_close="2026-08-20T15:00:00Z",
+        realized=50.0,
+        entry_comm=1.0,
+        exit_comm=1.0,
+    )
+    trades = classify_card_trades(
+        [_send_row("flush bounce", [10, 11], ts="2026-08-20T14:00:00Z")],
+        [closer],
+        {10, 11},
+        all_fills=[entry, closer],
+    )
+    assert trades[0]["realized_pnl"] == 48.0
+    assert trades[0]["conservative_pnl"] == 46.0
+    naked = classify_card_trades(
+        [_send_row("flush bounce", [10, 11], ts="2026-08-20T14:00:00Z")],
+        [{**closer, "commission": 0.0, "bid": None, "ask": None}],
+        {10, 11},
+        all_fills=[
+            {**entry, "commission": 0.0, "bid": None, "ask": None},
+            {**closer, "commission": 0.0, "bid": None, "ask": None},
+        ],
+    )
+    assert naked[0]["realized_pnl"] == 50.0
+    assert naked[0]["conservative_pnl"] is None
+
+
+def test_send_nbbo_marks_the_entry_when_the_fill_has_no_quote():
+    """Fill vs NBBO at send: paper mid entry marks to the ask."""
+    entry = {
+        "ts": "2026-08-20T14:00:01Z",
+        "exec_id": "e-10",
+        "order_id": 10,
+        "symbol": "WMT",
+        "sec_type": "STK",
+        "side": "BOT",
+        "quantity": 10,
+        "price": 100.0,
+        "commission": 1.0,
+        "realized_pnl": 0.0,
+    }
+    closer = {
+        "ts": "2026-08-20T15:00:00Z",
+        "exec_id": "x-11",
+        "order_id": 11,
+        "symbol": "WMT",
+        "sec_type": "STK",
+        "side": "SLD",
+        "quantity": 10,
+        "price": 105.0,
+        "commission": 1.0,
+        "realized_pnl": 50.0,
+        "bid": 104.90,
+        "ask": 105.10,
+    }
+    send = _send_row(
+        "flush bounce",
+        [10, 11],
+        ts="2026-08-20T14:00:00Z",
+        bid=99.90,
+        ask=100.10,
+    )
+    trades = classify_card_trades([send], [closer], {10, 11}, all_fills=[entry, closer])
+    assert trades[0]["realized_pnl"] == 48.0
+    assert trades[0]["conservative_pnl"] == 46.0

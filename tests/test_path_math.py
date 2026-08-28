@@ -3,6 +3,11 @@
 import math
 
 from abcxauto.path_math import (
+    commission_cost,
+    conservative_premium_usd,
+    conservative_px,
+    conservative_trade_pnl,
+    net_realized_usd,
     net_signed_premium,
     path_facts,
     path_from_journal,
@@ -155,3 +160,73 @@ def test_path_from_journal_nets_vertical_not_leg_tape():
     assert out["n"] == 4
     assert out["E"] == -22.5
     assert out["p"] == 0.25
+
+
+def test_commission_is_a_positive_cost():
+    assert commission_cost({"commission": 1.25}) == 1.25
+    assert commission_cost({"commission": -0.65}) == 0.65
+    assert commission_cost({"realized_pnl": 50.0}) == 0.0
+    assert net_realized_usd({"realized_pnl": 50.0, "commission": 1.3}) == 48.7
+    assert net_realized_usd({"commission": 1.0}) is None
+
+
+def test_debit_marks_at_ask_and_credit_at_bid():
+    buy = {
+        "price": 2.00,
+        "quantity": 1,
+        "side": "BUY",
+        "sec_type": "OPT",
+        "bid": 1.95,
+        "ask": 2.05,
+    }
+    sell = {
+        "price": 2.50,
+        "quantity": 1,
+        "side": "SELL",
+        "sec_type": "OPT",
+        "bid": 2.45,
+        "ask": 2.55,
+    }
+    assert conservative_px(buy) == 2.05
+    assert conservative_px(sell) == 2.45
+    assert conservative_premium_usd(buy) == -205.0
+    assert conservative_premium_usd(sell) == 245.0
+    # Paper mid was -200 + 250 = +50. Conservative is +40 before fees.
+    assert conservative_trade_pnl(
+        [
+            {**buy, "commission": 0.65},
+            {**sell, "commission": 0.65, "realized_pnl": 50.0},
+        ]
+    ) == 38.7
+
+
+def test_fill_worse_than_nbbo_keeps_the_fill():
+    paid_through = {
+        "price": 100.20,
+        "quantity": 10,
+        "side": "BOT",
+        "sec_type": "STK",
+        "bid": 99.90,
+        "ask": 100.10,
+    }
+    assert conservative_px(paid_through) == 100.20
+
+
+def test_paper_mid_without_quotes_is_not_a_conservative_mark():
+    mid_only = {
+        "price": 100.0,
+        "quantity": 10,
+        "side": "BOT",
+        "sec_type": "STK",
+        "realized_pnl": 0.0,
+    }
+    closer = {
+        "price": 105.0,
+        "quantity": 10,
+        "side": "SLD",
+        "sec_type": "STK",
+        "realized_pnl": 50.0,
+    }
+    assert conservative_px(mid_only) is None
+    assert conservative_trade_pnl([mid_only, closer]) is None
+    assert conservative_trade_pnl([closer]) is None
