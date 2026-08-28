@@ -1985,12 +1985,16 @@ class ProTerminal:
 
         focus = sc.get("fastest_beating") or sc.get("best_pace")
         win = (sc.get("windows") or {}).get(focus) if focus else None
-        all_bit = _bit(
-            "all",
-            sc.get("book_return_pct"),
-            sc.get("edge_usd"),
-            sc.get("beating_model"),
-        )
+        sess = sc.get("session") if isinstance(sc.get("session"), dict) else {}
+        sret = sess.get("book_return_pct")
+        if sret is None:
+            s_nl, spnl = sess.get("startup_nl"), sess.get("book_pnl")
+            if isinstance(s_nl, (int, float)) and s_nl > 0 and isinstance(spnl, (int, float)):
+                sret = (float(spnl) / float(s_nl)) * 100.0
+        sedge = sess.get("edge_usd")
+        sbeat = None if sedge is None else (float(sedge) > 0)
+        date = str(sess.get("session_date") or "RTH")
+        all_bit = _bit(date, sret, sedge, sbeat)
         if (
             isinstance(win, dict)
             and focus
@@ -2007,10 +2011,10 @@ class ProTerminal:
             beat = win.get("beating_model")
         else:
             self.lbl_score.value = f"Score: {all_bit}"
-            beat = sc.get("beating_model")
-        if beat is True or sc.get("beating_model") is True:
+            beat = sbeat
+        if beat is True or sbeat is True:
             self.lbl_score.color = GREEN
-        elif beat is False or sc.get("beating_model") is False:
+        elif beat is False or sbeat is False:
             self.lbl_score.color = AMBER
         else:
             self.lbl_score.color = MUTED
@@ -2077,17 +2081,26 @@ class ProTerminal:
             self.lbl_session_score.value = "sess —"
             self.lbl_session_score.color = MUTED
             return
+        date = str(sess.get("session_date") or "")
+        date_bit = f"{date} " if date else ""
         pnl = sess.get("book_pnl")
         cost = sess.get("model_cost_usd")
         edge = sess.get("edge_usd")
         fills = sess.get("fills")
         wins = sess.get("wins")
+        comm = sess.get("commissions_usd")
+        dd = sess.get("max_dd_usd")
+        spy = sess.get("spy_return_pct")
         pnl_s = f"{pnl:+.0f}" if isinstance(pnl, (int, float)) else "—"
         cost_s = f"{cost:.2f}" if isinstance(cost, (int, float)) else "—"
         edge_s = f"{edge:+.0f}" if isinstance(edge, (int, float)) else "—"
         fill_s = f"{wins}/{fills}" if fills not in (None, 0) else f"{fills or 0}"
+        comm_s = f"{comm:.2f}" if isinstance(comm, (int, float)) else "—"
+        dd_s = f"{dd:.0f}" if isinstance(dd, (int, float)) else "—"
+        spy_s = f"{spy:+.2f}%" if isinstance(spy, (int, float)) else "—"
         self.lbl_session_score.value = (
-            f"sess ΔNL={pnl_s} model$={cost_s} edge={edge_s} fills={fill_s}"
+            f"sess {date_bit}ΔNL={pnl_s} model$={cost_s} edge={edge_s} "
+            f"comm$={comm_s} maxDD={dd_s} vsSPY={spy_s} fills={fill_s}"
         )
         if isinstance(edge, (int, float)) and edge > 0:
             self.lbl_session_score.color = GREEN
@@ -2098,18 +2111,30 @@ class ProTerminal:
 
     def _sync_edge_stat(self, scorecard: dict) -> None:
         sc = scorecard if isinstance(scorecard, dict) else {}
-        edge = sc.get("edge_usd")
-        beat = sc.get("beating_model")
+        sess = sc.get("session") if isinstance(sc.get("session"), dict) else {}
+        # Hero is this RTH. Inception edge stays on the window row / promote floor.
+        edge = sess.get("edge_usd")
         if isinstance(edge, (int, float)):
+            beat = edge > 0
             self.lbl_edge.value = f"${edge:+,.0f}"
-            self.lbl_edge.color = GREEN if beat is True else (AMBER if beat is False else TEXT)
+            self.lbl_edge.color = GREEN if beat else AMBER
         else:
             self.lbl_edge.value = "—"
             self.lbl_edge.color = MUTED
-        cost = sc.get("model_cost_usd")
-        self.lbl_edge_sub.value = (
+        date = str(sess.get("session_date") or "")
+        cost = sess.get("model_cost_usd")
+        spy = sess.get("spy_return_pct")
+        bits = []
+        if date:
+            bits.append(f"RTH {date}")
+        bits.append(
             f"model ${cost:,.2f}" if isinstance(cost, (int, float)) else "vs model"
         )
+        if isinstance(spy, (int, float)):
+            bits.append(f"vs SPY {spy:+.2f}%")
+        elif sess:
+            bits.append("vs SPY —")
+        self.lbl_edge_sub.value = " · ".join(bits) if bits else "vs model"
 
     @staticmethod
     def _lot_view(positions: list | None, unprotected: list | None = None) -> list[dict]:
@@ -2876,12 +2901,6 @@ class ProTerminal:
         _ = force
         self.lbl_sc_netliq.value = self.lbl_equity.value
         self.lbl_sc_netliq.color = self.lbl_equity.color
-        for src, dst in (
-            (self.lbl_score, self.lbl_sc_score),
-            (self.lbl_session_score, self.lbl_sc_session),
-        ):
-            dst.value = src.value
-            dst.color = src.color
         sc: dict = {}
         if self.engine.state.equity:
             try:
@@ -2890,18 +2909,43 @@ class ProTerminal:
                 sc = compute_scorecard(equity=self.engine.state.equity) or {}
             except Exception:
                 sc = {}
-        beat = sc.get("beating_model")
-        if beat is True:
+        self._sync_edge_stat(sc)
+        self._sync_session_score(sc)
+        self.lbl_sc_session.value = self.lbl_session_score.value
+        self.lbl_sc_session.color = self.lbl_session_score.color
+        sess = sc.get("session") if isinstance(sc.get("session"), dict) else {}
+        sedge = sess.get("edge_usd")
+        if isinstance(sedge, (int, float)) and sedge > 0:
             self.lbl_sc_verdict.value = "BEATING the model bill"
             self.lbl_sc_verdict.color = GREEN
-        elif beat is False:
+        elif isinstance(sedge, (int, float)):
             self.lbl_sc_verdict.value = "behind the model bill"
             self.lbl_sc_verdict.color = AMBER
+        elif sess.get("session_date"):
+            self.lbl_sc_verdict.value = f"RTH {sess.get('session_date')} — no session NL yet"
+            self.lbl_sc_verdict.color = MUTED
         else:
             self.lbl_sc_verdict.value = "no live book — connect IBKR to score"
             self.lbl_sc_verdict.color = MUTED
+        start_nl = sess.get("startup_nl")
+        end_nl = sess.get("end_nl")
+        cost = sess.get("model_cost_usd")
+        comm = sess.get("commissions_usd")
+        dd = sess.get("max_dd_usd")
+        start_s = f"${start_nl:,.2f}" if isinstance(start_nl, (int, float)) else "—"
+        end_s = f"${end_nl:,.2f}" if isinstance(end_nl, (int, float)) else "—"
+        cost_s = f"${cost:,.2f}" if isinstance(cost, (int, float)) else "—"
+        comm_s = f"${comm:,.2f}" if isinstance(comm, (int, float)) else "—"
+        dd_s = f"${dd:,.2f}" if isinstance(dd, (int, float)) else "—"
+        date = str(sess.get("session_date") or "")
+        date_bit = f"RTH {date} · " if date else ""
+        self.lbl_sc_score.value = (
+            f"{date_bit}start {start_s} → {end_s} · model {cost_s} · "
+            f"comm {comm_s} · maxDD {dd_s}"
+        )
+        self.lbl_sc_score.color = TEXT if sess else MUTED
         self._sync_sc_windows(sc)
-        self._sync_sc_cards()
+        self._sync_sc_cards(sc)
         self._sync_sc_ledger(sc)
         try:
             from abcxauto.memory import get_journal
@@ -2921,7 +2965,13 @@ class ProTerminal:
         windows = sc.get("windows") if isinstance(sc, dict) else None
         windows = windows if isinstance(windows, dict) else {}
         rows: list[ft.Control] = [
-            self._head_row([("window", 78), ("return", 84), ("edge", 90), ("verdict", None)])
+            self._head_row([
+                ("window", 78),
+                ("return", 84),
+                ("edge", 90),
+                ("vs SPY", 72),
+                ("verdict", None),
+            ])
         ]
         order = ["15m", "1h", "4h", "inception"]
         seen = [k for k in order if k in windows] + [k for k in windows if k not in order]
@@ -2936,6 +2986,7 @@ class ProTerminal:
             edge = row.get("edge_usd")
             beat = row.get("beating_model")
             cov = str(row.get("coverage") or "")
+            spy = row.get("spy_return_pct")
             if beat is True:
                 verdict, color = "BEAT", GREEN
             elif beat is False:
@@ -2957,14 +3008,41 @@ class ProTerminal:
                         right=True,
                         color=color,
                     ),
+                    self._cell(
+                        f"{spy:+.2f}%" if isinstance(spy, (int, float)) else "—",
+                        width=72,
+                        right=True,
+                        color=MUTED,
+                    ),
                     self._cell(verdict, expand=True, color=color, weight=ft.FontWeight.W_600),
                 ])
             )
         self.col_sc_windows.controls = rows
 
-    def _sync_sc_cards(self) -> None:
+    @staticmethod
+    def _card_avg_r(row: dict) -> float | None:
+        """Mean R vs the card's declared max_loss_usd. None when risk is missing."""
+        retire = row.get("retire_if") if isinstance(row.get("retire_if"), dict) else {}
+        risk = retire.get("max_loss_usd")
+        n = int(row.get("resolved") or 0)
+        pnl = row.get("resolved_pnl")
         try:
-            from abcxauto.lab_playbook import card_scores, load_lab, walk_cards
+            risk_f = float(risk)
+            pnl_f = float(pnl)
+        except (TypeError, ValueError):
+            return None
+        if risk_f <= 0 or n <= 0:
+            return None
+        return pnl_f / (n * risk_f)
+
+    def _sync_sc_cards(self, sc: dict | None = None) -> None:
+        try:
+            from abcxauto.lab_playbook import (
+                attach_card_honesty,
+                card_scores,
+                load_lab,
+                walk_cards,
+            )
 
             lab = load_lab()
             cards: list[dict] = []
@@ -2979,6 +3057,16 @@ class ProTerminal:
             if not cards:
                 cards = [c for c in (lab.get("cards") or []) if isinstance(c, dict)]
             scores = card_scores(cards) or []
+            sess = (sc or {}).get("session") if isinstance(sc, dict) else None
+            model_cost = None
+            if isinstance(sess, dict) and sess.get("model_cost_usd") is not None:
+                model_cost = sess.get("model_cost_usd")
+            elif isinstance(sc, dict):
+                model_cost = sc.get("model_cost_usd")
+            try:
+                scores = attach_card_honesty(scores, model_cost=model_cost) or scores
+            except Exception:
+                pass
         except Exception:
             scores = []
         if not scores:
@@ -2990,22 +3078,26 @@ class ProTerminal:
                 )
             ]
             return
-        rows: list[ft.Control] = [
-            self._head_row([
-                ("card", None),
-                ("sends", 52),
-                ("fills", 46),
-                ("hit", 84),
-                ("realized", 88),
-            ])
-        ]
+        has_hit = False
+        for row in scores:
+            cal = row.get("calibration") if isinstance(row.get("calibration"), dict) else {}
+            if isinstance(cal.get("hit_rate"), (int, float)):
+                has_hit = True
+                break
+        head = [("card", None), ("n", 40), ("win", 40)]
+        if has_hit:
+            head.append(("hit", 84))
+        head.extend([("avg R", 64), ("cost-alloc", 88)])
+        rows: list[ft.Control] = [self._head_row(head)]
+        if not has_hit:
+            rows.insert(0, ft.Text("hit: none", size=11, color=MUTED))
         for row in scores[:20]:
-            pnl = row.get("realized_pnl")
-            fills = int(row.get("attributed_fills") or 0)
-            # Hit rate against the card's own claim. A green edge on a red hit
-            # rate is one fat winner, which is the pair worth seeing together.
-            cal = row.get("calibration")
-            cal = cal if isinstance(cal, dict) else {}
+            n = int(row.get("resolved") or 0)
+            wins = int(row.get("resolved_wins") or 0)
+            avg_r = self._card_avg_r(row)
+            honesty = row.get("honesty") if isinstance(row.get("honesty"), dict) else {}
+            cost_pnl = honesty.get("cost_allocated_pnl")
+            cal = row.get("calibration") if isinstance(row.get("calibration"), dict) else {}
             hit = cal.get("hit_rate")
             gap = cal.get("hit_rate_gap")
             if not isinstance(hit, (int, float)):
@@ -3015,42 +3107,42 @@ class ProTerminal:
                 hit_color = GREEN if gap >= 0 else RED
             else:
                 hit_text, hit_color = f"{hit:g}%", MUTED
-            color = MUTED
-            if fills and isinstance(pnl, (int, float)) and pnl:
-                color = GREEN if pnl > 0 else RED
-            # No joined fill is not a flat trade — $0.00 would read as one.
-            if not fills:
-                realized = "no fills yet"
-            elif isinstance(pnl, (int, float)):
-                realized = f"${pnl:+,.2f}"
+            if isinstance(cost_pnl, (int, float)):
+                cost_text = f"${cost_pnl:+,.2f}"
+                cost_color = GREEN if cost_pnl > 0 else RED if cost_pnl else MUTED
             else:
-                realized = "—"
+                cost_text, cost_color = "—", MUTED
             name = str(row.get("card") or "?")
             on_book = row.get("on_current_book")
-            rows.append(
-                self._blotter_row([
+            cells = [
+                self._cell(
+                    name if on_book is not False else f"{name} (retired)",
+                    expand=True,
+                    color=TEXT if on_book is not False else MUTED,
+                ),
+                self._cell(str(n), width=40, right=True),
+                self._cell(str(wins), width=40, right=True, color=MUTED),
+            ]
+            if has_hit:
+                cells.append(self._cell(hit_text, width=84, right=True, color=hit_color))
+            cells.extend(
+                [
                     self._cell(
-                        name if on_book is not False else f"{name} (retired)",
-                        expand=True,
-                        color=TEXT if on_book is not False else MUTED,
-                    ),
-                    self._cell(str(row.get("sends") or 0), width=52, right=True),
-                    self._cell(
-                        str(row.get("attributed_fills") or 0),
-                        width=46,
+                        f"{avg_r:.2f}R" if isinstance(avg_r, (int, float)) else "—",
+                        width=64,
                         right=True,
                         color=MUTED,
                     ),
-                    self._cell(hit_text, width=84, right=True, color=hit_color),
                     self._cell(
-                        realized,
+                        cost_text,
                         width=88,
                         right=True,
-                        color=color,
+                        color=cost_color,
                         weight=ft.FontWeight.W_600,
                     ),
-                ])
+                ]
             )
+            rows.append(self._blotter_row(cells))
         self.col_sc_cards.controls = rows
 
     def _sync_sc_ledger(self, sc: dict) -> None:

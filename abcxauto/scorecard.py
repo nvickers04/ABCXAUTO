@@ -1,4 +1,9 @@
-"""Primary scorecard: book return % of starting NetLiq vs model API cost."""
+"""Primary scorecard: book return % of starting NetLiq vs model API cost.
+
+Hero / session is the current ET regular session (RTH). Inception stays a
+window row and the promote floor — never the hero. vs SPY is a real print
+pair or blank; this module does not invent a SPY series.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ from typing import Any
 
 # Short → long. Grok picks which window is enough; code only reports facts.
 # Promote / inception beating stays the full-book row on compute_scorecard.
+# Hero and sess use rth_session_start, not these labels.
 HORIZONS: tuple[tuple[str, int | None], ...] = (
     ("15m", 15 * 60),
     ("1h", 3600),
@@ -174,6 +180,167 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
+def rth_session_start(now: datetime | None = None) -> tuple[datetime, str]:
+    """09:30 ET bell of the current (or most recent) weekday regular session.
+
+    After the bell on a weekday: that day's open. Before the bell, or on a
+    weekend: the previous weekday's open. Returns (UTC datetime, ET date).
+    """
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    clock = _utc(now).astimezone(et)
+    day = clock.date()
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    bell = datetime(day.year, day.month, day.day, 9, 30, tzinfo=et)
+    if clock < bell:
+        day -= timedelta(days=1)
+        while day.weekday() >= 5:
+            day -= timedelta(days=1)
+        bell = datetime(day.year, day.month, day.day, 9, 30, tzinfo=et)
+    return bell.astimezone(timezone.utc), day.isoformat()
+
+
+def _et_date(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text[:10] if len(text) >= 10 else None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+
+        return dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    except Exception:
+        return dt.astimezone(timezone.utc).date().isoformat()
+
+
+def _finite_px(raw: Any) -> float | None:
+    try:
+        px = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if px != px or px <= 0:
+        return None
+    return px
+
+
+def _absorb_spy_prints(blob: Any, out: dict[str, float]) -> None:
+    """Copy last/open/close from a quote dict or a last print. No series."""
+    if isinstance(blob, dict):
+        for key in ("last", "open", "close"):
+            px = _finite_px(blob.get(key))
+            if px is not None:
+                out.setdefault(key, px)
+        if "last" not in out:
+            px = _finite_px(blob.get("mid"))
+            if px is not None:
+                out["last"] = px
+        return
+    px = _finite_px(blob)
+    if px is not None:
+        out.setdefault("last", px)
+
+
+def spy_prints(spy: Any = None, *, load_last_turn: bool = True) -> dict[str, float]:
+    """IBKR SPY last/open/close already on the book. Never fetches a series.
+
+    ``spy`` may be a last print, a quote dict, or ``ibkr_live_quotes``. When
+    omitted, last_turn.ibkr_live_quotes['SPY'] is used if present.
+    """
+    out: dict[str, float] = {}
+    if spy is not None:
+        if isinstance(spy, dict) and (
+            "SPY" in spy or "spy" in spy or "ibkr_live_quotes" in spy
+        ):
+            quotes = spy.get("ibkr_live_quotes") if "ibkr_live_quotes" in spy else spy
+            if isinstance(quotes, dict):
+                _absorb_spy_prints(quotes.get("SPY") or quotes.get("spy"), out)
+            _absorb_spy_prints(spy.get("spy_quote") if isinstance(spy, dict) else None, out)
+            if not out:
+                _absorb_spy_prints(spy, out)
+        else:
+            _absorb_spy_prints(spy, out)
+        return out
+    if not load_last_turn:
+        return out
+    try:
+        from abcxauto.think_stream import LAST_TURN_PATH
+
+        raw = LAST_TURN_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return out
+    try:
+        import json
+
+        data = json.loads(raw) if raw else {}
+    except Exception:
+        return out
+    if not isinstance(data, dict):
+        return out
+    quotes = data.get("ibkr_live_quotes")
+    if isinstance(quotes, dict):
+        _absorb_spy_prints(quotes.get("SPY") or quotes.get("spy"), out)
+    _absorb_spy_prints(data.get("spy_quote"), out)
+    return out
+
+
+def spy_return_pct(
+    label: str,
+    prints: dict[str, float] | None,
+    *,
+    session: bool = False,
+) -> float | None:
+    """Same-window SPY return from prints already on the book.
+
+    Session: last vs today's open. 1d: last vs prior close. Other windows
+    need a series we do not have — return None rather than reuse the wrong
+    pair (open-to-last is not a 15m return).
+    """
+    blob = prints if isinstance(prints, dict) else {}
+    last = _finite_px(blob.get("last"))
+    if last is None:
+        return None
+    if session:
+        open_px = _finite_px(blob.get("open"))
+        if open_px is None:
+            return None
+        return (last / open_px - 1.0) * 100.0
+    if label == "1d":
+        close = _finite_px(blob.get("close"))
+        if close is None:
+            return None
+        return (last / close - 1.0) * 100.0
+    return None
+
+
+def max_dd_usd(points: list[float] | None) -> float | None:
+    """Peak-to-trough dollar drawdown of an NL path. None when empty."""
+    xs = [p for p in (points or []) if isinstance(p, (int, float))]
+    if not xs:
+        return None
+    peak = float(xs[0])
+    dd = 0.0
+    for raw in xs:
+        px = float(raw)
+        if px > peak:
+            peak = px
+        drop = peak - px
+        if drop > dd:
+            dd = drop
+    return dd
+
+
 def _pct_of_start(value: float | None, start_nl: float | None) -> float | None:
     """``value`` as percent of ``start_nl``. None when base is missing/non-positive."""
     if value is None or start_nl is None:
@@ -197,6 +364,7 @@ def _window_row(
     usage: dict[str, Any],
     snaps: int,
     now: datetime,
+    spy_return_pct: float | None = None,
 ) -> dict[str, Any]:
     book_pnl = None
     book_return_pct = None
@@ -256,6 +424,7 @@ def _window_row(
         "edge_per_hour": edge_per_hour,
         "beating_model": beating,
         "snaps": int(snaps or 0),
+        "spy_return_pct": spy_return_pct,
     }
 
 
@@ -264,12 +433,15 @@ def compute_scorecard(
     equity: float | None = None,
     journal: Any = None,
     now: datetime | None = None,
+    spy: Any = None,
 ) -> dict[str, Any]:
     """Book P&L vs model cost, scored as % of starting NetLiq.
 
-    Top-level beating_model is inception (promote / floor). ``windows`` are
-    shorter looks; ``fastest_beating`` is the shortest non-thin window that
-    is ahead of the model bill. Grok chooses which window is enough.
+    Top-level beating_model is inception (promote / floor). ``session`` is
+    this RTH (current ET regular session) — not a leftover model marker.
+    ``windows`` are shorter looks; each carries ``spy_return_pct`` (None
+    unless a real SPY print pair exists for that window). ``fastest_beating``
+    is the shortest non-thin window ahead of the model bill.
     """
     if journal is None:
         try:
@@ -326,9 +498,12 @@ def compute_scorecard(
     edge_pct = _pct_of_start(edge, start_base)
 
     clock = _utc(now)
+    spy_px = spy_prints(spy)
+    spy_last = spy_px.get("last")
     windows: dict[str, dict[str, Any]] = {}
     if journal is not None:
         for label, horizon_s in HORIZONS:
+            spy_ret = spy_return_pct(label, spy_px)
             if horizon_s is None:
                 start_ts = None
                 try:
@@ -345,6 +520,7 @@ def compute_scorecard(
                     usage=usage,
                     snaps=0,
                     now=clock,
+                    spy_return_pct=spy_ret,
                 )
                 continue
             cutoff = clock - timedelta(seconds=int(horizon_s))
@@ -376,6 +552,7 @@ def compute_scorecard(
                 usage=win_usage,
                 snaps=snaps,
                 now=clock,
+                spy_return_pct=spy_ret,
             )
 
     session: dict[str, Any] | None = None
@@ -387,68 +564,105 @@ def compute_scorecard(
             model_name = str(getattr(get_config(), "model", "") or "")
         except Exception:
             model_name = ""
-        marker = None
+        bell_utc, session_date = rth_session_start(clock)
+        start_ts = _iso(bell_utc)
+        start_nl = None
+        start_obs = None
         try:
-            if hasattr(journal, "last_session_marker"):
-                marker = journal.last_session_marker()
+            if hasattr(journal, "nav_at_or_after"):
+                start_nl, start_obs = journal.nav_at_or_after(start_ts)
         except Exception:
-            marker = None
-        if isinstance(marker, dict):
-            marker_model = str(marker.get("model") or "")
-            if model_name and marker_model and marker_model != model_name:
-                marker = None
-            elif marker_model and not model_name:
-                # No current model — do not inherit a leftover named session.
-                marker = None
-        if isinstance(marker, dict) and marker.get("ts"):
-            start_nl = marker.get("net_liquidation")
-            start_ts = str(marker.get("ts") or "")
-            if start_nl is None and start_ts:
-                try:
-                    # First NL in this session — never a leftover snap from before.
-                    if hasattr(journal, "nav_at_or_after"):
-                        start_nl, _ts = journal.nav_at_or_after(start_ts)
-                except Exception:
-                    start_nl = None
-            sess_usage = {
-                "calls": 0,
-                "cost_usd": 0.0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-            }
+            start_nl, start_obs = None, None
+        if start_nl is None:
             try:
-                if hasattr(journal, "model_usage_since"):
-                    sess_usage = dict(journal.model_usage_since(start_ts) or sess_usage)
+                if hasattr(journal, "nav_at_or_before"):
+                    pre_nl, pre_ts = journal.nav_at_or_before(start_ts)
+                    if pre_nl is not None and _et_date(pre_ts) == session_date:
+                        start_nl, start_obs = pre_nl, pre_ts
             except Exception:
                 pass
-            fills = {"n": 0, "wins": 0, "sum": 0.0}
+        sess_usage = {
+            "calls": 0,
+            "cost_usd": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+        try:
+            if hasattr(journal, "model_usage_since"):
+                sess_usage = dict(journal.model_usage_since(start_ts) or sess_usage)
+        except Exception:
+            pass
+        fills = {"n": 0, "wins": 0, "sum": 0.0}
+        try:
+            if hasattr(journal, "closed_fill_stats_since"):
+                fills = dict(journal.closed_fill_stats_since(start_ts) or fills)
+        except Exception:
+            pass
+        commissions = None
+        try:
+            if hasattr(journal, "commissions_since"):
+                commissions = float(journal.commissions_since(start_ts) or 0.0)
+        except Exception:
+            commissions = None
+        path_pts: list[float] = []
+        try:
+            if hasattr(journal, "nav_path_since"):
+                for _ts, nl in journal.nav_path_since(start_ts) or []:
+                    try:
+                        path_pts.append(float(nl))
+                    except (TypeError, ValueError):
+                        continue
+        except Exception:
+            path_pts = []
+        if start_nl is not None:
             try:
-                if hasattr(journal, "closed_fill_stats_since"):
-                    fills = dict(journal.closed_fill_stats_since(start_ts) or fills)
-            except Exception:
+                path_pts = [float(start_nl)] + path_pts
+            except (TypeError, ValueError):
                 pass
-            sess_pnl = None
-            if current is not None and start_nl is not None:
-                try:
-                    sess_pnl = float(current) - float(start_nl)
-                except (TypeError, ValueError):
-                    sess_pnl = None
-            sess_cost = float(sess_usage.get("cost_usd") or 0.0)
-            sess_edge = None if sess_pnl is None else (sess_pnl - sess_cost)
-            sess_base = float(start_nl) if start_nl is not None else None
-            session = {
-                "model": marker.get("model") or model_name,
-                "started_at": start_ts,
-                "startup_nl": sess_base,
-                "book_pnl": sess_pnl,
-                "model_cost_usd": sess_cost,
-                "model_cost_pct": _pct_of_start(sess_cost, sess_base),
-                "model_calls": int(sess_usage.get("calls") or 0),
-                "edge_usd": sess_edge,
-                "edge_pct": _pct_of_start(sess_edge, sess_base),
-                "fills": int(fills.get("n") or 0),
-                "wins": int(fills.get("wins") or 0),
-            }
+        if current is not None:
+            try:
+                path_pts.append(float(current))
+            except (TypeError, ValueError):
+                pass
+        sess_pnl = None
+        sess_ret = None
+        if current is not None and start_nl is not None:
+            try:
+                sess_pnl = float(current) - float(start_nl)
+                if float(start_nl) > 0:
+                    sess_ret = (sess_pnl / float(start_nl)) * 100.0
+            except (TypeError, ValueError):
+                sess_pnl = None
+        sess_cost = float(sess_usage.get("cost_usd") or 0.0)
+        sess_edge = None if sess_pnl is None else (sess_pnl - sess_cost)
+        sess_base = float(start_nl) if start_nl is not None else None
+        end_nl = None
+        try:
+            end_nl = float(current) if current is not None else None
+        except (TypeError, ValueError):
+            end_nl = None
+        dd = max_dd_usd(path_pts) if sess_base is not None else None
+        session = {
+            "kind": "rth",
+            "model": model_name,
+            "session_date": session_date,
+            "started_at": start_ts,
+            "startup_nl": sess_base,
+            "end_nl": end_nl,
+            "book_pnl": sess_pnl,
+            "book_return_pct": sess_ret,
+            "model_cost_usd": sess_cost,
+            "model_cost_pct": _pct_of_start(sess_cost, sess_base),
+            "model_calls": int(sess_usage.get("calls") or 0),
+            "edge_usd": sess_edge,
+            "edge_pct": _pct_of_start(sess_edge, sess_base),
+            "fills": int(fills.get("n") or 0),
+            "wins": int(fills.get("wins") or 0),
+            "commissions_usd": commissions,
+            "max_dd_usd": dd,
+            "spy_return_pct": spy_return_pct("rth", spy_px, session=True),
+            "start_obs_ts": start_obs,
+        }
 
     fastest_beating = None
     best_pace = None
@@ -485,6 +699,7 @@ def compute_scorecard(
         "windows": windows,
         "fastest_beating": fastest_beating,
         "best_pace": best_pace,
+        "spy_last": spy_last,
         "since_start": {
             "book_pnl": book_pnl,
             "model_cost_usd": cost,
@@ -542,15 +757,16 @@ def format_scorecard_block(
         book_tag = ""
         cost_tag = ""
     lines = ["SCORECARD:"]
-    # Session = marker from first run / ABCXAUTO_MODEL change — not calendar day,
-    # not inception. Promote / BEATING-vs-LOSING stay on inception below.
+    # Session = this RTH (ET regular session). Promote / BEATING-vs-LOSING
+    # stay on inception below. A leftover model marker is not sess.
     sess = sc.get("session")
     if isinstance(sess, dict) and sess:
-        sret = None
-        s_nl = sess.get("startup_nl")
-        spnl = sess.get("book_pnl")
-        if spnl is not None and s_nl is not None and float(s_nl) > 0:
-            sret = (float(spnl) / float(s_nl)) * 100.0
+        sret = sess.get("book_return_pct")
+        if sret is None:
+            s_nl = sess.get("startup_nl")
+            spnl = sess.get("book_pnl")
+            if spnl is not None and s_nl is not None and float(s_nl) > 0:
+                sret = (float(spnl) / float(s_nl)) * 100.0
         sret_s = f"{sret:+.2f}%" if sret is not None else "n/a"
         scost = sess.get("model_cost_usd")
         scost_s = f"${float(scost):.4f}" if scost is not None else "n/a"
@@ -568,13 +784,26 @@ def format_scorecard_block(
             fill_s = str(fills if fills is not None else 0)
         model = sess.get("model") or ""
         model_bit = f" model={model}" if model else ""
-        started = sess.get("started_at") or ""
-        started_bit = f" since={started}" if started else ""
+        rth_date = sess.get("session_date") or ""
+        date_bit = f"{rth_date} RTH " if rth_date else "RTH "
+        start_nl = sess.get("startup_nl")
+        end_nl = sess.get("end_nl")
+        start_s = f"{float(start_nl):.2f}" if isinstance(start_nl, (int, float)) else "n/a"
+        end_s = f"{float(end_nl):.2f}" if isinstance(end_nl, (int, float)) else "n/a"
+        comm = sess.get("commissions_usd")
+        comm_s = f"${float(comm):.2f}" if isinstance(comm, (int, float)) else "n/a"
+        dd = sess.get("max_dd_usd")
+        dd_s = f"${float(dd):.2f}" if isinstance(dd, (int, float)) else "n/a"
+        spy_r = sess.get("spy_return_pct")
+        spy_s = f"{float(spy_r):+.2f}%" if isinstance(spy_r, (int, float)) else "—"
         lines.append(
-            f"- session book={sret_s}{book_tag} "
+            f"- session {date_bit}book={sret_s}{book_tag} "
+            f"start={start_s} end={end_s} "
             f"model_cost={scost_pct_s} ({scost_s}{cost_tag}) "
             f"({int(sess.get('model_calls') or 0)} calls) "
-            f"edge={sedge_pct_s} ({sedge_s}$) fills={fill_s}{model_bit}{started_bit}"
+            f"edge={sedge_pct_s} ({sedge_s}$) "
+            f"comm={comm_s} maxDD={dd_s} vsSPY={spy_s} "
+            f"fills={fill_s}{model_bit}"
         )
     lines.extend(
         [
@@ -606,7 +835,9 @@ def format_scorecard_block(
         mark = "BEAT" if row.get("beating_model") is True else (
             "behind" if row.get("beating_model") is False else cov
         )
-        bits.append(f"{label}:{wr_s}/{we_s}/{mark}")
+        spy_r = row.get("spy_return_pct")
+        spy_s = f"{float(spy_r):+.2f}%" if isinstance(spy_r, (int, float)) else "—"
+        bits.append(f"{label}:{wr_s}/{we_s}/{mark}/spy={spy_s}")
     if bits:
         lines.append("- windows " + " ".join(bits))
     return "\n".join(lines) + "\n"
