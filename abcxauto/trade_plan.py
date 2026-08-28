@@ -966,6 +966,7 @@ def capacity_fact(
             "slots_left": None,
             "allows_new_risk": True,
             "cap_armed": False,
+            "with_size": "size_pct_nl",
             "note": "max_open_positions disabled (unlimited capacity Fact)",
         }
     left = max(0, max_n - charged)
@@ -984,7 +985,8 @@ def capacity_fact(
             "slots_left": None,
             "allows_new_risk": True,
             "cap_armed": False,
-            "note": note + " (not armed)",
+            "with_size": "size_pct_nl",
+            "note": note + " (not armed; size and slots together)",
         }
     note += f"; {left} slot(s) for new risk"
     return {
@@ -995,5 +997,6 @@ def capacity_fact(
         "slots_left": left,
         "allows_new_risk": left > 0,
         "cap_armed": True,
+        "with_size": "size_pct_nl",
         "note": note,
     }

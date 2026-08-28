@@ -547,6 +547,7 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
         "min": lo_open,
         "unit": "slots",
         "pick": "this book",
+        "with": "size_pct_nl",
     }
     if _live_desk(c):
         mop_lever["max"] = hi_open
@@ -557,5 +558,6 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
         "daily_loss_limit_pct": _pct("daily_loss_limit_pct"),
         "max_peak_drawdown_pct": _pct("max_peak_drawdown_pct"),
         "max_open_positions": mop_lever,
+        "together": "size_pct_nl and max_open_positions — not pick-one",
         "change": "self_tune",
     }

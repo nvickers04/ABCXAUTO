@@ -120,6 +120,8 @@ def test_levers_snapshot_shows_now_and_range():
     # Paper levers do not teach a baked 25 ceiling.
     assert "max" not in snap["max_open_positions"]
     assert snap["max_open_positions"]["pick"] == "this book"
+    assert snap["max_open_positions"]["with"] == "size_pct_nl"
+    assert "not pick-one" in snap["together"]
     assert snap["change"] == "self_tune"
 
 
@@ -734,6 +736,8 @@ def test_book_width_is_not_a_baked_nl_formula():
     assert big["nl"] == 35_000
     assert small["allows_new_risk"] is True
     assert big["allows_new_risk"] is True
+    assert small["with_size"] == "size_pct_nl"
+    assert big["with_size"] == "size_pct_nl"
     assert small["max_open_positions"] != big["max_open_positions"]
     assert 12 not in (small["max_open_positions"], big["max_open_positions"])
     assert 25 not in (small["max_open_positions"], big["max_open_positions"])

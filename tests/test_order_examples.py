@@ -72,6 +72,8 @@ def test_format_order_examples():
     assert "vertical_spread close:" in text
     assert '"closing_position":true' in text
     assert "Never close_option / oca / trailing a combo leg" in text
+    assert "together, not pick-one" in text
+    assert "Widening the book does not replace size" in text
     assert "one WORKING at a time" in text
     assert "Fill or cancel, then the next" in text
     assert "Filled lots do not use that slot" in text

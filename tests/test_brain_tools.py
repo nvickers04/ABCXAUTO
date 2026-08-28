@@ -2303,6 +2303,8 @@ def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
     # Paper book: do not teach leftover 25 as the working ceiling.
     assert "max" not in blob["levers"]["max_open_positions"]
     assert blob["levers"]["max_open_positions"]["pick"] == "this book"
+    assert blob["levers"]["max_open_positions"]["with"] == "size_pct_nl"
+    assert "not pick-one" in blob["levers"]["together"]
     assert "day" in blob
     assert "edge_usd" in blob["day"]
     assert blob["day"]["edge_meaning"] == "nl_vs_start_minus_model"
@@ -3086,6 +3088,7 @@ def test_send_tool_says_one_ticket_per_call():
     assert "place one ticket" not in desc.lower()
     assert "self_tune" in desc.lower()
     assert "ORDER EXAMPLES" in desc
+    assert "together, not pick-one" in desc
     assert "one WORKING" not in desc
     assert "iron butterfly" not in desc.lower()
     props = _tool_props("send")
@@ -3111,6 +3114,7 @@ def test_self_tune_tool_is_flat():
     desc = str(getattr(_tool_fn("self_tune"), "description", "") or "")
     assert "this book's NL" in desc
     assert "baked 15/25" in desc
+    assert "together, not pick-one" in desc
 
 
 @pytest.mark.asyncio

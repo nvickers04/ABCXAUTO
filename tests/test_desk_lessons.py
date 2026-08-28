@@ -76,6 +76,8 @@ def test_system_prompt_lock_still_holds():
     assert "riskless_combo_cap" not in SYSTEM_PROMPT
     assert "one WORKING" not in SYSTEM_PROMPT
     assert "max_open_positions" not in SYSTEM_PROMPT
+    assert "pick-one" not in SYSTEM_PROMPT
+    assert "size_pct_nl" not in SYSTEM_PROMPT
 
 
 def test_seed_lesson_is_in_book_payload():

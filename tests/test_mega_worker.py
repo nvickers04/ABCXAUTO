@@ -137,6 +137,7 @@ def test_capacity_fact_paints_open_and_nl_without_refusing_when_unarmed():
     assert cap["max_open_positions"] == 12
     assert cap["allows_new_risk"] is True
     assert cap["cap_armed"] is False
+    assert cap["with_size"] == "size_pct_nl"
     armed = capacity_fact(
         lots,
         max_open_positions=12,
