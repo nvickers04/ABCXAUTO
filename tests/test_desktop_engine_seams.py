@@ -241,7 +241,7 @@ def test_scan_tool_stamps_hits_on_the_snap(monkeypatch):
             "ok": True,
             "source": "ibkr",
             "arena": 12,
-            "scan_code": "HIGH_OPT_VOLUME",
+            "scan_code": "HOT_BY_OPT_VOLUME",
             "symbols": ["NVDA"],
             "hits": [{"symbol": "NVDA", "on_book": False, "rank": 1, "last": 182.5}],
             "applied": {},
@@ -283,7 +283,7 @@ def test_scan_tool_stamps_hits_on_the_snap(monkeypatch):
     blob = asyncio.run(
         _run_tool(
             "scan",
-            {"scan_code": "HIGH_OPT_VOLUME"},
+            {"scan_code": "HOT_BY_OPT_VOLUME"},
             connector=None,
             world=world,
             snap=snap,
@@ -294,7 +294,7 @@ def test_scan_tool_stamps_hits_on_the_snap(monkeypatch):
     hits = snap["scan_hits"]
     assert hits["ranked"] is True
     assert hits["quoted"] == 1
-    assert hits["scan_code"] == "HIGH_OPT_VOLUME"
+    assert hits["scan_code"] == "HOT_BY_OPT_VOLUME"
     assert hits["rows"][0]["symbol"] == "NVDA"
     assert hits["rows"][0]["last"] == 182.5
     # The MDA tape stays symbol stubs — an IBKR last must never paint as mda_last.
