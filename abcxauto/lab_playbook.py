@@ -2890,7 +2890,7 @@ def age_out_open_lots(
         index[card_key(type_name, name)] = card
         by_name.setdefault(name.lower(), []).append(card)
     sends = resolve_send_types(_card_sends(), state)
-    fills, placed = _journal_exit_facts()
+    fills, placed, _all_fills = _journal_exit_facts()
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for trade in classify_card_trades(sends, fills, placed):

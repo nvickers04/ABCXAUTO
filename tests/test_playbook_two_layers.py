@@ -1561,6 +1561,7 @@ def test_max_hold_sessions_is_not_a_graduation_numeric_kill():
         {
             "resolved": 3,
             "resolved_pnl": 50.0,
+            "conservative_pnl": 40.0,
             "resolved_wins": 3,
             "resolved_losses": 0,
         },
