@@ -19,9 +19,16 @@ __all__ = (
     "OVERLAY_NO_LONG_STOCK",
     "OVERLAY_SHARES_INSUFFICIENT",
     "OVERLAY_SHARES_UNSPECIFIED",
+    "OVERLAY_PLAYBOOK_TYPES",
     "check_overlay_shares",
     "long_share_lots",
+    "overlay_types_to_hide",
 )
+
+# Virgin overlay trunks Grok still sees in playbook() / book() after #128
+# refuses the send. Hide these on a last-stop-covered long; keep other
+# defined-risk trunks.
+OVERLAY_PLAYBOOK_TYPES = frozenset(_OVERLAY_STRATS)
 
 
 def long_share_lots(positions: list[dict] | None) -> dict[str, float]:
@@ -152,3 +159,29 @@ def check_overlay_shares(
     if strat not in _SHARE_OVERLAYS:
         return True, "ok", "n/a"
     return True, "ok", "shares ok"
+
+
+def overlay_types_to_hide(
+    positions: list[dict] | None,
+    orders: list[dict] | None = None,
+) -> frozenset[str]:
+    """Overlay trunks to strip from the Grok-facing playbook view.
+
+    When every long STK lot already has a covering last-stop, virgin
+    protective_put / covered_call / collar / cash_secured_put starters must
+    not appear — #128 already refuses the send. Unprotected STK still
+    overlays. A flat book, or a book with any unprotected long, keeps the
+    trunks. Defined-risk types that are not overlays are never hidden.
+    ``positions is None`` means the caller has no book (tests / desk file)
+    and must not strip.
+    """
+    if positions is None:
+        return frozenset()
+    lots = long_share_lots(positions)
+    if not lots:
+        return frozenset()
+    if any(
+        not _symbol_last_stop_covers(sym, positions, orders) for sym in lots
+    ):
+        return frozenset()
+    return frozenset(_OVERLAY_STRATS)
