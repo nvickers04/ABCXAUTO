@@ -143,7 +143,7 @@ def test_format_wake_no_tape_keeps_lots_and_minutes():
             "daily_pnl": 0.0,
             "risk_per_trade_pct": 5.0,
             "sizing_floors": False,
-            "capacity": {"open_count": 1, "max_open_positions": 15},
+            "capacity": {"open_count": 1, "max_open_positions": 0},
             "open_lots": ["AAPL STK long 20"],
             "mix": {"stk": 1},
             "tape_seed": ["AAPL", "ZZZZ", "MSFT"],
@@ -185,7 +185,7 @@ def test_format_wake_rth_fill_delta_no_tape_when_flat():
                 "names": 0,
                 "lots": 0,
                 "open_lots": [],
-                "capacity": {"open_count": 0, "max_open_positions": 15},
+                "capacity": {"open_count": 0, "max_open_positions": 0},
                 "mix": {},
                 "tape_seed": ["ZZZZ", "MSFT", "NVDA"],
             },
@@ -220,7 +220,7 @@ def test_format_wake_rth_delta_kinds_no_tape(kind):
             ibkr_up=True,
             day={
                 "nl": 50_000.0,
-                "capacity": {"open_count": 0, "max_open_positions": 15},
+                "capacity": {"open_count": 0, "max_open_positions": 0},
                 "tape_seed": ["SPY", "QQQ", "IWM"],
             },
         )
@@ -248,7 +248,7 @@ def test_format_wake_alarm_boot_operator_no_tape_no_options_live(kind):
                 "nl": 50_000.0,
                 "names": 0,
                 "lots": 0,
-                "capacity": {"open_count": 0, "max_open_positions": 15},
+                "capacity": {"open_count": 0, "max_open_positions": 0},
                 "tape_seed": ["SPY", "QQQ", "IWM", "DIA", "AAPL"],
             },
         )
@@ -273,7 +273,7 @@ def test_format_wake_open_lots_and_mix_still_print():
             "nl": 80_000.0,
             "names": 1,
             "lots": 1,
-            "capacity": {"open_count": 1, "max_open_positions": 15},
+            "capacity": {"open_count": 1, "max_open_positions": 0},
             "risk_per_trade_pct": 25.0,
             "sizing_floors": False,
             "open_lots": ["NVDA STK long 5"],
@@ -303,7 +303,7 @@ def test_format_wake_non_rth_fill_delta_omits_tape_and_options():
             ibkr_up=True,
             day={
                 "nl": 50_000.0,
-                "capacity": {"open_count": 0, "max_open_positions": 15},
+                "capacity": {"open_count": 0, "max_open_positions": 0},
                 "tape_seed": ["SPY", "QQQ"],
                 "minutes_to_open": 40,
             },

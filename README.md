@@ -20,7 +20,7 @@ Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro S
 
 - `send` is the only broker path
 - Defined-risk and cash-only
-- Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %; capacity `max_open_positions` (default 15)
+- Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %; optional capacity `max_open_positions` (default 0 = off; a positive N is Grok's ceiling)
 - One name across every lot vs `max_symbol_concentration_pct` — `max_position_pct` only sees one ticket, so N orders in a name could stack past it. Stock and its options sum
 - One sector/theme arena across names vs `max_arena_concentration_pct` — per-name cannot see NVDA+SMCI+ARM+AVGO as one bet. Scan sorts are not the bucket. Fires on send even when paper gates are off
 - Open ticket past the card's `retire_if.max_hold_sessions` / `max_hold_hours` trips that card and flattens that lot. Independent of paper gates
@@ -115,14 +115,14 @@ Tickets must match `ORDER EXAMPLES` (`abcxauto/order_examples.py`). Stock entrie
 
 ## Configuration
 
-Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** max position, **25%** risk/trade, **25%** per name, defined-risk on, cash-only, `trading_budget_usd=0` (full NetLiq), **15** max open positions.
+Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** max position, **25%** risk/trade, **25%** per name, defined-risk on, cash-only, `trading_budget_usd=0` (full NetLiq). Book width is Grok's; `max_open_positions` default **0** (off).
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ABCXAUTO_MODEL` | `grok-4.6` | Brain — Pro Settings `model` wins over this |
 | `IBKR_PORT` | `7497` | Paper TWS |
 | `IBKR_CLIENT_ID` | `42` | One id per process |
-| `ABCXAUTO_MAX_OPEN_POSITIONS` | `15` | Capacity (Grok may set 1–25) |
+| `ABCXAUTO_MAX_OPEN_POSITIONS` | `0` | Slot cap (0 = off; Grok may set a positive ceiling) |
 | `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `25` | Daily-loss halt vs NetLiq |
 | `ABCXAUTO_MAX_POSITION_PCT` | `25` | Max position vs NetLiq |
 | `ABCXAUTO_MAX_RISK_PER_TRADE_PCT` | `25` | Max risk per ticket vs NetLiq |

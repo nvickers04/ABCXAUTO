@@ -19,6 +19,7 @@ from abcxauto.self_tune import (
     floor_clamp_config_fields,
     is_self_tune_strategy,
     levers_snapshot,
+    slot_cap_armed,
 )
 
 _CEILING_KEYS = (
@@ -53,7 +54,7 @@ def test_defaults_are_1k_floor():
     assert cfg.max_position_pct == 25.0
     assert cfg.max_risk_per_trade_pct == 25.0
     assert cfg.max_peak_drawdown_pct == 25.0
-    assert cfg.max_open_positions == 15
+    assert cfg.max_open_positions == 0
     assert cfg.defined_risk_only is True
     assert cfg.cash_only is True
     assert cfg.auto_panic_on_breach is True
@@ -85,11 +86,14 @@ def test_cannot_disable_defined_risk():
 
 
 def test_paper_self_tune_mop_is_not_capped_at_25():
-    """Paper: Grok-chosen N for this book is not shoved back into 1–25."""
+    """Grok-chosen N is not shoved into a baked 25. 0 stays off."""
     out = apply_self_tune({"max_open_positions": 99}, persist=False)
     assert out["status"] == "ok"
     assert get_config().max_open_positions == 99
-    assert get_config().max_open_positions != MAX_OPEN_POSITIONS_RANGE[1]
+    assert get_config().max_open_positions != 25
+    off = apply_self_tune({"max_open_positions": 0}, persist=False)
+    assert off["status"] == "ok"
+    assert get_config().max_open_positions == 0
 
 
 def test_cannot_set_trading_budget_sleeve():
@@ -119,7 +123,9 @@ def test_levers_snapshot_shows_now_and_range():
     assert risk["max"] == 25.0
     assert risk["now"] is not None
     assert snap["max_open_positions"]["min"] == MAX_OPEN_POSITIONS_RANGE[0]
-    # Paper levers do not teach a baked 25 ceiling.
+    assert snap["max_open_positions"]["min"] == 0
+    assert snap["max_open_positions"]["off"] == 0
+    # Do not invent 25 as a ceiling on paper or live.
     assert "max" not in snap["max_open_positions"]
     assert snap["max_open_positions"]["pick"] == "this book"
     assert snap["max_open_positions"]["with"] == "size_pct_nl"
@@ -127,12 +133,12 @@ def test_levers_snapshot_shows_now_and_range():
     assert snap["change"] == "self_tune"
 
 
-def test_live_levers_snapshot_keeps_mop_range():
+def test_live_levers_snapshot_does_not_invent_25():
     cfg = SimpleNamespace(
         trading_mode="live",
         ibkr_port=7496,
         is_paper=False,
-        max_open_positions=15,
+        max_open_positions=0,
         max_risk_per_trade_pct=25.0,
         max_option_premium_pct=25.0,
         max_position_pct=25.0,
@@ -140,8 +146,10 @@ def test_live_levers_snapshot_keeps_mop_range():
         max_peak_drawdown_pct=25.0,
     )
     snap = levers_snapshot(cfg)
-    assert snap["max_open_positions"]["min"] == MAX_OPEN_POSITIONS_RANGE[0]
-    assert snap["max_open_positions"]["max"] == MAX_OPEN_POSITIONS_RANGE[1]
+    assert snap["max_open_positions"]["min"] == 0
+    assert snap["max_open_positions"]["now"] == 0
+    assert snap["max_open_positions"]["off"] == 0
+    assert "max" not in snap["max_open_positions"]
 
 
 def test_can_tighten_risk():
@@ -187,11 +195,11 @@ def test_clamp_risk_to_floor_cannot_raise_past_ceiling():
     assert note is None
     live = SimpleNamespace(trading_mode="live", ibkr_port=7496, is_paper=False)
     v_live, note_live = clamp_risk_to_floor("max_open_positions", 99, cfg=live)
-    assert v_live == MAX_OPEN_POSITIONS_RANGE[1]
-    assert note_live is not None
+    assert v_live == 99
+    assert note_live is None
     v0, note0 = clamp_risk_to_floor("max_open_positions", 0, cfg=live)
-    assert v0 == 15
-    assert note0 is not None
+    assert v0 == 0
+    assert note0 is None
 
 
 def test_clamp_risk_to_floor_rejects_nonfinite():
@@ -255,7 +263,7 @@ def test_malicious_self_tune_cannot_weaken_floor_or_go_live(tmp_path, monkeypatc
     assert cfg.max_risk_per_trade_pct <= RISK_FLOOR["max_risk_per_trade_pct"][1]
     assert cfg.max_position_pct <= RISK_FLOOR["max_position_pct"][1]
     assert cfg.daily_loss_limit_pct <= RISK_FLOOR["daily_loss_limit_pct"][1]
-    # Paper: a Grok-chosen mop may exceed the live 1–25 range.
+    # A Grok-chosen mop is not shoved into 25 on paper or live.
     assert cfg.max_open_positions == 10_000
     assert math.isfinite(cfg.max_risk_per_trade_pct)
     assert math.isfinite(cfg.max_position_pct)
@@ -502,8 +510,34 @@ def test_live_start_gates_off_repaired_on(tmp_path, monkeypatch):
     assert cfg.sizing_floors is True
 
 
-def test_live_start_mop_in_safe_range(tmp_path, monkeypatch):
-    """Live start keeps mop in 1–25 and still forces gates + sizing floors."""
+def test_live_start_mop_zero_stays_off(tmp_path, monkeypatch):
+    """Live start does not invent a 15/25 slot cap. Gates and sizing floors stay on."""
+    from abcxauto.config import load_risk_settings, update_capacity_config, update_risk_config
+
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
+    monkeypatch.setenv("TRADING_MODE", "live")
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    get_config.cache_clear()
+    update_capacity_config(max_open_positions=0, persist=True)
+    update_risk_config(
+        risk_gates_enabled=False,
+        sizing_floors=False,
+        persist=True,
+        _skip_clamp=True,
+    )
+    ensure_immutable_floor(persist=True)
+    cfg = get_config()
+    assert cfg.max_open_positions == 0
+    assert cfg.risk_gates_enabled is True
+    assert cfg.sizing_floors is True
+    assert cfg.defined_risk_only is True
+
+
+def test_live_start_keeps_grok_mop_above_25(tmp_path, monkeypatch):
+    """Live start does not cap a chosen mop at 25. Gates and sizing floors stay on."""
     from abcxauto.config import load_risk_settings, update_capacity_config, update_risk_config
 
     path = tmp_path / "risk.json"
@@ -522,8 +556,8 @@ def test_live_start_mop_in_safe_range(tmp_path, monkeypatch):
     )
     ensure_immutable_floor(persist=True)
     cfg = get_config()
-    assert MAX_OPEN_POSITIONS_RANGE[0] <= cfg.max_open_positions <= MAX_OPEN_POSITIONS_RANGE[1]
-    assert cfg.max_open_positions == MAX_OPEN_POSITIONS_RANGE[1]
+    assert cfg.max_open_positions == 99
+    assert cfg.max_open_positions != 25
     assert cfg.risk_gates_enabled is True
     assert cfg.sizing_floors is True
     assert cfg.defined_risk_only is True
@@ -553,7 +587,7 @@ def test_floor_clamp_paper_keeps_grok_mop_above_25():
     assert "max_open_positions" not in floor_clamp_config_fields(cfg)
 
 
-def test_floor_clamp_live_caps_mop_at_25():
+def test_floor_clamp_live_does_not_cap_mop_at_25():
     cfg = SimpleNamespace(
         daily_loss_limit_pct=25.0,
         max_position_pct=25.0,
@@ -574,8 +608,31 @@ def test_floor_clamp_live_caps_mop_at_25():
         is_paper=False,
         sizing_floors=True,
     )
-    fixes = floor_clamp_config_fields(cfg)
-    assert fixes.get("max_open_positions") == MAX_OPEN_POSITIONS_RANGE[1]
+    assert "max_open_positions" not in floor_clamp_config_fields(cfg)
+
+
+def test_floor_clamp_live_does_not_restore_zero_to_15():
+    cfg = SimpleNamespace(
+        daily_loss_limit_pct=25.0,
+        max_position_pct=25.0,
+        max_risk_per_trade_pct=25.0,
+        max_peak_drawdown_pct=25.0,
+        max_option_premium_pct=25.0,
+        max_symbol_concentration_pct=25.0,
+        max_arena_concentration_pct=25.0,
+        max_open_positions=0,
+        risk_gates_enabled=True,
+        auto_panic_on_breach=True,
+        defined_risk_only=True,
+        cash_only=True,
+        scan_fetch_cap=8,
+        trading_budget_usd=0.0,
+        trading_mode="live",
+        ibkr_port=7496,
+        is_paper=False,
+        sizing_floors=True,
+    )
+    assert "max_open_positions" not in floor_clamp_config_fields(cfg)
 
 
 def test_floor_clamp_paper_does_not_force_gates_on():
@@ -759,3 +816,56 @@ def test_self_tune_is_sendable():
     assert strat == "self_tune"
     assert forced is None
     assert "self_tune" in ALLOWED_ACTIONS
+
+
+def test_slot_cap_armed_is_positive_mop_only():
+    """One rule: mop > 0 is a ceiling. 0 is off. No live-always / paper-gates fork."""
+    paper_off = SimpleNamespace(
+        trading_mode="paper",
+        ibkr_port=7497,
+        is_paper=True,
+        risk_gates_enabled=True,
+        max_open_positions=0,
+    )
+    live_off = SimpleNamespace(
+        trading_mode="live",
+        ibkr_port=7496,
+        is_paper=False,
+        risk_gates_enabled=True,
+        max_open_positions=0,
+    )
+    paper_on = SimpleNamespace(
+        trading_mode="paper",
+        ibkr_port=7497,
+        is_paper=True,
+        risk_gates_enabled=False,
+        max_open_positions=4,
+    )
+    live_on = SimpleNamespace(
+        trading_mode="live",
+        ibkr_port=7496,
+        is_paper=False,
+        risk_gates_enabled=True,
+        max_open_positions=4,
+    )
+    assert slot_cap_armed(paper_off) is False
+    assert slot_cap_armed(live_off) is False
+    assert slot_cap_armed(paper_on) is True
+    assert slot_cap_armed(live_on) is True
+
+
+def test_live_self_tune_mop_zero_stays_off(tmp_path, monkeypatch):
+    """Live self_tune 0 is off — not restored to 15, not capped at 25."""
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
+    monkeypatch.setenv("TRADING_MODE", "live")
+    monkeypatch.setenv("IBKR_PORT", "7496")
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    get_config.cache_clear()
+    out = apply_self_tune({"max_open_positions": 0}, persist=False)
+    assert out["status"] == "ok"
+    assert get_config().max_open_positions == 0
+    assert get_config().max_open_positions != 15
+    assert get_config().max_open_positions != 25

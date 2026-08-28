@@ -1,9 +1,11 @@
 """Agent self-modification — live knobs only, no human approval.
 
-Immutable floor (code): daily-loss halt, max position size, max open positions,
-defined-risk, cash-only, auto-panic, fail-closed, exits never blocked, live gated.
-The agent may *tighten* risk. It cannot weaken the immutable risk floor.
-Cadence is park_clock (overnight only); process % dials do not exist.
+Immutable floor (code): daily-loss halt, max position %, defined-risk,
+cash-only, auto-panic, fail-closed, exits never blocked, live gated.
+max_open_positions is not a floor: 0 = off; a positive N is a ceiling
+Grok or the operator chose. The agent may *tighten* risk. It cannot
+weaken the immutable risk floor. Cadence is park_clock (overnight only);
+process % dials do not exist.
 """
 
 from __future__ import annotations
@@ -25,9 +27,9 @@ RISK_FLOOR: dict[str, tuple[float, float]] = {
     "max_symbol_concentration_pct": (5.0, 25.0),
     "max_arena_concentration_pct": (5.0, 25.0),
 }
-# Live integer cap only. Paper Grok picks N for this book — do not shove
-# that N back into 1–25 or treat 0 as 15. 0 on live would disable the gate.
-MAX_OPEN_POSITIONS_RANGE = (1, 25)
+# 0 = off (no count refuse). A positive integer is a ceiling Grok/operator
+# chose. No baked 15. No invented 25. Same on paper and live.
+MAX_OPEN_POSITIONS_RANGE = (0,)
 
 # Booleans the agent cannot turn off. risk_gates_enabled is live-locked;
 # paper honors an operator-off so Grok's chosen % of NL can send.
@@ -56,18 +58,20 @@ def _live_desk(cfg: Any) -> bool:
 
 
 def slot_cap_armed(cfg: Any = None) -> bool:
-    """True when the leftover integer slot cap may refuse new risk.
+    """True when a positive mop is a count ceiling.
 
-    Live (7496 family) is always armed. Paper is armed only with gates on.
-    Paper gates-off: Grok sends names; leftover 12/15/25 is not a refuse.
+    One rule, paper and live: mop > 0 is a ceiling Grok/operator set.
+    0 or absent is off — no count refuse. Not live-always, not paper-gates.
     """
     if cfg is None:
         from abcxauto.config import get_config
 
         cfg = get_config()
-    if _live_desk(cfg):
-        return True
-    return bool(getattr(cfg, "risk_gates_enabled", True))
+    try:
+        n = int(getattr(cfg, "max_open_positions", 0) or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return n > 0
 # Mode/port are operator-only. Extra keys here are rejects, not knobs.
 _LIVE_GATED: frozenset[str] = frozenset({
     "trading_mode",
@@ -96,7 +100,7 @@ UNSUPERVISED_DEFAULTS: dict[str, Any] = {
     "max_option_premium_pct": 25.0,
     "max_symbol_concentration_pct": 25.0,
     "max_arena_concentration_pct": 25.0,
-    "max_open_positions": 15,
+    "max_open_positions": 0,
     "scan_fetch_cap": 8,
 }
 
@@ -135,32 +139,18 @@ def clamp_risk_to_floor(
     *,
     cfg: Any = None,
 ) -> tuple[Any, dict[str, Any] | None]:
-    """Clamp a risk knob so it cannot weaken the immutable floor."""
+    """Clamp a risk knob so it cannot weaken the immutable floor.
+
+    ``cfg`` remains for call-site compat. mop is not paper/live forked.
+    """
     if key == "max_open_positions":
         n = _i(value)
-        if n is None:
+        if n is None or n < 0:
             return None, None
-        desk = cfg
-        if desk is None:
-            try:
-                from abcxauto.config import get_config
-
-                desk = get_config()
-            except Exception:
-                desk = None
-        if desk is None or not _live_desk(desk):
-            # Paper: Grok's N for this book. 0 = no leftover integer cap.
-            # Do not cap at 25 or convert 0 → 15.
-            if n < 0:
-                return None, None
-            return n, None
-        lo, hi = MAX_OPEN_POSITIONS_RANGE
-        if n < lo:
-            default = int(UNSUPERVISED_DEFAULTS["max_open_positions"])
-            return default, {"raw": n, "clamped": default}
-        clamped = min(hi, n)
-        note = {"raw": n, "clamped": clamped} if clamped != n else None
-        return clamped, note
+        # 0 = off. Positive N is Grok's ceiling. Do not clamp 0 up to 15.
+        # Do not invent 25. Same on paper and live. cfg is not a live-always fork.
+        _ = cfg
+        return n, None
     if key not in RISK_FLOOR:
         return None, None
     raw = _f(value)
@@ -479,18 +469,10 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
         elif cur < lo:
             fixes[key] = lo
     mop = _i(getattr(cfg, "max_open_positions", 0))
-    if _live_desk(cfg):
-        lo_p, hi_p = MAX_OPEN_POSITIONS_RANGE
-        if mop is None or mop < lo_p or mop > hi_p:
-            fixes["max_open_positions"] = (
-                UNSUPERVISED_DEFAULTS["max_open_positions"]
-                if mop is None or mop < lo_p
-                else hi_p
-            )
-    elif mop is None or mop < 0:
-        # Paper: keep Grok's N (including 0 = unlimited, or N > 25).
-        # Only repair missing / negative leftover garbage — not a chosen N.
-        fixes["max_open_positions"] = UNSUPERVISED_DEFAULTS["max_open_positions"]
+    if mop is None or mop < 0:
+        # Missing / negative leftover garbage → off. Do not restore 15.
+        # Do not cap a chosen N at 25. Paper and live are the same.
+        fixes["max_open_positions"] = int(UNSUPERVISED_DEFAULTS["max_open_positions"])
     for key in LOCKED_TRUE:
         if key == "risk_gates_enabled" and not _live_desk(cfg):
             # Paper: operator-off survives start. Live still forces gates on.
@@ -609,17 +591,15 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
             "unit": "pct_nl",
         }
 
-    lo_open, hi_open = MAX_OPEN_POSITIONS_RANGE
     mop_now = getattr(c, "max_open_positions", None)
     mop_lever: dict[str, Any] = {
         "now": mop_now,
-        "min": lo_open,
+        "min": MAX_OPEN_POSITIONS_RANGE[0],
         "unit": "slots",
+        "off": 0,
         "pick": "this book",
         "with": "size_pct_nl",
     }
-    if _live_desk(c):
-        mop_lever["max"] = hi_open
     out = {
         "max_risk_per_trade_pct": _pct("max_risk_per_trade_pct"),
         "max_option_premium_pct": _pct("max_option_premium_pct"),

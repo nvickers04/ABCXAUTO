@@ -1726,15 +1726,20 @@ def format_wake(
         parts.append(f"minutes_to_open={mins}.")
     if day:
         # max_risk= is the self_tune ceiling, not the ticket size.
-        # open= + nl= so Grok can pick mop for THIS book.
+        # open=N; denominator only when Grok/operator set a positive mop.
         nl = day.get("nl")
         if nl is None:
             nl = cap.get("nl")
         nl_bit = f" nl={nl}" if nl not in (None, "") else ""
+        try:
+            max_i = int(max_n) if max_n not in (None, "") else 0
+        except (TypeError, ValueError):
+            max_i = 0
+        open_bit = f"open={open_n}/{max_i}" if max_i > 0 else f"open={open_n}"
         parts.append(
             f"names={day.get('names')} lots={day.get('lots')} "
             f"{pnl_bits} "
-            f"max_risk={risk}%{floors_bit} open={open_n}/{max_n}{nl_bit}."
+            f"max_risk={risk}%{floors_bit} {open_bit}{nl_bit}."
         )
         if port_bits:
             parts.append(f"{port_bits}.")
@@ -2167,10 +2172,10 @@ def build_world_state(
 
 
 def capacity_allows_new_risk(world: Any, cfg: Any = None) -> bool:
-    """Refuse new risk on leftover mop only when the slot cap is armed.
+    """Refuse new risk on count only when mop is a positive Grok/operator ceiling.
 
-    Paper gates-off: leftover 12/15/25 is not a refuse. Live / gates-on still
-    fire. Working entries reserve slots when the cap is armed.
+    mop 0/absent: no count refuse. Same on paper and live. Working entries
+    reserve slots when the cap is armed.
     """
     c = cfg if cfg is not None else get_config()
     try:

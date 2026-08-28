@@ -262,8 +262,8 @@ def test_new_entry_rejected_when_capacity_full():
     assert "capacity" in str((forced or {}).get("note") or "").lower()
 
 
-def test_paper_gates_off_gate_ticket_ignores_leftover_mop(tmp_path, monkeypatch):
-    """Paper gates-off: leftover mop does not block a new-risk ticket."""
+def test_mop_zero_gate_ticket_allows_sixteen_names(tmp_path, monkeypatch):
+    """mop 0 = off. 16 names are not a slot refuse on paper or live."""
     from abcxauto.agent_loop import gate_ticket
 
     monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
@@ -271,29 +271,64 @@ def test_paper_gates_off_gate_ticket_ignores_leftover_mop(tmp_path, monkeypatch)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
     monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
+    lots = [{"symbol": f"S{i}", "quantity": 1} for i in range(16)]
+    world = _judgment_world(
+        positions=lots,
+        capacity={
+            "open_count": 16,
+            "max_open_positions": 0,
+            "slots_left": None,
+            "allows_new_risk": True,
+        },
+    )
+    for mode, port, paper in (("paper", 7497, True), ("live", 7496, False)):
+        monkeypatch.setattr(
+            "abcxauto.world_state.get_config",
+            lambda mode=mode, port=port, paper=paper: __import__("types").SimpleNamespace(
+                trading_mode=mode,
+                ibkr_port=port,
+                is_paper=paper,
+                risk_gates_enabled=True,
+                max_open_positions=0,
+            ),
+        )
+        strat, forced = gate_ticket(_new_entry_act(), world)
+        assert forced is None, (mode, forced)
+        assert strat == "market_bracket"
+
+
+def test_grok_set_mop_four_gate_ticket_refuses_the_fifth(tmp_path, monkeypatch):
+    """A Grok-set mop=4 still refuses the 5th name."""
+    from abcxauto.agent_loop import gate_ticket
+
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    reset_flat_streak()
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
+    lots = [{"symbol": f"S{i}", "quantity": 1} for i in range(4)]
+    world = _judgment_world(
+        positions=lots,
+        capacity={
+            "open_count": 4,
+            "max_open_positions": 4,
+            "slots_left": 0,
+            "allows_new_risk": False,
+        },
+    )
     monkeypatch.setattr(
         "abcxauto.world_state.get_config",
         lambda: __import__("types").SimpleNamespace(
             trading_mode="paper",
             ibkr_port=7497,
             is_paper=True,
-            risk_gates_enabled=False,
-            max_open_positions=15,
+            risk_gates_enabled=True,
+            max_open_positions=4,
         ),
     )
-    strat, forced = gate_ticket(
-        _new_entry_act(),
-        _judgment_world(
-            capacity={
-                "open_count": 15,
-                "max_open_positions": 15,
-                "slots_left": 0,
-                "allows_new_risk": False,
-            },
-        ),
-    )
-    assert forced is None, forced
-    assert strat == "market_bracket"
+    strat, forced = gate_ticket(_new_entry_act(), world)
+    assert strat == "blocked"
+    assert "capacity" in str((forced or {}).get("note") or "").lower()
 
 
 def test_new_entry_rejected_while_flat_streak_unconfirmed(tmp_path, monkeypatch):

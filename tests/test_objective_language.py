@@ -148,7 +148,7 @@ def test_format_wake_includes_portfolio_pct_nl():
                 "top_symbol": "QQQ",
                 "top_concentration_pct": 20.0,
             },
-            "capacity": {"open_count": 1, "max_open_positions": 15},
+            "capacity": {"open_count": 1, "max_open_positions": 0},
             "open_lots": ["QQQ STK long 10"],
         },
     )

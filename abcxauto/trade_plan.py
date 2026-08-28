@@ -938,10 +938,10 @@ def capacity_fact(
     net_liq: Any = None,
     cap_armed: bool | None = None,
 ) -> dict[str, Any]:
-    """Fact: open count + current NL. Slot refuse only when the cap is armed.
+    """Fact: open count + current NL. Slot refuse only when mop > 0.
 
-    Working entries reserve slots when ``cap_armed`` (live / gates-on).
-    Paper gates-off: leftover mop is Grok's N, not a refuse. 0 max = unlimited.
+    0 max = off (no count refuse). A positive N is a ceiling Grok/operator
+    chose. Working entries reserve slots when that ceiling is armed.
     """
     used = open_position_count(positions)
     pending = working_entry_slots(open_orders, positions)

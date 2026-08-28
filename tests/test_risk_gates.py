@@ -627,6 +627,63 @@ async def test_max_open_positions_rejection(gate, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_mop_zero_does_not_refuse_sixteen_names_paper_or_live(monkeypatch):
+    """mop 0 = off. 16 names are not a slot refuse on paper or live send."""
+    names = [{"symbol": f"S{i}", "quantity": 1, "sec_type": "STK"} for i in range(16)]
+    for mode, port in (("paper", 7497), ("live", 7496)):
+        monkeypatch.setattr(
+            "abcxauto.risk_gates.get_config",
+            lambda mode=mode, port=port: _cfg(
+                risk_gates_enabled=True,
+                trading_mode=mode,
+                ibkr_port=port,
+                max_open_positions=0,
+                max_position_pct=0,
+                daily_loss_limit_pct=0,
+                max_symbol_concentration_pct=0,
+                max_arena_concentration_pct=0,
+                sizing_floors=False,
+            ),
+        )
+        gate = reset_risk_gate()
+        ok, reason = await gate.pre_trade_check(
+            _bracket(), FakeConnector(positions=names)
+        )
+        assert ok is True, (mode, reason)
+
+
+@pytest.mark.asyncio
+async def test_grok_set_mop_four_refuses_the_fifth_paper_and_live(monkeypatch):
+    """A Grok-set mop=4 still refuses the 5th name on paper and live send."""
+    names = [{"symbol": f"S{i}", "quantity": 1, "sec_type": "STK"} for i in range(4)]
+    for mode, port in (("paper", 7497), ("live", 7496)):
+        monkeypatch.setattr(
+            "abcxauto.risk_gates.get_config",
+            lambda mode=mode, port=port: _cfg(
+                risk_gates_enabled=True,
+                trading_mode=mode,
+                ibkr_port=port,
+                max_open_positions=4,
+                max_position_pct=0,
+                daily_loss_limit_pct=0,
+                max_symbol_concentration_pct=0,
+                max_arena_concentration_pct=0,
+                sizing_floors=False,
+            ),
+        )
+        gate = reset_risk_gate()
+        ok, reason = await gate.pre_trade_check(
+            _bracket(), FakeConnector(positions=names)
+        )
+        assert ok is False, mode
+        assert "max open positions" in reason.lower()
+        ok_under, _ = await gate.pre_trade_check(
+            _bracket(), FakeConnector(positions=names[:3])
+        )
+        assert ok_under is True, mode
+
+
+@pytest.mark.asyncio
 async def test_paper_gates_off_skips_leftover_mop_refuse(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.risk_gates.get_config",
