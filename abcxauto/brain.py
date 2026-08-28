@@ -1398,6 +1398,7 @@ _FAT_CLIP_KEYS = (
     "sessions",
     "scan_tape",
     "types",
+    "card_scores",
     "tree",
     "notes",
 )

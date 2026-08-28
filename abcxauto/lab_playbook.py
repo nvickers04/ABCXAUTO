@@ -2641,6 +2641,8 @@ def attach_card_honesty(
             continue
     have_cost = isinstance(model_cost, (int, float)) and float(model_cost) >= 0
     for row in out:
+        if row.get("locked") is True:
+            continue
         gaps: list[str] = [
             "fill_vs_ibkr_last",
             "holdout",

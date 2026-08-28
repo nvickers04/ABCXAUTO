@@ -26,7 +26,13 @@ from abcxauto.lab_playbook import (
     walk_cards,
 )
 from abcxauto.llm import SYSTEM_PROMPT
-from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+
+SYSTEM_PROMPT_LOCK = (
+    "You own an Interactive Brokers {mode} book. Strategy is yours.\n"
+    "Live only follows a promoted playbook. Risk is code.\n"
+    "send tickets that match ORDER EXAMPLES.\n"
+    "Size vs max_risk_per_trade_pct of NetLiq.\n"
+)
 
 
 def _card(name: str, **over) -> dict:
