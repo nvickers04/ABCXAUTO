@@ -205,7 +205,7 @@ def conservative_premium_usd(row: dict[str, Any] | None) -> float | None:
     sign = _side_sign(row, qty)
     if sign is None:
         return None
-    return sign * abs(qty) * px * _multiplier(row)
+    return round(sign * abs(qty) * px * _multiplier(row), 4)
 
 
 def conservative_trade_pnl(fills: list[Any] | None) -> float | None:
@@ -228,7 +228,7 @@ def conservative_trade_pnl(fills: list[Any] | None) -> float | None:
             return None
         total += prem - commission_cost(raw)
         n += 1
-    return total if n >= 2 else None
+    return round(total, 4) if n >= 2 else None
 
 
 def net_signed_premium(legs: list[Any] | None) -> float | None:
