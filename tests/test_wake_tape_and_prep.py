@@ -359,11 +359,8 @@ async def test_scan_empty_is_not_canned_tape(monkeypatch, legal_tape):
             turn=BrainTurn(),
         )
     )
-    assert data.get("ok") is False
-    assert "arena" in str(data.get("error") or "").lower() or "symbols" in str(
-        data.get("error") or ""
-    ).lower()
-    assert data.get("symbols") in (None, [],)
+    assert data.get("ok") is True
+    assert data.get("symbols") in (None, [])
     assert "tape" not in data or not data.get("tape")
     assert "SPY" not in (data.get("symbols") or [])
     assert "QQQ" not in (data.get("symbols") or [])
@@ -390,12 +387,12 @@ async def test_scan_arena_most_active_ibkr_order_overlay_no_persist(
     before = load_allowlist()
 
     async def fake_pull(connector=None, *, arena=None, scan_code=None, filters=None):
-        assert arena == "most_active"
-        assert scan_code is None
+        assert arena in ("most_active", "top_losers", "top_gainers")
+        assert scan_code in ("MOST_ACTIVE", "TOP_PERC_LOSE", "TOP_PERC_GAIN")
         return {
             "ok": True,
-            "arena_id": "most_active",
-            "scan_code": "MOST_ACTIVE",
+            "arena_id": arena,
+            "scan_code": scan_code,
             "source": "ibkr",
             "symbols": ["TSLA", "AAPL", "AMD"],
             "applied": {},

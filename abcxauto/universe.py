@@ -489,6 +489,70 @@ def resolve_screen(
     return _resolve_one_selector(raw_arena or raw_code)
 
 
+# One look tape: most_active plus top losers or gainers (the flush card text).
+# Cap overlay is large_cap's floor so mega and large both pass; mega's $200B
+# native USD used to empty the tape before millions conversion.
+FLUSH_DEFAULT_SCREENS: tuple[tuple[str, str], ...] = (
+    ("most_active", "MOST_ACTIVE"),
+    ("top_losers", "TOP_PERC_LOSE"),
+    ("top_gainers", "TOP_PERC_GAIN"),
+)
+
+
+def flush_default_jobs() -> list[dict[str, str]]:
+    return [{"arena": arena, "scan_code": code} for arena, code in FLUSH_DEFAULT_SCREENS]
+
+
+def is_flush_default_screen(arena: str = "", scan_code: str = "") -> bool:
+    """True for a bare look or one of the three flush sort pages.
+
+    Cap-universe composes (mega_cap + TOP_PERC_LOSE) are extra screens.
+    """
+    raw_arena = str(arena or "").strip()
+    raw_code = str(scan_code or "").strip()
+    if not raw_arena and not raw_code:
+        return True
+    resolved = resolve_screen(
+        arena=raw_arena or None,
+        scan_code=raw_code or None,
+    )
+    if not resolved.get("ok"):
+        return False
+    aid = str(resolved.get("arena_id") or "").strip().lower()
+    code = str(resolved.get("scan_code") or "").strip().upper()
+    return (aid, code) in FLUSH_DEFAULT_SCREENS
+
+
+def _large_mega_cap_above_usd() -> float:
+    spec = (ARENA_CATALOG.get("large_cap") or {}).get("ibkr") or {}
+    try:
+        val = float(spec.get("marketCapAbove") or 0)
+    except (TypeError, ValueError):
+        val = 0.0
+    return val if val > 0 else 10_000_000_000.0
+
+
+def flush_cap_filters(base: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Overlay large/mega floor as native USD. ``_ibkr_scan`` converts to millions tags.
+
+    Do not send raw mega $200B as the only floor — that emptied large names.
+    A clerk-supplied cap on this call wins.
+    """
+    out = dict(base) if isinstance(base, dict) else {}
+    native = dict(out.get("native") or {})
+    tags = dict(out.get("tags") or {})
+    applied = dict(out.get("applied") or {})
+    if native.get("marketCapAbove") is None and "usdMarketCapAbove" not in tags:
+        floor = _large_mega_cap_above_usd()
+        native["marketCapAbove"] = floor
+        applied["market_cap_above"] = floor
+    out["ok"] = True
+    out["native"] = native
+    out["tags"] = tags
+    out["applied"] = applied
+    return out
+
+
 async def pull_one_screen(
     connector: Any = None,
     *,

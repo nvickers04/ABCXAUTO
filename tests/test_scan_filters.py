@@ -497,3 +497,35 @@ async def test_tool_args_hoists_camel_filter_aliases():
     assert args["usdMarketCapAbove"] == "10000"
     assert "abovePrice" not in args
     assert "usd_market_cap_above" not in args
+
+
+def test_flush_default_is_the_card_trio_with_large_mega_tags():
+    from abcxauto.universe import (
+        ARENA_CATALOG,
+        flush_cap_filters,
+        flush_default_jobs,
+        is_flush_default_screen,
+        _usd_to_scanner_millions,
+    )
+
+    jobs = flush_default_jobs()
+    assert [(j["arena"], j["scan_code"]) for j in jobs] == [
+        ("most_active", "MOST_ACTIVE"),
+        ("top_losers", "TOP_PERC_LOSE"),
+        ("top_gainers", "TOP_PERC_GAIN"),
+    ]
+    assert is_flush_default_screen() is True
+    assert is_flush_default_screen(scan_code="TOP_PERC_LOSE") is True
+    assert is_flush_default_screen(arena="most_active") is True
+    assert is_flush_default_screen(arena="mega_cap", scan_code="TOP_PERC_LOSE") is False
+    assert is_flush_default_screen(arena="hot_by_volume") is False
+    cap = flush_cap_filters()
+    floor = float(ARENA_CATALOG["large_cap"]["ibkr"]["marketCapAbove"])
+    assert cap["native"]["marketCapAbove"] == floor
+    assert cap["native"]["marketCapAbove"] < 200_000_000_000
+    # Same millions path as mega/large arenas — not raw USD that emptied the tape.
+    assert _usd_to_scanner_millions(cap["native"]["marketCapAbove"]) == 10_000.0
+    kept = flush_cap_filters(
+        {"ok": True, "native": {"marketCapAbove": 5e9}, "tags": {}, "applied": {}}
+    )
+    assert kept["native"]["marketCapAbove"] == 5e9
