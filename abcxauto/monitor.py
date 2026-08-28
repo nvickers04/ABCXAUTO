@@ -649,6 +649,10 @@ class PortfolioMonitor:
             except Exception as e:
                 logger.warning(f"Monitor fill ingest failed: {e}")
                 fills = []
+        try:
+            journal.resolve_unfilled_sends(orders)
+        except Exception as e:
+            logger.warning(f"Monitor send-mark resolve failed: {e}")
 
         snapshot = {
             "connected": True,

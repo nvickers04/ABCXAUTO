@@ -637,9 +637,43 @@ async def execute_proposal(
     if proposal.strategy == "close_option":
         kwargs = await _resolve_close_option_kwargs(kwargs, proposal, connector)
     logger.info(f"Executing proposal #{proposal.id}: {method_name}({kwargs})")
+    quote = {}
+    try:
+        from abcxauto.send_marks import capture_send_quote
+
+        quote = await capture_send_quote(connector, proposal) or {}
+    except Exception:
+        logger.debug("send_marks quote failed", exc_info=True)
+        quote = {}
     result = await method(**kwargs)
     logger.info(f"Proposal #{proposal.id} result: {result}")
-    journal.record_dispatch(journal_id, _dispatch_succeeded(result), result)
+    ok = _dispatch_succeeded(result)
+    journal_result = dict(result) if isinstance(result, dict) else {"raw": result}
+    payload: Dict[str, Any] = journal_result
+    marks: Optional[dict] = None
+    try:
+        from abcxauto.send_marks import build_dispatch_marks, public_marks
+
+        marks = build_dispatch_marks(
+            strategy=proposal.strategy,
+            params=proposal.params,
+            quote=quote,
+            result=journal_result,
+            ok=ok,
+        )
+        payload = dict(journal_result)
+        payload["send_marks"] = public_marks(marks)
+    except Exception:
+        logger.debug("send_marks build failed", exc_info=True)
+        marks = None
+    dispatch_id = journal.record_dispatch(journal_id, ok, payload)
+    if marks is not None:
+        journal.record_send_marks(
+            proposal_id=journal_id,
+            dispatch_id=dispatch_id,
+            marks=marks,
+            result=journal_result,
+        )
 
     if (
         cfg.risk_gates_enabled
