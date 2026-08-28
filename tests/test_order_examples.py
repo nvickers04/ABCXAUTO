@@ -73,7 +73,11 @@ def test_format_order_examples():
     assert '"closing_position":true' in text
     assert "Never close_option / oca / trailing a combo leg" in text
     assert "together, not pick-one" in text
+    assert "same size on 3 lots is not the same book as on 20 lots" in text
     assert "Widening the book does not replace size" in text
+    # Illustration of together-not-pick-one — not a working size or slot count.
+    assert "5%" not in text.split("iron condor")[0]
+    assert "1%" not in text.split("iron condor")[0]
     assert "one WORKING at a time" in text
     assert "Fill or cancel, then the next" in text
     assert "Filled lots do not use that slot" in text

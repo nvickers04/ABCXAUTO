@@ -388,6 +388,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "rejects SHORT stock brackets. "
         "Size (size_pct_nl, % of current NL) and max_open_positions (concurrent lots) "
         "are two knobs of the same book — together, not pick-one. "
+        "The same size on 3 lots is not the same book as on 20 lots. "
         "Widening the book does not replace size, and the reverse. "
         "iron condor, iron butterfly, and butterfly: one WORKING at a time. "
         "Fill or cancel, then the next. Filled lots do not use that slot. "
