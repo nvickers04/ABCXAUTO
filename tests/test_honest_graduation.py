@@ -1,4 +1,4 @@
-"""Honest graduation: paper mid cannot unlock live. No new cathedral."""
+"""Honest graduation: paper mid cannot graduate. One constitution, not two books."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from abcxauto.lab_playbook import (
     FILL_ASSUMPTION_FULL_SPREAD,
     FILL_ASSUMPTION_PAPER_MID,
     HONESTY_GAP_REASONS,
-    LIVE_HYPOTHESIS_CAP,
     apply_from_judgment,
     attach_card_honesty,
     card_facts,
@@ -21,7 +20,6 @@ from abcxauto.lab_playbook import (
     clamp_update,
     classify_card_trades,
     fill_assumption_of,
-    hypothesis_cap_reject,
     live_hypothesis_count,
     load_lab,
     maybe_promote,
@@ -108,9 +106,10 @@ def test_paper_mid_cannot_set_graduated():
     assert verdict["graduated"] is False
     assert verdict["fill_assumption"] == FILL_ASSUMPTION_PAPER_MID
     assert verdict["cannot_graduate_reason"] == "paper_mid cannot graduate"
-    assert verdict["live_evidence"] is False
-    assert verdict["paper_resolved_pnl"] == 900.0
-    assert verdict["live_resolved_pnl"] is None
+    assert "live_evidence" not in verdict
+    assert "paper_resolved_pnl" not in verdict
+    assert "live_resolved_pnl" not in verdict
+    assert verdict["resolved_pnl"] == 900.0
     marked = card_verdict(
         {"resolved": 3, "resolved_pnl": 900.0, "conservative_pnl": 120.0},
         card,
@@ -135,10 +134,10 @@ def test_conservative_fill_can_graduate_when_sample_and_kill_met():
     assert verdict["graduated"] is True
     assert verdict["fill_assumption"] == FILL_ASSUMPTION_CONSERVATIVE
     assert verdict["cannot_graduate_reason"] == ""
-    assert verdict["live_evidence"] is False
-    assert verdict["live_resolved_pnl"] is None
+    assert "live_evidence" not in verdict
+    assert "live_resolved_pnl" not in verdict
     assert verdict["conservative_pnl"] == 120.0
-    assert verdict["paper_resolved_pnl"] == 900.0
+    assert verdict["resolved_pnl"] == 900.0
 
 
 def test_full_spread_is_a_conservative_fill_assumption():
@@ -234,7 +233,7 @@ def test_promote_needs_sample_and_kill_and_conservative_fill(
     assert live["graduated"] == ["flush bounce"]
 
 
-def test_paper_win_rate_is_not_live_evidence():
+def test_paper_win_rate_is_not_split_into_live_columns():
     card = {
         **_card("flush bounce", fill_assumption="paper_mid", expect_hit_rate=70),
         "type": "market_bracket",
@@ -244,30 +243,32 @@ def test_paper_win_rate_is_not_live_evidence():
         card,
     )
     assert verdict["graduated"] is False
-    assert verdict["live_evidence"] is False
-    assert verdict["paper_win_rate"] == 80.0
-    assert verdict["live_win_rate"] is None
-    assert verdict["calibration"]["live_evidence"] is False
-    assert verdict["calibration"]["paper_hit_rate"] == 80.0
-    assert verdict["calibration"]["live_hit_rate"] is None
-    assert verdict["paper_resolved_pnl"] == 400.0
-    assert verdict["live_resolved_pnl"] is None
+    assert "live_evidence" not in verdict
+    assert "paper_win_rate" not in verdict
+    assert "live_win_rate" not in verdict
+    assert "paper_hit_rate" not in (verdict.get("calibration") or {})
+    assert "live_hit_rate" not in (verdict.get("calibration") or {})
+    assert verdict["calibration"]["hit_rate"] == 80.0
+    assert verdict["resolved_pnl"] == 400.0
+    assert "paper_resolved_pnl" not in verdict
+    assert "live_resolved_pnl" not in verdict
 
 
-def test_live_book_labels_resolved_pnl_as_live(monkeypatch):
+def test_live_socket_card_verdict_uses_resolved_pnl(monkeypatch):
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     card = {
         **_card("flush bounce", fill_assumption="conservative"),
         "type": "market_bracket",
     }
     verdict = card_verdict({"resolved": 3, "resolved_pnl": 55.0}, card)
-    assert verdict["live_evidence"] is True
-    assert verdict["live_resolved_pnl"] == 55.0
-    assert verdict["paper_resolved_pnl"] is None
+    assert "live_evidence" not in verdict
+    assert verdict["resolved_pnl"] == 55.0
+    assert "live_resolved_pnl" not in verdict
+    assert "paper_resolved_pnl" not in verdict
     assert verdict["graduated"] is True
 
 
-def test_fourth_live_card_write_is_refused(tmp_path, monkeypatch):
+def test_fourth_testing_card_write_on_paper_is_not_a_live_cap(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
@@ -276,30 +277,33 @@ def test_fourth_live_card_write_is_refused(tmp_path, monkeypatch):
     )
     assert first is not None
     assert first.get("status") != "rejected"
-    assert first["live_hypotheses"] == LIVE_HYPOTHESIS_CAP
+    assert "live_hypotheses" not in first
+    assert "live_hypothesis_cap" not in first
 
     fourth = apply_from_judgment({"lab_playbook": _book("delta")})
     assert fourth is not None
-    assert fourth.get("status") == "rejected"
-    assert "hypothesis_cap" in (fourth.get("rejected") or {})
+    assert fourth.get("status") != "rejected"
+    assert "hypothesis_cap" not in (fourth.get("rejected") or {})
     names = [c["name"] for c in type_cards(load_lab()["types"], "market_bracket")]
-    assert "delta" not in names
-    assert names[:3] == ["alpha", "bravo", "charlie"]
+    assert "delta" in names
+    assert "alpha" in names
+    assert "bravo" in names
+    assert "charlie" in names
 
 
-def test_four_cards_in_one_write_are_refused(tmp_path, monkeypatch):
+def test_four_cards_in_one_write_are_not_a_live_cap(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     out = apply_from_judgment(
         {"lab_playbook": _book("a", "b", "c", "d")}
     )
     assert out is not None
-    assert out.get("status") == "rejected"
-    assert "hypothesis_cap" in (out.get("rejected") or {})
-    assert load_lab() == {} or live_hypothesis_count(load_lab()) == 0
+    assert out.get("status") != "rejected"
+    assert "hypothesis_cap" not in (out.get("rejected") or {})
+    assert live_hypothesis_count(load_lab()) == 4
 
 
-def test_retire_then_write_stays_at_the_cap(tmp_path, monkeypatch):
+def test_retire_then_write_keeps_the_new_card(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     apply_from_judgment({"lab_playbook": _book("alpha", "bravo", "charlie")})
@@ -319,7 +323,7 @@ def test_retire_then_write_stays_at_the_cap(tmp_path, monkeypatch):
     )
     assert out is not None
     assert out.get("status") != "rejected"
-    assert out["live_hypotheses"] == LIVE_HYPOTHESIS_CAP
+    assert "live_hypotheses" not in out
     names = {
         c["name"]: c["status"]
         for c in type_cards(load_lab()["types"], "market_bracket")
@@ -328,24 +332,22 @@ def test_retire_then_write_stays_at_the_cap(tmp_path, monkeypatch):
     assert names["delta"] == "testing"
 
 
-def test_already_wide_book_is_flagged_not_wiped(tmp_path, monkeypatch):
+def test_already_wide_book_is_not_wiped(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     save_lab(clamp_update(_book("a", "b", "c", "d", "e")))
     assert live_hypothesis_count(load_lab()) == 5
-    staged = clamp_update({"types": {"market_bracket": {"gotchas": "stop side"}}})
-    assert hypothesis_cap_reject(staged, load_lab()) == {}
     out = apply_from_judgment(
         {"lab_playbook": {"types": {"market_bracket": {"gotchas": "stop side"}}}}
     )
     assert out is not None
     assert out.get("status") != "rejected"
-    assert out["live_hypotheses"] == 5
-    assert "over cap" in (out.get("hypothesis_cap_flag") or "")
+    assert "live_hypotheses" not in out
+    assert "hypothesis_cap_flag" not in out
     assert live_hypothesis_count(load_lab()) == 5
 
 
-def test_locked_starters_do_not_count_toward_the_cap(tmp_path, monkeypatch):
+def test_locked_starters_are_not_hunting_cards(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
     apply_from_judgment({"lab_playbook": _book("alpha")})
@@ -366,7 +368,6 @@ def test_honesty_allocates_model_cost_by_sends_and_leaves_named_gaps():
                 "resolved_pnl": 40.0,
                 "written_at": written,
                 "fill_assumption": "full_spread",
-                "live_evidence": False,
             },
             {
                 "card": "bravo",
@@ -375,7 +376,6 @@ def test_honesty_allocates_model_cost_by_sends_and_leaves_named_gaps():
                 "resolved_pnl": 80.0,
                 "written_at": written,
                 "fill_assumption": "paper_mid",
-                "live_evidence": False,
             },
         ],
         model_cost=8.0,
@@ -422,7 +422,7 @@ def test_card_facts_carry_honesty_and_do_not_graduate_paper_mid(
     row = card_facts()[0]
     assert row["fill_assumption"] == FILL_ASSUMPTION_PAPER_MID
     assert row["graduated"] is False
-    assert row["honesty"]["live_evidence"] is False
+    assert "live_evidence" not in row["honesty"]
     assert "beat_spy_after_model_cost" in row["honesty"]["gaps"]
     assert row["honesty"]["beat_spy_after_model_cost"] is None
 
@@ -585,7 +585,8 @@ def test_paper_tws_realized_is_not_the_verdict_input(tmp_path, monkeypatch):
     assert row["conservative_pnl"] is None
     assert row["graduated"] is False
     assert row["cannot_graduate_reason"] == "no conservative_pnl"
-    assert row["paper_resolved_pnl"] == 900.0
+    assert row["resolved_pnl"] == 900.0
+    assert "paper_resolved_pnl" not in row
 
 
 def test_conservative_pnl_path_can_graduate(tmp_path, monkeypatch):

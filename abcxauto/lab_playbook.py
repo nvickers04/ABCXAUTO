@@ -1,4 +1,4 @@
-"""Paper lab playbook â€” Grok's notebook; live only follows a promote.
+"""One playbook tree. The socket (7497 paper TWS vs 7496 live TWS) is the live switch.
 
 One tree, two layers, both written by Grok::
 
@@ -9,7 +9,7 @@ One tree, two layers, both written by Grok::
       |- card: post-earnings IV crush
 
 * the **trunk** is ``types``: one entry per sendable ORDER_EXAMPLES key holding
-  what Grok learned about *executing that structure* â€” the tool sequence that
+  what Grok learned about *executing that structure* — the tool sequence that
   works, the execution gotchas, how it reviews the result. Durable, changes
   slowly. The clerk never writes schema here: ``ORDER EXAMPLES`` is already in
   the prompt, and restating it was how ~40% of the old notebook became
@@ -17,7 +17,7 @@ One tree, two layers, both written by Grok::
 * the **branches** are that type's ``cards``: disposable hypotheses, each
   carrying its thesis, the evidence that produced it, and the falsification it
   declares for itself (``retire_if``). Numerous, tested, retired.
-* **locked OPEN starters** fill a trunk that has no live hypothesis so the book
+* **locked OPEN starters** fill a trunk that has no hunting card so the book
   is not three flush cards plus empty slots. Seeded on lab load/save only.
   Live snapshots are never seeded. ``locked`` is clerk seed identity — not a
   hunt floor, not a send stamp, not a freeze. Grok rewrites the same name;
@@ -25,7 +25,7 @@ One tree, two layers, both written by Grok::
   visible as unused type names on the wake and run sheet. Retired stay off.
 
 A card's position in the tree *is* its ticket, so a winning card sits inside
-the type entry it is supposed to improve â€” promoting what it learned is a move
+the type entry it is supposed to improve — promoting what it learned is a move
 within one stanza, not a join across two lists. Card identity is therefore
 ``(type, name)``, not a bare name.
 
@@ -40,9 +40,9 @@ computed ``conservative_pnl`` (debit at ask / credit at bid, or fill vs
 NBBO), its own ``retire_if.sample``, one numeric kill (``max_losses`` or
 ``max_loss_usd``), a thesis, and positive conservative edge. Paper TWS
 ``realized_pnl`` is a fact, not the verdict input. Fees sit in that P&L;
-model cost stays on honesty. Concurrent live hypotheses are capped. Only
-graduated cards, inside their pruned type stanzas, reach
-``playbook_live.json``. Live new risk still needs that promoted snapshot.
+model cost stays on honesty. Graduated cards can still snapshot to
+``playbook_live.json`` as an operator live-enable. New risk is new risk on
+either socket.
 
 A flat top-level ``cards`` list is still accepted on a write and is still
 *projected* on a read for the cockpit and older callers, but the tree is the
@@ -93,7 +93,7 @@ _TYPE_SCHEMA_ECHO = (
 )
 # Cards are the book. A card lives *under* its type, so the parent key is the
 # ticket and identity is (type, name). Shape lives in ``_norm_card``.
-# Room for Grok's live cards plus one locked starter per OPEN type.
+# Room for Grok's hunting cards plus one locked starter per OPEN type.
 _MAX_CARDS = 48
 _MAX_CARDS_PER_TYPE = 12
 # Legacy cards that named no type at all. Never dropped, never sendable (they
@@ -117,8 +117,6 @@ FILL_ASSUMPTIONS = (
     FILL_ASSUMPTION_FULL_SPREAD,
     FILL_ASSUMPTION_CONSERVATIVE,
 )
-# Testing/working unlocked cards. Three is a book; thirty is a blog.
-LIVE_HYPOTHESIS_CAP = 3
 # Numbers we will not invent. Keys stay stable so a missing series is a gap.
 HONESTY_GAP_REASONS: dict[str, str] = {
     "fill_vs_ibkr_last": "journal fills store price, not IBKR last at fill",
@@ -208,7 +206,7 @@ _STK_HUNT = ("scan", "news", "quote", "candles", "send")
 _OPT_HUNT = ("scan", "news", "option_chain", "option_facts", "option_quote", "send")
 _OVERLAY_HUNT = ("book", "quote", "option_chain", "option_facts", "send")
 # One short locked starter per OPEN type. Structure, not a ticker.
-# Seeded on lab load/save when the trunk has no live hypothesis (and, for
+# Seeded on lab load/save when the trunk has no hunting card (and, for
 # vertical_spread, when the generic debit/credit card is missing).
 OPEN_TYPE_STARTERS: dict[str, dict[str, Any]] = {
     "market_bracket": {
@@ -808,6 +806,11 @@ def is_paper() -> bool:
         return bool(get_config().is_paper)
     except Exception:
         return True
+
+
+def book_label() -> str:
+    """paper TWS vs live TWS. The socket, not a second rulebook."""
+    return "paper TWS" if is_paper() else "live TWS"
 
 
 def _field(raw: dict[str, Any], prev: dict[str, Any], key: str, default: str = "") -> str:
@@ -2871,13 +2874,6 @@ def card_verdict(
     cons_mark = _finite_pnl(sc.get("conservative_pnl"))
     edge_label = "conservative edge" if cons_mark is not None else "resolved edge"
     cal = card_calibration(sc, row)
-    cal["live_evidence"] = not paper
-    if paper:
-        cal["paper_hit_rate"] = cal.get("hit_rate")
-        cal["live_hit_rate"] = None
-    else:
-        cal["paper_hit_rate"] = None
-        cal["live_hit_rate"] = cal.get("hit_rate")
     out: dict[str, Any] = {
         "anchored_type": anchored or None,
         "status": status or None,
@@ -2894,12 +2890,8 @@ def card_verdict(
         "tripped": False,
         "trip_reason": "",
         "cannot_graduate_reason": "",
-        "live_evidence": not paper,
-        "paper_resolved_pnl": resolved_pnl if paper else None,
-        "live_resolved_pnl": None if paper else resolved_pnl,
+        "resolved_pnl": resolved_pnl,
         "conservative_pnl": cons_mark,
-        "paper_win_rate": cal.get("hit_rate") if paper else None,
-        "live_win_rate": None if paper else cal.get("hit_rate"),
         "locked": locked,
     }
     out.update(card_waiting(sc, row, now=now))
@@ -2928,8 +2920,7 @@ def card_verdict(
         elif not thesis:
             out["cannot_graduate_reason"] = "needs thesis"
         else:
-            # Conservative mark, not paper TWS realized. Paper dollars stay
-            # labeled paper — they do not become live_resolved_pnl.
+            # Conservative mark, not paper TWS realized.
             out["graduated"] = True
     if (
         isinstance(max_loss, (int, float))
@@ -3082,7 +3073,6 @@ def attach_card_honesty(
             gaps.append("turnover_per_day")
         row["honesty"] = {
             "fill_assumption": row.get("fill_assumption") or FILL_ASSUMPTION_PAPER_MID,
-            "live_evidence": bool(row.get("live_evidence")),
             "allocated_model_cost": allocated,
             "cost_allocated_pnl": cost_pnl,
             "fill_vs_ibkr_last": None,
@@ -3191,13 +3181,12 @@ def new_risk_card_error(
     can tally the strategy. The name is a label, not law: trunk, retired,
     tripped, unfiled, and card prose are not refuses. Exits, protection,
     modifies and cancels never reach here — ``is_new_risk`` is False for
-    them. Live new risk still needs ``live_new_risk_allowed`` (promoted book).
+    them. New risk is new risk on either socket.
     ``type`` is accepted for callers that pass the send strategy; it is not
     a trunk match.
     """
     _ = type
-    paper = is_paper()
-    state = book if isinstance(book, dict) else (load_lab() if paper else load_live())
+    state = book if isinstance(book, dict) else load_lab()
     pairs = walk_cards(state)
     names = [
         str(c.get("name") or "").strip()
@@ -3623,10 +3612,12 @@ def live_has_promoted() -> bool:
 
 
 def live_new_risk_allowed() -> bool:
-    """Paper may take new risk. Live needs at least one graduated card."""
-    if is_paper():
-        return True
-    return live_has_promoted()
+    """New risk is new risk. The socket is the live switch, not a second gate.
+
+    Promotion snapshot stays as an operator live-enable. It does not refuse
+    sends and is not a mid-look rule.
+    """
+    return True
 
 
 def _reject_note(rejected: dict[str, str]) -> str:
@@ -3677,18 +3668,6 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
             }
         return None
     prev = load_lab()
-    staged = _strip_projection(
-        _migrate_book({**_strip_projection(prev), **update})
-    )
-    cap_hit = hypothesis_cap_reject(staged, prev)
-    if cap_hit:
-        rejected.update(cap_hit)
-        return {
-            "status": "rejected",
-            "rejected": rejected,
-            "note": cap_hit["hypothesis_cap"],
-            **_hypothesis_cap_facts(prev),
-        }
     score = None
     try:
         from abcxauto.scorecard import compute_scorecard
@@ -3713,7 +3692,6 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
     out["needs_declaration"] = [
         _card_label(r) for r in facts if _owes_declaration(r)
     ]
-    out.update(_hypothesis_cap_facts(state))
     if rejected:
         out["rejected"] = rejected
         if "invented_pct_gate" in rejected:
@@ -4031,7 +4009,7 @@ def live_card_gap_floors(
 
 
 def _is_live_hypothesis(card: Any) -> bool:
-    """Grok's testing card. Virgin locked starters are catalog, not a hunt."""
+    """Grok's testing/working card. Virgin locked starters are catalog, not a hunt."""
     if not isinstance(card, dict) or not card.get("name"):
         return False
     if str(card.get("status") or "testing").strip().lower() == "retired":
@@ -4055,41 +4033,6 @@ def live_hypothesis_keys(state: dict[str, Any] | None) -> set[tuple[str, str]]:
 
 def live_hypothesis_count(state: dict[str, Any] | None = None) -> int:
     return len(live_hypothesis_keys(state))
-
-
-def hypothesis_cap_reject(
-    staged: dict[str, Any] | None,
-    prev: dict[str, Any] | None,
-) -> dict[str, str]:
-    """Refuse a write that adds live cards past the book cap.
-
-    Updates and retires on an already-wide book are flagged, not refused.
-    """
-    after = live_hypothesis_keys(staged)
-    if len(after) <= LIVE_HYPOTHESIS_CAP:
-        return {}
-    before = live_hypothesis_keys(prev)
-    if not (after - before):
-        return {}
-    return {
-        "hypothesis_cap": (
-            f"{len(after)} testing/working cards (cap {LIVE_HYPOTHESIS_CAP}); "
-            "retire one to write another"
-        )
-    }
-
-
-def _hypothesis_cap_facts(state: dict[str, Any] | None) -> dict[str, Any]:
-    n = live_hypothesis_count(state)
-    out: dict[str, Any] = {
-        "live_hypotheses": n,
-        "live_hypothesis_cap": LIVE_HYPOTHESIS_CAP,
-    }
-    if n > LIVE_HYPOTHESIS_CAP:
-        out["hypothesis_cap_flag"] = (
-            f"{n} testing/working cards over cap {LIVE_HYPOTHESIS_CAP}"
-        )
-    return out
 
 
 def _is_open_notebook_card(card: Any) -> bool:
@@ -5178,7 +5121,6 @@ def lab_facts(
             if not r["cards"] and r["type"] not in _MANAGEMENT_TRUNKS()
         ],
     }
-    out.update(_hypothesis_cap_facts(state))
     return out
 
 
@@ -5321,16 +5263,11 @@ def _live_scorecard(lab: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def format_block() -> str:
     """Notebook pointer. Not a look assignment and not a rev= opener."""
-    paper = is_paper()
+    tag = book_label()
     lab = load_lab()
-    live = load_live()
-    if paper:
-        if not notebook_text(lab):
-            return "LAB PLAYBOOK: none.\n"
-        return "LAB PLAYBOOK: notebook. playbook tool for full text.\n"
-    if not notebook_text(live):
-        return "LIVE: no promoted paper playbook. New risk blocked until promote (code).\n"
-    return "LIVE PLAYBOOK: notebook. playbook tool\n"
+    if not notebook_text(lab):
+        return f"PLAYBOOK ({tag}): none.\n"
+    return f"PLAYBOOK ({tag}): notebook. playbook tool for full text.\n"
 
 
 def clear_lab(*, reason: str = "") -> dict[str, Any]:
@@ -5381,8 +5318,7 @@ def playbook_payload(
     ``positions`` / ``orders`` hide overlay trunks on a last-stop-covered
     long. Omit them (desk file, tests) and the seeded starters stay.
     """
-    paper = is_paper()
-    lab = load_lab() if paper else load_live()
+    lab = load_lab()
     hidden: frozenset[str] = frozenset()
     try:
         from abcxauto.trade_playbook import overlay_types_to_hide
@@ -5392,9 +5328,7 @@ def playbook_payload(
         hidden = frozenset()
     if hidden:
         lab = _lab_view_without_types(lab, hidden)
-    live_sc = _live_scorecard(lab) if paper else (
-        lab.get("paper_score") if isinstance(lab.get("paper_score"), dict) else {}
-    )
+    live_sc = _live_scorecard(lab)
     facts = playbook_facts(live_sc)
     inst = notebook_text(lab)
     types = lab.get("types") if isinstance(lab.get("types"), dict) else {}
@@ -5406,7 +5340,7 @@ def playbook_payload(
         "written_at": lab.get("written_at") or lab.get("promoted_at"),
         "paper_score": lab.get("paper_score") or {},
         "instructions_n": len(inst),
-        "stale": playbook_is_stale(lab) if paper else False,
+        "stale": playbook_is_stale(lab),
     }
     cards = _flat_card_projection(lab)
     facts_by_card = [
@@ -5425,7 +5359,7 @@ def playbook_payload(
         for row in card_facts(lab)
     ]
     out: dict[str, Any] = {
-        "scope": "lab" if paper else "live",
+        "book": book_label(),
         # Facts and the notebook before the score tables. Copying types into
         # current plus a trailing tree used to blow the 24k tool clip and
         # return broken JSON — Grok then re-hunted a card it had already
@@ -5465,7 +5399,6 @@ def playbook_payload(
         "current": current,
         "types": types,
     }
-    out.update(_hypothesis_cap_facts(lab))
     if revision in (None, ""):
         return out
     try:

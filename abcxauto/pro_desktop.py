@@ -4181,17 +4181,17 @@ class ProTerminal:
         self._sync_lessons_line()
         self._sync_tabs()
         try:
-            from abcxauto.lab_playbook import is_paper, load_lab, load_live
+            from abcxauto.lab_playbook import is_paper, load_lab
 
-            pb = load_lab() if is_paper() else load_live()
+            pb = load_lab()
             pb = pb if isinstance(pb, dict) else {}
             inst = str(pb.get("instructions") or "").strip()
-            if is_paper():
-                tag = "promoted" if pb.get("promoted") else (
-                    "ready" if pb.get("ready_to_promote") else "lab"
-                )
+            if pb.get("promoted"):
+                tag = "promoted"
+            elif pb.get("ready_to_promote"):
+                tag = "ready"
             else:
-                tag = "live" if inst else "no promote"
+                tag = "paper TWS" if is_paper() else "live TWS"
             rev = pb.get("revision") or pb.get("promoted_revision") or "—"
             score = pb.get("paper_score") if isinstance(pb.get("paper_score"), dict) else {}
             edge = score.get("edge_usd")

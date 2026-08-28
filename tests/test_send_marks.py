@@ -2,7 +2,8 @@
 
 The live journal used to store oid/card= on the proposal and order_id on the
 dispatch, with fill price later — not NBBO vs fill. Graduation / conservative_pnl
-and live_marks_match_paper() are not this PR.
+are not this PR. live_marks_match_paper() is not an exploit-band key; paper 7497
+still never qualifies as live marks.
 """
 
 from __future__ import annotations

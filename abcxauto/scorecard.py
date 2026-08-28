@@ -682,7 +682,16 @@ def compute_scorecard(
             best_pace_val = eph
             best_pace = label
 
+    book = "paper TWS"
+    try:
+        from abcxauto.config import get_config
+
+        book = "paper TWS" if bool(getattr(get_config(), "is_paper", True)) else "live TWS"
+    except Exception:
+        book = "paper TWS"
+
     return {
+        "book": book,
         "startup_cash": start_base,
         "net_liquidation": current,
         "book_pnl": book_pnl,
@@ -739,24 +748,21 @@ def format_scorecard_block(
     cost_pct_s = f"{cost_pct:.4f}%" if cost_pct is not None else "n/a"
     start = sc.get("startup_cash")
     start_s = f"{start:.2f}" if start is not None else "n/a"
-    # Paper: book_pnl is paper; model_cost $ is REAL xAI cash. Live: both real.
+    # Paper TWS vs live TWS is a header label, not a per-field constitution.
     paper = True
     try:
         from abcxauto.config import get_config
 
         cfg = get_config()
-        paper = bool(getattr(cfg, "is_paper", True)) or (
-            str(getattr(cfg, "trading_mode", "paper") or "paper").lower() != "live"
-        )
+        paper = bool(getattr(cfg, "is_paper", True))
     except Exception:
         paper = True
+    book = "paper TWS" if paper else "live TWS"
     if paper:
-        book_tag = " paper"
         cost_tag = " real xAI"
     else:
-        book_tag = ""
         cost_tag = ""
-    lines = ["SCORECARD:"]
+    lines = [f"SCORECARD ({book}):"]
     # Session = this RTH (ET regular session). Promote / BEATING-vs-LOSING
     # stay on inception below. A leftover model marker is not sess.
     sess = sc.get("session")
@@ -797,7 +803,7 @@ def format_scorecard_block(
         spy_r = sess.get("spy_return_pct")
         spy_s = f"{float(spy_r):+.2f}%" if isinstance(spy_r, (int, float)) else "—"
         lines.append(
-            f"- session {date_bit}book={sret_s}{book_tag} "
+            f"- session {date_bit}book={sret_s} "
             f"start={start_s} end={end_s} "
             f"model_cost={scost_pct_s} ({scost_s}{cost_tag}) "
             f"({int(sess.get('model_calls') or 0)} calls) "
@@ -808,7 +814,7 @@ def format_scorecard_block(
     lines.extend(
         [
             f"- first_NL={start_s} NL={sc.get('net_liquidation')}",
-            f"- book_return={ret_s} of starting NetLiq ({pnl_s}${book_tag})",
+            f"- book_return={ret_s} of starting NetLiq ({pnl_s}$)",
             f"- model_cost={cost_pct_s} of starting NetLiq "
             f"(${sc['model_cost_usd']:.4f}{cost_tag or ' cash'}, "
             f"{sc['model_calls']} calls, "

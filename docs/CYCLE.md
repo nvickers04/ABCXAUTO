@@ -1,10 +1,10 @@
-# Agent cycle — paper lab, live follower
+# Agent cycle — one book, socket is the live switch
 
 **Goal:** book return % of starting NetLiq > model cost.
 Size and risk are % of the book. No dollar sleeve. No operator strategy card.
 
-Grok is the trader. The shell does not teach IBKR. Paper is the lab (TWS 7497).
-Live only follows a promoted snapshot. Operator = setup + kill switch.
+Grok is the trader. The shell does not teach IBKR. Paper is TWS 7497.
+Live is TWS 7496 after the confirm phrase. Same constitution. Operator = setup + kill switch.
 
 ## Autonomy
 
@@ -50,7 +50,6 @@ After a think:
 
 - Unprotected STK → last-stop first; hold forbidden until it rests at IBKR. Paper RTH + flat → hold is not a ticket. Combo close (`closing_position`) is one BAG, not new risk
 - Capacity, defined-risk, cash-only, size/loss floors, fail-closed
-- Live new risk without a promoted playbook
 - New risk without params.card naming an existing lab card (label, not law)
 - IBKR live last for ticket geometry (not MDA)
 - Ticket last / IV / credit / width must be in this look's quote / option_quote / book cache (`stale_or_invented_number`)

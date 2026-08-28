@@ -3,8 +3,8 @@
 Grok owns a paper IBKR book. Silent code is facts, hard gates, and the overnight park.
 Brain is the `model` knob (default grok-4.6). Mainline is `master`. There is no clerk process.
 
-Paper (TWS **7497**) is the lab. Live (TWS **7496**, confirm phrase, a different
-client id) only follows a **promoted paper playbook**. It never copies paper fills.
+Paper (TWS **7497**) is the book. Live (TWS **7496**, confirm phrase, a different
+client id) is the same constitution on the live socket. It never copies paper fills.
 
 Size, daily-loss, and the scorecard are **% of NetLiq**. Book return % must beat
 the cost of the model. Same rules at $1k, $100k, or $1M.
@@ -36,7 +36,6 @@ which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process.
 - Open ticket past `retire_if.max_hold_sessions` / `max_hold_hours` trips the card
   and flattens that lot. Independent of paper gates
 - Unprotected STK: last-stop; hold blocked until it rests at IBKR. Combo close is one BAG (`closing_position`), not new risk
-- Live new risk needs a promoted playbook
 - New risk must name an existing lab playbook card (scorecard label; prose is not law)
 - Ticket geometry uses **IBKR last**, not MDA
 - Ticket last / IV / credit / width must appear in this look's `quote` /
