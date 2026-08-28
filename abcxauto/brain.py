@@ -908,9 +908,10 @@ AGENT_TOOLS = [
         description=(
             "Retune knobs now. Floor cannot be weakened. "
             "max_open_positions is concurrent lots for this book's NL — "
-            "not a baked 15/25. Size (size_pct_nl on send) and slots are "
-            "together, not pick-one. session_look_cap / session_token_cap "
-            "tighten only. Not a ticket — send is the book."
+            "not a baked 15/25. Size (size_pct_nl on send / self_tune) "
+            "and slots are together, not pick-one. size_pct_nl tightens "
+            "the explore/exploit mode band. session_look_cap / "
+            "session_token_cap tighten only. Not a ticket — send is the book."
         ),
         parameters=_schema(
             {
@@ -921,6 +922,14 @@ AGENT_TOOLS = [
                 "max_option_premium_pct": {"type": "number"},
                 "max_symbol_concentration_pct": {"type": "number"},
                 "max_open_positions": {"type": "integer"},
+                "size_pct_nl": {
+                    "type": "number",
+                    "description": (
+                        "Working size ceiling as % of current NL. "
+                        "Tighten inside the explore/exploit mode band. "
+                        "send.apply_size_pct_nl uses the same band."
+                    ),
+                },
                 "session_look_cap": {"type": "integer"},
                 "session_token_cap": {"type": "integer"},
                 "enabled_arenas": _SYMBOLS_SCHEMA,
@@ -1001,7 +1010,12 @@ AGENT_TOOLS = [
                     "type": "string",
                     "description": "Free notes: regime, observations, what to watch.",
                 },
-                "mode": {"type": "string", "description": "explore or exploit"},
+                "mode": {
+                    "type": "string",
+                    "description": (
+                        "Size bit: explore or exploit — not a personality label"
+                    ),
+                },
                 "ready_to_promote": {"type": "boolean"},
             },
             [],

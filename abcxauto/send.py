@@ -92,35 +92,84 @@ def apply_size_pct_nl(
 ) -> dict[str, Any] | None:
     """Fill ``quantity`` from ``size_pct_nl`` × current NL. None if unused.
 
-    Does not overwrite a valid quantity. Does not bake 1% or 25%.
+    Mode bit clamps lottery % even when paper gates are off. A qty already
+    inside the band is left alone (#110). Over-ceiling qty is reduced.
+    Does not bake 1% or 25% as the working size.
     """
     if not isinstance(params, dict):
         return None
+    from abcxauto.mode_size import (
+        clamp_size_pct_nl,
+        implied_size_pct_nl,
+        working_size_ceiling,
+    )
+
+    card = params.get("card")
+    ceiling = working_size_ceiling(card=card, type=strategy)
+    pct_in = params.get(SEND_SIZE_PCT_NL)
+    clamped_pct, clamp_note = clamp_size_pct_nl(
+        pct_in, card=card, type=strategy
+    )
+    if clamp_note and clamped_pct is not None:
+        params[SEND_SIZE_PCT_NL] = float(clamped_pct)
+    pct = params.get(SEND_SIZE_PCT_NL)
+    mult = _option_multiplier(strategy, params)
+
     raw_qty = params.get("quantity")
     try:
-        if int(float(raw_qty)) >= 1:
-            return None
+        qty_n = int(float(raw_qty))
+        has_qty = qty_n >= 1
     except (TypeError, ValueError):
-        pass
-    pct = params.get(SEND_SIZE_PCT_NL)
+        qty_n = 0
+        has_qty = False
+
+    if has_qty:
+        implied = implied_size_pct_nl(
+            qty_n, net_liq, price, multiplier=mult
+        )
+        if implied is not None and implied > ceiling + 1e-6:
+            new_qty = qty_from_size_pct_nl(
+                ceiling, net_liq, price, multiplier=mult
+            )
+            if new_qty is None:
+                return None
+            params["quantity"] = new_qty
+            params[SEND_SIZE_PCT_NL] = float(ceiling)
+            notional = notional_from_size_pct_nl(ceiling, net_liq)
+            note = {
+                "quantity": new_qty,
+                "notional": notional,
+                "size_pct_nl": float(ceiling),
+                "net_liq": float(net_liq) if _pos_float(net_liq) else net_liq,
+                "clamped": True,
+                "raw_size_pct_nl": implied,
+            }
+            return note
+        return None
+
     if pct in (None, ""):
         return None
-    notional = notional_from_size_pct_nl(pct, net_liq)
+    use_pct = clamped_pct if clamped_pct is not None else pct
+    notional = notional_from_size_pct_nl(use_pct, net_liq)
     qty = qty_from_size_pct_nl(
-        pct,
+        use_pct,
         net_liq,
         price,
-        multiplier=_option_multiplier(strategy, params),
+        multiplier=mult,
     )
     if qty is None or notional is None:
         return None
     params["quantity"] = qty
-    return {
+    out = {
         "quantity": qty,
         "notional": notional,
-        "size_pct_nl": float(pct),
+        "size_pct_nl": float(use_pct),
         "net_liq": float(net_liq),
     }
+    if clamp_note:
+        out["clamped"] = True
+        out["raw_size_pct_nl"] = clamp_note.get("raw")
+    return out
 
 # TWS 7496 / Gateway 4001 — live socket family. Paper is 7497 / 4002.
 _LIVE_IBKR_PORTS = frozenset({7496, 4001})

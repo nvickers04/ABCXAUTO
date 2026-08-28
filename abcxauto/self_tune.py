@@ -77,6 +77,9 @@ _LIVE_GATED: frozenset[str] = frozenset({
 SCAN_FETCH_CAP_RANGE = (1, 8)
 # Session look/token caps: Grok may tighten (lower), never raise.
 
+# Working send ceiling Grok may tighten. Not a Config field, not 25%.
+_SIZE_PCT_NL_KEY = "size_pct_nl"
+
 # Unsupervised defaults — walk-away % of the full book.
 UNSUPERVISED_DEFAULTS: dict[str, Any] = {
     "trading_budget_usd": 0.0,
@@ -220,6 +223,7 @@ def apply_self_tune(
     controls_payload: dict[str, Any] = {}
     scan_cap: int | None = None
     session_caps_payload: dict[str, Any] = {}
+    size_pct: float | None = None
     universe_payload: dict[str, Any] = {}
 
     for key, value in flat.items():
@@ -297,6 +301,24 @@ def apply_self_tune(
                 continue
             session_caps_payload[key] = wanted
             continue
+        if key == _SIZE_PCT_NL_KEY:
+            from abcxauto.mode_size import (
+                MODE_SIZE_FLOOR,
+                mode_size_ceiling,
+                tuned_size_pct_nl,
+            )
+
+            before[key] = tuned_size_pct_nl()
+            as_f = _f(value)
+            if as_f is None or as_f <= 0:
+                rejected[key] = "invalid value"
+                continue
+            hi = mode_size_ceiling()
+            new_v = max(MODE_SIZE_FLOOR, min(hi, as_f))
+            if new_v != as_f:
+                clamped[key] = {"raw": value, "clamped": new_v}
+            size_pct = float(new_v)
+            continue
         if key in ("enabled_arenas", "custom_symbols", "exclude_symbols"):
             universe_payload[key] = value
             continue
@@ -333,6 +355,14 @@ def apply_self_tune(
 
         update_agent_config(**session_caps_payload, persist=persist)
         applied.update(session_caps_payload)
+    if size_pct is not None:
+        extra_size = {_SIZE_PCT_NL_KEY: size_pct}
+        if persist:
+            try:
+                _persist_agent_state(extra_size)
+            except Exception:
+                logger.exception("self_tune persist size_pct_nl failed")
+        applied.update(extra_size)
 
     if universe_payload:
         try:
@@ -367,6 +397,8 @@ def apply_self_tune(
         logger.debug("journal self_tune record failed", exc_info=True)
 
     after = {k: getattr(get_config(), k, None) for k in list(applied) if k != "universe"}
+    if size_pct is not None:
+        after[_SIZE_PCT_NL_KEY] = size_pct
     return {
         "status": "ok",
         "strategy": "self_tune",
@@ -430,11 +462,17 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
         "max_option_premium_pct": 5.0,
         "max_position_pct": 20.0,
     }
+    live = _live_desk(cfg)
     for key, (lo, hi) in RISK_FLOOR.items():
         cur = _f(getattr(cfg, key, None))
         if cur is None or cur <= 0 or cur > hi:
             fixes[key] = UNSUPERVISED_DEFAULTS[key]
-        elif key in _old_size_defaults and abs(cur - _old_size_defaults[key]) < 1e-9:
+        elif (
+            live
+            and key in _old_size_defaults
+            and abs(cur - _old_size_defaults[key]) < 1e-9
+        ):
+            # Live walk-away ceiling. Paper must not restore 25% as working size.
             fixes[key] = UNSUPERVISED_DEFAULTS[key]
         elif cur < lo:
             fixes[key] = lo
@@ -544,6 +582,7 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
         cleaned = {k: v for k, v in overlay.items() if k == "scan_fetch_cap"}
         if cleaned:
             _runtime_overrides.update(cleaned)
+        # size_pct_nl stays in agent_state. Never write 25% as working size.
 
     return {
         "risk": risk_fix,
@@ -579,7 +618,7 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
     }
     if _live_desk(c):
         mop_lever["max"] = hi_open
-    return {
+    out = {
         "max_risk_per_trade_pct": _pct("max_risk_per_trade_pct"),
         "max_option_premium_pct": _pct("max_option_premium_pct"),
         "max_position_pct": _pct("max_position_pct"),
@@ -589,3 +628,10 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
         "together": "size_pct_nl and max_open_positions — not pick-one",
         "change": "self_tune",
     }
+    try:
+        from abcxauto.mode_size import mode_size_band
+
+        out["size_pct_nl"] = mode_size_band()
+    except Exception:
+        pass
+    return out

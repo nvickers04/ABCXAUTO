@@ -32,7 +32,7 @@ from abcxauto.world_state import WorldState
 BSX_CARD = "large-cap 3pct gap hold"
 _BSX_PARAMS = {
     "symbol": "BSX",
-    "quantity": 184,
+    "quantity": 5,
     "direction": "LONG",
     "stop_price": 97.0,
     "target_price": 106.0,
@@ -174,7 +174,7 @@ def test_hoist_copies_top_level_card_into_existing_params():
     )
     assert out["params"]["card"] == BSX_CARD
     assert out["params"]["symbol"] == "BSX"
-    assert out["params"]["quantity"] == 184
+    assert out["params"]["quantity"] == 5
 
 
 def test_bind_send_card_stamps_top_level_onto_params():
@@ -202,7 +202,7 @@ def test_validate_proposal_journals_card_off_the_wire():
     journaled = params_for_journal(p)
     assert journaled["card"] == BSX_CARD
     assert journaled["symbol"] == "BSX"
-    assert journaled["quantity"] == 184
+    assert journaled["quantity"] == 5
 
 
 @pytest.mark.asyncio
@@ -240,7 +240,7 @@ async def test_bsx_named_market_bracket_journals_card(monkeypatch):
     assert result.get("success") is True or result.get("status") == "ok", result
     assert gw.calls and "card" not in gw.calls[0]
     assert gw.calls[0]["symbol"] == "BSX"
-    assert gw.calls[0]["quantity"] == 184
+    assert gw.calls[0]["quantity"] == 5
     rows = [r for r in _proposal_rows() if r["source"] != "clerk_block"]
     assert rows, _proposal_rows()
     row = rows[-1]
