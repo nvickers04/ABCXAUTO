@@ -5123,6 +5123,7 @@ def lab_facts(
     book: dict[str, Any] | None = None,
     *,
     rows: list[dict[str, Any]] | None = None,
+    hide_types: frozenset[str] | set[str] | None = None,
 ) -> dict[str, Any]:
     """What the lab has under test, and which trunks carry no hypothesis.
 
@@ -5158,13 +5159,19 @@ def lab_facts(
         idle.append(wait_row)
         if n == 0:
             awaiting.append(wait_row)
-    coverage = type_coverage(state)
+    skip = {str(x).strip().lower() for x in (hide_types or ()) if str(x).strip()}
+    coverage = [
+        r for r in type_coverage(state)
+        if str(r.get("type") or "").strip().lower() not in skip
+    ]
     out = {
         "cards": by_status,
         "resolved_trades": resolved_total,
         "cards_awaiting_first_trade": awaiting[:12],
         "cards_without_trigger": idle[:12],
-        "unused_open_types": unused_open_types(state, rows=card_rows),
+        "unused_open_types": unused_open_types(
+            state, rows=card_rows, hide_types=hide_types
+        ),
         "trunks_with_cards": [r["type"] for r in coverage if r["cards"]],
         "entry_trunks_untried": [
             r["type"] for r in coverage
@@ -5179,10 +5186,12 @@ def unused_open_types(
     book: dict[str, Any] | None = None,
     *,
     rows: list[dict[str, Any]] | None = None,
+    hide_types: frozenset[str] | set[str] | None = None,
 ) -> list[str]:
     """OPEN types with no send. Names only — not a look tally."""
     card_rows = rows if rows is not None else card_facts(book)
     sent: set[str] = set()
+    skip = {str(x).strip().lower() for x in (hide_types or ()) if str(x).strip()}
     for row in card_rows:
         try:
             n = int(row.get("sends") or 0)
@@ -5193,7 +5202,10 @@ def unused_open_types(
         parent = str(row.get("type") or "").strip()
         if parent:
             sent.add(parent)
-    return [name for name in open_playbook_types() if name not in sent]
+    return [
+        name for name in open_playbook_types()
+        if name not in sent and name not in skip
+    ]
 
 
 def lab_wake_bit(
@@ -5341,10 +5353,45 @@ def clear_lab(*, reason: str = "") -> dict[str, Any]:
     return state
 
 
-def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, Any]:
-    """Notebook plus score since write. full is accepted and ignored â€” the notes are the tool."""
+def _lab_view_without_types(
+    lab: dict[str, Any] | None,
+    hidden: frozenset[str] | set[str] | None,
+) -> dict[str, Any]:
+    """Copy of the notebook with overlay (or other) trunks removed. Disk unchanged."""
+    state = dict(lab) if isinstance(lab, dict) else {}
+    skip = {str(x).strip().lower() for x in (hidden or ()) if str(x).strip()}
+    if not skip:
+        return state
+    types = state.get("types") if isinstance(state.get("types"), dict) else {}
+    state["types"] = {
+        k: v for k, v in types.items() if str(k).strip().lower() not in skip
+    }
+    return state
+
+
+def playbook_payload(
+    revision: Any = None,
+    *,
+    full: bool = False,
+    positions: list | None = None,
+    orders: list | None = None,
+) -> dict[str, Any]:
+    """Notebook plus score since write. full is accepted and ignored â€” the notes are the tool.
+
+    ``positions`` / ``orders`` hide overlay trunks on a last-stop-covered
+    long. Omit them (desk file, tests) and the seeded starters stay.
+    """
     paper = is_paper()
     lab = load_lab() if paper else load_live()
+    hidden: frozenset[str] = frozenset()
+    try:
+        from abcxauto.trade_playbook import overlay_types_to_hide
+
+        hidden = overlay_types_to_hide(positions, orders)
+    except Exception:
+        hidden = frozenset()
+    if hidden:
+        lab = _lab_view_without_types(lab, hidden)
     live_sc = _live_scorecard(lab) if paper else (
         lab.get("paper_score") if isinstance(lab.get("paper_score"), dict) else {}
     )
@@ -5383,7 +5430,7 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
         # current plus a trailing tree used to blow the 24k tool clip and
         # return broken JSON — Grok then re-hunted a card it had already
         # written.
-        "lab": lab_facts(lab, rows=card_facts(lab)),
+        "lab": lab_facts(lab, rows=card_facts(lab), hide_types=hidden),
         "score": {
             "revision": facts.get("revision"),
             "age_h": facts.get("age_h"),

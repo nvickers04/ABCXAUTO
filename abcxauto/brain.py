@@ -1214,6 +1214,9 @@ class BrainTurn:
     # IBKR screens this look, keyed by scanCode / screen / symbols. Survives
     # a stay-up poke so the same screen is not pulled four times.
     scan_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # IBKR allows one scanner sub at a time. Same-args scans in one tool
+    # round used to gather and all miss the cache.
+    scan_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def look_failed(self) -> bool:
         """True empty / lone '?' only. A real say or send/fill is not junk.
@@ -2166,6 +2169,7 @@ def _book_payload(
     from abcxauto.lab_playbook import (
         _card_label,
         _flat_card_projection,
+        _lab_view_without_types,
         card_facts,
         lab_facts,
         load_lab,
@@ -2194,7 +2198,16 @@ def _book_payload(
         last_look = {}
     _ = (tool_trace, snap)
     try:
-        lab = load_lab()
+        from abcxauto.trade_playbook import overlay_types_to_hide
+
+        hidden = overlay_types_to_hide(
+            getattr(world, "positions", None),
+            getattr(world, "open_orders", None),
+        )
+    except Exception:
+        hidden = frozenset()
+    try:
+        lab = _lab_view_without_types(load_lab(), hidden)
         scored = [
             {
                 k: v
@@ -2226,7 +2239,7 @@ def _book_payload(
             or r.get("needs_conservative_fill")
         ]
         glance["notes"] = notebook_text(lab)[:4000]
-        glance["lab"] = lab_facts(lab, rows=scored)
+        glance["lab"] = lab_facts(lab, rows=scored, hide_types=hidden)
     except Exception:
         logger.debug("playbook block for book payload failed", exc_info=True)
     lessons: list[dict[str, str]] = []
@@ -2679,249 +2692,257 @@ async def _run_tool(
             str(args.get("scan_code") or "").strip(),
         )
         key = scan_screen_key(c_arena, c_code)
-        used = [str(x) for x in (snap.get("scan_screens") or [])]
-        prior_hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
-        cached_look = turn.scan_cache.get(look_key) if look_key else None
-        if cached_look or (key and key in used):
-            if cached_look:
-                reused = deepcopy(cached_look)
-            else:
-                rows = _scan_paint_rows(prior_hits, quotes=qmap)
-                screens = list(snap.get("scan_screens") or [])
-                reused = {
-                    "ok": True,
-                    "screens_this_look": int(snap.get("scan_calls") or 0),
-                    "screens": screens,
-                    "source": prior_hits.get("source") or "ibkr",
-                    "symbols": [r.get("symbol") for r in rows if r.get("symbol")],
-                    "hits": rows,
-                    "rows": rows,
-                    "applied": {},
-                    "persisted": False,
-                    "ranked": bool(prior_hits.get("ranked")),
-                    "rank_meaning": prior_hits.get("rank_meaning"),
-                    "quoted": prior_hits.get("quoted") or 0,
-                }
-                reused.update(_scan_gate_facts(rows))
-                if rows:
-                    painted = dict(prior_hits)
-                    painted["rows"] = rows
-                    snap["scan_hits"] = painted
-            reused["reused"] = True
-            reused["note"] = "this screen already fetched this look"
-            if cached_look:
-                if reused.get("screens"):
-                    snap["scan_screens"] = list(reused["screens"])
-                if reused.get("screens_this_look") is not None:
-                    snap["scan_calls"] = int(reused["screens_this_look"] or 0)
-                if reused.get("rows"):
-                    snap["scan_hits"] = {
-                        "source": reused.get("source") or "ibkr",
-                        "ranked": bool(reused.get("ranked")),
-                        "rank_meaning": reused.get("rank_meaning") or "",
-                        "quoted": reused.get("quoted") or 0,
-                        "rows": list(reused["rows"]),
+        lock = getattr(turn, "scan_lock", None)
+        if not isinstance(lock, asyncio.Lock):
+            lock = asyncio.Lock()
+            try:
+                turn.scan_lock = lock
+            except Exception:
+                pass
+        async with lock:
+            used = [str(x) for x in (snap.get("scan_screens") or [])]
+            prior_hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
+            cached_look = turn.scan_cache.get(look_key) if look_key else None
+            if cached_look or (key and key in used):
+                if cached_look:
+                    reused = deepcopy(cached_look)
+                else:
+                    rows = _scan_paint_rows(prior_hits, quotes=qmap)
+                    screens = list(snap.get("scan_screens") or [])
+                    reused = {
+                        "ok": True,
+                        "screens_this_look": int(snap.get("scan_calls") or 0),
+                        "screens": screens,
+                        "source": prior_hits.get("source") or "ibkr",
+                        "symbols": [r.get("symbol") for r in rows if r.get("symbol")],
+                        "hits": rows,
+                        "rows": rows,
+                        "applied": {},
+                        "persisted": False,
+                        "ranked": bool(prior_hits.get("ranked")),
+                        "rank_meaning": prior_hits.get("rank_meaning"),
+                        "quoted": prior_hits.get("quoted") or 0,
                     }
-            if want_news and not reused.get("news"):
+                    reused.update(_scan_gate_facts(rows))
+                    if rows:
+                        painted = dict(prior_hits)
+                        painted["rows"] = rows
+                        snap["scan_hits"] = painted
+                reused["reused"] = True
+                reused["note"] = "this screen already fetched this look"
+                if cached_look:
+                    if reused.get("screens"):
+                        snap["scan_screens"] = list(reused["screens"])
+                    if reused.get("screens_this_look") is not None:
+                        snap["scan_calls"] = int(reused["screens_this_look"] or 0)
+                    if reused.get("rows"):
+                        snap["scan_hits"] = {
+                            "source": reused.get("source") or "ibkr",
+                            "ranked": bool(reused.get("ranked")),
+                            "rank_meaning": reused.get("rank_meaning") or "",
+                            "quoted": reused.get("quoted") or 0,
+                            "rows": list(reused["rows"]),
+                        }
+                if want_news and not reused.get("news"):
+                    from abcxauto.prints import attach_mda_news
+
+                    news_syms = _news_symbols_for_scan(
+                        snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {},
+                        [str(s) for s in (reused.get("symbols") or []) if s],
+                    )
+                    reused["news"] = await _mda_news(news_syms)
+                    reused["news_freshness"] = "delayed_15m"
+                    reused["news_use"] = "color_not_trigger"
+                    attach_mda_news(reused.get("hits") or reused.get("rows") or [], reused["news"])
+                _attach_scan_run(reused, turn=turn, world=world)
+                think_emit("tool", "\n[scan = already have it]\n")
+                return _clip(reused)
+            jobs = [
+                {
+                    "arena": args.get("arena"),
+                    "scan_code": args.get("scan_code"),
+                    "symbols": args.get("symbols"),
+                }
+            ]
+            last_ok: dict[str, Any] | None = None
+            last_err: dict[str, Any] | None = None
+            pulled_hits: list[dict[str, Any]] = []
+            pulled_syms: list[str] = []
+            from abcxauto.think_stream import merge_scan_hits
+
+            for job in jobs:
+                snap["scan_calls"] = int(snap.get("scan_calls") or 0) + 1
+                payload = await criteria_scan(
+                    arena=job.get("arena"),
+                    scan_code=job.get("scan_code"),
+                    symbols=job.get("symbols") or args.get("symbols"),
+                    positions=list(world.positions or snap.get("positions") or []),
+                    connector=connector,
+                    turn_symbols=turn_syms,
+                    filters=parsed,
+                )
+                if not payload.get("ok"):
+                    last_err = payload
+                    continue
+                last_ok = payload
+                syms = list(payload.get("symbols") or [])
+                for s in syms:
+                    su = str(s or "").upper().strip()
+                    if su and su not in pulled_syms:
+                        pulled_syms.append(su)
+                # Union this look's screens. Last-scan-wins dropped names when a later
+                # empty mega/large sort followed a tape that actually had hits.
+                fetched = list(getattr(world, "scan_fetched", None) or [])
+                seen = {str(x).upper() for x in fetched if x}
+                for s in syms:
+                    su = str(s or "").upper().strip()
+                    if su and su not in seen:
+                        fetched.append(su)
+                        seen.add(su)
+                world.scan_fetched = fetched
+                snap["scan_fetched"] = list(fetched)
+                stub_ideas = [
+                    {"symbol": s, "source": payload.get("source") or "scan"} for s in syms
+                ]
+                if stub_ideas:
+                    from abcxauto.opportunity_scan import merge_tape
+
+                    ideas = merge_tape(list(world.opportunities or []), stub_ideas)
+                    world.opportunities = ideas
+                    snap["opportunities"] = ideas
+                hits = payload.get("hits") or []
+                for row in hits:
+                    if not isinstance(row, dict):
+                        continue
+                    pulled_hits.append(row)
+                    if row.get("last") is not None:
+                        _stash_live(
+                            world,
+                            snap,
+                            {
+                                "symbol": row.get("symbol"),
+                                "last": row.get("last"),
+                                "source": "ibkr",
+                            },
+                            mark=False,
+                        )
+                incoming = {
+                    "source": str(payload.get("source") or ""),
+                    "arena": payload.get("arena"),
+                    "scan_code": payload.get("scan_code"),
+                    "ranked": bool(payload.get("ranked")),
+                    "rank_meaning": str(payload.get("rank_meaning") or ""),
+                    "quoted": int(payload.get("quoted") or 0),
+                    "rows": [r for r in hits if isinstance(r, dict)][:24],
+                }
+                prior = (
+                    snap.get("scan_hits")
+                    if int(snap.get("scan_calls") or 0) > 1 or "scan" in turn.tool_trace
+                    else None
+                )
+                snap["scan_hits"] = merge_scan_hits(prior, incoming)
+                rec_arena, rec_code = _canonical_scan_screen(
+                    str(job.get("arena") or payload.get("arena") or ""),
+                    str(job.get("scan_code") or payload.get("scan_code") or ""),
+                )
+                _record_scan_screen(snap, rec_arena, rec_code)
+            if last_ok is None:
+                err = last_err or {
+                    "ok": False,
+                    "error": "scan requires arena | scan_code | symbols[]",
+                }
+                if isinstance(err, dict):
+                    err = dict(err)
+                    err.setdefault("ok", False)
+                    _attach_scan_run(err, turn=turn, world=world)
+                return _clip(err)
+            snap["scan_at"] = datetime.now(timezone.utc).isoformat()
+            merged = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
+            rows = _scan_paint_rows(merged, pulled_hits, quotes=qmap)
+            hits = rows
+            syms = pulled_syms or [str(r.get("symbol")) for r in hits if r.get("symbol")]
+            screens = list(snap.get("scan_screens") or [])
+            out: dict[str, Any] = {
+                "ok": True,
+                "source": last_ok.get("source"),
+                "symbols": syms,
+                "hits": hits,
+                "applied": last_ok.get("applied") or {},
+                "persisted": False,
+                "ranked": bool(merged.get("ranked") if merged else last_ok.get("ranked")),
+                "rank_meaning": (merged.get("rank_meaning") if merged else None)
+                or last_ok.get("rank_meaning"),
+                "quoted": merged.get("quoted") or last_ok.get("quoted") or 0,
+                "screens": screens,
+                "screens_this_look": int(snap.get("scan_calls") or len(screens) or 0),
+            }
+            if len(screens) <= 1:
+                out["arena"] = last_ok.get("arena")
+                out["scan_code"] = last_ok.get("scan_code")
+            out.update(_scan_gate_facts(rows))
+            pulled_by = {
+                str(r.get("symbol") or "").upper(): r
+                for r in pulled_hits
+                if isinstance(r, dict) and r.get("symbol")
+            }
+            hits = [pulled_by.get(str(r.get("symbol") or "").upper(), r) for r in rows]
+            out["hits"] = hits
+            out["rows"] = rows
+            if want_metrics and hits:
+                from abcxauto.opportunity_scan import attach_mda_metrics
+
+                await attach_mda_metrics(hits)
+            if want_news and (syms or hits):
                 from abcxauto.prints import attach_mda_news
 
-                news_syms = _news_symbols_for_scan(
-                    snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {},
-                    [str(s) for s in (reused.get("symbols") or []) if s],
-                )
-                reused["news"] = await _mda_news(news_syms)
-                reused["news_freshness"] = "delayed_15m"
-                reused["news_use"] = "color_not_trigger"
-                attach_mda_news(reused.get("hits") or reused.get("rows") or [], reused["news"])
-            _attach_scan_run(reused, turn=turn, world=world)
-            think_emit("tool", "\n[scan = already have it]\n")
-            return _clip(reused)
-        jobs = [
-            {
-                "arena": args.get("arena"),
-                "scan_code": args.get("scan_code"),
-                "symbols": args.get("symbols"),
-            }
-        ]
-        last_ok: dict[str, Any] | None = None
-        last_err: dict[str, Any] | None = None
-        pulled_hits: list[dict[str, Any]] = []
-        pulled_syms: list[str] = []
-        from abcxauto.think_stream import merge_scan_hits
-
-        for job in jobs:
-            snap["scan_calls"] = int(snap.get("scan_calls") or 0) + 1
-            payload = await criteria_scan(
-                arena=job.get("arena"),
-                scan_code=job.get("scan_code"),
-                symbols=job.get("symbols") or args.get("symbols"),
-                positions=list(world.positions or snap.get("positions") or []),
-                connector=connector,
-                turn_symbols=turn_syms,
-                filters=parsed,
-            )
-            if not payload.get("ok"):
-                last_err = payload
-                continue
-            last_ok = payload
-            syms = list(payload.get("symbols") or [])
-            for s in syms:
-                su = str(s or "").upper().strip()
-                if su and su not in pulled_syms:
-                    pulled_syms.append(su)
-            # Union this look's screens. Last-scan-wins dropped names when a later
-            # empty mega/large sort followed a tape that actually had hits.
-            fetched = list(getattr(world, "scan_fetched", None) or [])
-            seen = {str(x).upper() for x in fetched if x}
-            for s in syms:
-                su = str(s or "").upper().strip()
-                if su and su not in seen:
-                    fetched.append(su)
-                    seen.add(su)
-            world.scan_fetched = fetched
-            snap["scan_fetched"] = list(fetched)
-            stub_ideas = [
-                {"symbol": s, "source": payload.get("source") or "scan"} for s in syms
-            ]
-            if stub_ideas:
-                from abcxauto.opportunity_scan import merge_tape
-
-                ideas = merge_tape(list(world.opportunities or []), stub_ideas)
-                world.opportunities = ideas
-                snap["opportunities"] = ideas
-            hits = payload.get("hits") or []
-            for row in hits:
-                if not isinstance(row, dict):
-                    continue
-                pulled_hits.append(row)
-                if row.get("last") is not None:
-                    _stash_live(
-                        world,
+                news_syms = _news_symbols_for_scan(merged, pulled_syms)
+                out["news"] = await _mda_news(news_syms)
+                out["news_freshness"] = "delayed_15m"
+                out["news_use"] = "color_not_trigger"
+                attach_mda_news(hits, out["news"])
+                if out["news"]:
+                    snap["scan_news_attached"] = True
+                    if not world.news_items:
+                        world.news_items = list(out["news"])
+                        snap["news_items"] = list(out["news"])
+            snap["scan_hits"] = merge_scan_hits(merged, {**merged, "rows": out["rows"]})
+            if _snap_is_rth(snap):
+                sessions: dict[str, Any] = {}
+                for row in out.get("rows") or []:
+                    if not isinstance(row, dict):
+                        continue
+                    name = str(row.get("symbol") or "").upper()
+                    if not name:
+                        continue
+                    live = _live_open_session(
                         snap,
-                        {
-                            "symbol": row.get("symbol"),
-                            "last": row.get("last"),
-                            "source": "ibkr",
-                        },
-                        mark=False,
+                        name,
+                        last=row.get("last"),
+                        open_px=row.get("open"),
+                        open_gap_pct=row.get("open_gap_pct"),
                     )
-            incoming = {
-                "source": str(payload.get("source") or ""),
-                "arena": payload.get("arena"),
-                "scan_code": payload.get("scan_code"),
-                "ranked": bool(payload.get("ranked")),
-                "rank_meaning": str(payload.get("rank_meaning") or ""),
-                "quoted": int(payload.get("quoted") or 0),
-                "rows": [r for r in hits if isinstance(r, dict)][:24],
-            }
-            prior = (
-                snap.get("scan_hits")
-                if int(snap.get("scan_calls") or 0) > 1 or "scan" in turn.tool_trace
-                else None
+                    if not live:
+                        continue
+                    row["session"] = _finish_live_session(
+                        live, snap=snap, world=world, symbol=name, tape=row
+                    )
+                    sessions[name] = row["session"]
+                if sessions:
+                    out["sessions"] = sessions
+            _note_scan_news(turn, out)
+            _attach_scan_run(out, turn=turn, world=world)
+            gate = _scan_gate_facts(out.get("rows"))
+            deepest = gate.get("deepest_open_gap_pct")
+            deep_s = f"{deepest:+.1f}%" if isinstance(deepest, (int, float)) else "n/a"
+            think_emit(
+                "tool",
+                f"hits={len(syms)} screens={len(out.get('screens') or [])} "
+                f"deepest={deep_s} {gate.get('deepest_symbol') or ''} "
+                f"src={out.get('source') or 'empty'}\n",
             )
-            snap["scan_hits"] = merge_scan_hits(prior, incoming)
-            rec_arena, rec_code = _canonical_scan_screen(
-                str(job.get("arena") or payload.get("arena") or ""),
-                str(job.get("scan_code") or payload.get("scan_code") or ""),
-            )
-            _record_scan_screen(snap, rec_arena, rec_code)
-        if last_ok is None:
-            err = last_err or {
-                "ok": False,
-                "error": "scan requires arena | scan_code | symbols[]",
-            }
-            if isinstance(err, dict):
-                err = dict(err)
-                err.setdefault("ok", False)
-                _attach_scan_run(err, turn=turn, world=world)
-            return _clip(err)
-        snap["scan_at"] = datetime.now(timezone.utc).isoformat()
-        merged = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
-        rows = _scan_paint_rows(merged, pulled_hits, quotes=qmap)
-        hits = rows
-        syms = pulled_syms or [str(r.get("symbol")) for r in hits if r.get("symbol")]
-        screens = list(snap.get("scan_screens") or [])
-        out: dict[str, Any] = {
-            "ok": True,
-            "source": last_ok.get("source"),
-            "symbols": syms,
-            "hits": hits,
-            "applied": last_ok.get("applied") or {},
-            "persisted": False,
-            "ranked": bool(merged.get("ranked") if merged else last_ok.get("ranked")),
-            "rank_meaning": (merged.get("rank_meaning") if merged else None)
-            or last_ok.get("rank_meaning"),
-            "quoted": merged.get("quoted") or last_ok.get("quoted") or 0,
-            "screens": screens,
-            "screens_this_look": int(snap.get("scan_calls") or len(screens) or 0),
-        }
-        if len(screens) <= 1:
-            out["arena"] = last_ok.get("arena")
-            out["scan_code"] = last_ok.get("scan_code")
-        out.update(_scan_gate_facts(rows))
-        pulled_by = {
-            str(r.get("symbol") or "").upper(): r
-            for r in pulled_hits
-            if isinstance(r, dict) and r.get("symbol")
-        }
-        hits = [pulled_by.get(str(r.get("symbol") or "").upper(), r) for r in rows]
-        out["hits"] = hits
-        out["rows"] = rows
-        if want_metrics and hits:
-            from abcxauto.opportunity_scan import attach_mda_metrics
-
-            await attach_mda_metrics(hits)
-        if want_news and (syms or hits):
-            from abcxauto.prints import attach_mda_news
-
-            news_syms = _news_symbols_for_scan(merged, pulled_syms)
-            out["news"] = await _mda_news(news_syms)
-            out["news_freshness"] = "delayed_15m"
-            out["news_use"] = "color_not_trigger"
-            attach_mda_news(hits, out["news"])
-            if out["news"]:
-                snap["scan_news_attached"] = True
-                if not world.news_items:
-                    world.news_items = list(out["news"])
-                    snap["news_items"] = list(out["news"])
-        snap["scan_hits"] = merge_scan_hits(merged, {**merged, "rows": out["rows"]})
-        if _snap_is_rth(snap):
-            sessions: dict[str, Any] = {}
-            for row in out.get("rows") or []:
-                if not isinstance(row, dict):
-                    continue
-                name = str(row.get("symbol") or "").upper()
-                if not name:
-                    continue
-                live = _live_open_session(
-                    snap,
-                    name,
-                    last=row.get("last"),
-                    open_px=row.get("open"),
-                    open_gap_pct=row.get("open_gap_pct"),
-                )
-                if not live:
-                    continue
-                row["session"] = _finish_live_session(
-                    live, snap=snap, world=world, symbol=name, tape=row
-                )
-                sessions[name] = row["session"]
-            if sessions:
-                out["sessions"] = sessions
-        _note_scan_news(turn, out)
-        _attach_scan_run(out, turn=turn, world=world)
-        gate = _scan_gate_facts(out.get("rows"))
-        deepest = gate.get("deepest_open_gap_pct")
-        deep_s = f"{deepest:+.1f}%" if isinstance(deepest, (int, float)) else "n/a"
-        think_emit(
-            "tool",
-            f"hits={len(syms)} screens={len(out.get('screens') or [])} "
-            f"deepest={deep_s} {gate.get('deepest_symbol') or ''} "
-            f"src={out.get('source') or 'empty'}\n",
-        )
-        if look_key:
-            turn.scan_cache[look_key] = deepcopy(out)
-        return _clip(out)
+            if look_key:
+                turn.scan_cache[look_key] = deepcopy(out)
+            return _clip(out)
     if name == "candles":
         from abcxauto.broker.bars import ibkr_bar_freshness
 
@@ -3318,8 +3339,19 @@ async def _run_tool(
         full = args.get("full")
         if isinstance(full, str):
             full = full.strip().lower() in ("1", "true", "yes", "on")
+        pos = getattr(world, "positions", None)
+        if pos is None:
+            pos = snap.get("positions") or []
+        orders = getattr(world, "open_orders", None)
+        if orders is None:
+            orders = snap.get("open_orders") or []
         return _clip(
-            playbook_payload(args.get("revision"), full=bool(full)),
+            playbook_payload(
+                args.get("revision"),
+                full=bool(full),
+                positions=list(pos),
+                orders=list(orders),
+            ),
             max_chars=PLAYBOOK_CLIP_CHARS,
         )
     if name == "write_lab_playbook":
@@ -3640,14 +3672,48 @@ async def _dispatch_tool_calls(
         if writes and peek_interrupt() is not None:
             _defer_reads("book event before the reads; the ticket takes the turn")
         else:
-            rows = await asyncio.gather(
-                *[_one(p) for p in reads], return_exceptions=True
-            )
+            # IBKR one scanner sub at a time. Same-args scans in one round
+            # used to gather, all miss scan_cache, and paint four hits= lines.
+            scan_idx = [i for i, p in enumerate(reads) if p[0] == "scan"]
+            other_idx = [i for i, p in enumerate(reads) if p[0] != "scan"]
+            rows: list[Any] = [None] * len(reads)
+
+            async def _serial_scans() -> None:
+                for i in scan_idx:
+                    try:
+                        rows[i] = await _one(reads[i])
+                    except Exception as exc:
+                        rows[i] = exc
+
+            tasks: list[Any] = []
+            if other_idx:
+                tasks.append(
+                    asyncio.gather(
+                        *[_one(reads[i]) for i in other_idx],
+                        return_exceptions=True,
+                    )
+                )
+            if scan_idx:
+                tasks.append(_serial_scans())
+            if tasks:
+                gathered = await asyncio.gather(*tasks, return_exceptions=True)
+                if other_idx:
+                    other_rows = gathered[0]
+                    if isinstance(other_rows, Exception):
+                        for i in other_idx:
+                            rows[i] = other_rows
+                    else:
+                        for i, row in zip(other_idx, other_rows):
+                            rows[i] = row
             for item, row in zip(reads, rows):
                 if isinstance(row, Exception):
                     logger.exception("parallel tool failed")
                     _append_tool_result(
                         chat, item[2], json.dumps({"error": f"{item[0]} failed: {row}"})
+                    )
+                elif row is None:
+                    _append_tool_result(
+                        chat, item[2], json.dumps({"error": f"{item[0]} failed"})
                     )
                 else:
                     _append_tool_result(chat, row[0], row[1])

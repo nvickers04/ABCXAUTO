@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -318,3 +319,156 @@ async def test_stay_up_poke_does_not_refetch_the_same_scan(monkeypatch):
     assert n["calls"] == 1
     assert again["reused"] is True
     assert again["screens_this_look"] == 1
+
+
+def _gain_payload():
+    return {
+        "ok": True,
+        "source": "ibkr",
+        "arena": "top_gainers",
+        "scan_code": "TOP_PERC_GAIN",
+        "symbols": ["SNDK"],
+        "hits": [{"symbol": "SNDK", "open_gap_pct": -6.5, "last": 1485.0}],
+        "quoted": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_parallel_identical_scan_args_fetch_once(monkeypatch):
+    """The keep-file path: four scan() in one round, same screen, one IBKR pull."""
+    n = {"calls": 0}
+
+    async def _fake_scan(**_kw):
+        n["calls"] += 1
+        await asyncio.sleep(0.05)
+        return _gain_payload()
+
+    async def _no_tags(_conn):
+        return {}
+
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+    world = _world()
+    snap: dict = {}
+    turn = BrainTurn()
+    raw = await asyncio.gather(
+        *[
+            _run_tool(
+                "scan",
+                args,
+                connector=None,
+                world=world,
+                snap=snap,
+                turn=turn,
+            )
+            for args in (
+                {"scan_code": "TOP_PERC_GAIN"},
+                {"scan_code": "TOP_PERC_GAIN"},
+                {"arena": "top_gainers"},
+                {"scan_code": "TOP_PERC_GAIN"},
+            )
+        ]
+    )
+    rows = [json.loads(r) for r in raw]
+    assert n["calls"] == 1
+    assert rows[0].get("reused") is not True
+    assert rows[0]["screens_this_look"] == 1
+    assert sum(1 for r in rows[1:] if r.get("reused") is True) == 3
+    for row in rows:
+        assert row["screens_this_look"] == 1
+
+
+@pytest.mark.asyncio
+async def test_parallel_different_scan_args_still_fetch(monkeypatch):
+    n = {"calls": 0}
+
+    async def _fake_scan(**kw):
+        n["calls"] += 1
+        await asyncio.sleep(0.02)
+        code = str(kw.get("scan_code") or "")
+        return {
+            "ok": True,
+            "source": "ibkr",
+            "scan_code": code or "MOST_ACTIVE",
+            "symbols": ["SNDK"],
+            "hits": [{"symbol": "SNDK", "open_gap_pct": -6.5, "last": 1485.0}],
+            "quoted": 1,
+        }
+
+    async def _no_tags(_conn):
+        return {}
+
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+    world = _world()
+    snap: dict = {}
+    turn = BrainTurn()
+    await asyncio.gather(
+        _run_tool(
+            "scan",
+            {"scan_code": "TOP_PERC_GAIN"},
+            connector=None,
+            world=world,
+            snap=snap,
+            turn=turn,
+        ),
+        _run_tool(
+            "scan",
+            {"scan_code": "MOST_ACTIVE"},
+            connector=None,
+            world=world,
+            snap=snap,
+            turn=turn,
+        ),
+    )
+    assert n["calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_dispatch_one_round_same_scan_fetches_once(monkeypatch):
+    """Running path: gather of reads used to launch four IBKR screens."""
+    from abcxauto.brain import _dispatch_tool_calls
+
+    n = {"calls": 0}
+
+    async def _fake_scan(**_kw):
+        n["calls"] += 1
+        await asyncio.sleep(0.05)
+        return _gain_payload()
+
+    async def _no_tags(_conn):
+        return {}
+
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+
+    class _Fn:
+        def __init__(self, args):
+            self.name = "scan"
+            self.arguments = json.dumps(args)
+
+    class _Call:
+        def __init__(self, cid, args):
+            self.id = cid
+            self.function = _Fn(args)
+
+    class _Chat:
+        def append(self, *_a, **_k):
+            pass
+
+    turn = BrainTurn()
+    await _dispatch_tool_calls(
+        [
+            _Call("1", {"scan_code": "TOP_PERC_GAIN"}),
+            _Call("2", {"scan_code": "TOP_PERC_GAIN"}),
+            _Call("3", {"arena": "top_gainers"}),
+            _Call("4", {"scan_code": "TOP_PERC_GAIN"}),
+        ],
+        chat=_Chat(),
+        connector=None,
+        world=_world(),
+        snap={},
+        turn=turn,
+    )
+    assert n["calls"] == 1
+    assert turn.tool_trace.count("scan") >= 1
