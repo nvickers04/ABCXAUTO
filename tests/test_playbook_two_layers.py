@@ -17,6 +17,7 @@ live money. Live new risk still needs a promoted snapshot.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -27,6 +28,8 @@ from abcxauto.lab_playbook import (
     EXIT_OPERATOR,
     EXIT_PROTECTIVE,
     apply_from_judgment,
+    age_out_open_lots,
+    age_out_reason,
     card_calibration,
     card_facts,
     card_scores,
@@ -36,6 +39,7 @@ from abcxauto.lab_playbook import (
     classify_card_trades,
     clamp_update,
     graduated_card_names,
+    hold_sessions_open,
     load_lab,
     load_live,
     maybe_promote,
@@ -1406,6 +1410,192 @@ def test_declared_max_loss_and_max_losses_trip_early():
     )
     assert by_count["tripped"] is True
     assert "max_losses" in by_count["trip_reason"]
+
+
+def test_max_hold_sessions_trips_an_open_ticket():
+    """Age-out is a card kill, same class as max_losses — the ticket is still open."""
+    from abcxauto.llm import SYSTEM_PROMPT
+
+    assert "max_hold_sessions" not in SYSTEM_PROMPT
+    card = _card(
+        "flush bounce",
+        retire_if={
+            "sample": 20,
+            "condition": "no bounce",
+            "max_hold_sessions": 1,
+        },
+    )
+    now = datetime(2026, 8, 28, 14, 0, tzinfo=timezone.utc)
+    # Wednesday → Friday is three weekday sessions.
+    by_age = card_verdict(
+        {
+            "resolved": 0,
+            "open": 1,
+            "open_trades": [
+                {
+                    "opened_at": "2026-08-26T14:00:00+00:00",
+                    "symbol": "NVDA",
+                }
+            ],
+        },
+        card,
+        now=now,
+    )
+    assert by_age["tripped"] is True
+    assert "max_hold_sessions" in by_age["trip_reason"]
+    assert hold_sessions_open("2026-08-26T14:00:00+00:00", now=now) == 3
+
+    still_today = card_verdict(
+        {
+            "resolved": 0,
+            "open": 1,
+            "open_trades": [
+                {
+                    "opened_at": "2026-08-28T13:00:00+00:00",
+                    "symbol": "NVDA",
+                }
+            ],
+        },
+        card,
+        now=now,
+    )
+    assert still_today["tripped"] is False
+
+
+def test_max_hold_hours_trips_an_open_ticket():
+    card = _card(
+        "flush bounce",
+        retire_if={
+            "sample": 20,
+            "condition": "no bounce",
+            "max_hold_hours": 6,
+        },
+    )
+    now = datetime(2026, 8, 28, 14, 0, tzinfo=timezone.utc)
+    by_hours = card_verdict(
+        {
+            "resolved": 0,
+            "open": 1,
+            "open_trades": [
+                {
+                    "opened_at": "2026-08-28T02:00:00+00:00",
+                    "symbol": "NVDA",
+                }
+            ],
+        },
+        card,
+        now=now,
+    )
+    assert by_hours["tripped"] is True
+    assert "max_hold_hours" in by_hours["trip_reason"]
+
+
+def test_retire_if_keeps_max_hold_sessions():
+    _save(
+        market_bracket=[
+            _card(
+                "flush bounce",
+                retire_if={
+                    "sample": 3,
+                    "condition": "no bounce",
+                    "max_hold_sessions": 1,
+                    "max_hold_hours": 8,
+                },
+            )
+        ]
+    )
+    card = type_cards(load_lab()["types"], "market_bracket")[0]
+    assert card["retire_if"]["max_hold_sessions"] == 1
+    assert card["retire_if"]["max_hold_hours"] == 8.0
+
+
+def test_age_out_open_lots_names_the_stale_symbol():
+    _save(
+        market_bracket=[
+            _card(
+                "flush bounce",
+                retire_if={
+                    "sample": 8,
+                    "condition": "no bounce",
+                    "max_hold_sessions": 1,
+                },
+            )
+        ]
+    )
+    _write_card_log(
+        [
+            _send(
+                "flush bounce",
+                [1],
+                ts="2026-08-20T14:00:00+00:00",
+                symbol="WMT",
+            )
+        ]
+    )
+    now = datetime(2026, 8, 28, 14, 0, tzinfo=timezone.utc)
+    targets = age_out_open_lots(now=now)
+    assert [t["symbol"] for t in targets] == ["WMT"]
+    assert "max_hold_sessions" in targets[0]["reason"]
+    assert age_out_reason(
+        type_cards(load_lab()["types"], "market_bracket")[0],
+        "2026-08-20T14:00:00+00:00",
+        now=now,
+    )
+
+
+def test_max_hold_sessions_is_not_a_graduation_numeric_kill():
+    """Age-out trips an open ticket. It is not the sample+kill promotion gate."""
+    card = {
+        **_card(
+            "flush bounce",
+            fill_assumption="full_spread",
+            retire_if={
+                "sample": 3,
+                "condition": "no bounce",
+                "max_hold_sessions": 1,
+            },
+        ),
+        "type": "market_bracket",
+    }
+    out = card_verdict(
+        {
+            "resolved": 3,
+            "resolved_pnl": 50.0,
+            "conservative_pnl": 40.0,
+            "resolved_wins": 3,
+            "resolved_losses": 0,
+        },
+        card,
+    )
+    assert out["needs_numeric_kill"] is True
+    assert out["graduated"] is False
+    assert "numeric kill" in out["cannot_graduate_reason"]
+
+
+def test_max_hold_sessions_trips_even_when_sample_is_unmet():
+    """Gates-off cannot skip this: verdict is not pre_trade_check."""
+    card = _card(
+        "flush bounce",
+        retire_if={
+            "sample": 20,
+            "condition": "no bounce",
+            "max_hold_sessions": 1,
+        },
+    )
+    now = datetime(2026, 8, 28, 14, 0, tzinfo=timezone.utc)
+    out = card_verdict(
+        {
+            "resolved": 0,
+            "resolved_losses": 0,
+            "open_trades": [
+                {"opened_at": "2026-08-24T14:00:00Z", "symbol": "NVDA"}
+            ],
+        },
+        card,
+        now=now,
+    )
+    assert out["tripped"] is True
+    assert out["graduated"] is False
 
 
 def test_operator_exits_do_not_advance_a_card_toward_graduation(monkeypatch):

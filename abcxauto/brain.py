@@ -654,6 +654,17 @@ _CARD_BRANCH_SCHEMA = {
                         "type": "integer",
                         "description": "Losing resolved trades that kill it early.",
                     },
+                    "max_hold_sessions": {
+                        "type": "integer",
+                        "description": (
+                            "Weekday ET dates the ticket may stay open. "
+                            "Past that, code flattens the lot and trips the card."
+                        ),
+                    },
+                    "max_hold_hours": {
+                        "type": "number",
+                        "description": "Wall-clock hours the ticket may stay open.",
+                    },
                 },
                 "required": ["sample", "condition"],
             },
@@ -922,6 +933,7 @@ AGENT_TOOLS = [
                 "max_peak_drawdown_pct": {"type": "number"},
                 "max_option_premium_pct": {"type": "number"},
                 "max_symbol_concentration_pct": {"type": "number"},
+                "max_arena_concentration_pct": {"type": "number"},
                 "max_open_positions": {"type": "integer"},
                 "size_pct_nl": {
                     "type": "number",

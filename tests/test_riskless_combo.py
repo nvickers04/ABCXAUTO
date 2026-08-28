@@ -30,7 +30,7 @@ _RISKLESS_202 = (
 
 def _cfg(**overrides) -> Config:
     base = get_config()
-    return Config(**{**base.__dict__, "risk_gates_enabled": False, **overrides})
+    return Config(**{**base.__dict__, "risk_gates_enabled": False, "max_arena_concentration_pct": 0, **overrides})
 
 
 @pytest.fixture(autouse=True)

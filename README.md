@@ -22,6 +22,8 @@ Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro S
 - Defined-risk and cash-only
 - Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %; capacity `max_open_positions` (default 15)
 - One name across every lot vs `max_symbol_concentration_pct` — `max_position_pct` only sees one ticket, so N orders in a name could stack past it. Stock and its options sum
+- One sector/theme arena across names vs `max_arena_concentration_pct` — per-name cannot see NVDA+SMCI+ARM+AVGO as one bet. Scan sorts are not the bucket. Fires on send even when paper gates are off
+- Open ticket past the card's `retire_if.max_hold_sessions` / `max_hold_hours` trips that card and flattens that lot. Independent of paper gates
 - Unprotected STK: last-stop at IBKR; hold is blocked until it exists. Combo close (`closing_position` on the matching multi-leg send) is one BAG, not new risk
 - Live new risk needs a promoted playbook
 - Ticket geometry uses **IBKR last**, not MDA

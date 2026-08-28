@@ -547,6 +547,30 @@ async def _verify_riskless_combo_cap(
     return riskless_combo_reject(reason) if reason else None
 
 
+async def _verify_arena_concentration(
+    proposal: OrderProposal, connector: Any
+) -> Optional[Dict[str, Any]]:
+    """Bucket cap on send, even when paper risk_gates_enabled is off.
+
+    Isolation fixtures patch this module's ``get_config`` with cap 0 to opt
+    out. Cap 0 is off. Production floor is 5–25. Reads executor config so a
+    paper fixture that only patches this module actually skips — the helper
+    otherwise still sees the live 25% default.
+    """
+    from abcxauto.risk_gates import check_arena_concentration
+
+    try:
+        cap = float(getattr(get_config(), "max_arena_concentration_pct", 0) or 0)
+    except (TypeError, ValueError):
+        cap = 25.0
+    if cap <= 0:
+        return None
+    ok, reason = await check_arena_concentration(proposal, connector)
+    if ok:
+        return None
+    return {"error": reason, "status": "rejected"}
+
+
 async def execute_proposal(
     proposal: OrderProposal, connector: Any, *, source: str = "agent"
 ) -> Dict[str, Any]:
@@ -569,6 +593,12 @@ async def execute_proposal(
     )
 
     rejection = await _verify_riskless_combo_cap(proposal, connector)
+    if rejection:
+        logger.warning(f"Proposal #{proposal.id} blocked: {rejection['error']}")
+        journal.record_dispatch(journal_id, False, rejection)
+        return rejection
+
+    rejection = await _verify_arena_concentration(proposal, connector)
     if rejection:
         logger.warning(f"Proposal #{proposal.id} blocked: {rejection['error']}")
         journal.record_dispatch(journal_id, False, rejection)

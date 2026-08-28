@@ -59,7 +59,7 @@ import copy
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1127,7 +1127,12 @@ def _norm_retire_if(raw: Any) -> dict[str, Any]:
     cond = str(raw.get("condition") or raw.get("retire_if") or "").strip()
     if cond:
         out["condition"] = _strip_invented_pct_gate_lines(cond).strip()[:600]
-    for key, cap in (("max_loss_usd", 1e9), ("max_losses", 200)):
+    for key, cap in (
+        ("max_loss_usd", 1e9),
+        ("max_losses", 200),
+        ("max_hold_sessions", 200),
+        ("max_hold_hours", 1e6),
+    ):
         val = raw.get(key)
         if val in (None, ""):
             continue
@@ -1137,7 +1142,11 @@ def _norm_retire_if(raw: Any) -> dict[str, Any]:
             continue
         if num <= 0:
             continue
-        out[key] = int(min(num, cap)) if key == "max_losses" else round(min(num, cap), 2)
+        out[key] = (
+            int(min(num, cap))
+            if key in ("max_losses", "max_hold_sessions")
+            else round(min(num, cap), 2)
+        )
     looks = raw.get("max_looks_without_trigger", raw.get("max_looks"))
     try:
         n_looks = int(float(looks)) if looks not in (None, "") else 0
@@ -1526,6 +1535,10 @@ def _retire_if_line(retire: Any) -> str:
         bits.append(f"max_loss_usd={row['max_loss_usd']}")
     if row.get("max_losses"):
         bits.append(f"max_losses={row['max_losses']}")
+    if row.get("max_hold_sessions"):
+        bits.append(f"max_hold_sessions={row['max_hold_sessions']}")
+    if row.get("max_hold_hours"):
+        bits.append(f"max_hold_hours={row['max_hold_hours']}")
     if row.get("condition"):
         bits.append(str(row["condition"]))
     return " ".join(bits)
@@ -2367,6 +2380,7 @@ def _empty_score(card: str = "", card_type: str = "") -> dict[str, Any]:
         "resolved_losses": 0,
         "ambiguous_sends": 0,
         "exits": {k: 0 for k in CARD_EXIT_KINDS},
+        "open_trades": [],
     }
 
 
@@ -2467,6 +2481,13 @@ def card_scores(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any
             bucket["interrupted_pnl"] += pnl_f
         else:
             bucket["open"] += 1
+            bucket.setdefault("open_trades", [])
+            bucket["open_trades"].append(
+                {
+                    "opened_at": trade.get("opened_at"),
+                    "symbol": trade.get("symbol"),
+                }
+            )
     out: list[dict[str, Any]] = []
     for (card_type, name), bucket in buckets.items():
         for key in ("realized_pnl", "resolved_pnl", "interrupted_pnl"):
@@ -2522,6 +2543,68 @@ def _hours_since(raw: str, *, now: datetime | None = None) -> float | None:
     if clock.tzinfo is None:
         clock = clock.replace(tzinfo=timezone.utc)
     return max(0.0, (clock - written).total_seconds() / 3600.0)
+
+
+def hold_sessions_open(opened_at: Any, *, now: datetime | None = None) -> int:
+    """Inclusive weekday ET dates a ticket has been open.
+
+    Weekend days are skipped. Monday open still open Tuesday is two sessions.
+    """
+    text = str(opened_at or "").strip()
+    if not text:
+        return 0
+    try:
+        start = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    day = start.astimezone(et).date()
+    last = clock.astimezone(et).date()
+    if last < day:
+        return 0
+    n = 0
+    cur = day
+    while cur <= last:
+        if cur.weekday() < 5:
+            n += 1
+        cur += timedelta(days=1)
+    return n
+
+
+def age_out_reason(
+    card: dict[str, Any] | None,
+    opened_at: Any,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Empty unless this open ticket is past the card's max_hold_*."""
+    row = card if isinstance(card, dict) else {}
+    retire = row.get("retire_if") if isinstance(row.get("retire_if"), dict) else {}
+    sessions = retire.get("max_hold_sessions")
+    hours_cap = retire.get("max_hold_hours")
+    held_s = hold_sessions_open(opened_at, now=now)
+    held_h = _hours_since(str(opened_at or ""), now=now)
+    if isinstance(sessions, int) and sessions > 0 and held_s > sessions:
+        return (
+            f"open {held_s} sessions at declared max_hold_sessions {sessions}"
+        )
+    if (
+        isinstance(hours_cap, (int, float))
+        and float(hours_cap) > 0
+        and held_h is not None
+        and held_h > float(hours_cap)
+    ):
+        return (
+            f"open {held_h:.1f}h at declared max_hold_hours {hours_cap}"
+        )
+    return ""
 
 
 def _card_clock(card: dict[str, Any] | None, book: dict[str, Any] | None = None) -> str:
@@ -2664,6 +2747,8 @@ def _verdict_edge(score: dict[str, Any], *, paper: bool) -> float | None:
 def card_verdict(
     score: dict[str, Any] | None,
     card: dict[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Graduated / tripped from the card's own declaration — honestly.
 
@@ -2728,7 +2813,7 @@ def card_verdict(
         "live_win_rate": None if paper else cal.get("hit_rate"),
         "locked": locked,
     }
-    out.update(card_waiting(sc, row))
+    out.update(card_waiting(sc, row, now=now))
     if status == "retired":
         return out
     max_loss = retire.get("max_loss_usd")
@@ -2772,6 +2857,63 @@ def card_verdict(
         out["graduated"] = False
         out["trip_reason"] = (
             f"{losses} losing resolved trades at declared max_losses {max_losses}"
+        )
+        return out
+    for trade in sc.get("open_trades") or []:
+        if not isinstance(trade, dict):
+            continue
+        why = age_out_reason(row, trade.get("opened_at"), now=now)
+        if why:
+            out["tripped"] = True
+            out["graduated"] = False
+            out["trip_reason"] = why
+            return out
+    return out
+
+
+def age_out_open_lots(
+    *,
+    now: datetime | None = None,
+    book: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Open trades past the card's max_hold_*. Flatten those lots, not the book."""
+    paper = _paper_book()
+    state = book if isinstance(book, dict) else (
+        load_lab() if paper else load_live()
+    )
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for type_name, card in walk_cards(state):
+        name = str(card.get("name") or "").strip()
+        if not name:
+            continue
+        index[card_key(type_name, name)] = card
+        by_name.setdefault(name.lower(), []).append(card)
+    sends = resolve_send_types(_card_sends(), state)
+    fills, placed, _all_fills = _journal_exit_facts()
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for trade in classify_card_trades(sends, fills, placed):
+        if str(trade.get("exit") or "") != EXIT_OPEN:
+            continue
+        match = index.get(card_key(trade.get("type"), trade.get("card")))
+        if match is None:
+            same = by_name.get(str(trade.get("card") or "").lower()) or []
+            match = same[0] if len(same) == 1 else None
+        why = age_out_reason(match or {}, trade.get("opened_at"), now=now)
+        if not why:
+            continue
+        sym = str(trade.get("symbol") or "").upper()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        out.append(
+            {
+                "symbol": sym,
+                "card": str(trade.get("card") or ""),
+                "opened_at": trade.get("opened_at"),
+                "reason": why,
+            }
         )
     return out
 

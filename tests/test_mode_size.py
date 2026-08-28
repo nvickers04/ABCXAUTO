@@ -120,6 +120,7 @@ def _floor_cfg(*, live: bool, max_risk: float = 1.0) -> SimpleNamespace:
         max_peak_drawdown_pct=25.0,
         max_option_premium_pct=5.0,
         max_symbol_concentration_pct=25.0,
+        max_arena_concentration_pct=25.0,
         max_open_positions=15,
         risk_gates_enabled=False,
         auto_panic_on_breach=True,

@@ -12,6 +12,12 @@ Concentration gate (``max_symbol_concentration_pct``) is the only size gate that
 reads the book instead of just the ticket: ``max_position_pct`` sees one order at
 a time, so N orders in one name could stack past it. It sums every lot in the
 proposed underlying, stock and options together, and adds the new notional.
+
+Arena gate (``max_arena_concentration_pct``) is the cheap complex cap: one
+sector/theme/cap bucket from arenas we already scan, as a % of NL. Per-name
+cannot see NVDA+SMCI+ARM+AVGO as four names in one bet. Scan sorts are not
+buckets. This check lives on send even when paper ``risk_gates_enabled`` is
+off — same class as mode_size, not the floors-gated per-name helper.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from typing import Any, Optional, Tuple
 from abcxauto.config import get_config
 from abcxauto.proposals import MANAGEMENT_STRATEGIES, OrderProposal
 from abcxauto.strategy_params import EXIT_ONLY_EXTRA, OPTION_STRATEGIES
+from abcxauto.universe import arenas_for_symbol, is_bucket_arena
 
 logger = logging.getLogger(__name__)
 
@@ -338,6 +345,138 @@ def symbol_exposure_usd(positions: Any, symbol: str) -> Optional[float]:
             return None
         total += marked
     return total
+
+
+def arena_exposure_usd(
+    positions: Any,
+    arena_id: str,
+    *,
+    membership: list | None = None,
+) -> Optional[float]:
+    """Market value already held in one sector/theme/cap arena.
+
+    Every lot whose underlying belongs to that arena counts — different
+    tickers, stock and options. Scan-sort membership is ignored. Returns
+    ``None`` when a matching lot cannot be priced (fail-closed).
+    """
+    want = str(arena_id or "").strip()
+    if not want or not is_bucket_arena(want):
+        return 0.0
+    total = 0.0
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        names = _lot_names(p)
+        if not names:
+            continue
+        try:
+            qty = float(p.get("quantity") or p.get("position") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(qty) < 1e-9:
+            continue
+        in_arena = False
+        for name in names:
+            if want in arenas_for_symbol(name, membership=membership):
+                in_arena = True
+                break
+        if not in_arena:
+            continue
+        marked = _lot_market_value(p)
+        if marked is None:
+            return None
+        total += marked
+    return total
+
+
+def arena_concentration_error(
+    proposal: OrderProposal,
+    positions: Any,
+    net_liq: float,
+    *,
+    membership: list | None = None,
+    cap_pct: float | None = None,
+) -> str:
+    """Refuse when this ticket would push any of its arenas over the bucket %."""
+    if is_exit_or_management(proposal):
+        return ""
+    if cap_pct is None:
+        cap_pct = float(
+            getattr(get_config(), "max_arena_concentration_pct", 0) or 0
+        )
+    try:
+        cap = float(cap_pct)
+    except (TypeError, ValueError):
+        cap = 0.0
+    if not math.isfinite(cap) or cap <= 0:
+        return ""
+    symbol = str(getattr(proposal.params, "symbol", "") or "").strip()
+    arenas = [
+        a
+        for a in sorted(arenas_for_symbol(symbol, membership=membership))
+        if is_bucket_arena(a)
+    ]
+    if not arenas:
+        return ""
+    notional = estimate_notional(proposal)
+    if notional is None:
+        return "size_unknown_notional"
+    book = risk_base_usd(net_liq)
+    for arena in arenas:
+        held = arena_exposure_usd(
+            positions, arena, membership=membership
+        )
+        if held is None:
+            return "size_arena_concentration unknown"
+        after = held + float(notional)
+        after_pct = _pct_of_nl(after, book)
+        if not math.isfinite(after_pct) or after_pct > cap:
+            return (
+                f"size_arena_concentration {after_pct} > {cap} ({arena})"
+            )
+    return ""
+
+
+async def check_arena_concentration(
+    proposal: OrderProposal, connector: Any
+) -> Tuple[bool, str]:
+    """Always-on send check. Exits pass. Cap 0 is off."""
+    if is_exit_or_management(proposal):
+        return True, "exit"
+    cfg = get_config()
+    try:
+        cap = float(getattr(cfg, "max_arena_concentration_pct", 0) or 0)
+    except (TypeError, ValueError):
+        cap = 0.0
+    if not math.isfinite(cap) or cap <= 0:
+        return True, "off"
+    try:
+        account = await connector.get_account_summary()
+    except Exception as e:
+        return False, f"Risk gate fail-closed: cannot read account summary ({e})"
+    if not isinstance(account, dict) or account.get("error"):
+        err = account.get("error") if isinstance(account, dict) else "invalid account"
+        return False, f"Risk gate fail-closed: cannot read account summary ({err})"
+    nl_state, net_liq = _account_number_state(
+        account, "netliquidation", "NetLiquidation"
+    )
+    if nl_state != "ok" or net_liq is None or net_liq <= 0:
+        return False, "Risk gate fail-closed: NetLiquidation unavailable or non-positive"
+    try:
+        positions = await connector.get_positions()
+    except Exception as e:
+        return False, f"Risk gate fail-closed: cannot read positions ({e})"
+    if isinstance(positions, dict) and positions.get("error"):
+        return False, (
+            "Risk gate fail-closed: cannot read positions "
+            f"({positions.get('error')})"
+        )
+    if not isinstance(positions, list):
+        return False, "Risk gate fail-closed: cannot read positions"
+    note = arena_concentration_error(proposal, positions, float(net_liq))
+    if note:
+        return False, note
+    return True, "ok"
 
 
 def estimate_bracket_risk_dollars(proposal: OrderProposal) -> Optional[float]:

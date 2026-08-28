@@ -23,6 +23,7 @@ RISK_FLOOR: dict[str, tuple[float, float]] = {
     "max_peak_drawdown_pct": (2.0, 25.0),
     "max_option_premium_pct": (1.0, 25.0),
     "max_symbol_concentration_pct": (5.0, 25.0),
+    "max_arena_concentration_pct": (5.0, 25.0),
 }
 # Live integer cap only. Paper Grok picks N for this book — do not shove
 # that N back into 1–25 or treat 0 as 15. 0 on live would disable the gate.
@@ -94,6 +95,7 @@ UNSUPERVISED_DEFAULTS: dict[str, Any] = {
     "max_peak_drawdown_pct": 25.0,
     "max_option_premium_pct": 25.0,
     "max_symbol_concentration_pct": 25.0,
+    "max_arena_concentration_pct": 25.0,
     "max_open_positions": 15,
     "scan_fetch_cap": 8,
 }

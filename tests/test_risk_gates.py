@@ -9,6 +9,9 @@ import pytest
 from abcxauto.config import Config, get_config
 from abcxauto.proposals import validate_proposal
 from abcxauto.risk_gates import (
+    arena_concentration_error,
+    arena_exposure_usd,
+    check_arena_concentration,
     check_defined_risk_only,
     estimate_bracket_risk_dollars,
     estimate_notional,
@@ -324,6 +327,159 @@ def test_symbol_exposure_usd_fail_closed_on_nan_mark():
         underlying="SPY",
     )
     assert symbol_exposure_usd([occ], "SPY") == 9_000.0
+
+
+_TECH_MEMBERSHIP = [
+    {"symbol": s, "arena": "technology", "source": "test"}
+    for s in ("NVDA", "SMCI", "ARM", "AVGO", "AMD")
+]
+
+
+def test_symbol_concentration_helper_does_not_sum_same_arena_names():
+    """The hole: four names in one arena. Per-name exposure never sees the stack."""
+    from abcxauto.world_state import concentration
+
+    lots = [
+        _lot("NVDA", mv=8_000.0),
+        _lot("SMCI", mv=8_000.0),
+        _lot("ARM", mv=8_000.0),
+        _lot("AVGO", mv=8_000.0),
+    ]
+    assert symbol_exposure_usd(lots, "NVDA") == 8_000.0
+    assert symbol_exposure_usd(lots, "SMCI") == 8_000.0
+    assert symbol_exposure_usd(lots, "AMD") == 0.0
+    conc = concentration(lots)
+    assert conc["names"] == 4
+    assert conc["cloned"] == []
+
+
+def test_arena_concentration_refuses_same_arena_multi_name_book():
+    from abcxauto.llm import SYSTEM_PROMPT
+
+    assert "max_arena_concentration" not in SYSTEM_PROMPT
+    lots = [
+        _lot("NVDA", mv=8_000.0),
+        _lot("SMCI", mv=8_000.0),
+        _lot("ARM", mv=8_000.0),
+        _lot("AVGO", mv=8_000.0),
+    ]
+    held = arena_exposure_usd(
+        lots, "technology", membership=_TECH_MEMBERSHIP
+    )
+    assert held == 32_000.0
+    err = arena_concentration_error(
+        _bracket(qty=80, entry=100.0, symbol="AMD"),
+        lots,
+        100_000.0,
+        membership=_TECH_MEMBERSHIP,
+        cap_pct=25.0,
+    )
+    assert err
+    assert "size_arena_concentration" in err
+    assert "technology" in err
+    # Under the cap: two names at 8% + ticket 8% = 24%.
+    light = lots[:2]
+    ok = arena_concentration_error(
+        _bracket(qty=80, entry=100.0, symbol="AMD"),
+        light,
+        100_000.0,
+        membership=_TECH_MEMBERSHIP,
+        cap_pct=25.0,
+    )
+    assert ok == ""
+
+
+def test_most_active_scan_is_not_an_arena_bucket():
+    membership = [
+        {"symbol": s, "arena": "most_active", "source": "scan"}
+        for s in ("ZZAA", "ZZBB", "ZZCC", "ZZDD")
+    ]
+    lots = [
+        _lot("ZZAA", mv=8_000.0),
+        _lot("ZZBB", mv=8_000.0),
+        _lot("ZZCC", mv=8_000.0),
+        _lot("ZZDD", mv=8_000.0),
+    ]
+    err = arena_concentration_error(
+        _bracket(qty=80, entry=100.0, symbol="ZZAA"),
+        lots,
+        100_000.0,
+        membership=membership,
+        cap_pct=25.0,
+    )
+    assert err == ""
+
+
+@pytest.mark.asyncio
+async def test_arena_cap_fires_when_paper_gates_are_off(monkeypatch):
+    """mode_size class: execute_proposal still refuses. pre_trade_check skips."""
+    from abcxauto.executor import execute_proposal
+
+    cfg = _cfg(
+        risk_gates_enabled=False,
+        sizing_floors=False,
+        max_symbol_concentration_pct=25.0,
+        max_arena_concentration_pct=25.0,
+        max_position_pct=25.0,
+    )
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    monkeypatch.setattr(
+        "abcxauto.universe.membership_rows", lambda **_k: _TECH_MEMBERSHIP
+    )
+
+    lots = [
+        _lot("NVDA", mv=8_000.0),
+        _lot("SMCI", mv=8_000.0),
+        _lot("ARM", mv=8_000.0),
+        _lot("AVGO", mv=8_000.0),
+    ]
+    conn = FakeConnector(positions=lots)
+    order = _bracket(qty=80, entry=100.0, symbol="AMD")
+
+    gate = reset_risk_gate()
+    ok, reason = await gate.pre_trade_check(order, conn)
+    assert ok is True
+    assert "disabled" in reason
+
+    result = await execute_proposal(order, conn)
+    assert result.get("status") == "rejected"
+    assert "size_arena_concentration" in str(result.get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_arena_cap_zero_on_executor_skips_risk_gates_default(monkeypatch):
+    """Isolation patches executor.get_config. Cap 0 must not fail-closed."""
+    from abcxauto.executor import execute_proposal
+
+    off = _cfg(risk_gates_enabled=False, max_arena_concentration_pct=0)
+    on = _cfg(risk_gates_enabled=False, max_arena_concentration_pct=25.0)
+    monkeypatch.setattr("abcxauto.executor.get_config", lambda: off)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: on)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: off)
+
+    class Bare:
+        async def place_bracket_order(self, **kwargs):
+            return {"success": True, "order_id": 1}
+
+    result = await execute_proposal(_bracket(), Bare())
+    assert result.get("success") is True
+
+
+@pytest.mark.asyncio
+async def test_arena_concentration_never_blocks_an_exit(monkeypatch):
+    cfg = _cfg(max_arena_concentration_pct=5.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    lots = [
+        _lot("NVDA", mv=90_000.0),
+        _lot("SMCI", mv=90_000.0),
+    ]
+    ok, reason = await check_arena_concentration(
+        _market_order_exit(), FakeConnector(positions=lots)
+    )
+    assert ok is True
+    assert reason == "exit"
 
 
 @pytest.mark.asyncio
