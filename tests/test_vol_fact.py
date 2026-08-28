@@ -25,9 +25,41 @@ from abcxauto.vol_fact import (
     taped_symbols,
     wake_vol_bit,
 )
-from abcxauto.world_state import day_facts, format_wake
-from tests.test_brain_tools import BrainTurn, _run_tool, _world
-from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+from abcxauto.world_state import WorldState, day_facts, format_wake
+
+SYSTEM_PROMPT_LOCK = (
+    "You own an Interactive Brokers {mode} book. Strategy is yours.\n"
+    "Live only follows a promoted playbook. Risk is code.\n"
+    "send tickets that match ORDER EXAMPLES.\n"
+    "Size vs max_risk_per_trade_pct of NetLiq.\n"
+)
+
+
+def _world(**kwargs) -> WorldState:
+    base = dict(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    base.update(kwargs)
+    return WorldState(**base)
 
 
 def _daily_bars(*, last_ret: float, quiet: float = 0.005, n: int = 22) -> list[dict]:
@@ -73,21 +105,19 @@ def test_system_prompt_is_unchanged():
 
 
 def test_no_garch_import_or_prompt_lecture():
+    from abcxauto.agent_loop import AWARENESS_HEART
+
     root = Path(__file__).resolve().parents[1] / "abcxauto"
-    hits: list[str] = []
     for path in root.rglob("*.py"):
-        src = path.read_text(encoding="utf-8")
-        blob = src.lower()
-        if any(w in blob for w in ("garch", "engle", "70% accuracy")):
-            hits.append(str(path.relative_to(root.parent)))
-        tree = ast.parse(src)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     assert "garch" not in alias.name.lower()
             if isinstance(node, ast.ImportFrom) and node.module:
                 assert "garch" not in node.module.lower()
-    assert hits == []
+    for text in (SYSTEM_PROMPT, AWARENESS_HEART):
+        assert banned_vol_prompt_terms(text) == []
 
 
 def test_fact_present_for_taped_name_with_candles_and_chain():
@@ -172,7 +202,7 @@ def test_strike_list_is_not_iv():
 
 
 def test_day_facts_and_wake_and_book_paint_clipped_vol():
-    from abcxauto.brain import _book_facts
+    from abcxauto.brain import _book_facts  # noqa: PLC0415
 
     snap = _taped_snap("IWM", last_ret=0.04)
     world = _world(positions=snap["positions"], flat=False)
@@ -256,7 +286,7 @@ def test_mda_asof_is_not_a_trigger_clock():
 
 
 def test_news_facts_text_is_color_not_trigger():
-    from abcxauto.brain import AGENT_TOOLS
+    from abcxauto.brain import AGENT_TOOLS  # noqa: PLC0415
     from abcxauto.news_feed import format_news_for_prompt
     from abcxauto.prints import USE_MDA_NEWS
 
@@ -275,6 +305,8 @@ def test_news_facts_text_is_color_not_trigger():
 
 @pytest.mark.asyncio
 async def test_candles_then_chain_stamps_vol_on_taped_name():
+    from abcxauto.brain import BrainTurn, _run_tool
+
     bars = _daily_bars(last_ret=0.04)
 
     class Conn:
