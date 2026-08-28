@@ -15,12 +15,10 @@ from abcxauto.proposals import STRATEGIES
 ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
     "set_risk": {
         "max_risk_per_trade_pct": 0.75,
-        "max_open_positions": 15,
         "enabled_arenas": ["index_etfs", "most_active"],
     },
     "self_tune": {
         "max_risk_per_trade_pct": 0.75,
-        "max_open_positions": 15,
         "enabled_arenas": ["index_etfs", "most_active"],
     },
     "market_bracket": {

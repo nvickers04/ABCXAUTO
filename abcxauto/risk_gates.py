@@ -831,8 +831,9 @@ class RiskGate:
                     f"size_symbol_concentration {after_pct} > {concentration_pct}"
                 )
 
-        # Slot refuse: this method already returned when gates are off.
-        # Live / gates-on still fire. Working entries reserve in capacity_fact.
+        # Slot refuse only when mop is a positive Grok/operator ceiling.
+        # 0 = off. Same on paper and live. This method already returned
+        # when gates are off. Working entries reserve in capacity_fact.
         if cfg.max_open_positions > 0:
             open_count = 0
             for p in positions or []:

@@ -2304,8 +2304,9 @@ def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
     assert "book_unreliable" in blob["world"]
     assert "path" in blob
     assert "max_risk_per_trade_pct" in blob["levers"]
-    assert blob["levers"]["max_open_positions"]["min"] == 1
-    # Paper book: do not teach leftover 25 as the working ceiling.
+    assert blob["levers"]["max_open_positions"]["min"] == 0
+    assert blob["levers"]["max_open_positions"]["off"] == 0
+    # Do not teach leftover 25 as the working ceiling on paper or live.
     assert "max" not in blob["levers"]["max_open_positions"]
     assert blob["levers"]["max_open_positions"]["pick"] == "this book"
     assert blob["levers"]["max_open_positions"]["with"] == "size_pct_nl"

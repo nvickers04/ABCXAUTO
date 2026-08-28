@@ -161,7 +161,8 @@ class Config:
     # One sector/theme/cap arena (catalog we already scan), all names in it.
     # Per-name cap cannot see NVDA+SMCI+ARM+AVGO as one bet.
     max_arena_concentration_pct: float = 25.0
-    max_open_positions: int = 15
+    # 0 = off (no count refuse). A positive N is a Grok/operator ceiling.
+    max_open_positions: int = 0
 
     @property
     def is_paper(self) -> bool:
@@ -275,7 +276,7 @@ def _load_env_config() -> Config:
         sizing_floors=_env_bool("ABCXAUTO_SIZING_FLOORS", False),
         daily_loss_limit_pct=float(_env("ABCXAUTO_DAILY_LOSS_LIMIT_PCT", "25")),
         max_position_pct=float(_env("ABCXAUTO_MAX_POSITION_PCT", "25")),
-        max_open_positions=int(_env("ABCXAUTO_MAX_OPEN_POSITIONS", "15")),
+        max_open_positions=int(_env("ABCXAUTO_MAX_OPEN_POSITIONS", "0")),
         auto_panic_on_breach=_env_bool("ABCXAUTO_AUTO_PANIC_ON_BREACH", True),
         defined_risk_only=_env_bool("ABCXAUTO_DEFINED_RISK_ONLY", True),
         cash_only=_env_bool("ABCXAUTO_CASH_ONLY", True),

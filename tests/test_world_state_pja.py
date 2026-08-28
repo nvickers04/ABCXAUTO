@@ -306,7 +306,7 @@ def test_format_wake_includes_day_facts():
             "sizing_floors": True,
             "nl": 36000,
             "open_lots": ["IWM 260821C306 x1", "QQQ 260821C735 x1"],
-            "capacity": {"open_count": 8, "max_open_positions": 15, "nl": 36000},
+            "capacity": {"open_count": 8, "max_open_positions": 0, "nl": 36000},
             "mix": {"long_c": 7, "short_c": 1, "vert": 1},
             "playbook": {
                 "revision": 51,
@@ -344,7 +344,9 @@ def test_format_wake_includes_day_facts():
     assert "max_risk=25.0%" in text
     assert "floors=on" in text
     assert "risk/trade=" not in text
-    assert "open=8/15" in text
+    assert "open=8" in text
+    assert "open=8/15" not in text
+    assert "/15" not in text
     assert "nl=36000" in text
     assert "open_lots=IWM 260821C306 x1,QQQ 260821C735 x1" in text
     assert "haltAt=" in text
@@ -364,6 +366,45 @@ def test_format_wake_includes_day_facts():
     assert "This is a delta" not in text
     assert "no operator" not in text.lower()
     assert "clerk wake" not in text.lower()
+
+
+def test_format_wake_denominator_only_when_mop_set():
+    """Wake is open=12, not open=12/15. Denominator only if Grok set a ceiling."""
+    from abcxauto.park_clock import note_wake
+
+    note_wake(None)
+    off = format_wake(
+        cycle=1,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "names": 12,
+            "lots": 12,
+            "nl": 36000,
+            "max_risk_per_trade_pct": 25.0,
+            "capacity": {"open_count": 12, "max_open_positions": 0, "nl": 36000},
+        },
+    )
+    assert "open=12" in off
+    assert "open=12/" not in off
+    assert "/15" not in off
+    armed = format_wake(
+        cycle=1,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "names": 12,
+            "lots": 12,
+            "nl": 36000,
+            "max_risk_per_trade_pct": 25.0,
+            "capacity": {"open_count": 12, "max_open_positions": 4, "nl": 36000},
+        },
+    )
+    assert "open=12/4" in armed
 
 
 def test_format_wake_prints_lab_waiting_when_the_glance_has_it():
@@ -413,7 +454,7 @@ def test_format_wake_floors_on_still_paints_max_risk():
             "risk_per_trade_pct": 0.75,
             "sizing_floors": True,
             "open_lots": ["NVDA STK long 5"],
-            "capacity": {"open_count": 1, "max_open_positions": 15},
+            "capacity": {"open_count": 1, "max_open_positions": 0},
         },
     )
     assert "max_risk=0.75%" in text
@@ -524,7 +565,7 @@ def test_format_wake_fill_is_delta_not_discovery():
                 "names": 3,
                 "lots": 11,
                 "open_lots": ["XLF 260828C58.5 x1 -42%", "QQQ 260918C745 x1"],
-                "capacity": {"open_count": 11, "max_open_positions": 15},
+                "capacity": {"open_count": 11, "max_open_positions": 0},
                 "mix": {"long_c": 10, "vert": 2},
                 "playbook": {
                     "revision": 1,
@@ -570,7 +611,7 @@ def test_format_wake_spy_stk11_overrides_stale_last_turn_flat():
     ]
     world.net_liquidation = 35339.16
     world.daily_pnl = 0.0
-    world.capacity = {"open_count": 1, "max_open_positions": 15}
+    world.capacity = {"open_count": 1, "max_open_positions": 0}
     day = day_facts(world, {})
     text = format_wake(
         cycle=9,
@@ -603,7 +644,7 @@ def test_format_wake_wiped_playbook_omits_glance_and_ledger():
             "names": 0,
             "lots": 0,
             "open_lots": [],
-            "capacity": {"open_count": 0, "max_open_positions": 15},
+            "capacity": {"open_count": 0, "max_open_positions": 0},
             "max_risk_per_trade_pct": 25.0,
             "sizing_floors": False,
             "playbook": {
@@ -655,7 +696,7 @@ def test_format_wake_flat_empty_omits_leftover_prev():
             "names": 0,
             "lots": 0,
             "open_lots": [],
-            "capacity": {"open_count": 0, "max_open_positions": 15},
+            "capacity": {"open_count": 0, "max_open_positions": 0},
             "risk_per_trade_pct": 25.0,
             "sizing_floors": True,
         },

@@ -84,42 +84,66 @@ def test_capacity_allows_and_blocks():
     assert capacity_allows_new_risk(full, gates_on) is False
 
 
-def test_paper_gates_off_does_not_refuse_on_leftover_mop():
-    """Paper gates-off: leftover 15/25 is not a new-risk refuse."""
-    leftover_full = SimpleNamespace(
+def test_mop_zero_does_not_refuse_on_count():
+    """mop 0 = off. 16 names are not a slot refuse on paper or live."""
+    lots = [{"symbol": f"S{i}", "quantity": 1} for i in range(16)]
+    leftover = SimpleNamespace(
         capacity={
-            "open_count": 25,
-            "max_open_positions": 15,
-            "slots_left": 0,
-            "allows_new_risk": False,
+            "open_count": 16,
+            "max_open_positions": 0,
+            "slots_left": None,
+            "allows_new_risk": True,
         },
-        positions=[{"symbol": "SPY", "quantity": 1}] * 25,
+        positions=lots,
         open_orders=[],
     )
-    paper_off = SimpleNamespace(
-        trading_mode="paper",
-        ibkr_port=7497,
-        is_paper=True,
-        risk_gates_enabled=False,
-        max_open_positions=15,
-    )
-    paper_on = SimpleNamespace(
+    paper = SimpleNamespace(
         trading_mode="paper",
         ibkr_port=7497,
         is_paper=True,
         risk_gates_enabled=True,
-        max_open_positions=15,
+        max_open_positions=0,
     )
     live = SimpleNamespace(
         trading_mode="live",
         ibkr_port=7496,
         is_paper=False,
         risk_gates_enabled=True,
-        max_open_positions=15,
+        max_open_positions=0,
     )
-    assert capacity_allows_new_risk(leftover_full, paper_off) is True
-    assert capacity_allows_new_risk(leftover_full, paper_on) is False
-    assert capacity_allows_new_risk(leftover_full, live) is False
+    assert capacity_allows_new_risk(leftover, paper) is True
+    assert capacity_allows_new_risk(leftover, live) is True
+
+
+def test_grok_set_mop_four_refuses_the_fifth():
+    """A Grok-set mop=4 is a ceiling. The 5th name dies on paper and live."""
+    lots = [{"symbol": f"S{i}", "quantity": 1} for i in range(4)]
+    full = SimpleNamespace(
+        capacity={
+            "open_count": 4,
+            "max_open_positions": 4,
+            "slots_left": 0,
+            "allows_new_risk": False,
+        },
+        positions=lots,
+        open_orders=[],
+    )
+    paper = SimpleNamespace(
+        trading_mode="paper",
+        ibkr_port=7497,
+        is_paper=True,
+        risk_gates_enabled=True,
+        max_open_positions=4,
+    )
+    live = SimpleNamespace(
+        trading_mode="live",
+        ibkr_port=7496,
+        is_paper=False,
+        risk_gates_enabled=True,
+        max_open_positions=4,
+    )
+    assert capacity_allows_new_risk(full, paper) is False
+    assert capacity_allows_new_risk(full, live) is False
 
 
 def test_capacity_fact_paints_open_and_nl_without_refusing_when_unarmed():

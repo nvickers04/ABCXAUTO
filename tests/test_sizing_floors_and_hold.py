@@ -59,7 +59,7 @@ def _world(**kwargs):
         recent_decisions=[],
         trade_plan=None,
         trade_plans=[],
-        capacity={"open_count": 0, "max_open_positions": 15, "allows_new_risk": True},
+        capacity={"open_count": 0, "max_open_positions": 0, "allows_new_risk": True},
         structure_lessons=[],
         structure_cooldown={},
         book={},
@@ -330,7 +330,7 @@ def test_format_wake_prints_dollars_and_pct():
             "nl_vs_start": -100.0,
             "beating_model": False,
             "risk_per_trade_pct": 25.0,
-            "capacity": {"open_count": 1, "max_open_positions": 15},
+            "capacity": {"open_count": 1, "max_open_positions": 0},
             "open_lots": ["AAPL STK long 10"],
         },
     )

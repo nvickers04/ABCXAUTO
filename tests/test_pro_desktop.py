@@ -818,6 +818,7 @@ def test_settings_fields_cover_every_operator_knob(headless_pro):
     assert "1 – 25" not in mop_hint
     assert "1-25" not in mop_hint
     assert "this book" in mop_hint
+    assert "0 = off" in mop_hint
     assert "trading_mode" not in headless_pro.fields
     assert "ibkr_port" not in headless_pro.fields
     assert "live_confirm" not in headless_pro.fields

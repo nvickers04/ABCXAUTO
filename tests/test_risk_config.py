@@ -30,7 +30,7 @@ def test_defaults_1k_floor():
     assert snap["max_peak_drawdown_pct"] == 25.0
     assert snap["auto_panic_on_breach"] is True
     assert snap["defined_risk_only"] is True
-    assert snap["max_open_positions"] == 15
+    assert snap["max_open_positions"] == 0
 
 
 def test_risk_and_capacity_keys_disjoint():
