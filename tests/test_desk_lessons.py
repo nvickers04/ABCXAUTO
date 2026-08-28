@@ -74,6 +74,8 @@ def test_system_prompt_lock_still_holds():
     assert "Scan overflow" not in SYSTEM_PROMPT
     assert RISKLESS_COMBO_CAP_FACT not in SYSTEM_PROMPT
     assert "riskless_combo_cap" not in SYSTEM_PROMPT
+    assert "one WORKING" not in SYSTEM_PROMPT
+    assert "max_open_positions" not in SYSTEM_PROMPT
 
 
 def test_seed_lesson_is_in_book_payload():

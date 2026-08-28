@@ -897,7 +897,9 @@ AGENT_TOOLS = [
     tool(
         name="self_tune",
         description=(
-            "Retune knobs now. Floor cannot be weakened. Not a ticket — send is the book."
+            "Retune knobs now. Floor cannot be weakened. "
+            "max_open_positions is concurrent lots for this book's NL — "
+            "not a baked 15/25. Not a ticket — send is the book."
         ),
         parameters=_schema(
             {

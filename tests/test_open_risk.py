@@ -262,6 +262,40 @@ def test_new_entry_rejected_when_capacity_full():
     assert "capacity" in str((forced or {}).get("note") or "").lower()
 
 
+def test_paper_gates_off_gate_ticket_ignores_leftover_mop(tmp_path, monkeypatch):
+    """Paper gates-off: leftover mop does not block a new-risk ticket."""
+    from abcxauto.agent_loop import gate_ticket
+
+    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
+    reset_flat_streak()
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
+    monkeypatch.setattr(
+        "abcxauto.world_state.get_config",
+        lambda: __import__("types").SimpleNamespace(
+            trading_mode="paper",
+            ibkr_port=7497,
+            is_paper=True,
+            risk_gates_enabled=False,
+            max_open_positions=15,
+        ),
+    )
+    strat, forced = gate_ticket(
+        _new_entry_act(),
+        _judgment_world(
+            capacity={
+                "open_count": 15,
+                "max_open_positions": 15,
+                "slots_left": 0,
+                "allows_new_risk": False,
+            },
+        ),
+    )
+    assert forced is None, forced
+    assert strat == "market_bracket"
+
+
 def test_new_entry_rejected_while_flat_streak_unconfirmed(tmp_path, monkeypatch):
     from abcxauto.agent_loop import gate_ticket
     from abcxauto.trade_plan import _save_flat_streak_state

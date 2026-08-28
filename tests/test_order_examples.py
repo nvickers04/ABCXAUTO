@@ -72,6 +72,19 @@ def test_format_order_examples():
     assert "vertical_spread close:" in text
     assert '"closing_position":true' in text
     assert "Never close_option / oca / trailing a combo leg" in text
+    assert "one WORKING at a time" in text
+    assert "Fill or cancel, then the next" in text
+    assert "Filled lots do not use that slot" in text
+    assert "vertical, calendar, and diagonal are not in that IBKR [202] bucket" in text
+    assert "Transmit" not in text
+    assert "leg the combo" not in text.lower()
+    header = text.split("\n\n")[0] if "\n\n" in text else text.split("vertical_spread:")[0]
+    assert "iron condor" in header
+    assert "iron butterfly" in header
+    # Ticket lines still teach vertical/calendar/diagonal as sendable — not as [202].
+    assert "vertical_spread:" in text
+    assert "calendar_spread:" in text
+    assert "diagonal_spread:" in text
     assert "Clerk will not invent the close price" in text
     assert "Clerk will not invent omitted stop/target/qty" in text
     assert "Clerk fills missing" not in text

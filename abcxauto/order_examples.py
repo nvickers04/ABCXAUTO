@@ -385,7 +385,10 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "Algo/auction exits (vwap/twap/iceberg/adaptive/MOC/MOO/...) are sendable "
         "on protect/manage/new-entry; closing_position required. "
         "defined_risk_only still rejects unlimited/naked shapes; cash-only still "
-        "rejects SHORT stock brackets.",
+        "rejects SHORT stock brackets. "
+        "iron condor, iron butterfly, and butterfly: one WORKING at a time. "
+        "Fill or cancel, then the next. Filled lots do not use that slot. "
+        "vertical, calendar, and diagonal are not in that IBKR [202] bucket.",
         "",
     ]
     for name in sorted(ORDER_EXAMPLES):

@@ -1485,10 +1485,15 @@ def format_wake(
         parts.append(f"minutes_to_open={mins}.")
     if day:
         # max_risk= is the self_tune ceiling, not the ticket size.
+        # open= + nl= so Grok can pick mop for THIS book.
+        nl = day.get("nl")
+        if nl is None:
+            nl = cap.get("nl")
+        nl_bit = f" nl={nl}" if nl not in (None, "") else ""
         parts.append(
             f"names={day.get('names')} lots={day.get('lots')} "
             f"{pnl_bits} "
-            f"max_risk={risk}%{floors_bit} open={open_n}/{max_n}."
+            f"max_risk={risk}%{floors_bit} open={open_n}/{max_n}{nl_bit}."
         )
         if port_bits:
             parts.append(f"{port_bits}.")
@@ -1824,7 +1829,19 @@ def build_world_state(
         max_open = int(getattr(cfg, "max_open_positions", 0) or 0)
     except (TypeError, ValueError):
         max_open = 0
-    cap = capacity_fact(positions, max_open_positions=max_open, open_orders=orders)
+    try:
+        from abcxauto.self_tune import slot_cap_armed
+
+        armed = slot_cap_armed(cfg)
+    except Exception:
+        armed = None
+    cap = capacity_fact(
+        positions,
+        max_open_positions=max_open,
+        open_orders=orders,
+        net_liq=net,
+        cap_armed=armed,
+    )
     lessons = recent_structure_lessons(5)
     cool = structure_cooldown_symbols(lessons)
     option_facts = list(snap.get("option_facts") or [])
@@ -1890,10 +1907,22 @@ def build_world_state(
 
 
 def capacity_allows_new_risk(world: Any, cfg: Any = None) -> bool:
+    """Refuse new risk on leftover mop only when the slot cap is armed.
+
+    Paper gates-off: leftover 12/15/25 is not a refuse. Live / gates-on still
+    fire. Working entries reserve slots when the cap is armed.
+    """
+    c = cfg if cfg is not None else get_config()
+    try:
+        from abcxauto.self_tune import slot_cap_armed
+
+        if not slot_cap_armed(c):
+            return True
+    except Exception:
+        pass
     cap = getattr(world, "capacity", None) or {}
     if isinstance(cap, dict) and "allows_new_risk" in cap:
         return bool(cap.get("allows_new_risk"))
-    c = cfg if cfg is not None else get_config()
     try:
         max_n = int(getattr(c, "max_open_positions", 0) or 0)
     except (TypeError, ValueError):
