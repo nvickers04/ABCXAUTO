@@ -365,6 +365,33 @@ def _coerce_order_id(value: Any) -> Optional[int]:
         return None
 
 
+def _sql_fill_dict(row: sqlite3.Row) -> dict:
+    keys = set(row.keys())
+
+    def _get(name: str, default: Any = None) -> Any:
+        return row[name] if name in keys else default
+
+    pnl = _get("realized_pnl")
+    try:
+        pnl_f = float(pnl) if pnl is not None else None
+    except (TypeError, ValueError):
+        pnl_f = None
+    return {
+        "ts": _get("ts"),
+        "exec_id": _get("exec_id"),
+        "order_id": _coerce_order_id(_get("order_id")),
+        "symbol": str(_get("symbol") or "").upper(),
+        "sec_type": _get("sec_type"),
+        "side": _get("side"),
+        "quantity": _get("quantity"),
+        "price": _get("price"),
+        "commission": _get("commission"),
+        "realized_pnl": pnl_f,
+        "bid": _get("bid"),
+        "ask": _get("ask"),
+    }
+
+
 def _collect_order_ids(obj: Any, out: set) -> None:
     """Recursively collect integer order ids from a dispatch result dict/list."""
     if isinstance(obj, dict):
@@ -1784,7 +1811,9 @@ class TradeJournal:
 
         Openers report 0 / missing realized P&L, so a non-zero value is the
         marker of an exit. Symbol and ts let a caller line an exit up with the
-        entry it closed without re-deriving the fills join.
+        entry it closed without re-deriving the fills join. ``realized_pnl``
+        is the raw IBKR print; commissions stay on the row for the caller to
+        net.
         """
         out: List[dict] = []
         try:
@@ -1792,7 +1821,8 @@ class TradeJournal:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    SELECT ts, order_id, symbol, side, quantity, commission, realized_pnl
+                    SELECT ts, exec_id, order_id, symbol, sec_type, side,
+                           quantity, price, commission, realized_pnl, bid, ask
                     FROM fills
                     WHERE realized_pnl IS NOT NULL AND ABS(realized_pnl) > 1e-9
                     ORDER BY ts ASC, id ASC
@@ -1802,29 +1832,51 @@ class TradeJournal:
                 ).fetchall()
             for row in rows:
                 try:
-                    pnl = float(row["realized_pnl"])
-                except (TypeError, ValueError):
+                    item = _sql_fill_dict(row)
+                except Exception:
                     continue
-                out.append(
-                    {
-                        "ts": row["ts"],
-                        "order_id": _coerce_order_id(row["order_id"]),
-                        "symbol": str(row["symbol"] or "").upper(),
-                        "side": row["side"],
-                        "quantity": row["quantity"],
-                        "commission": row["commission"],
-                        "realized_pnl": pnl,
-                    }
-                )
+                if item.get("realized_pnl") is None:
+                    continue
+                out.append(item)
         except Exception:
             logger.exception("journal.closing_fills failed")
         return out
 
-    def realized_by_order_id(self, limit: int = 2000) -> dict:
-        """order_id -> summed realized P&L from stored fills.
+    def listed_fills(self, limit: int = 4000) -> List[dict]:
+        """Every stored fill with price, side, fee, and quote sides when present.
 
-        Lets a caller attribute P&L to whatever placed the order (setup card,
-        strategy) without duplicating the fills join.
+        Openers and closers both land here so a conservative round-trip can
+        mark debit-at-ask / credit-at-bid without a second join.
+        """
+        out: List[dict] = []
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT ts, exec_id, order_id, symbol, sec_type, side,
+                           quantity, price, commission, realized_pnl, bid, ask
+                    FROM fills
+                    ORDER BY ts ASC, id ASC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            for row in rows:
+                try:
+                    out.append(_sql_fill_dict(row))
+                except Exception:
+                    continue
+        except Exception:
+            logger.exception("journal.listed_fills failed")
+        return out
+
+    def realized_by_order_id(self, limit: int = 2000) -> dict:
+        """order_id -> summed realized P&L net of commissions.
+
+        IBKR ``commissionReport.realizedPNL`` is the raw close print. Fees
+        belong in the same number a caller reads as P&L. Opening fills with
+        a commission and no realized still subtract.
         """
         out: dict = {}
         try:
@@ -1832,9 +1884,10 @@ class TradeJournal:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    SELECT order_id, realized_pnl
+                    SELECT order_id, realized_pnl, commission
                     FROM fills
-                    WHERE order_id IS NOT NULL AND realized_pnl IS NOT NULL
+                    WHERE order_id IS NOT NULL
+                      AND (realized_pnl IS NOT NULL OR commission IS NOT NULL)
                     ORDER BY id DESC
                     LIMIT ?
                     """,
@@ -1844,10 +1897,19 @@ class TradeJournal:
                 oid = _coerce_order_id(row["order_id"])
                 if oid is None:
                     continue
+                pnl = 0.0
                 try:
-                    out[oid] = out.get(oid, 0.0) + float(row["realized_pnl"])
+                    if row["realized_pnl"] is not None:
+                        pnl = float(row["realized_pnl"])
                 except (TypeError, ValueError):
-                    continue
+                    pnl = 0.0
+                fee = 0.0
+                try:
+                    if row["commission"] is not None:
+                        fee = abs(float(row["commission"]))
+                except (TypeError, ValueError):
+                    fee = 0.0
+                out[oid] = out.get(oid, 0.0) + pnl - fee
         except Exception:
             logger.exception("journal.realized_by_order_id failed")
         return out

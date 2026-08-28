@@ -35,11 +35,13 @@ an existing card (scorecard label). Notebook prose is not a send gate — hold,
 gap, tape, session, and book sentences cannot invent a refuse. Operator
 flattens, panic, and halt exits are tracked but kept out of the graduation
 math — an interrupted trade is neither proof nor falsification. A card
-graduates only on a conservative fill assumption (not ``paper_mid``), its
-own ``retire_if.sample``, one numeric kill (``max_losses`` or
-``max_loss_usd``), a thesis, and positive resolved edge. Paper mid P&L and
-paper win-rate are facts, not live evidence. Concurrent live hypotheses
-are capped. Only graduated cards, inside their pruned type stanzas, reach
+graduates only on a conservative fill assumption (not ``paper_mid``), a
+computed ``conservative_pnl`` (debit at ask / credit at bid, or fill vs
+NBBO), its own ``retire_if.sample``, one numeric kill (``max_losses`` or
+``max_loss_usd``), a thesis, and positive conservative edge. Paper TWS
+``realized_pnl`` is a fact, not the verdict input. Fees sit in that P&L;
+model cost stays on honesty. Concurrent live hypotheses are capped. Only
+graduated cards, inside their pruned type stanzas, reach
 ``playbook_live.json``. Live new risk still needs that promoted snapshot.
 
 A flat top-level ``cards`` list is still accepted on a write and is still
@@ -60,6 +62,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from abcxauto.path_math import commission_cost, conservative_trade_pnl
 
 logger = logging.getLogger(__name__)
 
@@ -2126,10 +2130,117 @@ def _ts_num(raw: Any) -> float:
     return stamp.timestamp()
 
 
+_SEND_BID_KEYS = ("bid", "nbbo_bid", "bid_at_send", "send_bid")
+_SEND_ASK_KEYS = ("ask", "nbbo_ask", "ask_at_send", "send_ask")
+
+
+def _overlay_send_quotes(fill: dict[str, Any], send: dict[str, Any]) -> dict[str, Any]:
+    """Copy NBBO-at-send onto an entry fill that has no quote side of its own."""
+    row = dict(fill)
+    own = set(_send_oids(send))
+    try:
+        oid = int(fill.get("order_id"))
+    except (TypeError, ValueError):
+        oid = None
+    if oid not in own:
+        return row
+    for dst, keys in (("bid", _SEND_BID_KEYS), ("ask", _SEND_ASK_KEYS)):
+        if row.get(dst) is not None:
+            continue
+        for key in keys:
+            if send.get(key) is not None:
+                row[dst] = send.get(key)
+                break
+    return row
+
+
+def _related_fills(
+    send: dict[str, Any],
+    closer: dict[str, Any],
+    all_fills: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Entry + exit prints for one card trade. Closer is always included."""
+    own = set(_send_oids(send))
+    try:
+        closer_oid = int(closer["order_id"])
+    except (TypeError, ValueError, KeyError):
+        closer_oid = None
+    if closer_oid is not None:
+        own.add(closer_oid)
+    sym = str(closer.get("symbol") or send.get("symbol") or "").upper()
+    opened = _ts_num(send.get("ts"))
+    closed = _ts_num(closer.get("ts"))
+    out: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    for fill in all_fills or []:
+        if not isinstance(fill, dict):
+            continue
+        try:
+            oid = int(fill["order_id"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if oid not in own:
+            continue
+        if sym and str(fill.get("symbol") or "").upper() != sym:
+            continue
+        t = _ts_num(fill.get("ts"))
+        if opened and t and t < opened - 2.0:
+            continue
+        if closed and t and t > closed + 2.0:
+            continue
+        key = fill.get("exec_id") or (oid, str(fill.get("ts") or ""), fill.get("side"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(_overlay_send_quotes(fill, send))
+    closer_exec = closer.get("exec_id")
+    closer_ts = str(closer.get("ts") or "")
+    already = False
+    for fill in out:
+        if closer_exec and fill.get("exec_id") == closer_exec:
+            already = True
+            break
+        if (
+            closer_oid is not None
+            and fill.get("order_id") == closer_oid
+            and str(fill.get("ts") or "") == closer_ts
+        ):
+            already = True
+            break
+    if not already:
+        out.append(_overlay_send_quotes(closer, send))
+    return out
+
+
+def _net_trade_realized(
+    closer: dict[str, Any], related: list[dict[str, Any]]
+) -> float:
+    """Raw IBKR close print minus every commission on the round trip."""
+    try:
+        gross = float(closer.get("realized_pnl") or 0.0)
+    except (TypeError, ValueError):
+        gross = 0.0
+    fees = 0.0
+    seen: set[Any] = set()
+    for fill in related or [closer]:
+        if not isinstance(fill, dict):
+            continue
+        key = fill.get("exec_id") or id(fill)
+        if key in seen:
+            continue
+        seen.add(key)
+        fees += commission_cost(fill)
+    if not seen:
+        fees = commission_cost(closer)
+    return round(gross - fees, 4)
+
+
 def classify_card_trades(
     sends: list[dict[str, Any]] | None,
     fills: list[dict[str, Any]] | None,
     dispatched: set | None = None,
+    *,
+    all_fills: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """One row per new-risk card send: how that trade actually ended.
 
@@ -2177,6 +2288,7 @@ def classify_card_trades(
             "opened_at": ts,
             "exit": EXIT_OPEN,
             "realized_pnl": None,
+            "conservative_pnl": None,
             "exit_order_id": None,
             "exit_at": None,
         }
@@ -2196,9 +2308,14 @@ def classify_card_trades(
             else:
                 kind = EXIT_OPERATOR
             used.add(idx)
+            related = _related_fills(row, fill, all_fills)
+            cons = conservative_trade_pnl(related)
             trade.update(
                 exit=kind,
-                realized_pnl=round(float(fill.get("realized_pnl") or 0.0), 4),
+                realized_pnl=_net_trade_realized(fill, related),
+                conservative_pnl=(
+                    round(float(cons), 4) if cons is not None else None
+                ),
                 exit_order_id=oid,
                 exit_at=fill.get("ts"),
             )
@@ -2207,10 +2324,11 @@ def classify_card_trades(
     return out
 
 
-def _journal_exit_facts() -> tuple[list[dict[str, Any]], set]:
-    """Closing fills plus the order ids the clerk dispatched. Degrades to empty."""
+def _journal_exit_facts() -> tuple[list[dict[str, Any]], set, list[dict[str, Any]]]:
+    """Closing fills, dispatched order ids, and every fill (for fees / quotes)."""
     fills: list[dict[str, Any]] = []
     placed: set = set()
+    all_fills: list[dict[str, Any]] = []
     try:
         from abcxauto.memory import get_journal
 
@@ -2221,9 +2339,12 @@ def _journal_exit_facts() -> tuple[list[dict[str, Any]], set]:
         fn = getattr(journal, "dispatched_order_ids", None)
         if callable(fn):
             placed = set(fn() or set())
+        fn = getattr(journal, "listed_fills", None)
+        if callable(fn):
+            all_fills = [f for f in (fn() or []) if isinstance(f, dict)]
     except Exception:
         logger.debug("journal exit facts unavailable", exc_info=True)
-    return fills, placed
+    return fills, placed, all_fills
 
 
 def _empty_score(card: str = "", card_type: str = "") -> dict[str, Any]:
@@ -2240,6 +2361,7 @@ def _empty_score(card: str = "", card_type: str = "") -> dict[str, Any]:
         "interrupted": 0,
         "open": 0,
         "resolved_pnl": 0.0,
+        "conservative_pnl": None,
         "interrupted_pnl": 0.0,
         "resolved_wins": 0,
         "resolved_losses": 0,
@@ -2254,8 +2376,10 @@ def card_scores(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any
     Buckets are keyed by ``(type, name)``, so the same setup name under two
     order types scores as the two different experiments it is. ``realized_pnl``
     is every dollar the card's own order ids booked â€” the book number has to
-    reconcile. ``resolved_pnl`` is the graduation number: only trades whose exit
-    was the card's own protection or a dispatched decision.
+    reconcile. ``resolved_pnl`` is net of commissions on trades whose exit
+    was the card's own protection or a dispatched decision. ``conservative_pnl``
+    is the graduation number: debit at ask / credit at bid (or fill vs NBBO),
+    also net of fees. Paper TWS realized is not that number.
     """
     raw_sends = _card_sends()
     if not raw_sends:
@@ -2291,13 +2415,17 @@ def card_scores(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any
             realized = dict(fn() or {})
     except Exception:
         realized = {}
-    fills, placed = _journal_exit_facts()
-    trades = classify_card_trades(sends, fills, placed)
+    fills, placed, all_fills = _journal_exit_facts()
+    trades = classify_card_trades(sends, fills, placed, all_fills=all_fills)
     buckets: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _bucket(card_type: Any, name: str) -> dict[str, Any]:
         key = card_key(card_type, name)
         return buckets.setdefault(key, _empty_score(name, key[0]))
+
+    cons_sum: dict[tuple[str, str], float] = {}
+    cons_missing: set[tuple[str, str]] = set()
+    cons_n: dict[tuple[str, str], int] = {}
 
     for row in sends:
         name = str(row.get("card") or "")
@@ -2327,6 +2455,13 @@ def card_scores(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any
                 bucket["resolved_losses"] += 1
             elif pnl_f > 0:
                 bucket["resolved_wins"] += 1
+            key = card_key(trade.get("type"), str(trade.get("card") or ""))
+            cons_n[key] = cons_n.get(key, 0) + 1
+            cp = trade.get("conservative_pnl")
+            if isinstance(cp, (int, float)):
+                cons_sum[key] = cons_sum.get(key, 0.0) + float(cp)
+            else:
+                cons_missing.add(key)
         elif kind == EXIT_OPERATOR:
             bucket["interrupted"] += 1
             bucket["interrupted_pnl"] += pnl_f
@@ -2336,6 +2471,11 @@ def card_scores(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any
     for (card_type, name), bucket in buckets.items():
         for key in ("realized_pnl", "resolved_pnl", "interrupted_pnl"):
             bucket[key] = round(float(bucket[key]), 4)
+        ck = (card_type, name)
+        if ck in cons_missing or cons_n.get(ck, 0) == 0:
+            bucket["conservative_pnl"] = None
+        else:
+            bucket["conservative_pnl"] = round(float(cons_sum.get(ck, 0.0)), 4)
         bucket["symbols"] = bucket["symbols"][:8]
         match = by_key.get((card_type, name))
         if match is None:
@@ -2499,6 +2639,28 @@ def _paper_book() -> bool:
         return True
 
 
+def _finite_pnl(raw: Any) -> float | None:
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if v != v:
+        return None
+    return v
+
+
+def _verdict_edge(score: dict[str, Any], *, paper: bool) -> float | None:
+    """P&L the verdict reads. Paper TWS realized is never this number."""
+    cons = _finite_pnl(score.get("conservative_pnl"))
+    if cons is not None:
+        return cons
+    if not paper:
+        return float(score.get("resolved_pnl") or 0.0)
+    return None
+
+
 def card_verdict(
     score: dict[str, Any] | None,
     card: dict[str, Any] | None = None,
@@ -2508,9 +2670,10 @@ def card_verdict(
     The clerk supplies no thresholds. A card that declared nothing can neither
     graduate nor trip — it is flagged as owing a declaration on the next write.
     ``calibration`` rides along as a fact and never moves either verdict.
-    ``paper_mid`` cannot set ``graduated``. Paper win-rate and paper
-    ``resolved_pnl`` are labeled paper, not live evidence. Promotion also
-    needs ``retire_if.sample`` and one numeric kill.
+    ``paper_mid`` cannot set ``graduated``. The edge is ``conservative_pnl``
+    (debit at ask / credit at bid, or fill vs NBBO), net of commissions —
+    not paper TWS ``resolved_pnl``. Promotion also needs ``retire_if.sample``
+    and one numeric kill.
     """
     sc = score if isinstance(score, dict) else {}
     row = card if isinstance(card, dict) else {}
@@ -2530,6 +2693,9 @@ def card_verdict(
     conservative = fill in CONSERVATIVE_FILL_ASSUMPTIONS
     has_kill = _has_numeric_kill(retire)
     paper = _paper_book()
+    edge = _verdict_edge(sc, paper=paper)
+    cons_mark = _finite_pnl(sc.get("conservative_pnl"))
+    edge_label = "conservative edge" if cons_mark is not None else "resolved edge"
     cal = card_calibration(sc, row)
     cal["live_evidence"] = not paper
     if paper:
@@ -2557,6 +2723,7 @@ def card_verdict(
         "live_evidence": not paper,
         "paper_resolved_pnl": resolved_pnl if paper else None,
         "live_resolved_pnl": None if paper else resolved_pnl,
+        "conservative_pnl": cons_mark,
         "paper_win_rate": cal.get("hit_rate") if paper else None,
         "live_win_rate": None if paper else cal.get("hit_rate"),
         "locked": locked,
@@ -2567,31 +2734,37 @@ def card_verdict(
     max_loss = retire.get("max_loss_usd")
     max_losses = retire.get("max_losses")
     if sample and resolved >= sample:
-        if resolved_pnl > 0:
-            if not conservative or fill == FILL_ASSUMPTION_PAPER_MID:
-                out["cannot_graduate_reason"] = "paper_mid cannot graduate"
-            elif not has_kill:
-                out["cannot_graduate_reason"] = (
-                    "needs numeric kill (max_losses or max_loss_usd)"
-                )
-            elif not thesis:
-                out["cannot_graduate_reason"] = "needs thesis"
-            else:
-                # Conservative fill is declared. Paper dollars stay labeled
-                # paper — they do not become live_resolved_pnl.
-                out["graduated"] = True
-        else:
+        if edge is not None and edge <= 0:
             out["tripped"] = True
             out["trip_reason"] = (
-                f"declared sample {sample} reached with resolved edge "
-                f"{resolved_pnl:+.2f} — retire or rewrite"
+                f"declared sample {sample} reached with {edge_label} "
+                f"{edge:+.2f} — retire or rewrite"
             )
             return out
-    if isinstance(max_loss, (int, float)) and max_loss > 0 and resolved_pnl <= -float(max_loss):
+        if not conservative or fill == FILL_ASSUMPTION_PAPER_MID:
+            out["cannot_graduate_reason"] = "paper_mid cannot graduate"
+        elif edge is None:
+            out["cannot_graduate_reason"] = "no conservative_pnl"
+        elif not has_kill:
+            out["cannot_graduate_reason"] = (
+                "needs numeric kill (max_losses or max_loss_usd)"
+            )
+        elif not thesis:
+            out["cannot_graduate_reason"] = "needs thesis"
+        else:
+            # Conservative mark, not paper TWS realized. Paper dollars stay
+            # labeled paper — they do not become live_resolved_pnl.
+            out["graduated"] = True
+    if (
+        isinstance(max_loss, (int, float))
+        and max_loss > 0
+        and edge is not None
+        and edge <= -float(max_loss)
+    ):
         out["tripped"] = True
         out["graduated"] = False
         out["trip_reason"] = (
-            f"resolved edge {resolved_pnl:+.2f} hit declared max_loss_usd {max_loss}"
+            f"{edge_label} {edge:+.2f} hit declared max_loss_usd {max_loss}"
         )
         return out
     if isinstance(max_losses, int) and max_losses > 0 and losses >= max_losses:
@@ -3113,10 +3286,11 @@ def save_lab(
 def maybe_promote(*, scorecard: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Promote graduated cards, not the book.
 
-    Graduation is the honest verdict: conservative fill assumption, declared
-    sample, one numeric kill, thesis, positive resolved edge. Paper mid cannot
-    unlock live. Only those cards reach the live snapshot, inside their own
-    pruned type stanza.
+    Graduation is the honest verdict: conservative fill assumption, a
+    computed ``conservative_pnl``, declared sample, one numeric kill,
+    thesis, positive conservative edge. Paper mid and paper TWS realized
+    cannot unlock live. Only those cards reach the live snapshot, inside
+    their own pruned type stanza.
     """
     lab = load_lab()
     if not lab.get("ready_to_promote"):

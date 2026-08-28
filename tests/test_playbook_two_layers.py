@@ -1130,12 +1130,22 @@ def test_card_graduates_only_at_its_declared_sample_with_positive_edge():
         ),
         "type": "market_bracket",
     }
-    met = card_verdict({"resolved": 3, "resolved_pnl": 900.0}, honest)
+    met = card_verdict(
+        {"resolved": 3, "resolved_pnl": 900.0, "conservative_pnl": 900.0},
+        honest,
+    )
     assert met["graduated"] is True
     assert met["anchored_type"] == "market_bracket"
     assert met["fill_assumption"] == "full_spread"
 
-    flat = card_verdict({"resolved": 3, "resolved_pnl": 0.0}, honest)
+    sticker = card_verdict({"resolved": 3, "resolved_pnl": 900.0}, honest)
+    assert sticker["graduated"] is False
+    assert sticker["cannot_graduate_reason"] == "no conservative_pnl"
+
+    flat = card_verdict(
+        {"resolved": 3, "resolved_pnl": 0.0, "conservative_pnl": 0.0},
+        honest,
+    )
     assert flat["graduated"] is False
     assert flat["tripped"] is True
     assert "declared sample 3" in flat["trip_reason"]
@@ -1217,7 +1227,13 @@ def test_miscalibration_is_reported_but_never_blocks_graduation():
         "type": "market_bracket",
     }
     verdict = card_verdict(
-        {"resolved": 10, "resolved_wins": 4, "resolved_pnl": 900.0}, card
+        {
+            "resolved": 10,
+            "resolved_wins": 4,
+            "resolved_pnl": 900.0,
+            "conservative_pnl": 900.0,
+        },
+        card,
     )
     assert verdict["graduated"] is True
     assert verdict["tripped"] is False
@@ -1378,7 +1394,10 @@ def test_declared_max_loss_and_max_losses_trip_early():
             "max_losses": 2,
         },
     )
-    by_loss = card_verdict({"resolved": 3, "resolved_pnl": -320.0}, card)
+    by_loss = card_verdict(
+        {"resolved": 3, "resolved_pnl": -320.0, "conservative_pnl": -320.0},
+        card,
+    )
     assert by_loss["tripped"] is True
     assert "max_loss_usd" in by_loss["trip_reason"]
 

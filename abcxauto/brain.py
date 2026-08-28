@@ -624,7 +624,8 @@ _CARD_BRANCH_SCHEMA = {
                 "type": "string",
                 "description": (
                     "How fills are assumed. paper_mid is stored and cannot "
-                    "graduate. Graduation needs full_spread or conservative."
+                    "graduate. Graduation needs full_spread or conservative "
+                    "and a conservative_pnl mark, not paper TWS realized."
                 ),
             },
             "retire_if": {
