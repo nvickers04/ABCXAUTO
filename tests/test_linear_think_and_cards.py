@@ -181,6 +181,123 @@ def test_poke_kind_tool_cache(kind, detail, clears):
         clear_interrupt()
 
 
+def test_stop_dist_poke_omitted_when_stop_has_not_moved_a_tick(monkeypatch):
+    """Last-tick closest_stop is not a poke. Stop must move more than a tick."""
+    from abcxauto.brain import _inject_live_poke
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    fact = "fact: closest_stop PYPL STK long 50 dist=1.48 stop=52.61 last=54.09"
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: fact,
+    )
+    appended: list[object] = []
+
+    class _Chat:
+        def append(self, msg, **_k):
+            appended.append(msg)
+
+    chat = _Chat()
+    chat._abcx_last_desk_fact = fact + "."
+    turn = BrainTurn()
+    cached = json.dumps({"flat": False})
+    turn.tool_cache[_tool_key("book", {})] = cached
+    clear_interrupt()
+    note_interrupt(BookEvent("stop_dist", "PYPL last tick"))
+    try:
+        ok = asyncio.run(
+            _inject_live_poke(chat, connector=None, world=_world(), snap={}, turn=turn)
+        )
+        assert ok is False
+        assert appended == []
+        assert turn.tool_cache[_tool_key("book", {})] == cached
+        assert turn.interrupted is False
+    finally:
+        clear_interrupt()
+
+
+def test_stop_dist_poke_injects_when_stop_moved_more_than_a_tick(monkeypatch):
+    from abcxauto.brain import _inject_live_poke
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+    from xai_sdk.chat import developer
+
+    prev = "fact: closest_stop PYPL STK long 50 dist=1.48 stop=52.61 last=54.09."
+    moved = "fact: closest_stop PYPL STK long 50 dist=2.61 stop=51.50 last=54.11"
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: moved,
+    )
+    appended: list[object] = []
+
+    class _Chat:
+        def append(self, msg, **_k):
+            appended.append(msg)
+
+    chat = _Chat()
+    chat._abcx_last_desk_fact = prev
+    turn = BrainTurn()
+    cached = json.dumps({"flat": False})
+    turn.tool_cache[_tool_key("book", {})] = cached
+    clear_interrupt()
+    note_interrupt(BookEvent("stop_dist", "PYPL stop moved"))
+    try:
+        ok = asyncio.run(
+            _inject_live_poke(chat, connector=None, world=_world(), snap={}, turn=turn)
+        )
+        assert ok is True
+        assert appended
+        blob = ""
+        for msg in appended:
+            assert msg.role == developer("x").role
+            blob += "".join(getattr(p, "text", "") for p in (msg.content or []))
+        assert "fact: closest_stop" in blob
+        assert "stop=51.50" in blob
+        assert turn.interrupted is True
+        assert turn.tool_cache[_tool_key("book", {})] == cached
+    finally:
+        clear_interrupt()
+
+
+def test_fill_poke_does_not_repeat_identical_fact_line(monkeypatch):
+    """Fill still pokes. The closest_stop fact line stays one line."""
+    from abcxauto.brain import _inject_live_poke
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    fact = "fact: closest_stop PYPL STK long 50 dist=1.48 stop=52.61 last=54.09"
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: fact,
+    )
+    appended: list[object] = []
+
+    class _Chat:
+        def append(self, msg, **_k):
+            appended.append(msg)
+
+    chat = _Chat()
+    chat._abcx_last_desk_fact = fact + "."
+    turn = BrainTurn()
+    cached = json.dumps({"flat": False})
+    turn.tool_cache[_tool_key("book", {})] = cached
+    clear_interrupt()
+    note_interrupt(BookEvent("fill", "PYPL"))
+    try:
+        ok = asyncio.run(
+            _inject_live_poke(chat, connector=None, world=_world(), snap={}, turn=turn)
+        )
+        assert ok is True
+        assert appended
+        blob = ""
+        for msg in appended:
+            blob += "".join(getattr(p, "text", "") for p in (msg.content or []))
+        assert blob.count("fact: closest_stop") == 0
+        assert "session=" in blob
+        assert turn.interrupted is True
+        assert turn.tool_cache == {}
+    finally:
+        clear_interrupt()
+
+
 def test_every_wake_is_a_new_chat():
     from types import SimpleNamespace
 

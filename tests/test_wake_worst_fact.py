@@ -211,3 +211,39 @@ def test_format_wake_is_desk_facts_not_a_send_command():
     assert "you may send" not in lower
     assert "use the send tool" not in lower
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
+def test_closest_stop_last_tick_is_not_a_move():
+    from abcxauto.world_state import (
+        closest_stop_moved_more_than_a_tick,
+        desk_fact_is_duplicate,
+        omit_duplicate_fact_lead,
+        parse_closest_stop,
+    )
+
+    a = "fact: closest_stop PYPL STK long 50 dist=1.48 stop=52.61 last=54.09."
+    b = "fact: closest_stop PYPL STK long 50 dist=1.47 stop=52.61 last=54.08."
+    moved_stop = (
+        "fact: closest_stop PYPL STK long 50 dist=2.61 stop=51.50 last=54.11."
+    )
+    other = "fact: closest_stop ADSK STK long 10 dist=1.00 stop=280.0 last=281.0."
+    assert parse_closest_stop(a)["ident"] == "PYPL STK long 50"
+    assert parse_closest_stop(a)["stop"] == 52.61
+    assert closest_stop_moved_more_than_a_tick(a, b) is False
+    assert desk_fact_is_duplicate(a, a) is True
+    assert desk_fact_is_duplicate(a, b) is True
+    assert desk_fact_is_duplicate(a, moved_stop) is False
+    assert closest_stop_moved_more_than_a_tick(a, other) is True
+    assert desk_fact_is_duplicate(a, other) is False
+    assert closest_stop_moved_more_than_a_tick(a, moved_stop) is True
+    assert desk_fact_is_duplicate("session=regular send.", "session=regular send.") is False
+    body = a + "\nsession=regular flat=False unprotected=none ibkr=up."
+    assert omit_duplicate_fact_lead(a, body) == (
+        "session=regular flat=False unprotected=none ibkr=up."
+    )
+    assert omit_duplicate_fact_lead(a, a) == ""
+    assert omit_duplicate_fact_lead(a, moved_stop + "\nsession=regular.") == (
+        moved_stop + "\nsession=regular."
+    )
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+

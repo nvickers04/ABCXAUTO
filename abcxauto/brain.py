@@ -1207,6 +1207,7 @@ class BrainTurn:
     interrupted: bool = False
     failed: bool = False
     stream_error: str = ""
+    ended: bool = False
     steps: int = 0
     # Read results already fetched this think, keyed by tool + args. A repeat
     # ask is answered from here so the think moves forward instead of spinning.
@@ -1224,7 +1225,7 @@ class BrainTurn:
         A later empty assistant chunk, a leftover ``failed`` stamp, or a
         dead stream after a spoken/send look must not wipe the stay-up chat.
         """
-        if self.parked:
+        if self.parked or self.ended:
             return False
         return _look_is_empty_or_question(self)
 
@@ -1897,6 +1898,8 @@ async def grok(g: GrokClient, p: str, *, stage: str = "grok") -> str:
 def _reset_chat(g: GrokClient) -> None:
     g.chat = None
     g._wake_n = 0
+    g._wake_appended = False
+    g._last_desk_fact = ""
 
 
 def drop_live_chat(g: Any | None) -> None:
@@ -1924,13 +1927,39 @@ def _stay_up_session_label(session: str) -> str:
     return resolve_stay_up_session(sess)
 
 
+def _remember_desk_fact(g: Any, chat: Any, wake: str) -> None:
+    """Last closest_stop / stop_dist fact this chat already heard."""
+    text = str(wake or "")
+    if g is not None:
+        g._last_desk_fact = text
+        g._wake_appended = True
+    if chat is not None:
+        try:
+            chat._abcx_last_desk_fact = text
+        except Exception:
+            logger.debug("desk fact remember on chat failed", exc_info=True)
+
+
+def _chat_last_desk_fact(g: Any, chat: Any = None) -> str:
+    if chat is not None:
+        hit = getattr(chat, "_abcx_last_desk_fact", None)
+        if hit:
+            return str(hit)
+    if g is not None:
+        return str(getattr(g, "_last_desk_fact", "") or "")
+    return ""
+
+
 def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
     """Keep the live chat when the look actually said something or sent.
 
     Park, overnight, and a true empty / lone '?' drop it so the next
     think is a cold start. A ``failed`` / dead-stream stamp on a real
-    say or send/fill is not a drop.
+    say or send/fill is not a drop. An ended look (duplicate closest_stop
+    fact) keeps the chat — a look may end with no send.
     """
+    if turn.ended:
+        return
     if turn.parked or _look_is_empty_or_question(turn):
         _reset_chat(g)
         return
@@ -1983,6 +2012,7 @@ def _open_wake(
     resume appends book facts to the existing chat so Grok does not reboot
     as a new agent. A pending live poke owns the next developer turn.
     """
+    g._wake_appended = False
     live = None if reset else getattr(g, "chat", None)
     if resume and live is not None:
         pending = False
@@ -1993,11 +2023,21 @@ def _open_wake(
         except Exception:
             pending = False
         if not pending:
+            from abcxauto.world_state import desk_fact_is_duplicate
+
+            prev = _chat_last_desk_fact(g, live)
+            if desk_fact_is_duplicate(prev, wake):
+                # Same closest_stop / stop_dist fact. A look may end — do
+                # not append a fresh go-do-desk developer turn.
+                g._wake_n = int(getattr(g, "_wake_n", 0) or 0) + 1
+                return live
             live.append(developer(wake))
+            _remember_desk_fact(g, live, wake)
         g._wake_n = int(getattr(g, "_wake_n", 0) or 0) + 1
         return live
     chat = _new_chat(g, session=session)
     chat.append(developer(wake))
+    _remember_desk_fact(g, chat, wake)
     return chat
 
 
@@ -2016,6 +2056,25 @@ async def _inject_live_poke(
     ev = take_interrupt()
     if ev is None:
         return False
+    if str(ev.kind or "").strip().lower() == "stop_dist":
+        from abcxauto.world_state import desk_fact_is_duplicate, worst_wake_fact
+
+        try:
+            from abcxauto.scorecard import compute_scorecard
+
+            sc = compute_scorecard(equity=getattr(world, "net_liquidation", None))
+            day_now = day_facts(world, sc)
+        except Exception:
+            day_now = day_facts(world, None)
+        fact = worst_wake_fact(
+            unprotected=list(getattr(world, "unprotected", None) or []),
+            day=day_now,
+            session=str(getattr(world, "session_status", "") or ""),
+        )
+        prev = _chat_last_desk_fact(None, chat)
+        if desk_fact_is_duplicate(prev, fact):
+            # Stop has not moved more than a tick. Last-tick last is not a poke.
+            return False
     note_wake(ev)
     turn.interrupted = True
     # This look's IBKR screens did not change. Quotes/book refetch only when
@@ -2076,7 +2135,12 @@ async def _inject_live_poke(
         day=day,
     )
     try:
-        chat.append(developer(poke))
+        from abcxauto.world_state import omit_duplicate_fact_lead
+
+        to_append = omit_duplicate_fact_lead(_chat_last_desk_fact(None, chat), poke)
+        if to_append:
+            chat.append(developer(to_append))
+        _remember_desk_fact(None, chat, poke)
     except Exception:
         logger.debug("live poke append failed", exc_info=True)
         return False
@@ -3771,9 +3835,27 @@ async def _grok_turn_impl(
         turn.stream_error = str(exc)
         _finish_look_chat(g, turn, session=session)
         return turn
+    appended = bool(getattr(g, "_wake_appended", False))
     lead = str(wake or "").splitlines()[0].strip() if wake else ""
-    if lead:
+    if appended and lead:
         think_emit("tool", f"{lead}\n")
+    if resume and not appended:
+        from abcxauto.park_clock import peek_interrupt
+
+        if peek_interrupt() is not None:
+            ok = await _inject_live_poke(
+                chat, connector=connector, world=world, snap=snap, turn=turn
+            )
+            if not ok:
+                # stop_dist poke omitted — a look may end with no send.
+                turn.ended = True
+                _finish_look_chat(g, turn, session=session)
+                return turn
+        else:
+            # Duplicate closest_stop fact. Do not start a fresh go-do-desk.
+            turn.ended = True
+            _finish_look_chat(g, turn, session=session)
+            return turn
     ran_out = True
     while turn.steps < MAX_TOOL_STEPS:
         turn.steps += 1
@@ -3832,7 +3914,12 @@ async def _grok_turn_impl(
     if ran_out:
         turn.tool_budget_hit = True
         think_emit("tool", "\n[think stopped: step ceiling]\n")
-    if not turn.parked and not turn.failed and _look_is_empty_or_question(turn):
+    if (
+        not turn.ended
+        and not turn.parked
+        and not turn.failed
+        and _look_is_empty_or_question(turn)
+    ):
         turn.failed = True
         logger.warning("look failed: empty or junk assistant text")
     _finish_look_chat(g, turn, session=session)
