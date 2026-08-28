@@ -210,6 +210,37 @@ def test_think_session_keeps_looks_the_tail_window_drops(tmp_path, monkeypatch):
     assert (tmp_path / "think_tail.txt").read_text(encoding="utf-8") == ""
 
 
+def test_think_session_text_is_the_full_day_not_the_8kb_stub(tmp_path, monkeypatch):
+    """Pane/copy helper returns the session file even when live and tail are windows."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    early = "LOOK_ONE\n" + ("a" * 28000) + "\n"
+    late = "LOOK_TWO\n" + ("b" * 4000) + "\n"
+    session = early + late
+    assert len(session) > 24000
+    day_dir = tmp_path / "think_session"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    (day_dir / "2026-08-28.txt").write_text(session, encoding="utf-8")
+    (tmp_path / "think_tail.txt").write_text(session[-8000:], encoding="utf-8")
+    live = session[-24000:]
+    assert "LOOK_ONE" not in live
+    assert "LOOK_ONE" not in (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
+    assert len((tmp_path / "think_tail.txt").read_text(encoding="utf-8")) <= 8000
+
+    got = ts.think_session_text(live)
+    assert got == session
+    assert "LOOK_ONE" in got
+    assert "LOOK_TWO" in got
+    assert len(got) > 24000
+
+    # Missing session file: live, then the 8kb stub — never crash.
+    (day_dir / "2026-08-28.txt").unlink()
+    ts._session_read_cache.update(path="", mtime=None, size=None, text="")
+    assert ts.think_session_text(live) == live
+    assert ts.think_session_text("") == session[-8000:]
+
+
 def test_write_last_turn_skips_junk_failed_look(tmp_path, monkeypatch):
     """A failed empty/? look must not blank last_turn / desk_brief."""
     from abcxauto import think_stream as ts

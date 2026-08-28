@@ -151,6 +151,85 @@ def _think_session_path() -> Path:
     return THINK_SESSION_DIR / f"{_et_session_day()}.txt"
 
 
+_session_read_cache: dict[str, Any] = {
+    "path": "",
+    "mtime": None,
+    "size": None,
+    "text": "",
+}
+
+
+def _read_think_session_file() -> str:
+    """Today's append-only stream. Empty if the file is missing or unreadable."""
+    path = _think_session_path()
+    try:
+        if not path.is_file():
+            _session_read_cache.update(path=str(path), mtime=None, size=None, text="")
+            return ""
+        st = path.stat()
+        ident = str(path)
+        if (
+            _session_read_cache.get("path") == ident
+            and _session_read_cache.get("mtime") == st.st_mtime_ns
+            and _session_read_cache.get("size") == st.st_size
+        ):
+            return str(_session_read_cache.get("text") or "")
+        text = path.read_text(encoding="utf-8")
+        _session_read_cache.update(
+            path=ident, mtime=st.st_mtime_ns, size=st.st_size, text=text
+        )
+        return text
+    except OSError:
+        logger.debug("think_session read failed", exc_info=True)
+        return str(_session_read_cache.get("text") or "")
+
+
+def _read_think_tail_file() -> str:
+    try:
+        if THINK_TAIL_PATH.is_file():
+            return THINK_TAIL_PATH.read_text(encoding="utf-8")
+    except OSError:
+        logger.debug("think_tail read failed", exc_info=True)
+    return ""
+
+
+def _join_session_and_live(session: str, live: str) -> str:
+    """Keep the day's file and any live chars that have not landed yet."""
+    if not session:
+        return live
+    if not live:
+        return session
+    if session.endswith(live):
+        return session
+    chunk = 512
+    while chunk > 0:
+        if len(session) >= chunk:
+            fp = session[-chunk:]
+            at = live.find(fp)
+            if at != -1:
+                return session + live[at + chunk :]
+        chunk //= 2
+    if live in session:
+        return session
+    return session + live
+
+
+def think_session_text(live: str = "") -> str:
+    """Full day's stream for the Pro pane and Copy stream.
+
+    Prefers today's append-only think_session file so a look older than the
+    24k RAM window / 8kb glass tail is still readable. Falls back to the live
+    buffer, then think_tail.txt, so a missing file never crashes the glass.
+    """
+    session = _read_think_session_file()
+    buf = live or ""
+    if session:
+        return _join_session_and_live(session, buf)
+    if buf:
+        return buf
+    return _read_think_tail_file()
+
+
 def _append_think_session(piece: str) -> None:
     """Append this emit to today's ET file. The glass tail stays a short overwrite."""
     if not piece:

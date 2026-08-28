@@ -23,6 +23,7 @@ from abcxauto.broker.connection import LIVE_CONFIRM_PHRASE
 from abcxauto.config import get_config, setup_file_logging
 from abcxauto.pro_engine import ProEngine
 from abcxauto.reality_pulse import build_reality_pulse, format_desk_clock, pulse_clock_view
+from abcxauto.think_stream import think_session_text
 
 logger = logging.getLogger(__name__)
 
@@ -143,14 +144,14 @@ PAGE_REFRESH_S = 3.0
 TAIL_LIVE_S = 12.0
 # Markers that mean the tail is still inside a look, not an idle desk.
 _IN_FLIGHT_MARKERS = frozenset({"think", "tool", "banner", "cached", "send", "warn"})
-# The spine paints the readable tail — same size as the think_tail.txt mirror.
-# The raw fallback label stays short so an off-screen buffer is a small diff.
+# Tool-chip window on the live RAM buffer — not the pane. The pane reads
+# today's think_session file. think_tail.txt stays an 8kb overwrite stub.
 STREAM_TAIL_CHARS = 8000
 # Wrapped tool output at 13px Consolas in a narrow column is hard to read; the
 # stream is the surface the operator actually sits and reads.
 STREAM_FONT_SIZE = 14
+# Hidden plain-text fallback stays short so Flet is not shipping the day twice.
 STREAM_RAW_TAIL_CHARS = 1800
-STREAM_MAX_LINES = 180
 # Markers think_stream/brain emit. The text is Grok's — we colour it, never
 # rewrite it. Anything unlisted paints as prose, so a new marker still shows.
 STREAM_ALARM = (
@@ -2531,10 +2532,15 @@ class ProTerminal:
             bits.append("thin")
         return "Path: " + " · ".join(bits)
 
+    def _copy_stream_text(self) -> str:
+        """What Copy stream puts on the clipboard: the full day, not the 8kb stub."""
+        live = str(getattr(self.engine.state, "think_live", "") or "")
+        return think_session_text(live) or str(self.think_live.value or "")
+
     def _copy_stream(self, _=None) -> None:
-        text = str(getattr(self.engine.state, "think_live", "") or self.think_live.value or "")
+        text = self._copy_stream_text()
         try:
-            self.page.set_clipboard(text[-8000:])
+            self.page.set_clipboard(text)
             self._toast("Stream copied", color=BLUE)
         except Exception as exc:
             self._toast(f"Copy failed: {exc}", color=AMBER)
@@ -3592,14 +3598,14 @@ class ProTerminal:
     def _sync_think_stream(self) -> None:
         live = str(getattr(self.engine.state, "think_live", "") or "")
         status = str(getattr(self.engine.state, "status", "") or "").strip()
-        n = len(live)
+        body = think_session_text(live)
+        n = len(body)
         self.lbl_stream_status.value = f"{n:,} chars" + (f" · {status}" if status else "")
-        key = live[-24000:]
-        if key == getattr(self, "_think_sync_key", None):
+        if body == getattr(self, "_think_sync_key", None):
             return
-        self._think_sync_key = key
-        body = key.strip()
-        if not body:
+        self._think_sync_key = body
+        shown = body.strip()
+        if not shown:
             prev = self._prev_stream()
             self.think_live.value = prev or "Grok stream: waiting for tools..."
             self.think_live.color = MUTED
@@ -3607,8 +3613,8 @@ class ProTerminal:
             self.col_stream.controls = []
             self._stream_lines_key = ""
         else:
-            # Plain-text fallback + what Copy stream and the tests read.
-            self.think_live.value = body[-STREAM_RAW_TAIL_CHARS:]
+            # Hidden fallback stays a short stub. The spine and Copy read `body`.
+            self.think_live.value = shown[-STREAM_RAW_TAIL_CHARS:]
             self.think_live.color = TEXT
             self.think_live.visible = False
             self._sync_stream_lines(body)
@@ -3618,8 +3624,9 @@ class ProTerminal:
 
         Every line is painted with its own text — no marker is rewritten,
         stripped or reordered. Only whitespace-only lines become spacing.
+        The operator scrolls the whole session, not an 8kb / 180-line window.
         """
-        lines = body[-STREAM_TAIL_CHARS:].splitlines()[-STREAM_MAX_LINES:]
+        lines = body.splitlines()
         key = "\n".join(lines)
         if key == self._stream_lines_key:
             return
