@@ -63,7 +63,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from abcxauto.path_math import commission_cost, conservative_trade_pnl
+from abcxauto.path_math import commission_cost, conservative_trade_pnl, quote_bid_ask
 
 logger = logging.getLogger(__name__)
 
@@ -2145,25 +2145,72 @@ def _ts_num(raw: Any) -> float:
 
 _SEND_BID_KEYS = ("bid", "nbbo_bid", "bid_at_send", "send_bid")
 _SEND_ASK_KEYS = ("ask", "nbbo_ask", "ask_at_send", "send_ask")
+_SEND_LAST_KEYS = ("ibkr_last", "last", "mid")
 
 
-def _overlay_send_quotes(fill: dict[str, Any], send: dict[str, Any]) -> dict[str, Any]:
-    """Copy NBBO-at-send onto an entry fill that has no quote side of its own."""
+def _entry_send_oid(send: dict[str, Any]) -> int | None:
+    oids = _send_oids(send)
+    return oids[0] if oids else None
+
+
+def _usable_spread(row: dict[str, Any] | None) -> bool:
+    bid, ask = quote_bid_ask(row)
+    return bid is not None and ask is not None and (ask - bid) > 1e-9
+
+
+def _copy_quote_side(dst: dict[str, Any], src: dict[str, Any], side: str, keys: tuple[str, ...]) -> None:
+    if dst.get(side) is not None:
+        return
+    for key in keys:
+        if src.get(key) is not None:
+            dst[side] = src.get(key)
+            return
+
+
+def _overlay_send_quotes(
+    fill: dict[str, Any],
+    send: dict[str, Any],
+    *,
+    marks_by_oid: dict[int, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Copy this send's NBBO onto its own entry fill. Closers keep their quotes."""
     row = dict(fill)
-    own = set(_send_oids(send))
     try:
         oid = int(fill.get("order_id"))
     except (TypeError, ValueError):
-        oid = None
-    if oid not in own:
         return row
-    for dst, keys in (("bid", _SEND_BID_KEYS), ("ask", _SEND_ASK_KEYS)):
-        if row.get(dst) is not None:
-            continue
-        for key in keys:
-            if send.get(key) is not None:
-                row[dst] = send.get(key)
+    src: dict[str, Any] | None = None
+    mark = (marks_by_oid or {}).get(oid)
+    if isinstance(mark, dict):
+        src = mark
+    elif oid == _entry_send_oid(send):
+        src = send
+    if not isinstance(src, dict):
+        return row
+    if not _usable_spread(row):
+        src_bid = next((src.get(k) for k in _SEND_BID_KEYS if src.get(k) is not None), None)
+        src_ask = next((src.get(k) for k in _SEND_ASK_KEYS if src.get(k) is not None), None)
+        try:
+            src_spread = (
+                src_bid is not None
+                and src_ask is not None
+                and float(src_ask) - float(src_bid) > 1e-9
+            )
+        except (TypeError, ValueError):
+            src_spread = False
+        if src_spread:
+            row["bid"] = src_bid
+            row["ask"] = src_ask
+        else:
+            _copy_quote_side(row, src, "bid", _SEND_BID_KEYS)
+            _copy_quote_side(row, src, "ask", _SEND_ASK_KEYS)
+    if row.get("ibkr_last") is None:
+        for key in _SEND_LAST_KEYS:
+            if src.get(key) is not None:
+                row["ibkr_last"] = src.get(key)
                 break
+    if not row.get("fill_label") and src.get("fill_label"):
+        row["fill_label"] = src.get("fill_label")
     return row
 
 
@@ -2171,6 +2218,8 @@ def _related_fills(
     send: dict[str, Any],
     closer: dict[str, Any],
     all_fills: list[dict[str, Any]] | None,
+    *,
+    send_marks: dict[int, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Entry + exit prints for one card trade. Closer is always included."""
     own = set(_send_oids(send))
@@ -2205,7 +2254,7 @@ def _related_fills(
         if key in seen:
             continue
         seen.add(key)
-        out.append(_overlay_send_quotes(fill, send))
+        out.append(_overlay_send_quotes(fill, send, marks_by_oid=send_marks))
     closer_exec = closer.get("exec_id")
     closer_ts = str(closer.get("ts") or "")
     already = False
@@ -2221,7 +2270,7 @@ def _related_fills(
             already = True
             break
     if not already:
-        out.append(_overlay_send_quotes(closer, send))
+        out.append(_overlay_send_quotes(closer, send, marks_by_oid=send_marks))
     return out
 
 
@@ -2254,6 +2303,7 @@ def classify_card_trades(
     dispatched: set | None = None,
     *,
     all_fills: list[dict[str, Any]] | None = None,
+    send_marks: dict[int, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """One row per new-risk card send: how that trade actually ended.
 
@@ -2321,7 +2371,9 @@ def classify_card_trades(
             else:
                 kind = EXIT_OPERATOR
             used.add(idx)
-            related = _related_fills(row, fill, all_fills)
+            related = _related_fills(
+                row, fill, all_fills, send_marks=send_marks
+            )
             cons = conservative_trade_pnl(related)
             trade.update(
                 exit=kind,
@@ -2337,11 +2389,14 @@ def classify_card_trades(
     return out
 
 
-def _journal_exit_facts() -> tuple[list[dict[str, Any]], set, list[dict[str, Any]]]:
-    """Closing fills, dispatched order ids, and every fill (for fees / quotes)."""
+def _journal_exit_facts() -> tuple[
+    list[dict[str, Any]], set, list[dict[str, Any]], dict[int, dict[str, Any]]
+]:
+    """Closing fills, dispatched order ids, every fill, and send NBBO by oid."""
     fills: list[dict[str, Any]] = []
     placed: set = set()
     all_fills: list[dict[str, Any]] = []
+    send_marks: dict[int, dict[str, Any]] = {}
     try:
         from abcxauto.memory import get_journal
 
@@ -2355,9 +2410,18 @@ def _journal_exit_facts() -> tuple[list[dict[str, Any]], set, list[dict[str, Any
         fn = getattr(journal, "listed_fills", None)
         if callable(fn):
             all_fills = [f for f in (fn() or []) if isinstance(f, dict)]
+        fn = getattr(journal, "send_marks_by_order_id", None)
+        if callable(fn):
+            raw = fn() or {}
+            if isinstance(raw, dict):
+                for key, val in raw.items():
+                    try:
+                        send_marks[int(key)] = val if isinstance(val, dict) else {}
+                    except (TypeError, ValueError):
+                        continue
     except Exception:
         logger.debug("journal exit facts unavailable", exc_info=True)
-    return fills, placed, all_fills
+    return fills, placed, all_fills, send_marks
 
 
 def _empty_score(card: str = "", card_type: str = "") -> dict[str, Any]:
@@ -2429,8 +2493,10 @@ def card_scores(cards: list[dict[str, Any]] | None = None) -> list[dict[str, Any
             realized = dict(fn() or {})
     except Exception:
         realized = {}
-    fills, placed, all_fills = _journal_exit_facts()
-    trades = classify_card_trades(sends, fills, placed, all_fills=all_fills)
+    fills, placed, all_fills, send_marks = _journal_exit_facts()
+    trades = classify_card_trades(
+        sends, fills, placed, all_fills=all_fills, send_marks=send_marks
+    )
     buckets: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _bucket(card_type: Any, name: str) -> dict[str, Any]:
@@ -2735,7 +2801,7 @@ def _finite_pnl(raw: Any) -> float | None:
 
 
 def _verdict_edge(score: dict[str, Any], *, paper: bool) -> float | None:
-    """P&L the verdict reads. Paper TWS realized is never this number."""
+    """P&L the verdict reads. Paper TWS realized / mid is never this number."""
     cons = _finite_pnl(score.get("conservative_pnl"))
     if cons is not None:
         return cons
@@ -2828,6 +2894,8 @@ def card_verdict(
             return out
         if not conservative or fill == FILL_ASSUMPTION_PAPER_MID:
             out["cannot_graduate_reason"] = "paper_mid cannot graduate"
+        elif paper and cons_mark is None:
+            out["cannot_graduate_reason"] = "no conservative_pnl"
         elif edge is None:
             out["cannot_graduate_reason"] = "no conservative_pnl"
         elif not has_kill:
@@ -2890,7 +2958,7 @@ def age_out_open_lots(
         index[card_key(type_name, name)] = card
         by_name.setdefault(name.lower(), []).append(card)
     sends = resolve_send_types(_card_sends(), state)
-    fills, placed, _all_fills = _journal_exit_facts()
+    fills, placed, _all_fills, _send_marks = _journal_exit_facts()
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for trade in classify_card_trades(sends, fills, placed):

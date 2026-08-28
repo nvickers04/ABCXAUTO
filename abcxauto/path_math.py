@@ -131,6 +131,9 @@ def signed_premium_usd(row: dict[str, Any] | None) -> float | None:
 
 _BID_KEYS = ("bid", "nbbo_bid", "bid_at_send", "send_bid")
 _ASK_KEYS = ("ask", "nbbo_ask", "ask_at_send", "send_ask")
+_LAST_KEYS = ("ibkr_last", "last", "mid")
+_MID_INSIDE_LABELS = frozenset({"mid_inside_spread", "inside_spread"})
+_PX_EPS = 1e-9
 
 
 def commission_cost(row: dict[str, Any] | None) -> float:
@@ -168,12 +171,45 @@ def quote_bid_ask(row: dict[str, Any] | None) -> tuple[float | None, float | Non
     return _quote_px(row, _BID_KEYS), _quote_px(row, _ASK_KEYS)
 
 
+def _px_near(left: float | None, right: float | None) -> bool:
+    if left is None or right is None:
+        return False
+    return abs(left - right) <= _PX_EPS
+
+
+def _real_nbbo(bid: float | None, ask: float | None) -> bool:
+    """A usable spread. Locked last=bid=ask is not NBBO."""
+    return bid is not None and ask is not None and (ask - bid) > _PX_EPS
+
+
+def _side_far(sign: float, bid: float | None, ask: float | None) -> float | None:
+    return ask if sign < 0 else bid
+
+
+def fill_at_or_through_far_side(row: dict[str, Any] | None) -> bool:
+    """True when the print is already the conservative side of a real NBBO."""
+    if not isinstance(row, dict):
+        return False
+    qty = _row_qty(row)
+    sign = _side_sign(row, qty if qty is not None else 1.0)
+    if sign is None:
+        return False
+    fill = _fill_price(row)
+    bid, ask = quote_bid_ask(row)
+    if fill is None or not _real_nbbo(bid, ask):
+        return False
+    if sign < 0:
+        return fill + _PX_EPS >= ask  # type: ignore[operator]
+    return fill - _PX_EPS <= bid  # type: ignore[operator]
+
+
 def conservative_px(row: dict[str, Any] | None) -> float | None:
     """Debit at ask / credit at bid, or the worse of fill vs that NBBO.
 
     A mid fill inside the spread marks to the far side. A fill already
     through the far side keeps the fill. No quote side means None — a
-    paper TWS mid is not a conservative print.
+    paper TWS mid is not a conservative print. Locked last=bid=ask is
+    the same mid with a sticker, not a reprice.
     """
     if not isinstance(row, dict):
         return None
@@ -183,13 +219,39 @@ def conservative_px(row: dict[str, Any] | None) -> float | None:
         return None
     fill = _fill_price(row)
     bid, ask = quote_bid_ask(row)
-    if sign < 0:
-        if ask is None:
-            return None
-        return max(fill, ask) if fill is not None else ask
-    if bid is None:
+    last = _quote_px(row, _LAST_KEYS)
+    far = _side_far(sign, bid, ask)
+    if far is None:
         return None
-    return min(fill, bid) if fill is not None else bid
+    if bid is not None and ask is not None and not _real_nbbo(bid, ask):
+        return None
+    real = _real_nbbo(bid, ask)
+    if fill_at_or_through_far_side(row):
+        return fill if fill is not None else far
+    label = str(row.get("fill_label") or "").strip().lower()
+    inside = (
+        fill is not None
+        and real
+        and bid + _PX_EPS < fill < ask - _PX_EPS  # type: ignore[operator]
+    )
+    if inside or label in _MID_INSIDE_LABELS:
+        if fill is not None and _px_near(far, fill):
+            return None
+        return far
+    # One-sided quote that is the last and the fill: last stored as bid/ask.
+    if (
+        not real
+        and fill is not None
+        and last is not None
+        and _px_near(fill, last)
+        and _px_near(far, last)
+    ):
+        return None
+    if fill is None:
+        return far
+    if sign < 0:
+        return max(fill, far)
+    return min(fill, far)
 
 
 def conservative_premium_usd(row: dict[str, Any] | None) -> float | None:
@@ -212,8 +274,9 @@ def conservative_trade_pnl(fills: list[Any] | None) -> float | None:
     """Round-trip conservative cash minus commissions.
 
     Needs at least two qty-bearing fills (entry and exit), each with a
-    quote side. A single closer is not a mark. Missing quotes return None
-    rather than falling back to a paper mid.
+    quote side. A single closer is not a mark. Missing quotes, a locked
+    last=bid=ask, or a mark equal to the mid print return None rather
+    than falling back to paper TWS realized / last.
     """
     total = 0.0
     n = 0
@@ -225,6 +288,14 @@ def conservative_trade_pnl(fills: list[Any] | None) -> float | None:
             continue
         prem = conservative_premium_usd(raw)
         if prem is None:
+            return None
+        fill_prem = signed_premium_usd(raw)
+        if (
+            fill_prem is not None
+            and abs(prem - round(fill_prem, 4)) <= 1e-4
+            and not fill_at_or_through_far_side(raw)
+        ):
+            # Mid-equal: the "conservative" print is the fill itself.
             return None
         total += prem - commission_cost(raw)
         n += 1
