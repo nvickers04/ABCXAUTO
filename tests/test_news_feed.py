@@ -32,6 +32,8 @@ def test_format_news_for_prompt_empty():
     assert "NEWS" in text
     assert "no headlines" in text
     assert "MDA" not in text
+    assert "color only" in text
+    assert "not a trigger" in text
 
 
 def test_format_news_for_prompt_items():
@@ -41,6 +43,8 @@ def test_format_news_for_prompt_items():
     ])
     assert "[SPY] Markets rally" in text
     assert "[AAPL] Apple supplier" in text
+    assert "color only" in text
+    assert "not a trigger" in text
 
 
 def test_format_news_for_prompt_timeout_is_unavailable_not_empty():

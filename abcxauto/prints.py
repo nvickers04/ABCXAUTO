@@ -15,6 +15,7 @@ _ET = ZoneInfo("America/New_York")
 
 USE_IBKR = "ibkr_live_for_decisions"
 USE_MDA = "mda_context_not_send_geometry"
+USE_MDA_NEWS = "color_not_trigger"
 
 _MDA_MISS: dict[str, float] = {}
 _MDA_MISS_TTL_S = 1800.0
@@ -273,6 +274,7 @@ def attach_mda_news(rows: list[dict[str, Any]], items: list[dict[str, Any]] | No
         mda.setdefault("source", "mda")
         mda.setdefault("freshness", "delayed_15m")
         mda.setdefault("use", USE_MDA)
+        mda["news_use"] = USE_MDA_NEWS
         row["mda"] = mda
         n += 1
     return n
