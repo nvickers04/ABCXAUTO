@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -934,31 +935,68 @@ def capacity_fact(
     *,
     max_open_positions: int = 0,
     open_orders: list[dict] | None = None,
+    net_liq: Any = None,
+    cap_armed: bool | None = None,
 ) -> dict[str, Any]:
-    """Fact: filled lots + working entries vs max_open_positions (0 max = unlimited)."""
+    """Fact: open count + current NL. Slot refuse only when the cap is armed.
+
+    Working entries reserve slots when ``cap_armed`` (live / gates-on).
+    Paper gates-off: leftover mop is Grok's N, not a refuse. 0 max = unlimited.
+    """
     used = open_position_count(positions)
     pending = working_entry_slots(open_orders, positions)
     charged = used + pending
     max_n = int(max_open_positions or 0)
+    try:
+        nl = float(net_liq) if net_liq not in (None, "") else None
+        if nl is not None and not math.isfinite(nl):
+            nl = None
+    except (TypeError, ValueError):
+        nl = None
+    if cap_armed is None:
+        armed = max_n > 0
+    else:
+        armed = bool(cap_armed)
     if max_n <= 0:
         return {
             "open_count": used,
             "pending_entries": pending,
             "max_open_positions": 0,
+            "nl": nl,
             "slots_left": None,
             "allows_new_risk": True,
+            "cap_armed": False,
+            "with_size": "size_pct_nl",
             "note": "max_open_positions disabled (unlimited capacity Fact)",
         }
     left = max(0, max_n - charged)
-    note = f"{used}/{max_n} open"
+    note = f"{used} open"
     if pending:
         note += f" + {pending} working-entry"
+    if nl is not None:
+        note += f", nl={nl:g}"
+    note += f"; mop={max_n}"
+    if not armed:
+        return {
+            "open_count": used,
+            "pending_entries": pending,
+            "max_open_positions": max_n,
+            "nl": nl,
+            "slots_left": None,
+            "allows_new_risk": True,
+            "cap_armed": False,
+            "with_size": "size_pct_nl",
+            "note": note + " (not armed; size and slots together)",
+        }
     note += f"; {left} slot(s) for new risk"
     return {
         "open_count": used,
         "pending_entries": pending,
         "max_open_positions": max_n,
+        "nl": nl,
         "slots_left": left,
         "allows_new_risk": left > 0,
+        "cap_armed": True,
+        "with_size": "size_pct_nl",
         "note": note,
     }

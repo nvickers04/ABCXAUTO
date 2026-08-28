@@ -304,8 +304,9 @@ def test_format_wake_includes_day_facts():
             "max_risk_per_trade_pct": 25.0,
             "risk_per_trade_pct": 25.0,
             "sizing_floors": True,
+            "nl": 36000,
             "open_lots": ["IWM 260821C306 x1", "QQQ 260821C735 x1"],
-            "capacity": {"open_count": 8, "max_open_positions": 15},
+            "capacity": {"open_count": 8, "max_open_positions": 15, "nl": 36000},
             "mix": {"long_c": 7, "short_c": 1, "vert": 1},
             "playbook": {
                 "revision": 51,
@@ -344,6 +345,7 @@ def test_format_wake_includes_day_facts():
     assert "floors=on" in text
     assert "risk/trade=" not in text
     assert "open=8/15" in text
+    assert "nl=36000" in text
     assert "open_lots=IWM 260821C306 x1,QQQ 260821C735 x1" in text
     assert "haltAt=" in text
     assert "playbook rev=51" not in text

@@ -70,7 +70,7 @@ def test_update_capacity(tmp_path, monkeypatch):
     update_capacity_config(max_open_positions=12)
     assert get_config().max_open_positions == 12
     update_capacity_config(max_open_positions=99)
-    assert get_config().max_open_positions == 25
+    assert get_config().max_open_positions == 99
 
 
 def test_update_risk_config_persists(tmp_path, monkeypatch):

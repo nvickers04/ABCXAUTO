@@ -24,7 +24,8 @@ RISK_FLOOR: dict[str, tuple[float, float]] = {
     "max_option_premium_pct": (1.0, 25.0),
     "max_symbol_concentration_pct": (5.0, 25.0),
 }
-# Integer capacity: 0 would disable the gate — forbidden. Grok sets N.
+# Live integer cap only. Paper Grok picks N for this book — do not shove
+# that N back into 1–25 or treat 0 as 15. 0 on live would disable the gate.
 MAX_OPEN_POSITIONS_RANGE = (1, 25)
 
 # Booleans the agent cannot turn off. risk_gates_enabled is live-locked;
@@ -51,6 +52,21 @@ def _live_desk(cfg: Any) -> bool:
     except (TypeError, ValueError):
         port = 0
     return port in _LIVE_IBKR_PORTS
+
+
+def slot_cap_armed(cfg: Any = None) -> bool:
+    """True when the leftover integer slot cap may refuse new risk.
+
+    Live (7496 family) is always armed. Paper is armed only with gates on.
+    Paper gates-off: Grok sends names; leftover 12/15/25 is not a refuse.
+    """
+    if cfg is None:
+        from abcxauto.config import get_config
+
+        cfg = get_config()
+    if _live_desk(cfg):
+        return True
+    return bool(getattr(cfg, "risk_gates_enabled", True))
 # Mode/port are operator-only. Extra keys here are rejects, not knobs.
 _LIVE_GATED: frozenset[str] = frozenset({
     "trading_mode",
@@ -107,14 +123,36 @@ def _i(value: Any) -> int | None:
         return None
 
 
-def clamp_risk_to_floor(key: str, value: Any) -> tuple[Any, dict[str, Any] | None]:
+def clamp_risk_to_floor(
+    key: str,
+    value: Any,
+    *,
+    cfg: Any = None,
+) -> tuple[Any, dict[str, Any] | None]:
     """Clamp a risk knob so it cannot weaken the immutable floor."""
     if key == "max_open_positions":
         n = _i(value)
         if n is None:
             return None, None
+        desk = cfg
+        if desk is None:
+            try:
+                from abcxauto.config import get_config
+
+                desk = get_config()
+            except Exception:
+                desk = None
+        if desk is None or not _live_desk(desk):
+            # Paper: Grok's N for this book. 0 = no leftover integer cap.
+            # Do not cap at 25 or convert 0 → 15.
+            if n < 0:
+                return None, None
+            return n, None
         lo, hi = MAX_OPEN_POSITIONS_RANGE
-        clamped = max(lo, min(hi, n))
+        if n < lo:
+            default = int(UNSUPERVISED_DEFAULTS["max_open_positions"])
+            return default, {"raw": n, "clamped": default}
+        clamped = min(hi, n)
         note = {"raw": n, "clamped": clamped} if clamped != n else None
         return clamped, note
     if key not in RISK_FLOOR:
@@ -201,26 +239,23 @@ def apply_self_tune(
             continue
         if key in RISK_FLOOR or key == "max_open_positions":
             before[key] = getattr(cfg, key, None)
-            new_v, note = clamp_risk_to_floor(key, value)
+            new_v, note = clamp_risk_to_floor(key, value, cfg=cfg)
             if new_v is None:
                 rejected[key] = "invalid value"
                 continue
-            hi = (
-                MAX_OPEN_POSITIONS_RANGE[1]
-                if key == "max_open_positions"
-                else RISK_FLOOR[key][1]
-            )
-            try:
-                as_f = float(new_v)
-            except (TypeError, ValueError):
-                rejected[key] = "invalid value"
-                continue
-            if not math.isfinite(as_f):
-                rejected[key] = "invalid value"
-                continue
-            if as_f > hi:
-                note = {"raw": value, "clamped": hi}
-                new_v = int(hi) if key == "max_open_positions" else float(hi)
+            if key != "max_open_positions":
+                hi = RISK_FLOOR[key][1]
+                try:
+                    as_f = float(new_v)
+                except (TypeError, ValueError):
+                    rejected[key] = "invalid value"
+                    continue
+                if not math.isfinite(as_f):
+                    rejected[key] = "invalid value"
+                    continue
+                if as_f > hi:
+                    note = {"raw": value, "clamped": hi}
+                    new_v = float(hi)
             if note:
                 clamped[key] = note
             if key == "max_open_positions":
@@ -376,13 +411,18 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
         elif cur < lo:
             fixes[key] = lo
     mop = _i(getattr(cfg, "max_open_positions", 0))
-    lo_p, hi_p = MAX_OPEN_POSITIONS_RANGE
-    if mop is None or mop < lo_p or mop > hi_p:
-        fixes["max_open_positions"] = (
-            UNSUPERVISED_DEFAULTS["max_open_positions"]
-            if mop is None or mop < lo_p
-            else hi_p
-        )
+    if _live_desk(cfg):
+        lo_p, hi_p = MAX_OPEN_POSITIONS_RANGE
+        if mop is None or mop < lo_p or mop > hi_p:
+            fixes["max_open_positions"] = (
+                UNSUPERVISED_DEFAULTS["max_open_positions"]
+                if mop is None or mop < lo_p
+                else hi_p
+            )
+    elif mop is None or mop < 0:
+        # Paper: keep Grok's N (including 0 = unlimited, or N > 25).
+        # Only repair missing / negative leftover garbage — not a chosen N.
+        fixes["max_open_positions"] = UNSUPERVISED_DEFAULTS["max_open_positions"]
     for key in LOCKED_TRUE:
         if key == "risk_gates_enabled" and not _live_desk(cfg):
             # Paper: operator-off survives start. Live still forces gates on.
@@ -501,17 +541,23 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
         }
 
     lo_open, hi_open = MAX_OPEN_POSITIONS_RANGE
+    mop_now = getattr(c, "max_open_positions", None)
+    mop_lever: dict[str, Any] = {
+        "now": mop_now,
+        "min": lo_open,
+        "unit": "slots",
+        "pick": "this book",
+        "with": "size_pct_nl",
+    }
+    if _live_desk(c):
+        mop_lever["max"] = hi_open
     return {
         "max_risk_per_trade_pct": _pct("max_risk_per_trade_pct"),
         "max_option_premium_pct": _pct("max_option_premium_pct"),
         "max_position_pct": _pct("max_position_pct"),
         "daily_loss_limit_pct": _pct("daily_loss_limit_pct"),
         "max_peak_drawdown_pct": _pct("max_peak_drawdown_pct"),
-        "max_open_positions": {
-            "now": getattr(c, "max_open_positions", None),
-            "min": lo_open,
-            "max": hi_open,
-            "unit": "slots",
-        },
+        "max_open_positions": mop_lever,
+        "together": "size_pct_nl and max_open_positions — not pick-one",
         "change": "self_tune",
     }

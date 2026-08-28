@@ -385,7 +385,14 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "Algo/auction exits (vwap/twap/iceberg/adaptive/MOC/MOO/...) are sendable "
         "on protect/manage/new-entry; closing_position required. "
         "defined_risk_only still rejects unlimited/naked shapes; cash-only still "
-        "rejects SHORT stock brackets.",
+        "rejects SHORT stock brackets. "
+        "Size (size_pct_nl, % of current NL) and max_open_positions (concurrent lots) "
+        "are two knobs of the same book — together, not pick-one. "
+        "The same size on 3 lots is not the same book as on 20 lots. "
+        "Widening the book does not replace size, and the reverse. "
+        "iron condor, iron butterfly, and butterfly: one WORKING at a time. "
+        "Fill or cancel, then the next. Filled lots do not use that slot. "
+        "vertical, calendar, and diagonal are not in that IBKR [202] bucket.",
         "",
     ]
     for name in sorted(ORDER_EXAMPLES):

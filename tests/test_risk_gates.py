@@ -471,6 +471,30 @@ async def test_max_open_positions_rejection(gate, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_paper_gates_off_skips_leftover_mop_refuse(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_config",
+        lambda: _cfg(
+            risk_gates_enabled=False,
+            trading_mode="paper",
+            ibkr_port=7497,
+            max_open_positions=2,
+            max_position_pct=0,
+            daily_loss_limit_pct=0,
+        ),
+    )
+    gate = reset_risk_gate()
+    positions = [
+        {"symbol": "AAPL", "quantity": 10, "sec_type": "STK"},
+        {"symbol": "MSFT", "quantity": 5, "sec_type": "STK"},
+        {"symbol": "NVDA", "quantity": 3, "sec_type": "STK"},
+    ]
+    ok, reason = await gate.pre_trade_check(_bracket(), FakeConnector(positions=positions))
+    assert ok is True
+    assert reason == "risk gates disabled"
+
+
+@pytest.mark.asyncio
 async def test_max_daily_trades_removed_no_gate(gate, monkeypatch):
     """Trade frequency is Grok's clock — no max_daily_trades hard gate."""
     monkeypatch.setattr(

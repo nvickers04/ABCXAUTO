@@ -114,7 +114,7 @@ RISK_FIELDS = (
     ("max_symbol_concentration_pct", "Max per name", "% of NetLiq, all lots, 5 – 25"),
     ("max_peak_drawdown_pct", "Peak drawdown", "% of NetLiq, 2 – 25"),
     ("max_option_premium_pct", "Max option premium", "% of NetLiq, 1 – 25"),
-    ("max_open_positions", "Max open lots", "slots, 1 – 25"),
+    ("max_open_positions", "Max open lots", "slots — Grok picks N for this book"),
 )
 # ProEngine._note kinds. Anything not listed still paints its message in MUTED,
 # so a new note kind is visible the day it is added.
