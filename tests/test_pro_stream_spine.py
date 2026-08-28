@@ -21,6 +21,7 @@ from abcxauto.pro_desktop import (
     grok_sub_state,
     last_card_send_label,
     stream_line_kind,
+    think_tail_in_flight,
     think_tail_last_say,
     think_tail_tool_chips,
 )
@@ -459,6 +460,15 @@ def test_strip_looking_beats_fail_streak_on_a_live_stream(pro):
     assert grok_sub_state(
         running=True, status="Thinking", fail_streak=1, tail_moved=False
     ) == "looking"
+    assert grok_sub_state(
+        running=True, status="On", fail_streak=1, tail_moved=False, tail_live=True
+    ) == "looking"
+    assert grok_sub_state(
+        running=True, status="On", fail_streak=1, tail_moved=False, tail_live=False
+    ) == "look failed"
+    assert grok_sub_state(
+        running=True, status="On", fail_streak=0, tail_moved=False, tail_live=False
+    ) == "sat"
     assert pro.lbl_hs_state.value == "looking"
     assert pro.lbl_desk_sub.value == "looking"
     assert pro.lbl_hs_state.color == GREEN
@@ -474,13 +484,137 @@ def test_strip_looking_when_think_tail_moves_while_status_lags(pro):
     pro.engine._fail_streak = 1
     s.think_live = "--- GROK ---\n[think]\n"
     pro._tail_len = len(s.think_live)
+    pro._tail_fp = s.think_live[-512:]
     pro._tail_moved_mono = 0.0
     pro._sync_health_strip()
-    assert pro.lbl_hs_state.value == "look failed"
+    # Open [think] is in flight even when length did not grow this tick.
+    assert think_tail_in_flight(s.think_live)
+    assert pro.lbl_hs_state.value == "looking"
     s.think_live += "[book]\n[status]\n[playbook]\n[scan]\n"
     pro._sync_health_strip()
     assert pro.lbl_hs_state.value == "looking"
     assert pro.lbl_desk_sub.value == "looking"
+
+
+def test_strip_fail_streak_when_the_look_is_actually_idle(pro):
+    """fail_streak/sat only win when the tail is idle — a finished say, no motion."""
+    s = pro.engine.state
+    s.running = True
+    s.autonomous = True
+    s.status = "On"
+    done = (
+        "--- GROK ---\n"
+        "[say]\n"
+        "Holding for the open. Nothing to chase premarket.\n"
+    )
+    s.think_live = done
+    pro.engine._fail_streak = 1
+    pro._tail_len = len(done)
+    pro._tail_fp = done[-512:]
+    pro._tail_moved_mono = 0.0
+    pro._sync_health_strip()
+    assert not think_tail_in_flight(done)
+    assert pro.lbl_hs_state.value == "look failed"
+    pro.engine._fail_streak = 0
+    pro._sync_health_strip()
+    assert pro.lbl_hs_state.value == "sat"
+
+
+FRIDAY_0800 = "\n".join(
+    [
+        "--- GROK ---",
+        "[think]",
+        "premarket, 34 minutes to open",
+        "[say]",
+        "Premarket, 34 minutes to open - pulling the book, playbook, "
+        "and option facts before any ticket.",
+        "[book]",
+        "[status]",
+        "[playbook]",
+        "[option_facts]",
+        "[fills]",
+        "[scan]",
+        "[quote]",
+        "[news]",
+        "--- GROK ---",
+        "[say]",
+        "Premarket dump is PYPL/MRVL - quoting those names and checking "
+        "whether any flush card is actually on before the open.",
+        "--- GROK ---",
+        "[think]",
+        "Let me analyze the situation carefully. Got it - thanks for "
+        "laying out the full setup...",
+        "",
+    ]
+)
+
+
+def test_strip_looking_friday_0800_moving_tail_and_recent_say(pro):
+    """Friday 8:00 CT glass: live think_tail + PYPL/MRVL say paints looking, not sat.
+
+    Engine status is On (think returned or not yet Thinking) and fail_streak
+    may be set. The tail is mid-look: chips, a recent say, an open [think].
+    That is looking. Sat is only correct when the look is actually idle.
+    """
+    s = pro.engine.state
+    s.running = True
+    s.autonomous = True
+    s.status = "On"
+    s.think_live = FRIDAY_0800
+    s.tool_trace = []
+    s.sends_last_look = 0
+    pro.engine._fail_streak = 1
+    s.backoff_wait_s = 0.0
+    # Already-painted frozen tick: length did not grow, 2.5s hold expired.
+    pro._tail_len = len(FRIDAY_0800)
+    pro._tail_fp = FRIDAY_0800[-512:]
+    pro._tail_moved_mono = 0.0
+    pro._sync_health_strip()
+    assert think_tail_in_flight(FRIDAY_0800)
+    assert "PYPL/MRVL" in think_tail_last_say(FRIDAY_0800)
+    assert think_tail_tool_chips(FRIDAY_0800) == [
+        "book",
+        "status",
+        "playbook",
+        "option_facts",
+        "fills",
+        "scan",
+        "quote",
+        "news",
+    ]
+    assert grok_sub_state(
+        running=True, status="On", fail_streak=1, tail_moved=False, tail_live=True
+    ) == "looking"
+    assert pro.lbl_hs_state.value == "looking"
+    assert pro.lbl_desk_sub.value == "looking"
+    assert pro.lbl_hs_state.color == GREEN
+    assert "look failed" not in (pro.lbl_hs_next.value or "")
+    assert "8 tool(s)" in (pro.lbl_hs_look.value or "")
+    assert "PYPL/MRVL" in (pro.lbl_last_send.value or "")
+    # Moving tail + recent say stays looking.
+    s.think_live += " quoting PYPL/MRVL before the open\n"
+    pro._sync_health_strip()
+    assert pro.lbl_hs_state.value == "looking"
+    pro.engine._fail_streak = 0
+    pro._sync_health_strip()
+    assert pro.lbl_hs_state.value == "looking"
+
+
+def test_strip_idle_cap_is_sat_even_with_a_leftover_think(pro):
+    """Session cap / idle beats a leftover open think. That look is not live."""
+    s = pro.engine.state
+    s.running = True
+    s.autonomous = True
+    s.status = "Idle"
+    s.think_live = FRIDAY_0800
+    pro.engine._session_capped = True
+    pro.engine._fail_streak = 0
+    pro._sync_health_strip()
+    assert grok_sub_state(
+        running=True, status="Idle", fail_streak=0, tail_live=True
+    ) == "sat"
+    assert pro.lbl_hs_state.value == "sat"
+    assert "session cap" in (pro.lbl_hs_next.value or "")
 
 
 def test_strip_last_line_is_last_say_or_real_card_send(pro, monkeypatch):
