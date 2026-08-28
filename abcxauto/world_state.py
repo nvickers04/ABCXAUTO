@@ -1754,7 +1754,7 @@ def format_wake(
         if ev is not None:
             parts.append(f"event={ev.kind} {ev.detail}.".strip())
         # leftover say / prev= / unused= stay off wake.
-    parts.append("send.")
+    # Desk facts only — no trailing "send." (Grok reads that as an operator command).
     body = " ".join(parts)
     lead = worst_wake_fact(unprotected=unprotected, day=day, session=session)
     if lead:

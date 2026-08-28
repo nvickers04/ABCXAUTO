@@ -161,7 +161,8 @@ def test_format_wake_no_tape_keeps_lots_and_minutes():
     assert "session_prep" not in text
     assert "estimate" not in text.lower()
     assert "you must" not in text.lower()
-    assert text.rstrip().split()[-1] == "send."
+    assert text.rstrip().split()[-1] != "send."
+    assert not text.rstrip().endswith("send.")
 
 
 def test_format_wake_rth_fill_delta_no_tape_when_flat():

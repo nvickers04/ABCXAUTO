@@ -2705,7 +2705,8 @@ def test_live_poke_interrupt_skips_reset_chat():
     assert "session=" in text
     assert "This is a delta" not in text
     assert "yield resume" not in text
-    assert "send." in text
+    # poke is format_wake facts, not a send command
+    assert text.rstrip().split()[-1] != "send."
     assert "set_wake" not in text
     assert "ORDER EXAMPLES" not in text
     assert "AWARENESS" not in text
