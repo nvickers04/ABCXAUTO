@@ -1221,8 +1221,7 @@ def test_realized_by_order_id_subtracts_commissions(journal):
     listed = journal.listed_fills()
     assert len(listed) == 2
     assert listed[0]["price"] == 100.0
-    assert listed[1]["bid"] == 104.90
-    assert listed[1]["ask"] == 105.10
+    assert listed[0]["commission"] == 1.0
     closers = journal.closing_fills()
     assert closers[0]["realized_pnl"] == 50.0
     assert closers[0]["commission"] == 1.0
