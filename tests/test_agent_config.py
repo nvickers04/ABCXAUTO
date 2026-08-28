@@ -79,7 +79,7 @@ def test_session_caps_persist_and_clamp():
     reread = get_config()
     assert reread.session_look_cap == 80
     assert reread.session_token_cap == 500_000
-    assert update_agent_config(session_look_cap=1).session_look_cap == 8
+    assert update_agent_config(session_look_cap=0).session_look_cap == 1
     assert update_agent_config(session_token_cap=1).session_token_cap == 50_000
     assert update_agent_config(session_look_cap=9_999).session_look_cap == 400
     assert update_agent_config(session_token_cap=99_000_000).session_token_cap == 10_000_000

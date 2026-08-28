@@ -79,7 +79,7 @@ PERSISTED_SETTINGS_KEYS = PERSISTED_OPERATOR_KEYS | AGENT_CONFIG_KEYS
 AGENT_BOUNDS: dict[str, tuple[float, float]] = {
     "temperature": (0.0, 2.0),
     "max_tokens": (1024, 131_072),
-    "session_look_cap": (8, 400),
+    "session_look_cap": (1, 400),
     "session_token_cap": (50_000, 10_000_000),
     "monitor_poll_s": (5, 900),
     "monitor_review_s": (30, 21_600),

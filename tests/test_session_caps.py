@@ -24,7 +24,14 @@ from abcxauto.session_caps import (
 )
 from abcxauto.self_tune import apply_self_tune
 from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+from tests.test_pro_engine import _Cfg as _EngineCfg
 from tests.test_pro_engine import _stay_up_snap, _wire_stay_up_engine
+
+
+@pytest.fixture(autouse=True)
+def _engine_xai(monkeypatch):
+    """ProEngine.start requires an xAI key. Same stub as test_pro_engine."""
+    monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _EngineCfg())
 
 
 def _et(y, m, d, h=10, mi=0):

@@ -95,7 +95,7 @@ PACING_FIELDS = (
     (
         "session_look_cap",
         "Session look cap",
-        "8 – 400 looks this session (premarket / RTH). Hit stays idle",
+        "1 – 400 looks this session (premarket / RTH). Hit stays idle",
     ),
     (
         "session_token_cap",

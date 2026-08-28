@@ -28,7 +28,7 @@ _DEFAULT_PATH = _REPO / "data" / "state" / "session_caps.json"
 # regular hours. A 45s no-ticket grind stops in about two hours.
 DEFAULT_LOOK_CAP = 160
 DEFAULT_TOKEN_CAP = 2_500_000
-LOOK_CAP_RANGE = (8, 400)
+LOOK_CAP_RANGE = (1, 400)
 TOKEN_CAP_RANGE = (50_000, 10_000_000)
 
 _cache: dict[str, Any] | None = None

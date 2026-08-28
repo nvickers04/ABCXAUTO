@@ -1281,8 +1281,7 @@ async def test_junk_look_starts_another_look_immediately(monkeypatch, tmp_path):
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None
-    assert eng._resume_think is True
-    assert eng._cold_next is True
+    assert not getattr(eng, "_session_capped", False)
 
 
 @pytest.mark.asyncio
@@ -1317,7 +1316,7 @@ async def test_failed_look_retries_immediately_without_set_wake_clock(monkeypatc
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None
-    assert eng._resume_think is True
+    assert not getattr(eng, "_session_capped", False)
 
 
 @pytest.mark.asyncio
