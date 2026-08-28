@@ -877,6 +877,9 @@ def test_the_stream_dominates_its_surface(headless_pro):
     assert headless_pro.btn_copy_stream in painted
     assert headless_pro.lbl_stream_status in painted
     assert headless_pro.btn_stream_follow in painted
+    assert headless_pro.lbl_why not in painted
+    assert headless_pro.lbl_path not in painted
+    assert headless_pro.lbl_mix not in painted
 
 
 def test_the_status_strip_is_a_bar_not_a_hero_panel(headless_pro):
@@ -901,9 +904,13 @@ def test_the_status_strip_is_a_bar_not_a_hero_panel(headless_pro):
     ):
         assert kept in painted
     # Cut: repeats of the rail pill. Open MTM lives on the Account card.
+    # Path / Mix / Why are leftover dashboard copies — hidden, not painted.
     for cut in (
         headless_pro.lbl_status,
         headless_pro.lbl_pace,
+        headless_pro.lbl_why,
+        headless_pro.lbl_path,
+        headless_pro.lbl_mix,
     ):
         assert cut not in painted
         assert cut in list(_walk(headless_pro._hidden_metrics))

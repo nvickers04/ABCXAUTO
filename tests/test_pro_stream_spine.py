@@ -18,8 +18,10 @@ from abcxauto.pro_desktop import (
     NAV,
     NAV_TITLES,
     ProTerminal,
+    format_token_count,
     grok_sub_state,
     last_card_send_label,
+    session_cap_idle_line,
     stream_line_kind,
     think_tail_in_flight,
     think_tail_last_say,
@@ -513,6 +515,12 @@ def test_strip_looking_beats_fail_streak_on_a_live_stream(pro):
     assert grok_sub_state(
         running=True, status="On", fail_streak=0, tail_moved=False, tail_live=False
     ) == "sat"
+    assert grok_sub_state(
+        running=True, status="Idle", fail_streak=0, tail_live=True
+    ) == "idle"
+    assert grok_sub_state(
+        running=False, paused=True, status="Paused", tail_live=True
+    ) == "paused"
     assert pro.lbl_hs_state.value == "looking"
     assert pro.lbl_desk_sub.value == "looking"
     assert pro.lbl_hs_state.color == GREEN
@@ -644,7 +652,7 @@ def test_strip_looking_friday_0800_moving_tail_and_recent_say(pro):
     assert pro.lbl_hs_state.value == "looking"
 
 
-def test_strip_idle_cap_is_sat_even_with_a_leftover_think(pro):
+def test_strip_idle_cap_is_idle_even_with_a_leftover_think(pro):
     """Session cap / idle beats a leftover open think. That look is not live."""
     s = pro.engine.state
     s.running = True
@@ -656,9 +664,131 @@ def test_strip_idle_cap_is_sat_even_with_a_leftover_think(pro):
     pro._sync_health_strip()
     assert grok_sub_state(
         running=True, status="Idle", fail_streak=0, tail_live=True
-    ) == "sat"
-    assert pro.lbl_hs_state.value == "sat"
-    assert "session cap" in (pro.lbl_hs_next.value or "")
+    ) == "idle"
+    assert pro.lbl_hs_state.value == "idle"
+    assert pro.lbl_desk_sub.value == "idle"
+    assert "sat" not in (pro.lbl_hs_state.value or "")
+    assert "idle" in (pro.lbl_hs_next.value or "")
+
+
+def test_session_cap_idle_line_names_the_token_cap():
+    assert format_token_count(2_533_000) == "2.533M"
+    assert format_token_count(2_500_000) == "2.5M"
+    line = session_cap_idle_line(
+        {
+            "why": "tokens",
+            "tokens": 2_533_000,
+            "token_cap": 2_500_000,
+            "looks": 40,
+            "look_cap": 160,
+            "hit": True,
+        }
+    )
+    assert line == "token cap 2.533M/2.5M — idle"
+    assert "sat" not in line
+    looks = session_cap_idle_line(
+        {
+            "why": "looks",
+            "looks": 160,
+            "look_cap": 160,
+            "tokens": 10,
+            "token_cap": 2_500_000,
+            "hit": True,
+        }
+    )
+    assert line != looks
+    assert looks == "look cap 160/160 — idle"
+
+
+def test_cap_idle_paints_idle_and_token_numbers_not_sat(pro, monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.session_caps.usage",
+        lambda session="": {
+            "why": "tokens",
+            "tokens": 2_533_000,
+            "token_cap": 2_500_000,
+            "looks": 40,
+            "look_cap": 160,
+            "hit": True,
+        },
+    )
+    s = pro.engine.state
+    s.running = True
+    s.autonomous = True
+    s.paused = False
+    s.status = "Idle"
+    s.think_live = FRIDAY_0800
+    pro.engine._session_capped = True
+    pro.engine._fail_streak = 0
+    pro._sync_health_strip()
+    assert pro.lbl_hs_state.value == "idle"
+    assert pro.lbl_desk_sub.value == "idle"
+    assert "sat" not in (pro.lbl_hs_state.value or "")
+    assert "sat" not in (pro.lbl_desk_sub.value or "")
+    shown = pro.lbl_hs_next.value or ""
+    assert "2.533M/2.5M" in shown
+    assert "token cap" in shown
+    assert "idle" in shown
+
+
+def test_paused_is_operator_stop_not_sat(pro):
+    s = pro.engine.state
+    s.running = False
+    s.autonomous = False
+    s.paused = True
+    s.status = "Paused"
+    s.think_live = FRIDAY_0800
+    pro._refresh_run_btn()
+    pro._sync_health_strip()
+    assert pro.lbl_desk.value == "Paused"
+    assert pro.lbl_hs_state.value == "paused"
+    assert "sat" not in (pro.lbl_hs_state.value or "")
+    assert "sat" not in (pro.lbl_desk_sub.value or "")
+
+
+def test_lots_chip_is_open_book_count_not_slot_cap(pro, monkeypatch):
+    class _Cfg25:
+        xai_api_key = "test-key"
+        model = "grok-4.6"
+        trading_mode = "paper"
+        ibkr_port = 7497
+        max_open_positions = 25
+
+        @property
+        def is_paper(self) -> bool:
+            return True
+
+    monkeypatch.setattr("abcxauto.pro_desktop.get_config", lambda: _Cfg25())
+    s = pro.engine.state
+    s.equity = 35_000.0
+    s.positions = [
+        {"symbol": "HPQ", "quantity": 1, "sec_type": "OPT", "right": "C",
+         "strike": 28, "expiration": "20260918", "conId": 1},
+        {"symbol": "IWM", "quantity": 1, "sec_type": "OPT", "right": "C",
+         "strike": 306, "expiration": "20260821", "conId": 2},
+        {"symbol": "QQQ", "quantity": 1, "sec_type": "OPT", "right": "C",
+         "strike": 735, "expiration": "20260821", "conId": 3},
+        {"symbol": "SPY", "quantity": 0, "sec_type": "STK", "conId": 4},
+    ]
+    pro._sync_widgets()
+    assert pro.lbl_lot_count.value == "3"
+    assert "/25" not in (pro.lbl_lot_count.value or "")
+    assert "25" not in (pro.lbl_lot_count.value or "")
+    assert "/" not in (pro.lbl_lot_count.value or "")
+
+
+def test_scorecard_page_has_no_path_mix(pro):
+    page = pro._page_scorecard()
+    blob = " | ".join(_texts(page))
+    assert "Path:" not in blob
+    assert "Mix:" not in blob
+    assert "Path" not in blob
+    assert "Mix" not in blob
+    assert not hasattr(pro, "lbl_sc_path")
+    assert not hasattr(pro, "lbl_sc_mix")
+    painted = list(_visible_walk(page))
+    assert pro.lbl_path not in painted
+    assert pro.lbl_mix not in painted
 
 
 def test_strip_last_line_is_last_say_or_real_card_send(pro, monkeypatch):
@@ -831,6 +961,9 @@ def test_dashboard_is_the_stream_not_a_card_wall(pro):
     assert pro.lbl_lot_count not in painted
     assert pro.lbl_status not in painted
     assert pro.lbl_open_upnl not in painted
+    assert pro.lbl_why not in painted
+    assert pro.lbl_path not in painted
+    assert pro.lbl_mix not in painted
 
 
 # -------------------------------------------------------------------- playbook
