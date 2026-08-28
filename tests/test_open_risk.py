@@ -244,9 +244,22 @@ def test_new_entry_rejected_on_structure_cooldown(monkeypatch):
     assert "cooldown" in str((forced or {}).get("note") or "").lower()
 
 
-def test_new_entry_rejected_when_capacity_full():
+def test_new_entry_rejected_when_capacity_full(monkeypatch):
     from abcxauto.agent_loop import gate_ticket
 
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
+    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
+    monkeypatch.setattr(
+        "abcxauto.world_state.get_config",
+        lambda: __import__("types").SimpleNamespace(
+            trading_mode="paper",
+            ibkr_port=7497,
+            is_paper=True,
+            risk_gates_enabled=True,
+            max_open_positions=6,
+        ),
+    )
     strat, forced = gate_ticket(
         _new_entry_act(),
         _judgment_world(
