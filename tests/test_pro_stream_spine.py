@@ -156,6 +156,48 @@ def test_stream_line_kind_classifies_every_marker_the_desk_emits():
     assert stream_line_kind("   ") == "blank"
 
 
+def test_pane_and_copy_read_full_session_not_glass_tail(pro, tmp_path, monkeypatch):
+    """A day bigger than the 8kb stub and 24k RAM window still paints and copies."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    early = "LOOK_ONE\n" + ("a" * 28000) + "\n"
+    late = "LOOK_TWO\n" + ("b" * 4000) + "\n"
+    session = early + late
+    assert len(session) > 24000
+    day_dir = tmp_path / "think_session"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    (day_dir / "2026-08-28.txt").write_text(session, encoding="utf-8")
+    tail = session[-8000:]
+    (tmp_path / "think_tail.txt").write_text(tail, encoding="utf-8")
+    live = session[-24000:]
+    pro.engine.state.think_live = live
+    assert "LOOK_ONE" not in live
+    assert "LOOK_ONE" not in tail
+    assert len(tail) <= 8000
+
+    got = ts.think_session_text(live)
+    assert "LOOK_ONE" in got
+    assert "LOOK_TWO" in got
+    assert len(got) == len(session)
+
+    pro._think_sync_key = None
+    pro._sync_think_stream()
+    painted = "\n".join(_texts(pro.col_stream))
+    assert "LOOK_ONE" in painted
+    assert "LOOK_TWO" in painted
+    status = (pro.lbl_stream_status.value or "").replace(",", "")
+    assert str(len(session)) in status
+    copied = pro._copy_stream_text()
+    assert "LOOK_ONE" in copied
+    assert "LOOK_TWO" in copied
+    assert len(copied) == len(session)
+    clip: list[str] = []
+    pro.page.set_clipboard = lambda t: clip.append(t)
+    pro._copy_stream()
+    assert clip == [session]
+
+
 def test_spine_paints_every_marker_verbatim(pro):
     pro.engine.state.think_live = BUFFER
     pro._sync_think_stream()
@@ -231,8 +273,9 @@ def test_buffer_arriving_hides_the_fallback_but_keeps_it_readable(pro):
     pro.engine.state.think_live = BUFFER
     pro._sync_think_stream()
     assert pro.think_live.visible is False
-    # Copy stream and the plain-text fallback still see the tail.
+    # Hidden fallback stays a short stub; Copy and the spine read the session.
     assert "Bought WMT 70" in (pro.think_live.value or "")
+    assert "Bought WMT 70" in pro._copy_stream_text()
 
 
 def test_follow_chip_holds_position_then_jumps_back_to_live(pro):

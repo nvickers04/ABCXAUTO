@@ -451,14 +451,18 @@ def test_stream_line_widget_follows_tokens(headless_pro):
     assert "delta" in (headless_pro.think_live.value or "")
 
 
-def test_stream_paints_tail_not_full_buffer(headless_pro):
-    blob = ("head-" * 20) + ("tail-" * 400)
+def test_stream_paints_full_buffer_not_just_a_tail(headless_pro):
+    blob = "HEAD_MARK\n" + ("mid.\n" * 500) + "TAIL_MARK\n"
     headless_pro.engine.state.think_live = blob
     headless_pro._think_sync_key = ""
     headless_pro._sync_think_stream()
-    shown = headless_pro.think_live.value or ""
-    assert len(shown) <= 1800
-    assert shown.endswith("tail-" * 4)
+    painted = "\n".join(
+        str(getattr(n, "value", "") or "")
+        for n in _walk(headless_pro.col_stream)
+        if getattr(n, "value", None)
+    )
+    assert "HEAD_MARK" in painted
+    assert "TAIL_MARK" in painted
     assert str(len(blob)) in (headless_pro.lbl_stream_status.value or "").replace(",", "")
 
 
