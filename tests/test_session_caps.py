@@ -428,6 +428,8 @@ def test_health_strip_cap_idle_does_not_say_next_look(monkeypatch):
     pro.engine._session_capped = True
     pro._sync_health_strip()
     shown = pro.lbl_hs_next.value or ""
-    assert "session cap" in shown
+    assert "session cap" in shown or "idle" in shown
+    assert pro.lbl_hs_state.value == "idle"
+    assert "sat" not in (pro.lbl_hs_state.value or "")
     assert "next look" not in shown
     assert "set_wake" not in shown

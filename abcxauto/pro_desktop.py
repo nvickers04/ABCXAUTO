@@ -297,13 +297,23 @@ def grok_sub_state(
     parked: bool = False,
     tail_moved: bool = False,
     tail_live: bool = False,
+    paused: bool = False,
+    session_capped: bool = False,
 ) -> str:
-    """Grok sub: looking | sat | look failed. fail_streak cannot hide a live think."""
+    """One process, one state: looking | sat | idle | paused | look failed | off.
+
+    Cap-idle and overnight park are idle, not sat. A leftover open think after
+    the cap is not live. Paused is operator stop. Sat is only between looks.
+    """
+    if paused:
+        return "paused"
     if not running:
         return "off"
     st = (status or "").lower()
-    idle = parked or st in ("parked", "idle")
-    looking = (not idle) and (
+    # Session cap / park beat a leftover open think. That look is not live.
+    if session_capped or st == "idle" or parked or st == "parked":
+        return "idle"
+    looking = (
         st.startswith("thinking")
         or st.startswith("grok")
         or bool(tail_moved)
@@ -319,11 +329,56 @@ def grok_sub_state(
 def grok_sub_color(state: str) -> str:
     if state == "looking":
         return GREEN
-    if state == "look failed":
+    if state in ("look failed", "idle", "paused"):
         return AMBER
     if state == "sat":
         return TEXT
     return MUTED
+
+
+def format_token_count(n: int | float | None) -> str:
+    """Compact billed-token count for the strip (2.533M/2.5M)."""
+    try:
+        count = int(n or 0)
+    except (TypeError, ValueError):
+        return "0"
+    if abs(count) >= 1_000_000:
+        text = f"{count / 1_000_000:.3f}".rstrip("0").rstrip(".")
+        return f"{text}M"
+    if abs(count) >= 1000:
+        text = f"{count / 1000:.1f}".rstrip("0").rstrip(".")
+        return f"{text}k"
+    return str(count)
+
+
+def session_cap_idle_line(used: dict | None = None) -> str:
+    """Which cap tripped, with the numbers. Never sat."""
+    row = used if isinstance(used, dict) else {}
+    why = str(row.get("why") or "").strip().lower()
+    try:
+        looks = int(row.get("looks") or 0)
+        look_cap = int(row.get("look_cap") or 0)
+    except (TypeError, ValueError):
+        looks, look_cap = 0, 0
+    try:
+        tokens = int(row.get("tokens") or 0)
+        token_cap = int(row.get("token_cap") or 0)
+    except (TypeError, ValueError):
+        tokens, token_cap = 0, 0
+    look_hit = why in ("looks", "looks+tokens") or (look_cap > 0 and looks >= look_cap)
+    token_hit = why in ("tokens", "looks+tokens") or (
+        token_cap > 0 and tokens >= token_cap
+    )
+    bits: list[str] = []
+    if look_hit:
+        bits.append(f"look cap {looks}/{look_cap}")
+    if token_hit:
+        bits.append(
+            f"token cap {format_token_count(tokens)}/{format_token_count(token_cap)}"
+        )
+    if not bits:
+        return "session cap — idle"
+    return f"{' · '.join(bits)} — idle"
 
 
 class ProTerminal:
@@ -591,8 +646,6 @@ class ProTerminal:
         self.lbl_sc_verdict = ft.Text("—", size=13, weight=ft.FontWeight.W_600, color=MUTED)
         self.lbl_sc_score = ft.Text("Score: —", size=12, color=MUTED, selectable=True)
         self.lbl_sc_session = ft.Text("sess —", size=12, color=MUTED, selectable=True)
-        self.lbl_sc_path = ft.Text("Path: —", size=12, color=MUTED, selectable=True)
-        self.lbl_sc_mix = ft.Text("Mix: —", size=12, color=MUTED, selectable=True)
         self.lbl_sc_strats = ft.Text("", size=12, color=MUTED, selectable=True)
         self.col_sc_windows = ft.Column(spacing=3, tight=True)
         self.col_sc_cards = ft.Column(spacing=3, tight=True)
@@ -673,6 +726,8 @@ class ProTerminal:
             [
                 self.lbl_session_score,
                 self.lbl_path,
+                self.lbl_mix,
+                self.lbl_why,
                 self.lbl_playbook,
                 self.lbl_tools,
                 self.lbl_status,
@@ -1371,15 +1426,10 @@ class ProTerminal:
         )
 
     def _page_overview(self) -> ft.Control:
-        """The watch surface. The stream owns it — the reason is one line under it."""
+        """The watch surface. The stream owns it."""
         return ft.Column(
             [
                 self._stream_pane(),
-                ft.Container(
-                    padding=ft.Padding.only(left=16, right=16, top=5, bottom=5),
-                    border=ft.Border(top=ft.BorderSide(1, BORDER)),
-                    content=self.lbl_why,
-                ),
                 self._hidden_metrics,
             ],
             spacing=0,
@@ -1577,12 +1627,7 @@ class ProTerminal:
                                 ),
                                 self.col_sc_ledger,
                             ),
-                            self._section(
-                                "Path",
-                                self.lbl_sc_path,
-                                self.lbl_sc_mix,
-                                self.lbl_sc_strats,
-                            ),
+                            self.lbl_sc_strats,
                         ],
                         spacing=0,
                         scroll=ft.ScrollMode.AUTO,
@@ -2432,11 +2477,19 @@ class ProTerminal:
             )
         self.col_activity.controls = controls
 
+    def _open_lot_n(self) -> int:
+        """Open book lots on the strip — not leftover max_open_positions."""
+        s = self.engine.state
+        book = getattr(s, "portfolio", None) or {}
+        naked = book.get("unprotected_symbols") if isinstance(book, dict) else None
+        n = len(self._lot_view(s.positions, naked))
+        if not n and not s.equity:
+            n = len(self._brief().get("open_lots") or [])
+        return n
+
     def _sync_tabs(self) -> None:
         s = self.engine.state
-        lots_n = len(s.positions or [])
-        if not lots_n and not s.equity:
-            lots_n = len(self._brief().get("open_lots") or [])
+        lots_n = self._open_lot_n()
         counts = {
             "lots": lots_n,
             "orders": len(s.open_orders or []),
@@ -2820,8 +2873,6 @@ class ProTerminal:
         for src, dst in (
             (self.lbl_score, self.lbl_sc_score),
             (self.lbl_session_score, self.lbl_sc_session),
-            (self.lbl_path, self.lbl_sc_path),
-            (self.lbl_mix, self.lbl_sc_mix),
         ):
             dst.value = src.value
             dst.color = src.color
@@ -3809,13 +3860,19 @@ class ProTerminal:
         Monotonic math and small dict reads only; this paints every tick.
         """
         s, eng = self.engine.state, self.engine
-        running = bool(s.running) and bool(getattr(s, "autonomous", False))
+        paused = bool(getattr(s, "paused", False))
+        running = (
+            bool(s.running)
+            and bool(getattr(s, "autonomous", False))
+            and not paused
+        )
         streak = int(getattr(eng, "_fail_streak", 0) or 0)
         last = float(getattr(eng, "_last_grok_mono", 0.0) or 0.0)
         status = str(getattr(s, "status", "") or "")
         st = status.lower()
         buf = str(getattr(s, "think_live", "") or "")
         parked = bool(getattr(eng, "_think_parked", False) or st == "parked")
+        capped = bool(getattr(eng, "_session_capped", False) or st == "idle")
         tail_moved = self._think_tail_moved(buf)
         say = think_tail_last_say(buf)
         tail_live = think_tail_in_flight(buf) or (bool(say) and tail_moved)
@@ -3826,12 +3883,14 @@ class ProTerminal:
             parked=parked,
             tail_moved=tail_moved,
             tail_live=tail_live,
+            paused=paused,
+            session_capped=capped,
         )
         color = grok_sub_color(state)
         looking = state == "looking"
         self.lbl_hs_state.value = state
         self.lbl_hs_state.color = color
-        # Grok tile mirrors the strip so "On" alone never hides a think or a wait.
+        # Grok tile mirrors the strip so "On" alone never hides a think, a wait, or a cap.
         if running:
             self.lbl_desk_sub.value = state
             self.lbl_desk_sub.color = color
@@ -3844,11 +3903,17 @@ class ProTerminal:
             self.lbl_hs_age.color = (
                 RED if running and age > 1800 else (AMBER if running and age > 900 else MUTED)
             )
-        capped = bool(getattr(eng, "_session_capped", False) or st == "idle")
-        if capped and not looking:
-            self.lbl_hs_next.value = "session cap — idle"
+        if state == "idle" and capped:
+            used: dict = {}
+            try:
+                from abcxauto.session_caps import usage
+
+                used = usage(session=str(getattr(eng, "_last_session", "") or "")) or {}
+            except Exception:
+                used = {}
+            self.lbl_hs_next.value = session_cap_idle_line(used)
             self.lbl_hs_next.color = AMBER
-        elif streak and not looking:
+        elif streak and not looking and state != "paused":
             self.lbl_hs_next.value = f"look failed (x{streak})"
             self.lbl_hs_next.color = AMBER
         else:
@@ -4025,13 +4090,9 @@ class ProTerminal:
         unprot = int(getattr(s, "unprotected_count", 0) or 0)
         self.lbl_unprotected.value = str(unprot)
         self.lbl_unprotected.color = RED if unprot else GREEN
-        lots = len(s.positions or []) or len(brief.get("open_lots") or [])
-        try:
-            cap = int(getattr(get_config(), "max_open_positions", 0) or 0)
-        except (TypeError, ValueError):
-            cap = 0
-        self.lbl_lot_count.value = f"{lots}/{cap}" if cap else str(lots)
-        self.lbl_lot_count.color = AMBER if cap and lots >= cap else TEXT
+        lots = self._open_lot_n()
+        self.lbl_lot_count.value = str(lots)
+        self.lbl_lot_count.color = TEXT
         self.lbl_risk.value = f"Risk: {s.risk}" if s.risk else "Risk: —"
         self.lbl_status.value = s.status
         running = bool(s.running) and getattr(s, "autonomous", False)
