@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
 from abcxauto.llm import SYSTEM_PROMPT
 from abcxauto.world_state import format_wake, worst_wake_fact
 from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+
+_TRAILING_BARE_SEND = re.compile(r"(?:^|\s)send\.\s*$")
 
 
 def test_system_prompt_unchanged():
@@ -109,3 +113,49 @@ def test_working_order_missing_beats_session_cap():
         },
     )
     assert fact.startswith("working_order_missing=QQQ")
+
+
+def test_format_wake_is_desk_facts_not_a_send_command():
+    """Wake is book facts. Trailing send. was leftover tool-naming, not a command."""
+    from abcxauto.park_clock import note_wake
+
+    note_wake(None)
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=False,
+        unprotected=["AAPL STK"],
+        ibkr_up=True,
+        day={
+            "names": 1,
+            "lots": 1,
+            "nl": 100_000.0,
+            "daily_pnl": 0.0,
+            "max_risk_per_trade_pct": 5.0,
+            "sizing_floors": False,
+            "capacity": {"open_count": 1, "max_open_positions": 15, "nl": 100_000.0},
+            "open_lots": ["AAPL STK long 20"],
+            "mix": {"stk": 1},
+            "vol_bit": "IWM rv=high iv=22.0",
+            "session_cap": {"looks_left": 12, "tokens_left": 100000},
+        },
+    )
+    lead = text.splitlines()[0]
+    assert lead == "unprotected=AAPL STK."
+    assert "session=regular" in text
+    assert "flat=False" in text
+    assert "open_lots=AAPL STK long 20" in text
+    assert "names=1" in text
+    assert "lots=1" in text
+    assert "max_risk=5.0%" in text
+    assert "mix=" in text
+    assert "vol=IWM rv=high" in text
+    stripped = text.rstrip()
+    assert stripped.split()[-1] != "send."
+    assert not stripped.endswith("send.")
+    assert _TRAILING_BARE_SEND.search(stripped) is None
+    assert stripped.splitlines()[-1].strip() != "send."
+    lower = stripped.lower()
+    assert "you may send" not in lower
+    assert "use the send tool" not in lower
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK

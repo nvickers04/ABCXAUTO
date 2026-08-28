@@ -169,7 +169,8 @@ def test_wake_does_not_carry_the_lesson_as_a_job():
         {"last_say": SEED_FACT, "rationale": SEED_FACT}
     ) == ""
     assert lab_wake_bit() == ""
-    assert text.endswith("send.")
+    assert not text.rstrip().endswith("send.")
+    assert text.rstrip().split()[-1] != "send."
 
 
 def test_write_adds_an_extra_and_keeps_the_seed():
