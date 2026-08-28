@@ -100,6 +100,9 @@ def live_marks_match_paper() -> bool:
 
     Paper 7497 never qualifies — paper marks are not live marks. A promote
     snapshot that only copies ``paper_score`` is not a live mark either.
+    Not an exploit-band key: sizing uses the same ceiling until the socket
+    flips. Callers that still want this fact can read it; ``mode_size`` does
+    not wait on it.
     """
     try:
         from abcxauto.lab_playbook import is_paper, live_has_promoted, load_live
@@ -145,12 +148,12 @@ def live_marks_match_paper() -> bool:
 
 
 def exploit_may_widen() -> bool:
-    """Exploit widens only with graduated cards *and* matching live marks."""
+    """Exploit widens with graduated cards. Same ceiling on either socket."""
     if playbook_mode() != "exploit":
         return False
     if not graduated_names():
         return False
-    return live_marks_match_paper()
+    return True
 
 
 def mode_size_ceiling(
@@ -162,7 +165,7 @@ def mode_size_ceiling(
     """Hard % NL ceiling for this mode/card. Grok may tighten, not raise.
 
     Explore and unproven exploit stay single-digit. A learning card never
-    inherits a wider band. Proven live (graduated + live marks) opens the
+    inherits a wider band. Exploit plus graduated cards opens the
     walk-away band — it does not set 25% as the working size.
     """
     bit = str(mode or playbook_mode() or "explore").strip().lower()
@@ -174,8 +177,6 @@ def mode_size_ceiling(
     if bit != "exploit":
         return explore_hi
     if not graduated_names():
-        return explore_hi
-    if not live_marks_match_paper():
         return explore_hi
     try:
         from abcxauto.self_tune import RISK_FLOOR

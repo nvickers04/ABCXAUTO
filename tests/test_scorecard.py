@@ -71,8 +71,8 @@ def test_scorecard_beating_when_book_ahead():
     assert abs(sc["since_start"]["edge_pct"] - 9.999) < 1e-9
     assert "prefer" not in sc
     text = format_scorecard_block(equity=1100.0, journal=j, sc=sc)
-    # % leads; model bill shows scale % and REAL $ (paper book vs real xAI)
-    assert "book_return=+10.00% of starting NetLiq (+100.00$ paper)" in text
+    assert "book_return=+10.00% of starting NetLiq (+100.00$)" in text
+    assert "SCORECARD (paper TWS):" in text
     assert "model_cost=0.0010% of starting NetLiq ($0.0100 real xAI" in text
     assert "edge=+9.9990% (+99.99$) → BEATING" in text
 
@@ -266,10 +266,11 @@ def test_scorecard_session_is_not_inception(monkeypatch):
     assert sc["beating_model"] is False  # inception edge: -1538 - 2 < 0
     text = format_scorecard_block(equity=35100.0, journal=J(), sc=sc)
     lines = text.strip().splitlines()
-    assert lines[0] == "SCORECARD:"
+    assert lines[0] == "SCORECARD (paper TWS):"
     assert lines[1].startswith("- session ")
     assert "2026-08-28 RTH" in lines[1]
-    assert "book=+0.29% paper" in lines[1]
+    assert "book=+0.29%" in lines[1]
+    assert "book=+0.29% paper" not in lines[1]
     assert "model_cost=0.0011% ($0.4000 real xAI)" in lines[1]
     assert "edge=+0.2846%" in lines[1]
     assert "fills=1/2" in lines[1]
@@ -368,6 +369,7 @@ def test_live_scorecard_does_not_split_paper_vs_real(monkeypatch):
         },
     }
     text = format_scorecard_block(sc=sc)
+    assert "SCORECARD (live TWS):" in text
     assert " paper" not in text
     assert "real xAI" not in text
     assert "model_cost=0.0010% of starting NetLiq ($0.0100 cash," in text

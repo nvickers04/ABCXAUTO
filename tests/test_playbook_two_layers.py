@@ -11,7 +11,7 @@ The clerk's half is attribution: a named ``params.card`` tags the fill so the
 card is scored on the trades that actually resolved. New risk must name an
 existing card (scorecard label). Notebook prose is not law. An operator flatten
 or a halt exit is real P&L but not evidence, so it never advances a card toward
-live money. Live new risk still needs a promoted snapshot.
+graduation. New risk names a card. The socket is the live switch.
 """
 
 from __future__ import annotations
@@ -1698,37 +1698,23 @@ def test_live_snapshot_holds_only_graduated_cards_inside_their_types(monkeypatch
     assert "condor grind" not in json.dumps(on_disk)
 
 
-def test_live_new_risk_needs_a_promoted_book_and_a_cited_card(monkeypatch):
+def test_live_new_risk_uses_the_lab_book_not_a_promote_gate(monkeypatch):
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
-    from abcxauto.lab_playbook import live_new_risk_allowed
+    from abcxauto.lab_playbook import live_has_promoted, live_new_risk_allowed
 
-    assert live_new_risk_allowed() is False
-    strat, forced = gate_ticket(_entry(), _world())
-    assert strat == "blocked"
-    assert "promoted paper playbook" in str((forced or {}).get("note") or "")
-
-    assert load_live() == {}  # nothing promoted yet
-
-    from abcxauto.lab_playbook import _live_path, _write
-
-    _write(
-        _live_path(),
-        {
-            "promoted": True,
-            "types": {
-                "market_bracket": {"cards": [_card("flush bounce")]},
-                "iron_condor": {"cards": [_card("condor grind")]},
-            },
-            "graduated": ["flush bounce"],
-        },
-    )
     assert live_new_risk_allowed() is True
-    assert new_risk_card_error("flush bounce", type="market_bracket") == ""
-    assert new_risk_card_error("condor grind", type="iron_condor") == ""
-    assert "params.card" in new_risk_card_error("")
+    assert live_has_promoted() is False
     unnamed, unnamed_forced = gate_ticket(_entry(), _world())
     assert unnamed == "blocked"
     assert "params.card" in str((unnamed_forced or {}).get("note") or "")
+    assert "promoted paper playbook" not in str((unnamed_forced or {}).get("note") or "")
+
+    _save(
+        market_bracket={"cards": [_card("flush bounce")]},
+        iron_condor={"cards": [_card("condor grind")]},
+    )
+    assert new_risk_card_error("flush bounce", type="market_bracket") == ""
+    assert new_risk_card_error("condor grind", type="iron_condor") == ""
     named, named_forced = gate_ticket(_entry("flush bounce"), _world())
     assert named_forced is None, named_forced
     assert named == "market_bracket"
@@ -2022,7 +2008,9 @@ def test_playbook_tool_reports_the_tree_and_the_verdicts():
     assert payload["graduated"] == []
     assert payload["tripped"] == []
     assert payload["needs_declaration"] == ["flush bounce [market_bracket]"]
-    assert payload["live_hypothesis_cap"] == 3
+    assert "live_hypothesis_cap" not in payload
+    assert "live_hypotheses" not in payload
+    assert payload["book"] == "paper TWS"
 
 
 def test_run_sheet_follows_parent_tool_order_instead_of_rescan():

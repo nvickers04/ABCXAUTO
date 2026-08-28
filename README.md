@@ -2,7 +2,7 @@
 
 **Grok owns a paper IBKR book. Silent code is facts, hard gates, and the overnight park.**
 
-Grok (the `model` knob, default grok-4.6) invents tickets and standing notes. Live (TWS **7496**, confirm phrase, a different client id) only follows a **promoted paper playbook**. It never copies paper fills.
+Grok (the `model` knob, default grok-4.6) invents tickets and standing notes. Live is the **7496** socket after the confirm phrase and a different client id. Same constitution as paper **7497**. It never copies paper fills.
 
 Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of NetLiq**. Book return % must beat the cost of the model.
 
@@ -25,7 +25,6 @@ Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro S
 - One sector/theme arena across names vs `max_arena_concentration_pct` — per-name cannot see NVDA+SMCI+ARM+AVGO as one bet. Scan sorts are not the bucket. Fires on send even when paper gates are off
 - Open ticket past the card's `retire_if.max_hold_sessions` / `max_hold_hours` trips that card and flattens that lot. Independent of paper gates
 - Unprotected STK: last-stop at IBKR; hold is blocked until it exists. Combo close (`closing_position` on the matching multi-leg send) is one BAG, not new risk
-- Live new risk needs a promoted playbook
 - Ticket geometry uses **IBKR last**, not MDA
 - Ticket last / IV / credit / width must be in this look's `quote` / `option_quote` / `book` cache
 - Exits are never blocked; fail-closed if the book is unknown
@@ -95,7 +94,7 @@ python -m abcxauto              # supervisor + Pro desktop + think stream
 python -m abcxauto --cleanup --aggressive   # kill leftovers; marks operator stop
 ```
 
-Console-only (paper): `$env:ABCXAUTO_FORCE_HEADLESS=1`. Do not launch if 7497 refuses. Do not enable live unless you typed the confirm phrase and a promoted playbook exists.
+Console-only (paper): `$env:ABCXAUTO_FORCE_HEADLESS=1`. Do not launch if 7497 refuses. Do not enable live unless you typed the confirm phrase.
 
 Desktop icon: `python scripts/install_desktop_icon.py`.
 
@@ -131,7 +130,7 @@ Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** 
 | `ABCXAUTO_JOURNAL_PATH` | `journal.db` | Clerk SQLite journal |
 | `ABCXAUTO_DEFAULT_LOOK_S` | `90` (`60` open-book; `600` flat hunt) | Clerk look when a card has no `next_look_s` |
 
-See `.env.template` for the rest. Live: `TRADING_MODE=live`, port **7496**, `ABCXAUTO_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING_RISK`, and a promoted playbook.
+See `.env.template` for the rest. Live: `TRADING_MODE=live`, port **7496**, `ABCXAUTO_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING_RISK`. Same gates as paper.
 
 ## Architecture
 

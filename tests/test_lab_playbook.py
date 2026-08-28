@@ -1,4 +1,4 @@
-"""Paper lab playbook: Grok writes instructions; live only follows a promote."""
+"""Paper lab playbook: Grok writes instructions. The socket is the live switch."""
 
 import json
 from datetime import datetime, timedelta, timezone
@@ -77,11 +77,11 @@ def test_paper_may_take_new_risk_without_playbook(monkeypatch, tmp_path):
     assert live_new_risk_allowed() is True
 
 
-def test_live_blocks_new_risk_until_promote(monkeypatch, tmp_path):
+def test_live_new_risk_does_not_wait_on_promote(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
-    assert live_new_risk_allowed() is False
+    assert live_new_risk_allowed() is True
     assert live_has_promoted() is False
 
 

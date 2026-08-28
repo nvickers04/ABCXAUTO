@@ -2267,7 +2267,8 @@ async def test_playbook_tool_returns_current_and_ledger(tmp_path, monkeypatch):
     data = json.loads(
         await _run_tool("playbook", {}, connector=None, world=_world(), snap={}, turn=BrainTurn())
     )
-    assert data["scope"] == "lab"
+    assert data["book"] == "paper TWS"
+    assert "scope" not in data
     assert "Standing notes" in data["tree"]
     assert data["ledger"][0]["revision"] == 1
     assert "instructions" not in data["ledger"][0]

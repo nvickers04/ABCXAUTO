@@ -1,7 +1,7 @@
 """explore/exploit is a MODE BIT that sizes, not a personality label.
 
 Paper gates-off (#110) must still clamp lottery % of NL. Exploit without
-graduated cards / live marks must not widen. Paper start must not restore
+graduated cards must not widen. Paper start must not restore
 25% as the working send size. Live still forces gates.
 """
 
@@ -235,7 +235,6 @@ def test_exploit_without_graduated_cards_does_not_widen():
     assert mode_size_ceiling(card=card, type="market_bracket") == MODE_SIZE_CEILING_EXPLORE
     assert working_size_ceiling() == MODE_SIZE_CEILING_EXPLORE
     assert exploit_may_widen() is False
-    assert live_marks_match_paper() is False
     params = {"card": card, "size_pct_nl": 12.0}
     note = apply_size_pct_nl(
         params, net_liq=100_000.0, price=50.0, strategy="market_bracket"
@@ -257,8 +256,8 @@ def test_exploit_learning_card_does_not_open_risk():
     assert exploit_learning_card_error(card, type="market_bracket") == note
 
 
-def test_exploit_with_declared_grads_on_paper_still_does_not_widen(monkeypatch):
-    """Paper marks are not live marks. Band stays single-digit."""
+def test_exploit_with_graduated_cards_opens_walkaway_not_working_size(monkeypatch):
+    """Exploit + graduated opens the walk-away ceiling. Working default stays single-digit."""
     _save_card(mode="exploit")
     monkeypatch.setattr("abcxauto.mode_size.graduated_names", lambda book=None: ["grad"])
     monkeypatch.setattr(
@@ -266,8 +265,9 @@ def test_exploit_with_declared_grads_on_paper_still_does_not_widen(monkeypatch):
         lambda *_a, **_k: True,
     )
     assert live_marks_match_paper() is False
-    assert exploit_may_widen() is False
-    assert mode_size_ceiling(card="grad") == MODE_SIZE_CEILING_EXPLORE
+    assert exploit_may_widen() is True
+    assert mode_size_ceiling(card="grad") == 25.0
+    assert working_size_ceiling(card="grad") == MODE_SIZE_CEILING_EXPLORE
     assert working_size_ceiling(card="grad") != 25.0
     assert working_size_ceiling(card="grad") < 10
 
