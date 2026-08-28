@@ -601,6 +601,7 @@ async def execute_ticket(
 ) -> dict:
     """Normalize, gate, geometry, then send_action. Never bypass the clerk."""
     positions = list(snap.get("positions") or world.positions or [])
+    orders = list(snap.get("open_orders") or world.open_orders or [])
     asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
     try:
         from abcxauto.lab_playbook import apply_hunt_send_sketch
@@ -623,7 +624,7 @@ async def execute_ticket(
         from abcxauto.trade_playbook import check_overlay_shares
 
         ok_sh, sh_code, sh_msg = check_overlay_shares(
-            strat, act.get("params") or {}, positions
+            strat, act.get("params") or {}, positions, orders
         )
         if not ok_sh:
             try:
