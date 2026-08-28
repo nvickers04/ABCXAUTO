@@ -47,6 +47,8 @@ def test_schema_creation(journal, tmp_path):
         "judgments",
         "model_usage",
         "session_markers",
+        "send_marks",
+        "send_mark_orders",
     } <= tables
 
 

@@ -80,7 +80,14 @@ CREATE TABLE IF NOT EXISTS fills (
     quantity REAL,
     price REAL,
     commission REAL,
-    realized_pnl REAL
+    realized_pnl REAL,
+    ibkr_last REAL,
+    bid REAL,
+    ask REAL,
+    sent_price REAL,
+    signed_slippage REAL,
+    spread_paid REAL,
+    fill_label TEXT
 );
 
 CREATE TABLE IF NOT EXISTS decisions (
@@ -138,7 +145,49 @@ CREATE TABLE IF NOT EXISTS self_tunes (
     rejected_json TEXT,
     rationale TEXT
 );
+
+CREATE TABLE IF NOT EXISTS send_marks (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    proposal_id INTEGER REFERENCES proposals(id),
+    dispatch_id INTEGER REFERENCES dispatches(id),
+    order_id INTEGER,
+    order_ids_json TEXT,
+    symbol TEXT,
+    strategy TEXT,
+    card TEXT,
+    side TEXT,
+    ibkr_last REAL,
+    bid REAL,
+    ask REAL,
+    mid REAL,
+    sent_price REAL,
+    fill_price REAL,
+    signed_slippage REAL,
+    spread_paid REAL,
+    fill_label TEXT,
+    status TEXT,
+    seen_working INTEGER DEFAULT 0,
+    marks_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS send_mark_orders (
+    order_id INTEGER PRIMARY KEY,
+    send_mark_id INTEGER NOT NULL REFERENCES send_marks(id)
+);
 """
+
+_FILL_MARK_COLS = (
+    ("ibkr_last", "REAL"),
+    ("bid", "REAL"),
+    ("ask", "REAL"),
+    ("sent_price", "REAL"),
+    ("signed_slippage", "REAL"),
+    ("spread_paid", "REAL"),
+    ("fill_label", "TEXT"),
+)
+
+_UNFILLED_GRACE_S = 15.0
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -335,7 +384,9 @@ def _collect_order_ids(obj: Any, out: set) -> None:
                 oid = _coerce_order_id(raw)
                 if oid is not None:
                     out.add(oid)
-        for value in obj.values():
+        for key, value in obj.items():
+            if key in ("send_marks", "marks_json"):
+                continue
             if isinstance(value, (dict, list, tuple)):
                 _collect_order_ids(value, out)
     elif isinstance(obj, (list, tuple)):
@@ -353,6 +404,76 @@ def _order_ids_from_result_json(raw: Any) -> set:
     found: set = set()
     _collect_order_ids(parsed, found)
     return found
+
+
+def _table_cols(conn: sqlite3.Connection, table: str) -> set:
+    return {
+        str(r[1])
+        for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
+def _ensure_columns(
+    conn: sqlite3.Connection, table: str, columns: tuple[tuple[str, str], ...]
+) -> None:
+    have = _table_cols(conn, table)
+    for name, decl in columns:
+        if name in have:
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
+def _open_order_id_set(open_orders: Any) -> set:
+    out: set = set()
+    if not open_orders:
+        return out
+    if isinstance(open_orders, (set, frozenset)):
+        items = open_orders
+    elif isinstance(open_orders, (list, tuple)):
+        items = open_orders
+    else:
+        items = [open_orders]
+    for item in items:
+        if isinstance(item, dict):
+            oid = _coerce_order_id(
+                item.get("order_id")
+                if item.get("order_id") is not None
+                else item.get("orderId")
+            )
+        else:
+            oid = _coerce_order_id(item)
+        if oid is not None:
+            out.add(oid)
+    return out
+
+
+def _patch_dispatch_send_marks(
+    conn: sqlite3.Connection, dispatch_id: Optional[int], marks: Any
+) -> None:
+    if dispatch_id is None or not isinstance(marks, dict):
+        return
+    row = conn.execute(
+        "SELECT result_json FROM dispatches WHERE id = ?",
+        (int(dispatch_id),),
+    ).fetchone()
+    if row is None:
+        return
+    blob: Any = {}
+    raw = row["result_json"] if row["result_json"] is not None else None
+    if raw:
+        try:
+            blob = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError, json.JSONDecodeError):
+            blob = {"raw": raw}
+    if not isinstance(blob, dict):
+        blob = {"raw": blob}
+    from abcxauto.send_marks import public_marks
+
+    blob["send_marks"] = public_marks(marks)
+    conn.execute(
+        "UPDATE dispatches SET result_json = ? WHERE id = ?",
+        (_json_dumps(blob), int(dispatch_id)),
+    )
 
 
 class TradeJournal:
@@ -410,6 +531,21 @@ class TradeJournal:
                         net_liquidation REAL
                     )
                     """
+                )
+                if "fills" in {
+                    str(r[0])
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }:
+                    _ensure_columns(conn, "fills", _FILL_MARK_COLS)
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_send_marks_order_id "
+                    "ON send_marks(order_id)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_send_marks_status "
+                    "ON send_marks(status)"
                 )
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.commit()
@@ -509,14 +645,14 @@ class TradeJournal:
         result: Any = None,
         *,
         ts: Optional[str] = None,
-    ) -> None:
+    ) -> Optional[int]:
         if not self.enabled:
-            return
+            return None
         try:
             self._ensure_schema()
             result_json = _json_dumps(result) if result is not None else None
             with self._connect() as conn:
-                conn.execute(
+                cur = conn.execute(
                     """
                     INSERT INTO dispatches (ts, proposal_id, ok, result_json)
                     VALUES (?, ?, ?, ?)
@@ -529,8 +665,100 @@ class TradeJournal:
                     ),
                 )
                 conn.commit()
+                return int(cur.lastrowid)
         except Exception:
             logger.exception("journal.record_dispatch failed")
+            return None
+
+    def record_send_marks(
+        self,
+        *,
+        proposal_id: Optional[int] = None,
+        dispatch_id: Optional[int] = None,
+        marks: Any = None,
+        result: Any = None,
+        ts: Optional[str] = None,
+    ) -> Optional[int]:
+        """Persist dispatch-time NBBO vs later fill. Never raises."""
+        if not self.enabled or not isinstance(marks, dict):
+            return None
+        try:
+            from abcxauto.send_marks import public_marks
+
+            self._ensure_schema()
+            oids = sorted(
+                _order_ids_from_result_json(
+                    _json_dumps(result) if result is not None else None
+                )
+            )
+            primary = marks.get("order_id")
+            if primary is not None:
+                try:
+                    primary = int(primary)
+                except (TypeError, ValueError):
+                    primary = None
+            if primary is None and oids:
+                primary = oids[0]
+            stamp = _row_ts(ts)
+            pub = public_marks(marks)
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO send_marks (
+                        ts, proposal_id, dispatch_id, order_id, order_ids_json,
+                        symbol, strategy, card, side,
+                        ibkr_last, bid, ask, mid, sent_price, fill_price,
+                        signed_slippage, spread_paid, fill_label, status,
+                        seen_working, marks_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        stamp,
+                        proposal_id,
+                        dispatch_id,
+                        primary,
+                        _json_dumps(oids),
+                        str(marks.get("symbol") or "")[:12] or None,
+                        str(marks.get("strategy") or "")[:60] or None,
+                        str(marks.get("card") or "")[:120] or None,
+                        marks.get("side"),
+                        pub.get("ibkr_last"),
+                        pub.get("bid"),
+                        pub.get("ask"),
+                        marks.get("mid"),
+                        pub.get("sent_price"),
+                        pub.get("fill_price"),
+                        pub.get("signed_slippage"),
+                        pub.get("spread_paid"),
+                        pub.get("fill_label"),
+                        marks.get("status"),
+                        1 if marks.get("seen_working") else 0,
+                        _json_dumps(marks),
+                    ),
+                )
+                mark_id = int(cur.lastrowid)
+                for oid in oids:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO send_mark_orders (order_id, send_mark_id)
+                        VALUES (?, ?)
+                        """,
+                        (int(oid), mark_id),
+                    )
+                if primary is not None and primary not in oids:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO send_mark_orders (order_id, send_mark_id)
+                        VALUES (?, ?)
+                        """,
+                        (int(primary), mark_id),
+                    )
+                _patch_dispatch_send_marks(conn, dispatch_id, marks)
+                conn.commit()
+                return mark_id
+        except Exception:
+            logger.exception("journal.record_send_marks failed")
+            return None
 
     def record_halt(
         self,
@@ -623,6 +851,25 @@ class TradeJournal:
                         prev = anchors.get(oid)
                         if prev is None or dts < prev:
                             anchors[oid] = dts
+                mark_by_oid: dict = {}
+                try:
+                    for mrow in conn.execute(
+                        "SELECT send_mark_id, order_id FROM send_mark_orders"
+                    ).fetchall():
+                        oid_key = _coerce_order_id(mrow["order_id"])
+                        if oid_key is not None:
+                            mark_by_oid[oid_key] = int(mrow["send_mark_id"])
+                except sqlite3.OperationalError:
+                    mark_by_oid = {}
+                mark_rows: dict = {}
+                if mark_by_oid:
+                    ids = sorted(set(mark_by_oid.values()))
+                    qmarks = ",".join("?" * len(ids))
+                    for mrow in conn.execute(
+                        f"SELECT * FROM send_marks WHERE id IN ({qmarks})",
+                        ids,
+                    ).fetchall():
+                        mark_rows[int(mrow["id"])] = dict(mrow)
                 for fill in fills or []:
                     if not isinstance(fill, dict):
                         continue
@@ -635,12 +882,20 @@ class TradeJournal:
                             _row_ts(fill.get("ts")),
                             anchors.get(oid) if oid is not None else None,
                         )
+                        mark = (
+                            mark_rows.get(mark_by_oid.get(oid))
+                            if oid is not None
+                            else None
+                        )
+                        fill_marks = self._fill_mark_values(mark, fill)
                         cur = conn.execute(
                             """
                             INSERT OR IGNORE INTO fills (
                                 ts, exec_id, order_id, symbol, sec_type, side,
-                                quantity, price, commission, realized_pnl
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                quantity, price, commission, realized_pnl,
+                                ibkr_last, bid, ask, sent_price,
+                                signed_slippage, spread_paid, fill_label
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 fill_ts,
@@ -653,9 +908,24 @@ class TradeJournal:
                                 fill.get("price"),
                                 fill.get("commission"),
                                 fill.get("realized_pnl"),
+                                fill_marks.get("ibkr_last"),
+                                fill_marks.get("bid"),
+                                fill_marks.get("ask"),
+                                fill_marks.get("sent_price"),
+                                fill_marks.get("signed_slippage"),
+                                fill_marks.get("spread_paid"),
+                                fill_marks.get("fill_label"),
                             ),
                         )
                         inserted += int(cur.rowcount or 0)
+                        if int(cur.rowcount or 0) and mark is not None and oid is not None:
+                            self._apply_fill_to_send_mark_locked(conn, mark, fill, oid)
+                            refreshed = conn.execute(
+                                "SELECT * FROM send_marks WHERE id = ?",
+                                (int(mark["id"]),),
+                            ).fetchone()
+                            if refreshed is not None:
+                                mark_rows[int(mark["id"])] = dict(refreshed)
                     except Exception:
                         logger.exception(
                             "journal.record_fills row failed exec_id=%s", exec_id
@@ -665,6 +935,182 @@ class TradeJournal:
         except Exception:
             logger.exception("journal.record_fills failed")
             return 0
+
+    def _fill_mark_values(self, mark: Optional[dict], fill: dict) -> dict:
+        """Dispatch NBBO + this fill's price / slippage / spread / label."""
+        from abcxauto.send_marks import apply_fill_to_marks, public_marks
+
+        if not isinstance(mark, dict):
+            return {key: None for key in (
+                "ibkr_last", "bid", "ask", "sent_price",
+                "signed_slippage", "spread_paid", "fill_label",
+            )}
+        filled = apply_fill_to_marks(
+            mark, fill_price=fill.get("price"), side=fill.get("side") or mark.get("side")
+        )
+        return public_marks(filled)
+
+    def _apply_fill_to_send_mark_locked(
+        self,
+        conn: sqlite3.Connection,
+        mark: dict,
+        fill: dict,
+        oid: int,
+    ) -> None:
+        """Update the send row when its primary (entry) order fills."""
+        from abcxauto.send_marks import apply_fill_to_marks
+
+        primary = _coerce_order_id(mark.get("order_id"))
+        if primary is not None and oid != primary:
+            return
+        if str(mark.get("status") or "") == "filled" and mark.get("fill_price") is not None:
+            # Keep the first print; partials still land on the fills table.
+            if primary is not None:
+                return
+        filled = apply_fill_to_marks(
+            mark, fill_price=fill.get("price"), side=fill.get("side") or mark.get("side")
+        )
+        conn.execute(
+            """
+            UPDATE send_marks SET
+                fill_price = ?, signed_slippage = ?, spread_paid = ?,
+                fill_label = ?, status = ?, marks_json = ?
+            WHERE id = ?
+            """,
+            (
+                filled.get("fill_price"),
+                filled.get("signed_slippage"),
+                filled.get("spread_paid"),
+                filled.get("fill_label"),
+                filled.get("status"),
+                _json_dumps(filled),
+                int(mark["id"]),
+            ),
+        )
+        _patch_dispatch_send_marks(conn, mark.get("dispatch_id"), filled)
+
+    def resolve_unfilled_sends(
+        self,
+        open_orders: Any = None,
+        *,
+        grace_s: float = _UNFILLED_GRACE_S,
+        ts: Optional[str] = None,
+    ) -> int:
+        """Once a working order is gone with no fill, stamp the send row missed."""
+        if not self.enabled:
+            return 0
+        try:
+            from abcxauto.send_marks import mark_missed
+
+            self._ensure_schema()
+            open_ids = _open_order_id_set(open_orders)
+            now = _parse_ts(ts) or datetime.now(timezone.utc)
+            try:
+                grace = float(grace_s)
+            except (TypeError, ValueError):
+                grace = _UNFILLED_GRACE_S
+            resolved = 0
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM send_marks
+                    WHERE status = 'working' OR (status IS NULL AND fill_price IS NULL)
+                    """
+                ).fetchall()
+                for row in rows:
+                    mark = dict(row)
+                    mark_id = int(mark["id"])
+                    oids: set = set()
+                    primary = _coerce_order_id(mark.get("order_id"))
+                    if primary is not None:
+                        oids.add(primary)
+                    for link in conn.execute(
+                        "SELECT order_id FROM send_mark_orders WHERE send_mark_id = ?",
+                        (mark_id,),
+                    ).fetchall():
+                        oid = _coerce_order_id(link["order_id"])
+                        if oid is not None:
+                            oids.add(oid)
+                    if not oids:
+                        continue
+                    live = oids & open_ids
+                    if live:
+                        if not mark.get("seen_working"):
+                            conn.execute(
+                                "UPDATE send_marks SET seen_working = 1 WHERE id = ?",
+                                (mark_id,),
+                            )
+                        continue
+                    fill_row = conn.execute(
+                        """
+                        SELECT price, side FROM fills
+                        WHERE order_id IN ({})
+                        ORDER BY id ASC LIMIT 1
+                        """.format(",".join("?" * len(oids))),
+                        tuple(sorted(oids)),
+                    ).fetchone()
+                    if fill_row is not None and fill_row["price"] is not None:
+                        self._apply_fill_to_send_mark_locked(
+                            conn,
+                            mark,
+                            {
+                                "price": fill_row["price"],
+                                "side": fill_row["side"],
+                            },
+                            primary if primary is not None else next(iter(oids)),
+                        )
+                        resolved += 1
+                        continue
+                    seen = bool(mark.get("seen_working"))
+                    age = 0.0
+                    born = _parse_ts(mark.get("ts"))
+                    if born is not None:
+                        age = (now - born).total_seconds()
+                    if not seen and age < grace:
+                        continue
+                    missed = mark_missed(mark)
+                    conn.execute(
+                        """
+                        UPDATE send_marks SET
+                            fill_price = NULL, signed_slippage = NULL, spread_paid = NULL,
+                            fill_label = ?, status = ?, marks_json = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            missed.get("fill_label"),
+                            missed.get("status"),
+                            _json_dumps(missed),
+                            mark_id,
+                        ),
+                    )
+                    _patch_dispatch_send_marks(conn, mark.get("dispatch_id"), missed)
+                    resolved += 1
+                conn.commit()
+            return resolved
+        except Exception:
+            logger.exception("journal.resolve_unfilled_sends failed")
+            return 0
+
+    def recent_send_marks(self, limit: int = 50) -> List[dict]:
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, ts, proposal_id, dispatch_id, order_id, symbol,
+                           strategy, card, side, ibkr_last, bid, ask, mid,
+                           sent_price, fill_price, signed_slippage, spread_paid,
+                           fill_label, status, seen_working
+                    FROM send_marks
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            return [dict(row) for row in rows]
+        except Exception:
+            logger.exception("journal.recent_send_marks failed")
+            return []
 
     def record_decision(
         self,
@@ -901,9 +1347,13 @@ class TradeJournal:
             with self._connect() as conn:
                 rows = conn.execute(
                     """
-                    SELECT id, ts, proposal_id, ok, result_json
-                    FROM dispatches
-                    ORDER BY id DESC
+                    SELECT d.id, d.ts, d.proposal_id, d.ok, d.result_json,
+                           sm.ibkr_last, sm.bid, sm.ask, sm.sent_price,
+                           sm.fill_price, sm.signed_slippage, sm.spread_paid,
+                           sm.fill_label, sm.status AS fill_status
+                    FROM dispatches d
+                    LEFT JOIN send_marks sm ON sm.dispatch_id = d.id
+                    ORDER BY d.id DESC
                     LIMIT ?
                     """,
                     (int(limit),),
