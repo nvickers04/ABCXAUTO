@@ -137,6 +137,11 @@ NOTE_COLOR = {
     "cap": AMBER,
 }
 PAGE_REFRESH_S = 3.0
+# Length-growth hold. Tool waits and the post-look snap are longer than this;
+# think_tail_in_flight is what keeps those ticks looking.
+TAIL_LIVE_S = 12.0
+# Markers that mean the tail is still inside a look, not an idle desk.
+_IN_FLIGHT_MARKERS = frozenset({"think", "tool", "banner", "cached", "send", "warn"})
 # The spine paints the readable tail — same size as the think_tail.txt mirror.
 # The raw fallback label stays short so an off-screen buffer is a small diff.
 STREAM_TAIL_CHARS = 8000
@@ -193,15 +198,45 @@ def current_look_text(buf: str) -> str:
 
 
 def think_tail_tool_chips(buf: str) -> list[str]:
-    """Tool names from this look's [chip] lines, not last_turn.tool_trace."""
+    """Tool names from the readable tail's [chip] lines, not last_turn.tool_trace.
+
+    Each model step paints ``--- GROK ---``, so the last banner is often an
+    open [think] with [book]/[scan]/… still above it. Counting only
+    current_look_text then paints 0 tools on a live look.
+    """
     names: list[str] = []
-    for raw in current_look_text(buf).splitlines():
+    for raw in (buf or "")[-STREAM_TAIL_CHARS:].splitlines():
         if stream_line_kind(raw) != "tool":
             continue
         inner = raw.strip()[1:-1].strip()
         if inner:
             names.append(inner.split()[0])
     return names
+
+
+def think_tail_last_marker(buf: str) -> str:
+    """Last stream marker in the tail. Prose keeps the marker it follows."""
+    last = ""
+    for raw in (buf or "").splitlines():
+        kind = stream_line_kind(raw)
+        if kind in (
+            "think",
+            "say",
+            "tool",
+            "banner",
+            "cached",
+            "send",
+            "warn",
+            "alarm",
+            "poke",
+        ):
+            last = kind
+    return last
+
+
+def think_tail_in_flight(buf: str) -> bool:
+    """True when the tail is still inside a look (open think, tool, or new banner)."""
+    return think_tail_last_marker(current_look_text(buf)) in _IN_FLIGHT_MARKERS
 
 
 def _say_is_real(text: str) -> bool:
@@ -260,13 +295,18 @@ def grok_sub_state(
     fail_streak: int = 0,
     parked: bool = False,
     tail_moved: bool = False,
+    tail_live: bool = False,
 ) -> str:
     """Grok sub: looking | sat | look failed. fail_streak cannot hide a live think."""
     if not running:
         return "off"
     st = (status or "").lower()
-    looking = (not parked and st != "parked") and (
-        st.startswith("thinking") or st.startswith("grok") or bool(tail_moved)
+    idle = parked or st in ("parked", "idle")
+    looking = (not idle) and (
+        st.startswith("thinking")
+        or st.startswith("grok")
+        or bool(tail_moved)
+        or bool(tail_live)
     )
     if looking:
         return "looking"
@@ -415,6 +455,7 @@ class ProTerminal:
         self.health_box = ft.Container(padding=0)
         self._sc_last: dict = {}
         self._tail_len: int | None = None
+        self._tail_fp: str | None = None
         self._tail_moved_mono = 0.0
         # ---- Book strip: context for reading the stream, not a risk panel.
         self.lbl_book_strip = ft.Text("No open lots", size=12, color=MUTED, selectable=True)
@@ -3700,18 +3741,26 @@ class ProTerminal:
         return f"{sec / 3600:.1f}h"
 
     def _think_tail_moved(self, buf: str) -> bool:
-        """True when think_live grew since the last paint. First paint is not motion."""
-        n = len(buf or "")
-        prev = self._tail_len
+        """True when think_live changed since the last paint. First paint is not motion.
+
+        Length alone lies once the 24k cap is full — the last 512 chars still
+        move. Hold TAIL_LIVE_S after the last change so a 4s snap gap stays looking.
+        """
+        text = buf or ""
+        n = len(text)
+        fp = text[-512:]
+        prev_n = self._tail_len
+        prev_fp = self._tail_fp
         self._tail_len = n
+        self._tail_fp = fp
         now = time.monotonic()
-        if prev is None:
+        if prev_n is None:
             return False
-        if n > prev:
+        if n > prev_n or (prev_fp is not None and fp != prev_fp):
             self._tail_moved_mono = now
             return True
         age = now - float(self._tail_moved_mono or 0)
-        return bool(self._tail_moved_mono) and age < 2.5
+        return bool(self._tail_moved_mono) and age < TAIL_LIVE_S
 
     def _sync_last_line(self) -> None:
         """Last say in the tail, else last real card send. Never Last send: — after a look."""
@@ -3767,12 +3816,15 @@ class ProTerminal:
         buf = str(getattr(s, "think_live", "") or "")
         parked = bool(getattr(eng, "_think_parked", False) or st == "parked")
         tail_moved = self._think_tail_moved(buf)
+        say = think_tail_last_say(buf)
+        tail_live = think_tail_in_flight(buf) or (bool(say) and tail_moved)
         state = grok_sub_state(
             running=running,
             status=status,
             fail_streak=streak,
             parked=parked,
             tail_moved=tail_moved,
+            tail_live=tail_live,
         )
         color = grok_sub_color(state)
         looking = state == "looking"
