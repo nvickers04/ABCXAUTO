@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -142,6 +143,17 @@ def _news_symbols_this_look(
     return [s for s in order[:12] if mda_worth_asking(s)]
 
 
+_SCAN_LOOK_SNAP_KEYS = (
+    "scan_screens",
+    "scan_hits",
+    "scan_calls",
+    "scan_fetched",
+    "scan_at",
+    "scan_news_attached",
+    "scan_arenas",
+)
+
+
 def _record_scan_screen(snap: dict[str, Any], arena: str, scan_code: str) -> None:
     from abcxauto.lab_playbook import scan_screen_key
 
@@ -159,12 +171,89 @@ def _record_scan_screen(snap: dict[str, Any], arena: str, scan_code: str) -> Non
         snap["scan_arenas"] = seen
 
 
-def _scan_gate_facts(rows: list[Any] | None) -> dict[str, Any]:
-    """Deepest |open_gap| on this tape. Playbook when_on is not a floor."""
+def _canonical_scan_screen(arena: str = "", scan_code: str = "") -> tuple[str, str]:
+    """Resolve arena/scan_code aliases to one screen identity."""
+    raw_arena = str(arena or "").strip()
+    raw_code = str(scan_code or "").strip()
+    if not raw_arena and not raw_code:
+        return "", ""
+    try:
+        from abcxauto.universe import resolve_screen
+
+        resolved = resolve_screen(
+            arena=raw_arena or None,
+            scan_code=raw_code or None,
+        )
+    except Exception:
+        return raw_arena, raw_code
+    if not resolved.get("ok"):
+        return raw_arena, raw_code
+    return (
+        str(resolved.get("arena_id") or raw_arena),
+        str(resolved.get("scan_code") or raw_code),
+    )
+
+
+def _scan_look_key(args: dict[str, Any] | None) -> str:
+    """Same look, same IBKR screen: scanCode / screen / symbols. Not ``with``."""
+    bag = args if isinstance(args, dict) else {}
+    arena, code = _canonical_scan_screen(
+        str(bag.get("arena") or "").strip(),
+        str(bag.get("scan_code") or "").strip(),
+    )
+    symbols = normalize_tickers(bag.get("symbols") or [])
+    return json.dumps(
+        {
+            "arena": arena.strip().lower(),
+            "scan_code": code.strip().upper(),
+            "symbols": symbols,
+        },
+        sort_keys=True,
+    )
+
+
+def _scan_snap_bag(snap: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(snap, dict):
+        return {}
+    return {k: deepcopy(snap[k]) for k in _SCAN_LOOK_SNAP_KEYS if k in snap}
+
+
+def _restore_scan_snap(snap: dict[str, Any] | None, bag: dict[str, Any] | None) -> None:
+    if not isinstance(snap, dict) or not bag:
+        return
+    for key, val in bag.items():
+        snap[key] = val
+
+
+def _scan_gate_facts(
+    rows: list[Any] | None,
+    book: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Deepest |open_gap| on this tape. Playbook when_on is not a floor.
+
+    Skip-class names (levered / micro) are not pinned as ``deepest`` when
+    those skip cards are on the book. Hits stay on the tape; retrace is
+    Grok's grade, not a card-prose refuse.
+    """
     try:
         from abcxauto.think_stream import _signed_open_gap
     except Exception:
         return {}
+    skip_rank = False
+    try:
+        from abcxauto.lab_playbook import skip_cards_on_book
+
+        skip_rank = skip_cards_on_book(book)
+    except Exception:
+        skip_rank = False
+    skip_of = None
+    if skip_rank:
+        try:
+            from abcxauto.universe import scan_skip_class
+
+            skip_of = scan_skip_class
+        except Exception:
+            skip_of = None
     deepest = None
     deepest_sym = ""
     deepest_signed = None
@@ -172,6 +261,8 @@ def _scan_gate_facts(rows: list[Any] | None) -> dict[str, Any]:
         if not isinstance(row, dict):
             continue
         if row.get("open_gap_pct") is None:
+            continue
+        if skip_of and skip_of(row):
             continue
         signed = _signed_open_gap(row)
         mag = abs(signed)
@@ -1120,6 +1211,9 @@ class BrainTurn:
     # Read results already fetched this think, keyed by tool + args. A repeat
     # ask is answered from here so the think moves forward instead of spinning.
     tool_cache: dict[str, str] = field(default_factory=dict)
+    # IBKR screens this look, keyed by scanCode / screen / symbols. Survives
+    # a stay-up poke so the same screen is not pulled four times.
+    scan_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def look_failed(self) -> bool:
         """True empty / lone '?' only. A real say or send/fill is not junk.
@@ -1921,6 +2015,9 @@ async def _inject_live_poke(
         return False
     note_wake(ev)
     turn.interrupted = True
+    # This look's IBKR screens did not change. Quotes/book refetch only when
+    # the poke actually moved the book (fill / order_change / unprotected).
+    scan_snap = _scan_snap_bag(snap)
     if live_poke_clears_tool_cache(ev):
         # Fill / real order fill-cancel / unprotected: the book moved under us.
         turn.tool_cache.clear()
@@ -1941,6 +2038,7 @@ async def _inject_live_poke(
             if isinstance(fresh, dict):
                 snap.clear()
                 snap.update(fresh)
+                _restore_scan_snap(snap, scan_snap)
                 world.net_liquidation = (
                     fresh.get("net_liquidation")
                     or (fresh.get("account") or {}).get("netliquidation")
@@ -2575,36 +2673,66 @@ async def _run_tool(
             return _clip(err)
         from abcxauto.lab_playbook import scan_screen_key
 
-        key = scan_screen_key(
+        look_key = _scan_look_key(args)
+        c_arena, c_code = _canonical_scan_screen(
             str(args.get("arena") or "").strip(),
             str(args.get("scan_code") or "").strip(),
         )
+        key = scan_screen_key(c_arena, c_code)
         used = [str(x) for x in (snap.get("scan_screens") or [])]
         prior_hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
-        if key and key in used:
-            rows = _scan_paint_rows(prior_hits, quotes=qmap)
-            screens = list(snap.get("scan_screens") or [])
-            reused = {
-                "ok": True,
-                "reused": True,
-                "screens_this_look": int(snap.get("scan_calls") or 0),
-                "screens": screens,
-                "note": "this screen already fetched this look",
-                "source": prior_hits.get("source") or "ibkr",
-                "symbols": [r.get("symbol") for r in rows if r.get("symbol")],
-                "hits": rows,
-                "rows": rows,
-                "applied": {},
-                "persisted": False,
-                "ranked": bool(prior_hits.get("ranked")),
-                "rank_meaning": prior_hits.get("rank_meaning"),
-                "quoted": prior_hits.get("quoted") or 0,
-            }
-            reused.update(_scan_gate_facts(rows))
-            if rows:
-                painted = dict(prior_hits)
-                painted["rows"] = rows
-                snap["scan_hits"] = painted
+        cached_look = turn.scan_cache.get(look_key) if look_key else None
+        if cached_look or (key and key in used):
+            if cached_look:
+                reused = deepcopy(cached_look)
+            else:
+                rows = _scan_paint_rows(prior_hits, quotes=qmap)
+                screens = list(snap.get("scan_screens") or [])
+                reused = {
+                    "ok": True,
+                    "screens_this_look": int(snap.get("scan_calls") or 0),
+                    "screens": screens,
+                    "source": prior_hits.get("source") or "ibkr",
+                    "symbols": [r.get("symbol") for r in rows if r.get("symbol")],
+                    "hits": rows,
+                    "rows": rows,
+                    "applied": {},
+                    "persisted": False,
+                    "ranked": bool(prior_hits.get("ranked")),
+                    "rank_meaning": prior_hits.get("rank_meaning"),
+                    "quoted": prior_hits.get("quoted") or 0,
+                }
+                reused.update(_scan_gate_facts(rows))
+                if rows:
+                    painted = dict(prior_hits)
+                    painted["rows"] = rows
+                    snap["scan_hits"] = painted
+            reused["reused"] = True
+            reused["note"] = "this screen already fetched this look"
+            if cached_look:
+                if reused.get("screens"):
+                    snap["scan_screens"] = list(reused["screens"])
+                if reused.get("screens_this_look") is not None:
+                    snap["scan_calls"] = int(reused["screens_this_look"] or 0)
+                if reused.get("rows"):
+                    snap["scan_hits"] = {
+                        "source": reused.get("source") or "ibkr",
+                        "ranked": bool(reused.get("ranked")),
+                        "rank_meaning": reused.get("rank_meaning") or "",
+                        "quoted": reused.get("quoted") or 0,
+                        "rows": list(reused["rows"]),
+                    }
+            if want_news and not reused.get("news"):
+                from abcxauto.prints import attach_mda_news
+
+                news_syms = _news_symbols_for_scan(
+                    snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {},
+                    [str(s) for s in (reused.get("symbols") or []) if s],
+                )
+                reused["news"] = await _mda_news(news_syms)
+                reused["news_freshness"] = "delayed_15m"
+                reused["news_use"] = "color_not_trigger"
+                attach_mda_news(reused.get("hits") or reused.get("rows") or [], reused["news"])
             _attach_scan_run(reused, turn=turn, world=world)
             think_emit("tool", "\n[scan = already have it]\n")
             return _clip(reused)
@@ -2692,11 +2820,11 @@ async def _run_tool(
                 else None
             )
             snap["scan_hits"] = merge_scan_hits(prior, incoming)
-            _record_scan_screen(
-                snap,
+            rec_arena, rec_code = _canonical_scan_screen(
                 str(job.get("arena") or payload.get("arena") or ""),
                 str(job.get("scan_code") or payload.get("scan_code") or ""),
             )
+            _record_scan_screen(snap, rec_arena, rec_code)
         if last_ok is None:
             err = last_err or {
                 "ok": False,
@@ -2791,6 +2919,8 @@ async def _run_tool(
             f"deepest={deep_s} {gate.get('deepest_symbol') or ''} "
             f"src={out.get('source') or 'empty'}\n",
         )
+        if look_key:
+            turn.scan_cache[look_key] = deepcopy(out)
         return _clip(out)
     if name == "candles":
         from abcxauto.broker.bars import ibkr_bar_freshness

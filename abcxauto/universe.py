@@ -659,6 +659,62 @@ def is_common_equity_symbol(symbol: str) -> bool:
     return True
 
 
+# Ranking only. Not a send floor. 2x/3x/inverse/vol/crypto-beta products the
+# IBKR gainer screens dump as lottery prints.
+LEVERED_SCAN_ETFS = frozenset(
+    {
+        "TQQQ", "SQQQ", "QLD", "QID", "UPRO", "SPXU", "SPXL", "SPXS", "SSO", "SDS",
+        "UDOW", "SDOW", "TNA", "TZA", "FAS", "FAZ", "ERX", "ERY", "DIG", "DUG",
+        "SOXL", "SOXS", "TECL", "TECS", "LABU", "LABD", "NAIL", "DPST", "CURE",
+        "NUGT", "DUST", "JNUG", "JDST", "YINN", "YANG", "TMF", "TMV", "TBT", "TBF",
+        "UVXY", "SVXY", "VIXY", "VIXM", "BOIL", "KOLD", "AGQ", "ZSL", "UGL", "GLL",
+        "FNGU", "FNGD", "WEBL", "WEBS", "HIBL", "HIBS", "TSLL", "TSLQ", "NVDL",
+        "NVDQ", "NVDX", "CONL", "CONI", "MSTU", "MSTZ", "MSTX", "BITX", "BITI",
+        "ETHU", "ETHD", "AMZU", "AAPX", "MSFX", "GOOX", "METU", "PSQ",
+    }
+)
+_LEVERED_NAME_RE = re.compile(
+    r"(?i)\b(?:2x|3x|-2x|-3x|ultrapro|ultrashort|ultra |inverse |levered |direxion)\b"
+)
+# Cheap lottery prints. Code constant, not parsed from card prose.
+MICRO_LAST_MAX = 15.0
+MICRO_MARKET_CAP_MAX = 300_000_000.0
+
+
+def scan_skip_class(row: dict[str, Any] | None) -> str:
+    """``levered`` / ``micro`` / ``""``. Scan ranking color, not a send refuse."""
+    if not isinstance(row, dict):
+        return ""
+    tagged = str(row.get("skip_class") or "").strip().lower()
+    if tagged in ("levered", "micro"):
+        return tagged
+    sym = str(row.get("symbol") or "").upper().strip()
+    if sym in LEVERED_SCAN_ETFS:
+        return "levered"
+    st = str(row.get("stock_type") or row.get("stockType") or "").upper()
+    if st in ("ETF", "ETN"):
+        blob = " ".join(
+            str(row.get(k) or "") for k in ("long_name", "name", "description")
+        )
+        if _LEVERED_NAME_RE.search(blob):
+            return "levered"
+    last = row.get("last")
+    try:
+        if last is not None and 0 < float(last) < MICRO_LAST_MAX:
+            return "micro"
+    except (TypeError, ValueError):
+        pass
+    cap = row.get("market_cap")
+    if cap is None:
+        cap = row.get("marketCap")
+    try:
+        if cap is not None and 0 < float(cap) < MICRO_MARKET_CAP_MAX:
+            return "micro"
+    except (TypeError, ValueError):
+        pass
+    return ""
+
+
 def normalize_symbols(raw: Any) -> list[str]:
     out: list[str] = []
     items = raw if isinstance(raw, (list, tuple)) else [raw]
@@ -703,6 +759,14 @@ def _scan_row_facts(row: Any, symbol: str, *, rank_fallback: int) -> dict[str, A
         val = getattr(row, src, None)
         if val not in (None, ""):
             out[dst] = str(val)
+    cd = getattr(row, "contractDetails", None)
+    if cd is not None:
+        st = str(getattr(cd, "stockType", "") or "").strip()
+        if st:
+            out["stock_type"] = st
+        long_name = str(getattr(cd, "longName", "") or "").strip()
+        if long_name:
+            out["long_name"] = long_name
     return out
 
 
