@@ -36,6 +36,8 @@ which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process.
 - Ticket geometry uses **IBKR last**, not MDA
 - Exits never blocked; fail-closed if the book is unknown
 - Agent may tighten floors via `self_tune`; it cannot weaken them or switch to live
+- Session look and token caps (Settings). Hit stays idle / park-ready; chat is
+  kept; no sit clock. Grok may tighten via `self_tune`, not raise.
 
 Walk-away ceilings: **25%** daily-loss, **25%** max position, **25%** risk/trade,
 **25%** per name, defined-risk on, cash-only, full NetLiq (`trading_budget_usd=0`).

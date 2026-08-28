@@ -75,6 +75,7 @@ _LIVE_GATED: frozenset[str] = frozenset({
 })
 
 SCAN_FETCH_CAP_RANGE = (1, 8)
+# Session look/token caps: Grok may tighten (lower), never raise.
 
 # Unsupervised defaults — walk-away % of the full book.
 UNSUPERVISED_DEFAULTS: dict[str, Any] = {
@@ -218,6 +219,7 @@ def apply_self_tune(
     risk_payload: dict[str, Any] = {}
     controls_payload: dict[str, Any] = {}
     scan_cap: int | None = None
+    session_caps_payload: dict[str, Any] = {}
     universe_payload: dict[str, Any] = {}
 
     for key, value in flat.items():
@@ -274,6 +276,27 @@ def apply_self_tune(
             if scan_cap != n:
                 clamped[key] = {"raw": n, "clamped": scan_cap}
             continue
+        if key in ("session_look_cap", "session_token_cap"):
+            from abcxauto.session_caps import LOOK_CAP_RANGE, TOKEN_CAP_RANGE
+
+            before[key] = getattr(cfg, key, None)
+            n = _i(value)
+            if n is None:
+                rejected[key] = "invalid value"
+                continue
+            lo, hi = LOOK_CAP_RANGE if key == "session_look_cap" else TOKEN_CAP_RANGE
+            wanted = max(lo, min(hi, n))
+            if wanted != n:
+                clamped[key] = {"raw": n, "clamped": wanted}
+            try:
+                current = int(getattr(cfg, key))
+            except (TypeError, ValueError):
+                current = hi
+            if wanted > current:
+                rejected[key] = "cannot weaken session cap"
+                continue
+            session_caps_payload[key] = wanted
+            continue
         if key in ("enabled_arenas", "custom_symbols", "exclude_symbols"):
             universe_payload[key] = value
             continue
@@ -305,6 +328,11 @@ def apply_self_tune(
             except Exception:
                 logger.exception("self_tune persist extra failed")
         applied.update(extra)
+    if session_caps_payload:
+        from abcxauto.config import update_agent_config
+
+        update_agent_config(**session_caps_payload, persist=persist)
+        applied.update(session_caps_payload)
 
     if universe_payload:
         try:

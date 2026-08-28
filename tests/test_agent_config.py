@@ -67,6 +67,24 @@ def test_numeric_knobs_are_clamped_not_accepted_raw():
     assert cfg.max_tokens == 1024
 
 
+def test_session_caps_persist_and_clamp():
+    cfg = update_agent_config(session_look_cap=80, session_token_cap=500_000)
+    assert cfg.session_look_cap == 80
+    assert cfg.session_token_cap == 500_000
+    from abcxauto import config as cfg_mod
+
+    cfg_mod._file_overrides = {}
+    cfg_mod._runtime_overrides.clear()
+    load_risk_settings(risk_settings_path())
+    reread = get_config()
+    assert reread.session_look_cap == 80
+    assert reread.session_token_cap == 500_000
+    assert update_agent_config(session_look_cap=1).session_look_cap == 8
+    assert update_agent_config(session_token_cap=1).session_token_cap == 50_000
+    assert update_agent_config(session_look_cap=9_999).session_look_cap == 400
+    assert update_agent_config(session_token_cap=99_000_000).session_token_cap == 10_000_000
+
+
 def test_scan_fetch_cap_stays_with_self_tune():
     """agent_state beats risk_settings, so an operator write here would be a lie."""
     with pytest.raises(ValueError):

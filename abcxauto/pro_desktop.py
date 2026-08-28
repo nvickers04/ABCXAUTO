@@ -92,6 +92,16 @@ PACING_FIELDS = (
     ("monitor_poll_s", "Monitor poll", "seconds, 5 – 900"),
     ("monitor_review_s", "Monitor review", "seconds, 30 – 21600"),
     ("disconnect_halt_s", "Disconnect halt", "seconds down before halt, 1 – 900"),
+    (
+        "session_look_cap",
+        "Session look cap",
+        "8 – 400 looks this session (premarket / RTH). Hit stays idle",
+    ),
+    (
+        "session_token_cap",
+        "Session token cap",
+        "50000 – 10000000 billed tokens this session. Hit stays idle",
+    ),
 )
 LINK_FIELDS = (
     ("ibkr_host", "IBKR host", "TWS host — disconnected only"),
@@ -118,7 +128,14 @@ RISK_FIELDS = (
 )
 # ProEngine._note kinds. Anything not listed still paints its message in MUTED,
 # so a new note kind is visible the day it is added.
-NOTE_COLOR = {"err": RED, "error": RED, "retry": AMBER, "park": AMBER, "pause": AMBER}
+NOTE_COLOR = {
+    "err": RED,
+    "error": RED,
+    "retry": AMBER,
+    "park": AMBER,
+    "pause": AMBER,
+    "cap": AMBER,
+}
 PAGE_REFRESH_S = 3.0
 # The spine paints the readable tail — same size as the think_tail.txt mirror.
 # The raw fallback label stays short so an off-screen buffer is a small diff.
@@ -579,10 +596,17 @@ class ProTerminal:
             "monitor_poll_s",
             "monitor_review_s",
             "disconnect_halt_s",
+            "session_look_cap",
+            "session_token_cap",
             "ibkr_host",
             "ibkr_client_id",
         ):
-            self._num_field(key, width=150 if key in ("model", "ibkr_host") else 110)
+            self._num_field(
+                key,
+                width=150
+                if key in ("model", "ibkr_host", "session_token_cap")
+                else 110,
+            )
         for key in ("monitor_enabled", "monitor_extended_hours"):
             self.gates[key] = ft.Switch(
                 value=True,
@@ -1637,8 +1661,10 @@ class ProTerminal:
                                 "Data and pacing",
                                 ft.Text(
                                     "How often the background monitor polls, reviews "
-                                    "and halts on a dead broker link. Scan depth is "
-                                    "self_tune. Stay-up has no sit clock.",
+                                    "and halts on a dead broker link. Session look/"
+                                    "token caps stop a flat grind — hit stays idle, "
+                                    "chat kept. Scan depth is self_tune. Stay-up has "
+                                    "no sit clock.",
                                     size=11,
                                     color=MUTED,
                                 ),
@@ -3119,9 +3145,24 @@ class ProTerminal:
             if sw is not None:
                 sw.value = bool(getattr(cfg, key, False))
         live = self.engine.state.running and getattr(self.engine.state, "autonomous", False)
+        sess_bit = ""
+        try:
+            from abcxauto.session_caps import usage
+
+            used = usage(session=str(getattr(self.engine, "_last_session", "") or ""))
+            sess_bit = (
+                f" · session {used['looks']}/{used['look_cap']} looks · "
+                f"{used['tokens']}/{used['token_cap']} tok"
+            )
+        except Exception:
+            sess_bit = (
+                f" · session cap {getattr(cfg, 'session_look_cap', '—')} looks / "
+                f"{getattr(cfg, 'session_token_cap', '—')} tok"
+            )
         self.lbl_settings_brain.value = (
             f"{getattr(cfg, 'model', '—')} · temp {getattr(cfg, 'temperature', '—')} · "
-            f"{getattr(cfg, 'max_tokens', '—')} tokens"
+            f"{getattr(cfg, 'max_tokens', '—')} tokens/turn"
+            + sess_bit
             + (" · applies on the next look" if live else "")
         )
         paper = bool(getattr(cfg, "is_paper", True))
@@ -3750,7 +3791,11 @@ class ProTerminal:
             self.lbl_hs_age.color = (
                 RED if running and age > 1800 else (AMBER if running and age > 900 else MUTED)
             )
-        if streak and not looking:
+        capped = bool(getattr(eng, "_session_capped", False) or st == "idle")
+        if capped and not looking:
+            self.lbl_hs_next.value = "session cap — idle"
+            self.lbl_hs_next.color = AMBER
+        elif streak and not looking:
             self.lbl_hs_next.value = f"look failed (x{streak})"
             self.lbl_hs_next.color = AMBER
         else:

@@ -199,6 +199,10 @@ def _isolate_open_risk_and_structure_files(tmp_path, monkeypatch):
 def _isolate_desk_state(tmp_path, monkeypatch):
     """Pytest must not clobber the live last_turn / wake / playbook."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "grok_wake.json"))
+    monkeypatch.setenv("ABCXAUTO_SESSION_CAPS_PATH", str(tmp_path / "session_caps.json"))
+    from abcxauto.session_caps import reset_session_caps
+
+    reset_session_caps()
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "playbook_lab.json"))
     monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "playbook_live.json"))

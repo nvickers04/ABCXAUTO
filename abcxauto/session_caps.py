@@ -1,0 +1,220 @@
+"""Per-session look and token ceilings.
+
+A flat stay-up grind can think all RTH and still lose the scorecard.
+These caps are the hard stop: when either is hit the desk stays idle /
+park-ready. Chat is kept. No sit clock. Overnight park stays park_clock.
+
+Session key is ET date + market label (premarket / regular). Premarket
+and RTH each get a budget so stay-up through the open still trades.
+Grok may tighten the knobs via self_tune; it cannot raise them.
+Usage is operator-visible, not a wake / system-prompt tally.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_REPO = Path(__file__).resolve().parents[1]
+_DEFAULT_PATH = _REPO / "data" / "state" / "session_caps.json"
+
+# Conservative RTH ceiling: a working desk at ~2.5 min/look can finish
+# regular hours. A 45s no-ticket grind stops in about two hours.
+DEFAULT_LOOK_CAP = 160
+DEFAULT_TOKEN_CAP = 2_500_000
+LOOK_CAP_RANGE = (8, 400)
+TOKEN_CAP_RANGE = (50_000, 10_000_000)
+
+_cache: dict[str, Any] | None = None
+_cache_path: str = ""
+
+
+def _path() -> Path:
+    raw = (os.environ.get("ABCXAUTO_SESSION_CAPS_PATH") or "").strip()
+    return Path(raw) if raw else _DEFAULT_PATH
+
+
+def _et_date(now: datetime | None = None) -> str:
+    from zoneinfo import ZoneInfo
+
+    clock = now or datetime.now(ZoneInfo("America/New_York"))
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=ZoneInfo("America/New_York"))
+    else:
+        clock = clock.astimezone(ZoneInfo("America/New_York"))
+    return clock.date().isoformat()
+
+
+def session_key(session: str = "", *, now: datetime | None = None) -> str:
+    """One budget per ET date + stay-up label (premarket / regular)."""
+    from abcxauto.park_clock import resolve_stay_up_session
+
+    sess = resolve_stay_up_session(session, now=now)
+    sess = str(sess or session or "").strip().lower()
+    if sess in ("", "unknown"):
+        sess = "unknown"
+    return f"{_et_date(now)}:{sess}"
+
+
+def _empty(key: str) -> dict[str, Any]:
+    return {"key": key, "looks": 0, "tokens": 0}
+
+
+def _load() -> dict[str, Any]:
+    global _cache, _cache_path
+    p = str(_path())
+    if _cache is not None and _cache_path == p:
+        return _cache
+    raw: dict[str, Any] = {}
+    path = _path()
+    if path.is_file():
+        try:
+            blob = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(blob, dict):
+                raw = blob
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            raw = {}
+    key = str(raw.get("key") or "")
+    try:
+        looks = max(0, int(raw.get("looks") or 0))
+    except (TypeError, ValueError):
+        looks = 0
+    try:
+        tokens = max(0, int(raw.get("tokens") or 0))
+    except (TypeError, ValueError):
+        tokens = 0
+    state = {"key": key, "looks": looks, "tokens": tokens}
+    _cache = state
+    _cache_path = p
+    return state
+
+
+def _save(state: dict[str, Any]) -> None:
+    global _cache, _cache_path
+    path = _path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "key": str(state.get("key") or ""),
+                    "looks": int(state.get("looks") or 0),
+                    "tokens": int(state.get("tokens") or 0),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.debug("session_caps write failed", exc_info=True)
+    _cache = {
+        "key": str(state.get("key") or ""),
+        "looks": int(state.get("looks") or 0),
+        "tokens": int(state.get("tokens") or 0),
+    }
+    _cache_path = str(path)
+
+
+def reset_session_caps() -> None:
+    """Drop the in-memory cache (tests)."""
+    global _cache, _cache_path
+    _cache = None
+    _cache_path = ""
+
+
+def _caps() -> tuple[int, int]:
+    from abcxauto.config import get_config
+
+    cfg = get_config()
+    lo_l, hi_l = LOOK_CAP_RANGE
+    lo_t, hi_t = TOKEN_CAP_RANGE
+    try:
+        looks = int(getattr(cfg, "session_look_cap", DEFAULT_LOOK_CAP) or DEFAULT_LOOK_CAP)
+    except (TypeError, ValueError):
+        looks = DEFAULT_LOOK_CAP
+    try:
+        tokens = int(
+            getattr(cfg, "session_token_cap", DEFAULT_TOKEN_CAP) or DEFAULT_TOKEN_CAP
+        )
+    except (TypeError, ValueError):
+        tokens = DEFAULT_TOKEN_CAP
+    return (
+        max(lo_l, min(hi_l, looks)),
+        max(lo_t, min(hi_t, tokens)),
+    )
+
+
+def _state_for(session: str = "", *, now: datetime | None = None) -> dict[str, Any]:
+    key = session_key(session, now=now)
+    state = _load()
+    if str(state.get("key") or "") != key:
+        state = _empty(key)
+        _save(state)
+    return state
+
+
+def billed_tokens_now() -> int:
+    """Journal billed tokens (input + output + cached). 0 when the journal is dark."""
+    try:
+        from abcxauto.memory import get_journal
+
+        used = get_journal().model_usage_totals() or {}
+        return (
+            max(0, int(used.get("input_tokens") or 0))
+            + max(0, int(used.get("output_tokens") or 0))
+            + max(0, int(used.get("cached_tokens") or 0))
+        )
+    except Exception:
+        return 0
+
+
+def usage(session: str = "", *, now: datetime | None = None) -> dict[str, Any]:
+    """Operator snapshot. Not for the wake line."""
+    look_cap, token_cap = _caps()
+    state = _state_for(session, now=now)
+    looks = int(state.get("looks") or 0)
+    tokens = int(state.get("tokens") or 0)
+    hit = looks >= look_cap or tokens >= token_cap
+    why = ""
+    if looks >= look_cap:
+        why = "looks"
+    if tokens >= token_cap:
+        why = "tokens" if not why else "looks+tokens"
+    return {
+        "key": str(state.get("key") or ""),
+        "looks": looks,
+        "tokens": tokens,
+        "look_cap": look_cap,
+        "token_cap": token_cap,
+        "hit": hit,
+        "why": why,
+    }
+
+
+def is_capped(session: str = "", *, now: datetime | None = None) -> bool:
+    return bool(usage(session, now=now).get("hit"))
+
+
+def note_look(
+    session: str = "",
+    *,
+    tokens: int = 0,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Count one finished look (and its billed tokens) against this session."""
+    try:
+        add = max(0, int(tokens or 0))
+    except (TypeError, ValueError):
+        add = 0
+    state = _state_for(session, now=now)
+    state["looks"] = int(state.get("looks") or 0) + 1
+    state["tokens"] = int(state.get("tokens") or 0) + add
+    _save(state)
+    return usage(session, now=now)

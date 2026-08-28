@@ -210,6 +210,10 @@ def test_scan_cap_is_not_on_the_settings_form():
 
     assert "scan_fetch_cap" not in AGENT_FIELD_KEYS
     assert all(key != "scan_fetch_cap" for key, _label, _hint in PACING_FIELDS)
+    assert "session_look_cap" in AGENT_FIELD_KEYS
+    assert "session_token_cap" in AGENT_FIELD_KEYS
+    assert any(key == "session_look_cap" for key, _label, _hint in PACING_FIELDS)
+    assert any(key == "session_token_cap" for key, _label, _hint in PACING_FIELDS)
 
 
 def test_self_tune_still_owns_the_scan_cap():

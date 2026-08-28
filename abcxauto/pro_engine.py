@@ -256,6 +256,7 @@ class ProEngine:
         self._think_parked = False
         self._last_session = ""
         self._fail_streak = 0
+        self._session_capped = False
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
         from abcxauto.think_stream import bind_engine
@@ -513,6 +514,13 @@ class ProEngine:
             or getattr(self, "_think_parked", False)
         ):
             return
+        try:
+            from abcxauto.session_caps import is_capped
+
+            if is_capped(session=str(getattr(self, "_last_session", "") or "")):
+                return
+        except Exception:
+            pass
         if self._wake_gate is None:
             self._wake_gate = WakeGate()
         if not self._wake_gate.try_wake(reason):
@@ -825,6 +833,21 @@ class ProEngine:
 
         return resolve_stay_up_session(session)
 
+    def _idle_on_session_cap(self, session: str = "", *, note: bool = True) -> bool:
+        """True when this session is out of looks or tokens. Idle, keep chat."""
+        from abcxauto.session_caps import is_capped
+
+        if not is_capped(session=session):
+            self._session_capped = False
+            return False
+        first = not bool(getattr(self, "_session_capped", False))
+        self._session_capped = True
+        self._resume_think = False
+        self.state.status = "Idle"
+        if note and first:
+            self._note("CAP", "session look/token cap — idle")
+        return True
+
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
         """Stay-up next look is immediate. No sit clock.
 
@@ -861,10 +884,12 @@ class ProEngine:
         self._cold_next = bool(failed or parked or stream_err)
         if not failed:
             self._fail_streak = 0
+        else:
+            self._fail_streak = int(getattr(self, "_fail_streak", 0) or 0) + 1
+            if not stay:
+                self._resume_think = False
+        if self._idle_on_session_cap(session):
             return 0.0
-        self._fail_streak = int(getattr(self, "_fail_streak", 0) or 0) + 1
-        if not stay:
-            self._resume_think = False
         return 0.0
 
     async def _host_think(
@@ -1118,6 +1143,28 @@ class ProEngine:
                     self.state.status = "Parked"
                     await asyncio.sleep(0.25)
                     continue
+                if getattr(self, "_session_capped", False) and not want_look:
+                    # Cap idle: snap so a session roll (premarket → RTH) can
+                    # stay-up through the open on a fresh budget. No sit clock.
+                    try:
+                        s_cap = await snap(self.conn)
+                    except Exception as e:
+                        self.ui.put(("error", f"snap failed: {e}"))
+                        await asyncio.sleep(2.0)
+                        continue
+                    cap_sess = self._resolve_session(self._session_of_snap(s_cap))
+                    self._last_session = cap_sess
+                    from abcxauto.park_clock import paper_stay_up
+
+                    if paper_stay_up(cap_sess):
+                        if self._idle_on_session_cap(cap_sess):
+                            await asyncio.sleep(0.25)
+                            continue
+                        self._resume_think = True
+                        continue
+                    self._session_capped = False
+                    self._resume_think = True
+                    continue
                 from abcxauto.park_clock import (
                     PULSE_S,
                     clear_park,
@@ -1144,6 +1191,9 @@ class ProEngine:
                         continue
                     if not honor:
                         if paper_stay_up(sess):
+                            if self._idle_on_session_cap(sess):
+                                await asyncio.sleep(0.25)
+                                continue
                             try:
                                 clear_park()
                             except Exception:
@@ -1194,6 +1244,8 @@ class ProEngine:
                 mins_open = minutes_to_open_from_snap(s)
                 flat_book = not (s.get("positions") or [])
                 stay = paper_stay_up(session)
+                if self._idle_on_session_cap(session):
+                    continue
                 if not _wake_grok_for_session(session, needs_prot=needs_prot):
                     # Overnight / after-close only. Do not call ensure_next_look
                     # in RTH / premarket — stay-up looks on this process.
@@ -1217,8 +1269,15 @@ class ProEngine:
                     continue
 
                 n += 1
+                from abcxauto.session_caps import billed_tokens_now, note_look
+
+                before_tok = billed_tokens_now()
                 try:
                     out = await self._host_think(n, g, s, resume=resume)
+                    note_look(
+                        session=session,
+                        tokens=max(0, billed_tokens_now() - before_tok),
+                    )
                     if out.get("_parked"):
                         self.ui.put(("cycle", out))
                         if stay:
@@ -1273,6 +1332,10 @@ class ProEngine:
                                 self._note("WAKE", "next look seed failed")
                     self._rearm_after_think(out, session=session)
                 except Exception as e:
+                    note_look(
+                        session=session,
+                        tokens=max(0, billed_tokens_now() - before_tok),
+                    )
                     self.ui.put(("error", str(e)))
                     payload = {"_failed": True, "_stream_error": str(e)}
                     self._rearm_after_think(payload, session=session)
