@@ -179,6 +179,18 @@ def test_brain_system_has_order_examples():
     assert "the operator gives" not in text
 
 
+def test_brain_system_send_closer_allows_no_send():
+    from abcxauto.llm import SYSTEM_PROMPT
+    from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+
+    text = brain_system_prompt()
+    closer = "send changes the book; a look may end with no send."
+    assert closer in text
+    assert text.rstrip().splitlines()[-1] == closer
+    assert "send is the only way to change the book." not in text
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
 def test_normalize_noop_is_not_a_ticket():
     strat, forced = normalize_action({"action": "noop"})
     assert strat == "blocked"

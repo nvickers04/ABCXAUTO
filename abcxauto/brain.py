@@ -1189,7 +1189,7 @@ def brain_system_prompt() -> str:
         + AWARENESS_HEART
         + "\n"
         + format_order_examples(allowed=allowed)
-        + "\nsend is the only way to change the book."
+        + "\nsend changes the book; a look may end with no send."
     )
 
 
