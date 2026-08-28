@@ -230,3 +230,74 @@ def test_paper_mid_without_quotes_is_not_a_conservative_mark():
     assert conservative_px(mid_only) is None
     assert conservative_trade_pnl([mid_only, closer]) is None
     assert conservative_trade_pnl([closer]) is None
+
+
+def test_locked_last_quote_is_not_a_conservative_mark():
+    """Paper TWS last printed as bid=ask=fill is the mid with a sticker."""
+    buy = {
+        "price": 100.0,
+        "quantity": 10,
+        "side": "BOT",
+        "sec_type": "STK",
+        "bid": 100.0,
+        "ask": 100.0,
+        "ibkr_last": 100.0,
+        "realized_pnl": 0.0,
+    }
+    sell = {
+        "price": 105.0,
+        "quantity": 10,
+        "side": "SLD",
+        "sec_type": "STK",
+        "bid": 105.0,
+        "ask": 105.0,
+        "ibkr_last": 105.0,
+        "realized_pnl": 50.0,
+    }
+    assert conservative_px(buy) is None
+    assert conservative_px(sell) is None
+    assert conservative_trade_pnl([buy, sell]) is None
+
+
+def test_mid_inside_spread_reprices_to_the_far_side():
+    buy = {
+        "price": 100.0,
+        "quantity": 10,
+        "side": "BUY",
+        "sec_type": "STK",
+        "bid": 99.90,
+        "ask": 100.10,
+        "ibkr_last": 100.0,
+        "fill_label": "mid_inside_spread",
+        "commission": 1.0,
+    }
+    sell = {
+        "price": 105.0,
+        "quantity": 10,
+        "side": "SELL",
+        "sec_type": "STK",
+        "bid": 104.90,
+        "ask": 105.10,
+        "ibkr_last": 105.0,
+        "fill_label": "mid_inside_spread",
+        "commission": 1.0,
+        "realized_pnl": 50.0,
+    }
+    assert conservative_px(buy) == 100.10
+    assert conservative_px(sell) == 104.90
+    assert conservative_trade_pnl([buy, sell]) == 46.0
+
+
+def test_fill_at_ask_with_last_at_ask_stays_the_print():
+    """Last sitting on the ask is a real far-side fill, not a locked mid."""
+    row = {
+        "price": 100.10,
+        "quantity": 10,
+        "side": "BUY",
+        "sec_type": "STK",
+        "bid": 99.90,
+        "ask": 100.10,
+        "ibkr_last": 100.10,
+        "fill_label": "at_ask",
+    }
+    assert conservative_px(row) == 100.10

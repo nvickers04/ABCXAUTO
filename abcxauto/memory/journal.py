@@ -387,8 +387,10 @@ def _sql_fill_dict(row: sqlite3.Row) -> dict:
         "price": _get("price"),
         "commission": _get("commission"),
         "realized_pnl": pnl_f,
+        "ibkr_last": _get("ibkr_last"),
         "bid": _get("bid"),
         "ask": _get("ask"),
+        "fill_label": _get("fill_label"),
     }
 
 
@@ -909,12 +911,25 @@ class TradeJournal:
                             _row_ts(fill.get("ts")),
                             anchors.get(oid) if oid is not None else None,
                         )
-                        mark = (
+                        raw_mark = (
                             mark_rows.get(mark_by_oid.get(oid))
                             if oid is not None
                             else None
                         )
-                        fill_marks = self._fill_mark_values(mark, fill)
+                        primary = (
+                            _coerce_order_id(raw_mark.get("order_id"))
+                            if isinstance(raw_mark, dict)
+                            else None
+                        )
+                        # Stop/target oids share the entry send_mark. Do not
+                        # stamp that dispatch NBBO onto the closer.
+                        stamp_mark = (
+                            raw_mark
+                            if isinstance(raw_mark, dict)
+                            and (primary is None or oid == primary)
+                            else None
+                        )
+                        fill_marks = self._fill_mark_values(stamp_mark, fill)
                         cur = conn.execute(
                             """
                             INSERT OR IGNORE INTO fills (
@@ -945,14 +960,20 @@ class TradeJournal:
                             ),
                         )
                         inserted += int(cur.rowcount or 0)
-                        if int(cur.rowcount or 0) and mark is not None and oid is not None:
-                            self._apply_fill_to_send_mark_locked(conn, mark, fill, oid)
+                        if (
+                            int(cur.rowcount or 0)
+                            and isinstance(raw_mark, dict)
+                            and oid is not None
+                        ):
+                            self._apply_fill_to_send_mark_locked(
+                                conn, raw_mark, fill, oid
+                            )
                             refreshed = conn.execute(
                                 "SELECT * FROM send_marks WHERE id = ?",
-                                (int(mark["id"]),),
+                                (int(raw_mark["id"]),),
                             ).fetchone()
                             if refreshed is not None:
-                                mark_rows[int(mark["id"])] = dict(refreshed)
+                                mark_rows[int(raw_mark["id"])] = dict(refreshed)
                     except Exception:
                         logger.exception(
                             "journal.record_fills row failed exec_id=%s", exec_id
@@ -964,18 +985,50 @@ class TradeJournal:
             return 0
 
     def _fill_mark_values(self, mark: Optional[dict], fill: dict) -> dict:
-        """Dispatch NBBO + this fill's price / slippage / spread / label."""
-        from abcxauto.send_marks import apply_fill_to_marks, public_marks
-
-        if not isinstance(mark, dict):
-            return {key: None for key in (
-                "ibkr_last", "bid", "ask", "sent_price",
-                "signed_slippage", "spread_paid", "fill_label",
-            )}
-        filled = apply_fill_to_marks(
-            mark, fill_price=fill.get("price"), side=fill.get("side") or mark.get("side")
+        """This send's NBBO vs this fill. Parent-bracket quotes stay off closers."""
+        from abcxauto.send_marks import (
+            apply_fill_to_marks,
+            compute_marks,
+            finite_px,
+            public_marks,
         )
-        return public_marks(filled)
+
+        empty = {
+            key: None
+            for key in (
+                "ibkr_last",
+                "bid",
+                "ask",
+                "sent_price",
+                "signed_slippage",
+                "spread_paid",
+                "fill_label",
+            )
+        }
+        if isinstance(mark, dict):
+            filled = apply_fill_to_marks(
+                mark,
+                fill_price=fill.get("price"),
+                side=fill.get("side") or mark.get("side"),
+            )
+            return public_marks(filled)
+        quote = {
+            "last": fill.get("ibkr_last") or fill.get("last"),
+            "bid": fill.get("bid"),
+            "ask": fill.get("ask"),
+            "mid": fill.get("mid"),
+        }
+        if not any(finite_px(quote[k]) for k in ("last", "bid", "ask", "mid")):
+            return empty
+        return public_marks(
+            compute_marks(
+                quote,
+                sent_price=fill.get("sent_price"),
+                fill_price=fill.get("price"),
+                side=fill.get("side"),
+                status="filled" if fill.get("price") is not None else "",
+            )
+        )
 
     def _apply_fill_to_send_mark_locked(
         self,
@@ -1138,6 +1191,36 @@ class TradeJournal:
         except Exception:
             logger.exception("journal.recent_send_marks failed")
             return []
+
+    def send_marks_by_order_id(self, limit: int = 4000) -> dict:
+        """Primary send order_id -> dispatch NBBO. Bracket children are omitted.
+
+        Conservative reprice is fill vs this send's quote, not the parent
+        bracket's NBBO stamped onto a stop.
+        """
+        out: dict = {}
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT order_id, ibkr_last, bid, ask, mid, sent_price,
+                           fill_price, fill_label, side, status
+                    FROM send_marks
+                    WHERE order_id IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+            for row in rows:
+                oid = _coerce_order_id(row["order_id"])
+                if oid is None or oid in out:
+                    continue
+                out[oid] = dict(row)
+        except Exception:
+            logger.exception("journal.send_marks_by_order_id failed")
+        return out
 
     def record_decision(
         self,
@@ -1822,7 +1905,8 @@ class TradeJournal:
                 rows = conn.execute(
                     """
                     SELECT ts, exec_id, order_id, symbol, sec_type, side,
-                           quantity, price, commission, realized_pnl, bid, ask
+                           quantity, price, commission, realized_pnl,
+                           ibkr_last, bid, ask, fill_label
                     FROM fills
                     WHERE realized_pnl IS NOT NULL AND ABS(realized_pnl) > 1e-9
                     ORDER BY ts ASC, id ASC
@@ -1855,7 +1939,8 @@ class TradeJournal:
                 rows = conn.execute(
                     """
                     SELECT ts, exec_id, order_id, symbol, sec_type, side,
-                           quantity, price, commission, realized_pnl, bid, ask
+                           quantity, price, commission, realized_pnl,
+                           ibkr_last, bid, ask, fill_label
                     FROM fills
                     ORDER BY ts ASC, id ASC
                     LIMIT ?

@@ -692,3 +692,254 @@ def test_send_nbbo_marks_the_entry_when_the_fill_has_no_quote():
     trades = classify_card_trades([send], [closer], {10, 11}, all_fills=[entry, closer])
     assert trades[0]["realized_pnl"] == 48.0
     assert trades[0]["conservative_pnl"] == 46.0
+
+
+def test_entry_send_nbbo_does_not_mark_the_closer():
+    """Parent-bracket quotes are not the exit NBBO. Missing exit mark → None."""
+    entry = {
+        "ts": "2026-08-20T14:00:01Z",
+        "exec_id": "e-10",
+        "order_id": 10,
+        "symbol": "WMT",
+        "sec_type": "STK",
+        "side": "BOT",
+        "quantity": 10,
+        "price": 100.0,
+        "commission": 1.0,
+        "realized_pnl": 0.0,
+    }
+    closer = {
+        "ts": "2026-08-20T15:00:00Z",
+        "exec_id": "x-11",
+        "order_id": 11,
+        "symbol": "WMT",
+        "sec_type": "STK",
+        "side": "SLD",
+        "quantity": 10,
+        "price": 105.0,
+        "commission": 1.0,
+        "realized_pnl": 50.0,
+    }
+    send = _send_row(
+        "flush bounce",
+        [10, 11],
+        ts="2026-08-20T14:00:00Z",
+        bid=99.90,
+        ask=100.10,
+    )
+    trades = classify_card_trades([send], [closer], {10, 11}, all_fills=[entry, closer])
+    assert trades[0]["realized_pnl"] == 48.0
+    assert trades[0]["conservative_pnl"] is None
+
+
+def test_mid_equal_locked_quotes_do_not_graduate(tmp_path, monkeypatch):
+    """Winning paper mid with last=bid=ask is not a conservative mark."""
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    save_lab(
+        clamp_update(
+            _book(
+                "flush bounce",
+                fill_assumption="conservative",
+                retire_if={"sample": 1, "condition": "x", "max_losses": 2},
+            )
+        )
+    )
+    entry, closer = _stk_round_trip(
+        101,
+        102,
+        ts_open="2026-08-20T14:00:01Z",
+        ts_close="2026-08-20T15:00:00Z",
+        realized=50.0,
+        entry_bid=100.0,
+        entry_ask=100.0,
+        exit_bid=105.0,
+        exit_ask=105.0,
+    )
+    entry["ibkr_last"] = 100.0
+    closer["ibkr_last"] = 105.0
+    monkeypatch.setattr(
+        "abcxauto.memory.get_journal",
+        lambda: _Journal([entry, closer], {101, 102}),
+    )
+    _write_sends(
+        [_send_row("flush bounce", [101, 102], ts="2026-08-20T14:00:00+00:00")]
+    )
+    row = card_facts()[0]
+    assert row["resolved"] == 1
+    assert row["resolved_pnl"] == 48.0
+    assert row["conservative_pnl"] is None
+    assert row["graduated"] is False
+    assert row["cannot_graduate_reason"] == "no conservative_pnl"
+
+
+def _journal_send_mark(journal, *, oid, symbol, side, bid, ask, last, card):
+    from abcxauto.send_marks import build_dispatch_marks
+
+    pid = journal.record_proposal(
+        strategy="market_bracket",
+        symbol=symbol,
+        direction=side,
+        quantity=10,
+        params={"card": card},
+        validation_ok=True,
+    )
+    marks = build_dispatch_marks(
+        strategy="market_bracket",
+        params={"symbol": symbol, "direction": side, "card": card},
+        quote={"last": last, "bid": bid, "ask": ask},
+        result={"success": True, "order_id": oid, "status": "Submitted"},
+        ok=True,
+    )
+    did = journal.record_dispatch(pid, True, {"success": True, "order_id": oid})
+    journal.record_send_marks(
+        proposal_id=pid,
+        dispatch_id=did,
+        marks=marks,
+        result={"success": True, "order_id": oid},
+    )
+
+
+def test_send_journal_nbbo_is_what_the_verdict_reads(tmp_path, monkeypatch):
+    """Fill vs NBBO at send: paper mid reprices; that number graduates."""
+    from abcxauto.memory import get_journal
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    save_lab(
+        clamp_update(
+            _book(
+                "flush bounce",
+                fill_assumption="conservative",
+                retire_if={"sample": 1, "condition": "x", "max_losses": 2},
+            )
+        )
+    )
+    journal = get_journal()
+    _journal_send_mark(
+        journal,
+        oid=101,
+        symbol="WMT",
+        side="LONG",
+        bid=99.90,
+        ask=100.10,
+        last=100.0,
+        card="flush bounce",
+    )
+    _journal_send_mark(
+        journal,
+        oid=102,
+        symbol="WMT",
+        side="SHORT",
+        bid=104.90,
+        ask=105.10,
+        last=105.0,
+        card="flush bounce",
+    )
+    assert journal.record_fills(
+        [
+            {
+                "ts": "2026-08-20T14:00:01.000Z",
+                "exec_id": "e-101",
+                "order_id": 101,
+                "symbol": "WMT",
+                "sec_type": "STK",
+                "side": "BOT",
+                "quantity": 10,
+                "price": 100.0,
+                "commission": 1.0,
+                "realized_pnl": 0.0,
+            },
+            {
+                "ts": "2026-08-20T15:00:00.000Z",
+                "exec_id": "x-102",
+                "order_id": 102,
+                "symbol": "WMT",
+                "sec_type": "STK",
+                "side": "SLD",
+                "quantity": 10,
+                "price": 105.0,
+                "commission": 1.0,
+                "realized_pnl": 50.0,
+            },
+        ]
+    ) == 2
+    listed = journal.listed_fills()
+    assert listed[0]["bid"] == 99.90
+    assert listed[0]["ask"] == 100.10
+    assert listed[0]["fill_label"] == "mid_inside_spread"
+    assert listed[1]["bid"] == 104.90
+    assert listed[1]["ask"] == 105.10
+    _write_sends(
+        [_send_row("flush bounce", [101, 102], ts="2026-08-20T14:00:00+00:00")]
+    )
+    row = card_facts()[0]
+    assert row["resolved_pnl"] == 48.0
+    assert row["conservative_pnl"] == 46.0
+    assert row["conservative_pnl"] != row["resolved_pnl"]
+    assert row["graduated"] is True
+    assert row["cannot_graduate_reason"] == ""
+
+
+def test_paper_win_without_exit_nbbo_does_not_graduate(tmp_path, monkeypatch):
+    """Entry send mark alone is not a round-trip reprice."""
+    from abcxauto.memory import get_journal
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
+    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
+    save_lab(
+        clamp_update(
+            _book(
+                "flush bounce",
+                fill_assumption="conservative",
+                retire_if={"sample": 1, "condition": "x", "max_losses": 2},
+            )
+        )
+    )
+    journal = get_journal()
+    _journal_send_mark(
+        journal,
+        oid=101,
+        symbol="WMT",
+        side="LONG",
+        bid=99.90,
+        ask=100.10,
+        last=100.0,
+        card="flush bounce",
+    )
+    assert journal.record_fills(
+        [
+            {
+                "ts": "2026-08-20T14:00:01.000Z",
+                "exec_id": "e-101",
+                "order_id": 101,
+                "symbol": "WMT",
+                "sec_type": "STK",
+                "side": "BOT",
+                "quantity": 10,
+                "price": 100.0,
+                "commission": 1.0,
+                "realized_pnl": 0.0,
+            },
+            {
+                "ts": "2026-08-20T15:00:00.000Z",
+                "exec_id": "x-102",
+                "order_id": 102,
+                "symbol": "WMT",
+                "sec_type": "STK",
+                "side": "SLD",
+                "quantity": 10,
+                "price": 105.0,
+                "commission": 1.0,
+                "realized_pnl": 50.0,
+            },
+        ]
+    ) == 2
+    _write_sends(
+        [_send_row("flush bounce", [101, 102], ts="2026-08-20T14:00:00+00:00")]
+    )
+    row = card_facts()[0]
+    assert row["resolved_pnl"] == 48.0
+    assert row["conservative_pnl"] is None
+    assert row["graduated"] is False
+    assert row["cannot_graduate_reason"] == "no conservative_pnl"
