@@ -1610,6 +1610,18 @@ def _session_cap_from_counter(session: str) -> dict[str, Any]:
     }
 
 
+# Leading-line prefix so a protected stop / missing working order cannot
+# parse as an order ticket. Not a hold-law. unprotected= stays bare.
+WAKE_FACT_PREFIX = "fact:"
+
+
+def _desk_fact_line(body: str) -> str:
+    bit = str(body or "").strip()
+    if not bit:
+        return ""
+    return f"{WAKE_FACT_PREFIX} {bit}"
+
+
 def worst_wake_fact(
     *,
     unprotected: list[str] | None,
@@ -1631,17 +1643,17 @@ def worst_wake_fact(
         px = stop.get("stop")
         last = stop.get("last")
         if dist is not None and px is not None:
-            bit = f"stop_dist={ident} {dist} to {px}"
+            bit = f"closest_stop {ident} dist={dist} stop={px}"
             if last is not None:
                 bit += f" last={last}"
-            return bit
+            return _desk_fact_line(bit)
     missing = [
         str(x).strip()
         for x in (day.get("working_order_missing") or [])
         if str(x).strip()
     ]
     if missing:
-        return "working_order_missing=" + ",".join(missing[:6])
+        return _desk_fact_line("working_order_missing " + ",".join(missing[:6]))
     if _halt_is_tight(day):
         dp = day.get("ibkr_daily_pnl")
         if dp is None:

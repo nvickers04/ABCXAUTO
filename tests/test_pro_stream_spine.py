@@ -150,6 +150,7 @@ def test_stream_line_kind_classifies_every_marker_the_desk_emits():
     assert stream_line_kind("[fill]") == "poke"
     assert stream_line_kind("[order_change]") == "poke"
     assert stream_line_kind("[unprotected]") == "poke"
+    assert stream_line_kind("[stop_dist]") == "poke"
     assert stream_line_kind("hits=3 quoted=2 src=ibkr") == "scan"
     assert stream_line_kind("WMT is holding the shelf.") == "prose"
     assert stream_line_kind("   ") == "blank"

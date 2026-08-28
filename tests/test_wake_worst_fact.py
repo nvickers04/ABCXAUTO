@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from abcxauto.llm import SYSTEM_PROMPT
-from abcxauto.world_state import format_wake, worst_wake_fact
+from abcxauto.world_state import WAKE_FACT_PREFIX, format_wake, worst_wake_fact
 from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
 
 _TRAILING_BARE_SEND = re.compile(r"(?:^|\s)send\.\s*$")
@@ -100,7 +100,11 @@ def test_stop_distance_beats_session_cap():
             "session_cap": {"looks_left": 40, "tokens_left": 1_000_000},
         },
     )
-    assert "stop_dist=AAPL STK long 20 2.12 to 178.0" in fact
+    assert fact == (
+        f"{WAKE_FACT_PREFIX} closest_stop AAPL STK long 20 "
+        "dist=2.12 stop=178.0 last=180.12"
+    )
+    assert not fact.startswith("stop_dist=")
     assert "session_cap" not in fact
 
 
@@ -112,7 +116,55 @@ def test_working_order_missing_beats_session_cap():
             "session_cap": {"looks_left": 40, "tokens_left": 1_000_000},
         },
     )
-    assert fact.startswith("working_order_missing=QQQ")
+    assert fact == f"{WAKE_FACT_PREFIX} working_order_missing QQQ 260918C500 long 1"
+    assert not fact.startswith("working_order_missing=")
+
+
+def test_protected_stop_dist_wake_leads_with_fact_prefix():
+    """Protected closest_stop is a desk fact, not a bare order ticket."""
+    from abcxauto.park_clock import note_wake
+
+    note_wake(None)
+    day = {
+        "names": 1,
+        "lots": 1,
+        "nl": 100_000.0,
+        "daily_pnl": 0.0,
+        "max_risk_per_trade_pct": 5.0,
+        "sizing_floors": False,
+        "capacity": {"open_count": 1, "max_open_positions": 15, "nl": 100_000.0},
+        "open_lots": ["PYPL STK long 50"],
+        "mix": {"stk": 1},
+        "vol_bit": "IWM rv=mid iv=18.0",
+        "session_cap": {"looks_left": 40, "tokens_left": 1_000_000},
+        "stop_dist": {
+            "ident": "PYPL STK long 50",
+            "last": 54.09,
+            "stop": 52.61,
+            "dist": 1.48,
+        },
+    }
+    fact = worst_wake_fact(unprotected=[], day=day)
+    assert fact == (
+        f"{WAKE_FACT_PREFIX} closest_stop PYPL STK long 50 "
+        "dist=1.48 stop=52.61 last=54.09"
+    )
+    assert fact.startswith(f"{WAKE_FACT_PREFIX} ")
+    assert not fact.startswith("stop_dist=")
+    assert "stop_dist=PYPL" not in fact
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day=day,
+    )
+    lead = text.splitlines()[0]
+    assert lead == fact + "."
+    assert lead.startswith(f"{WAKE_FACT_PREFIX} closest_stop PYPL")
+    assert not lead.startswith("stop_dist=")
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
 def test_format_wake_is_desk_facts_not_a_send_command():

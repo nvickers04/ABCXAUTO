@@ -140,6 +140,47 @@ def test_a_live_poke_invalidates_cached_reads():
         clear_interrupt()
 
 
+@pytest.mark.parametrize(
+    "kind,detail,clears",
+    [
+        ("stop_dist", "PYPL STK long 50 dist=1.48", False),
+        ("fill", "NVDA", True),
+        ("unprotected", "AAPL STK", True),
+        ("order_change", "working orders changed", True),
+    ],
+)
+def test_poke_kind_tool_cache(kind, detail, clears):
+    """Last-tick stop_dist keeps the cache; fill / real order_change / unprotected clear it."""
+    from abcxauto.brain import _inject_live_poke
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    cached = json.dumps({"flat": False, "open_lots": ["PYPL STK long 50"]})
+    turn = BrainTurn()
+    turn.tool_cache[_tool_key("book", {})] = cached
+    turn.tool_cache[_tool_key("status", {})] = json.dumps({"ibkr": "up"})
+
+    class _Chat:
+        def append(self, *_a, **_k):
+            pass
+
+    clear_interrupt()
+    note_interrupt(BookEvent(kind, detail))
+    try:
+        ok = asyncio.run(
+            _inject_live_poke(
+                _Chat(), connector=None, world=_world(), snap={}, turn=turn
+            )
+        )
+        assert ok is True
+        if clears:
+            assert turn.tool_cache == {}
+        else:
+            assert turn.tool_cache[_tool_key("book", {})] == cached
+            assert _tool_key("status", {}) in turn.tool_cache
+    finally:
+        clear_interrupt()
+
+
 def test_every_wake_is_a_new_chat():
     from types import SimpleNamespace
 
