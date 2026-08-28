@@ -2711,6 +2711,7 @@ class ProTerminal:
             ("scan", "scan"),
             ("shape", "shape"),
             ("invalidation", "invalid"),
+            ("fill_assumption", "fill"),
             ("note", "note"),
         ):
             val = str(card.get(field) or "").strip()

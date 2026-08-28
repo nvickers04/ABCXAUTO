@@ -1103,20 +1103,39 @@ def _fake_execute(result):
 
 
 def test_card_graduates_only_at_its_declared_sample_with_positive_edge():
-    card = {
+    paper = {
         **_card("flush bounce", retire_if={"sample": 3, "condition": "no bounce"}),
         "type": "market_bracket",
     }
-    short = card_verdict({"resolved": 2, "resolved_pnl": 900.0}, card)
+    short = card_verdict({"resolved": 2, "resolved_pnl": 900.0}, paper)
     assert short["graduated"] is False
     assert short["tripped"] is False
     assert short["sample_left"] == 1
 
-    met = card_verdict({"resolved": 3, "resolved_pnl": 900.0}, card)
+    # Sample + paper mid + thesis is the notebook pleasing itself.
+    mid = card_verdict({"resolved": 3, "resolved_pnl": 900.0}, paper)
+    assert mid["graduated"] is False
+    assert mid["fill_assumption"] == "paper_mid"
+    assert mid["cannot_graduate_reason"] == "paper_mid cannot graduate"
+
+    honest = {
+        **_card(
+            "flush bounce",
+            fill_assumption="full_spread",
+            retire_if={
+                "sample": 3,
+                "condition": "no bounce",
+                "max_losses": 2,
+            },
+        ),
+        "type": "market_bracket",
+    }
+    met = card_verdict({"resolved": 3, "resolved_pnl": 900.0}, honest)
     assert met["graduated"] is True
     assert met["anchored_type"] == "market_bracket"
+    assert met["fill_assumption"] == "full_spread"
 
-    flat = card_verdict({"resolved": 3, "resolved_pnl": 0.0}, card)
+    flat = card_verdict({"resolved": 3, "resolved_pnl": 0.0}, honest)
     assert flat["graduated"] is False
     assert flat["tripped"] is True
     assert "declared sample 3" in flat["trip_reason"]
@@ -1187,7 +1206,12 @@ def test_miscalibration_is_reported_but_never_blocks_graduation():
     card = {
         **_card(
             "flush bounce",
-            retire_if={"sample": 10, "condition": "no bounce"},
+            fill_assumption="conservative",
+            retire_if={
+                "sample": 10,
+                "condition": "no bounce",
+                "max_loss_usd": 500,
+            },
             expect_hit_rate=70,
         ),
         "type": "market_bracket",
@@ -1788,7 +1812,8 @@ def test_playbook_tool_reports_the_tree_and_the_verdicts():
     assert "TYPE market_bracket" in payload["tree"]
     assert payload["graduated"] == []
     assert payload["tripped"] == []
-    assert payload["needs_declaration"] == []
+    assert payload["needs_declaration"] == ["flush bounce [market_bracket]"]
+    assert payload["live_hypothesis_cap"] == 3
 
 
 def test_run_sheet_follows_parent_tool_order_instead_of_rescan():

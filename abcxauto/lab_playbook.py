@@ -35,8 +35,11 @@ an existing card (scorecard label). Notebook prose is not a send gate — hold,
 gap, tape, session, and book sentences cannot invent a refuse. Operator
 flattens, panic, and halt exits are tracked but kept out of the graduation
 math — an interrupted trade is neither proof nor falsification. A card
-graduates when it meets *its own* declared sample with positive resolved
-edge; only graduated cards, inside their pruned type stanzas, reach
+graduates only on a conservative fill assumption (not ``paper_mid``), its
+own ``retire_if.sample``, one numeric kill (``max_losses`` or
+``max_loss_usd``), a thesis, and positive resolved edge. Paper mid P&L and
+paper win-rate are facts, not live evidence. Concurrent live hypotheses
+are capped. Only graduated cards, inside their pruned type stanzas, reach
 ``playbook_live.json``. Live new risk still needs that promoted snapshot.
 
 A flat top-level ``cards`` list is still accepted on a write and is still
@@ -97,6 +100,29 @@ _PROJECTED_KEYS = ("cards",)
 # What a card actually used. Not a checklist — populate what applies.
 EVIDENCE_FIELDS = ("scan", "news", "reads", "odds")
 CARD_STATUSES = ("testing", "working", "retired")
+# Paper IBKR option fills are fantasy mids. Stored as a fact; cannot graduate.
+FILL_ASSUMPTION_PAPER_MID = "paper_mid"
+FILL_ASSUMPTION_FULL_SPREAD = "full_spread"
+FILL_ASSUMPTION_CONSERVATIVE = "conservative"
+CONSERVATIVE_FILL_ASSUMPTIONS = frozenset({
+    FILL_ASSUMPTION_FULL_SPREAD,
+    FILL_ASSUMPTION_CONSERVATIVE,
+})
+FILL_ASSUMPTIONS = (
+    FILL_ASSUMPTION_PAPER_MID,
+    FILL_ASSUMPTION_FULL_SPREAD,
+    FILL_ASSUMPTION_CONSERVATIVE,
+)
+# Testing/working unlocked cards. Three is a book; thirty is a blog.
+LIVE_HYPOTHESIS_CAP = 3
+# Numbers we will not invent. Keys stay stable so a missing series is a gap.
+HONESTY_GAP_REASONS: dict[str, str] = {
+    "fill_vs_ibkr_last": "journal fills store price, not IBKR last at fill",
+    "holdout": "no holdout split on card trades",
+    "beat_spy_after_model_cost": "no SPY return series; account_returns is IBKR NAV only",
+    "cost_allocated_pnl": "no model cost or no sends to allocate",
+    "turnover_per_day": "no card clock",
+}
 # Resolved trades before a hit rate is worth printing. Matches path_math's
 # refusal to compute expectancy on a thinner sample than this.
 _CALIBRATION_MIN_N = 4
@@ -1120,6 +1146,53 @@ def _norm_retire_if(raw: Any) -> dict[str, Any]:
     return out
 
 
+def _has_numeric_kill(retire: Any) -> bool:
+    """Promotion needs sample plus one of these. Clerk does not invent them."""
+    row = retire if isinstance(retire, dict) else {}
+    max_loss = row.get("max_loss_usd")
+    if isinstance(max_loss, (int, float)) and float(max_loss) > 0:
+        return True
+    max_losses = row.get("max_losses")
+    if isinstance(max_losses, int) and max_losses > 0:
+        return True
+    return False
+
+
+def _norm_fill_assumption(raw: Any) -> str:
+    """How the card's fills are assumed. Missing is paper_mid — not conservative."""
+    text = str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+    compact = text.replace("_", "")
+    if text in (
+        FILL_ASSUMPTION_PAPER_MID,
+        "mid",
+        "paper",
+        "fantasy_mid",
+        "paper_mids",
+    ) or compact in {"papermid", "papermids", "mid", "paper", "fantasymid"}:
+        return FILL_ASSUMPTION_PAPER_MID
+    if text in (
+        FILL_ASSUMPTION_FULL_SPREAD,
+        "pay_spread",
+        "pay_the_spread",
+    ) or compact in {"fullspread", "payspread", "paythespread"}:
+        return FILL_ASSUMPTION_FULL_SPREAD
+    if text in (
+        FILL_ASSUMPTION_CONSERVATIVE,
+        "conservative_fill",
+    ) or compact in {"conservative", "conservativefill"}:
+        return FILL_ASSUMPTION_CONSERVATIVE
+    return FILL_ASSUMPTION_PAPER_MID
+
+
+def fill_assumption_of(card: Any) -> str:
+    row = card if isinstance(card, dict) else {}
+    return _norm_fill_assumption(row.get("fill_assumption"))
+
+
+def fill_assumption_is_conservative(card: Any) -> bool:
+    return fill_assumption_of(card) in CONSERVATIVE_FILL_ASSUMPTIONS
+
+
 def card_ticket_of(raw: Any) -> str:
     """The type a loose card claims. Only used to file it under its parent."""
     if not isinstance(raw, dict):
@@ -1221,6 +1294,13 @@ def _norm_card(raw: Any, *, prev: dict[str, Any] | None = None) -> dict[str, Any
         retire = _norm_retire_if(carried.get("retire_if"))
     if retire:
         out["retire_if"] = retire
+    if "fill_assumption" in raw:
+        out["fill_assumption"] = _norm_fill_assumption(raw.get("fill_assumption"))
+    elif carried.get("fill_assumption"):
+        out["fill_assumption"] = _norm_fill_assumption(carried.get("fill_assumption"))
+    else:
+        # Honest default: paper IBKR fills are mids until Grok says otherwise.
+        out["fill_assumption"] = FILL_ASSUMPTION_PAPER_MID
     written = str(raw.get("written_at") or carried.get("written_at") or "").strip()
     if written:
         out["written_at"] = written[:48]
@@ -1475,6 +1555,8 @@ def render_cards(cards: list[dict[str, Any]] | None, *, indent: str = "") -> str
             val = str(evidence.get(key) or "").strip()
             if val:
                 lines.append(f"{indent}  evidence.{key}: {val}")
+        fill = fill_assumption_of(card)
+        lines.append(f"{indent}  fill_assumption: {fill}")
         retire = _retire_if_line(card.get("retire_if"))
         lines.append(
             f"{indent}  retire_if: {retire}"
@@ -2410,16 +2492,25 @@ def card_calibration(
     return out
 
 
+def _paper_book() -> bool:
+    try:
+        return bool(is_paper())
+    except Exception:
+        return True
+
+
 def card_verdict(
     score: dict[str, Any] | None,
     card: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Graduated / tripped strictly from the card's own declaration.
+    """Graduated / tripped from the card's own declaration — honestly.
 
     The clerk supplies no thresholds. A card that declared nothing can neither
-    graduate nor trip â€” it is flagged as owing a declaration on the next write.
-    ``calibration`` rides along as a fact and never moves either verdict: a
-    miscalibrated card with positive resolved edge still graduates.
+    graduate nor trip — it is flagged as owing a declaration on the next write.
+    ``calibration`` rides along as a fact and never moves either verdict.
+    ``paper_mid`` cannot set ``graduated``. Paper win-rate and paper
+    ``resolved_pnl`` are labeled paper, not live evidence. Promotion also
+    needs ``retire_if.sample`` and one numeric kill.
     """
     sc = score if isinstance(score, dict) else {}
     row = card if isinstance(card, dict) else {}
@@ -2435,18 +2526,39 @@ def card_verdict(
     losses = int(sc.get("resolved_losses") or 0)
     anchored = str(row.get("type") or row.get("ticket") or sc.get("type") or "")
     locked = row.get("locked") is True
+    fill = fill_assumption_of(row)
+    conservative = fill in CONSERVATIVE_FILL_ASSUMPTIONS
+    has_kill = _has_numeric_kill(retire)
+    paper = _paper_book()
+    cal = card_calibration(sc, row)
+    cal["live_evidence"] = not paper
+    if paper:
+        cal["paper_hit_rate"] = cal.get("hit_rate")
+        cal["live_hit_rate"] = None
+    else:
+        cal["paper_hit_rate"] = None
+        cal["live_hit_rate"] = cal.get("hit_rate")
     out: dict[str, Any] = {
         "anchored_type": anchored or None,
         "status": status or None,
         "retire_if": dict(retire) or None,
         "declared_sample": sample or None,
+        "fill_assumption": fill,
         "needs_retire_if": bool(row) and not retire and not locked,
         "needs_thesis": bool(row) and not thesis and not locked,
+        "needs_numeric_kill": bool(row) and not has_kill and not locked,
+        "needs_conservative_fill": bool(row) and not conservative and not locked,
         "sample_left": max(0, sample - resolved) if sample else None,
-        "calibration": card_calibration(sc, row),
+        "calibration": cal,
         "graduated": False,
         "tripped": False,
         "trip_reason": "",
+        "cannot_graduate_reason": "",
+        "live_evidence": not paper,
+        "paper_resolved_pnl": resolved_pnl if paper else None,
+        "live_resolved_pnl": None if paper else resolved_pnl,
+        "paper_win_rate": cal.get("hit_rate") if paper else None,
+        "live_win_rate": None if paper else cal.get("hit_rate"),
         "locked": locked,
     }
     out.update(card_waiting(sc, row))
@@ -2456,8 +2568,18 @@ def card_verdict(
     max_losses = retire.get("max_losses")
     if sample and resolved >= sample:
         if resolved_pnl > 0:
-            # A card with no written thesis has nothing for live to follow.
-            out["graduated"] = bool(thesis)
+            if not conservative or fill == FILL_ASSUMPTION_PAPER_MID:
+                out["cannot_graduate_reason"] = "paper_mid cannot graduate"
+            elif not has_kill:
+                out["cannot_graduate_reason"] = (
+                    "needs numeric kill (max_losses or max_loss_usd)"
+                )
+            elif not thesis:
+                out["cannot_graduate_reason"] = "needs thesis"
+            else:
+                # Conservative fill is declared. Paper dollars stay labeled
+                # paper — they do not become live_resolved_pnl.
+                out["graduated"] = True
         else:
             out["tripped"] = True
             out["trip_reason"] = (
@@ -2478,6 +2600,91 @@ def card_verdict(
         out["trip_reason"] = (
             f"{losses} losing resolved trades at declared max_losses {max_losses}"
         )
+    return out
+
+
+def _model_cost_usd() -> float | None:
+    """Book model bill when the scorecard has it. None is a named gap."""
+    try:
+        from abcxauto.scorecard import compute_scorecard
+
+        sc = compute_scorecard()
+    except Exception:
+        return None
+    cost = (sc or {}).get("model_cost_usd") if isinstance(sc, dict) else None
+    try:
+        val = float(cost)
+    except (TypeError, ValueError):
+        return None
+    if val != val or val < 0:
+        return None
+    return val
+
+
+def attach_card_honesty(
+    rows: list[dict[str, Any]] | None,
+    *,
+    model_cost: float | None = None,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Cost share, turnover, named gaps. Does not invent SPY or fill-vs-last.
+
+    Allocates the book model bill by send count. A card with no sends gets no
+    share. Missing series stay in ``gaps`` with reasons in HONESTY_GAP_REASONS.
+    """
+    out = [dict(r) for r in (rows or []) if isinstance(r, dict)]
+    total_sends = 0
+    for row in out:
+        try:
+            total_sends += max(0, int(row.get("sends") or 0))
+        except (TypeError, ValueError):
+            continue
+    have_cost = isinstance(model_cost, (int, float)) and float(model_cost) >= 0
+    for row in out:
+        if row.get("locked") is True:
+            continue
+        gaps: list[str] = [
+            "fill_vs_ibkr_last",
+            "holdout",
+            "beat_spy_after_model_cost",
+        ]
+        try:
+            sends = max(0, int(row.get("sends") or 0))
+        except (TypeError, ValueError):
+            sends = 0
+        allocated = None
+        cost_pnl = None
+        if have_cost and total_sends > 0 and sends > 0:
+            allocated = round(float(model_cost) * (sends / float(total_sends)), 4)
+            try:
+                pnl = float(row.get("resolved_pnl") or 0.0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+            cost_pnl = round(pnl - allocated, 4)
+        else:
+            gaps.append("cost_allocated_pnl")
+        clock = str(row.get("written_at") or "").strip()
+        hours = _hours_since(clock, now=now) if clock else None
+        turnover = None
+        if hours is not None and hours > 0:
+            try:
+                resolved = int(row.get("resolved") or 0)
+            except (TypeError, ValueError):
+                resolved = 0
+            turnover = round(resolved / (hours / 24.0), 4)
+        else:
+            gaps.append("turnover_per_day")
+        row["honesty"] = {
+            "fill_assumption": row.get("fill_assumption") or FILL_ASSUMPTION_PAPER_MID,
+            "live_evidence": bool(row.get("live_evidence")),
+            "allocated_model_cost": allocated,
+            "cost_allocated_pnl": cost_pnl,
+            "fill_vs_ibkr_last": None,
+            "turnover_per_day": turnover,
+            "holdout": None,
+            "beat_spy_after_model_cost": None,
+            "gaps": gaps,
+        }
     return out
 
 
@@ -2509,11 +2716,11 @@ def card_facts(book: dict[str, Any] | None = None) -> list[dict[str, Any]]:
             # Same name under two types: those sends belong to neither.
             row["ambiguous_sends"] = int(stray.get("ambiguous_sends") or 0)
         out.append(row)
-    return out
+    return attach_card_honesty(out, model_cost=_model_cost_usd())
 
 
 def graduated_card_names(book: dict[str, Any] | None = None) -> list[str]:
-    """Cards that met their own declared sample with positive resolved edge."""
+    """Cards that cleared honest graduation, not paper-mid sample pleasing."""
     state = book if isinstance(book, dict) else load_lab()
     declared = state.get("graduated")
     if isinstance(declared, list) and declared:
@@ -2523,6 +2730,16 @@ def graduated_card_names(book: dict[str, Any] | None = None) -> list[str]:
         for row in card_facts(state)
         if row.get("graduated")
     ]
+
+
+def _owes_declaration(row: dict[str, Any] | None) -> bool:
+    blob = row if isinstance(row, dict) else {}
+    return bool(
+        blob.get("needs_retire_if")
+        or blob.get("needs_thesis")
+        or blob.get("needs_numeric_kill")
+        or blob.get("needs_conservative_fill")
+    )
 
 
 def _card_label(row: dict[str, Any] | None) -> str:
@@ -2737,6 +2954,7 @@ def _card_book_tuple(card: dict[str, Any]) -> tuple[Any, ...]:
         card.get("locked") is True,
         json.dumps(retire, sort_keys=True, default=str),
         _norm_book_text(card.get("expect_hit_rate")),
+        fill_assumption_of(card),
     )
 
 
@@ -2887,10 +3105,10 @@ def save_lab(
 def maybe_promote(*, scorecard: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Promote graduated cards, not the book.
 
-    A card graduates on its own declared sample with positive resolved edge.
-    Only those cards reach the live snapshot, and they travel inside their own
-    pruned type stanza â€” one lucky ad-hoc trade no longer unlocks live for
-    everything, and live never sees a hypothesis that has not earned it.
+    Graduation is the honest verdict: conservative fill assumption, declared
+    sample, one numeric kill, thesis, positive resolved edge. Paper mid cannot
+    unlock live. Only those cards reach the live snapshot, inside their own
+    pruned type stanza.
     """
     lab = load_lab()
     if not lab.get("ready_to_promote"):
@@ -2999,6 +3217,8 @@ def live_new_risk_allowed() -> bool:
 def _reject_note(rejected: dict[str, str]) -> str:
     if "unknown_type" in rejected:
         return rejected["unknown_type"]
+    if "hypothesis_cap" in rejected:
+        return rejected["hypothesis_cap"]
     if "invented_pct_gate" in rejected and set(rejected) <= {"invented_pct_gate"}:
         return "notebook cannot invent a % gate"
     if "ticker_list" in rejected:
@@ -3041,6 +3261,19 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
                 "note": _reject_note(rejected),
             }
         return None
+    prev = load_lab()
+    staged = _strip_projection(
+        _migrate_book({**_strip_projection(prev), **update})
+    )
+    cap_hit = hypothesis_cap_reject(staged, prev)
+    if cap_hit:
+        rejected.update(cap_hit)
+        return {
+            "status": "rejected",
+            "rejected": rejected,
+            "note": cap_hit["hypothesis_cap"],
+            **_hypothesis_cap_facts(prev),
+        }
     score = None
     try:
         from abcxauto.scorecard import compute_scorecard
@@ -3063,10 +3296,9 @@ def apply_from_judgment(judgment: dict[str, Any] | None) -> dict[str, Any] | Non
     out["graduated_cards"] = [_card_label(r) for r in facts if r.get("graduated")]
     out["tripped_cards"] = [_card_label(r) for r in facts if r.get("tripped")]
     out["needs_declaration"] = [
-        _card_label(r)
-        for r in facts
-        if r.get("needs_retire_if") or r.get("needs_thesis")
+        _card_label(r) for r in facts if _owes_declaration(r)
     ]
+    out.update(_hypothesis_cap_facts(state))
     if rejected:
         out["rejected"] = rejected
         if "invented_pct_gate" in rejected:
@@ -3392,6 +3624,57 @@ def _is_live_hypothesis(card: Any) -> bool:
     if card.get("locked") is True:
         return False
     return True
+
+
+def live_hypothesis_keys(state: dict[str, Any] | None) -> set[tuple[str, str]]:
+    """Filed testing/working unlocked cards. Locked starters do not count."""
+    keys: set[tuple[str, str]] = set()
+    for type_name, card in walk_cards(state if isinstance(state, dict) else {}):
+        if not type_name:
+            continue
+        if not _is_live_hypothesis(card):
+            continue
+        keys.add(card_key(type_name, card.get("name")))
+    return keys
+
+
+def live_hypothesis_count(state: dict[str, Any] | None = None) -> int:
+    return len(live_hypothesis_keys(state))
+
+
+def hypothesis_cap_reject(
+    staged: dict[str, Any] | None,
+    prev: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Refuse a write that adds live cards past the book cap.
+
+    Updates and retires on an already-wide book are flagged, not refused.
+    """
+    after = live_hypothesis_keys(staged)
+    if len(after) <= LIVE_HYPOTHESIS_CAP:
+        return {}
+    before = live_hypothesis_keys(prev)
+    if not (after - before):
+        return {}
+    return {
+        "hypothesis_cap": (
+            f"{len(after)} testing/working cards (cap {LIVE_HYPOTHESIS_CAP}); "
+            "retire one to write another"
+        )
+    }
+
+
+def _hypothesis_cap_facts(state: dict[str, Any] | None) -> dict[str, Any]:
+    n = live_hypothesis_count(state)
+    out: dict[str, Any] = {
+        "live_hypotheses": n,
+        "live_hypothesis_cap": LIVE_HYPOTHESIS_CAP,
+    }
+    if n > LIVE_HYPOTHESIS_CAP:
+        out["hypothesis_cap_flag"] = (
+            f"{n} testing/working cards over cap {LIVE_HYPOTHESIS_CAP}"
+        )
+    return out
 
 
 def _is_open_notebook_card(card: Any) -> bool:
@@ -4453,7 +4736,7 @@ def lab_facts(
         if n == 0:
             awaiting.append(wait_row)
     coverage = type_coverage(state)
-    return {
+    out = {
         "cards": by_status,
         "resolved_trades": resolved_total,
         "cards_awaiting_first_trade": awaiting[:12],
@@ -4465,6 +4748,8 @@ def lab_facts(
             if not r["cards"] and r["type"] not in _MANAGEMENT_TRUNKS()
         ],
     }
+    out.update(_hypothesis_cap_facts(state))
+    return out
 
 
 def unused_open_types(
@@ -4701,9 +4986,7 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
         "graduated": [_card_label(r) for r in facts_by_card if r.get("graduated")],
         "tripped": [_card_label(r) for r in facts_by_card if r.get("tripped")],
         "needs_declaration": [
-            _card_label(r)
-            for r in facts_by_card
-            if r.get("needs_retire_if") or r.get("needs_thesis")
+            _card_label(r) for r in facts_by_card if _owes_declaration(r)
         ],
         "strategy_scores": strategy_scores(),
         "unfiled_cards": list(lab.get(UNFILED_KEY) or []),
@@ -4712,6 +4995,7 @@ def playbook_payload(revision: Any = None, *, full: bool = False) -> dict[str, A
         "current": current,
         "types": types,
     }
+    out.update(_hypothesis_cap_facts(lab))
     if revision in (None, ""):
         return out
     try:
