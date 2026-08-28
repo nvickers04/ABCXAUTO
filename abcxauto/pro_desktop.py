@@ -514,10 +514,6 @@ class ProTerminal:
         self._tail_len: int | None = None
         self._tail_fp: str | None = None
         self._tail_moved_mono = 0.0
-        # ---- Book strip: context for reading the stream, not a risk panel.
-        self.lbl_book_strip = ft.Text("No open lots", size=12, color=MUTED, selectable=True)
-        self.col_book_strip = ft.Column(spacing=2, tight=True)
-        self._book_strip_key = ""
         self.lbl_stream_status = ft.Text("Grok stream", size=12, color=MUTED)
         self.think_live = ft.Text(
             "Grok stream: waiting for tools...",
@@ -1212,7 +1208,6 @@ class ProTerminal:
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                     ),
                     self.health_box,
-                    self.col_book_strip,
                     self.lbl_alert,
                     self.lbl_banner,
                     self.lbl_lessons,
@@ -4039,88 +4034,6 @@ class ProTerminal:
         self.lbl_hs_link.color = GREEN if bool(getattr(s, "connected", False)) else RED
         self._sync_last_line()
 
-    def _sync_book_strip(self) -> None:
-        """Three lots and three working orders — context for reading the stream."""
-        s = self.engine.state
-        book = getattr(s, "portfolio", None) or {}
-        naked = book.get("unprotected_symbols") if isinstance(book, dict) else None
-        lots = self._lot_view(s.positions, naked)[:3]
-        try:
-            from abcxauto.world_state import compact_working_orders
-
-            orders = compact_working_orders(s.open_orders or [], positions=s.positions)[:3]
-        except Exception:
-            orders = []
-        key = json.dumps([lots, orders], sort_keys=True, default=str)
-        if key == self._book_strip_key:
-            return
-        self._book_strip_key = key
-        if not lots and not orders:
-            self.lbl_book_strip.value = "No open lots"
-            self.col_book_strip.controls = [self.lbl_book_strip]
-            return
-        controls: list[ft.Control] = []
-        for r in lots:
-            mkt, pct = r.get("mkt"), r.get("mtm_pct")
-            protected = not bool(r.get("unprotected"))
-            controls.append(
-                self._blotter_row(
-                    [
-                        self._cell(str(r.get("ident") or "?"), expand=True, mono=True),
-                        self._cell(
-                            f"{mkt:,.2f}" if isinstance(mkt, (int, float)) else "—",
-                            width=76,
-                            right=True,
-                            mono=True,
-                            color=TEXT if isinstance(mkt, (int, float)) else MUTED,
-                        ),
-                        self._cell(
-                            f"{pct:+.0f}%" if isinstance(pct, (int, float)) else "—",
-                            width=52,
-                            right=True,
-                            color=(
-                                MUTED
-                                if not isinstance(pct, (int, float))
-                                else (GREEN if pct >= 0 else RED)
-                            ),
-                        ),
-                        self._cell(
-                            "protected" if protected else "naked",
-                            width=72,
-                            right=True,
-                            color=MUTED if protected else RED,
-                            weight=ft.FontWeight.W_600,
-                        ),
-                    ],
-                    alert=not protected,
-                )
-            )
-        for o in orders:
-            px = []
-            if o.get("stop") not in (None, ""):
-                px.append(f"stop {o['stop']}")
-            if o.get("lmt") not in (None, ""):
-                px.append(f"lmt {o['lmt']}")
-            controls.append(
-                ft.Text(
-                    " ".join(
-                        str(x)
-                        for x in (
-                            o.get("order_id") or "?",
-                            o.get("symbol") or "?",
-                            o.get("action") or "",
-                            o.get("type") or "",
-                            " · ".join(px),
-                        )
-                        if str(x).strip()
-                    ),
-                    size=11,
-                    color=MUTED,
-                    selectable=True,
-                )
-            )
-        self.col_book_strip.controls = controls
-
     def _prev_stream(self) -> str:
         """An idle pane is wasted — show the last look Grok took."""
         if self._prev_text is None:
@@ -4265,7 +4178,6 @@ class ProTerminal:
         self._sync_activity()
         self._sync_scan_tape()
         self._sync_health_strip()
-        self._sync_book_strip()
         self._sync_lessons_line()
         self._sync_tabs()
         try:

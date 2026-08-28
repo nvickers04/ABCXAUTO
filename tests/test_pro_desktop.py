@@ -947,7 +947,6 @@ def test_the_status_strip_is_a_bar_not_a_hero_panel(headless_pro):
         headless_pro.lbl_unprotected,
         headless_pro.lbl_last_send,
         headless_pro.lbl_result,
-        headless_pro.col_book_strip,
     ):
         assert kept in painted
     # Cut: repeats of the rail pill. Open MTM lives on the Account card.
@@ -962,6 +961,25 @@ def test_the_status_strip_is_a_bar_not_a_hero_panel(headless_pro):
         assert cut not in painted
         assert cut in list(_walk(headless_pro._hidden_metrics))
     assert headless_pro.lbl_open_upnl not in painted
+    assert not hasattr(headless_pro, "col_book_strip")
+
+
+def test_chrome_does_not_mount_book_strip(headless_pro):
+    """Three lot chips used to sit above every tab. Positions keeps the blotter."""
+    assert not hasattr(headless_pro, "col_book_strip")
+    assert not hasattr(headless_pro, "lbl_book_strip")
+    assert not hasattr(headless_pro, "_sync_book_strip")
+    strip = headless_pro._status_strip()
+    painted = list(_visible_walk(strip))
+    for kept in (
+        headless_pro.lbl_halt,
+        headless_pro.lbl_lot_count,
+        headless_pro.lbl_unprotected,
+    ):
+        assert kept in painted
+    pos = list(_walk(headless_pro._page_positions()))
+    assert headless_pro.col_lots in pos
+    assert "positions" in [k for k, _label, _o, _f in _nav()]
 
 
 def test_cut_metrics_still_sync_so_nothing_goes_stale(headless_pro):

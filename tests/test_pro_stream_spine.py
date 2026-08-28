@@ -1,4 +1,4 @@
-"""The watch surface: think-stream spine, health strip, book strip, inline scan.
+"""The watch surface: think-stream spine, health strip, inline scan.
 
 The operator sits and reads the stream to decide whether to trust the desk, so
 these cover legibility (markers stay verbatim but paint differently), the three
@@ -890,46 +890,20 @@ def test_looks_since_send_is_not_a_tally():
     assert eng.state.sends_last_look == 1
 
 
-# ------------------------------------------------------------------ book strip
+# ------------------------------------------------------------------ book strip (gone from chrome)
 
 
-def test_book_strip_shows_the_lot_the_stream_is_talking_about(pro):
-    s = pro.engine.state
-    s.positions = [
-        {
-            "symbol": "WMT",
-            "quantity": 70,
-            "sec_type": "STK",
-            "avgCost": 103.08,
-            "marketPrice": 104.10,
-            "conId": 7,
-        }
-    ]
-    s.open_orders = [
-        {"order_id": 4445, "symbol": "WMT", "order_type": "STP", "quantity": 70, "aux_price": 101},
-        {"order_id": 4446, "symbol": "WMT", "order_type": "LMT", "quantity": 70, "lmtPrice": 107.5},
-    ]
-    pro._sync_book_strip()
-    blob = " | ".join(_texts(pro.col_book_strip))
-    assert "WMT" in blob
-    assert "4445" in blob and "4446" in blob
-
-
-def test_book_strip_says_naked_when_a_lot_is_unprotected(pro):
-    s = pro.engine.state
-    s.positions = [
-        {"symbol": "SPY", "quantity": 5, "sec_type": "STK", "avgCost": 500.0, "conId": 1}
-    ]
-    s.portfolio = {"unprotected_symbols": ["SPY"]}
-    pro._sync_book_strip()
-    assert "naked" in " | ".join(_texts(pro.col_book_strip))
-
-
-def test_book_strip_empty_book_says_so(pro):
-    pro.engine.state.positions = []
-    pro.engine.state.open_orders = []
-    pro._sync_book_strip()
-    assert "No open lots" in " | ".join(_texts(pro.col_book_strip))
+def test_chrome_does_not_mount_book_strip(pro):
+    """Lot chips used to pin above every tab. The Positions blotter owns them."""
+    assert not hasattr(pro, "col_book_strip")
+    assert not hasattr(pro, "lbl_book_strip")
+    assert not hasattr(pro, "_sync_book_strip")
+    strip = pro._status_strip()
+    painted = list(_visible_walk(strip))
+    for kept in (pro.lbl_halt, pro.lbl_lot_count, pro.lbl_unprotected):
+        assert kept in painted
+    pos = list(_walk(pro._page_positions()))
+    assert pro.col_lots in pos
 
 
 # ------------------------------------------------- pinned strips on every page
@@ -945,10 +919,13 @@ def test_every_surface_builds_with_the_spine_and_strips(pro):
         assert pro.lbl_center_title.value == NAV_TITLES[key]
     shell = pro._shell()
     mounted = list(_walk(shell))
-    # Liveness, burn and the book stay on screen while reviewing a drill-down.
+    # Liveness and burn stay on screen while reviewing a drill-down.
     assert pro.lbl_hs_state in mounted
     assert pro.lbl_hs_burn in mounted
-    assert pro.col_book_strip in mounted
+    assert pro.lbl_halt in mounted
+    assert pro.lbl_lot_count in mounted
+    assert pro.lbl_unprotected in mounted
+    assert not hasattr(pro, "col_book_strip")
 
 
 def test_dashboard_is_the_stream_not_a_card_wall(pro):
