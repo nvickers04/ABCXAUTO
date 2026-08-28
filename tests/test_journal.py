@@ -1225,3 +1225,51 @@ def test_realized_by_order_id_subtracts_commissions(journal):
     closers = journal.closing_fills()
     assert closers[0]["realized_pnl"] == 50.0
     assert closers[0]["commission"] == 1.0
+
+
+def test_nav_path_since_and_commissions_since(journal):
+    journal.record_snapshot(
+        account={"NetLiquidation": 1000.0, "DailyPnL": 0.0},
+        ts="2026-08-26T14:00:00.000Z",
+    )
+    journal.record_snapshot(
+        account={"NetLiquidation": 1100.0, "DailyPnL": 10.0},
+        ts="2026-08-28T13:35:00.000Z",
+    )
+    journal.record_snapshot(
+        account={"NetLiquidation": 1080.0, "DailyPnL": -10.0},
+        ts="2026-08-28T15:00:00.000Z",
+    )
+    path = journal.nav_path_since("2026-08-28T13:30:00.000Z")
+    assert [nl for _ts, nl in path] == [1100.0, 1080.0]
+    pid = journal.record_proposal(strategy="bracket", symbol="AAPL", validation_ok=True)
+    journal.record_dispatch(pid, True, {"success": True, "order_id": 501}, ts="2026-08-28T14:00:00.000Z")
+    journal.record_fills(
+        [
+            {
+                "ts": "2026-08-26T15:00:00.000Z",
+                "exec_id": "old",
+                "order_id": 501,
+                "symbol": "AAPL",
+                "commission": 9.0,
+                "realized_pnl": 1.0,
+            },
+            {
+                "ts": "2026-08-28T14:10:00.000Z",
+                "exec_id": "new",
+                "order_id": 501,
+                "symbol": "AAPL",
+                "commission": 1.25,
+                "realized_pnl": 2.0,
+            },
+            {
+                "ts": "2026-08-28T14:20:00.000Z",
+                "exec_id": "orphan",
+                "order_id": 9999,
+                "symbol": "TSLA",
+                "commission": 3.0,
+                "realized_pnl": 1.0,
+            },
+        ]
+    )
+    assert journal.commissions_since("2026-08-28T13:30:00.000Z") == 1.25

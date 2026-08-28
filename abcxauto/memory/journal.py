@@ -2275,6 +2275,64 @@ class TradeJournal:
             logger.exception("journal.snapshot_count_since failed")
             return 0
 
+    def nav_path_since(self, since_iso: str) -> list:
+        """NL prints at or after ``since_iso``, oldest first. Empty on miss."""
+        out: list = []
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT ts, net_liquidation FROM snapshots
+                    WHERE net_liquidation IS NOT NULL
+                      AND net_liquidation > 0
+                      AND ts >= ?
+                    ORDER BY id ASC
+                    """,
+                    (_ts_bound(since_iso),),
+                ).fetchall()
+            for row in rows:
+                try:
+                    out.append((str(row["ts"] or ""), float(row["net_liquidation"])))
+                except (TypeError, ValueError, KeyError):
+                    continue
+            return out
+        except Exception:
+            logger.exception("journal.nav_path_since failed")
+            return []
+
+    def commissions_since(self, since_iso: str) -> float:
+        """Sum of abs(commission) on dispatched fills since ``since_iso``.
+
+        Orphan TWS / other-client fills are skipped — same join as
+        ``closed_fill_stats_since``.
+        """
+        try:
+            self._ensure_schema()
+            placed = self.dispatched_order_ids()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT order_id, commission FROM fills
+                    WHERE commission IS NOT NULL
+                      AND ts >= ?
+                    """,
+                    (_ts_bound(since_iso),),
+                ).fetchall()
+            total = 0.0
+            for row in rows:
+                oid = _coerce_order_id(row["order_id"])
+                if oid is None or oid not in placed:
+                    continue
+                try:
+                    total += abs(float(row["commission"]))
+                except (TypeError, ValueError, KeyError):
+                    continue
+            return total
+        except Exception:
+            logger.exception("journal.commissions_since failed")
+            return 0.0
+
     def model_usage_totals(self) -> dict:
         empty = {
             "calls": 0,

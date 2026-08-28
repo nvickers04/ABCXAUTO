@@ -1024,8 +1024,12 @@ def test_card_scores_table_does_not_print_zero_for_an_unjoined_send(pro, monkeyp
     )
     pro._sync_sc_cards()
     blob = " | ".join(_texts(pro.col_sc_cards))
-    assert "no fills yet" in blob
     assert "$+0.00" not in blob
+    assert "hit: none" in blob
+    assert "avg R" in blob
+    assert "cost-alloc" in blob
+    # No hit-column dash farm — the header is hidden when nothing is calibrated.
+    assert " | hit | " not in f" | {blob} | "
 
 
 def test_card_scores_table_empty_state_is_honest(pro, monkeypatch):
@@ -1033,3 +1037,59 @@ def test_card_scores_table_empty_state_is_honest(pro, monkeypatch):
     monkeypatch.setattr("abcxauto.lab_playbook.card_scores", lambda cards=None: [])
     pro._sync_sc_cards()
     assert "No card-attributed sends yet" in " | ".join(_texts(pro.col_sc_cards))
+
+
+def test_scorecard_windows_paint_vs_spy_blank_not_invented(pro):
+    pro._sync_sc_windows({
+        "windows": {
+            "15m": {
+                "book_return_pct": 0.1,
+                "edge_usd": 12.0,
+                "beating_model": True,
+                "coverage": "ok",
+                "spy_return_pct": None,
+            },
+            "inception": {
+                "book_return_pct": -4.0,
+                "edge_usd": -1544.0,
+                "beating_model": False,
+                "coverage": "ok",
+                "spy_return_pct": None,
+            },
+        }
+    })
+    blob = " | ".join(_texts(pro.col_sc_windows))
+    assert "vs SPY" in blob
+    assert "15m" in blob
+    assert "inception" in blob
+    assert "-4.00%" in blob
+    assert "—" in blob
+
+
+def test_card_scores_hit_column_only_when_calibrated(pro, monkeypatch):
+    monkeypatch.setattr("abcxauto.lab_playbook.load_lab", lambda: {"cards": []})
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.attach_card_honesty",
+        lambda rows, **_k: rows,
+    )
+    monkeypatch.setattr(
+        "abcxauto.lab_playbook.card_scores",
+        lambda cards=None: [
+            {
+                "card": "flush bounce",
+                "sends": 8,
+                "resolved": 8,
+                "resolved_wins": 4,
+                "resolved_pnl": 40.0,
+                "retire_if": {"max_loss_usd": 10.0},
+                "calibration": {"hit_rate": 50.0, "hit_rate_gap": -20.0},
+                "honesty": {"cost_allocated_pnl": 12.5},
+            }
+        ],
+    )
+    pro._sync_sc_cards()
+    blob = " | ".join(_texts(pro.col_sc_cards))
+    assert "hit: none" not in blob
+    assert "50%" in blob
+    assert "0.50R" in blob
+    assert "$+12.50" in blob

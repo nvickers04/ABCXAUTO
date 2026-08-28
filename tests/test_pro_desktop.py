@@ -417,12 +417,59 @@ def test_path_line_is_facts_not_advice(headless_pro):
     assert "ruin 3.1%" in line
 
 
-def test_edge_stat_tracks_beating_model(headless_pro):
-    headless_pro._sync_edge_stat({"edge_usd": 42.0, "beating_model": True, "model_cost_usd": 1.5})
+def test_edge_stat_tracks_rth_session_not_inception(headless_pro):
+    headless_pro._sync_edge_stat({
+        "edge_usd": -1544.0,
+        "beating_model": False,
+        "model_cost_usd": 103.0,
+        "session": {
+            "session_date": "2026-08-28",
+            "edge_usd": 42.0,
+            "model_cost_usd": 1.5,
+            "spy_return_pct": None,
+        },
+    })
     assert headless_pro.lbl_edge.value == "$+42"
+    assert "1544" not in (headless_pro.lbl_edge.value or "")
+    assert "2026-08-28" in (headless_pro.lbl_edge_sub.value or "")
     assert "1.50" in (headless_pro.lbl_edge_sub.value or "")
-    headless_pro._sync_edge_stat({})
+    headless_pro._sync_edge_stat({
+        "edge_usd": -1544.0,
+        "beating_model": False,
+        "model_cost_usd": 103.0,
+    })
     assert headless_pro.lbl_edge.value == "—"
+    headless_pro._sync_session_score({
+        "session": {
+            "session_date": "2026-08-28",
+            "book_pnl": 22.0,
+            "model_cost_usd": 4.0,
+            "edge_usd": -5.0,
+            "fills": 1,
+            "wins": 0,
+            "commissions_usd": 1.2,
+            "max_dd_usd": 15.0,
+            "spy_return_pct": None,
+        }
+    })
+    line = headless_pro.lbl_session_score.value or ""
+    assert "2026-08-28" in line
+    assert "ΔNL=+22" in line
+    assert "vsSPY=—" in line
+    headless_pro._sync_session_score({
+        "session": {
+            "session_date": "2026-08-26",
+            "book_pnl": 22.0,
+            "model_cost_usd": 49.07,
+            "edge_usd": -27.0,
+            "fills": 1,
+            "wins": 0,
+        }
+    })
+    leftover = headless_pro.lbl_session_score.value or ""
+    # Painting a passed session is the UI's job; compute_scorecard must not
+    # feed an 8/26 leftover as sess. The date in the line is whatever was given.
+    assert "2026-08-26" in leftover
 
 
 def test_tabs_show_one_body_with_counts(headless_pro):
