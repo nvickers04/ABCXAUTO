@@ -214,4 +214,5 @@ def _isolate_desk_state(tmp_path, monkeypatch):
     monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
     monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
     monkeypatch.setattr(ts, "THINK_PREV_PATH", tmp_path / "think_prev.txt")
+    monkeypatch.setattr(ts, "THINK_SESSION_DIR", tmp_path / "think_session")
     monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")
