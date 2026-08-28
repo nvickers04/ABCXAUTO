@@ -748,6 +748,8 @@ def test_settings_fields_cover_every_operator_knob(headless_pro):
         "model",
         "temperature",
         "max_tokens",
+        "session_look_cap",
+        "session_token_cap",
         "monitor_poll_s",
         "monitor_review_s",
         "disconnect_halt_s",

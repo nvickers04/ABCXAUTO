@@ -3110,6 +3110,8 @@ def test_send_tool_says_one_ticket_per_call():
 def test_self_tune_tool_is_flat():
     props = _tool_props("self_tune")
     assert "max_risk_per_trade_pct" in props
+    assert "session_look_cap" in props
+    assert "session_token_cap" in props
     assert "enabled_arenas" in props
     assert "controls" not in props
     assert "params" not in props
@@ -3117,6 +3119,7 @@ def test_self_tune_tool_is_flat():
     assert "this book's NL" in desc
     assert "baked 15/25" in desc
     assert "together, not pick-one" in desc
+    assert "tighten only" in desc
 
 
 @pytest.mark.asyncio

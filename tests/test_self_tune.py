@@ -58,6 +58,8 @@ def test_defaults_are_1k_floor():
     assert cfg.cash_only is True
     assert cfg.auto_panic_on_breach is True
     assert cfg.scan_fetch_cap == 8
+    assert cfg.session_look_cap == 160
+    assert cfg.session_token_cap == 2_500_000
     assert cfg.trading_budget_usd == 0.0
     assert not hasattr(cfg, "cycle_sleep_s")
     assert not hasattr(cfg, "control_budget_pct")

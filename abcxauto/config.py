@@ -50,6 +50,8 @@ AGENT_CONFIG_KEYS = frozenset({
     "model",
     "temperature",
     "max_tokens",
+    "session_look_cap",
+    "session_token_cap",
     "monitor_enabled",
     "monitor_poll_s",
     "monitor_review_s",
@@ -77,6 +79,8 @@ PERSISTED_SETTINGS_KEYS = PERSISTED_OPERATOR_KEYS | AGENT_CONFIG_KEYS
 AGENT_BOUNDS: dict[str, tuple[float, float]] = {
     "temperature": (0.0, 2.0),
     "max_tokens": (1024, 131_072),
+    "session_look_cap": (1, 400),
+    "session_token_cap": (50_000, 10_000_000),
     "monitor_poll_s": (5, 900),
     "monitor_review_s": (30, 21_600),
     "disconnect_halt_s": (1.0, 900.0),
@@ -85,6 +89,8 @@ AGENT_BOUNDS: dict[str, tuple[float, float]] = {
 _AGENT_BOOL_KEYS = frozenset({"monitor_enabled", "monitor_extended_hours"})
 _AGENT_INT_KEYS = frozenset({
     "max_tokens",
+    "session_look_cap",
+    "session_token_cap",
     "monitor_poll_s",
     "monitor_review_s",
     "ibkr_client_id",
@@ -105,6 +111,9 @@ class Config:
     model: str = "grok-4.6"  # ABCXAUTO_MODEL is the env form; see get_config()
     temperature: float = 0.3
     max_tokens: int = 8192
+    # Per stay-up session (premarket / RTH). Hit stays idle. Not a per-turn cap.
+    session_look_cap: int = 160
+    session_token_cap: int = 2_500_000
 
     # MarketData.app
     marketdata_token: str = ""
@@ -237,6 +246,8 @@ def _load_env_config() -> Config:
         model=_env("ABCXAUTO_MODEL", "grok-4.6"),
         temperature=float(_env("ABCXAUTO_TEMPERATURE", "0.3")),
         max_tokens=int(_env("ABCXAUTO_MAX_TOKENS", "8192")),
+        session_look_cap=int(_env("ABCXAUTO_SESSION_LOOK_CAP", "160")),
+        session_token_cap=int(_env("ABCXAUTO_SESSION_TOKEN_CAP", "2500000")),
         marketdata_token=_env("MARKETDATA_TOKEN") or _env("MARKETDATA_API_KEY"),
         ibkr_host=_env("IBKR_HOST", "127.0.0.1"),
         ibkr_port=int(_env("IBKR_PORT", "7497")),

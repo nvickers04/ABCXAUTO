@@ -909,7 +909,8 @@ AGENT_TOOLS = [
             "Retune knobs now. Floor cannot be weakened. "
             "max_open_positions is concurrent lots for this book's NL — "
             "not a baked 15/25. Size (size_pct_nl on send) and slots are "
-            "together, not pick-one. Not a ticket — send is the book."
+            "together, not pick-one. session_look_cap / session_token_cap "
+            "tighten only. Not a ticket — send is the book."
         ),
         parameters=_schema(
             {
@@ -920,6 +921,8 @@ AGENT_TOOLS = [
                 "max_option_premium_pct": {"type": "number"},
                 "max_symbol_concentration_pct": {"type": "number"},
                 "max_open_positions": {"type": "integer"},
+                "session_look_cap": {"type": "integer"},
+                "session_token_cap": {"type": "integer"},
                 "enabled_arenas": _SYMBOLS_SCHEMA,
                 "custom_symbols": _SYMBOLS_SCHEMA,
                 "exclude_symbols": _SYMBOLS_SCHEMA,

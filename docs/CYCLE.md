@@ -34,13 +34,15 @@ LOOK     Finished RTH look writes no grok_wake.json. Empty/? retries on this pro
         Overnight / after-close also drop the chat. Repeat reads inside a think are
         served from cache, cleared on any mutating tool or live poke. Stall/loop
         detectors, a 64-step runaway ceiling, and per-tool timeouts stay. There
-        is no stream time box and no max-look ceiling. `wait_for_pace` is just
-        the pulse sleep until the next wake.
+        is no stream time box. A session look/token cap (Settings) stops new
+        looks when hit — idle / park-ready, chat kept, no sit clock.
+        `wait_for_pace` is just the pulse sleep until the next wake.
 
 After a think:
 
 - Closed / postmarket: no Grok (unprotected still interrupts); park until premarket
 - Paper RTH / premarket: stay up on this process. Empty / `?` retries immediately
+- Session look/token cap hit: stay idle. Chat kept. No grok_wake / set_wake.
 - Session-card opening print is a send gate, not a park
 - Last hour to the open is stay-up, not a sit clock
 
