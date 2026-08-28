@@ -300,16 +300,20 @@ def test_paper_start_does_not_restore_25pct_working_size():
 
 def test_live_still_forces_gates_and_old_1pct_walkaway():
     live = _floor_cfg(live=True, max_risk=1.0)
+    live.defined_risk_only = False
+    live.cash_only = False
+    live.auto_panic_on_breach = False
     fixes = floor_clamp_config_fields(live)
     assert fixes.get("risk_gates_enabled") is True
     assert fixes.get("defined_risk_only") is True
+    assert fixes.get("cash_only") is True
+    assert fixes.get("auto_panic_on_breach") is True
     assert fixes.get("sizing_floors") is True
     assert fixes.get("max_risk_per_trade_pct") == 25.0
 
 
 def test_live_start_repairs_gates_off(tmp_path, monkeypatch):
-    from abcxauto.config import load_risk_settings, update_risk_config
-    from abcxauto.config import clear_risk_settings
+    from abcxauto.config import clear_risk_settings, load_risk_settings, update_risk_config
 
     path = tmp_path / "risk.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
