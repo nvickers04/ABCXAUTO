@@ -1912,8 +1912,8 @@ async def _inject_live_poke(
     snap: dict[str, Any],
     turn: BrainTurn,
 ) -> bool:
-    """Apply fill/order_change/unprotected to the open think — same chat, same wake."""
-    from abcxauto.park_clock import note_wake, take_interrupt
+    """Apply fill/order_change/unprotected/stop_dist to the open think — same chat."""
+    from abcxauto.park_clock import live_poke_clears_tool_cache, note_wake, take_interrupt
     from abcxauto.world_state import day_facts, format_wake
 
     ev = take_interrupt()
@@ -1921,14 +1921,15 @@ async def _inject_live_poke(
         return False
     note_wake(ev)
     turn.interrupted = True
-    # A fill / order change / unprotected lot means the book moved under us.
-    turn.tool_cache.clear()
-    try:
-        from abcxauto.look_snapshot import begin_look
+    if live_poke_clears_tool_cache(ev):
+        # Fill / real order fill-cancel / unprotected: the book moved under us.
+        turn.tool_cache.clear()
+        try:
+            from abcxauto.look_snapshot import begin_look
 
-        begin_look(snap)
-    except Exception:
-        logger.debug("look snapshot reset on poke failed", exc_info=True)
+            begin_look(snap)
+        except Exception:
+            logger.debug("look snapshot reset on poke failed", exc_info=True)
     think_emit("tool", f"\n[{ev.kind}]\n")
     # Refresh book facts when we can — thin poke, not a second wake dump.
     day: dict[str, Any] | None = None

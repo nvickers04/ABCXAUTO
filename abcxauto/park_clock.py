@@ -32,7 +32,9 @@ BOOK_EVENTS = frozenset({
 })
 HARD_INTERRUPTS = frozenset({"unprotected", "halt"})
 # Live poke into the open xAI episode (same chat). Not a sit-clock.
-LIVE_POKE_KINDS = frozenset({"fill", "order_change", "unprotected"})
+LIVE_POKE_KINDS = frozenset({"fill", "order_change", "unprotected", "stop_dist"})
+# Last-tick stop distance is a desk fact, not a book change.
+POKE_KEEPS_TOOL_CACHE = frozenset({"stop_dist"})
 PULSE_S = 10.0
 DEFAULT_LOOK_S = 90.0
 DEFAULT_LOOK_OPEN_S = 300.0
@@ -97,7 +99,7 @@ def last_wake() -> BookEvent | None:
 
 
 def note_interrupt(event: BookEvent | None) -> None:
-    """Fill / order / unprotected poke the open xAI episode mid-turn."""
+    """Fill / order / unprotected / stop_dist poke the open xAI episode mid-turn."""
     global _pending_interrupt
     if event is None:
         return
@@ -105,6 +107,20 @@ def note_interrupt(event: BookEvent | None) -> None:
     if kind not in LIVE_POKE_KINDS:
         return
     _pending_interrupt = BookEvent(kind, str(event.detail or ""), ts=event.ts)
+
+
+def live_poke_clears_tool_cache(event: BookEvent | None) -> bool:
+    """True when this poke means cached reads are stale.
+
+    Fill, a real working-order fill/cancel, or unprotected becoming true
+    move the book. A last-tick stop_dist poke does not.
+    """
+    if event is None:
+        return False
+    kind = str(event.kind or "").strip().lower()
+    if kind not in LIVE_POKE_KINDS:
+        return False
+    return kind not in POKE_KEEPS_TOOL_CACHE
 
 
 def peek_interrupt() -> BookEvent | None:

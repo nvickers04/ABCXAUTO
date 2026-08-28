@@ -160,7 +160,7 @@ STREAM_ALARM = (
     "timed out",
 )
 STREAM_WARN = ("[think stopped:", "[truncated: max_tokens]")
-STREAM_POKE = ("[fill]", "[order_change]", "[unprotected]")
+STREAM_POKE = ("[fill]", "[order_change]", "[unprotected]", "[stop_dist]")
 
 
 def stream_line_kind(line: str) -> str:

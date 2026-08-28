@@ -204,7 +204,22 @@ def test_live_interrupt_note_and_take():
     assert peek_interrupt() is None
     note_interrupt(BookEvent("unprotected", "SPY"))
     assert take_interrupt().kind == "unprotected"
+    note_interrupt(BookEvent("stop_dist", "PYPL last tick"))
+    assert peek_interrupt() is not None
+    assert peek_interrupt().kind == "stop_dist"
+    assert take_interrupt().kind == "stop_dist"
     clear_interrupt()
+
+
+def test_live_poke_clears_tool_cache_skips_last_tick_stop_dist():
+    from abcxauto.park_clock import BookEvent, live_poke_clears_tool_cache
+
+    assert live_poke_clears_tool_cache(BookEvent("stop_dist", "last tick")) is False
+    assert live_poke_clears_tool_cache(BookEvent("fill", "QQQ")) is True
+    assert live_poke_clears_tool_cache(BookEvent("unprotected", "AAPL STK")) is True
+    assert live_poke_clears_tool_cache(BookEvent("order_change", "working orders changed")) is True
+    assert live_poke_clears_tool_cache(BookEvent("alarm", "nope")) is False
+    assert live_poke_clears_tool_cache(None) is False
 
 
 def test_paper_rth_set_wake_writes_no_sit_clock(tmp_path, monkeypatch):
