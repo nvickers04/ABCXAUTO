@@ -762,7 +762,8 @@ AGENT_TOOLS = [
     tool(
         name="news",
         description=(
-            "MDA headlines (~15 min delayed). Context only, not live last. "
+            "MDA headlines (~15 min delayed). Color only, never a trigger. "
+            "Anything time-sensitive at +15 minutes is already in the price. "
             "Bare news() uses this look's scan tape when present, not SPY."
         ),
         parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, []),
@@ -827,8 +828,8 @@ AGENT_TOOLS = [
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Optional: news and/or metrics. MDA delayed, nested on "
-                        "the same hits as ibkr live last — not send geometry."
+                        "Optional: news and/or metrics. MDA delayed color, "
+                        "never a trigger, not send geometry."
                     ),
                 },
             },
@@ -1997,6 +1998,7 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
             for o in (world.opportunities or [])[:12]
         ],
         "option_facts": list(world.option_facts or [])[:16],
+        "vol": list(getattr(world, "vol_facts", None) or [])[:6],
         "news": [
             f"[{n.get('symbol')}] {n.get('headline')}"
             for n in (world.news_items or [])[:8]
@@ -2183,6 +2185,58 @@ def _stash_live(
     world.ibkr_live_last = px
 
 
+def _stash_vol_bars(snap: dict[str, Any], series: list[Any]) -> None:
+    from abcxauto.vol_fact import stash_look_bars
+
+    for row in series or []:
+        if not isinstance(row, dict) or not row.get("bars"):
+            continue
+        stash_look_bars(
+            snap,
+            str(row.get("symbol") or ""),
+            row.get("bars"),
+            resolution=str(row.get("resolution") or ""),
+        )
+
+
+def _stash_vol_chain(snap: dict[str, Any], chain: Any) -> None:
+    from abcxauto.vol_fact import stash_look_chain
+
+    stash_look_chain(snap, chain)
+
+
+def _stash_vol_quote_iv(snap: dict[str, Any], data: Any) -> None:
+    from abcxauto.vol_fact import stash_look_iv
+
+    if not isinstance(data, dict):
+        return
+    if isinstance(data.get("quotes"), list):
+        for row in data["quotes"]:
+            _stash_vol_quote_iv(snap, row)
+        return
+    stash_look_iv(snap, str(data.get("symbol") or ""), data.get("iv"))
+
+
+def _stash_vol_option_quote(snap: dict[str, Any], row: Any) -> None:
+    from abcxauto.vol_fact import stash_look_iv
+
+    if not isinstance(row, dict):
+        return
+    su = str(row.get("symbol") or "").upper().strip()
+    mda = row.get("mda") if isinstance(row.get("mda"), dict) else {}
+    ibkr = row.get("ibkr") if isinstance(row.get("ibkr"), dict) else {}
+    raw = mda.get("iv")
+    if raw is None:
+        raw = ibkr.get("iv")
+    stash_look_iv(snap, su, raw)
+
+
+def _publish_vol(world: WorldState, snap: dict[str, Any]) -> None:
+    from abcxauto.vol_fact import publish_vol_facts
+
+    publish_vol_facts(world, snap)
+
+
 def _compact_chain(raw: dict[str, Any], *, last: float | None = None) -> dict[str, Any]:
     strikes = list(raw.get("strikes") or [])
     exps = list(raw.get("expirations") or [])[:10]
@@ -2362,6 +2416,7 @@ async def _run_tool(
             data = {}
         if isinstance(data, dict):
             _stash_live(world, snap, data)
+            _stash_vol_quote_iv(snap, data)
             live = _live_open_session(
                 snap,
                 str(data.get("symbol") or ""),
@@ -2408,7 +2463,8 @@ async def _run_tool(
         payload = {
             "source": "mda",
             "freshness": "delayed_15m",
-            "use": "context_not_live_last",
+            "use": "color_not_trigger",
+            "note": "delayed MDA; time-sensitive at +15m is already in the price",
             "items": items[:24],
         }
         miss = news_hard_miss(items)
@@ -2644,7 +2700,7 @@ async def _run_tool(
             news_syms = _news_symbols_for_scan(merged, pulled_syms)
             out["news"] = await _mda_news(news_syms)
             out["news_freshness"] = "delayed_15m"
-            out["news_use"] = "context_not_live_last"
+            out["news_use"] = "color_not_trigger"
             attach_mda_news(hits, out["news"])
             if out["news"]:
                 snap["scan_news_attached"] = True
@@ -2915,6 +2971,8 @@ async def _run_tool(
             _attach_run_sheet(
                 payload, turn=turn, world=world, tool="candles", quoted=snap
             )
+            _stash_vol_bars(snap, series)
+            _publish_vol(world, snap)
         return _clip(payload, max_chars=CANDLES_CLIP_CHARS)
     if name == "option_chain":
         fn = getattr(connector, "get_option_chain", None)
@@ -2945,6 +3003,9 @@ async def _run_tool(
                 chains.append({"symbol": sym, "error": str(row), "source": "ibkr"})
             else:
                 chains.append(row)
+        for row in chains:
+            _stash_vol_chain(snap, row)
+        _publish_vol(world, snap)
         if len(chains) == 1:
             return _clip(chains[0])
         return _clip({"source": "ibkr", "chains": chains})
@@ -2955,6 +3016,9 @@ async def _run_tool(
         rows = await asyncio.gather(
             *[_one_option_quote(connector, spec) for spec in specs[:OPTION_QUOTE_CAP]]
         )
+        for row in rows:
+            _stash_vol_option_quote(snap, row)
+        _publish_vol(world, snap)
         if len(rows) == 1:
             return _clip(rows[0])
         return _clip({
@@ -2970,6 +3034,7 @@ async def _run_tool(
         )
         world.option_facts = facts
         snap["option_facts"] = facts
+        _publish_vol(world, snap)
         return _clip({
             "source": "ibkr_live+mda_greeks",
             "freshness": "ibkr_live; greeks_delayed_15m",

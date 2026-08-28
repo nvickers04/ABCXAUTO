@@ -447,6 +447,8 @@ async def test_news_is_labeled_delayed_but_candles_never_serves_mda(monkeypatch)
     )
     assert news["source"] == "mda"
     assert "delayed" in news["freshness"]
+    assert news["use"] == "color_not_trigger"
+    assert "already in the price" in str(news.get("note") or "")
     candles = json.loads(
         await _run_tool(
             "candles",

@@ -774,7 +774,7 @@ class MarketDataClient:
                     item,
                     source="mda",
                     freshness="delayed_15m",
-                    use="context_not_live_last",
+                    use="color_not_trigger",
                     asof=pub,
                 ))
             return out

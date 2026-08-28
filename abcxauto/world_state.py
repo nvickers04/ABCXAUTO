@@ -1234,6 +1234,7 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     mins_open = _minutes_to_open(world)
     pulse = getattr(world, "pulse", None) if isinstance(getattr(world, "pulse", None), dict) else {}
     sess_block = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
+    vol_rows = _day_vol(world)
     return {
         "nl": nl,
         "ibkr_daily_pnl": daily,
@@ -1276,6 +1277,8 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "ibkr_day_vs_halt": day_vs,
         "ibkr_day_vs_halt_pct_of_nl": pct_of_nl(day_vs, nl),
         "candle_source": candle_source,
+        "vol": vol_rows,
+        "vol_bit": _vol_wake_bit(vol_rows),
         "sizing_floors": floors,
         # Soft concentration / liquidity % of NL (from WorldState._portfolio_risk).
         "portfolio_risk": port,
@@ -1288,6 +1291,25 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "countdown_human": sess_block.get("countdown_human"),
         "tradable_now": pulse.get("tradable_now"),
     }
+
+
+def _day_vol(world: Any) -> list[dict[str, Any]]:
+    """Clipped this-look vol. Empty when nothing is taped."""
+    try:
+        from abcxauto.vol_fact import clip_vol_facts
+
+        return clip_vol_facts(getattr(world, "vol_facts", None))
+    except Exception:
+        return []
+
+
+def _vol_wake_bit(rows: Any) -> str:
+    try:
+        from abcxauto.vol_fact import wake_vol_bit
+
+        return wake_vol_bit(rows)
+    except Exception:
+        return ""
 
 
 def _playbook_day(
@@ -1515,6 +1537,11 @@ def format_wake(
         src = str(day.get("candle_source") or "").strip()
         if src and src not in ("none",):
             parts.append(f"candles={src}.")
+        vol_bit = str(day.get("vol_bit") or "").strip()
+        if not vol_bit:
+            vol_bit = _vol_wake_bit(day.get("vol"))
+        if vol_bit:
+            parts.append(f"vol={vol_bit}.")
         if mix_s:
             parts.append(f"mix={mix_s}.")
         if ev is not None:
@@ -1712,6 +1739,7 @@ class WorldState:
     candle_source: str = ""
     scan_fetched: list[str] = field(default_factory=list)
     option_facts: list[dict] = field(default_factory=list)
+    vol_facts: list[dict] = field(default_factory=list)
     fills: list[dict] = field(default_factory=list)
     stop_qty_fact: dict[str, Any] | None = None
     book_reconciled: bool = False
@@ -1730,6 +1758,7 @@ class WorldState:
             "opportunities": self.opportunities[:12],
             "scan_fetched": list(self.scan_fetched),
             "option_facts": list(self.option_facts[:8]),
+            "vol_facts": list(self.vol_facts[:6]),
             "stop_qty_fact": self.stop_qty_fact,
             "ibkr_live_last": self.ibkr_live_last,
             "ibkr_live_symbol": self.ibkr_live_symbol,
@@ -1895,14 +1924,22 @@ def build_world_state(
         pulse=pulse if isinstance(pulse, dict) else {},
         taken_at=str(snap.get("taken_at") or ""),
         option_facts=option_facts,
+        vol_facts=list(snap.get("vol_facts") or []),
         fills=list(snap.get("fills") or [])[:12],
         stop_qty_fact=stop_fact,
         book_reconciled=book_reconciled,
         ibkr_live_quotes=dict(snap.get("ibkr_live_quotes") or {}),
         candle_source=str(snap.get("candle_source") or "") or "none",
+        scan_fetched=list(snap.get("scan_fetched") or []),
         ibkr_live_symbol=live_sym,
         ibkr_live_last=live_last,
     )
+    try:
+        from abcxauto.vol_fact import publish_vol_facts
+
+        publish_vol_facts(ws, snap)
+    except Exception:
+        pass
     return ws
 
 

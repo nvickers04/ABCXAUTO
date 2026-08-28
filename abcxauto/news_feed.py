@@ -327,7 +327,7 @@ async def fetch_agent_news(
 def format_news_for_prompt(items: list[dict], *, limit: int = 18) -> str:
     """Compact NEWS block for the cycle prompt."""
     lines = [
-        "NEWS (headlines — not orders):",
+        "NEWS (color only — not a trigger):",
     ]
     real: list[dict] = []
     misses: list[dict] = []

@@ -664,7 +664,8 @@ def _scan_hits_asof_age_s(
         if not isinstance(item, dict):
             continue
         ibkr = item.get("ibkr") if isinstance(item.get("ibkr"), dict) else {}
-        raw = str(ibkr.get("asof_iso") or item.get("asof_iso") or "").strip()
+        # IBKR clocks only. MDA asof_iso is color, never a trigger.
+        raw = str(ibkr.get("asof_iso") or "").strip()
         if not raw:
             continue
         age = last_look_age_s({"ts": raw}, now=now)
