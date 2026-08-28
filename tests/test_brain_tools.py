@@ -2744,6 +2744,56 @@ def test_open_wake_is_developer_not_user():
     assert "no operator" not in text.lower()
 
 
+_PYPL_FACT = (
+    "fact: closest_stop PYPL STK long 50 dist=1.48 stop=52.61 last=54.09.\n"
+    "session=regular flat=False unprotected=none ibkr=up."
+)
+_PYPL_FACT_TICK = (
+    "fact: closest_stop PYPL STK long 50 dist=1.47 stop=52.61 last=54.08.\n"
+    "session=regular flat=False unprotected=none ibkr=up."
+)
+_PYPL_FACT_STOP_MOVED = (
+    "fact: closest_stop PYPL STK long 50 dist=2.61 stop=51.50 last=54.11.\n"
+    "session=regular flat=False unprotected=none ibkr=up."
+)
+
+
+def test_resume_duplicate_closest_stop_does_not_append_a_fresh_desk():
+    """Identical / last-tick closest_stop is one fact line, not a go-do-desk."""
+    from abcxauto.brain import _open_wake
+    from abcxauto.llm import SYSTEM_PROMPT
+    from abcxauto.park_clock import clear_interrupt
+    from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+
+    clear_interrupt()
+    got: list[object] = []
+
+    class Chat:
+        def append(self, msg, **_k):
+            got.append(msg)
+
+    class _ChatNS:
+        @staticmethod
+        def create(**_k):
+            return Chat()
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+    )
+    _open_wake(g, _PYPL_FACT)
+    assert len(got) == 1
+    _open_wake(g, _PYPL_FACT, resume=True)
+    assert len(got) == 1
+    _open_wake(g, _PYPL_FACT_TICK, resume=True)
+    assert len(got) == 1
+    _open_wake(g, _PYPL_FACT_STOP_MOVED, resume=True)
+    assert len(got) == 2
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
 def test_append_hist_caps_and_drops_old_snapshots():
     from abcxauto.agent_loop import _HIST_CAP, _append_hist
 
@@ -3685,6 +3735,39 @@ async def test_stay_up_resume_keeps_chat_cold_start_does_not():
     assert third.look_failed() is False
     assert g.chat is not live
     assert len(created) == 2
+
+
+@pytest.mark.asyncio
+async def test_resume_duplicate_closest_stop_look_may_end_with_no_send():
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    g, created = _stay_up_chat_client()
+    first = await grok_turn(
+        g, connector=None, world=_world(), snap={}, wake=_PYPL_FACT
+    )
+    assert first.ended is False
+    assert first.look_failed() is False
+    assert first.sends == []
+    live = g.chat
+    assert live is created[0]
+    rounds = int(getattr(live, "rounds", 0) or 0)
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake=_PYPL_FACT_TICK,
+        resume=True,
+    )
+    assert second.ended is True
+    assert second.look_failed() is False
+    assert second.failed is False
+    assert second.sends == []
+    assert g.chat is live
+    assert len(created) == 1
+    assert int(getattr(live, "rounds", 0) or 0) == rounds
 
 
 @pytest.mark.asyncio

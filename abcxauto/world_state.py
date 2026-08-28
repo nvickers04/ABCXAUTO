@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -1613,6 +1614,14 @@ def _session_cap_from_counter(session: str) -> dict[str, Any]:
 # Leading-line prefix so a protected stop / missing working order cannot
 # parse as an order ticket. Not a hold-law. unprotected= stays bare.
 WAKE_FACT_PREFIX = "fact:"
+# US equity tick. Last-tick last/dist noise is not a stop move.
+STOP_DIST_TICK = 0.01
+_CLOSEST_STOP_RE = re.compile(
+    r"closest_stop\s+(?P<ident>.+?)\s+dist=(?P<dist>[-+]?(?:\d+\.?\d*|\.\d+))"
+    r"\s+stop=(?P<stop>[-+]?(?:\d+\.?\d*|\.\d+))"
+    r"(?:\s+last=(?P<last>[-+]?(?:\d+\.?\d*|\.\d+)))?",
+    re.IGNORECASE,
+)
 
 
 def _desk_fact_line(body: str) -> str:
@@ -1620,6 +1629,120 @@ def _desk_fact_line(body: str) -> str:
     if not bit:
         return ""
     return f"{WAKE_FACT_PREFIX} {bit}"
+
+
+def wake_fact_line(text: str) -> str:
+    """First line of a wake / poke. Empty when there is no text."""
+    return str(text or "").splitlines()[0].strip() if text else ""
+
+
+def _is_closest_stop_fact_line(text: str) -> bool:
+    bit = wake_fact_line(text).lower()
+    if not bit:
+        return False
+    if "closest_stop" in bit:
+        return True
+    return bit.startswith("stop_dist") or bit.startswith("stop_dist=")
+
+
+def parse_closest_stop(raw: Any) -> dict[str, Any] | None:
+    """ident + stop from a stop_dist row or a ``fact: closest_stop`` line."""
+    if isinstance(raw, dict):
+        ident = str(raw.get("ident") or "").strip()
+        if not ident:
+            return None
+        try:
+            stop = float(raw.get("stop"))
+        except (TypeError, ValueError):
+            return None
+        row: dict[str, Any] = {"ident": ident, "stop": stop}
+        for key in ("dist", "last"):
+            try:
+                if raw.get(key) is not None:
+                    row[key] = float(raw[key])
+            except (TypeError, ValueError):
+                continue
+        return row
+    bit = wake_fact_line(str(raw or ""))
+    if not bit:
+        return None
+    m = _CLOSEST_STOP_RE.search(bit)
+    if not m:
+        return None
+    ident = str(m.group("ident") or "").strip()
+    if not ident:
+        return None
+    try:
+        stop = float(m.group("stop"))
+    except (TypeError, ValueError):
+        return None
+    row = {"ident": ident, "stop": stop}
+    for key in ("dist", "last"):
+        try:
+            if m.group(key) is not None:
+                row[key] = float(m.group(key))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return row
+
+
+def closest_stop_moved_more_than_a_tick(
+    prev: Any,
+    cur: Any,
+    *,
+    tick: float = STOP_DIST_TICK,
+) -> bool:
+    """True when ident changed or the stop price moved more than a tick.
+
+    Last-tick last/dist noise is not a move. No previous closest_stop is a
+    move so the first fact still lands. Unparseable current is a move so we
+    never swallow a real poke.
+    """
+    b = parse_closest_stop(cur)
+    if b is None:
+        return True
+    a = parse_closest_stop(prev)
+    if a is None:
+        return True
+    if a.get("ident") != b.get("ident"):
+        return True
+    try:
+        step = abs(float(tick))
+    except (TypeError, ValueError):
+        step = STOP_DIST_TICK
+    if step <= 0:
+        step = STOP_DIST_TICK
+    try:
+        return abs(float(b["stop"]) - float(a["stop"])) > step
+    except (TypeError, ValueError):
+        return True
+
+
+def desk_fact_is_duplicate(prev: Any, cur: Any) -> bool:
+    """Same closest_stop / stop_dist fact line, including last-tick last noise.
+
+    Other wakes (session=, unprotected=) are not collapsed here.
+    """
+    b = wake_fact_line(str(cur or ""))
+    if not _is_closest_stop_fact_line(b):
+        return False
+    a = wake_fact_line(str(prev or ""))
+    if a and a == b:
+        return True
+    if not a:
+        return False
+    return not closest_stop_moved_more_than_a_tick(a, b)
+
+
+def omit_duplicate_fact_lead(prev: Any, text: str) -> str:
+    """Keep one identical ``fact: closest_stop`` line; drop a later copy."""
+    raw = str(text or "")
+    if not desk_fact_is_duplicate(prev, raw):
+        return raw
+    lines = raw.splitlines()
+    if len(lines) <= 1:
+        return ""
+    return "\n".join(lines[1:]).strip()
 
 
 def worst_wake_fact(

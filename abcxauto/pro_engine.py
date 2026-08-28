@@ -849,12 +849,13 @@ class ProEngine:
         return True
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
-        """Stay-up next look is immediate. No sit clock.
+        """Stay-up keeps the process. Duplicate FACT waits for a poke.
 
-        Paper RTH / premarket re-arm on this process. A good look writes no
-        grok_wake.json. A look that already spoke or sent resumes the same
-        chat. True empty / lone '?' drop the chat and start another look
-        now. Overnight park is park_clock after a closed skip.
+        Paper RTH / premarket stay on this process. A good look writes no
+        grok_wake.json. A spoken or send look keeps the chat. A duplicate
+        closest_stop look ends with no send and waits — not a fresh
+        go-do-desk. True empty / lone '?' drop the chat and start another
+        look now. Overnight park is park_clock after a closed skip.
         """
         session = self._resolve_session(session)
         self._last_session = session
@@ -872,7 +873,10 @@ class ProEngine:
         except (TypeError, ValueError):
             sends = 0
         # A spoken say or a send/fill is a finished look. Do not wipe chat.
-        if sends > 0 or not _look_text_is_junk(rationale):
+        # Duplicate closest_stop (_ended) waits for a poke, not a fresh desk.
+        ended = bool(payload.get("_ended"))
+        finished = ended or sends > 0 or not _look_text_is_junk(rationale)
+        if finished:
             failed = False
             stream_err = ""
         if parked and not stay:
@@ -880,8 +884,14 @@ class ProEngine:
             self._cold_next = True
             return 0.0
         if stay:
-            self._resume_think = True
-        self._cold_next = bool(failed or parked or stream_err)
+            if ended:
+                self._resume_think = False
+                self._cold_next = False
+            else:
+                self._resume_think = True
+                self._cold_next = bool(failed or parked or stream_err)
+        else:
+            self._cold_next = bool(failed or parked or stream_err)
         if not failed:
             self._fail_streak = 0
         else:
@@ -986,6 +996,7 @@ class ProEngine:
             "pace": {"tier": "stay", "sleep_s": 0, "reason": "yield"},
             "_parked": parked,
             "_failed": failed and not parked,
+            "_ended": bool(getattr(turn, "ended", False)),
             "_stream_error": str(getattr(turn, "stream_error", "") or ""),
         }
 
@@ -1136,8 +1147,10 @@ class ProEngine:
                     self._brain_key = brain_key
 
                 want_look = bool(getattr(self, "_resume_think", False))
-                resume = want_look and not getattr(self, "_cold_next", False)
+                cold = bool(getattr(self, "_cold_next", False))
                 poked = peek_interrupt() is not None
+                live_chat = g is not None and getattr(g, "chat", None) is not None
+                resume = (not cold) and (want_look or poked or live_chat)
                 if getattr(self, "_think_parked", False) and not want_look:
                     # Park is shutdown. Do not wait on pokes. Start is the only resume.
                     self.state.status = "Parked"
@@ -1198,7 +1211,24 @@ class ProEngine:
                                 clear_park()
                             except Exception:
                                 pass
-                            self._resume_think = True
+                            # A look may end. Wait for a poke (or pulse) —
+                            # do not dump a fresh go-do-desk developer turn.
+                            wait = float(PULSE_S)
+                            self.state.status = "On"
+                            ev = self._wake_event
+                            if ev is not None:
+                                try:
+                                    await asyncio.wait_for(ev.wait(), timeout=wait)
+                                except asyncio.TimeoutError:
+                                    pass
+                                else:
+                                    ev.clear()
+                            else:
+                                await asyncio.sleep(wait)
+                            if peek_interrupt() is None:
+                                # Pulse look. Duplicate closest_stop ends
+                                # inside grok_turn with no send.
+                                self._resume_think = True
                             continue
                         wait = float(PULSE_S)
                         self.state.status = "On"
@@ -1274,10 +1304,15 @@ class ProEngine:
                 before_tok = billed_tokens_now()
                 try:
                     out = await self._host_think(n, g, s, resume=resume)
-                    note_look(
-                        session=session,
-                        tokens=max(0, billed_tokens_now() - before_tok),
-                    )
+                    if not out.get("_ended"):
+                        note_look(
+                            session=session,
+                            tokens=max(0, billed_tokens_now() - before_tok),
+                        )
+                    if out.get("_ended"):
+                        # Duplicate closest_stop fact. A look may end.
+                        self._rearm_after_think(out, session=session)
+                        continue
                     if out.get("_parked"):
                         self.ui.put(("cycle", out))
                         if stay:

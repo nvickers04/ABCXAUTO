@@ -165,4 +165,6 @@ class GrokClient:
         self.max_tokens = cfg.max_tokens
         self.chat = None
         self._wake_n = 0
+        self._wake_appended = False
+        self._last_desk_fact = ""
         logger.info(f"Grok client ready (model={self.model})")

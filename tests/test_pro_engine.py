@@ -662,6 +662,9 @@ def _wire_stay_up_engine(monkeypatch, *, session: str, think, paper: bool = True
     async def _al(*_a, **_k):
         return {"legal_symbols": [], "source": "test"}
 
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
     monkeypatch.setattr(
         "abcxauto.config.Config.is_paper",
         property(lambda self: paper),
@@ -701,6 +704,18 @@ def test_a_good_paper_look_re_arms_stay_up():
         assert eng._resume_think is True, sess
         assert eng._cold_next is False, sess
         assert wait == 0.0
+
+
+def test_ended_duplicate_fact_does_not_rearm_a_fresh_desk():
+    """After FACT, the next look is not a go-do-desk. Wait for a poke."""
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {"_ended": True, "_failed": False, "rationale": "", "sends": 0},
+        session="regular",
+    )
+    assert eng._resume_think is False
+    assert eng._cold_next is False
+    assert wait == 0.0
 
 
 def test_rearm_empty_session_during_rth_still_looks(monkeypatch):
@@ -1054,6 +1069,7 @@ async def test_paper_regular_stay_up_looks_without_a_clock(monkeypatch, tmp_path
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None
+    assert not (tmp_path / "wake.json").exists()
 
 
 @pytest.mark.asyncio
