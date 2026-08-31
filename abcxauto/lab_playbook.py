@@ -3,7 +3,7 @@
 Promote contract: ``abcxauto.playbook.promote`` (``retire_if.sample`` plus one
 numeric kill; ``conservative_pnl``; paper mids cannot graduate). Card schema:
 ``abcxauto.playbook.schema``. Persistence: ``abcxauto.playbook.persist``.
-Hunt notes: ``abcxauto.playbook.hunt``. Public names stay on this module.
+Live-card notes: ``abcxauto.playbook.live_cards``. Public names stay on this module.
 
 
 One tree, two layers, both written by Grok::
@@ -72,7 +72,7 @@ from abcxauto.path_math import commission_cost, conservative_trade_pnl, quote_bi
 from abcxauto.playbook.schema import *  # noqa: F401,F403
 from abcxauto.playbook.persist import *  # noqa: F401,F403
 from abcxauto.playbook.promote import *  # noqa: F401,F403
-from abcxauto.playbook.hunt import *  # noqa: F401,F403
+from abcxauto.playbook.live_cards import *  # noqa: F401,F403
 
 logger = logging.getLogger(__name__)
 

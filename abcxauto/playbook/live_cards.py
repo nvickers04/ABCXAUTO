@@ -1,4 +1,4 @@
-"""Live-card notes used as hunt hints. Prose is not a send gate.
+"""Live-card notes. Prose is not a send gate.
 
 Hold / gap / tape / session / book sentences cannot invent a refuse.
 ``apply_hunt_send_sketch`` is a no-op — the notebook does not fill tickets.

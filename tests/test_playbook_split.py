@@ -12,6 +12,7 @@ from abcxauto.lab_playbook import (
     maybe_promote,
     save_lab,
 )
+from abcxauto.playbook import live_cards as live_cards_mod
 from abcxauto.playbook import promote as promote_mod
 from abcxauto.playbook import schema as schema_mod
 
@@ -46,6 +47,22 @@ def test_paper_mid_cannot_graduate_without_conservative_mark():
     )
     assert verdict["graduated"] is False
     assert verdict["cannot_graduate_reason"] == "paper_mid cannot graduate"
+
+
+def test_live_card_notes_are_not_a_hunt_module():
+    import importlib
+
+    import abcxauto.playbook.live_cards as live_cards
+    from abcxauto.lab_playbook import apply_hunt_send_sketch, live_card_session_error
+
+    assert live_cards is live_cards_mod
+    assert live_card_session_error.__module__ == "abcxauto.playbook.live_cards"
+    assert apply_hunt_send_sketch.__module__ == "abcxauto.playbook.live_cards"
+    try:
+        importlib.import_module("abcxauto.playbook.hunt")
+    except ModuleNotFoundError:
+        return
+    raise AssertionError("abcxauto.playbook.hunt must not exist")
 
 
 def test_brain_tools_reexport_from_brain():

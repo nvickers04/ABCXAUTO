@@ -4,5 +4,5 @@
 - ``persist`` — lab/live json, ``load_lab`` / ``save_lab``
 - ``promote`` — graduation + live snapshot (sample + one numeric kill;
   ``conservative_pnl``). Paper mids cannot graduate.
-- ``hunt`` — live-card notes and scan constraints (prose is not a send gate)
+- ``live_cards`` — live-card notes and scan constraints (prose is not a send gate)
 """
