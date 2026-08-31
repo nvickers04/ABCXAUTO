@@ -2849,17 +2849,6 @@ def test_resume_duplicate_wom_set_does_not_append_a_fresh_desk():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
-def test_append_hist_caps_and_drops_old_snapshots():
-    from abcxauto.agent_loop import _HIST_CAP, _append_hist
-
-    h: list[dict] = []
-    for i in range(_HIST_CAP + 5):
-        _append_hist(h, {"snapshot": {"i": i}, "cycle": i})
-    assert len(h) == _HIST_CAP
-    assert "snapshot" not in h[0]
-    assert "snapshot" in h[-1]
-
-
 @pytest.mark.asyncio
 async def test_stream_round_breaks_when_stalled(monkeypatch):
     import asyncio
@@ -3342,14 +3331,6 @@ async def test_send_writes_last_turn_from_live_book(monkeypatch, tmp_path):
         },
     ]
 
-    persist_calls: list[int] = []
-
-    def _boom(out):
-        persist_calls.append(1)
-        raise AssertionError("cycle persist must not be required")
-
-    monkeypatch.setattr("abcxauto.agent_loop._persist_cycle", _boom)
-
     async def fake_exec(act, *_a, **_k):
         return {
             "success": True,
@@ -3391,7 +3372,6 @@ async def test_send_writes_last_turn_from_live_book(monkeypatch, tmp_path):
         turn=turn,
     )
     last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
-    assert persist_calls == []
     assert last["stale"] is False
     assert last["flat"] is False
     assert last["sends"] == 1
@@ -3915,28 +3895,17 @@ def _stay_up_chat_client(*, replies: list[str] | None = None):
             self.rounds = 0
             self._replies = list(replies)
             self._i = 0
-            # 2.2 continues after a spoken no-tool say. Insert one empty
-            # stream so this mock look can end without a 64-step mill;
-            # the next look may speak again from the same bag.
-            self._need_empty_continue = False
 
         def append(self, msg, **_k):
             self.appended.append(msg)
 
         async def stream(self):
             self.rounds += 1
-            if self._need_empty_continue:
-                self._need_empty_continue = False
-                text = ""
+            if self._i < len(self._replies):
+                text = self._replies[self._i]
+                self._i += 1
             else:
-                if self._i < len(self._replies):
-                    text = self._replies[self._i]
-                    self._i += 1
-                else:
-                    text = self._replies[-1] if self._replies else ""
-                raw = (text or "").strip()
-                if raw and raw != "?":
-                    self._need_empty_continue = True
+                text = self._replies[-1] if self._replies else ""
             yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
                 content=text, reasoning_content=""
             )
@@ -3962,7 +3931,7 @@ def _stay_up_chat_client(*, replies: list[str] | None = None):
 def _scripted_chat_client(*, rounds: list):
     """Exact stream rounds. Each item is a str or (text, tool_calls).
 
-    After the list, further streams are empty no-tool so a 2.2 look can end.
+    After the list, further streams are empty no-tool.
     """
     spec = list(rounds)
     created: list[object] = []
@@ -4121,8 +4090,8 @@ async def test_resume_duplicate_wom_set_look_may_end_with_no_send():
 
 
 @pytest.mark.asyncio
-async def test_junk_stay_up_look_retries_same_chat_then_idles():
-    """Empty/? retries the same chat once. Still junk → idle, chat kept, not cold."""
+async def test_junk_stay_up_look_idles_same_chat_no_retry():
+    """Empty/? ends this grok_turn. Chat kept. No second model call."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
     from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
@@ -4147,7 +4116,7 @@ async def test_junk_stay_up_look_retries_same_chat_then_idles():
     assert first.failed is False
     assert g.chat is created[0]
     assert len(created) == 1
-    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
     grok_banners = [p for p in painted if "--- GROK ---" in p]
     assert len(grok_banners) == 1
 
@@ -4166,28 +4135,41 @@ async def test_junk_stay_up_look_retries_same_chat_then_idles():
 
 
 @pytest.mark.asyncio
-async def test_junk_retry_same_chat_recovers_without_a_new_look():
-    """A real say on the in-look retry is the same billed look, same chat."""
+async def test_junk_look_next_poke_may_speak_same_chat():
+    """A junk say ends this grok_turn. The next poke may speak on the same chat."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
 
     clear_interrupt()
     g, created = _stay_up_chat_client(replies=["?", "watching the book"])
-    turn = await grok_turn(
+    first = await grok_turn(
         g, connector=None, world=_world(), snap={}, wake="session=regular send."
     )
-    assert turn.look_failed() is False
-    assert turn.failed is False
-    assert "watching the book" in (turn.text or "")
+    assert first.look_failed() is True
+    assert first.failed is False
     assert g.chat is created[0]
     assert len(created) == 1
-    # Junk retry + spoken checkpoint + empty so the look can end.
-    assert int(getattr(created[0], "rounds", 0) or 0) == 3
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
+
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake="fill IWM 2 @ 248.10",
+        resume=True,
+    )
+    assert second.look_failed() is False
+    assert second.failed is False
+    assert "watching the book" in (second.text or "")
+    assert g.chat is created[0]
+    assert len(created) == 1
+    assert int(getattr(created[0], "rounds", 0) or 0) == 2
 
 
 @pytest.mark.asyncio
-async def test_spoken_no_tool_say_continues_same_look_same_chat():
-    """A real no-tool say is a checkpoint: same look, same chat, one GROK banner."""
+async def test_spoken_no_tool_say_ends_this_grok_turn_keeps_chat():
+    """A real no-tool say is a checkpoint: this grok_turn stops, chat kept."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
     from abcxauto.pro_engine import ProEngine
@@ -4215,10 +4197,10 @@ async def test_spoken_no_tool_say_continues_same_look_same_chat():
     assert turn.failed is False
     assert turn.tool_budget_hit is False
     assert "watching IWM" in (turn.text or "")
-    assert "still watching the book" in (turn.text or "")
+    assert "still watching the book" not in (turn.text or "")
     assert g.chat is created[0]
     assert len(created) == 1
-    assert int(getattr(created[0], "rounds", 0) or 0) >= 2
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
     grok_banners = [p for p in painted if "--- GROK ---" in p]
     assert len(grok_banners) == 1
     from abcxauto.think_stream import bind_engine
@@ -4237,8 +4219,8 @@ async def test_spoken_no_tool_say_continues_same_look_same_chat():
 
 
 @pytest.mark.asyncio
-async def test_spoken_no_tool_third_fourth_reply_still_continues():
-    """There is no two-consecutive-no-tool mill cap. Third/fourth still continue."""
+async def test_spoken_no_tool_next_poke_speaks_again_same_chat():
+    """A later poke resumes the same chat. It does not mill extra says in one grok_turn."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
     from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
@@ -4259,27 +4241,39 @@ async def test_spoken_no_tool_third_fourth_reply_still_continues():
     ]
     g, created = _scripted_chat_client(rounds=says)
     try:
-        turn = await grok_turn(
+        first = await grok_turn(
             g, connector=None, world=_world(), snap={}, wake="session=regular send."
+        )
+        assert first.look_failed() is False
+        assert "watching IWM" in (first.text or "")
+        assert "book is quiet" not in (first.text or "")
+        assert int(getattr(created[0], "rounds", 0) or 0) == 1
+        second = await grok_turn(
+            g,
+            connector=None,
+            world=_world(),
+            snap={},
+            wake="fill IWM 1 @ 248.10",
+            resume=True,
         )
     finally:
         unsubscribe(cap)
         reset_speaker()
-    assert turn.look_failed() is False
-    assert turn.failed is False
-    assert turn.tool_budget_hit is False
-    for bit in says:
-        assert bit in (turn.text or "")
+    assert second.look_failed() is False
+    assert second.failed is False
+    assert second.tool_budget_hit is False
+    assert "book is quiet" in (second.text or "")
+    assert "still no ticket" not in (second.text or "")
     assert g.chat is created[0]
     assert len(created) == 1
-    assert int(getattr(created[0], "rounds", 0) or 0) >= 4
+    assert int(getattr(created[0], "rounds", 0) or 0) == 2
     grok_banners = [p for p in painted if "--- GROK ---" in p]
-    assert len(grok_banners) == 1
+    assert grok_banners
 
 
 @pytest.mark.asyncio
-async def test_spoken_no_tool_later_round_may_tool(monkeypatch):
-    """A continuation round after a spoken checkpoint may call tools."""
+async def test_tool_calls_then_spoken_no_tool_stops_same_chat(monkeypatch):
+    """Tool_calls execute, results append, the model is called again on this chat."""
     from abcxauto import brain
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
@@ -4288,7 +4282,7 @@ async def test_spoken_no_tool_later_round_may_tool(monkeypatch):
     clear_interrupt()
 
     async def fake_read(name, args, **_k):
-        return json.dumps({"ok": name})
+        return json.dumps({"ok": name, "last": 248.1})
 
     monkeypatch.setattr(brain, "_run_tool", fake_read)
 
@@ -4305,8 +4299,8 @@ async def test_spoken_no_tool_later_round_may_tool(monkeypatch):
     subscribe(cap)
     g, created = _scripted_chat_client(
         rounds=[
-            "watching IWM. I'll inspect the book.",
             ("checking the book", [TC()]),
+            "watching IWM. Iron fly still working.",
         ]
     )
     try:
@@ -4322,11 +4316,57 @@ async def test_spoken_no_tool_later_round_may_tool(monkeypatch):
     assert "watching IWM" in (turn.text or "")
     assert g.chat is created[0]
     assert len(created) == 1
-    assert int(getattr(created[0], "rounds", 0) or 0) >= 2
+    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+    paid = " ".join(str(m) for m in created[0].appended)
+    assert "ok" in paid or "book" in paid
     grok_banners = [p for p in painted if "--- GROK ---" in p]
-    # First spoken checkpoint is silent; the post-tool stream is the
-    # existing tool-loop banner, not a new look.
     assert grok_banners
+
+
+@pytest.mark.asyncio
+async def test_spoken_no_tool_does_not_tool_until_next_poke(monkeypatch):
+    """Words and no tool_calls end this grok_turn. A later poke may tool on this chat."""
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="book", arguments="{}")
+
+    g, created = _scripted_chat_client(
+        rounds=[
+            "watching IWM. I'll inspect the book.",
+            ("checking the book", [TC()]),
+        ]
+    )
+    first = await grok_turn(
+        g, connector=None, world=_world(), snap={}, wake="session=regular send."
+    )
+    assert first.look_failed() is False
+    assert "book" not in first.tool_trace
+    assert "watching IWM" in (first.text or "")
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
+
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake="fill IWM 1 @ 248.10",
+        resume=True,
+    )
+    assert "book" in second.tool_trace
+    assert g.chat is created[0]
+    assert len(created) == 1
+    assert int(getattr(created[0], "rounds", 0) or 0) >= 2
 
 
 @pytest.mark.asyncio
@@ -4378,7 +4418,39 @@ async def test_spoken_no_tool_continue_injects_fill_doorbell():
 
 
 @pytest.mark.asyncio
-async def test_empty_stay_up_look_idles_in_chat():
+async def test_spoken_no_tool_next_fill_poke_resumes_same_chat():
+    """After a spoken no-tool say, a fill poke calls again on the same chat."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    clear_interrupt()
+    g, created = _stay_up_chat_client(
+        replies=["watching IWM. Iron fly still working.", "fill seen. still working."]
+    )
+    try:
+        first = await grok_turn(
+            g, connector=None, world=_world(), snap={}, wake="session=regular send."
+        )
+        assert "watching IWM" in first.text
+        assert first.interrupted is False
+        assert int(getattr(created[0], "rounds", 0) or 0) == 1
+        live = g.chat
+        note_interrupt(BookEvent("fill", "IWM"))
+        second = await grok_turn(
+            g,
+            connector=None,
+            world=_world(),
+            snap={},
+            wake="session=regular send.",
+            resume=True,
+        )
+        assert g.chat is live
+        assert len(created) == 1
+        assert second.interrupted is True
+        assert "fill seen" in (second.text or "")
+        assert int(getattr(created[0], "rounds", 0) or 0) >= 2
+    finally:
+        clear_interrupt()
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
 
@@ -4391,7 +4463,7 @@ async def test_empty_stay_up_look_idles_in_chat():
     assert turn.failed is False
     assert g.chat is created[0]
     assert len(created) == 1
-    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
 
 
 @pytest.mark.asyncio

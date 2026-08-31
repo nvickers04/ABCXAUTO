@@ -102,7 +102,6 @@ async def test_wait_for_pace_wakes_even_when_asked_to_park():
 
 @pytest.mark.asyncio
 async def test_idle_still_runs_act(monkeypatch, tmp_path):
-    from abcxauto.agent_loop import run_cycle
 
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
@@ -162,15 +161,20 @@ async def test_idle_still_runs_act(monkeypatch, tmp_path):
     async def grok_turn(*_a, **_k):
         return BrainTurn(tool_trace=["book"], text="act yield")
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_turn)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    from abcxauto.agent_loop import snap
+    from abcxauto.pro_engine import ProEngine
+
+    eng = ProEngine()
+    eng.conn = FakeConnector()
+    s = await snap(eng.conn)
+    out = await eng._host_think(1, None, s)
     assert out["strat"] != "hold"
     assert out["strat"] != "blocked"
 
 
 @pytest.mark.asyncio
 async def test_protect_still_calls_act(monkeypatch, tmp_path):
-    from abcxauto.agent_loop import run_cycle
 
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
@@ -240,7 +244,7 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
             return {"netliquidation": 10000, "unrealizedpnl": 0}
 
     monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
+        "abcxauto.brain.grok_turn",
         fake_grok_turn(act, wakes=calls),
     )
 
@@ -248,14 +252,19 @@ async def test_protect_still_calls_act(monkeypatch, tmp_path):
         return {"status": "blocked", "note": "test"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    from abcxauto.agent_loop import snap
+    from abcxauto.pro_engine import ProEngine
+
+    eng = ProEngine()
+    eng.conn = FakeConnector()
+    s = await snap(eng.conn)
+    out = await eng._host_think(1, None, s)
     assert calls
     assert out["strat"] == "blocked"
 
 
 @pytest.mark.asyncio
 async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
-    from abcxauto.agent_loop import run_cycle
     from abcxauto.memory import reset_journal
 
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
@@ -324,8 +333,14 @@ async def test_manage_hold_still_runs_act(monkeypatch, tmp_path):
         calls.append(wake)
         return BrainTurn(tool_trace=["book"], text="manage book — stop working")
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_turn)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    from abcxauto.agent_loop import snap
+    from abcxauto.pro_engine import ProEngine
+
+    eng = ProEngine()
+    eng.conn = FakeConnector()
+    s = await snap(eng.conn)
+    out = await eng._host_think(1, None, s)
     assert calls
     assert out["strat"] != "hold"
     assert out["strat"] != "blocked"

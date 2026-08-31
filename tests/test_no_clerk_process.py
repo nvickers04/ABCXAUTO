@@ -180,6 +180,18 @@ def test_rth_failed_look_has_no_sit():
     assert clerk_look_s(flat=False, session="premarket", minutes_to_open=45) == 0.0
 
 
+def test_no_clerk_cycle_or_run_cycle():
+    import importlib
+
+    import pytest
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("abcxauto.cycle")
+    import abcxauto.agent_loop as agent_loop
+
+    assert not hasattr(agent_loop, "run_cycle")
+
+
 def test_health_strip_does_not_invent_a_next_look_sit(monkeypatch):
     from abcxauto.pro_desktop import ProTerminal
 

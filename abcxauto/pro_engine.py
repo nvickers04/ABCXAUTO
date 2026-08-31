@@ -16,8 +16,13 @@ from typing import Any
 from abcxauto.broker.connector import get_ibkr_connector
 from abcxauto.config import get_config
 from abcxauto.llm import GrokClient
-from abcxauto.agent_loop import equity_of, pnl_of, risk_label, snap
-from abcxauto.cycle import format_position_inventory
+from abcxauto.agent_loop import (
+    equity_of,
+    format_position_inventory,
+    pnl_of,
+    risk_label,
+    snap,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -954,6 +959,12 @@ class ProEngine:
         )
 
         try:
+            from abcxauto.memory import get_journal
+
+            get_journal().ingest_look(s)
+        except Exception:
+            logger.debug("look journal ingest failed", exc_info=True)
+        try:
             from abcxauto.think_stream import seed_snap_from_last_turn
 
             seed_snap_from_last_turn(s)
@@ -1003,6 +1014,11 @@ class ProEngine:
         act = dict(turn.last_act or {})
         result = dict(turn.last_result or {})
         strat = str(turn.last_strat or act.get("strategy") or "")
+        if not getattr(turn, "sends", None) and strat.lower() not in ("blocked",):
+            # No send this look is yield, not a hold ticket.
+            act = {}
+            strat = ""
+            result = {}
         return {
             "cycle": n,
             "pnl": pnl,
@@ -1033,6 +1049,7 @@ class ProEngine:
             ),
             "sends": len(getattr(turn, "sends", None) or []),
             "validation": str(result.get("note") or result.get("status") or "ok"),
+            "structure_grade": str(act.get("_structure_grade") or ""),
             "pace": {"tier": "stay", "sleep_s": 0, "reason": "yield"},
             "_parked": parked,
             "_failed": failed and not parked,

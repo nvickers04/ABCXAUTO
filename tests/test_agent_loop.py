@@ -12,7 +12,6 @@ from abcxauto.agent_loop import (
     gate_ticket,
     is_new_risk,
     normalize_action,
-    run_cycle,
     snap,
     stance_from_book,
     turn_did_work,
@@ -35,6 +34,17 @@ class FakeConnector:
 
     async def get_account_summary(self):
         return {"netliquidation": 1000, "unrealizedpnl": 0}
+
+
+async def _think(monkeypatch, grok_fn, conn=None, snap_d=None):
+    from abcxauto.pro_engine import ProEngine
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_fn)
+    eng = ProEngine()
+    c = conn or FakeConnector()
+    eng.conn = c
+    s = snap_d if snap_d is not None else await snap(c)
+    return await eng._host_think(1, None, s)
 
 
 async def _fake_tool(_c, name: str, _a=None):
@@ -127,12 +137,11 @@ async def test_no_send_is_yield_not_a_ticket(monkeypatch):
         send_calls.append(1)
         raise AssertionError("send_action must not run on no-send")
 
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", boom_send)
+    out = await _think(
+        monkeypatch,
         _no_send_turn(tool_trace=["book"], text="watching"),
     )
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", boom_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out["strat"] != "hold"
     assert out["strat"] != "blocked"
     assert send_calls == []
@@ -152,12 +161,8 @@ async def test_paper_flat_rth_no_send_does_not_send(monkeypatch):
         "abcxauto.agent_loop.build_world_state",
         lambda **_k: _world(flat=True, session_status="regular"),
     )
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
-        _no_send_turn(tool_trace=["book"]),
-    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom_send)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    out = await _think(monkeypatch, _no_send_turn(tool_trace=["book"]))
     assert out["strat"] != "hold"
     assert out["strat"] != "blocked"
     assert send_calls == []
@@ -363,23 +368,6 @@ def test_wake_grok_for_session():
 
 
 @pytest.mark.asyncio
-async def test_run_cycle_skips_when_ibkr_down(monkeypatch):
-    called: list[int] = []
-
-    async def boom(*_a, **_k):
-        called.append(1)
-        raise AssertionError("grok must not run while IBKR is down")
-
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", boom)
-    c = FakeConnector()
-    c.connected = False
-    out = await run_cycle(1, c, None, [], 0.0)
-    assert out["strat"] == "skipped"
-    assert "ibkr_down" in (out.get("validation") or "")
-    assert called == []
-
-
-@pytest.mark.asyncio
 async def test_snap_timeout_returns_empty_book(monkeypatch):
     import asyncio
 
@@ -394,32 +382,6 @@ async def test_snap_timeout_returns_empty_book(monkeypatch):
     assert out["positions"] == []
     assert out["book_unreliable"] is True
     assert "reality_pulse" in out
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_skips_when_book_unreliable(monkeypatch):
-    called: list[int] = []
-
-    async def boom(*_a, **_k):
-        called.append(1)
-        raise AssertionError("grok must not run on an unreliable book")
-
-    async def bad_tool(_c, name: str, _a=None):
-        if name == "positions":
-            return {"error": "positions failed"}
-        return {
-            "account_summary": {"netliquidation": 1000, "unrealizedpnl": 0},
-            "open_orders": [],
-            "market_hours": {"session": "regular"},
-            "quote": {"symbol": "SPY", "last": 500},
-        }.get(name, {})
-
-    monkeypatch.setattr("abcxauto.agent_loop._tool", bad_tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", boom)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert out["strat"] == "skipped"
-    assert "book_unreliable" in (out.get("validation") or "")
-    assert called == []
 
 
 @pytest.mark.asyncio
@@ -520,8 +482,7 @@ async def test_paper_no_send_after_tools_is_rest_not_hold_ticket(monkeypatch):
         "abcxauto.agent_loop.build_world_state",
         lambda **_k: _world(flat=True, session_status="regular"),
     )
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", worked)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    out = await _think(monkeypatch, worked)
     assert out["strat"] != "hold"
     assert out["strat"] != "blocked"
     assert "hold is not a ticket" not in str(
@@ -545,8 +506,7 @@ async def test_paper_no_send_idle_is_rest_not_blocked(monkeypatch):
         "abcxauto.agent_loop.build_world_state",
         lambda **_k: _world(flat=True, session_status="regular"),
     )
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", idle)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    out = await _think(monkeypatch, idle)
     assert out["strat"] != "blocked"
     assert out["strat"] != "hold"
     assert "hold is not a ticket" not in str(
@@ -565,12 +525,7 @@ async def test_notes_only_unprotected_no_send_is_rest(monkeypatch):
             tool_trace=["write_lab_playbook"],
         )
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", notes)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.build_world_state",
-        lambda **_k: _world(needs_protection=True, unprotected=["SPY"], flat=False),
-    )
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    out = await _think(monkeypatch, notes)
     assert out["strat"] != "hold"
     assert "hold_forbidden" not in str(
         (out.get("result") or {}).get("note") or out.get("validation") or ""
@@ -630,8 +585,7 @@ async def test_stale_playbook_tool_tour_is_not_work(tmp_path, monkeypatch):
             tool_trace=["book", "scan", "quote"],
         )
 
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", worked)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    out = await _think(monkeypatch, worked)
     assert out["strat"] != "hold"
     assert out["strat"] != "blocked"
     assert "hold is not a ticket" not in str(
@@ -651,11 +605,10 @@ async def test_live_no_send_is_yield(monkeypatch):
         ),
     )
     monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.grok_turn",
+    out = await _think(
+        monkeypatch,
         _no_send_turn(tool_trace=["book", "set_wake"], text="watching"),
     )
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
     assert out.get("sends") == 0
     assert out["strat"] != "hold"
     assert out["strat"] != "blocked"
@@ -690,8 +643,7 @@ async def test_explicit_hold_send_unprotected_still_forbidden(monkeypatch):
         "abcxauto.agent_loop.build_world_state",
         lambda **_k: _world(needs_protection=True, unprotected=["SPY"], flat=False),
     )
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", sent_hold)
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
+    out = await _think(monkeypatch, sent_hold)
     assert out["strat"] == "blocked"
     assert "hold_forbidden" in str(
         (out.get("result") or {}).get("note") or out.get("validation") or ""

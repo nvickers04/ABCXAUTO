@@ -1,9 +1,10 @@
 """Grok owns the book via tools. The shell is facts + send gates.
 
-Paper RTH / premarket stay-up continues the live chat across successful
-looks. Overnight / after-close / park drop it. A spoken no-tool say is
-a checkpoint in the same look (no new --- GROK ---), not sit. Empty-junk
-retries once in the same chat, then sits.
+One look is one kept chat. Tool_calls execute, results append, the model
+is called again on that same chat until it returns words and no tools.
+A spoken no-tool say ends this grok_turn — chat kept, no extra model call.
+Next grok_turn is fill / order_change / unprotected / operator poke, with
+the full chat plus a fresh snap. Overnight / after-close / park drop it.
 Tickets go through ``execute_ticket`` → ``send_action``. IBKR tools are
 live. scan() is one tape this look (merged hits + on_book); candles
 are IBKR hist or the live 5s stream (error if both miss); news is ~15
@@ -755,6 +756,44 @@ async def stream_round(
     return o, last_resp, reason
 
 
+def _model_usage_calls() -> int:
+    try:
+        from abcxauto.memory import get_journal
+
+        return int((get_journal().model_usage_totals() or {}).get("calls") or 0)
+    except Exception:
+        return 0
+
+
+def _bill_spoken_look_if_unbilled(turn: BrainTurn, *, before_calls: int) -> None:
+    """If this look spoke and stream_round wrote no usage row, estimate it.
+
+    Empty-token leftover $0.18 rows are refused. A real spoken look still bills.
+    """
+    if _look_text_is_junk(turn.text):
+        return
+    try:
+        from abcxauto.config import get_config
+        from abcxauto.memory import get_journal
+        from abcxauto.scorecard import estimate_cost_usd, estimate_tokens
+
+        journal = get_journal()
+        after = int((journal.model_usage_totals() or {}).get("calls") or 0)
+        if after > int(before_calls or 0):
+            return
+        out = estimate_tokens(turn.text)
+        if out <= 0:
+            return
+        journal.record_model_usage(
+            stage="grok",
+            model=str(getattr(get_config(), "model", "") or ""),
+            output_tokens=out,
+            cost_usd=estimate_cost_usd(0, out),
+        )
+    except Exception:
+        logger.debug("spoken-look usage backup failed", exc_info=True)
+
+
 async def grok(g: GrokClient, p: str, *, stage: str = "grok") -> str:
     """One-shot streamed reply (tests / no tools). Hot path is grok_turn."""
     create_kw: dict[str, Any] = {
@@ -829,13 +868,13 @@ def _chat_last_desk_fact(g: Any, chat: Any = None) -> str:
 
 
 def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
-    """Keep the live chat on paper stay-up, including empty / '?' idle.
+    """Keep the live chat on paper stay-up, including a spoken no-tool say.
 
     Park and overnight drop it so the next think is a cold start. A
     ``failed`` / dead-stream stamp on a real say or send/fill is not a
     drop. An ended look (duplicate lead fact) keeps the chat — a look
-    may end with no send. A spoken no-tool say continues this look;
-    junk retries once, then sits.
+    may end with no send. Spoken words without tool_calls do not wipe
+    the chat; the next poke resumes it.
     """
     if turn.ended:
         return
@@ -1239,14 +1278,14 @@ async def grok_turn(
     wake: str,
     resume: bool = False,
 ) -> BrainTurn:
-    """One Grok tool loop. send() is the only broker path.
+    """One Grok tool loop on one kept chat. send() is the only broker path.
 
     ``resume`` is optional so older grok_turn mocks keep working. Stay-up
-    continues the live chat after a spoken say or send/fill. A spoken
-    no-tool say keeps this look and streams again (no new user poke, no
-    new --- GROK ---) until a tool call or a 2.1 sit. True empty / lone
-    '?' retry once then idle. A fresh BrainTurn still drops refused send
-    tickets so they cannot be the next look's send target.
+    continues the live chat after a spoken say or send/fill. Tool_calls
+    execute and the model is called again with those results on this
+    chat. Words with no tool_calls end this grok_turn — chat kept, no
+    extra model call. A fresh BrainTurn still drops refused send tickets
+    so they cannot be the next look's send target.
     """
     return await _grok_turn_impl(
         g,
@@ -1653,9 +1692,8 @@ async def _grok_turn_impl(
             turn.ended = True
             _finish_look_chat(g, turn, session=session)
             return turn
+    billed_before = _model_usage_calls()
     ran_out = True
-    silent_round = False
-    junk_retried = False
     while turn.steps < MAX_TOOL_STEPS:
         turn.steps += 1
         try:
@@ -1666,10 +1704,7 @@ async def _grok_turn_impl(
                     chat, connector=connector, world=world, snap=snap, turn=turn
                 )
                 continue
-            text, response, stop = await stream_round(
-                chat, emit_stage=not silent_round
-            )
-            silent_round = False
+            text, response, stop = await stream_round(chat)
         except Exception as exc:
             # A dead empty stream ends the look. A look that already spoke
             # or sent still keeps the stay-up chat.
@@ -1701,26 +1736,8 @@ async def _grok_turn_impl(
                 logger.debug("chat.append(response) failed", exc_info=True)
         calls = list(getattr(response, "tool_calls", None) or []) if response is not None else []
         if not calls:
-            if (
-                not junk_retried
-                and not turn.parked
-                and not turn.ended
-                and _look_is_empty_or_question(turn)
-            ):
-                # Same chat, once. No new --- GROK --- re-intro.
-                junk_retried = True
-                silent_round = True
-                continue
-            if (
-                stop == "ok"
-                and not turn.parked
-                and not turn.ended
-                and not _look_text_is_junk(text)
-            ):
-                # Spoken no-tool say is a keep-file checkpoint, not look-end.
-                # Same chat / same look. No new --- GROK ---. No user poke.
-                silent_round = True
-                continue
+            # Words (or empty) and no tools: this grok_turn is done. Chat
+            # stays. Next model call is a poke with this chat + a fresh snap.
             ran_out = False
             break
         interrupted = await _dispatch_tool_calls(
@@ -1746,6 +1763,7 @@ async def _grok_turn_impl(
     ):
         # Idle in this chat. Do not stamp failed — that cold-restarts.
         logger.warning("look idle: empty or junk assistant text")
+    _bill_spoken_look_if_unbilled(turn, before_calls=billed_before)
     _finish_look_chat(g, turn, session=session)
     if not turn.sends:
         if str(turn.last_strat or "").lower() == "hold":

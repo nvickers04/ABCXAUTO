@@ -39,7 +39,7 @@ def _poke_book(eng, kind: str = "fill", detail: str = "SPY") -> None:
 
 @pytest.mark.asyncio
 async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_path):
-    """Engine.start() drives >=3 run_cycle with inventory+validation in records."""
+    """Engine.start() drives >=3 looks with inventory+validation in records."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "0.05")
     monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)

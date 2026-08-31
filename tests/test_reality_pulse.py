@@ -1,7 +1,7 @@
 """Reality Pulse — situational awareness heart."""
 
 from abcxauto.reality_pulse import build_narrative, build_reality_pulse, pulse_clock_view
-from abcxauto.cycle import AWARENESS_HEART, RULES
+from abcxauto.agent_loop import AWARENESS_HEART, RULES
 
 
 MIXED = [

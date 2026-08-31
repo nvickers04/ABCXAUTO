@@ -1,7 +1,4 @@
-"""Wake loop: snap facts, Grok tools, send gates.
-
-``abcxauto.cycle`` re-exports this API for test/UI compatibility.
-"""
+"""Wake loop: snap facts, send gates. Think is hosted on ``pro_engine``."""
 
 from __future__ import annotations
 
@@ -10,11 +7,10 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, List
+from typing import Any
 
 from abcxauto.book import build_book_from_snap
 from abcxauto.config import get_config
-from abcxauto.llm import GrokClient
 from abcxauto.memory import get_journal
 from abcxauto.monitor import build_protection_report
 from abcxauto.order_examples import SENDABLE_TYPES
@@ -29,12 +25,8 @@ from abcxauto.trade_plan import (
 )
 from abcxauto.world_state import (
     WorldState,
-    build_world_state,
     capacity_allows_new_risk,
-    day_facts,
-    format_wake,
 )
-from abcxauto.brain import grok, grok_turn
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +48,6 @@ AWARENESS_HEART = (
 )
 RULES = AWARENESS_HEART
 SNAP_S = 25.0
-_HIST_KEYS = (
-    "cycle", "pnl", "pnl_chg", "reality_pulse",
-    "result", "inventory",
-    "validation", "reasoning_chain", "impact",
-)
-_HIST_CAP = 24
 _NEW_RISK = frozenset(_OPTION_ENTRY_ACTIONS.split("|")) | frozenset(
     {"bracket", "market_bracket"}
 )
@@ -937,43 +923,6 @@ def _result_dict(
     }
 
 
-def _journal_stages(
-    out: dict, act: dict, s: dict, judgment: dict | None
-) -> None:
-    try:
-        journal = get_journal()
-        strat = str(out.get("strat") or "")
-        result = out.get("result") or {}
-        j = judgment or {}
-        if j:
-            journal.record_judgment(
-                cycle=out.get("cycle"),
-                stance=str(j.get("stance") or out.get("stance") or ""),
-                thesis=str(j.get("thesis") or out.get("thesis") or ""),
-                focus=str(j.get("focus") or ""),
-                dismissed=str(j.get("dismissed") or ""),
-                intent=j.get("intent") or {},
-                judgment=j,
-            )
-        thesis = str(j.get("thesis") or out.get("thesis") or act.get("rationale") or "").strip()
-        if thesis and strat not in ("hold", "skipped", "blocked", BLOCKED_STRAT):
-            journal.set_working_thesis(thesis[:400])
-        journal.record_decision(
-            cycle=out.get("cycle"),
-            action=act.get("action") or strat,
-            strategy=strat,
-            rationale=out.get("rationale") or act.get("rationale") or "",
-            portfolio_snapshot=s.get("portfolio_state"),
-            outcome={
-                **(result if isinstance(result, dict) else {"raw": result}),
-                "stance": j.get("stance"),
-                "judgment": j,
-            },
-        )
-    except Exception as exc:
-        logger.warning("agent_loop: journal stages failed: %s", exc)
-
-
 def _order_id_of(order: dict) -> int | None:
     raw = order.get("order_id") if order.get("order_id") is not None else order.get("orderId")
     try:
@@ -1036,232 +985,6 @@ async def _reconcile_protection_after_snap(c: Any, s: dict) -> None:
     except Exception:
         logger.exception("protective-exit reconcile failed")
 
-
-def _persist_cycle(out: dict) -> dict:
-    try:
-        from abcxauto.think_stream import write_last_turn
-
-        write_last_turn(out)
-    except Exception:
-        logger.debug("last_turn persist failed", exc_info=True)
-    return out
-
-
-def _append_hist(h: List[dict], rec: dict) -> None:
-    h.append(rec)
-    if len(h) <= _HIST_CAP:
-        return
-    del h[:-_HIST_CAP]
-    for old in h[:-3]:
-        old.pop("snapshot", None)
-
-
-async def run_cycle(
-    n: int,
-    c: Any,
-    g: GrokClient,
-    h: List[dict],
-    prev: float,
-) -> dict:
-    """Snap facts, Grok tools, clerk on send, journal."""
-    s = await snap(c)
-    await _reconcile_protection_after_snap(c, s)
-    positions = s.get("positions") or []
-    for p in positions:
-        if "conId" not in p and "con_id" in p:
-            p["conId"] = p["con_id"]
-    pulse = s.get("reality_pulse") or {}
-    acct = s.get("account") or {}
-    pnl, eq = pnl_of(acct), equity_of(acct)
-    inventory = format_position_inventory(positions)
-    sess_block = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
-    session = str(sess_block.get("status") or "").lower()
-    try:
-        countdown_s = float(sess_block["countdown_s"]) if sess_block.get("countdown_s") is not None else None
-    except (TypeError, ValueError):
-        countdown_s = None
-    countdown_to = str(sess_block.get("countdown_to") or "")
-    needs_prot = bool((s.get("protection") or {}).get("unprotected_symbols"))
-    ibkr_up = bool(getattr(c, "connected", False))
-
-    if not ibkr_up:
-        act = {
-            "action": "skipped", "strategy": "skipped",
-            "rationale": "skipped_grok: ibkr_down",
-        }
-        out = _result_dict(
-            n=n, s=s, act=act, strat="skipped",
-            result={"status": "skipped", "note": "skipped_grok: ibkr_down"},
-            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-            validation="skipped_grok: ibkr_down",
-        )
-        _journal_stages(out, act, s, None)
-        _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-        return _persist_cycle(out)
-
-    if s.get("book_unreliable"):
-        act = {
-            "action": "skipped", "strategy": "skipped",
-            "rationale": "skipped_grok: book_unreliable",
-        }
-        out = _result_dict(
-            n=n, s=s, act=act, strat="skipped",
-            result={"status": "skipped", "note": "skipped_grok: book_unreliable"},
-            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-            validation="skipped_grok: book_unreliable",
-        )
-        _journal_stages(out, act, s, None)
-        _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-        return _persist_cycle(out)
-
-    if not _wake_grok_for_session(
-        session,
-        needs_prot=needs_prot,
-        countdown_s=countdown_s,
-        countdown_to=countdown_to,
-    ):
-        if session in ("", "closed"):
-            why = "session_closed"
-        else:
-            why = "session_extended"
-        act = {
-            "action": "skipped", "strategy": "skipped",
-            "rationale": f"skipped_grok: {why}",
-        }
-        out = _result_dict(
-            n=n, s=s, act=act, strat="skipped",
-            result={"status": "skipped", "note": f"skipped_grok: {why}"},
-            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-            validation=f"skipped_grok: {why}",
-        )
-        _journal_stages(out, act, s, None)
-        _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-        return _persist_cycle(out)
-
-    try:
-        sync_open_risk(
-            positions,
-            s.get("open_orders") or [],
-            thesis="",
-            bump=False,
-        )
-    except Exception:
-        logger.exception("open risk sync failed")
-
-    s.setdefault("news_items", [])
-    s.setdefault("option_facts", [])
-    s.setdefault("opportunities", [])
-    try:
-        from abcxauto.think_stream import seed_snap_from_last_turn
-
-        seed_snap_from_last_turn(s)
-    except Exception:
-        pass
-    world = build_world_state(
-        cycle=n, snap=s, opportunities=[], news_items=[],
-    )
-    world_dict = world.to_dict()
-    day = None
-    try:
-        from abcxauto.scorecard import compute_scorecard
-
-        sc = compute_scorecard(equity=getattr(world, "net_liquidation", None))
-        day = day_facts(world, sc)
-    except Exception:
-        day = None
-    wake = format_wake(
-        cycle=n,
-        session=world.session_status,
-        flat=world.flat,
-        unprotected=world.unprotected,
-        ibkr_up=ibkr_up,
-        day=day,
-    )
-    try:
-        from abcxauto.think_stream import write_last_turn
-
-        write_last_turn({
-            "cycle": n,
-            "strat": "in_progress",
-            "rationale": "grok_turn",
-            "validation": "",
-            "book_unreliable": bool(s.get("book_unreliable")),
-            "sends": 0,
-            "positions": list(world.positions or []),
-            "reality_pulse": s.get("reality_pulse") or {},
-            "scan_hits": s.get("scan_hits") if isinstance(s.get("scan_hits"), dict) else {},
-            "session_range": (
-                s.get("session_range") if isinstance(s.get("session_range"), dict) else {}
-            ),
-            "world_state": world_dict,
-        })
-    except Exception:
-        logger.debug("in-progress last_turn write failed", exc_info=True)
-
-    try:
-        turn = await grok_turn(g, connector=c, world=world, snap=s, wake=wake)
-    except Exception as exc:
-        logger.exception("grok_turn failed")
-        act = {
-            "action": BLOCKED_STRAT, "strategy": BLOCKED_STRAT,
-            "rationale": f"grok_error: {exc}",
-        }
-        out = _result_dict(
-            n=n, s=s, act=act, strat=BLOCKED_STRAT,
-            result={"status": "blocked", "note": f"grok_error: {exc}"},
-            pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-            validation=f"grok_error: {exc}",
-            world=world_dict, stage_error=str(exc),
-        )
-        _journal_stages(out, act, s, None)
-        _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS}})
-        return _persist_cycle(out)
-
-    act = dict(turn.last_act or {})
-    result = dict(turn.last_result or {})
-    strat = str(turn.last_strat or act.get("strategy") or "")
-    if not turn.sends and strat not in (BLOCKED_STRAT, "blocked"):
-        # No send this look is yield, not a ticket.
-        act = {}
-        strat = ""
-        result = {}
-
-    s["opportunities"] = list(world.opportunities or [])
-    s["news_items"] = list(world.news_items or [])
-    s["option_facts"] = list(world.option_facts or [])
-    if turn.text and not act.get("market_read"):
-        act["market_read"] = turn.text[:400]
-    tool_note = ""
-    if getattr(turn, "tool_budget_hit", False):
-        tool_note = "think_hit_step_ceiling"
-    impact = act.get("_impact") or simulate_close_impact(act, positions)
-    out = _result_dict(
-        n=n, s=s, act=act, strat=strat, result=result,
-        pnl=pnl, eq=eq, prev=prev, inventory=inventory,
-        validation=str(result.get("note") or result.get("status") or "ok"),
-        impact=impact, world=world.to_dict(),
-        judgment={"lab_playbook": turn.lab_playbook} if turn.lab_playbook else {},
-        stage_error=tool_note,
-    )
-    out["tool_trace"] = list(turn.tool_trace or [])
-    out["sends"] = len(turn.sends or [])
-    parked = bool(getattr(turn, "parked", False))
-    look_fn = getattr(turn, "look_failed", None)
-    failed = bool(look_fn()) if callable(look_fn) else bool(getattr(turn, "failed", False))
-    out["_parked"] = parked
-    out["_failed"] = failed and not parked
-    if turn.sends:
-        for item in turn.sends:
-            _journal_stages(
-                {**out, "strat": item.get("strat") or out.get("strat"),
-                 "result": item.get("result") or {},
-                 "rationale": (item.get("act") or {}).get("rationale") or ""},
-                item.get("act") or act, s, None,
-            )
-    else:
-        _journal_stages(out, act, s, None)
-    _append_hist(h, {"snapshot": s, "action": act, **{k: out[k] for k in _HIST_KEYS if k in out}})
-    return _persist_cycle(out)
 
 
 def _extract_last(q: dict | None) -> float | None:

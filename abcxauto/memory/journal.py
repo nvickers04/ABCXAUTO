@@ -1171,6 +1171,29 @@ class TradeJournal:
             logger.exception("journal.resolve_unfilled_sends failed")
             return 0
 
+    def ingest_look(self, snap: Optional[dict] = None) -> dict:
+        """Persist this look's book on the existing journal. Same writer as monitor.
+
+        Snapshot + fills + missed-send resolve. Not a second ledger.
+        """
+        bag = snap if isinstance(snap, dict) else {}
+        account = bag.get("account") if isinstance(bag.get("account"), dict) else {}
+        positions = bag.get("positions") if isinstance(bag.get("positions"), list) else []
+        open_orders = (
+            bag.get("open_orders") if isinstance(bag.get("open_orders"), list) else []
+        )
+        fills = bag.get("fills") if isinstance(bag.get("fills"), list) else []
+        taken = bag.get("taken_at")
+        ts = taken if isinstance(taken, str) and taken.strip() else None
+        self.record_snapshot(account, positions, open_orders, ts=ts)
+        inserted = self.record_fills(fills)
+        resolved = 0
+        try:
+            resolved = self.resolve_unfilled_sends(open_orders, ts=ts)
+        except Exception:
+            logger.exception("journal.ingest_look resolve failed")
+        return {"fills_inserted": int(inserted or 0), "sends_resolved": int(resolved or 0)}
+
     def recent_send_marks(self, limit: int = 50) -> List[dict]:
         try:
             self._ensure_schema()
