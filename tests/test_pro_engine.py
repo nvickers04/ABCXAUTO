@@ -1474,6 +1474,68 @@ async def test_fill_poke_after_sit_opens_a_look(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pulse_timeout_unchanged_wom_set_sits(monkeypatch, tmp_path):
+    """After a look, 10s+ with no poke and unchanged WOM → zero extra looks."""
+    from abcxauto.park_clock import PULSE_S
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    wom = "fact: working_order_missing QQQ 260918C500 long 1,SPY STK long 10."
+    resumes: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import take_interrupt
+
+        take_interrupt()
+        resumes.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "watching the book",
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+
+    async def fake_snap(_c):
+        return _stay_up_snap("regular")
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: wom,
+    )
+    chat = SimpleNamespace(_abcx_last_desk_fact=wom)
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.GrokClient",
+        lambda: SimpleNamespace(chat=chat, _last_desk_fact=wom),
+    )
+
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert len(resumes) == 1
+    ev = getattr(eng, "_wake_event", None)
+    loop = getattr(eng, "_worker_loop", None)
+    if loop is not None and ev is not None:
+        # halt / flat_confirmed: event with no live poke must sit.
+        loop.call_soon_threadsafe(ev.set)
+    idle_until = time.time() + float(PULSE_S) + 1.5
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) == 1
+    assert eng._cold_next is False
+    assert eng._resume_think is False
+
+
+@pytest.mark.asyncio
 async def test_stay_up_lead_changed_detects_wom_set_identity(monkeypatch):
     from abcxauto.pro_engine import ProEngine
     from abcxauto.world_state import WAKE_FACT_PREFIX

@@ -1272,8 +1272,6 @@ class ProEngine:
                                 if await self._stay_up_lead_changed(g):
                                     self._resume_think = True
                                 continue
-                            # halt / flat_confirmed: event without a live poke.
-                            self._resume_think = True
                             continue
                         wait = float(PULSE_S)
                         self.state.status = "On"

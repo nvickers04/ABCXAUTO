@@ -4064,47 +4064,6 @@ async def test_resume_duplicate_wom_set_look_may_end_with_no_send():
 
 
 @pytest.mark.asyncio
-async def test_resume_duplicate_wom_set_look_may_end_with_no_send():
-    from abcxauto.brain import grok_turn
-    from abcxauto.park_clock import clear_interrupt
-
-    clear_interrupt()
-    g, created = _stay_up_chat_client()
-    first = await grok_turn(
-        g, connector=None, world=_world(), snap={}, wake=_WOM_FACT
-    )
-    assert first.ended is False
-    live = g.chat
-    rounds = int(getattr(live, "rounds", 0) or 0)
-    second = await grok_turn(
-        g,
-        connector=None,
-        world=_world(),
-        snap={},
-        wake=_WOM_FACT_SWAPPED,
-        resume=True,
-    )
-    assert second.ended is True
-    assert second.look_failed() is False
-    assert second.failed is False
-    assert g.chat is live
-    assert len(created) == 1
-    assert int(getattr(live, "rounds", 0) or 0) == rounds
-    third = await grok_turn(
-        g,
-        connector=None,
-        world=_world(),
-        snap={},
-        wake=_WOM_FACT_CHANGED,
-        resume=True,
-    )
-    assert third.ended is False
-    assert third.look_failed() is False
-    assert g.chat is live
-    assert int(getattr(live, "rounds", 0) or 0) > rounds
-
-
-@pytest.mark.asyncio
 async def test_junk_stay_up_look_retries_same_chat_then_idles():
     """Empty/? retries the same chat once. Still junk → idle, chat kept, not cold."""
     from abcxauto.brain import grok_turn
