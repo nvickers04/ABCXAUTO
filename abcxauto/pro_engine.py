@@ -853,9 +853,11 @@ class ProEngine:
 
         Paper RTH / premarket stay on this process. A good look writes no
         grok_wake.json. Stay-up may sit — the runner does not self-schedule.
-        Duplicate lead-fact looks end with no send and wait. Junk retries
-        in the same chat (brain) then idles here: never ``_cold_next``.
-        Overnight park is park_clock after a closed skip.
+        Duplicate lead-fact looks end with no send and wait. A spoken
+        no-tool say is a checkpoint inside grok_turn, not look-end — this
+        rearm runs after the look actually finishes. Junk retries in the
+        same chat (brain) then idles here: never ``_cold_next``. Overnight
+        park is park_clock after a closed skip.
         """
         session = self._resolve_session(session)
         self._last_session = session

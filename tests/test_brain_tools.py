@@ -3915,17 +3915,28 @@ def _stay_up_chat_client(*, replies: list[str] | None = None):
             self.rounds = 0
             self._replies = list(replies)
             self._i = 0
+            # 2.2 continues after a spoken no-tool say. Insert one empty
+            # stream so this mock look can end without a 64-step mill;
+            # the next look may speak again from the same bag.
+            self._need_empty_continue = False
 
         def append(self, msg, **_k):
             self.appended.append(msg)
 
         async def stream(self):
             self.rounds += 1
-            if self._i < len(self._replies):
-                text = self._replies[self._i]
-                self._i += 1
+            if self._need_empty_continue:
+                self._need_empty_continue = False
+                text = ""
             else:
-                text = self._replies[-1] if self._replies else ""
+                if self._i < len(self._replies):
+                    text = self._replies[self._i]
+                    self._i += 1
+                else:
+                    text = self._replies[-1] if self._replies else ""
+                raw = (text or "").strip()
+                if raw and raw != "?":
+                    self._need_empty_continue = True
             yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
                 content=text, reasoning_content=""
             )
@@ -3934,6 +3945,52 @@ def _stay_up_chat_client(*, replies: list[str] | None = None):
         @staticmethod
         def create(**_k):
             chat = Chat(bag)
+            created.append(chat)
+            return chat
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=None,
+        _wake_n=0,
+    )
+    return g, created
+
+
+def _scripted_chat_client(*, rounds: list):
+    """Exact stream rounds. Each item is a str or (text, tool_calls).
+
+    After the list, further streams are empty no-tool so a 2.2 look can end.
+    """
+    spec = list(rounds)
+    created: list[object] = []
+
+    class Chat:
+        def __init__(self):
+            self.appended: list[object] = []
+            self.rounds = 0
+
+        def append(self, msg, **_k):
+            self.appended.append(msg)
+
+        async def stream(self):
+            self.rounds += 1
+            i = self.rounds - 1
+            item = spec[i] if i < len(spec) else ""
+            if isinstance(item, tuple):
+                text, calls = item
+            else:
+                text, calls = item, []
+            yield SimpleNamespace(tool_calls=list(calls or [])), SimpleNamespace(
+                content=text, reasoning_content=""
+            )
+
+    class _ChatNS:
+        @staticmethod
+        def create(**_k):
+            chat = Chat()
             created.append(chat)
             return chat
 
@@ -4124,7 +4181,200 @@ async def test_junk_retry_same_chat_recovers_without_a_new_look():
     assert "watching the book" in (turn.text or "")
     assert g.chat is created[0]
     assert len(created) == 1
-    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+    # Junk retry + spoken checkpoint + empty so the look can end.
+    assert int(getattr(created[0], "rounds", 0) or 0) == 3
+
+
+@pytest.mark.asyncio
+async def test_spoken_no_tool_say_continues_same_look_same_chat():
+    """A real no-tool say is a checkpoint: same look, same chat, one GROK banner."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+    from abcxauto.pro_engine import ProEngine
+    from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
+
+    clear_interrupt()
+    painted: list[str] = []
+
+    def cap(kind: str, text: str, piece: str = "") -> None:
+        painted.append(piece or text)
+
+    reset_speaker()
+    subscribe(cap)
+    g, created = _scripted_chat_client(
+        rounds=["watching IWM. No ticket.", "still watching the book."]
+    )
+    try:
+        turn = await grok_turn(
+            g, connector=None, world=_world(), snap={}, wake="session=regular send."
+        )
+    finally:
+        unsubscribe(cap)
+        reset_speaker()
+    assert turn.look_failed() is False
+    assert turn.failed is False
+    assert turn.tool_budget_hit is False
+    assert "watching IWM" in (turn.text or "")
+    assert "still watching the book" in (turn.text or "")
+    assert g.chat is created[0]
+    assert len(created) == 1
+    assert int(getattr(created[0], "rounds", 0) or 0) >= 2
+    grok_banners = [p for p in painted if "--- GROK ---" in p]
+    assert len(grok_banners) == 1
+    from abcxauto.think_stream import bind_engine
+
+    eng = ProEngine()
+    try:
+        wait = eng._rearm_after_think(
+            {"_failed": False, "rationale": turn.text, "sends": 0},
+            session="regular",
+        )
+        assert eng._cold_next is False
+        assert eng._resume_think is False
+        assert wait == 0.0
+    finally:
+        bind_engine(None)
+
+
+@pytest.mark.asyncio
+async def test_spoken_no_tool_third_fourth_reply_still_continues():
+    """There is no two-consecutive-no-tool mill cap. Third/fourth still continue."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+    from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
+
+    clear_interrupt()
+    painted: list[str] = []
+
+    def cap(kind: str, text: str, piece: str = "") -> None:
+        painted.append(piece or text)
+
+    reset_speaker()
+    subscribe(cap)
+    says = [
+        "watching IWM",
+        "book is quiet",
+        "still no ticket",
+        "holding the same thesis",
+    ]
+    g, created = _scripted_chat_client(rounds=says)
+    try:
+        turn = await grok_turn(
+            g, connector=None, world=_world(), snap={}, wake="session=regular send."
+        )
+    finally:
+        unsubscribe(cap)
+        reset_speaker()
+    assert turn.look_failed() is False
+    assert turn.failed is False
+    assert turn.tool_budget_hit is False
+    for bit in says:
+        assert bit in (turn.text or "")
+    assert g.chat is created[0]
+    assert len(created) == 1
+    assert int(getattr(created[0], "rounds", 0) or 0) >= 4
+    grok_banners = [p for p in painted if "--- GROK ---" in p]
+    assert len(grok_banners) == 1
+
+
+@pytest.mark.asyncio
+async def test_spoken_no_tool_later_round_may_tool(monkeypatch):
+    """A continuation round after a spoken checkpoint may call tools."""
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+    from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
+
+    clear_interrupt()
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="book", arguments="{}")
+
+    painted: list[str] = []
+
+    def cap(kind: str, text: str, piece: str = "") -> None:
+        painted.append(piece or text)
+
+    reset_speaker()
+    subscribe(cap)
+    g, created = _scripted_chat_client(
+        rounds=[
+            "watching IWM. I'll inspect the book.",
+            ("checking the book", [TC()]),
+        ]
+    )
+    try:
+        turn = await grok_turn(
+            g, connector=None, world=_world(), snap={}, wake="session=regular send."
+        )
+    finally:
+        unsubscribe(cap)
+        reset_speaker()
+    assert turn.look_failed() is False
+    assert turn.failed is False
+    assert "book" in turn.tool_trace
+    assert "watching IWM" in (turn.text or "")
+    assert g.chat is created[0]
+    assert len(created) == 1
+    assert int(getattr(created[0], "rounds", 0) or 0) >= 2
+    grok_banners = [p for p in painted if "--- GROK ---" in p]
+    # First spoken checkpoint is silent; the post-tool stream is the
+    # existing tool-loop banner, not a new look.
+    assert grok_banners
+
+
+@pytest.mark.asyncio
+async def test_spoken_no_tool_continue_injects_fill_doorbell():
+    """Fill mid-look injects into this chat; the spoken checkpoint is kept."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    clear_interrupt()
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="watching IWM. Iron fly still working.",
+                    reasoning_content="",
+                )
+                note_interrupt(BookEvent("fill", "IWM"))
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: Chat())),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=None,
+        _wake_n=0,
+    )
+    try:
+        turn = await grok_turn(
+            g, connector=None, world=_world(), snap={}, wake="session=regular send."
+        )
+        assert "watching IWM" in turn.text
+        assert turn.interrupted is True
+        assert turn.failed is False
+        assert turn.look_failed() is False
+        assert getattr(g, "chat", None) is not None
+    finally:
+        clear_interrupt()
 
 
 @pytest.mark.asyncio
@@ -4406,9 +4656,13 @@ async def test_stay_up_resume_drops_refused_send_keeps_chat(monkeypatch):
                 yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
                     content="sending", reasoning_content=""
                 )
-            else:
+            elif self.rounds == 2:
                 yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
                     content="blocked; standing down", reasoning_content=""
+                )
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
                 )
 
     class _ChatNS:
