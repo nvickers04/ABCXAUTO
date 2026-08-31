@@ -3519,8 +3519,8 @@ async def test_invoke_other_tool_emits_marker_only(monkeypatch):
     assert not any("should not dump" in t for t in got)
 
 
-def test_append_tool_result_keeps_the_paid_json(tmp_path, monkeypatch):
-    """chat.append's payload must land in the session keep-file, not the glass stub."""
+def test_append_tool_result_emits_the_paid_json(tmp_path, monkeypatch):
+    """chat.append's payload must emit() into the day file — Pro not required."""
     from types import SimpleNamespace
 
     from abcxauto import brain
@@ -3533,8 +3533,7 @@ def test_append_tool_result_keeps_the_paid_json(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
     ts.reset_speaker()
-    st = SimpleNamespace(think_live="")
-    ts.bind_engine(SimpleNamespace(state=st))
+    ts.bind_engine(None)
     painted: list[tuple[str, str]] = []
 
     def cap(kind: str, text: str, *_a) -> None:
@@ -3561,7 +3560,6 @@ def test_append_tool_result_keeps_the_paid_json(tmp_path, monkeypatch):
         brain._append_tool_result(chat, tc, paid)
     finally:
         ts.unsubscribe(cap)
-        ts.bind_engine(None)
         ts.reset_speaker()
 
     session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
@@ -3569,9 +3567,9 @@ def test_append_tool_result_keeps_the_paid_json(tmp_path, monkeypatch):
     assert args in session
     assert "screens=" not in session
     assert chat.rows == [("tr", paid, "c1")]
-    assert not any(paid in t for _k, t in painted)
-    assert paid not in (st.think_live or "")
-    assert args not in (st.think_live or "")
+    assert any(paid in t for _k, t in painted)
+    assert any(args in t for _k, t in painted)
+    assert not (tmp_path / "think_tail.txt").exists()
 
 
 def test_append_tool_result_skips_empty_args_object(tmp_path, monkeypatch):
@@ -3603,10 +3601,8 @@ def test_append_tool_result_skips_empty_args_object(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_keeps_paid_json_off_the_glass_emit(tmp_path, monkeypatch):
-    """A tool result that chat.append sees also lands in today's keep-file."""
-    from types import SimpleNamespace
-
+async def test_dispatch_emits_paid_json_into_the_day_file(tmp_path, monkeypatch):
+    """After _invoke_named_tool returns, the same string chat.append sees is emit()'d."""
     from abcxauto import brain
     from abcxauto import think_stream as ts
     from abcxauto.brain import BrainTurn, _dispatch_tool_calls
@@ -3648,8 +3644,7 @@ async def test_dispatch_keeps_paid_json_off_the_glass_emit(tmp_path, monkeypatch
         painted.append((kind, text))
 
     ts.reset_speaker()
-    st = SimpleNamespace(think_live="")
-    ts.bind_engine(SimpleNamespace(state=st))
+    ts.bind_engine(None)
     ts.subscribe(cap)
     try:
         await _dispatch_tool_calls(
@@ -3662,22 +3657,21 @@ async def test_dispatch_keeps_paid_json_off_the_glass_emit(tmp_path, monkeypatch
         )
     finally:
         ts.unsubscribe(cap)
-        ts.bind_engine(None)
         ts.reset_speaker()
 
     session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
     assert paid in session
     assert '"symbol": "IWM"' in session
     assert any("[quote]" in t for _k, t in painted)
-    assert not any(paid in t for _k, t in painted)
-    assert paid not in (st.think_live or "")
+    assert any(paid in t for _k, t in painted)
     assert chat.rows and chat.rows[0][1] == paid
+    assert not (tmp_path / "think_tail.txt").exists()
 
 
-def test_write_lab_playbook_notebook_stays_off_glass_but_in_keep(
+def test_write_lab_playbook_invoke_is_marker_only_append_emits_paid(
     tmp_path, monkeypatch
 ):
-    """Notebook text is the paid payload. Glass still gets the marker only."""
+    """_invoke_named_tool stays marker-only. The paid result emit()s from append."""
     from types import SimpleNamespace
 
     from abcxauto import brain
@@ -3704,18 +3698,15 @@ def test_write_lab_playbook_notebook_stays_off_glass_but_in_keep(
             pass
 
     ts.reset_speaker()
-    st = SimpleNamespace(think_live="")
-    ts.bind_engine(SimpleNamespace(state=st))
+    ts.bind_engine(None)
     try:
         brain._append_tool_result(Chat(), tc, paid)
     finally:
-        ts.bind_engine(None)
         ts.reset_speaker()
 
     session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
     assert note in session
     assert paid in session
-    assert note not in (st.think_live or "")
 
 
 def test_look_failed_question_empty_and_stream_error():

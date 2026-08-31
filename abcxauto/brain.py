@@ -26,7 +26,7 @@ from xai_sdk.chat import developer, system, tool, tool_result, user
 from abcxauto.llm import GrokClient, build_system_prompt
 from abcxauto.opportunity_scan import criteria_scan, normalize_tickers
 from abcxauto.order_examples import format_order_examples, ticket_strategy_names
-from abcxauto.think_stream import emit as think_emit, keep as think_keep
+from abcxauto.think_stream import emit as think_emit
 from abcxauto.tools import run_readonly_tool
 from abcxauto.tool_args import (
     CANDLE_CAP,
@@ -3681,17 +3681,18 @@ def _tool_call_args_text(tc: Any) -> str:
     return text
 
 
-def _keep_paid_look(tc: Any, result: str) -> None:
-    """Session keep-file gets the paid args + result. Glass stays the ``[name]`` stub."""
-    chunks: list[str] = []
+def _emit_paid_look(tc: Any, result: str) -> None:
+    """Same string ``chat.append`` paid for, via emit() into the ET day file.
+
+    Args when the tool call already has them. Glass/RAM still need Pro;
+    the day file does not.
+    """
     args_text = _tool_call_args_text(tc)
     if args_text:
-        chunks.append(args_text)
-    paid = str(result or "").rstrip("\n")
+        think_emit("tool", args_text if args_text.endswith("\n") else f"{args_text}\n")
+    paid = str(result or "")
     if paid:
-        chunks.append(paid)
-    if chunks:
-        think_keep("\n".join(chunks) + "\n")
+        think_emit("tool", paid if paid.endswith("\n") else f"{paid}\n")
 
 
 def _append_tool_result(chat: Any, tc: Any, result: str) -> None:
@@ -3699,7 +3700,7 @@ def _append_tool_result(chat: Any, tc: Any, result: str) -> None:
         chat.append(tool_result(result, tool_call_id=getattr(tc, "id", None)))
     except TypeError:
         chat.append(tool_result(result))
-    _keep_paid_look(tc, result)
+    _emit_paid_look(tc, result)
 
 
 def _tool_key(name: str, args: dict[str, Any]) -> str:

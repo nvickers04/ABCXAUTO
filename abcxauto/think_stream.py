@@ -115,7 +115,9 @@ def emit(kind: str, text: str) -> None:
         fns = list(_listeners)
         eng = _engine
         piece = _paint(kind, text)
-    # Session keep is not gated on ProEngine. RAM/tail still need a bind.
+    # Day file is emit() itself — not a ProEngine side effect. Friday's
+    # keep-file appeared at first Pro paint; headless / pre-Pro looks never
+    # landed. Glass RAM / think_tail still require a bound engine.
     if piece:
         _append_think_session(piece)
     if eng is not None and piece:
@@ -138,8 +140,8 @@ def emit(kind: str, text: str) -> None:
 def keep(text: str) -> None:
     """Append to today's session keep-file. Does not touch RAM or the glass tail.
 
-    Tool JSON that ``chat.append`` paid for lands here. Glass still paints the
-    ``[name]`` stub and the one trophy line; the 8kb/24kb windows stay clipped.
+    The run banner uses this so a bounce is grep-able before Pro binds.
+    Paid tool JSON goes through ``emit()`` so headless looks still land.
     """
     if not text:
         return

@@ -242,6 +242,27 @@ def test_think_session_text_is_the_full_day_not_the_8kb_stub(tmp_path, monkeypat
     assert ts.think_session_text("") == session[-8000:]
 
 
+def test_emit_writes_day_file_when_pro_is_not_bound(tmp_path, monkeypatch):
+    """Headless / pre-Pro looks must create YYYY-MM-DD.txt. Engine is glass/RAM only."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    engine_calls: list[str] = []
+    real_engine = ts._append_engine_piece
+
+    def _spy_engine(eng: object, piece: str) -> None:
+        engine_calls.append(piece)
+        real_engine(eng, piece)
+
+    monkeypatch.setattr(ts, "_append_engine_piece", _spy_engine)
+    ts.bind_engine(None)
+    ts.emit("say", "PRE_PRO_LOOK\n")
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert "PRE_PRO_LOOK" in session
+    assert engine_calls == []
+    assert not (tmp_path / "think_tail.txt").exists()
+
+
 def test_emit_keeps_session_without_a_bound_engine(tmp_path, monkeypatch):
     """The keep-file is the day's stream, not a ProEngine side effect."""
     from abcxauto import think_stream as ts
@@ -257,7 +278,7 @@ def test_emit_keeps_session_without_a_bound_engine(tmp_path, monkeypatch):
 
 
 def test_keep_writes_session_not_ram_or_tail(tmp_path, monkeypatch):
-    """Paid tool JSON is keep-file only. Glass RAM/tail stay the clipped stub."""
+    """keep() is session-only (run banner). Glass RAM/tail stay the clipped stub."""
     from abcxauto import think_stream as ts
 
     monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 0.0)
@@ -306,7 +327,7 @@ def test_paid_keep_survives_ram_clip_and_begin_run(tmp_path, monkeypatch):
     try:
         ts.emit("stage", "grok")
         ts.emit("say", "LOOK_ONE " + ("a" * 20000))
-        ts.keep('{"unique_paid": "SNDK_GAP", "hits": [{"symbol": "SNDK"}]}\n')
+        ts.emit("tool", '{"unique_paid": "SNDK_GAP", "hits": [{"symbol": "SNDK"}]}\n')
         ts.emit("stage", "grok")
         ts.emit("say", "LOOK_TWO " + ("b" * 6000))
     finally:
