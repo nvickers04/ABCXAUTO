@@ -1,8 +1,9 @@
 """Grok owns the book via tools. The shell is facts + send gates.
 
 Paper RTH / premarket stay-up continues the live chat across successful
-looks. Overnight / after-close / park drop it. Empty-junk retries once
-in the same chat, then sits.
+looks. Overnight / after-close / park drop it. A spoken no-tool say is
+a checkpoint in the same look (no new --- GROK ---), not sit. Empty-junk
+retries once in the same chat, then sits.
 Tickets go through ``execute_ticket`` → ``send_action``. IBKR tools are
 live. scan() is one tape this look (merged hits + on_book); candles
 are IBKR hist or the live 5s stream (error if both miss); news is ~15
@@ -833,7 +834,8 @@ def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
     Park and overnight drop it so the next think is a cold start. A
     ``failed`` / dead-stream stamp on a real say or send/fill is not a
     drop. An ended look (duplicate lead fact) keeps the chat — a look
-    may end with no send. Stay-up junk retries in this chat, then sits.
+    may end with no send. A spoken no-tool say continues this look;
+    junk retries once, then sits.
     """
     if turn.ended:
         return
@@ -1240,9 +1242,11 @@ async def grok_turn(
     """One Grok tool loop. send() is the only broker path.
 
     ``resume`` is optional so older grok_turn mocks keep working. Stay-up
-    continues the live chat after a spoken say or send/fill. True empty /
-    lone '?' drop it so the next think is cold. A fresh BrainTurn still
-    drops refused send tickets so they cannot be the next look's send target.
+    continues the live chat after a spoken say or send/fill. A spoken
+    no-tool say keeps this look and streams again (no new user poke, no
+    new --- GROK ---) until a tool call or a 2.1 sit. True empty / lone
+    '?' retry once then idle. A fresh BrainTurn still drops refused send
+    tickets so they cannot be the next look's send target.
     """
     return await _grok_turn_impl(
         g,
@@ -1705,6 +1709,16 @@ async def _grok_turn_impl(
             ):
                 # Same chat, once. No new --- GROK --- re-intro.
                 junk_retried = True
+                silent_round = True
+                continue
+            if (
+                stop == "ok"
+                and not turn.parked
+                and not turn.ended
+                and not _look_text_is_junk(text)
+            ):
+                # Spoken no-tool say is a keep-file checkpoint, not look-end.
+                # Same chat / same look. No new --- GROK ---. No user poke.
                 silent_round = True
                 continue
             ran_out = False
