@@ -40,6 +40,8 @@ which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process.
 - Ticket geometry uses **IBKR last**, not MDA
 - Ticket last / IV / credit / width must appear in this look's `quote` /
   `option_quote` / `book` cache (`stale_or_invented_number`; unverifiable kills)
+- Promote contract: [`abcxauto/playbook/promote.py`](abcxauto/playbook/promote.py)
+  (`retire_if.sample` + one numeric kill; `conservative_pnl`; paper mids cannot graduate)
 - Exits never blocked; fail-closed if the book is unknown
 - Agent may tighten floors via `self_tune`; it cannot weaken them or switch to live
 - Session look and token caps (Settings). Hit stays idle / park-ready; chat is
