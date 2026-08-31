@@ -247,3 +247,64 @@ def test_closest_stop_last_tick_is_not_a_move():
     )
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
+
+def test_duplicate_working_order_missing_set_is_identity_not_string():
+    from abcxauto.world_state import (
+        WAKE_FACT_PREFIX,
+        desk_fact_changed,
+        desk_fact_is_duplicate,
+        omit_duplicate_fact_lead,
+        parse_desk_fact,
+    )
+
+    a = f"{WAKE_FACT_PREFIX} working_order_missing QQQ 260918C500 long 1,SPY STK long 10."
+    swapped = (
+        f"{WAKE_FACT_PREFIX} working_order_missing "
+        "SPY STK long 10,QQQ 260918C500 long 1."
+    )
+    changed = f"{WAKE_FACT_PREFIX} working_order_missing QQQ 260918C500 long 1."
+    first = parse_desk_fact(a)
+    assert first is not None and first["kind"] == "working_order_missing"
+    assert first["items"] == frozenset(
+        {"QQQ 260918C500 long 1", "SPY STK long 10"}
+    )
+    assert desk_fact_is_duplicate(a, a) is True
+    assert desk_fact_is_duplicate(a, swapped) is True
+    assert desk_fact_is_duplicate("", a) is False
+    assert desk_fact_is_duplicate(a, changed) is False
+    assert desk_fact_changed("", a) is True
+    assert desk_fact_changed(a, swapped) is False
+    assert desk_fact_changed(a, changed) is True
+    assert desk_fact_changed(a, "session=regular send.") is False
+    body = a + "\nsession=regular flat=False unprotected=none ibkr=up."
+    assert omit_duplicate_fact_lead(a, body) == (
+        "session=regular flat=False unprotected=none ibkr=up."
+    )
+    assert omit_duplicate_fact_lead(a, swapped) == ""
+    assert omit_duplicate_fact_lead(a, changed) == changed
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
+def test_duplicate_unprotected_list_is_identity_not_string():
+    from abcxauto.world_state import (
+        desk_fact_changed,
+        desk_fact_is_duplicate,
+        omit_duplicate_fact_lead,
+    )
+
+    a = "unprotected=AAPL STK,MSFT STK."
+    swapped = "unprotected=MSFT STK,AAPL STK."
+    changed = "unprotected=AAPL STK."
+    none = "unprotected=none."
+    assert desk_fact_is_duplicate(a, a) is True
+    assert desk_fact_is_duplicate(a, swapped) is True
+    assert desk_fact_is_duplicate("", a) is False
+    assert desk_fact_is_duplicate(a, changed) is False
+    assert desk_fact_is_duplicate(none, none) is False
+    assert desk_fact_changed("", a) is True
+    assert desk_fact_changed(a, swapped) is False
+    assert desk_fact_changed(a, changed) is True
+    assert omit_duplicate_fact_lead(a, swapped) == ""
+    assert omit_duplicate_fact_lead(a, changed) == changed
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+

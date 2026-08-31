@@ -208,6 +208,8 @@ def test_live_interrupt_note_and_take():
     assert peek_interrupt() is not None
     assert peek_interrupt().kind == "stop_dist"
     assert take_interrupt().kind == "stop_dist"
+    note_interrupt(BookEvent("working_order_missing", "QQQ 260918C500 long 1"))
+    assert take_interrupt().kind == "working_order_missing"
     clear_interrupt()
 
 
@@ -215,6 +217,7 @@ def test_live_poke_clears_tool_cache_skips_last_tick_stop_dist():
     from abcxauto.park_clock import BookEvent, live_poke_clears_tool_cache
 
     assert live_poke_clears_tool_cache(BookEvent("stop_dist", "last tick")) is False
+    assert live_poke_clears_tool_cache(BookEvent("working_order_missing", "QQQ")) is False
     assert live_poke_clears_tool_cache(BookEvent("fill", "QQQ")) is True
     assert live_poke_clears_tool_cache(BookEvent("unprotected", "AAPL STK")) is True
     assert live_poke_clears_tool_cache(BookEvent("order_change", "working orders changed")) is True

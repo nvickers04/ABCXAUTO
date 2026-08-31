@@ -1,7 +1,7 @@
 """Linear think, screen facts, and the setup-card playbook.
 
 Paper RTH / premarket stay-up keeps the live chat across successful looks.
-Empty / junk / overnight drop it. Refused send tickets do not ride. Cards
+Empty / junk retries the same chat once, then sits. Overnight drop it. Refused send tickets do not ride. Cards
 carry their own P&L so a revision is a decision about evidence rather than
 about whole-book drift.
 """
@@ -144,6 +144,7 @@ def test_a_live_poke_invalidates_cached_reads():
     "kind,detail,clears",
     [
         ("stop_dist", "PYPL STK long 50 dist=1.48", False),
+        ("working_order_missing", "QQQ 260918C500 long 1", False),
         ("fill", "NVDA", True),
         ("unprotected", "AAPL STK", True),
         ("order_change", "working orders changed", True),
@@ -254,6 +255,117 @@ def test_stop_dist_poke_injects_when_stop_moved_more_than_a_tick(monkeypatch):
         assert "stop=51.50" in blob
         assert turn.interrupted is True
         assert turn.tool_cache[_tool_key("book", {})] == cached
+    finally:
+        clear_interrupt()
+
+
+def test_wom_poke_omitted_when_missing_set_unchanged(monkeypatch):
+    """Unchanged missing-order SET is not a poke. Do not stream or wipe cache."""
+    from abcxauto.brain import _inject_live_poke
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    fact = "fact: working_order_missing QQQ 260918C500 long 1,SPY STK long 10"
+    swapped = "fact: working_order_missing SPY STK long 10,QQQ 260918C500 long 1"
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: swapped,
+    )
+    appended: list[object] = []
+
+    class _Chat:
+        def append(self, msg, **_k):
+            appended.append(msg)
+
+    chat = _Chat()
+    chat._abcx_last_desk_fact = fact + "."
+    turn = BrainTurn()
+    cached = json.dumps({"flat": False})
+    turn.tool_cache[_tool_key("book", {})] = cached
+    clear_interrupt()
+    note_interrupt(BookEvent("working_order_missing", "QQQ still missing"))
+    try:
+        ok = asyncio.run(
+            _inject_live_poke(chat, connector=None, world=_world(), snap={}, turn=turn)
+        )
+        assert ok is False
+        assert appended == []
+        assert turn.tool_cache[_tool_key("book", {})] == cached
+        assert turn.interrupted is False
+    finally:
+        clear_interrupt()
+
+
+def test_wom_poke_injects_when_missing_set_changed(monkeypatch):
+    from abcxauto.brain import _inject_live_poke
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+    from xai_sdk.chat import developer
+
+    prev = "fact: working_order_missing QQQ 260918C500 long 1."
+    changed = "fact: working_order_missing QQQ 260918C500 long 1,SPY STK long 10"
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: changed,
+    )
+    appended: list[object] = []
+
+    class _Chat:
+        def append(self, msg, **_k):
+            appended.append(msg)
+
+    chat = _Chat()
+    chat._abcx_last_desk_fact = prev
+    turn = BrainTurn()
+    cached = json.dumps({"flat": False})
+    turn.tool_cache[_tool_key("book", {})] = cached
+    clear_interrupt()
+    note_interrupt(BookEvent("working_order_missing", "SPY joined"))
+    try:
+        ok = asyncio.run(
+            _inject_live_poke(chat, connector=None, world=_world(), snap={}, turn=turn)
+        )
+        assert ok is True
+        assert appended
+        blob = ""
+        for msg in appended:
+            assert msg.role == developer("x").role
+            blob += "".join(getattr(p, "text", "") for p in (msg.content or []))
+        assert "working_order_missing" in blob
+        assert turn.interrupted is True
+        assert turn.tool_cache[_tool_key("book", {})] == cached
+    finally:
+        clear_interrupt()
+
+
+def test_unprotected_poke_omitted_when_list_unchanged(monkeypatch):
+    from abcxauto.brain import _inject_live_poke
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    fact = "unprotected=AAPL STK,MSFT STK"
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: "unprotected=MSFT STK,AAPL STK",
+    )
+    appended: list[object] = []
+
+    class _Chat:
+        def append(self, msg, **_k):
+            appended.append(msg)
+
+    chat = _Chat()
+    chat._abcx_last_desk_fact = fact + "."
+    turn = BrainTurn()
+    cached = json.dumps({"flat": False})
+    turn.tool_cache[_tool_key("book", {})] = cached
+    clear_interrupt()
+    note_interrupt(BookEvent("unprotected", "AAPL STK"))
+    try:
+        ok = asyncio.run(
+            _inject_live_poke(chat, connector=None, world=_world(), snap={}, turn=turn)
+        )
+        assert ok is False
+        assert appended == []
+        assert turn.tool_cache[_tool_key("book", {})] == cached
+        assert turn.interrupted is False
     finally:
         clear_interrupt()
 

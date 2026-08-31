@@ -66,7 +66,7 @@ def test_no_clerk_stream_speaker():
     assert "watching the gap" in live
 
 
-def test_real_say_keeps_chat_empty_question_drops():
+def test_real_say_keeps_chat_empty_question_idles():
     from abcxauto.brain import _ensure_chat
 
     g = _stub_chat()
@@ -92,14 +92,11 @@ def test_real_say_keeps_chat_empty_question_drops():
     assert getattr(g, "chat", None) is chat
 
     _finish_look_chat(g, BrainTurn(text=""), session="regular")
-    assert getattr(g, "chat", None) is None
-    g.chat = chat
+    assert getattr(g, "chat", None) is chat
     _finish_look_chat(g, BrainTurn(text="?"), session="regular")
-    assert getattr(g, "chat", None) is None
-    g.chat = chat
+    assert getattr(g, "chat", None) is chat
     _finish_look_chat(g, BrainTurn(stream_error="RESOURCE_EXHAUSTED"), session="regular")
-    assert getattr(g, "chat", None) is None
-    g.chat = chat
+    assert getattr(g, "chat", None) is chat
     _finish_look_chat(
         g,
         BrainTurn(stream_error="RESOURCE_EXHAUSTED", text="watching IWM"),
@@ -165,8 +162,8 @@ def test_rth_failed_look_has_no_sit():
         session="regular",
     )
     assert wait == 0.0
-    assert eng._resume_think is True
-    assert eng._cold_next is True
+    assert eng._resume_think is False
+    assert eng._cold_next is False
     wait = eng._rearm_after_think({"_failed": True, "rationale": "?"}, session="regular")
     assert wait == 0.0
     wait = eng._rearm_after_think(
@@ -177,7 +174,7 @@ def test_rth_failed_look_has_no_sit():
         session="regular",
     )
     assert wait == 0.0
-    assert eng._resume_think is True
+    assert eng._resume_think is False
     assert eng._cold_next is False
     assert clerk_look_s(flat=True, session="regular") == 0.0
     assert clerk_look_s(flat=False, session="premarket", minutes_to_open=45) == 0.0
