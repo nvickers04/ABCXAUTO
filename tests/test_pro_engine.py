@@ -26,6 +26,17 @@ def patch_config(monkeypatch):
     monkeypatch.setattr("abcxauto.pro_engine.get_config", lambda: _Cfg())
 
 
+def _poke_book(eng, kind: str = "fill", detail: str = "SPY") -> None:
+    """Wake a sitting stay-up worker from the pytest thread."""
+    from abcxauto.park_clock import BookEvent, note_interrupt
+
+    note_interrupt(BookEvent(kind, detail))
+    ev = getattr(eng, "_wake_event", None)
+    loop = getattr(eng, "_worker_loop", None)
+    if loop is not None and ev is not None:
+        loop.call_soon_threadsafe(ev.set)
+
+
 @pytest.mark.asyncio
 async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_path):
     """Engine.start() drives >=3 run_cycle with inventory+validation in records."""
@@ -130,10 +141,12 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_
     assert err is None, f"start err: {err}"
     assert eng.state.running
 
-    # Around-open clerk look is shortened so the engine can pulse >=3 cycles.
+    # Stay-up sits after a look. Fill pokes drive the extra cycles.
     deadline = time.time() + 20
     while time.time() < deadline and eng.state.cycles < 3:
         eng.drain_apply()
+        if eng.state.cycles >= 1 and str(eng.state.status or "") == "On":
+            _poke_book(eng, "fill", "SPY")
         await asyncio.sleep(0.05)
 
     eng.stop_engine()
@@ -1422,6 +1435,9 @@ async def test_fill_poke_after_sit_opens_a_look(monkeypatch, tmp_path):
     resumes: list[bool] = []
 
     async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import take_interrupt
+
+        take_interrupt()
         resumes.append(resume)
         return {
             "cycle": n,
@@ -1446,7 +1462,7 @@ async def test_fill_poke_after_sit_opens_a_look(monkeypatch, tmp_path):
         await asyncio.sleep(0.05)
     assert len(resumes) == 1
     assert eng._resume_think is False
-    eng.request_wake("fill")
+    _poke_book(eng, "fill", "QQQ")
     deadline = time.time() + 4
     while time.time() < deadline and len(resumes) < 2:
         eng.drain_apply()
