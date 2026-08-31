@@ -3779,7 +3779,7 @@ def test_look_failed_question_empty_and_stream_error():
 
 
 @pytest.mark.asyncio
-async def test_question_mark_turn_retries_then_idles():
+async def test_question_mark_turn_idles_without_retry():
     from abcxauto.brain import grok_turn
 
     class Chat:
@@ -3807,7 +3807,7 @@ async def test_question_mark_turn_retries_then_idles():
     assert turn.look_failed() is True
     assert turn.parked is False
     assert getattr(g, "chat", None) is not None
-    assert Chat.rounds == 2
+    assert Chat.rounds == 1
 
 
 @pytest.mark.asyncio
@@ -4391,6 +4391,9 @@ async def test_spoken_no_tool_continue_injects_fill_doorbell():
                     reasoning_content="",
                 )
                 note_interrupt(BookEvent("fill", "IWM"))
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
             else:
                 yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
                     content="", reasoning_content=""

@@ -1168,7 +1168,7 @@ def test_bind_engine_keeps_prior_think_on_new_wake():
 
 @pytest.mark.asyncio
 async def test_grok_streams_think_and_say(monkeypatch):
-    from abcxauto.agent_loop import grok
+    from abcxauto.brain import grok
 
     class Ch:
         def __init__(self, content="", reasoning_content=""):
@@ -1213,7 +1213,7 @@ async def test_grok_streams_think_and_say(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_grok_streams_cumulative_reasoning_as_delta(monkeypatch):
-    from abcxauto.agent_loop import grok
+    from abcxauto.brain import grok
 
     class Ch:
         def __init__(self, content="", reasoning_content=""):
@@ -1253,7 +1253,7 @@ async def test_grok_streams_cumulative_reasoning_as_delta(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_grok_uses_client_max_tokens_not_2048_cap():
-    from abcxauto.agent_loop import grok
+    from abcxauto.brain import grok
 
     class Ch:
         def __init__(self, content="", reasoning_content=""):

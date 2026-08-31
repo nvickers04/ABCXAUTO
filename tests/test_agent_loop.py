@@ -157,10 +157,6 @@ async def test_paper_flat_rth_no_send_does_not_send(monkeypatch):
         send_calls.append(1)
         raise AssertionError("send_action must not run on no-send")
 
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.build_world_state",
-        lambda **_k: _world(flat=True, session_status="regular"),
-    )
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom_send)
     out = await _think(monkeypatch, _no_send_turn(tool_trace=["book"]))
     assert out["strat"] != "hold"
@@ -478,10 +474,6 @@ async def test_paper_no_send_after_tools_is_rest_not_hold_ticket(monkeypatch):
             tool_trace=["book", "option_facts"],
         )
 
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.build_world_state",
-        lambda **_k: _world(flat=True, session_status="regular"),
-    )
     out = await _think(monkeypatch, worked)
     assert out["strat"] != "hold"
     assert out["strat"] != "blocked"
@@ -502,10 +494,6 @@ async def test_paper_no_send_idle_is_rest_not_blocked(monkeypatch):
             last_result={"status": "hold", "strategy": "hold"},
         )
 
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.build_world_state",
-        lambda **_k: _world(flat=True, session_status="regular"),
-    )
     out = await _think(monkeypatch, idle)
     assert out["strat"] != "blocked"
     assert out["strat"] != "hold"
@@ -639,10 +627,6 @@ async def test_explicit_hold_send_unprotected_still_forbidden(monkeypatch):
             tool_trace=["send"],
         )
 
-    monkeypatch.setattr(
-        "abcxauto.agent_loop.build_world_state",
-        lambda **_k: _world(needs_protection=True, unprotected=["SPY"], flat=False),
-    )
     out = await _think(monkeypatch, sent_hold)
     assert out["strat"] == "blocked"
     assert "hold_forbidden" in str(
