@@ -1,4 +1,4 @@
-"""Look snap + LLM usage land on the live journal, not a retired clerk cycle."""
+"""Look snap + LLM usage land on the live journal."""
 
 from __future__ import annotations
 

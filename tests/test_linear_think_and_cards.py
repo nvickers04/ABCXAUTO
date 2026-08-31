@@ -1,7 +1,7 @@
 """Linear think, screen facts, and the setup-card playbook.
 
 Paper RTH / premarket stay-up keeps the live chat across successful looks.
-Empty / junk ends this grok_turn; chat kept until a poke. Overnight drop it. Refused send tickets do not ride. Cards
+Empty / junk: stop calling the model; chat kept until a poke. Overnight drop it. Refused send tickets do not ride. Cards
 carry their own P&L so a revision is a decision about evidence rather than
 about whole-book drift.
 """

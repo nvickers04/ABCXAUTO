@@ -214,7 +214,7 @@ def append_structure_event(event: dict[str, Any]) -> None:
 
 
 def recent_structure_lessons(limit: int = 5) -> list[dict[str, Any]]:
-    """Prefer live-cycle lessons; skip suite/fixture noise (e.g. SPY @ 500)."""
+    """Prefer live-look lessons; skip suite/fixture noise (e.g. SPY @ 500)."""
     path = _path_events()
     if not path.is_file():
         return []

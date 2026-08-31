@@ -251,7 +251,7 @@ def build_reality_pulse(
     taken_at: str | None = None,
     now: datetime | None = None,
 ) -> dict:
-    """Assemble the Reality Pulse JSON — heart of every decision cycle."""
+    """Assemble the Reality Pulse JSON — heart of every look."""
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)

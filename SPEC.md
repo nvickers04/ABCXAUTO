@@ -51,11 +51,21 @@ Walk-away ceilings: **25%** daily-loss, **25%** max position, **25%** risk/trade
 **25%** per name, defined-risk on, cash-only, full NetLiq (`trading_budget_usd=0`).
 Paper operator may turn % floors off (`sizing_floors`); live cannot (forced ON); 25% walk-away is the live ceiling. `% of NL` review facts live on `day_facts` / `book` / wake / `compact_position`, not `brain.py`.
 
-## Loop
+## Look
 
-See [`docs/CYCLE.md`](docs/CYCLE.md). Short form: snap → Grok tools →
-`send` gates. Paper RTH / premarket stay up (no sit clock). Closed/postmarket
-does not call Grok (unprotected still does); park_clock until premarket.
+One look stays open (chat kept). Call the model. If `tool_calls`: run tools,
+call the model again with those results on the same chat. Repeat until there
+are no `tool_calls`. If words only: stop calling the model until fill /
+order_change / unprotected / operator poke. Do not call the model again
+because it spoke. A poke does not start a new messages list. Tool results
+stay on the chat. A spoken line does not wipe it.
+
+Overnight / after-close / park drop the chat. Paper RTH / premarket stay up
+(no sit clock). Closed/postmarket does not call Grok (unprotected still does);
+park_clock until premarket. Session cap idles; chat is kept. Durable notes
+across days are the lab playbook file.
+
+See [`docs/LOOK.md`](docs/LOOK.md). Snap facts → Grok tools → `send` gates.
 
 ## Priority
 

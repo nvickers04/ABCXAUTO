@@ -1,4 +1,4 @@
-"""Product book surface — compact state for prompts and cycle snapshots."""
+"""Product book surface — compact state for prompts and look snapshots."""
 
 from __future__ import annotations
 
@@ -285,7 +285,7 @@ def build_book(
 
 
 def build_book_from_snap(snap: dict) -> dict:
-    """Build book state from a cycle/pro snap dict."""
+    """Build book state from a look/pro snap dict."""
     if not isinstance(snap, dict):
         return build_book()
     return build_book(

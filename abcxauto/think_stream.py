@@ -1,4 +1,4 @@
-"""Live Grok thinking stream — tool-loop tokens as they arrive.
+"""Live Grok thinking stream — think/say tokens as they arrive.
 
 Headless prints to stdout (ASCII). ProEngine binds so the UI can show the same buffer.
 A short tail file lets Cursor review the stream without the window.
@@ -1109,9 +1109,9 @@ def write_last_turn_after_send(
 
 
 def write_last_turn(out: dict[str, Any]) -> None:
-    """Snapshot of the last Grok turn for the Cursor review loop.
+    """Snapshot of the last Grok turn for Cursor review.
 
-    Operator paint has no sit-loop counter. Journal/logs keep the increment.
+    Operator paint has no sit clock. Journal/logs keep the increment.
     A junk / empty / failed look is not a completed turn — keep the last
     real say/tools until a real look finishes. Overnight / park still write.
     """

@@ -1256,7 +1256,7 @@ class TradeJournal:
         *,
         ts: Optional[str] = None,
     ) -> Optional[int]:
-        """Record a cycle decision (including hold / blocked outcomes)."""
+        """Record a look decision (including hold / blocked outcomes)."""
         if not self.enabled:
             return None
         try:
@@ -1329,7 +1329,7 @@ class TradeJournal:
         judgment: Any = None,
         ts: Optional[str] = None,
     ) -> Optional[int]:
-        """Persist a Judge-stage record for cross-cycle thesis continuity."""
+        """Persist a Judge-stage record for thesis continuity across looks."""
         if not self.enabled:
             return None
         try:

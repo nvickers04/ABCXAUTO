@@ -4626,7 +4626,7 @@ class ProTerminal:
         remember_headlines(painted)
         self._render_news_list(painted)
 
-    # ----------------------------------------------------------------- loops
+    # ----------------------------------------------------------------- polls
 
     async def _reveal_window(self) -> None:
         try:

@@ -103,7 +103,7 @@ def _build_portfolio_view(
     halted: bool,
     portfolio_raw: Any = None,
 ) -> dict:
-    """Book view for the Pro UI from cycle ``portfolio_state`` or engine fields."""
+    """Book view for the Pro UI from ``portfolio_state`` or engine fields."""
     if isinstance(portfolio_raw, dict) and portfolio_raw:
         view = dict(portfolio_raw)
         view.setdefault("net_liquidation", equity)
@@ -269,7 +269,7 @@ class ProEngine:
         bind_engine(self)
 
     def connect_broker(self) -> str | None:
-        """Connect IBKR + start monitor without running agent cycles.
+        """Connect IBKR + start monitor without calling the model.
 
         Does not require an xAI key. Idempotent if the worker is already up.
         """
@@ -414,7 +414,7 @@ class ProEngine:
             self._note("OPEN_RISK", format_open_risk_line(plan))
 
     def pause_engine(self) -> None:
-        """Pause agent cycles without tearing down IBKR / monitor."""
+        """Pause think without tearing down IBKR / monitor."""
         if not self.worker or not self.worker.is_alive():
             return
         self.pause.set()
@@ -508,7 +508,7 @@ class ProEngine:
         )
 
     def request_wake(self, reason: str) -> None:
-        """Interrupt cycle sleep for a whitelisted pace wake (monitor → engine)."""
+        """Interrupt pulse sleep for a whitelisted pace wake (monitor → engine)."""
         from abcxauto.pacing import WakeGate
         from abcxauto.park_clock import BookEvent, note_interrupt
 
@@ -624,7 +624,7 @@ class ProEngine:
                 }
             )
         elif kind == "monitor_snapshot":
-            # Keep equity / positions fresh from monitor polls between cycles.
+            # Keep equity / positions fresh from monitor polls between looks.
             snap = data or {}
             acct = snap.get("account") or {}
             try:
@@ -854,14 +854,13 @@ class ProEngine:
         return True
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
-        """Stay-up keeps the process. Next look is a poke or a changed lead fact.
+        """Stay-up keeps the process. Next model call is a poke or a changed lead fact.
 
         Paper RTH / premarket stay on this process. A good look writes no
         grok_wake.json. Stay-up may sit — the runner does not self-schedule.
-        Duplicate lead-fact looks end with no send and wait. A spoken
-        no-tool say is a checkpoint inside grok_turn, not look-end — this
-        rearm runs after the look actually finishes. Junk retries in the
-        same chat (brain) then idles here: never ``_cold_next``. Overnight
+        Duplicate lead-fact looks end with no send and wait. Words with no
+        tool_calls already stopped the model; this rearm waits for fill /
+        order_change / unprotected / operator poke. Chat is kept. Overnight
         park is park_clock after a closed skip.
         """
         session = self._resolve_session(session)
@@ -950,7 +949,7 @@ class ProEngine:
     async def _host_think(
         self, n: int, g: Any, s: dict, *, resume: bool = False
     ) -> dict:
-        """One grok_turn. Stay-up resume keeps the live chat; book events poke it."""
+        """Call the model on the open chat. Stay-up resume keeps it; book events poke it."""
         from abcxauto.brain import grok_turn, grok_turn_kwargs
         from abcxauto.world_state import (
             build_world_state,
@@ -1207,6 +1206,7 @@ class ProEngine:
                 cold = bool(getattr(self, "_cold_next", False))
                 poked = peek_interrupt() is not None
                 live_chat = g is not None and getattr(g, "chat", None) is not None
+                # Poke / stay-up continue this chat. Do not start a new messages list.
                 resume = (not cold) and (want_look or poked or live_chat)
                 if getattr(self, "_think_parked", False) and not want_look:
                     # Park is shutdown. Do not wait on pokes. Start is the only resume.

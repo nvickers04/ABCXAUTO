@@ -1,4 +1,4 @@
-"""Inventory helpers live on agent_loop. The clerk cycle module is gone."""
+"""Inventory helpers live on agent_loop. ``cycle.py`` and ``run_cycle`` are gone."""
 
 from __future__ import annotations
 

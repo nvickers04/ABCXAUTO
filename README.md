@@ -32,7 +32,13 @@ Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro S
 
 Grok may retune knobs immediately. No proposal step.
 
-## Loop
+## Look
+
+One look stays open (chat kept). Call the model. If `tool_calls`: run tools,
+call the model again with those results on the same chat. Repeat until there
+are no `tool_calls`. If words only: stop calling the model until fill /
+order_change / unprotected / operator poke. Do not call the model again
+because it spoke. A poke does not start a new messages list.
 
 ```
 WAKE     Overnight / after-close park until premarket. Paper RTH / premarket stay up.
@@ -45,6 +51,7 @@ GROK     tools (facts + send). Wake is a short line — Grok fetches what it nee
 SEND     send → gates → IBKR. Journal write is code, not a Grok tool.
     |
 LOOK     Finished RTH look writes no grok_wake.json. Stay-up has no sit clock.
+         Session cap idles; chat is kept. Overnight / park drop the chat.
 ```
 
 `python -m abcxauto` wraps Pro in a supervisor: useful hours are weekdays **8:30–16:00 ET**, TWS **7497** must be listening, crash relaunches, clean window close stays down. `--cleanup` marks operator stop.
@@ -141,8 +148,8 @@ abcxauto/
   __main__.py           Pro + supervisor; --cleanup = operator stop
   supervisor.py         Useful hours + TWS probe; relaunch on crash
   park_clock.py         Overnight / after-close park; book-event pulse. No RTH sit clock
-  agent_loop.py         Snap → Grok tools → clerk send
-  brain.py              Tool loop (facts + send + self_tune + playbook)
+  agent_loop.py         Snap facts, send gates
+  brain.py              Call the model; tool results stay on the same chat
   llm.py                Short system prompt; no prompt_extra
   order_examples.py     Sendable ticket shapes
   executor.py / send.py Validate → gate → IBKR
@@ -158,11 +165,11 @@ abcxauto/
   pro_desktop.py        Flet cockpit
   think_stream.py       Live Grok think/say
   config.py             Env + walk-away floor
-  memory/               SQLite journal (clerk)
+  memory/               SQLite journal
   broker/               IBKR
 ```
 
-See [`SPEC.md`](SPEC.md) and [`docs/CYCLE.md`](docs/CYCLE.md).
+See [`SPEC.md`](SPEC.md) and [`docs/LOOK.md`](docs/LOOK.md).
 
 ## Tests
 

@@ -1,6 +1,6 @@
 """Background portfolio monitor: P&L snapshots + Grok review injections.
 
-Two loops in one task:
+Two clocks in one task:
 - every ``monitor_poll_s`` seconds: refresh a snapshot (positions, account
   P&L, open orders, protection audit) for the UI and for change detection;
 - every ``monitor_review_s`` seconds (market hours, or any time a position is
@@ -379,7 +379,7 @@ class PortfolioMonitor:
         )
 
     def _start_reconciler(self) -> None:
-        """Arm the fill-driven orphan sweep — the poll loop is too slow alone."""
+        """Arm the fill-driven orphan sweep — the poll clock is too slow alone."""
         try:
             from abcxauto.protect_reconciler import ProtectionReconciler
 

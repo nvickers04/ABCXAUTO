@@ -112,7 +112,7 @@ class StopLimitParams(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Entries + management (cycle allowlist)
+# Entries + management (send allowlist)
 # ---------------------------------------------------------------------------
 
 class TicketCard(BaseModel):

@@ -1,4 +1,4 @@
-"""Wake loop: snap facts, send gates. Think is hosted on ``pro_engine``."""
+"""Snap facts, send gates. Think is hosted on ``pro_engine``."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ _NEW_RISK = frozenset(_OPTION_ENTRY_ACTIONS.split("|")) | frozenset(
 
 
 def pnl_of(acct: dict) -> float:
-    """Desktop / cycle Day PnL = IBKR DailyPnL. Not unrealized vs avg cost, not NL."""
+    """Desktop Day PnL = IBKR DailyPnL. Not unrealized vs avg cost, not NL."""
     from abcxauto.world_state import daily_pnl_of
 
     v = daily_pnl_of(acct)

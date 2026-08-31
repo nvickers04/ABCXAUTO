@@ -1,4 +1,4 @@
-"""Shared news feed for Pro UI + agent cycle prompt."""
+"""Shared news feed for Pro UI + wake facts."""
 
 from __future__ import annotations
 
@@ -325,7 +325,7 @@ async def fetch_agent_news(
 
 
 def format_news_for_prompt(items: list[dict], *, limit: int = 18) -> str:
-    """Compact NEWS block for the cycle prompt."""
+    """Compact NEWS block for the wake."""
     lines = [
         "NEWS (color only — not a trigger):",
     ]

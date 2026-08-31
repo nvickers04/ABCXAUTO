@@ -4169,7 +4169,7 @@ async def test_junk_look_next_poke_may_speak_same_chat():
 
 @pytest.mark.asyncio
 async def test_spoken_no_tool_say_ends_this_grok_turn_keeps_chat():
-    """A real no-tool say is a checkpoint: this grok_turn stops, chat kept."""
+    """Words with no tool_calls: stop calling the model. Chat kept."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
     from abcxauto.pro_engine import ProEngine
@@ -4371,7 +4371,7 @@ async def test_spoken_no_tool_does_not_tool_until_next_poke(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_spoken_no_tool_continue_injects_fill_doorbell():
-    """Fill mid-look injects into this chat; the spoken checkpoint is kept."""
+    """Fill mid-look injects into this chat; the spoken line is kept."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
 
