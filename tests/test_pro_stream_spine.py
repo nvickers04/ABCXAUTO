@@ -23,6 +23,7 @@ from abcxauto.pro_desktop import (
     last_card_send_label,
     session_cap_idle_line,
     stream_line_kind,
+    stream_view_lines,
     think_tail_in_flight,
     think_tail_last_say,
     think_tail_tool_chips,
@@ -155,8 +156,62 @@ def test_stream_line_kind_classifies_every_marker_the_desk_emits():
     assert stream_line_kind("[unprotected]") == "poke"
     assert stream_line_kind("[stop_dist]") == "poke"
     assert stream_line_kind("hits=3 quoted=2 src=ibkr") == "scan"
+    assert stream_line_kind('{"open_lots": [], "nl": 35000}') == "json"
     assert stream_line_kind("WMT is holding the shelf.") == "prose"
     assert stream_line_kind("   ") == "blank"
+
+
+def test_stream_view_lines_collapses_json_objects_and_keeps_chips():
+    """Pane view skips the dump body; [think]/[say]/[tool] chips stay."""
+    dump = '{"open_lots": [' + ('{"symbol": "SPY", "qty": 1},' * 80) + "]}"
+    args = '{"symbol": "SPY"}'
+    body = "\n".join(
+        [
+            "--- GROK ---",
+            "[book]",
+            args,
+            dump,
+            "[playbook]",
+            '{"cards": [{"id": 1}]}',
+            "[scan]",
+            "hits=3 quoted=2 src=ibkr",
+            '{"rows": [{"symbol": "NVDA"}]}',
+            "[think]",
+            "WMT is holding the 103 shelf.",
+            "[say]",
+            "watching the gap",
+            "",
+        ]
+    )
+    view = stream_view_lines(body)
+    assert "[book]" in view
+    assert "[playbook]" in view
+    assert "[scan]" in view
+    assert "[think]" in view
+    assert "[say]" in view
+    assert "--- GROK ---" in view
+    assert "hits=3 quoted=2 src=ibkr" in view
+    assert "WMT is holding the 103 shelf." in view
+    assert "watching the gap" in view
+    blob = "\n".join(view)
+    assert dump not in blob
+    assert args not in blob
+    assert '"open_lots"' not in blob
+    assert '"cards"' not in blob
+    assert '"rows"' not in blob
+    assert any(line.startswith("{json ") and line.endswith(" chars}") for line in view)
+    # args+result after [book] collapse to one stub, not two dumps.
+    book_at = view.index("[book]")
+    assert view[book_at + 1].startswith("{json ")
+    assert view[book_at + 2] == "[playbook]"
+    # No JSON → chips and prose stay verbatim (blanks dropped).
+    raw_look = "[think]\nWMT is holding the 103 shelf.\n[say]\nwatching the gap\n"
+    assert stream_view_lines(raw_look) == [
+        "[think]",
+        "WMT is holding the 103 shelf.",
+        "[say]",
+        "watching the gap",
+    ]
 
 
 def test_pane_and_copy_read_full_session_not_glass_tail(pro, tmp_path, monkeypatch):
@@ -204,6 +259,84 @@ def test_pane_and_copy_read_full_session_not_glass_tail(pro, tmp_path, monkeypat
     pro.page.set_clipboard = lambda t: clip.append(t)
     pro._copy_stream()
     assert clip == [session]
+
+
+def test_spine_collapses_json_object_lines_and_keeps_chips(pro):
+    """Paid JSON stays on Copy/keep-file; the pane keeps the look readable."""
+    dump = '{"open_lots": [' + ('{"symbol": "SPY", "qty": 1},' * 80) + "]}"
+    body = "\n".join(
+        [
+            "--- GROK ---",
+            "[book]",
+            dump,
+            "[playbook]",
+            '{"cards": [{"id": 1, "name": "gap"}]}',
+            "[scan]",
+            "hits=3 quoted=2 src=ibkr",
+            "[think]",
+            "WMT is holding the 103 shelf.",
+            "[say]",
+            "watching the gap",
+            "",
+        ]
+    )
+    pro.engine.state.think_live = body
+    pro._sync_think_stream()
+    painted = _texts(pro.col_stream)
+    for chip in ("[book]", "[playbook]", "[scan]", "[think]", "[say]"):
+        assert chip in painted
+    assert "WMT is holding the 103 shelf." in painted
+    assert "watching the gap" in painted
+    blob = "\n".join(painted)
+    assert dump not in blob
+    assert '"open_lots"' not in blob
+    assert '"cards"' not in blob
+    assert any(v.startswith("{json ") and v.endswith(" chars}") for v in painted)
+    stub = next(v for v in painted if v.startswith("{json "))
+    assert _line(pro, stub).color == MUTED
+    copied = pro._copy_stream_text()
+    assert dump in copied
+    assert '"open_lots"' in copied
+    assert "watching the gap" in copied
+
+
+def test_pane_collapses_keep_file_json_without_clipping_disk(pro, tmp_path, monkeypatch):
+    """#137 archive stays; this PR only changes what the pane paints."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-31")
+    dump = '{"unique_paid": "SNDK_GAP", "hits": [' + ("1," * 400) + "0]}"
+    session = "\n".join(
+        [
+            "--- GROK ---",
+            "[book]",
+            dump,
+            "[think]",
+            "gap still holds.",
+            "[say]",
+            "watching the gap",
+            "",
+        ]
+    )
+    day_dir = tmp_path / "think_session"
+    day_dir.mkdir(parents=True, exist_ok=True)
+    path = day_dir / "2026-08-31.txt"
+    path.write_text(session, encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    pro.engine.state.think_live = session[-200:]
+    pro._think_sync_key = None
+    pro._sync_think_stream()
+    painted = "\n".join(_texts(pro.col_stream))
+    assert "[book]" in painted
+    assert "[think]" in painted
+    assert "[say]" in painted
+    assert "gap still holds." in painted
+    assert "watching the gap" in painted
+    assert "SNDK_GAP" not in painted
+    assert dump not in painted
+    assert path.read_text(encoding="utf-8") == before
+    assert "SNDK_GAP" in before
+    assert pro._copy_stream_text() == before
 
 
 def test_spine_paints_every_marker_verbatim(pro):
