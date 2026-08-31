@@ -207,6 +207,7 @@ def test_think_session_keeps_looks_the_tail_window_drops(tmp_path, monkeypatch):
     after = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
     assert "LOOK_ONE" in after
     assert "LOOK_TWO" in after
+    assert "=== run " in after
     assert (tmp_path / "think_tail.txt").read_text(encoding="utf-8") == ""
 
 
@@ -327,7 +328,53 @@ def test_paid_keep_survives_ram_clip_and_begin_run(tmp_path, monkeypatch):
     after = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
     assert "SNDK_GAP" in after
     assert "LOOK_ONE" in after
+    assert "=== run " in after
     assert (tmp_path / "think_tail.txt").read_text(encoding="utf-8") == ""
+
+
+def test_run_banner_line_is_desk_ct():
+    from datetime import datetime, timezone
+
+    from abcxauto.think_stream import _run_banner_line
+
+    now = datetime(2026, 8, 31, 16, 56, tzinfo=timezone.utc)
+    line = _run_banner_line(pid=2752, sha="abc1234", now=now)
+    assert line == "=== run 2026-08-31 11:56 CT pid=2752 sha=abc1234 ===\n"
+
+
+def test_begin_run_appends_banner_to_the_same_day_file(tmp_path, monkeypatch):
+    """One YYYY-MM-DD.txt for the day. Bounces append. No per-run files."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    monkeypatch.setattr(ts, "_git_sha_short", lambda: "deadbeef")
+    monkeypatch.setattr(ts.os, "getpid", lambda: 2752)
+    ts._run = {}
+    ts.reset_speaker()
+    st = SimpleNamespace(think_live="")
+    ts.bind_engine(SimpleNamespace(state=st))
+    try:
+        ts.emit("say", "LOOK_ONE\n")
+        ts.keep('{"unique_paid": "SNDK_GAP"}\n')
+        ts.begin_run()
+        ts.emit("say", "LOOK_TWO\n")
+        ts.begin_run()
+    finally:
+        ts.bind_engine(None)
+
+    day_dir = tmp_path / "think_session"
+    names = sorted(p.name for p in day_dir.iterdir())
+    assert names == ["2026-08-28.txt"]
+    body = (day_dir / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert body.count("=== run ") == 2
+    assert "LOOK_ONE" in body
+    assert "LOOK_TWO" in body
+    assert "SNDK_GAP" in body
+    assert "=== run " in body
+    assert "CT pid=2752 sha=deadbeef ===" in body
+    assert "=== run" not in st.think_live
+    tail = (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
+    assert "=== run" not in tail or tail == ""
 
 
 def test_write_last_turn_skips_junk_failed_look(tmp_path, monkeypatch):

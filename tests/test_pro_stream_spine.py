@@ -137,6 +137,7 @@ def test_stream_line_kind_classifies_every_marker_the_desk_emits():
     assert stream_line_kind("--- GROK ---") == "banner"
     assert stream_line_kind("--- GROK JUDGE ---") == "banner"
     assert stream_line_kind("--- CLERK ---") == "banner"
+    assert stream_line_kind("=== run 2026-08-31 11:56 CT pid=2752 sha=abc1234 ===") == "banner"
     assert stream_line_kind("[think]") == "think"
     assert stream_line_kind("[say]") == "say"
     assert stream_line_kind("[clerk]") == "clerk"
