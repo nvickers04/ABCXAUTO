@@ -206,8 +206,6 @@ def test_new_entry_allowed_when_book_open_and_capacity(monkeypatch):
     from abcxauto.agent_loop import gate_ticket
 
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
     strat, forced = gate_ticket(
         _new_entry_act(),
         _judgment_world(
@@ -227,7 +225,6 @@ def test_new_entry_rejected_on_structure_cooldown(monkeypatch):
     from abcxauto.agent_loop import gate_ticket
 
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     strat, forced = gate_ticket(
         _new_entry_act("QQQ"),
         _judgment_world(
@@ -248,8 +245,6 @@ def test_new_entry_rejected_when_capacity_full(monkeypatch):
     from abcxauto.agent_loop import gate_ticket
 
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
     monkeypatch.setattr(
         "abcxauto.world_state.get_config",
         lambda: __import__("types").SimpleNamespace(
@@ -282,8 +277,6 @@ def test_mop_zero_gate_ticket_allows_sixteen_names(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
     reset_flat_streak()
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
     lots = [{"symbol": f"S{i}", "quantity": 1} for i in range(16)]
     world = _judgment_world(
         positions=lots,
@@ -317,8 +310,6 @@ def test_grok_set_mop_four_gate_ticket_refuses_the_fifth(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
     reset_flat_streak()
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
     lots = [{"symbol": f"S{i}", "quantity": 1} for i in range(4)]
     world = _judgment_world(
         positions=lots,
@@ -351,7 +342,6 @@ def test_new_entry_rejected_while_flat_streak_unconfirmed(tmp_path, monkeypatch)
     monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     clear_trade_plan()
     _save_flat_streak_state(1, True)
     strat, forced = gate_ticket(

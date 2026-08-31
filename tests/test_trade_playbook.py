@@ -275,8 +275,6 @@ def _stub_overlay_send(monkeypatch) -> list[dict]:
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -421,106 +419,6 @@ def test_overlay_types_to_hide_mixed_book_keeps_trunks_for_unprotected():
     assert hidden == frozenset()
 
 
-def _seed_overlay_lab(tmp_path, monkeypatch):
-    from abcxauto.lab_playbook import _lab_path, _write, load_lab
-    from tests.test_playbook_open_starters import _todays_three_type_book
-
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    _write(_lab_path(), _todays_three_type_book())
-    return load_lab()
 
 
-def test_playbook_hides_overlay_starters_on_stopped_pypl(tmp_path, monkeypatch):
-    """#128 refuses the send; playbook must not still float virgin overlay trunks."""
-    from abcxauto.lab_playbook import OPEN_TYPE_STARTERS, load_lab, playbook_payload
 
-    lab = _seed_overlay_lab(tmp_path, monkeypatch)
-    for name in OVERLAY_PLAYBOOK_TYPES:
-        assert name in lab["types"], name
-        assert OPEN_TYPE_STARTERS[name]["name"] in {
-            c["name"] for c in (lab["types"][name].get("cards") or [])
-        }
-
-    payload = playbook_payload(
-        positions=[_pypl_long(50)],
-        orders=[_last_stop()],
-    )
-    tree = payload["tree"]
-    types = payload["types"]
-    unused = payload["lab"]["unused_open_types"]
-    cards = {c.get("name") for c in (payload.get("cards") or [])}
-    awaiting = " ".join(
-        str(r.get("card") or "") for r in payload["lab"]["cards_awaiting_first_trade"]
-    )
-    for name in OVERLAY_PLAYBOOK_TYPES:
-        assert name not in types
-        assert f"TYPE {name}" not in tree
-        assert name not in unused
-        assert OPEN_TYPE_STARTERS[name]["name"] not in cards
-        assert name not in awaiting
-        assert OPEN_TYPE_STARTERS[name]["name"] not in awaiting
-    assert "TYPE vertical_spread" in tree
-    assert "vertical_spread" in types
-    assert "TYPE market_bracket" in tree
-    assert "vertical_spread" in unused or "iron_condor" in unused
-    # Disk / seed unchanged — this is a view filter, not a write.
-    on_disk = load_lab()
-    for name in OVERLAY_PLAYBOOK_TYPES:
-        assert name in on_disk["types"]
-
-
-def test_playbook_keeps_overlay_starters_when_pypl_unprotected(tmp_path, monkeypatch):
-    from abcxauto.lab_playbook import OPEN_TYPE_STARTERS, playbook_payload
-
-    _seed_overlay_lab(tmp_path, monkeypatch)
-    payload = playbook_payload(positions=[_pypl_long(50)], orders=[])
-    tree = payload["tree"]
-    for name in OVERLAY_PLAYBOOK_TYPES:
-        assert name in payload["types"]
-        assert f"TYPE {name}" in tree
-        assert OPEN_TYPE_STARTERS[name]["name"] in {
-            c.get("name") for c in (payload.get("cards") or [])
-        }
-
-
-def test_book_payload_hides_overlay_starters_on_stopped_pypl(tmp_path, monkeypatch):
-    from abcxauto.brain import _book_payload
-    from abcxauto.lab_playbook import OPEN_TYPE_STARTERS
-    from abcxauto.world_state import WorldState
-
-    _seed_overlay_lab(tmp_path, monkeypatch)
-    world = WorldState(
-        cycle=1,
-        session_status="regular",
-        flat=False,
-        needs_protection=False,
-        unprotected=[],
-        net_liquidation=37000.0,
-        daily_pnl=0.0,
-        positions=[_pypl_long(50)],
-        open_orders=[_last_stop()],
-        opportunities=[],
-        news_items=[],
-        risk_posture="balanced",
-        effective_posture="balanced",
-        gates={},
-        envelope={},
-        regime={},
-        portfolio_risk={},
-        working_thesis="",
-        recent_decisions=[],
-        trade_plan=None,
-    )
-    payload = _book_payload(world, snap={})
-    glance = payload["playbook"]
-    notes = glance.get("notes") or ""
-    cards = {c.get("name") for c in (glance.get("cards") or [])}
-    unused = (glance.get("lab") or {}).get("unused_open_types") or []
-    for name in OVERLAY_PLAYBOOK_TYPES:
-        assert f"TYPE {name}" not in notes
-        assert OPEN_TYPE_STARTERS[name]["name"] not in cards
-        assert name not in unused
-    assert "TYPE vertical_spread" in notes
-    assert "TYPE market_bracket" in notes

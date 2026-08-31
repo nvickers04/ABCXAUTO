@@ -29,22 +29,13 @@ def _pos_float(value: Any) -> float | None:
 
 
 def playbook_mode() -> str:
-    """explore | exploit. String bit; sizing is ``mode_size_ceiling``."""
-    try:
-        from abcxauto.lab_playbook import playbook_mode as _mode
-
-        return _mode()
-    except Exception:
-        return "explore"
+    """explore | exploit. Persist is gone; explore is the size band."""
+    return "explore"
 
 
 def graduated_names(book: dict[str, Any] | None = None) -> list[str]:
-    try:
-        from abcxauto.lab_playbook import graduated_card_names
-
-        return [str(x) for x in (graduated_card_names(book) or []) if str(x).strip()]
-    except Exception:
-        return []
+    _ = book
+    return []
 
 
 def _norm_card(value: Any) -> str:
@@ -60,26 +51,7 @@ def card_is_graduated(
     type: str = "",
     book: dict[str, Any] | None = None,
 ) -> bool:
-    """True when this named card has actually graduated (not a self-label)."""
-    want = _norm_card(card)
-    if not want:
-        return False
-    parent = str(type or "").strip().lower()
-    try:
-        from abcxauto.lab_playbook import card_facts
-
-        for row in card_facts(book) or []:
-            if not row.get("graduated"):
-                continue
-            name = _norm_card(row.get("card") or row.get("name"))
-            row_type = str(row.get("type") or "").strip().lower()
-            if name == want and (not parent or row_type == parent):
-                return True
-    except Exception:
-        pass
-    for n in graduated_names(book):
-        if _norm_card(n) == want:
-            return True
+    _ = (card, type, book)
     return False
 
 
@@ -96,64 +68,13 @@ def card_is_learning(
 
 
 def live_marks_match_paper() -> bool:
-    """True only when live (not paper) marks corroborate paper graduation.
-
-    Paper 7497 never qualifies — paper marks are not live marks. A promote
-    snapshot that only copies ``paper_score`` is not a live mark either.
-    Not an exploit-band key: sizing uses the same ceiling until the socket
-    flips. Callers that still want this fact can read it; ``mode_size`` does
-    not wait on it.
-    """
-    try:
-        from abcxauto.lab_playbook import is_paper, live_has_promoted, load_live
-
-        if is_paper():
-            return False
-        if not live_has_promoted():
-            return False
-        live = load_live()
-    except Exception:
-        return False
-    paper_score = live.get("paper_score") if isinstance(live.get("paper_score"), dict) else {}
-    try:
-        from abcxauto.scorecard import compute_scorecard
-
-        live_sc = compute_scorecard()
-    except Exception:
-        live_sc = {}
-    if not isinstance(live_sc, dict) or not live_sc:
-        return False
-    if (
-        live_sc.get("edge_usd") == paper_score.get("edge_usd")
-        and live_sc.get("book_return_pct") == paper_score.get("book_return_pct")
-    ):
-        return False
-    if not graduated_names(live):
-        return False
-    try:
-        from abcxauto.lab_playbook import card_facts
-
-        marked = [
-            r
-            for r in (card_facts(live) or [])
-            if r.get("graduated")
-            and (
-                int(r.get("resolved") or 0) > 0
-                or r.get("resolved_pnl") is not None
-            )
-        ]
-    except Exception:
-        marked = []
-    return bool(marked)
+    """Paper 7497 never qualifies. No live snapshot without persist."""
+    return False
 
 
 def exploit_may_widen() -> bool:
-    """Exploit widens with graduated cards. Same ceiling on either socket."""
-    if playbook_mode() != "exploit":
-        return False
-    if not graduated_names():
-        return False
-    return True
+    """Exploit widen needed graduated cards. Persist is gone."""
+    return False
 
 
 def mode_size_ceiling(
@@ -280,16 +201,9 @@ def exploit_learning_card_error(
     type: str = "",
     book: dict[str, Any] | None = None,
 ) -> str:
-    """Exploit sends only graduated cards. Empty string means this ticket may go."""
-    bit = str((book or {}).get("mode") or playbook_mode() or "explore").strip().lower()
-    if bit != "exploit":
-        return ""
-    want = str(card or "").strip()
-    if not want:
-        return ""
-    if card_is_graduated(want, type=type, book=book):
-        return ""
-    return f"exploit: only graduated cards; {want!r} is a learning card"
+    """Graduation persist is gone. Empty string means this ticket may go."""
+    _ = (card, type, book)
+    return ""
 
 
 def mode_size_ticket_error(

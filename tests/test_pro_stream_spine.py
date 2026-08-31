@@ -1129,27 +1129,8 @@ def test_playbook_card_with_fills_shows_realized(pro):
     assert "$+41.50" in blob
 
 
-def test_card_scores_table_does_not_print_zero_for_an_unjoined_send(pro, monkeypatch):
-    monkeypatch.setattr("abcxauto.lab_playbook.load_lab", lambda: {"cards": []})
-    monkeypatch.setattr(
-        "abcxauto.lab_playbook.card_scores",
-        lambda cards=None: [
-            {"card": "shelf reclaim", "sends": 3, "attributed_fills": 0, "realized_pnl": 0.0}
-        ],
-    )
-    pro._sync_sc_cards()
-    blob = " | ".join(_texts(pro.col_sc_cards))
-    assert "$+0.00" not in blob
-    assert "hit: none" in blob
-    assert "avg R" in blob
-    assert "cost-alloc" in blob
-    # No hit-column dash farm — the header is hidden when nothing is calibrated.
-    assert " | hit | " not in f" | {blob} | "
-
 
 def test_card_scores_table_empty_state_is_honest(pro, monkeypatch):
-    monkeypatch.setattr("abcxauto.lab_playbook.load_lab", lambda: {"cards": []})
-    monkeypatch.setattr("abcxauto.lab_playbook.card_scores", lambda cards=None: [])
     pro._sync_sc_cards()
     assert "No card-attributed sends yet" in " | ".join(_texts(pro.col_sc_cards))
 
@@ -1181,30 +1162,3 @@ def test_scorecard_windows_paint_vs_spy_blank_not_invented(pro):
     assert "—" in blob
 
 
-def test_card_scores_hit_column_only_when_calibrated(pro, monkeypatch):
-    monkeypatch.setattr("abcxauto.lab_playbook.load_lab", lambda: {"cards": []})
-    monkeypatch.setattr(
-        "abcxauto.lab_playbook.attach_card_honesty",
-        lambda rows, **_k: rows,
-    )
-    monkeypatch.setattr(
-        "abcxauto.lab_playbook.card_scores",
-        lambda cards=None: [
-            {
-                "card": "flush bounce",
-                "sends": 8,
-                "resolved": 8,
-                "resolved_wins": 4,
-                "resolved_pnl": 40.0,
-                "retire_if": {"max_loss_usd": 10.0},
-                "calibration": {"hit_rate": 50.0, "hit_rate_gap": -20.0},
-                "honesty": {"cost_allocated_pnl": 12.5},
-            }
-        ],
-    )
-    pro._sync_sc_cards()
-    blob = " | ".join(_texts(pro.col_sc_cards))
-    assert "hit: none" not in blob
-    assert "50%" in blob
-    assert "0.50R" in blob
-    assert "$+12.50" in blob

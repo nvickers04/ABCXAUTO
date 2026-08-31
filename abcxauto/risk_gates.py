@@ -104,6 +104,24 @@ def check_defined_risk_only(proposal: OrderProposal) -> Tuple[bool, str]:
     return True, "ok"
 
 
+def new_risk_card_error(
+    card: Any,
+    *,
+    type: str = "",
+    book: dict[str, Any] | None = None,
+) -> str:
+    """New risk must name a play. Empty string means this ticket may go.
+
+    ``params.card`` is a journal/scorecard label, not a persisted catalog.
+    Exits, protection, modifies and cancels never reach here — ``is_new_risk``
+    is False for them. ``type`` / ``book`` are accepted for older callers.
+    """
+    _ = (type, book)
+    if not str(card or "").strip():
+        return "new risk requires params.card naming a play"
+    return ""
+
+
 def _market_bracket_entry_proxy(params: Any) -> Optional[float]:
     """Entry proxy for market_bracket notional / risk sizing.
 

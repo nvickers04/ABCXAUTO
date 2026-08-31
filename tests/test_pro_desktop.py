@@ -160,32 +160,11 @@ def test_run_btn_uses_text_not_content(headless_pro):
 
 
 def test_playbook_line_paints_run_next(headless_pro):
-    from abcxauto.lab_playbook import clamp_update, save_lab
 
-    update = clamp_update(
-        {
-            "instructions": "stay flat when the card gate is off",
-            "types": {
-                "market_bracket": {
-                    "tool_order": ["scan", "news", "quote", "candles", "send"],
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "when_on": "mega/large ≥6% earnings-miss gap",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ],
-                }
-            },
-        }
-    )
-    assert update is not None
-    save_lab(update)
     headless_pro.engine.state.flat = True
     headless_pro._sync_widgets()
     line = headless_pro.lbl_playbook.value or ""
-    assert "Playbook [" in line
+    assert line == "Playbook: —"
     assert "next=" not in line
     assert "send SYM" not in line
     assert "Nlooks" not in line
@@ -219,7 +198,7 @@ def test_book_strip_sync(headless_pro):
 
     assert_no_cycle_counter(headless_pro.page.title or "")
     assert (headless_pro.page.title or "") == "ABCXAUTO"
-    assert "Playbook [" in (headless_pro.lbl_playbook.value or "")
+    assert (headless_pro.lbl_playbook.value or "") == "Playbook: —"
     assert len(headless_pro.col_lots.controls) == 1
     assert headless_pro.lbl_lot_count.value == "1"
     assert "stk:1" in (headless_pro.lbl_mix.value or "")
@@ -680,62 +659,15 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
     assert calls["grok"] >= 3
 
 
-def test_notebook_viewer_reads_lab_not_think(headless_pro, monkeypatch):
-    monkeypatch.setattr(
-        "abcxauto.lab_playbook.load_lab",
-        lambda: {
-            "revision": 3,
-            "mode": "explore",
-            "instructions": "look at options, not a nap",
-        },
-    )
+def test_notebook_viewer_reads_lab_not_think(headless_pro):
     head, body = headless_pro._lab_notebook()
-    assert "rev=3" in head
-    assert "notebook, not law" in head
-    assert "look at options" in body
-    # Notebook is a nav surface now, not a dialog.
+    assert head == "Lab notebook"
+    assert body == "(empty)"
     assert "notebook" in dict((k, v) for k, v, _o, _f in _nav())
     assert headless_pro._hidden_metrics.visible is False
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
-    assert "look at options" not in (headless_pro.think_live.value or "")
 
-
-def test_notebook_paints_nested_lab_cards(headless_pro):
-    from abcxauto.lab_playbook import clamp_update, save_lab
-
-    update = clamp_update(
-        {
-            "instructions": "stay flat when the card gate is off",
-            "types": {
-                "market_bracket": {
-                    "tool_order": ["scan", "news", "quote", "candles", "send"],
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "when_on": "mega/large ≥6% earnings-miss gap",
-                            "scan": "most_active + top_losers; mega/large only",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ],
-                }
-            },
-        }
-    )
-    assert update is not None
-    save_lab(update)
-    headless_pro.engine.state.flat = True
-    headless_pro._sync_notebook_page(force=True)
-    text = " ".join(
-        str(getattr(ctrl, "value", "") or "")
-        for ctrl in _walk(headless_pro.col_notebook_cards)
-    )
-    assert "flush bounce" in text
-    assert "next=scan" not in text
-    assert "next=" not in text
-    assert "No setup cards yet" not in text
-    assert "≥6%" in text or "6%" in text
 
 
 def test_risk_settings_surface_hidden_metrics_stay_hidden(headless_pro, monkeypatch):

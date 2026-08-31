@@ -100,35 +100,6 @@ def test_bare_quote_empty_book_still_has_spy(monkeypatch):
     assert fb == ["SPY"]
 
 
-def test_bare_quote_empty_tape_does_not_invent_spy_on_a_live_card(monkeypatch):
-    from abcxauto.lab_playbook import clamp_update, save_lab
-
-    monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda: {})
-    update = clamp_update(
-        {
-            "instructions": "Skip SPY same-session scrape.",
-            "types": {
-                "market_bracket": {
-                    "gotchas": "do not re-ticket SPY the same session",
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ],
-                }
-            },
-        }
-    )
-    assert update is not None
-    save_lab(update)
-    fb = fallback_quote_symbols(_world(positions=[]), {})
-    assert fb == []
-    name, args = normalize_tool_call("quote", {}, fallback_symbols=fb)
-    assert args.get("symbols") in (None, "", [])
-    assert args.get("symbol") in (None, "")
-
 
 def test_send_hoists_flat_fields():
     out = hoist_send_params(

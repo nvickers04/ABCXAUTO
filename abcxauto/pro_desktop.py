@@ -313,14 +313,9 @@ def think_tail_last_say(buf: str) -> str:
 
 
 def last_card_send_label(rows: list[dict[str, Any]] | None = None) -> str:
-    """Last real card_sends.jsonl row. Does not invent a card."""
+    """Last named send row when the caller already has it. Persist is gone."""
     if rows is None:
-        try:
-            from abcxauto.lab_playbook import _card_sends
-
-            rows = _card_sends(limit=40)
-        except Exception:
-            return ""
+        return ""
     if not rows:
         return ""
     row = rows[-1] if isinstance(rows[-1], dict) else {}
@@ -1916,19 +1911,8 @@ class ProTerminal:
         self._safe_update()
 
     def _lab_notebook(self) -> tuple[str, str]:
-        """Current lab notebook. Read-only. Notebook, not law."""
-        try:
-            from abcxauto.lab_playbook import load_lab
-
-            pb = load_lab()
-        except Exception:
-            return "Lab notebook — unreadable", "(could not load playbook_lab.json)"
-        pb = pb if isinstance(pb, dict) else {}
-        inst = str(pb.get("instructions") or "").strip()
-        rev = pb.get("revision") if pb.get("revision") not in (None, "") else "—"
-        mode = str(pb.get("mode") or "explore").strip() or "explore"
-        head = f"rev={rev} mode={mode} — notebook, not law"
-        return head, inst or "(empty)"
+        """Empty notebook surface. Persist is gone."""
+        return "Lab notebook", "(empty)"
 
     def _open_disconnect_confirm_dialog(self) -> None:
         s = self.engine.state
@@ -2728,154 +2712,31 @@ class ProTerminal:
     # ------------------------------------------------------------- notebook
 
     def _sync_notebook_page(self, *, force: bool = False) -> None:
-        """Setup cards are the book. Fall back to the TYPE tree / prose."""
-        try:
-            from abcxauto.lab_playbook import (
-                load_lab,
-                notebook_text,
-                playbook_age_hours,
-                unknown_card_tickets,
-            )
-        except Exception:
-            return
-        try:
-            lab = load_lab()
-        except Exception:
-            lab = {}
-        lab = lab if isinstance(lab, dict) else {}
-        cards = self._notebook_setup_cards(lab)
-        body = ""
-        try:
-            body = notebook_text(lab) or ""
-        except Exception:
-            body = self._lab_notebook()[1]
-        key = json.dumps([lab.get("revision"), lab.get("written_at"), len(body)], default=str)
-        if not force and key == self._notebook_key:
-            return
-        self._notebook_key = key
-        rev = lab.get("revision") if lab.get("revision") not in (None, "") else "—"
-        mode = str(lab.get("mode") or "explore").strip() or "explore"
-        if lab.get("promoted"):
-            state, state_color = "promoted", GREEN
-        elif lab.get("ready_to_promote"):
-            state, state_color = "ready to promote", AMBER
-        else:
-            state, state_color = "lab", MUTED
-        self.lbl_notebook_head.value = f"rev {rev} · {mode} · {state}"
-        self.lbl_notebook_head.color = state_color
-        try:
-            age = playbook_age_hours(lab)
-        except Exception:
-            age = None
-        age_s = f"{age:.1f}h old" if isinstance(age, (int, float)) else "age —"
-        try:
-            unsendable = unknown_card_tickets(cards)
-        except Exception:
-            unsendable = []
-        self.lbl_notebook_meta.value = (
-            f"{age_s} · {len(cards)} setup card(s) · {len(body):,} chars · playbook, not law"
-            + (f" · UNSENDABLE ticket: {', '.join(unsendable)}" if unsendable else "")
-        )
-        self.lbl_notebook_meta.color = RED if unsendable else MUTED
-        lots = [str(x) for x in (lab.get("lots_at_write") or [])][:8]
-        self.lbl_notebook_lots.value = (
-            f"lots at write: {', '.join(lots)}" if lots else "lots at write: none"
-        )
-        try:
-            from abcxauto.lab_playbook import card_facts
-
-            attrib = {
-                str(r.get("card") or "").lower(): r
-                for r in (card_facts(lab) or [])
-                if isinstance(r, dict)
-            }
-        except Exception:
-            attrib = {}
-        if cards:
-            self.col_notebook_cards.controls = [
-                self._notebook_card(c, attrib) for c in cards
-            ]
-            self.notebook_raw_panel.visible = False
-            self.lbl_notebook_body.value = ""
-        else:
-            self.col_notebook_cards.controls = [
-                ft.Text(
-                    "No setup cards yet — Grok writes them with write_lab_playbook.",
-                    size=12,
-                    color=MUTED,
-                )
-            ]
-            self.lbl_notebook_body.value = body or "(empty)"
-            self.notebook_raw_panel.visible = True
-        self._sync_notebook_types(lab)
+        """Empty notebook surface. Persist is gone."""
+        _ = force
+        self.lbl_notebook_head.value = "—"
+        self.lbl_notebook_head.color = MUTED
+        self.lbl_notebook_meta.value = "—"
+        self.lbl_notebook_meta.color = MUTED
+        self.lbl_notebook_lots.value = "lots at write: none"
+        self.col_notebook_cards.controls = [
+            ft.Text("No setup cards yet.", size=12, color=MUTED)
+        ]
+        self.lbl_notebook_body.value = "(empty)"
+        self.notebook_raw_panel.visible = True
+        self._sync_notebook_types({})
         self.lbl_nb_playbook.value = self.lbl_playbook.value
         self.lbl_nb_playbook.color = self.lbl_playbook.color
         self.lbl_nb_playbook.tooltip = self.lbl_playbook.tooltip
 
     def _notebook_setup_cards(self, lab: dict) -> list[dict]:
-        """Nested type cards first. A leftover flat list is the fallback."""
-        out: list[dict] = []
-        try:
-            from abcxauto.lab_playbook import walk_cards
-
-            for type_name, card in walk_cards(lab):
-                if not isinstance(card, dict) or not card.get("name"):
-                    continue
-                row = dict(card)
-                if type_name and not row.get("ticket"):
-                    row["ticket"] = type_name
-                out.append(row)
-        except Exception:
-            out = []
-        if out:
-            return out
-        return [c for c in (lab.get("cards") or []) if isinstance(c, dict) and c.get("name")]
+        _ = lab
+        return []
 
     def _sync_notebook_types(self, lab: dict) -> None:
-        """Every sendable trunk, filled or not. A gap here is Grok's to write."""
-        try:
-            from abcxauto.lab_playbook import type_coverage
-
-            rows = type_coverage(lab) or []
-        except Exception:
-            rows = []
-        if not rows:
-            self.lbl_notebook_types.value = "order types unavailable"
-            self.col_notebook_types.controls = []
-            return
-        filled = [r for r in rows if r.get("touched")]
-        self.lbl_notebook_types.value = (
-            f"{len(filled)}/{len(rows)} sendable types touched · "
-            "a trunk appears once Grok learns something under it"
-        )
-        out: list[ft.Control] = [
-            self._head_row([("order type", None), ("cards", 52), ("learned", 190)])
-        ]
-        for row in rows:
-            learned = ", ".join(str(x) for x in (row.get("learned") or []))
-            touched = bool(row.get("touched"))
-            n_cards = int(row.get("cards") or 0)
-            out.append(
-                self._blotter_row([
-                    self._cell(
-                        str(row.get("type") or "?"),
-                        expand=True,
-                        color=TEXT if touched else MUTED,
-                    ),
-                    self._cell(
-                        str(n_cards) if n_cards else "—",
-                        width=52,
-                        right=True,
-                        color=TEXT if n_cards else MUTED,
-                    ),
-                    self._cell(
-                        learned or ("—" if touched else "untouched"),
-                        width=190,
-                        color=MUTED,
-                    ),
-                ])
-            )
-        self.col_notebook_types.controls = out
+        _ = lab
+        self.lbl_notebook_types.value = ""
+        self.col_notebook_types.controls = []
 
     def _notebook_card(self, card: dict, attrib: dict | None = None) -> ft.Control:
         status = str(card.get("status") or "testing").strip().lower()
@@ -3086,168 +2947,20 @@ class ProTerminal:
         return pnl_f / (n * risk_f)
 
     def _sync_sc_cards(self, sc: dict | None = None) -> None:
-        try:
-            from abcxauto.lab_playbook import (
-                attach_card_honesty,
-                card_scores,
-                load_lab,
-                walk_cards,
+        _ = sc
+        self.col_sc_cards.controls = [
+            ft.Text(
+                "No card-attributed sends yet. A send records the card that called it.",
+                size=12,
+                color=MUTED,
             )
-
-            lab = load_lab()
-            cards: list[dict] = []
-            for type_name, card in walk_cards(lab):
-                if not isinstance(card, dict) or not card.get("name"):
-                    continue
-                row = dict(card)
-                row["type"] = type_name
-                if type_name:
-                    row.setdefault("ticket", type_name)
-                cards.append(row)
-            if not cards:
-                cards = [c for c in (lab.get("cards") or []) if isinstance(c, dict)]
-            scores = card_scores(cards) or []
-            sess = (sc or {}).get("session") if isinstance(sc, dict) else None
-            model_cost = None
-            if isinstance(sess, dict) and sess.get("model_cost_usd") is not None:
-                model_cost = sess.get("model_cost_usd")
-            elif isinstance(sc, dict):
-                model_cost = sc.get("model_cost_usd")
-            try:
-                scores = attach_card_honesty(scores, model_cost=model_cost) or scores
-            except Exception:
-                pass
-        except Exception:
-            scores = []
-        if not scores:
-            self.col_sc_cards.controls = [
-                ft.Text(
-                    "No card-attributed sends yet. A send records the card that called it.",
-                    size=12,
-                    color=MUTED,
-                )
-            ]
-            return
-        has_hit = False
-        for row in scores:
-            cal = row.get("calibration") if isinstance(row.get("calibration"), dict) else {}
-            if isinstance(cal.get("hit_rate"), (int, float)):
-                has_hit = True
-                break
-        head = [("card", None), ("n", 40), ("win", 40)]
-        if has_hit:
-            head.append(("hit", 84))
-        head.extend([("avg R", 64), ("cost-alloc", 88)])
-        rows: list[ft.Control] = [self._head_row(head)]
-        if not has_hit:
-            rows.insert(0, ft.Text("hit: none", size=11, color=MUTED))
-        for row in scores[:20]:
-            n = int(row.get("resolved") or 0)
-            wins = int(row.get("resolved_wins") or 0)
-            avg_r = self._card_avg_r(row)
-            honesty = row.get("honesty") if isinstance(row.get("honesty"), dict) else {}
-            cost_pnl = honesty.get("cost_allocated_pnl")
-            cal = row.get("calibration") if isinstance(row.get("calibration"), dict) else {}
-            hit = cal.get("hit_rate")
-            gap = cal.get("hit_rate_gap")
-            if not isinstance(hit, (int, float)):
-                hit_text, hit_color = "—", MUTED
-            elif isinstance(gap, (int, float)):
-                hit_text = f"{hit:g}% {gap:+g}"
-                hit_color = GREEN if gap >= 0 else RED
-            else:
-                hit_text, hit_color = f"{hit:g}%", MUTED
-            if isinstance(cost_pnl, (int, float)):
-                cost_text = f"${cost_pnl:+,.2f}"
-                cost_color = GREEN if cost_pnl > 0 else RED if cost_pnl else MUTED
-            else:
-                cost_text, cost_color = "—", MUTED
-            name = str(row.get("card") or "?")
-            on_book = row.get("on_current_book")
-            cells = [
-                self._cell(
-                    name if on_book is not False else f"{name} (retired)",
-                    expand=True,
-                    color=TEXT if on_book is not False else MUTED,
-                ),
-                self._cell(str(n), width=40, right=True),
-                self._cell(str(wins), width=40, right=True, color=MUTED),
-            ]
-            if has_hit:
-                cells.append(self._cell(hit_text, width=84, right=True, color=hit_color))
-            cells.extend(
-                [
-                    self._cell(
-                        f"{avg_r:.2f}R" if isinstance(avg_r, (int, float)) else "—",
-                        width=64,
-                        right=True,
-                        color=MUTED,
-                    ),
-                    self._cell(
-                        cost_text,
-                        width=88,
-                        right=True,
-                        color=cost_color,
-                        weight=ft.FontWeight.W_600,
-                    ),
-                ]
-            )
-            rows.append(self._blotter_row(cells))
-        self.col_sc_cards.controls = rows
+        ]
 
     def _sync_sc_ledger(self, sc: dict) -> None:
-        try:
-            from abcxauto.lab_playbook import playbook_facts
-
-            facts = playbook_facts(sc) or {}
-            ledger = [r for r in (facts.get("ledger") or []) if isinstance(r, dict)]
-        except Exception:
-            ledger = []
-        if not ledger:
-            self.col_sc_ledger.controls = [
-                ft.Text("No notebook revisions yet.", size=12, color=MUTED)
-            ]
-            return
-        rows: list[ft.Control] = [
-            self._head_row([("rev", 46), ("mode", 70), ("at write", 88), ("closed", 88), ("", None)])
+        _ = sc
+        self.col_sc_ledger.controls = [
+            ft.Text("No notebook revisions yet.", size=12, color=MUTED)
         ]
-        for row in reversed(ledger[-8:]):
-            at_edge = row.get("edge_usd")
-            closed = row.get("closed_edge")
-            beat = row.get("closed_beating")
-            if beat is None:
-                beat = row.get("beating_model")
-            if beat is True:
-                tag, color = "beat", GREEN
-            elif beat is False:
-                tag, color = "behind", AMBER
-            else:
-                tag, color = "open", MUTED
-            rows.append(
-                self._blotter_row([
-                    self._cell(
-                        f"r{row.get('revision')}", width=46, mono=True,
-                        weight=ft.FontWeight.W_600,
-                    ),
-                    self._cell(str(row.get("mode") or "—"), width=70, color=MUTED),
-                    self._cell(
-                        f"${at_edge:+,.2f}" if isinstance(at_edge, (int, float)) else "—",
-                        width=88,
-                        right=True,
-                        color=MUTED,
-                    ),
-                    self._cell(
-                        f"${closed:+,.2f}" if isinstance(closed, (int, float)) else "—",
-                        width=88,
-                        right=True,
-                        color=color,
-                    ),
-                    self._cell(tag, expand=True, color=color, right=True),
-                ])
-            )
-        self.col_sc_ledger.controls = rows
-
-    # ----------------------------------------------------------------- risk
 
     def _risk_settings_lines(self) -> list[str]:
         """Persisted knobs from get_config / risk_settings.json. Display only."""
@@ -4237,31 +3950,9 @@ class ProTerminal:
         self._sync_health_strip()
         self._sync_lessons_line()
         self._sync_tabs()
-        try:
-            from abcxauto.lab_playbook import is_paper, load_lab
-
-            pb = load_lab()
-            pb = pb if isinstance(pb, dict) else {}
-            inst = str(pb.get("instructions") or "").strip()
-            if pb.get("promoted"):
-                tag = "promoted"
-            elif pb.get("ready_to_promote"):
-                tag = "ready"
-            else:
-                tag = "paper TWS" if is_paper() else "live TWS"
-            rev = pb.get("revision") or pb.get("promoted_revision") or "—"
-            score = pb.get("paper_score") if isinstance(pb.get("paper_score"), dict) else {}
-            edge = score.get("edge_usd")
-            edge_s = f"{edge:,.2f}" if isinstance(edge, (int, float)) else edge
-            line = (
-                f"Playbook [{tag}] rev={rev} edge={edge_s}"
-                if inst else f"Playbook [{tag}]: none"
-            )
-            self.lbl_playbook.value = line
-            self.lbl_playbook.tooltip = str(pb.get("instructions") or "")[:600] or None
-            self.lbl_playbook.color = TEXT if inst else MUTED
-        except Exception:
-            self.lbl_playbook.value = "Playbook: —"
+        self.lbl_playbook.value = "Playbook: —"
+        self.lbl_playbook.tooltip = None
+        self.lbl_playbook.color = MUTED
         self.page.title = "ABCXAUTO"
         self.lbl_working_orders.value = self._format_working_orders(
             s.open_orders or [], positions=getattr(s, "positions", None)

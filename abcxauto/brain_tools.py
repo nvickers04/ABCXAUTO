@@ -150,10 +150,16 @@ _SCAN_LOOK_SNAP_KEYS = (
 )
 
 
-def _record_scan_screen(snap: dict[str, Any], arena: str, scan_code: str) -> None:
-    from abcxauto.lab_playbook import scan_screen_key
+def _scan_screen_key(arena: str = "", scan_code: str = "") -> str:
+    name = str(arena or "").strip()
+    code = str(scan_code or "").strip()
+    if name and code:
+        return f"{name}:{code}"
+    return name or code
 
-    key = scan_screen_key(arena, scan_code)
+
+def _record_scan_screen(snap: dict[str, Any], arena: str, scan_code: str) -> None:
+    key = _scan_screen_key(arena, scan_code)
     if not key:
         return
     seen_screens = [str(x) for x in (snap.get("scan_screens") or [])]
@@ -312,14 +318,13 @@ def _union_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
 
 def _scan_screen_on_look(snap: dict[str, Any], arena: str, code: str) -> bool:
     """True when this selector is already on the look tape (or the flush ran)."""
-    from abcxauto.lab_playbook import scan_screen_key
     from abcxauto.universe import is_flush_default_screen
 
     if not arena and not code:
         return bool(snap.get("scan_flush"))
     if snap.get("scan_flush") and is_flush_default_screen(arena, code):
         return True
-    key = scan_screen_key(arena, code)
+    key = _scan_screen_key(arena, code)
     used = [str(x) for x in (snap.get("scan_screens") or [])]
     return bool(key and key in used)
 
@@ -518,13 +523,6 @@ def _scan_gap_pct(snap: dict[str, Any] | None, symbol: str) -> Any:
 
 def _candle_res_from_tape(snap: dict[str, Any] | None) -> str:
     """Daily bars cannot answer an opening-low hold on a gap screen."""
-    try:
-        from abcxauto.lab_playbook import live_card_needs_session
-
-        if live_card_needs_session():
-            return "5"
-    except Exception:
-        pass
     hits = snap.get("scan_hits") if isinstance(snap, dict) else None
     if not isinstance(hits, dict):
         return "D"
@@ -550,47 +548,6 @@ def _stamp_session_size(session: dict[str, Any], world: WorldState) -> None:
         sized = {}
     if sized:
         session["size"] = sized
-    try:
-        from types import SimpleNamespace
-
-        from abcxauto.lab_playbook import live_card_send_facts
-
-        facts = live_card_send_facts()
-    except Exception:
-        facts = {}
-    if not facts:
-        return
-    try:
-        from abcxauto.protect import size_if_stop
-
-        risk = facts.get("risk_pct")
-        if risk is None:
-            card_sized = {}
-        else:
-            card_sized = size_if_stop(
-                last=session.get("last"),
-                stop=session.get("low"),
-                equity=getattr(world, "net_liquidation", None),
-                cfg=SimpleNamespace(
-                    max_risk_per_trade_pct=risk,
-                    max_position_pct=(
-                        facts.get("notional_pct")
-                        if facts.get("notional_pct") is not None
-                        else 100.0
-                    ),
-                ),
-            )
-    except Exception:
-        card_sized = {}
-    if facts.get("risk_pct") is not None or facts.get("notional_pct") is not None:
-        session.setdefault("size", {})
-        if facts.get("risk_pct") is not None:
-            session["size"]["card_risk_pct"] = facts["risk_pct"]
-        if facts.get("notional_pct") is not None:
-            session["size"]["card_notional_pct"] = facts["notional_pct"]
-    if card_sized:
-        session.setdefault("size", {})
-        session["size"]["card_qty"] = card_sized["qty"]
 
 
 def _stamp_session_ticket(session: dict[str, Any]) -> None:
@@ -775,10 +732,34 @@ def _apply_candle_session(
     )
 
 
-def _note_scan_news(turn: BrainTurn, payload: dict[str, Any]) -> None:
-    """Headlines already on the screen are the card's news step."""
-    from abcxauto.lab_playbook import _scan_carries_news
+def _scan_carries_news(raw: Any) -> bool:
+    """True when a scan already nested MDA headlines on the same hits."""
+    if raw is True:
+        return True
+    if isinstance(raw, list):
+        return any(
+            isinstance(item, dict)
+            and (item.get("headline") or item.get("title") or item.get("summary"))
+            for item in raw
+        )
+    if not isinstance(raw, dict):
+        return False
+    items = raw.get("news")
+    if isinstance(items, list) and items:
+        return True
+    for row in list(raw.get("hits") or []) + list(raw.get("rows") or []):
+        if not isinstance(row, dict):
+            continue
+        if row.get("news"):
+            return True
+        mda = row.get("mda")
+        if isinstance(mda, dict) and mda.get("news"):
+            return True
+    return False
 
+
+def _note_scan_news(turn: BrainTurn, payload: dict[str, Any]) -> None:
+    """Headlines already on the screen are this look's news step."""
     if not _scan_carries_news(payload):
         return
     if "news" not in turn.tool_trace:
@@ -808,131 +789,6 @@ def _attach_scan_run(
 
 def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required}
-
-
-# The branches under one order type. A card's parent key is its ticket, so it
-# carries no ticket of its own — see lab_playbook for why identity is
-# (type, name).
-_CARD_BRANCH_SCHEMA = {
-    "type": "array",
-    "description": (
-        "Hypotheses under this order type. A named write changes that card "
-        "and keeps siblings; omit the key to keep the list. Do not rewrite a "
-        "name to record a look. cards=[] clears this type. status=retired "
-        "drops it from the hunt. A card that earns its sample belongs "
-        "promoted into this type's gotchas / review / tool_order — same "
-        "stanza, move it up."
-    ),
-    "items": {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "The setup, e.g. 'gap fade after 10:00'",
-            },
-            "thesis": {
-                "type": "string",
-                "description": "What you claim will happen, and why.",
-            },
-            "evidence": {
-                "type": "object",
-                "description": "Grounds for this card, not a look diary.",
-                "properties": {
-                    "scan": {
-                        "type": "string",
-                        "description": "arena / scan_code + filters that surfaced it.",
-                    },
-                    "news": {
-                        "type": "string",
-                        "description": "Headlines behind the thesis.",
-                    },
-                    "reads": {
-                        "type": "string",
-                        "description": "quote / candles / option_quote reads you took.",
-                    },
-                    "odds": {
-                        "type": "string",
-                        "description": "Prediction-market implied probs, where relevant.",
-                    },
-                },
-            },
-            "expect_hit_rate": {
-                "type": "number",
-                "description": (
-                    "Win rate you expect, percent. Scored against what the card "
-                    "actually hit; never gates graduation."
-                ),
-            },
-            "fill_assumption": {
-                "type": "string",
-                "description": (
-                    "How fills are assumed. paper_mid is stored and cannot "
-                    "graduate. Graduation needs full_spread or conservative "
-                    "and a conservative_pnl mark, not paper TWS realized."
-                ),
-            },
-            "retire_if": {
-                "type": "object",
-                "description": (
-                    "How this card dies. The clerk enforces exactly what you "
-                    "declare and invents nothing."
-                ),
-                "properties": {
-                    "sample": {
-                        "type": "integer",
-                        "description": (
-                            "Resolved trades that settle the question. Operator "
-                            "flattens and halt exits do not count toward it."
-                        ),
-                    },
-                    "condition": {
-                        "type": "string",
-                        "description": "What would falsify the thesis.",
-                    },
-                    "max_loss_usd": {
-                        "type": "number",
-                        "description": "Resolved loss that kills it early.",
-                    },
-                    "max_losses": {
-                        "type": "integer",
-                        "description": "Losing resolved trades that kill it early.",
-                    },
-                    "max_hold_sessions": {
-                        "type": "integer",
-                        "description": (
-                            "Weekday ET dates the ticket may stay open. "
-                            "Past that, code flattens the lot and trips the card."
-                        ),
-                    },
-                    "max_hold_hours": {
-                        "type": "number",
-                        "description": "Wall-clock hours the ticket may stay open.",
-                    },
-                },
-                "required": ["sample", "condition"],
-            },
-            "when_on": {
-                "type": "string",
-                "description": "Conditions that turn this card on.",
-            },
-            "scan": {
-                "type": "string",
-                "description": "Screen that finds it (arena + filters).",
-            },
-            "shape": {"type": "string"},
-            "invalidation": {"type": "string"},
-            "status": {
-                "type": "string",
-                "description": (
-                    "testing | working | retired. Graduation to live is the "
-                    "clerk's verdict from resolved trades."
-                ),
-            },
-            "note": {"type": "string"},
-        },
-        "required": ["name", "thesis", "retire_if"],
-    },
-}
 
 
 def _send_tool(strategy_names: list[str] | None = None) -> Any:
@@ -972,11 +828,9 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
                 "card": {
                     "type": "string",
                     "description": (
-                        "Playbook card this ticket comes from. Required on new "
-                        "risk (must name an existing lab card so the fill is "
-                        "scored); optional on exits, protection, modifies and "
-                        "cancels. Scorecard label, not law — card prose is not "
-                        "a send gate."
+                        "Play name for this ticket. Required on new risk; "
+                        "optional on exits, protection, modifies and cancels. "
+                        "Scorecard label, not a catalog."
                     ),
                 },
                 "rationale": {"type": "string"},
@@ -992,7 +846,7 @@ AGENT_TOOLS = [
         name="book",
         description=(
             "Live IBKR book: positions, working orders, protection, tape, "
-            "scorecard, desk lessons."
+            "scorecard."
         ),
         parameters=_schema({}, []),
     ),
@@ -1192,119 +1046,6 @@ AGENT_TOOLS = [
                 "custom_symbols": _SYMBOLS_SCHEMA,
                 "exclude_symbols": _SYMBOLS_SCHEMA,
                 "rationale": {"type": "string"},
-            },
-            [],
-        ),
-    ),
-    tool(
-        name="playbook",
-        description=(
-            "Your notes plus how they scored since the write. "
-            "revision= is an old card's outcome (edge, lots), not the old essay."
-        ),
-        parameters=_schema(
-            {
-                "revision": {"type": "integer"},
-                "full": {"type": "boolean"},
-            },
-            [],
-        ),
-    ),
-    tool(
-        name="write_lab_playbook",
-        description=(
-            "Paper only: your book, one tree. Keyed by order type — each type "
-            "holds what you learned executing it (durable) and the cards "
-            "branching under it (disposable, one hypothesis each). A card's "
-            "type is what it sends, so it needs no ticket of its own. "
-            "instructions is free notes. A named rewrite changes the card; "
-            "do not write to record that you looked. A revision is a card, "
-            "type, or mode change — a same-book rescan note is dropped, not "
-            "a new revision. Not a wake clock."
-        ),
-        parameters=_schema(
-            {
-                "types": {
-                    "type": "object",
-                    "description": (
-                        "Keyed by sendable strategy name. Only what you learned "
-                        "running that structure — the schema is already in ORDER "
-                        "EXAMPLES. Omitted types keep what you last wrote, cards "
-                        "included."
-                    ),
-                    "additionalProperties": {
-                        "type": "object",
-                        "properties": {
-                            "tool_order": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": (
-                                    "Tool sequence that actually works for this "
-                                    "structure, in order."
-                                ),
-                            },
-                            "gotchas": {
-                                "type": "string",
-                                "description": (
-                                    "Execution traps you hit: rejects, fill lag, "
-                                    "leg order, protection timing."
-                                ),
-                            },
-                            "review": {
-                                "type": "string",
-                                "description": (
-                                    "How you check the result after this structure "
-                                    "is on and after it comes off."
-                                ),
-                            },
-                            "note": {"type": "string"},
-                            "cards": _CARD_BRANCH_SCHEMA,
-                        },
-                    },
-                },
-                "instructions": {
-                    "type": "string",
-                    "description": "Free notes: regime, observations, what to watch.",
-                },
-                "mode": {
-                    "type": "string",
-                    "description": (
-                        "Size bit: explore or exploit — not a personality label"
-                    ),
-                },
-                "ready_to_promote": {"type": "boolean"},
-            },
-            [],
-        ),
-    ),
-    tool(
-        name="write_desk_lessons",
-        description=(
-            "Durable tool facts across looks. book() returns the shelf. "
-            "Not a playbook card, not law, not a wake job. A fact is a "
-            "tool mechanic you already hit — no tickers, no skip list."
-        ),
-        parameters=_schema(
-            {
-                "lessons": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string"},
-                            "fact": {
-                                "type": "string",
-                                "description": "Tool fact only. Not a card, not law.",
-                            },
-                        },
-                    },
-                    "description": "Upsert extras. The seed lesson stays.",
-                },
-                "fact": {
-                    "type": "string",
-                    "description": "Add or replace one tool fact.",
-                },
-                "id": {"type": "string"},
             },
             [],
         ),
@@ -1581,12 +1322,6 @@ async def _run_tool(
         except Exception:
             st["open_lots"] = []
             st["working_orders"] = []
-        try:
-            from abcxauto.desk_lessons import desk_lessons_payload
-
-            st["desk_lessons"] = desk_lessons_payload()
-        except Exception:
-            st["desk_lessons"] = []
         pulse = snap.get("reality_pulse") if isinstance(snap.get("reality_pulse"), dict) else {}
         if not pulse:
             pulse = getattr(world, "pulse", None) or {}
@@ -2253,19 +1988,6 @@ async def _run_tool(
         turn.last_strat = strat
         if _hub()._send_succeeded(result):
             try:
-                from abcxauto.lab_playbook import record_card_send
-
-                params = act.get("params") if isinstance(act.get("params"), dict) else {}
-                record_card_send(
-                    card=str(params.get("card") or args.get("card") or ""),
-                    strategy=strat,
-                    symbol=str(params.get("symbol") or ""),
-                    result=result,
-                    params=params,
-                )
-            except Exception:
-                logger.debug("card send log failed", exc_info=True)
-            try:
                 await _hub()._write_last_turn_after_send(
                     connector=connector,
                     world=world,
@@ -2298,42 +2020,6 @@ async def _run_tool(
         turn.last_result = result
         turn.last_strat = strat
         return _hub()._clip(result)
-    if name == "playbook":
-        from abcxauto.lab_playbook import playbook_payload
-
-        full = args.get("full")
-        if isinstance(full, str):
-            full = full.strip().lower() in ("1", "true", "yes", "on")
-        pos = getattr(world, "positions", None)
-        if pos is None:
-            pos = snap.get("positions") or []
-        orders = getattr(world, "open_orders", None)
-        if orders is None:
-            orders = snap.get("open_orders") or []
-        return _hub()._clip(
-            playbook_payload(
-                args.get("revision"),
-                full=bool(full),
-                positions=list(pos),
-                orders=list(orders),
-            ),
-            max_chars=_hub().PLAYBOOK_CLIP_CHARS,
-        )
-    if name == "write_lab_playbook":
-        from abcxauto.lab_playbook import apply_from_judgment, grounding_error
-
-        note = grounding_error(args, tool_trace=turn.tool_trace)
-        if note:
-            return _hub()._clip({"status": "rejected", "note": note})
-        args = dict(args)
-        judgment = {"lab_playbook": args}
-        state = apply_from_judgment(judgment)
-        turn.lab_playbook = state
-        return _hub()._clip(state or {"status": "ignored", "note": "live cannot rewrite lab"})
-    if name == "write_desk_lessons":
-        from abcxauto.desk_lessons import apply_desk_lessons
-
-        return _hub()._clip(apply_desk_lessons(args if isinstance(args, dict) else {}))
     return json.dumps({"error": f"unknown tool {name}"})
 
 
@@ -2383,7 +2069,6 @@ __all__ = [
     '_attach_run_sheet',
     '_attach_scan_run',
     '_schema',
-    '_CARD_BRANCH_SCHEMA',
     '_send_tool',
     'AGENT_TOOLS',
     '_send_strategy_names_for_look',

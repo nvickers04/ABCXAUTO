@@ -520,21 +520,8 @@ def _open_gap_mag(row: dict[str, Any] | None) -> float:
 
 
 def sort_scan_rows(rows: list[Any] | None) -> list[dict[str, Any]]:
-    """Biggest |gap| first. Playbook does not pick down vs up.
-
-    When skip cards are on the book, levered/micro names sort after the
-    rest so a lottery print is not the tape lead. Retrace stays Grok's.
-    """
+    """Biggest |gap| first. Levered / micro sort after so they are not the lead."""
     clean = [r for r in (rows or []) if isinstance(r, dict)]
-    skip_rank = False
-    try:
-        from abcxauto.lab_playbook import skip_cards_on_book
-
-        skip_rank = skip_cards_on_book()
-    except Exception:
-        skip_rank = False
-    if not skip_rank:
-        return sorted(clean, key=_open_gap_mag, reverse=True)
     try:
         from abcxauto.universe import scan_skip_class
     except Exception:

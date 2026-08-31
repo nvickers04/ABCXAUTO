@@ -796,25 +796,8 @@ def _lot_mtm_suffix(row: dict[str, Any], qty: float) -> str:
 
 
 def _lot_card_tag(ident: str, row: dict[str, Any]) -> str:
-    try:
-        from abcxauto.lab_playbook import load_lab
-
-        lab = load_lab()
-    except Exception:
-        return ""
-    pre = lab.get("lots_at_write") if isinstance(lab.get("lots_at_write"), list) else []
-    if not pre:
-        return ""
-    keys = {str(x) for x in pre if x}
-    con = str(row.get("conId") or row.get("con_id") or "")
-    if con and con in keys:
-        return " pre"
-    if ident in keys:
-        return " pre"
-    for s in keys:
-        if ident.startswith(s) or s.startswith(ident):
-            return " pre"
-    return " this"
+    _ = (ident, row)
+    return ""
 
 
 def _opt_exp_key(pos: dict[str, Any] | None) -> str:

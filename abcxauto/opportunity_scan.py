@@ -357,22 +357,6 @@ async def criteria_scan(
         scanner_rows=scanner_rows,
     )
     quoted = await attach_live_quotes(rows, connector=connector)
-    try:
-        from abcxauto.lab_playbook import drop_hits_off_card
-
-        rows, dropped = drop_hits_off_card(rows)
-        hits_syms = [str(r.get("symbol") or "") for r in rows if r.get("symbol")]
-        if dropped:
-            applied = dict(applied)
-            applied["dropped"] = dropped[:16]
-        quoted = sum(
-            1
-            for r in rows
-            if r.get("last") is not None
-            or (isinstance(r.get("ibkr"), dict) and r["ibkr"].get("last") is not None)
-        )
-    except Exception:
-        logger.debug("card hit drop failed", exc_info=True)
     ranked = bool(scanner_rows) and source == "ibkr"
     return {
         "ok": True,

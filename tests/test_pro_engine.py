@@ -42,7 +42,6 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_
     """Engine.start() drives >=3 looks with inventory+validation in records."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "0.05")
-    monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
     monkeypatch.setattr("abcxauto.park_clock.min_look_s", lambda: 0.05)
     monkeypatch.setattr("abcxauto.park_clock.default_look_s", lambda **_k: 0.05)
     monkeypatch.setattr("abcxauto.park_clock.pulse_sleep_s", lambda *_a, **_k: 0.05)
@@ -1216,69 +1215,6 @@ async def test_paper_premarket_stay_up_writes_no_sit_clock(monkeypatch, tmp_path
 
     assert load_alarm().wake_at is None
 
-
-@pytest.mark.asyncio
-async def test_premarket_session_cards_do_not_park_start_until_the_bell(
-    monkeypatch, tmp_path
-):
-    """Remaining-to-bell leftover + gap cards: Start still looks, no sit clock."""
-    from datetime import datetime, timedelta, timezone
-
-    from abcxauto.lab_playbook import clamp_update, save_lab
-    from abcxauto.park_clock import GrokAlarm, load_alarm, save_alarm
-
-    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
-    monkeypatch.setattr("abcxauto.park_clock.et_minutes_to_rth_open", lambda **_k: 32.0)
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "when_on": "hold above the opening low",
-                            "shape": "LONG STK. Stop under opening low.",
-                            "next_look_s": 1800,
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
-    bell = (datetime.now(timezone.utc) + timedelta(minutes=32)).isoformat()
-    save_alarm(GrokAlarm(wake_at=bell, set_at=bell))
-    calls = {"n": 0}
-
-    async def think(self, n, g, s, *, resume=False):
-        calls["n"] += 1
-        return {
-            "cycle": n,
-            "pnl": 0,
-            "equity": 100000,
-            "_failed": False,
-            "rationale": "premarket looking",
-        }
-
-    _wire_stay_up_engine(monkeypatch, session="premarket", think=think)
-    eng = ProEngine()
-    assert eng.start() is None
-    deadline = time.time() + 4
-    while time.time() < deadline and calls["n"] < 1:
-        eng.drain_apply()
-        await asyncio.sleep(0.05)
-    assert calls["n"] >= 1
-    deadline = time.time() + 1.5
-    while time.time() < deadline:
-        await asyncio.sleep(0.05)
-    eng.stop_engine()
-    eng.drain_apply()
-    assert load_alarm().wake_at is None
 
 
 @pytest.mark.asyncio

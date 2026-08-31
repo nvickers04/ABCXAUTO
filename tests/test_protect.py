@@ -189,9 +189,7 @@ async def test_execute_ticket_refuses_thin_idea(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     # A promoted naked entry becomes new risk; the card gate has its own suite.
-    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -253,8 +251,6 @@ def _stub_thin_send(monkeypatch) -> list[dict]:
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.new_risk_card_error", lambda *_a, **_k: "")
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -306,6 +302,7 @@ async def test_execute_ticket_refuses_omitted_qty_when_size_would_fit(monkeypatc
         "action": "market_bracket",
         "strategy": "market_bracket",
         "params": {
+            "card": "flush bounce",
             "symbol": "SPY",
             "direction": "LONG",
             "stop_price": 490.0,
@@ -338,14 +335,11 @@ async def test_execute_ticket_refuses_omitted_stop_even_with_session_low(monkeyp
     from abcxauto.agent_loop import execute_ticket
 
     sent = _stub_thin_send(monkeypatch)
-    monkeypatch.setattr(
-        "abcxauto.lab_playbook.apply_hunt_send_sketch",
-        lambda *_a, **_k: None,
-    )
     act = {
         "action": "market_bracket",
         "strategy": "market_bracket",
         "params": {
+            "card": "flush bounce",
             "symbol": "SNDK",
             "direction": "LONG",
             "quantity": 10,
@@ -489,26 +483,8 @@ def test_bot_alias_is_exit_side_for_a_short():
 @pytest.mark.asyncio
 async def test_execute_ticket_does_not_fill_omitted_fields_from_hunt_sketch(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -517,7 +493,6 @@ async def test_execute_ticket_does_not_fill_omitted_fields_from_hunt_sketch(monk
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -656,45 +631,6 @@ def test_size_if_stop_is_knob_math_not_a_ticket():
     assert size_if_stop(last=91.5, stop=91.5, equity=37000.0, cfg=cfg) == {}
 
 
-def _save_gap_card():
-    from abcxauto.lab_playbook import clamp_update, save_lab
-
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK. Stop under opening low.",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
-
-
-def test_gap_card_does_not_invent_a_percent_stop():
-    _save_gap_card()
-    act = {
-        "action": "market_bracket",
-        "strategy": "market_bracket",
-        "params": {"symbol": "SNDK", "direction": "LONG"},
-    }
-    filled = fill_missing_protection(
-        act,
-        quote_last=91.5,
-        equity=37000.0,
-        posture="balanced",
-        cfg=_cfg(),
-    )
-    assert filled == []
-    _assert_omitted(act["params"])
 
 
 @pytest.mark.asyncio
@@ -702,7 +638,6 @@ async def test_opening_market_bracket_needs_a_real_card_then_reaches_geometry(mo
     """No card / unknown card refuse at the label. A real name reaches geometry."""
     from abcxauto.agent_loop import execute_ticket
 
-    _save_gap_card()
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -711,7 +646,6 @@ async def test_opening_market_bracket_needs_a_real_card_then_reaches_geometry(mo
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -761,9 +695,9 @@ async def test_opening_market_bracket_needs_a_real_card_then_reaches_geometry(mo
         world,
         snap,
     )
-    assert unknown.get("status") == "blocked"
-    assert "not on the playbook" in str(unknown.get("note") or "")
-    assert sent == []
+    assert unknown.get("status") == "ok"
+    assert sent and sent[0]["params"]["card"] == "moon shot"
+    sent.clear()
 
     thin = await execute_ticket(
         {
@@ -817,7 +751,6 @@ async def test_close_and_cancel_without_card_still_send(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     world = _flat_world(
         net_liquidation=37000.0,
         flat=False,
@@ -892,7 +825,6 @@ async def test_execute_ticket_without_session_does_not_invent_a_candles_gate(mon
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.world_state import WorldState
 
-    _save_gap_card()
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -901,7 +833,6 @@ async def test_execute_ticket_without_session_does_not_invent_a_candles_gate(mon
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -974,7 +905,6 @@ async def test_session_card_send_before_open_print_is_refused(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.world_state import WorldState
 
-    _save_gap_card()
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -983,7 +913,6 @@ async def test_session_card_send_before_open_print_is_refused(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     world = WorldState(
         cycle=1,
         session_status="premarket",
@@ -1082,28 +1011,8 @@ async def test_session_card_send_before_open_print_is_refused(monkeypatch):
 @pytest.mark.asyncio
 async def test_non_session_card_may_send_in_premarket(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "generic STK market bracket",
-                            "thesis": "defined-risk stock structure",
-                            "when_on": "liquid large/mega name",
-                            "shape": "LONG STK market_bracket.",
-                            "retire_if": {"sample": 3, "condition": "no edge"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1112,7 +1021,6 @@ async def test_non_session_card_may_send_in_premarket(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     world = WorldState(
         cycle=1,
         session_status="premarket",
@@ -1166,7 +1074,6 @@ async def test_execute_ticket_does_not_invent_a_hold_above_open_gate(monkeypatch
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.world_state import WorldState
 
-    _save_gap_card()
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1175,7 +1082,6 @@ async def test_execute_ticket_does_not_invent_a_hold_above_open_gate(monkeypatch
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1240,28 +1146,8 @@ async def test_execute_ticket_does_not_invent_a_hold_above_open_gate(monkeypatch
 @pytest.mark.asyncio
 async def test_execute_ticket_does_not_invent_a_gap_floor_gate(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK. Stop under opening low.",
-                            "when_on": "mega/large ≥6% earnings-miss gap",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1270,7 +1156,6 @@ async def test_execute_ticket_does_not_invent_a_gap_floor_gate(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1335,28 +1220,8 @@ async def test_execute_ticket_does_not_invent_a_gap_floor_gate(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_ticket_does_not_invent_a_card_price_floor_gate(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK. Stop under opening low.",
-                            "scan": "most_active + top_losers; mega/large only; skip levered ETFs and sub-$15 names",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1365,7 +1230,6 @@ async def test_execute_ticket_does_not_invent_a_card_price_floor_gate(monkeypatc
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1428,29 +1292,8 @@ async def test_execute_ticket_does_not_invent_a_card_price_floor_gate(monkeypatc
 @pytest.mark.asyncio
 async def test_execute_ticket_does_not_invent_a_tight_spread_gate(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "review": "do not re-enter that name the same session",
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK. Stop under opening low.",
-                            "when_on": "tight live spread, hold above the opening low",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ],
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1459,7 +1302,6 @@ async def test_execute_ticket_does_not_invent_a_tight_spread_gate(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1524,7 +1366,6 @@ async def test_execute_ticket_does_not_apply_hunt_hold_to_manage(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.world_state import WorldState
 
-    _save_gap_card()
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1585,26 +1426,8 @@ async def test_execute_ticket_does_not_apply_hunt_hold_to_manage(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_ticket_uses_scan_hit_last_when_quote_map_misses(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1613,7 +1436,6 @@ async def test_execute_ticket_uses_scan_hit_last_when_quote_map_misses(monkeypat
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -1698,27 +1520,8 @@ async def test_execute_ticket_uses_scan_hit_last_when_quote_map_misses(monkeypat
 @pytest.mark.asyncio
 async def test_execute_ticket_does_not_invent_a_no_add_gate(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK. One name, no add.",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1727,7 +1530,6 @@ async def test_execute_ticket_does_not_invent_a_no_add_gate(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1790,26 +1592,8 @@ async def test_execute_ticket_does_not_invent_a_no_add_gate(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_ticket_blocks_new_risk_on_a_price_hint(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "bounce",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1818,7 +1602,6 @@ async def test_execute_ticket_blocks_new_risk_on_a_price_hint(monkeypatch):
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1874,27 +1657,8 @@ async def test_execute_ticket_blocks_new_risk_on_a_price_hint(monkeypatch):
 @pytest.mark.asyncio
 async def test_execute_ticket_blocks_when_one_share_blows_card_risk(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "bounce",
-                            "shape": "LONG STK. Qty so dollar risk ≤1% NL.",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1903,7 +1667,6 @@ async def test_execute_ticket_blocks_when_one_share_blows_card_risk(monkeypatch)
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -1966,27 +1729,8 @@ async def test_execute_ticket_blocks_when_one_share_blows_card_risk(monkeypatch)
 async def test_execute_ticket_size_pct_nl_is_not_a_card_one_pct_refuse(monkeypatch):
     """A card note of 1% is not a refuse. Grok's % of NL sizes the ticket."""
     from abcxauto.agent_loop import execute_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.world_state import WorldState
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "bounce",
-                            "shape": "LONG STK. Qty so dollar risk ≤1% NL.",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -1995,7 +1739,6 @@ async def test_execute_ticket_size_pct_nl_is_not_a_card_one_pct_refuse(monkeypat
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(

@@ -23,7 +23,6 @@ import pytest
 from abcxauto.agent_loop import execute_ticket
 from abcxauto.config import Config, get_config
 from abcxauto.executor import execute_proposal
-from abcxauto.lab_playbook import clamp_update, save_lab
 from abcxauto.memory import get_journal
 from abcxauto.proposals import params_for_journal, validate_proposal
 from abcxauto.tool_args import bind_send_card, hoist_send_params, normalize_tool_call
@@ -39,37 +38,6 @@ _BSX_PARAMS = {
 }
 
 
-@pytest.fixture(autouse=True)
-def _lab(tmp_path, monkeypatch):
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
-    monkeypatch.setenv("ABCXAUTO_CARD_LOG_PATH", str(tmp_path / "cards.jsonl"))
-    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    return tmp_path
-
-
-def _save_bsx_card() -> None:
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": BSX_CARD,
-                            "thesis": "large-cap holds a 3 percent gap",
-                            "retire_if": {
-                                "sample": 3,
-                                "condition": "gap fails to hold",
-                            },
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
 
 
 def _world() -> WorldState:
@@ -161,7 +129,6 @@ def _paper_no_risk_gates(monkeypatch) -> None:
     monkeypatch.setattr("abcxauto.send.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: cfg)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
 
 
 def test_hoist_copies_top_level_card_into_existing_params():
@@ -209,7 +176,6 @@ def test_validate_proposal_journals_card_off_the_wire():
 @pytest.mark.asyncio
 async def test_bsx_nameless_market_bracket_is_clerk_block():
     """Same ticket Noah filled, with no card: must not reach the broker."""
-    _save_bsx_card()
     gw = _BracketGw()
     result = await execute_ticket(_ticket(), gw, _world(), _snap())
     assert result.get("status") == "blocked"
@@ -232,7 +198,6 @@ async def test_bsx_nameless_market_bracket_is_clerk_block():
 @pytest.mark.asyncio
 async def test_bsx_named_market_bracket_journals_card(monkeypatch):
     """Same ticket with card= on the lab book: may send; journal keeps the name."""
-    _save_bsx_card()
     _paper_no_risk_gates(monkeypatch)
     gw = _BracketGw()
     result = await execute_ticket(
@@ -253,7 +218,6 @@ async def test_bsx_named_market_bracket_journals_card(monkeypatch):
 @pytest.mark.asyncio
 async def test_top_level_card_without_params_card_journals_name(monkeypatch):
     """Grok put card next to strategy, not inside params. Still a named send."""
-    _save_bsx_card()
     _paper_no_risk_gates(monkeypatch)
     gw = _BracketGw()
     result = await execute_ticket(

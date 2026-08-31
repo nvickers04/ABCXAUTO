@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 from abcxauto.config import Config, get_config
-from abcxauto.lab_playbook import clamp_update, new_risk_card_error, save_lab
 from abcxauto.mode_size import (
     MODE_SIZE_CEILING_EXPLORE,
     MODE_SIZE_FLOOR,
@@ -33,37 +32,6 @@ from abcxauto.send import apply_size_pct_nl, qty_from_size_pct_nl
 from abcxauto.world_state import WorldState
 
 
-@pytest.fixture(autouse=True)
-def _lab_and_paper(tmp_path, monkeypatch):
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
-    monkeypatch.setenv("ABCXAUTO_CARD_LOG_PATH", str(tmp_path / "cards.jsonl"))
-    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    return tmp_path
-
-
-def _save_card(*, mode: str = "explore", name: str = "learn flush") -> str:
-    update = clamp_update(
-        {
-            "mode": mode,
-            "instructions": "mode-bit size test",
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": name,
-                            "thesis": "learning card",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            },
-        }
-    )
-    assert update is not None
-    save_lab(update)
-    return name
 
 
 def _paper_cfg(**overrides) -> Config:
@@ -137,7 +105,7 @@ def _floor_cfg(*, live: bool, max_risk: float = 1.0) -> SimpleNamespace:
 
 def test_explore_clamps_12pct_learning_card_send_when_paper_gates_off():
     """A learning card cannot send a live-intolerable % of NL — even gates-off."""
-    card = _save_card(mode="explore")
+    card = "learn flush"
     params = {"card": card, "symbol": "AAPL", "size_pct_nl": 12.0}
     note = apply_size_pct_nl(
         params, net_liq=100_000.0, price=50.0, strategy="market_bracket"
@@ -174,14 +142,13 @@ def test_explore_clamps_lottery_qty_without_size_pct_nl():
 async def test_execute_ticket_explore_clamps_12pct_when_paper_gates_off(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
 
-    card = _save_card(mode="explore")
+    card = "learn flush"
     cfg = _paper_cfg()
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.send.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-    monkeypatch.setattr("abcxauto.lab_playbook.live_new_risk_allowed", lambda: True)
 
     sent: list[dict] = []
 
@@ -230,7 +197,7 @@ async def test_execute_ticket_explore_clamps_12pct_when_paper_gates_off(monkeypa
 
 
 def test_exploit_without_graduated_cards_does_not_widen():
-    card = _save_card(mode="exploit", name="still learning")
+    card = "still learning"
     assert mode_size_ceiling() == MODE_SIZE_CEILING_EXPLORE
     assert mode_size_ceiling(card=card, type="market_bracket") == MODE_SIZE_CEILING_EXPLORE
     assert working_size_ceiling() == MODE_SIZE_CEILING_EXPLORE
@@ -248,17 +215,9 @@ def test_exploit_without_graduated_cards_does_not_widen():
     assert out["clamped"]["size_pct_nl"]["raw"] == 12.0
 
 
-def test_exploit_learning_card_does_not_open_risk():
-    card = _save_card(mode="exploit", name="lottery")
-    note = new_risk_card_error(card, type="market_bracket")
-    assert "graduated" in note
-    assert "learning" in note
-    assert exploit_learning_card_error(card, type="market_bracket") == note
-
 
 def test_exploit_with_graduated_cards_opens_walkaway_not_working_size(monkeypatch):
     """Exploit + graduated opens the walk-away ceiling. Working default stays single-digit."""
-    _save_card(mode="exploit")
     monkeypatch.setattr("abcxauto.mode_size.graduated_names", lambda book=None: ["grad"])
     monkeypatch.setattr(
         "abcxauto.mode_size.card_is_graduated",
@@ -273,7 +232,6 @@ def test_exploit_with_graduated_cards_opens_walkaway_not_working_size(monkeypatc
 
 
 def test_self_tune_may_move_inside_the_band_not_only_down():
-    _save_card(mode="explore")
     first = apply_self_tune({"size_pct_nl": 3.0}, persist=True)
     assert first["applied"]["size_pct_nl"] == 3.0
     second = apply_self_tune({"size_pct_nl": 6.0}, persist=True)

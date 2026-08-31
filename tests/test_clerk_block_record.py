@@ -109,7 +109,7 @@ def test_last_turn_send_calls_excludes_self_tune():
     ts.write_last_turn({
         "strat": "self_tune",
         "sends": 1,
-        "tool_trace": ["book", "scan", "write_lab_playbook", "self_tune"],
+        "tool_trace": ["book", "scan", "self_tune"],
         "world_state": {"flat": True, "net_liquidation": 35310.1},
     })
     payload = json.loads(ts.LAST_TURN_PATH.read_text(encoding="utf-8"))

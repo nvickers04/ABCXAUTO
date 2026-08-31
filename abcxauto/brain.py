@@ -7,7 +7,7 @@ Chat kept. Do not call the model again because it spoke. Next call is
 fill / order_change / unprotected / operator poke, with the full chat
 plus a fresh snap. A poke does not start a new messages list. Overnight
 / after-close / park drop the chat. Session cap idles; chat is kept.
-Durable notes across days are the lab playbook file. Tickets go through
+Durable notes across days are gone. Tickets go through
 ``execute_ticket`` → ``send_action``. IBKR tools are live. scan() is one
 tape this look (merged hits + on_book); candles are IBKR hist or the
 live 5s stream (error if both miss); news is ~15 min delayed.
@@ -47,9 +47,7 @@ from abcxauto.brain_tools import *  # noqa: F401,F403
 
 logger = logging.getLogger(__name__)
 
-_MUTATING_TOOLS = frozenset(
-    {"send", "self_tune", "write_lab_playbook", "write_desk_lessons"}
-)
+_MUTATING_TOOLS = frozenset({"send", "self_tune"})
 STREAM_CHUNK_S = 8.0
 STREAM_IDLE_LIMIT = 6
 STREAM_LOOP_UNIT = 12
@@ -78,7 +76,6 @@ class BrainTurn:
     last_result: dict[str, Any] = field(default_factory=dict)
     last_strat: str = ""
     tool_trace: list[str] = field(default_factory=list)
-    lab_playbook: dict[str, Any] | None = None
     tool_budget_hit: bool = False
     parked: bool = False
     interrupted: bool = False
@@ -225,7 +222,6 @@ async def _write_last_turn_after_send(
     )
 
 
-PLAYBOOK_CLIP_CHARS = 48_000
 # Compact 4×80 OHLC bars plus session still fit; the old 24k clip dropped
 # the series to save the run sheet and Grok sized off a metadata stub.
 CANDLES_CLIP_CHARS = 48_000
@@ -415,7 +411,6 @@ _LIVE_BOOK_ROOTS = frozenset(
 _LIVE_BOOK_KEEP = (
     "day",
     "world",
-    "desk_lessons",
     "open_lots",
     "working_orders",
     "positions",
@@ -474,35 +469,15 @@ def _is_live_book(data: dict[str, Any]) -> bool:
     """book() / status shaped payloads — never payload-clip away the book."""
     if any(key in data for key in _LIVE_BOOK_ROOTS):
         return True
-    if "desk_lessons" in data and any(
-        key in data
-        for key in (
-            "ibkr_connected",
-            "trading_mode",
-            "session",
-            "levers",
-            "sends_this_turn",
-            "path",
-            "score_windows",
-        )
-    ):
-        return True
     return False
 
 
 def _keep_live_book(data: dict[str, Any]) -> dict[str, Any]:
-    """Emergency book core. Lots, orders, and desk_lessons stay; fat look does not."""
+    """Emergency book core. Lots, orders, and fills stay; fat look does not."""
     out: dict[str, Any] = {}
     for key in _LIVE_BOOK_KEEP:
         if key in data:
             out[key] = data[key]
-    playbook = data.get("playbook")
-    if isinstance(playbook, dict):
-        kept_pb = {k: playbook[k] for k in ("lab", "cards", "mode") if k in playbook}
-        if playbook.get("_clipped"):
-            kept_pb["_clipped"] = playbook["_clipped"]
-        if kept_pb:
-            out["playbook"] = kept_pb
     look = data.get("last_look")
     if isinstance(look, dict) and look.get("_clipped"):
         out["last_look"] = {
@@ -531,18 +506,8 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
                 return text
         if _is_live_book(slim):
             return json.dumps(_keep_live_book(slim), default=str)
-        kept: dict[str, Any] = {}
-        if "lab" in slim:
-            kept["lab"] = slim["lab"]
-        # Catalog (including locked starters) so Grok can pick a name to
-        # rewrite after overflow. Tree/types can be huge; cards is the
-        # pick-list and must survive the emergency clip.
-        if "cards" in slim:
-            kept["cards"] = slim["cards"]
         if slim.get("run") is not None:
             kept["run"] = slim["run"]
-        if "desk_lessons" in slim:
-            kept["desk_lessons"] = slim["desk_lessons"]
         if kept:
             kept["ok"] = slim.get("ok")
             kept["_clipped"] = "payload"
@@ -1156,17 +1121,6 @@ def _book_payload(
     snap: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from abcxauto.config import get_config
-    from abcxauto.lab_playbook import (
-        _card_label,
-        _flat_card_projection,
-        _lab_view_without_types,
-        card_facts,
-        lab_facts,
-        load_lab,
-        notebook_text,
-        playbook_glance,
-        playbook_mode,
-    )
     from abcxauto.self_tune import levers_snapshot
     from abcxauto.world_state import day_facts
 
@@ -1178,7 +1132,6 @@ def _book_payload(
     except Exception:
         sc = {}
     facts = _book_facts(world)
-    glance = playbook_glance(sc)
     last_look: dict[str, Any] = {}
     try:
         from abcxauto.think_stream import last_look_facts
@@ -1187,58 +1140,6 @@ def _book_payload(
     except Exception:
         last_look = {}
     _ = (tool_trace, snap)
-    try:
-        from abcxauto.trade_playbook import overlay_types_to_hide
-
-        hidden = overlay_types_to_hide(
-            getattr(world, "positions", None),
-            getattr(world, "open_orders", None),
-        )
-    except Exception:
-        hidden = frozenset()
-    try:
-        lab = _lab_view_without_types(load_lab(), hidden)
-        scored = [
-            {
-                k: v
-                for k, v in row.items()
-                if k
-                not in (
-                    "looks_without_trigger",
-                    "days_without_trigger",
-                    "max_looks_without_trigger",
-                    "looks",
-                    "days",
-                )
-            }
-            for row in card_facts(lab)
-        ]
-        glance = dict(glance)
-        glance["mode"] = playbook_mode()
-        glance["cards"] = _flat_card_projection(lab)
-        glance["unfiled_cards"] = list(lab.get("unfiled_cards") or [])
-        glance["card_scores"] = scored
-        glance["graduated"] = [_card_label(r) for r in scored if r.get("graduated")]
-        glance["tripped"] = [_card_label(r) for r in scored if r.get("tripped")]
-        glance["needs_declaration"] = [
-            _card_label(r)
-            for r in scored
-            if r.get("needs_retire_if")
-            or r.get("needs_thesis")
-            or r.get("needs_numeric_kill")
-            or r.get("needs_conservative_fill")
-        ]
-        glance["notes"] = notebook_text(lab)[:4000]
-        glance["lab"] = lab_facts(lab, rows=scored, hide_types=hidden)
-    except Exception:
-        logger.debug("playbook block for book payload failed", exc_info=True)
-    lessons: list[dict[str, str]] = []
-    try:
-        from abcxauto.desk_lessons import desk_lessons_payload
-
-        lessons = desk_lessons_payload()
-    except Exception:
-        logger.debug("desk lessons for book payload failed", exc_info=True)
     out: dict[str, Any] = {
         "day": day_facts(world, sc),
         "world": facts,
@@ -1249,8 +1150,6 @@ def _book_payload(
             "windows": (sc or {}).get("windows") or {},
         },
         "levers": levers_snapshot(cfg),
-        "playbook": glance,
-        "desk_lessons": lessons,
         "path": _path_block(world, cfg),
     }
     if last_look:

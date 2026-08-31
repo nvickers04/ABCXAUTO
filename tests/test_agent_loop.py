@@ -456,7 +456,7 @@ def test_turn_did_work_facts_or_tune():
 
     assert turn_did_work(BrainTurn()) is False
     assert turn_did_work(BrainTurn(tool_trace=["book", "scan"])) is True
-    assert turn_did_work(BrainTurn(lab_playbook={"rev": 1})) is False
+    assert turn_did_work(BrainTurn(text="notes only")) is False
     assert turn_did_work(BrainTurn(tool_trace=["write_lab_playbook"])) is False
     assert turn_did_work(BrainTurn(sends=[{"strat": "self_tune"}])) is True
 
@@ -509,7 +509,6 @@ async def test_notes_only_unprotected_no_send_is_rest(monkeypatch):
 
     async def notes(*_a, **_k):
         return BrainTurn(
-            lab_playbook={"revision": 1},
             tool_trace=["write_lab_playbook"],
         )
 
@@ -522,63 +521,6 @@ async def test_notes_only_unprotected_no_send_is_rest(monkeypatch):
         (out.get("result") or {}).get("note") or out.get("validation") or ""
     )
 
-def test_stale_playbook_does_not_make_hold_a_ticket(tmp_path):
-    from datetime import datetime, timedelta, timezone
-
-    from abcxauto.lab_playbook import save_lab
-
-    save_lab(
-        {
-            "mode": "explore",
-            "instructions": "Debit verticals only.",
-            "do_more": "verticals",
-            "stop_doing": "lottery calls",
-            "ready_to_promote": False,
-        }
-    )
-    lab = __import__("json").loads((tmp_path / "lab.json").read_text(encoding="utf-8"))
-    lab["written_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    (tmp_path / "lab.json").write_text(__import__("json").dumps(lab), encoding="utf-8")
-    strat, forced = gate_ticket(_hold_act(), _world(flat=False, session_status="regular"))
-    assert strat == "blocked"
-    note = str((forced or {}).get("note") or "")
-    assert "invalid" in note or "allowlist" in note
-
-
-@pytest.mark.asyncio
-async def test_stale_playbook_tool_tour_is_not_work(tmp_path, monkeypatch):
-    from datetime import datetime, timedelta, timezone
-
-    from abcxauto.brain import BrainTurn
-    from abcxauto.lab_playbook import save_lab
-
-    save_lab(
-        {
-            "mode": "explore",
-            "instructions": "Debit verticals only.",
-            "do_more": "verticals",
-            "stop_doing": "lottery calls",
-            "ready_to_promote": False,
-        }
-    )
-    lab = __import__("json").loads((tmp_path / "lab.json").read_text(encoding="utf-8"))
-    lab["written_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    (tmp_path / "lab.json").write_text(__import__("json").dumps(lab), encoding="utf-8")
-
-    async def worked(*_a, **_k):
-        return BrainTurn(
-            last_act={"action": "hold", "strategy": "hold", "rationale": "no send"},
-            last_strat="hold",
-            last_result={"status": "hold", "strategy": "hold"},
-            tool_trace=["book", "scan", "quote"],
-        )
-
-    out = await _think(monkeypatch, worked)
-    assert out["strat"] != "hold"
-    assert out["strat"] != "blocked"
-    assert "hold is not a ticket" not in str(
-        (out.get("result") or {}).get("note") or out.get("validation") or ""
-    )
 
 
 @pytest.mark.asyncio
@@ -592,7 +534,6 @@ async def test_live_no_send_is_yield(monkeypatch):
             is_paper=False,
         ),
     )
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: False)
     out = await _think(
         monkeypatch,
         _no_send_turn(tool_trace=["book", "set_wake"], text="watching"),
