@@ -795,28 +795,6 @@ def _lot_mtm_suffix(row: dict[str, Any], qty: float) -> str:
     return f" {pct:+.0f}%"
 
 
-def _lot_card_tag(ident: str, row: dict[str, Any]) -> str:
-    try:
-        from abcxauto.lab_playbook import load_lab
-
-        lab = load_lab()
-    except Exception:
-        return ""
-    pre = lab.get("lots_at_write") if isinstance(lab.get("lots_at_write"), list) else []
-    if not pre:
-        return ""
-    keys = {str(x) for x in pre if x}
-    con = str(row.get("conId") or row.get("con_id") or "")
-    if con and con in keys:
-        return " pre"
-    if ident in keys:
-        return " pre"
-    for s in keys:
-        if ident.startswith(s) or s.startswith(ident):
-            return " pre"
-    return " this"
-
-
 def _opt_exp_key(pos: dict[str, Any] | None) -> str:
     p = pos if isinstance(pos, dict) else {}
     raw = str(p.get("expiration") or p.get("lastTradeDateOrContractMonth") or "").replace("-", "")
@@ -1070,9 +1048,8 @@ def lot_labels(positions: list[dict] | None, *, limit: int = 16) -> list[str]:
             continue
         ident = lot_ident(p)
         extra = _lot_mtm_suffix(row, qty)
-        card = _lot_card_tag(ident, row)
-        if extra or card:
-            ident = f"{ident}{extra}{card}"
+        if extra:
+            ident = f"{ident}{extra}"
         labels.append(ident)
         if len(labels) >= limit:
             break
@@ -1271,7 +1248,7 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         # Ceiling knob — not the working size. Wake prints max_risk=, not risk/trade=.
         "max_risk_per_trade_pct": risk_pct,
         "risk_per_trade_pct": risk_pct,
-        "playbook": _playbook_day(sc, flat=getattr(world, "flat", None)),
+        "playbook": {},
         "lot_lasts": lot_lasts,
         "working_exits": working_exits,
         "halt_trips_at_usd": halt_at,
@@ -1421,16 +1398,6 @@ def _vol_wake_bit(rows: Any) -> str:
         return wake_vol_bit(rows)
     except Exception:
         return ""
-
-
-def _playbook_day(
-    scorecard: dict[str, Any] | None,
-    *,
-    flat: bool | None = None,
-) -> dict[str, Any]:
-    """Playbook is notes. No unused= or leftover say on the wake."""
-    _ = (scorecard, flat)
-    return {}
 
 
 def _wake_has_live_lots(day: dict[str, Any] | None) -> bool:

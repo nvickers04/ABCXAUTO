@@ -325,57 +325,11 @@ def test_structure_lessons_paint_on_the_dashboard(pro):
 # ----------------------------------------------------------------- setup cards
 
 
-def test_notebook_page_flags_an_unsendable_card_ticket(pro, monkeypatch, tmp_path):
-    lab = tmp_path / "playbook_lab.json"
-    lab.write_text(
-        json.dumps(
-            {
-                "revision": 4,
-                "mode": "explore",
-                "written_at": "2026-08-20T13:00:00+00:00",
-                "instructions": "CARD gap fade",
-                "cards": [
-                    {"name": "gap fade", "ticket": "bracket", "status": "working"},
-                    {"name": "moon shot", "ticket": "naked_call", "status": "testing"},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(lab))
-    pro._sync_notebook_page(force=True)
-    assert "2 setup card(s)" in (pro.lbl_notebook_meta.value or "")
-    assert "UNSENDABLE ticket: naked_call" in (pro.lbl_notebook_meta.value or "")
-    names = " | ".join(_row_text(c) for c in pro.col_notebook_cards.controls)
-    assert "gap fade" in names and "moon shot" in names
-    assert pro.notebook_raw_panel.visible is False
 
-
-def test_notebook_page_survives_a_cleared_book(pro, monkeypatch, tmp_path):
-    """``clear_lab`` leaves revision 0 with empty cards / types — not a crash."""
-    lab = tmp_path / "playbook_lab.json"
-    lab.write_text(
-        json.dumps(
-            {
-                "mode": "explore",
-                "instructions": "",
-                "cards": [],
-                "types": {},
-                "ready_to_promote": False,
-                "promoted": False,
-                "revision": 0,
-                "written_at": "2026-08-20T16:04:01+00:00",
-                "ledger": [],
-                "paper_score": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(lab))
+def test_notebook_page_survives_a_cleared_book(pro):
+    """Empty notebook / scorecard card surfaces — persist is gone."""
     pro._sync_notebook_page(force=True)
-    # rev 0 is a real revision, not a missing one.
-    assert "rev 0" in (pro.lbl_notebook_head.value or "")
-    assert "0 setup card(s)" in (pro.lbl_notebook_meta.value or "")
+    assert (pro.lbl_notebook_head.value or "") == "—"
     assert "UNSENDABLE" not in (pro.lbl_notebook_meta.value or "")
     assert "lots at write: none" in (pro.lbl_notebook_lots.value or "")
     names = " | ".join(_row_text(c) for c in pro.col_notebook_cards.controls)
@@ -388,50 +342,6 @@ def test_notebook_page_survives_a_cleared_book(pro, monkeypatch, tmp_path):
     assert "No notebook revisions yet" in ledger
 
 
-def test_notebook_page_shows_every_sendable_order_type(pro, monkeypatch, tmp_path):
-    """Operator coverage: filled trunks and untouched ones, side by side."""
-    from abcxauto.lab_playbook import playbook_type_keys
-
-    lab = tmp_path / "playbook_lab.json"
-    lab.write_text(
-        json.dumps(
-            {
-                "revision": 3,
-                "mode": "explore",
-                "types": {
-                    "market_bracket": {
-                        "gotchas": "stop must be the wrong side of live last",
-                        "cards": [{"name": "flush bounce", "status": "testing"}],
-                    },
-                    "vertical_spread": {"tool_order": ["quote", "option_chain", "send"]},
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(lab))
-    pro._sync_notebook_page(force=True)
-    rows = " | ".join(_row_text(c) for c in pro.col_notebook_types.controls)
-    # Every sendable trunk is listed, not only the two Grok has touched.
-    for name in playbook_type_keys():
-        assert name in rows, name
-    assert "gotchas" in rows
-    assert "tool_order" in rows
-    assert "untouched" in rows
-    assert "2/" in (pro.lbl_notebook_types.value or "")
-
-
-def test_notebook_page_falls_back_to_prose(pro, monkeypatch, tmp_path):
-    lab = tmp_path / "playbook_lab.json"
-    lab.write_text(
-        json.dumps({"revision": 1, "instructions": "watch the open, no cards yet"}),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(lab))
-    pro._sync_notebook_page(force=True)
-    assert pro.notebook_raw_panel.visible is True
-    assert "watch the open" in (pro.lbl_notebook_body.value or "")
-    assert "0 setup card(s)" in (pro.lbl_notebook_meta.value or "")
 
 
 # -------------------------------------------------------------------- desk lock

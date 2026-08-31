@@ -194,7 +194,7 @@ def run_headless() -> int:
         print(f"Start failed: {err}", flush=True)
         return 1
     print(
-        "ABCXAUTO headless paper lab - Grok writes the playbook, "
+        "ABCXAUTO headless paper lab - Grok owns the book, "
         "scorecard is book return vs model cost. Ctrl+C is the kill switch.",
         flush=True,
     )

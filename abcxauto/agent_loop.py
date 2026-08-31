@@ -529,10 +529,9 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
                 "status": "blocked",
                 "note": f"structure cooldown {sym}: {why}",
             }
-        from abcxauto.lab_playbook import new_risk_card_error
+        from abcxauto.risk_gates import new_risk_card_error
 
-        # Label only: scorecard/journal need a real card name. Card prose
-        # (hold / gap / tape / session / book) is not a refuse.
+        # Label only: journal/scorecard need a play name. Not a catalog lookup.
         card_note = new_risk_card_error(
             params.get("card") or act.get("card"), type=strat
         )
@@ -584,12 +583,6 @@ async def execute_ticket(
     positions = list(snap.get("positions") or world.positions or [])
     orders = list(snap.get("open_orders") or world.open_orders or [])
     asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
-    try:
-        from abcxauto.lab_playbook import apply_hunt_send_sketch
-
-        apply_hunt_send_sketch(act, snap)
-    except Exception:
-        logger.debug("hunt send sketch apply failed", exc_info=True)
     strat, forced = gate_ticket(act, world)
     if forced is not None:
         act["strategy"] = act["action"] = BLOCKED_STRAT
@@ -689,23 +682,6 @@ async def execute_ticket(
         if isinstance(row, dict):
             session = row
     act["_session"] = session
-    if is_new_risk(strat, params):
-        from abcxauto.lab_playbook import session_card_open_print_error
-
-        print_note = session_card_open_print_error(
-            params,
-            session,
-            market_session=str(getattr(world, "session_status", "") or ""),
-        )
-        if print_note:
-            act["strategy"] = act["action"] = BLOCKED_STRAT
-            act["rationale"] = print_note
-            _record_clerk_block(act, asked, print_note, stage="opening_print")
-            return {
-                "status": "blocked",
-                "note": print_note,
-                "reason_code": "opening_print",
-            }
     fill_missing_protection(
         act,
         quote_last=quote_last,
@@ -987,6 +963,26 @@ async def _reconcile_protection_after_snap(c: Any, s: dict) -> None:
 
 
 
+def _scan_hit_last(snap: dict | None, symbol: str) -> float | None:
+    """IBKR last from this look's scan row. Not MDA tape as live."""
+    want = str(symbol or "").upper()
+    if not want or not isinstance(snap, dict):
+        return None
+    hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
+    for row in hits.get("rows") or []:
+        if not isinstance(row, dict) or str(row.get("symbol") or "").upper() != want:
+            continue
+        ibkr = row.get("ibkr") if isinstance(row.get("ibkr"), dict) else {}
+        for raw in (ibkr.get("last"), row.get("last")):
+            try:
+                v = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if v > 0:
+                return v
+    return None
+
+
 def _extract_last(q: dict | None) -> float | None:
     """IBKR live last / mid. Prior close is not a last — it rejects a gap ticket."""
     if not isinstance(q, dict):
@@ -1037,12 +1033,7 @@ async def _quote_for_action(act: dict, snap: dict, connector: Any = None) -> flo
             except (TypeError, ValueError):
                 pass
     if live is None and sym:
-        try:
-            from abcxauto.lab_playbook import ibkr_live_last
-
-            live = ibkr_live_last(sym, snap=snap)
-        except Exception:
-            live = None
+        live = _scan_hit_last(snap, sym)
     if live is None and sym in ("", "SPY"):
         live = _extract_last(snap.get("spy_quote") or {})
     if live is not None:

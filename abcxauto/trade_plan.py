@@ -1,7 +1,7 @@
 """ActiveTradePlan(s) — IBKR open-risk reconciliation, not a second notebook.
 
 Multi-plan book: ``active_trade_plans.json`` holds STK lots vs working exits.
-Thesis / lifecycle live on the playbook card tagged at send. Broker book is
+Thesis / lifecycle live on the card tagged at send. Broker book is
 source of truth; confirmed-flat (not a single empty snap) closes plans.
 """
 
@@ -767,7 +767,7 @@ def sync_open_risk(
 ) -> Optional[ActiveTradePlan]:
     """Reconcile + persist all STK plans; confirmed-flat close when book empty.
 
-    ``bump`` is ignored — hold time is the playbook card, not a cycle counter.
+    ``bump`` is ignored — hold time is the card at send, not a cycle counter.
     Set ``allow_flat_close=False`` on Pause/Stop so an empty in-memory snap
     cannot wipe a durable plan.
     """

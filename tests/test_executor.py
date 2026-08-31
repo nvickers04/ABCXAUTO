@@ -84,7 +84,12 @@ class FakeGateway:
 @pytest.mark.parametrize("strategy", sorted(STRATEGIES))
 @pytest.mark.asyncio
 async def test_dispatch_maps_strategy_to_gateway_method(strategy):
-    proposal = validate_proposal(strategy, VALID_PAYLOADS[strategy], RATIONALE)
+    # market_bracket / oca geometry needs a print. ORDER EXAMPLES omit price_hint
+    # so Grok must quote first — the dispatch test is not that quote.
+    quote_last = 100.0 if strategy in ("market_bracket", "oca") else None
+    proposal = validate_proposal(
+        strategy, VALID_PAYLOADS[strategy], RATIONALE, quote_last=quote_last
+    )
     gateway = FakeGateway()
 
     result = await execute_proposal(proposal, gateway)
@@ -456,7 +461,9 @@ class TestProtectionRequiresPosition:
     @pytest.mark.asyncio
     async def test_oca_without_position_blocked(self):
         gateway = FakeGateway(positions=[])
-        proposal = validate_proposal("oca", VALID_PAYLOADS["oca"], RATIONALE)
+        proposal = validate_proposal(
+            "oca", VALID_PAYLOADS["oca"], RATIONALE, quote_last=100.0
+        )
         result = await execute_proposal(proposal, gateway)
         assert "error" in result
         assert "protection order rejected" in result["error"].lower()
@@ -468,7 +475,9 @@ class TestProtectionRequiresPosition:
         gateway = FakeGateway(
             positions=[{"symbol": "NVDA", "quantity": 10, "sec_type": "STK"}]
         )
-        proposal = validate_proposal("oca", VALID_PAYLOADS["oca"], RATIONALE)
+        proposal = validate_proposal(
+            "oca", VALID_PAYLOADS["oca"], RATIONALE, quote_last=100.0
+        )
         result = await execute_proposal(proposal, gateway)
         assert result["success"] is True
         assert gateway.calls[0][0] == "place_oca"
@@ -589,7 +598,9 @@ class TestStackedProtectiveExits:
                 },
             ],
         )
-        proposal = validate_proposal("oca", VALID_PAYLOADS["oca"], RATIONALE)
+        proposal = validate_proposal(
+            "oca", VALID_PAYLOADS["oca"], RATIONALE, quote_last=100.0
+        )
         result = await execute_proposal(proposal, gateway)
         assert result["success"] is True
         assert result["order_id"] == 1234

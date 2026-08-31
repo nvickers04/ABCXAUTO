@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from abcxauto.brain import BrainTurn, _finish_look_chat, _look_text_is_junk
 from abcxauto.llm import SYSTEM_PROMPT
 from abcxauto.think_stream import emit, reset_speaker
@@ -244,29 +246,25 @@ def test_health_strip_does_not_invent_a_next_look_sit(monkeypatch):
     assert "21s" not in shown
 
 
-def test_card_still_required_on_new_risk(monkeypatch, tmp_path):
-    from abcxauto.lab_playbook import clamp_update, new_risk_card_error, save_lab
+def test_card_still_required_on_new_risk():
+    from abcxauto.risk_gates import new_risk_card_error
 
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
-    monkeypatch.setenv("ABCXAUTO_CARD_LOG_PATH", str(tmp_path / "cards.jsonl"))
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "large-cap 3pct gap hold",
-                            "thesis": "holds a 3 percent gap",
-                            "retire_if": {"sample": 3, "condition": "gap fails"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     assert new_risk_card_error("")
+    assert new_risk_card_error("   ")
     assert not new_risk_card_error("large-cap 3pct gap hold")
+    assert not new_risk_card_error("moon shot")
+
+
+def test_playbook_cathedral_modules_are_gone():
+    import pkgutil
+
+    import abcxauto
+
+    names = {m.name for m in pkgutil.iter_modules(abcxauto.__path__)}
+    assert "playbook" not in names
+    assert "desk_lessons" not in names
+    assert "lab_playbook" not in names
+    for name in ("playbook", "desk_lessons", "lab_playbook"):
+        with pytest.raises(ModuleNotFoundError):
+            __import__(f"abcxauto.{name}")
+

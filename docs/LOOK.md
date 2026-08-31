@@ -32,8 +32,7 @@ up on this process — no sit clock. Closed / postmarket does not call Grok
 (unprotected still does); park_clock until premarket.
 
 Session look/token cap (Settings) idles when hit. Chat is kept. No sit clock.
-Durable notes across days are the lab playbook file. Do not grow the system
-prompt as memory.
+Do not grow the system prompt as memory.
 
 `send` → gates → IBKR. Journal write is code, not a Grok tool.
 Repeat reads inside a think are served from cache, cleared on any mutating
@@ -46,14 +45,13 @@ After a think:
 - Closed / postmarket: no Grok (unprotected still interrupts); park until premarket
 - Paper RTH / premarket: stay up on this process. Next model call is fill / order_change / unprotected / a lead fact that actually changed
 - Session look/token cap hit: stay idle. Chat kept. No grok_wake / set_wake
-- Session-card opening print is a send gate, not a park
 - Last hour to the open is stay-up, not a sit clock
 
 ## Hard (code)
 
 - Unprotected STK → last-stop first; hold forbidden until it rests at IBKR. Paper RTH + flat → hold is not a ticket. Combo close (`closing_position`) is one BAG, not new risk
 - Capacity, defined-risk, cash-only, size/loss floors, fail-closed
-- New risk without params.card naming an existing lab card (label, not law)
+- New risk without params.card naming a play (scorecard label, not a catalog)
 - IBKR live last for ticket geometry (not MDA)
 - Ticket last / IV / credit / width must be in this look's quote / option_quote / book cache (`stale_or_invented_number`)
 - `candles`: IBKR hist, else live 5s stream; error if both miss (not MDA)

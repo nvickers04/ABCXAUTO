@@ -599,24 +599,10 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "rev.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
 
-    from abcxauto.lab_playbook import save_lab
     from abcxauto.memory import reset_journal
 
     # A carded ticket still has to survive geometry.
-    save_lab(
-        {
-            "cards": [
-                {
-                    "name": "qqq pullback",
-                    "ticket": "market_bracket",
-                    "thesis": "index pullbacks bounce",
-                    "retire_if": {"sample": 5, "condition": "no bounce"},
-                }
-            ]
-        }
-    )
     reset_journal(path=str(tmp_path / "j.db"), enabled=True)
 
     async def _tool(_c, name, _a=None):

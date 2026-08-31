@@ -8,7 +8,6 @@ import json
 import pytest
 
 from abcxauto.brain import BrainTurn, _run_tool, _scan_gate_facts, _scan_look_key
-from abcxauto.lab_playbook import PROTECTED_CARD_NAMES, SKIP_CARD_NAMES, skip_cards_on_book
 from abcxauto.universe import scan_skip_class
 from abcxauto.world_state import WorldState
 
@@ -40,49 +39,6 @@ def _world(**kwargs) -> WorldState:
     return WorldState(**base)
 
 
-def _skip_book() -> dict:
-    return {
-        "types": {
-            "market_bracket": {
-                "cards": [
-                    {
-                        "name": "mega-cap earnings-flush bounce",
-                        "status": "testing",
-                        "scan": "most_active + top_losers; mega/large only",
-                    },
-                    {
-                        "name": "levered-crypto and micro gap chase",
-                        "status": "retired",
-                        "scan": "top_gainers, high_open_gap",
-                    },
-                ]
-            },
-            "buy_option": {
-                "cards": [
-                    {
-                        "name": "naked / short-dated option spray",
-                        "status": "retired",
-                    }
-                ]
-            },
-        }
-    }
-
-
-def _flush_only_book() -> dict:
-    return {
-        "types": {
-            "market_bracket": {
-                "cards": [
-                    {
-                        "name": "mega-cap earnings-flush bounce",
-                        "status": "testing",
-                        "scan": "most_active + top_losers; mega/large only",
-                    }
-                ]
-            }
-        }
-    }
 
 
 def _tape():
@@ -92,14 +48,6 @@ def _tape():
         {"symbol": "SNDK", "open_gap_pct": -6.5, "last": 1485.0},
     ]
 
-
-def test_skip_card_names_are_the_existing_skip_classes():
-    assert SKIP_CARD_NAMES <= PROTECTED_CARD_NAMES
-    assert "levered-crypto and micro gap chase" in SKIP_CARD_NAMES
-    assert "naked / short-dated option spray" in SKIP_CARD_NAMES
-    assert skip_cards_on_book(_skip_book()) is True
-    assert skip_cards_on_book(_flush_only_book()) is False
-    assert skip_cards_on_book({"types": {}}) is False
 
 
 def test_scan_skip_class_is_levered_or_micro_not_a_send_gate():
@@ -117,27 +65,21 @@ def test_scan_skip_class_is_levered_or_micro_not_a_send_gate():
 
 def test_skip_class_micro_is_not_deepest_when_skip_cards_exist():
     """Lottery print stays on the tape; trophy is the next non-skip name."""
-    gate = _scan_gate_facts(_tape(), book=_skip_book())
+    gate = _scan_gate_facts(_tape())
     assert gate["deepest_symbol"] == "SNDK"
     assert gate["deepest_open_gap_pct"] == pytest.approx(-6.5)
 
 
 def test_skip_class_never_occupies_deepest_even_without_skip_cards():
     """Levered / micro never headline. Playbook when_on is not a floor."""
-    gate = _scan_gate_facts(_tape(), book=_flush_only_book())
+    gate = _scan_gate_facts(_tape())
     assert gate["deepest_symbol"] == "SNDK"
     assert gate["deepest_open_gap_pct"] == pytest.approx(-6.5)
     assert any(r["symbol"] == "PSQL" for r in _tape())
 
 
 @pytest.mark.asyncio
-async def test_scan_tool_does_not_pin_skip_class_as_deepest(monkeypatch, tmp_path):
-    from abcxauto.lab_playbook import _lab_path, _write
-
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
-    monkeypatch.setattr("abcxauto.lab_playbook.is_paper", lambda: True)
-    _write(_lab_path(), _skip_book())
+async def test_scan_tool_does_not_pin_skip_class_as_deepest(monkeypatch):
 
     async def _fake_scan(**_kw):
         return {
@@ -549,12 +491,10 @@ async def test_bare_scan_runs_the_flush_trio(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch, tmp_path):
+async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
     """Four different arena calls collapse to one bag; same args skip IBKR."""
     from abcxauto.opportunity_scan import overlay_hits as _real_overlay
 
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
     ibkr = {"calls": 0}
 
     async def _fake_ibkr(_connector, spec):

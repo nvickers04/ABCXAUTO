@@ -58,8 +58,6 @@ _TICKET_WIDTH = ("width", "wing_width")
 _SKIP_WALK = frozenset(
     {
         "mda",
-        "playbook",
-        "desk_lessons",
         "score_windows",
         "levers",
         "path",

@@ -276,13 +276,6 @@ def fallback_quote_symbols(world: Any = None, snap: dict | None = None) -> list[
         if len(out) >= 8:
             return out
     if not out:
-        try:
-            from abcxauto.lab_playbook import live_card_send_facts, live_card_skips_spy
-
-            if live_card_send_facts().get("card") or live_card_skips_spy():
-                return []
-        except Exception:
-            pass
         out.append("SPY")
     return out[:8]
 

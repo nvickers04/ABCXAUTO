@@ -78,10 +78,10 @@ def test_agent_tools_cover_ibkr_and_mda():
         "option_facts",
         "send",
         "self_tune",
-        "playbook",
-        "write_lab_playbook",
-        "write_desk_lessons",
     } <= names
+    assert "playbook" not in names
+    assert "write_lab_playbook" not in names
+    assert "write_desk_lessons" not in names
     assert "set_wake" not in names
     assert "journal" not in names
     assert "universe" not in names
@@ -602,26 +602,7 @@ async def test_third_scan_this_look_reuses_merged_hits(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_third_scan_reuses_an_empty_tape_instead_of_requiring_arena(monkeypatch):
-    from abcxauto.lab_playbook import clamp_update, save_lab
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "tool_order": ["scan", "news", "quote", "candles", "send"],
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ],
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     n = {"calls": 0}
 
     async def _fake_scan(**_kw):
@@ -662,26 +643,7 @@ async def test_third_scan_reuses_an_empty_tape_instead_of_requiring_arena(monkey
 
 @pytest.mark.asyncio
 async def test_scan_does_not_auto_fetch_news_from_a_playbook_card(monkeypatch):
-    from abcxauto.lab_playbook import clamp_update, save_lab
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "tool_order": ["scan", "news", "quote", "candles", "send"],
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ],
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
 
     async def _fake_scan(**_kw):
         return {
@@ -728,110 +690,6 @@ async def test_scan_does_not_auto_fetch_news_from_a_playbook_card(monkeypatch):
     )
     assert asked["news"][0]["headline"] == "sales miss"
 
-
-@pytest.mark.asyncio
-async def test_empty_scan_on_a_live_card_does_not_run_playbook_screens(monkeypatch):
-    from abcxauto.lab_playbook import clamp_update, save_lab
-
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "tool_order": ["scan", "news", "quote", "candles", "send"],
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "when_on": ">=6% earnings-miss gap",
-                            "shape": "LONG STK market_bracket",
-                            "scan": "most_active + top_losers; mega/large only",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ],
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
-    seen: list[tuple[str, str]] = []
-
-    async def _fake_scan(**kw):
-        arena = str(kw.get("arena") or "")
-        code = str(kw.get("scan_code") or "")
-        seen.append((arena, code))
-        return {
-            "ok": True,
-            "source": "ibkr",
-            "arena": arena,
-            "scan_code": code,
-            "symbols": ["ALB"],
-            "hits": [{"symbol": "ALB", "last": 134.0, "open_gap_pct": -3.8}],
-            "quoted": 1,
-        }
-
-    async def _no_tags(_conn):
-        return {}
-
-    async def _no_news(*_a, **_k):
-        return []
-
-    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
-    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
-    monkeypatch.setattr("abcxauto.brain._mda_news", _no_news)
-    world = _world()
-    snap: dict = {}
-    first = json.loads(
-        await _run_tool("scan", {}, connector=None, world=world, snap=snap, turn=BrainTurn())
-    )
-    assert first.get("ok") is True
-    assert seen[:3] == [
-        ("most_active", "MOST_ACTIVE"),
-        ("top_losers", "TOP_PERC_LOSE"),
-        ("top_gainers", "TOP_PERC_GAIN"),
-    ]
-    pulled = json.loads(
-        await _run_tool(
-            "scan",
-            {"arena": "large_cap", "scan_code": "TOP_PERC_LOSE"},
-            connector=None,
-            world=world,
-            snap=snap,
-            turn=BrainTurn(),
-        )
-    )
-    assert ("large_cap", "TOP_PERC_LOSE") in seen
-    assert pulled.get("ok") is True
-    assert "card_min_gap_pct" not in pulled
-    assert "card_gap_met" not in pulled
-    assert "card_gap_floors" not in pulled
-    from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
-
-    painted: list[tuple[str, str]] = []
-
-    def cap(kind: str, text: str, *_a) -> None:
-        painted.append((kind, text))
-
-    reset_speaker()
-    subscribe(cap)
-    try:
-        reused = json.loads(
-            await _run_tool(
-                "scan",
-                {"arena": "large_cap", "scan_code": "TOP_PERC_LOSE"},
-                connector=None,
-                world=world,
-                snap=snap,
-                turn=BrainTurn(),
-            )
-        )
-    finally:
-        unsubscribe(cap)
-    assert reused.get("reused") is True
-    assert reused.get("note") == "this screen already fetched this look"
-    assert "card_gap_met" not in reused
-    assert any("already have it" in text for _kind, text in painted)
-    assert seen.count(("large_cap", "TOP_PERC_LOSE")) == 1
 
 
 @pytest.mark.asyncio
@@ -908,55 +766,10 @@ def test_bare_candles_use_five_minute_bars_on_a_gap_tape():
     )
 
 
-def test_bare_candles_use_five_minute_when_card_needs_opening_low():
-    from abcxauto.lab_playbook import clamp_update, save_lab
-
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK. Stop under opening low.",
-                            "when_on": "mega/large ≥6% earnings-miss gap",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
-    assert _candle_res_from_tape({}) == "5"
-    assert _candle_res_from_tape({"scan_hits": {"rows": [{"symbol": "SNDK"}]}}) == "5"
-
 
 def test_candles_use_live_open_when_hist_is_still_yesterday():
-    from abcxauto.lab_playbook import clamp_update, save_lab
     from abcxauto.structure_grade import session_usable
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK. Stop under opening low.",
-                            "when_on": "mega/large ≥6% earnings-miss gap",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     out = {
         "bars": [
             {"t": "2026-08-24T15:55:00", "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.0},
@@ -1111,158 +924,11 @@ async def test_bare_candles_on_gap_hits_request_five_minute_hist():
     assert seen["resolution"] == "5"
 
 
-@pytest.mark.asyncio
-async def test_bare_candles_on_session_card_request_five_minute_without_gap_tick():
-    from abcxauto.lab_playbook import clamp_update, save_lab
-
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK. Stop under opening low.",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
-    seen: dict = {}
-
-    class Conn:
-        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
-            seen["symbol"] = symbol
-            seen["resolution"] = resolution
-            return {
-                "symbol": symbol,
-                "bars": [{"t": "2026-08-25", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 1}],
-                "source": "ibkr",
-                "freshness": "ibkr_rth",
-            }
-
-        async def get_realtime_bars(self, symbol, **_k):
-            raise AssertionError("hist answered — do not open the 5s stream")
-
-    await _run_tool(
-        "candles",
-        {},
-        connector=Conn(),
-        world=_world(),
-        snap={"scan_hits": {"quoted": 1, "rows": [{"symbol": "SNDK", "last": 91.5}]}},
-        turn=BrainTurn(),
-    )
-    assert seen["symbol"] == "SNDK"
-    assert seen["resolution"] == "5"
-
-
-@pytest.mark.asyncio
-async def test_candles_stamp_session_range_and_run_next_send(monkeypatch):
-    from abcxauto.lab_playbook import clamp_update, save_lab
-
-    monkeypatch.setattr(
-        "abcxauto.opportunity_scan._et_calendar_day",
-        lambda now=None: "2026-08-25",
-    )
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "tool_order": ["scan", "news", "quote", "candles", "send"],
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": (
-                                "LONG STK market_bracket. Stop under opening low. "
-                                "Qty so dollar risk <=1% NL and notional <=25% NL."
-                            ),
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ],
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
-
-    class Conn:
-        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
-            return {
-                "symbol": symbol,
-                "bars": [
-                    {"t": "2026-08-25T09:35:00", "o": 90.0, "h": 91.0, "l": 88.0, "c": 89.0},
-                    {"t": "2026-08-25T09:40:00", "o": 89.0, "h": 92.0, "l": 88.5, "c": 91.5},
-                ],
-                "source": "ibkr",
-                "freshness": "ibkr_rth",
-            }
-
-        async def get_realtime_bars(self, symbol, **_k):
-            raise AssertionError("hist answered")
-
-    turn = BrainTurn()
-    turn.tool_trace = ["book", "scan", "news"]
-    snap = {
-        "scan_hits": {
-            "quoted": 1,
-            "rows": [{"symbol": "SNDK", "last": 91.5, "open_gap_pct": -6.5}],
-        }
-    }
-    data = json.loads(
-        await _run_tool(
-            "candles",
-            {"symbol": "SNDK", "resolution": "5"},
-            connector=Conn(),
-            world=_world(),
-            snap=snap,
-            turn=turn,
-        )
-    )
-    assert data["session"]["open"] == 90.0
-    assert data["session"]["low"] == 88.0
-    assert data["session"]["above_open"] is True
-    assert data["session"]["prior_close"] == pytest.approx(96.2567, rel=1e-3)
-    assert data["session"]["retrace_30"] > data["session"]["open"]
-    assert data["session"]["size"]["qty"] >= 1
-    assert data["session"]["size"]["stop"] == 88.0
-    assert data["session"]["size"]["risk_per_share"] == pytest.approx(3.5)
-    assert data["session"]["size"]["card_qty"] >= 1
-    assert data["session"]["size"]["card_risk_pct"] == 1.0
-    assert "ticket" not in data["session"]
-    assert snap["session_range"]["SNDK"]["low"] == 88.0
-    assert "run" not in data
 
 
 def test_stamp_session_ticket_does_not_paint_a_playbook_card():
     from abcxauto.brain import _stamp_session_ticket
-    from abcxauto.lab_playbook import clamp_update, save_lab
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK market_bracket. Stop under opening low.",
-                            "when_on": "mega/large ≥6% earnings-miss gap",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ]
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
     half = {
         "today": True,
         "low": 88.0,
@@ -1347,16 +1013,6 @@ def _live_book_core() -> dict:
                 {"symbol": "HPQ", "sec": "BAG", "side": "BOT", "qty": 1, "px": 1.15},
             ],
         },
-        "desk_lessons": [
-            {
-                "id": "scan_overflow",
-                "fact": "Scan overflow drops ranked hits and keeps sessions.",
-            }
-        ],
-        "playbook": {
-            "lab": {"entry_trunks_untried": ["iron_condor"]},
-            "cards": [{"name": "flush bounce"}],
-        },
     }
 
 
@@ -1380,34 +1036,14 @@ def test_clip_keeps_live_book_when_last_look_scan_overflows():
     assert data["day"]["open_lots"][2].startswith("SPY")
     assert data["world"]["working_orders"][0]["order_id"] == 77
     assert data["world"]["fills"][0]["symbol"] == "HPQ"
-    assert data["desk_lessons"][0]["id"] == "scan_overflow"
     look = data.get("last_look") or {}
     assert "scan_hits" not in look
     assert look.get("_clipped") in {"scan_hits", "session_range", "rows"}
-    assert data.get("_clipped") not in {"payload", "world", "day", "desk_lessons"}
+    assert data.get("_clipped") not in {"payload", "world", "day"}
 
 
-def test_clip_keeps_live_book_when_playbook_notes_overflow():
-    payload = {
-        **_live_book_core(),
-        "playbook": {
-            "lab": {"entry_trunks_untried": ["iron_condor"]},
-            "cards": [{"name": "flush bounce"}],
-            "notes": "x" * 30_000,
-        },
-    }
-    raw = _clip(payload)
-    data = json.loads(raw)
-    assert data.get("_clipped") != "payload"
-    assert "HPQ" in data["day"]["open_lots"][0]
-    assert data["desk_lessons"][0]["id"] == "scan_overflow"
-    assert data["world"]["working_orders"]
-    pb = data.get("playbook") or {}
-    assert "notes" not in pb
-    assert pb.get("_clipped") == "notes"
 
-
-def test_clip_status_keeps_lots_and_lessons_when_news_overflows():
+def test_clip_status_keeps_lots_when_news_overflows():
     payload = {
         "ibkr_connected": True,
         "trading_mode": "paper",
@@ -1415,7 +1051,6 @@ def test_clip_status_keeps_lots_and_lessons_when_news_overflows():
         "sends_this_turn": 0,
         "open_lots": ["HPQ 260918C28 long 1", "SPY 260918C650 long 1"],
         "working_orders": [{"symbol": "HPQ", "type": "LMT", "role": "exit"}],
-        "desk_lessons": [{"id": "scan_overflow", "fact": "Do not rescan the same arena."}],
         "news": [{"headline": "n" * 400} for _ in range(80)],
     }
     raw = _clip(payload)
@@ -1423,12 +1058,11 @@ def test_clip_status_keeps_lots_and_lessons_when_news_overflows():
     assert data.get("_clipped") == "news"
     assert data["open_lots"][0].startswith("HPQ")
     assert data["working_orders"][0]["symbol"] == "HPQ"
-    assert data["desk_lessons"][0]["id"] == "scan_overflow"
     assert "news" not in data
 
 
 @pytest.mark.asyncio
-async def test_book_tool_clip_keeps_lots_and_desk_lessons(monkeypatch):
+async def test_book_tool_clip_keeps_lots(monkeypatch):
     fat_look = {
         "fresh": True,
         "send_calls": 1,
@@ -1481,7 +1115,6 @@ async def test_book_tool_clip_keeps_lots_and_desk_lessons(monkeypatch):
     world_b = data.get("world") or {}
     assert world_b.get("working_orders")
     assert world_b.get("fills")
-    assert data.get("desk_lessons")
     look = data.get("last_look") or {}
     if look:
         assert look.get("_clipped") in {"scan_hits", "session_range", "rows"}
@@ -1489,7 +1122,7 @@ async def test_book_tool_clip_keeps_lots_and_desk_lessons(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_status_tool_keeps_lots_orders_and_lessons(monkeypatch):
+async def test_status_tool_keeps_lots_and_orders(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.connections.connection_status",
         lambda *_a, **_k: {"ibkr_connected": True, "trading_mode": "paper"},
@@ -1524,7 +1157,6 @@ async def test_status_tool_keeps_lots_orders_and_lessons(monkeypatch):
     data = json.loads(raw)
     assert any("HPQ" in str(x) for x in (data.get("open_lots") or []))
     assert data.get("working_orders")
-    assert data.get("desk_lessons")
 
 
 def _fat_session_bars(n: int, *, close: float = 90.0) -> list[dict]:
@@ -1620,78 +1252,6 @@ def test_clip_keeps_batch_series_bars():
         _assert_think_bars(row.get("bars") or [])
         assert row.get("symbol") in {"SPY", "QQQ", "IWM", "DIA"}
 
-
-@pytest.mark.asyncio
-async def test_multi_name_candles_send_sketch_uses_this_look_session(monkeypatch):
-    from abcxauto.lab_playbook import clamp_update, save_lab
-
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "tool_order": ["scan", "news", "quote", "candles", "send"],
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK. Stop under opening low.",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ],
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
-    monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda *a, **k: {})
-    monkeypatch.setattr(
-        "abcxauto.opportunity_scan._et_calendar_day",
-        lambda now=None: "2026-08-25",
-    )
-
-    class Conn:
-        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
-            low = 88.0 if symbol == "SNDK" else 900.0
-            return {
-                "symbol": symbol,
-                "bars": [
-                    {
-                        "t": "2026-08-25T09:35:00",
-                        "o": low + 2,
-                        "h": low + 4,
-                        "l": low,
-                        "c": low + 3,
-                    },
-                ],
-                "source": "ibkr",
-                "freshness": "ibkr_rth",
-            }
-
-        async def get_realtime_bars(self, symbol, **_k):
-            raise AssertionError("hist answered")
-
-    snap = {
-        "scan_hits": {
-            "quoted": 2,
-            "rows": [
-                {"symbol": "SNDK", "last": 91.5, "open_gap_pct": -6.5},
-                {"symbol": "MU", "last": 911.0, "open_gap_pct": -3.3},
-            ],
-        }
-    }
-    data = json.loads(
-        await _run_tool(
-            "candles",
-            {"symbols": ["MU", "SNDK"], "resolution": "5"},
-            connector=Conn(),
-            world=_world(),
-            snap=snap,
-            turn=BrainTurn(tool_trace=["book", "scan", "news"]),
-        )
-    )
-    assert snap["session_range"]["SNDK"]["low"] == 88.0
-    assert "run" not in data
 
 
 @pytest.mark.asyncio
@@ -2014,27 +1574,7 @@ async def test_candles_batch_fat_hist_returns_series_bars():
 
 @pytest.mark.asyncio
 async def test_candles_miss_is_error_not_clipped_metadata():
-    from abcxauto.lab_playbook import clamp_update, save_lab
 
-    update = clamp_update(
-        {
-            "types": {
-                "market_bracket": {
-                    "tool_order": ["scan", "news", "quote", "candles", "send"],
-                    "cards": [
-                        {
-                            "name": "flush bounce",
-                            "thesis": "gap retrace",
-                            "shape": "LONG STK. Stop under opening low.",
-                            "retire_if": {"sample": 3, "condition": "no bounce"},
-                        }
-                    ],
-                }
-            }
-        }
-    )
-    assert update is not None
-    save_lab(update)
 
     class Conn:
         async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
@@ -2248,41 +1788,6 @@ async def test_quote_batch_stashes_each_symbol():
     assert snap["ibkr_live_quotes"]["SPY"] == 100.0
     assert snap["ibkr_live_quotes"]["QQQ"] == 101.0
 
-
-@pytest.mark.asyncio
-async def test_playbook_tool_returns_current_and_ledger(tmp_path, monkeypatch):
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    from abcxauto.lab_playbook import save_lab
-
-    save_lab(
-        {
-            "mode": "explore",
-            "instructions": "Standing notes for the lab.",
-            "do_more": "size",
-            "stop_doing": "clones",
-            "ready_to_promote": False,
-        },
-        scorecard={"beating_model": False, "edge_usd": -12.0},
-    )
-    data = json.loads(
-        await _run_tool("playbook", {}, connector=None, world=_world(), snap={}, turn=BrainTurn())
-    )
-    assert data["book"] == "paper TWS"
-    assert "scope" not in data
-    assert "Standing notes" in data["tree"]
-    assert data["ledger"][0]["revision"] == 1
-    assert "instructions" not in data["ledger"][0]
-    full = json.loads(
-        await _run_tool(
-            "playbook",
-            {"full": True},
-            connector=None,
-            world=_world(),
-            snap={},
-            turn=BrainTurn(),
-        )
-    )
-    assert "Standing notes" in full["tree"]
 
 
 def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
@@ -3073,7 +2578,7 @@ async def test_read_tools_run_in_parallel(monkeypatch):
     from abcxauto.brain import grok_turn
 
     reads = ("quote", "news", "scan")
-    writes = ("send", "self_tune", "write_lab_playbook")
+    writes = ("send", "self_tune")
     gate_s = 2.0
 
     reads_in_flight = 0
@@ -3165,26 +2670,6 @@ def _tool_props(name: str) -> dict:
     return dict((params or {}).get("properties") or {})
 
 
-def test_playbook_tools_are_a_notebook_not_a_form():
-    playbook = str(getattr(_tool_fn("playbook"), "description", "") or "")
-    write = str(getattr(_tool_fn("write_lab_playbook"), "description", "") or "")
-    assert "outcome" in playbook.lower()
-    assert "WHAT_WORKED" not in write
-    assert "wake clock" in write.lower()
-    assert "next-look-you" not in write
-    assert "record that you looked" in write.lower()
-    assert "named rewrite changes the card" in write.lower()
-    fn = _tool_fn("write_lab_playbook")
-    params = getattr(fn, "parameters", None) or {}
-    if isinstance(params, str):
-        params = json.loads(params)
-    elif hasattr(params, "model_dump"):
-        params = params.model_dump()
-    blob = json.dumps(params)
-    assert "next_look_s" not in blob
-    assert "max_looks_without_trigger" not in blob
-    assert "look diary" in blob.lower()
-
 
 def test_send_tool_says_one_ticket_per_call():
     fn = _tool_fn("send")
@@ -3206,8 +2691,7 @@ def test_send_tool_says_one_ticket_per_call():
     assert "quantity" in props
     card = props.get("card") or {}
     assert "required on new risk" in str(card.get("description") or "").lower()
-    assert "not law" in str(card.get("description") or "").lower()
-    assert "prose is not a send gate" in str(card.get("description") or "").lower()
+    assert "not a catalog" in str(card.get("description") or "").lower()
 
 
 def test_self_tune_tool_is_flat():
@@ -3419,109 +2903,7 @@ async def test_book_has_combo_avg_and_sends_count():
     assert pos[0]["right"] == "C"
 
 
-def test_write_lab_playbook_has_no_think_essay_dump():
-    """Keep [write_lab_playbook] marker only — no notebook text in the think stream."""
-    import abcxauto.brain as brain
 
-    assert not hasattr(brain, "_emit_write_lab_playbook_think")
-    assert not hasattr(brain, "_LAB_PLAYBOOK_THINK_CAP")
-
-
-@pytest.mark.asyncio
-async def test_invoke_write_lab_playbook_emits_marker_only(monkeypatch):
-    from abcxauto import brain
-    from abcxauto.brain import BrainTurn, _invoke_named_tool
-    from abcxauto.think_stream import subscribe, unsubscribe
-
-    async def fake_run(name, args, **_k):
-        return json.dumps({"status": "ok", "instructions": args.get("instructions")})
-
-    monkeypatch.setattr(brain, "_run_tool", fake_run)
-    got: list[str] = []
-
-    def cap(kind: str, text: str) -> None:
-        if kind == "tool":
-            got.append(text)
-
-    note = "Paper: prefer debit verticals on index ETFs."
-    subscribe(cap)
-    try:
-        out = await _invoke_named_tool(
-            "write_lab_playbook",
-            {"instructions": note, "mode": "explore"},
-            1.0,
-            connector=None,
-            world=_world(),
-            snap={},
-            turn=BrainTurn(),
-        )
-    finally:
-        unsubscribe(cap)
-    assert json.loads(out)["status"] == "ok"
-    assert got == ["\n[write_lab_playbook]\n"]
-    joined = "".join(got)
-    assert note not in joined
-    assert "... [truncated]" not in joined
-
-
-@pytest.mark.asyncio
-async def test_invoke_write_lab_playbook_long_notebook_stays_off_stream(monkeypatch):
-    from abcxauto import brain
-    from abcxauto.brain import BrainTurn, _invoke_named_tool
-    from abcxauto.think_stream import subscribe, unsubscribe
-
-    async def fake_run(name, args, **_k):
-        return json.dumps({"status": "ok"})
-
-    monkeypatch.setattr(brain, "_run_tool", fake_run)
-    got: list[str] = []
-
-    def cap(kind: str, text: str) -> None:
-        if kind == "tool":
-            got.append(text)
-
-    note = ("AAPL — wait. " * 400) + ("x" * 2000)
-    subscribe(cap)
-    try:
-        await _invoke_named_tool(
-            "write_lab_playbook",
-            {"instructions": note},
-            1.0,
-            connector=None,
-            world=_world(),
-            snap={},
-            turn=BrainTurn(),
-        )
-        await _invoke_named_tool(
-            "write_lab_playbook",
-            {"instructions": "   "},
-            1.0,
-            connector=None,
-            world=_world(),
-            snap={},
-            turn=BrainTurn(),
-        )
-        await _invoke_named_tool(
-            "write_lab_playbook",
-            {},
-            1.0,
-            connector=None,
-            world=_world(),
-            snap={},
-            turn=BrainTurn(),
-        )
-    finally:
-        unsubscribe(cap)
-    assert got == [
-        "\n[write_lab_playbook]\n",
-        "\n[write_lab_playbook]\n",
-        "\n[write_lab_playbook]\n",
-    ]
-    joined = "".join(got)
-    assert "AAPL" not in joined
-    assert "wait" not in joined
-    assert "xxxx" not in joined
-    assert "... [truncated]" not in joined
 
 
 @pytest.mark.asyncio
@@ -3705,46 +3087,6 @@ async def test_dispatch_emits_paid_json_into_the_day_file(tmp_path, monkeypatch)
     assert chat.rows and chat.rows[0][1] == paid
     assert not (tmp_path / "think_tail.txt").exists()
 
-
-def test_write_lab_playbook_invoke_is_marker_only_append_emits_paid(
-    tmp_path, monkeypatch
-):
-    """_invoke_named_tool stays marker-only. The paid result emit()s from append."""
-    from types import SimpleNamespace
-
-    from abcxauto import brain
-    from abcxauto import think_stream as ts
-
-    monkeypatch.setattr(
-        brain,
-        "tool_result",
-        lambda result, tool_call_id=None: result,
-    )
-    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
-    note = "Paper: prefer debit verticals on index ETFs."
-    paid = json.dumps({"status": "ok", "instructions": note})
-    tc = SimpleNamespace(
-        id="c3",
-        function=SimpleNamespace(
-            name="write_lab_playbook",
-            arguments=json.dumps({"instructions": note, "mode": "explore"}),
-        ),
-    )
-
-    class Chat:
-        def append(self, *_a, **_k) -> None:
-            pass
-
-    ts.reset_speaker()
-    ts.bind_engine(None)
-    try:
-        brain._append_tool_result(Chat(), tc, paid)
-    finally:
-        ts.reset_speaker()
-
-    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
-    assert note in session
-    assert paid in session
 
 
 def test_look_failed_question_empty_and_stream_error():

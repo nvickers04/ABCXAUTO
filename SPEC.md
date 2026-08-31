@@ -13,7 +13,7 @@ the cost of the model. Same rules at $1k, $100k, or $1M.
 
 | Owner | Job |
 |-------|-----|
-| **Grok** | Tickets (`send`), knobs (`self_tune`), lab notebook (`write_lab_playbook`) |
+| **Grok** | Tickets (`send`), knobs (`self_tune`) |
 | **Code** | Live facts, `ORDER EXAMPLES`, hard gates, overnight / after-close park |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No strategy card. |
 
@@ -33,15 +33,11 @@ which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process.
 - One sector/theme arena vs `max_arena_concentration_pct` of NL. Per-name cannot
   see NVDA+SMCI+ARM+AVGO as four names. Catalog arenas we already scan (industry /
   cap / ETF / commodity), not scan sorts. Send still fires when paper gates are off
-- Open ticket past `retire_if.max_hold_sessions` / `max_hold_hours` trips the card
-  and flattens that lot. Independent of paper gates
 - Unprotected STK: last-stop; hold blocked until it rests at IBKR. Combo close is one BAG (`closing_position`), not new risk
-- New risk must name an existing lab playbook card (scorecard label; prose is not law)
+- New risk must name a play (`params.card` is a scorecard label, not a catalog)
 - Ticket geometry uses **IBKR last**, not MDA
 - Ticket last / IV / credit / width must appear in this look's `quote` /
   `option_quote` / `book` cache (`stale_or_invented_number`; unverifiable kills)
-- Promote contract: [`abcxauto/playbook/promote.py`](abcxauto/playbook/promote.py)
-  (`retire_if.sample` + one numeric kill; `conservative_pnl`; paper mids cannot graduate)
 - Exits never blocked; fail-closed if the book is unknown
 - Agent may tighten floors via `self_tune`; it cannot weaken them or switch to live
 - Session look and token caps (Settings). Hit stays idle / park-ready; chat is
@@ -63,7 +59,7 @@ stay on the chat. A spoken line does not wipe it.
 Overnight / after-close / park drop the chat. Paper RTH / premarket stay up
 (no sit clock). Closed/postmarket does not call Grok (unprotected still does);
 park_clock until premarket. Session cap idles; chat is kept. Durable notes
-across days are the lab playbook file.
+across days are gone.
 
 See [`docs/LOOK.md`](docs/LOOK.md). Snap facts → Grok tools → `send` gates.
 
@@ -80,8 +76,7 @@ IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 
 MDA ~15m delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
 
-Other: `odds` (Polymarket, not send geometry), `playbook`, `write_lab_playbook`,
-`send`, `self_tune` (flat knobs).
+Other: `odds` (Polymarket, not send geometry), `send`, `self_tune` (flat knobs).
 
 Universe is a watchlist Grok can change via `self_tune`; `send` is not limited
 to it. Code writes `journal.db`; there is no `journal` tool.
