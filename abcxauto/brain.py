@@ -931,13 +931,15 @@ def _open_wake(
 ) -> Any:
     """Start this look, or continue the live stay-up chat.
 
-    A cold start is a new chat (system prompt + developer wake). Stay-up
-    resume appends book facts to the existing chat. A poke does not start
-    a new messages list. A pending live poke owns the next developer turn.
+    A live chat is this look. Do not start a new messages list while it
+    exists — including when ``resume`` is false (older callers / a poke).
+    ``reset=True`` and overnight / park drop are the only new-chat paths.
+    A pending live poke owns the next developer turn.
     """
+    _ = resume
     g._wake_appended = False
     live = None if reset else getattr(g, "chat", None)
-    if resume and live is not None:
+    if live is not None:
         pending = False
         try:
             from abcxauto.park_clock import peek_interrupt
@@ -1282,13 +1284,13 @@ async def grok_turn(
 ) -> BrainTurn:
     """Call the model on one kept chat. send() is the only broker path.
 
-    ``resume`` is optional so older grok_turn mocks keep working. Stay-up
-    continues the live chat. Tool_calls execute and the model is called
-    again with those results on this chat. Words with no tool_calls: stop
-    calling the model. Chat kept. Do not call the model again because it
-    spoke. A poke does not start a new messages list. A fresh BrainTurn
-    still drops refused send tickets so they cannot be the next look's
-    send target.
+    ``resume`` is optional so older grok_turn mocks keep working. A live
+    chat is this look even when ``resume`` is false. Tool_calls execute
+    and the model is called again with those results on this chat. Words
+    with no tool_calls: stop calling the model. Chat kept. Do not call
+    the model again because it spoke. A poke does not start a new
+    messages list. A fresh BrainTurn still drops refused send tickets so
+    they cannot be the next look's send target.
     """
     return await _grok_turn_impl(
         g,
@@ -1664,6 +1666,9 @@ async def _grok_turn_impl(
         turn.failed = True
         return turn
     session = str(getattr(world, "session_status", "") or "")
+    live_before = getattr(g, "chat", None)
+    # A live chat is this look. A poke does not start a new messages list.
+    resume = bool(resume) or live_before is not None
     try:
         chat = _open_wake(g, wake, session=session, resume=resume)
     except Exception as exc:

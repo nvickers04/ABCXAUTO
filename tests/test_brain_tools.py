@@ -2416,8 +2416,8 @@ def test_ensure_chat_rotates_non_episode():
 
 
 def test_every_wake_opens_a_fresh_linear_think():
-    """A cold _open_wake is a new chat. Stay-up resume is the other path."""
-    from abcxauto.brain import _ensure_chat, _open_wake
+    """Cold _ensure_chat is a new chat. A live chat stays one messages list."""
+    from abcxauto.brain import _ensure_chat, _open_wake, drop_live_chat
     from abcxauto.park_clock import BookEvent, note_wake
 
     g, created = _stub_chat_client()
@@ -2430,7 +2430,11 @@ def test_every_wake_opens_a_fresh_linear_think():
         g2, created2 = _stub_chat_client()
         first = _open_wake(g2, "look brief")
         second = _open_wake(g2, "delta brief")
-        assert second is not first
+        assert second is first
+        assert len(created2) == 1
+        drop_live_chat(g2)
+        third = _open_wake(g2, "after drop")
+        assert third is not first
         assert len(created2) == 2
     finally:
         note_wake(None)
@@ -2639,6 +2643,10 @@ def test_stay_up_resume_skips_append_when_poke_pending():
     try:
         out = _open_wake(g, "session=regular send.", resume=True)
         assert out is live
+        assert live.appended == []
+        # A poke does not start a new messages list, even if resume is false.
+        again = _open_wake(g, "session=regular send.", resume=False)
+        assert again is live
         assert live.appended == []
     finally:
         clear_interrupt()
@@ -4002,6 +4010,7 @@ async def test_stay_up_resume_keeps_chat_cold_start_does_not():
     assert g.chat is live
     assert len(created) == 1
 
+    # Spoken line already left the chat. resume=False must not wipe it.
     third = await grok_turn(
         g,
         connector=None,
@@ -4011,6 +4020,21 @@ async def test_stay_up_resume_keeps_chat_cold_start_does_not():
         resume=False,
     )
     assert third.look_failed() is False
+    assert g.chat is live
+    assert len(created) == 1
+
+    from abcxauto.brain import drop_live_chat
+
+    drop_live_chat(g)
+    fourth = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake="session=regular send.",
+        resume=False,
+    )
+    assert fourth.look_failed() is False
     assert g.chat is not live
     assert len(created) == 2
 
