@@ -191,7 +191,46 @@ def stream_line_kind(line: str) -> str:
         return "send" if s == "[send]" else "tool"
     if s.startswith("hits=") and " src=" in s:
         return "scan"
+    if s.startswith("{"):
+        # Compact tool dumps from emit(). Chips are [book], not {…}.
+        return "json"
     return "prose"
+
+
+def stream_view_lines(body: str) -> list[str]:
+    """What the think pane paints from think_session_text.
+
+    JSON object dumps stay on the ET keep-file (Copy stream / disk). The pane
+    keeps [think]/[say]/[tool] chips, banners, and prose so the look is
+    readable. Consecutive JSON object lines collapse to one muted stub.
+    """
+    out: list[str] = []
+    json_chars = 0
+    json_n = 0
+
+    def _flush_json() -> None:
+        nonlocal json_chars, json_n
+        if not json_n:
+            return
+        if json_n == 1:
+            out.append(f"{{json {json_chars:,} chars}}")
+        else:
+            out.append(f"{{json {json_n} lines, {json_chars:,} chars}}")
+        json_chars = 0
+        json_n = 0
+
+    for raw in (body or "").splitlines():
+        kind = stream_line_kind(raw)
+        if kind == "blank":
+            continue
+        if kind == "json":
+            json_n += 1
+            json_chars += len(raw.strip())
+            continue
+        _flush_json()
+        out.append(raw)
+    _flush_json()
+    return out
 
 
 def current_look_text(buf: str) -> str:
@@ -2613,7 +2652,7 @@ class ProTerminal:
         return think_session_text(live=live) or str(self.think_live.value or "")
 
     def _pane_stream_text(self) -> str:
-        """Visible Grok stream: today's keep-file lines, not think_live[-24000:]."""
+        """Visible Grok stream: pane view of today's keep-file, not think_live[-24000:]."""
         bits: list[str] = []
         for node in getattr(self.col_stream, "controls", None) or []:
             val = getattr(node, "value", None)
@@ -3767,7 +3806,8 @@ class ProTerminal:
             self.col_stream.controls = []
             self._stream_lines_key = ""
         else:
-            # Empty-state label only. The spine is the day; do not slice it.
+            # Empty-state label only. The spine is the day; JSON dumps
+            # collapse in the view, not on the keep-file.
             self.think_live.value = ""
             self.think_live.visible = False
             self._sync_stream_lines(body)
@@ -3775,13 +3815,13 @@ class ProTerminal:
                 self.think_scroll.auto_scroll = True
 
     def _sync_stream_lines(self, body: str) -> None:
-        """One control per stream line so markers read at a glance.
+        """One control per view line so markers read at a glance.
 
-        Every line is painted with its own text — no marker is rewritten,
-        stripped or reordered. Only whitespace-only lines become spacing.
-        The operator scrolls the whole session, not an 8kb / 24kb window.
+        Chips, banners, and think/say prose paint verbatim. JSON object dumps
+        collapse to a short stub — the pane is a view, not the keep-file.
+        The operator scrolls the look, not 40kb of [book]/[scan] JSON.
         """
-        lines = body.splitlines()
+        lines = stream_view_lines(body)
         key = "\n".join(lines)
         if key == self._stream_lines_key:
             return
@@ -3837,7 +3877,7 @@ class ProTerminal:
             color, weight = MUTED, ft.FontWeight.W_600
         elif kind == "say":
             color, weight = BLUE, ft.FontWeight.W_600
-        elif kind in ("cached", "scan"):
+        elif kind in ("cached", "scan", "json"):
             color = MUTED
         elif mode == "think":
             color = MUTED
