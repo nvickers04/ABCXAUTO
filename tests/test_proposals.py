@@ -16,6 +16,11 @@ RATIONALE = "test rationale"
 VALID_PAYLOADS = {k: dict(v) for k, v in ORDER_EXAMPLES.items() if k in STRATEGIES}
 
 
+def _geometry_last(strategy: str) -> float | None:
+    """ORDER EXAMPLES omit price_hint so Grok has to quote. Schema tests still need a print."""
+    return 100.0 if strategy in ("market_bracket", "oca") else None
+
+
 @pytest.fixture(autouse=True)
 def _relax_proposal_gates(monkeypatch):
     """Matrix tests cover schema shape; R:R gates have dedicated cases."""
@@ -32,7 +37,9 @@ def test_every_strategy_has_a_valid_payload_case():
 
 @pytest.mark.parametrize("strategy", sorted(VALID_PAYLOADS))
 def test_valid_payloads_accepted(strategy):
-    proposal = validate_proposal(strategy, VALID_PAYLOADS[strategy], RATIONALE)
+    proposal = validate_proposal(
+        strategy, VALID_PAYLOADS[strategy], RATIONALE, quote_last=_geometry_last(strategy)
+    )
     assert proposal.strategy == strategy
     assert proposal.gateway_method == STRATEGIES[strategy][1]
     if "symbol" in VALID_PAYLOADS[strategy]:
@@ -120,10 +127,20 @@ class TestProtectionRequired:
 
     def test_management_strategies_flagged(self):
         for strategy in ("oca", "modify_stop", "modify_target", "cancel_order"):
-            p = validate_proposal(strategy, VALID_PAYLOADS[strategy], RATIONALE)
+            p = validate_proposal(
+                strategy,
+                VALID_PAYLOADS[strategy],
+                RATIONALE,
+                quote_last=_geometry_last(strategy),
+            )
             assert p.is_management, strategy
         for strategy in ("bracket", "market_bracket", "market_order", "close_option"):
-            p = validate_proposal(strategy, VALID_PAYLOADS[strategy], RATIONALE)
+            p = validate_proposal(
+                strategy,
+                VALID_PAYLOADS[strategy],
+                RATIONALE,
+                quote_last=_geometry_last(strategy),
+            )
             assert not p.is_management, strategy
 
 

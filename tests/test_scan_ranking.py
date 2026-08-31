@@ -79,7 +79,7 @@ def test_skip_class_never_occupies_deepest_even_without_skip_cards():
 
 
 @pytest.mark.asyncio
-async def test_scan_tool_does_not_pin_skip_class_as_deepest(monkeypatch, tmp_path):
+async def test_scan_tool_does_not_pin_skip_class_as_deepest(monkeypatch):
 
     async def _fake_scan(**_kw):
         return {
@@ -491,12 +491,10 @@ async def test_bare_scan_runs_the_flush_trio(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch, tmp_path):
+async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
     """Four different arena calls collapse to one bag; same args skip IBKR."""
     from abcxauto.opportunity_scan import overlay_hits as _real_overlay
 
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
     ibkr = {"calls": 0}
 
     async def _fake_ibkr(_connector, spec):

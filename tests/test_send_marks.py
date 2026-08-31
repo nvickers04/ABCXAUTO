@@ -246,7 +246,13 @@ async def test_execute_proposal_journals_nbbo_vs_paper_mid_fill(monkeypatch):
     base = get_config()
     monkeypatch.setattr(
         "abcxauto.executor.get_config",
-        lambda: Config(**{**base.__dict__, "risk_gates_enabled": False}),
+        lambda: Config(
+            **{
+                **base.__dict__,
+                "risk_gates_enabled": False,
+                "max_arena_concentration_pct": 0,
+            }
+        ),
     )
     monkeypatch.setattr(
         "abcxauto.proposals.get_config",

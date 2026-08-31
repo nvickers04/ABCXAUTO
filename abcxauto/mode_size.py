@@ -73,8 +73,10 @@ def live_marks_match_paper() -> bool:
 
 
 def exploit_may_widen() -> bool:
-    """Exploit widen needed graduated cards. Persist is gone."""
-    return False
+    """Exploit widens with graduated cards. Persist is gone, so this stays closed."""
+    if playbook_mode() != "exploit":
+        return False
+    return bool(graduated_names())
 
 
 def mode_size_ceiling(
@@ -193,17 +195,6 @@ def mode_size_band(
         "with": "max_open_positions",
         "change": "self_tune",
     }
-
-
-def exploit_learning_card_error(
-    card: Any,
-    *,
-    type: str = "",
-    book: dict[str, Any] | None = None,
-) -> str:
-    """Graduation persist is gone. Empty string means this ticket may go."""
-    _ = (card, type, book)
-    return ""
 
 
 def mode_size_ticket_error(

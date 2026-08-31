@@ -15,11 +15,10 @@ def test_metrics_no_advice_note():
     assert "uptrend support" not in str(idea).lower()
 
 
-def test_book_facts_have_no_controls_lecture(tmp_path, monkeypatch):
+def test_book_facts_have_no_controls_lecture(monkeypatch):
     from abcxauto.brain import _book_payload
     from abcxauto.world_state import WorldState
 
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     get_config.cache_clear()
 
     world = WorldState(

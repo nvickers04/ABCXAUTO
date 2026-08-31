@@ -712,21 +712,6 @@ def test_format_wake_flat_empty_omits_leftover_prev():
 
 
 def test_day_facts_wiped_instructions_drop_playbook_glance():
-    import json
-    import os
-    from pathlib import Path
-
-    path = Path(os.environ["ABCXAUTO_PLAYBOOK_LAB_PATH"])
-    path.write_text(
-        json.dumps(
-            {
-                "revision": 51,
-                "instructions": "   ",
-                "ledger": [{"revision": 51, "edge_usd": -12.0}],
-            }
-        ),
-        encoding="utf-8",
-    )
     world = type("W", (), {})()
     world.positions = []
     world.net_liquidation = 35339.16

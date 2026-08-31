@@ -599,7 +599,6 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))
     monkeypatch.setenv("ABCXAUTO_SESSION_PREP_PATH", str(tmp_path / "prep.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_REVIEW_PATH", str(tmp_path / "rev.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
 
     from abcxauto.memory import reset_journal
 

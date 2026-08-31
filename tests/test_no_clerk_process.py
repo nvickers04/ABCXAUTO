@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from abcxauto.brain import BrainTurn, _finish_look_chat, _look_text_is_junk
 from abcxauto.llm import SYSTEM_PROMPT
 from abcxauto.think_stream import emit, reset_speaker
@@ -251,3 +253,18 @@ def test_card_still_required_on_new_risk():
     assert new_risk_card_error("   ")
     assert not new_risk_card_error("large-cap 3pct gap hold")
     assert not new_risk_card_error("moon shot")
+
+
+def test_playbook_cathedral_modules_are_gone():
+    import pkgutil
+
+    import abcxauto
+
+    names = {m.name for m in pkgutil.iter_modules(abcxauto.__path__)}
+    assert "playbook" not in names
+    assert "desk_lessons" not in names
+    assert "lab_playbook" not in names
+    for name in ("playbook", "desk_lessons", "lab_playbook"):
+        with pytest.raises(ModuleNotFoundError):
+            __import__(f"abcxauto.{name}")
+

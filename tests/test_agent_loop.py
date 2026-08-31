@@ -122,7 +122,6 @@ def _stub_config(monkeypatch, tmp_path):
     monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", _empty)
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "journal.db"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     from abcxauto.memory import reset_journal
 
     reset_journal(path=str(tmp_path / "journal.db"), enabled=True)

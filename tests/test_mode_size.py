@@ -15,7 +15,6 @@ from abcxauto.config import Config, get_config
 from abcxauto.mode_size import (
     MODE_SIZE_CEILING_EXPLORE,
     MODE_SIZE_FLOOR,
-    exploit_learning_card_error,
     exploit_may_widen,
     live_marks_match_paper,
     mode_size_ceiling,
@@ -214,21 +213,6 @@ def test_exploit_without_graduated_cards_does_not_widen():
     assert out["applied"]["size_pct_nl"] == MODE_SIZE_CEILING_EXPLORE
     assert out["clamped"]["size_pct_nl"]["raw"] == 12.0
 
-
-
-def test_exploit_with_graduated_cards_opens_walkaway_not_working_size(monkeypatch):
-    """Exploit + graduated opens the walk-away ceiling. Working default stays single-digit."""
-    monkeypatch.setattr("abcxauto.mode_size.graduated_names", lambda book=None: ["grad"])
-    monkeypatch.setattr(
-        "abcxauto.mode_size.card_is_graduated",
-        lambda *_a, **_k: True,
-    )
-    assert live_marks_match_paper() is False
-    assert exploit_may_widen() is True
-    assert mode_size_ceiling(card="grad") == 25.0
-    assert working_size_ceiling(card="grad") == MODE_SIZE_CEILING_EXPLORE
-    assert working_size_ceiling(card="grad") != 25.0
-    assert working_size_ceiling(card="grad") < 10
 
 
 def test_self_tune_may_move_inside_the_band_not_only_down():

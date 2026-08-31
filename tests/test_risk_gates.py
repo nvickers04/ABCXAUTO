@@ -104,7 +104,9 @@ def _market_order_exit():
 
 
 def _oca():
-    return validate_proposal("oca", VALID_PAYLOADS["oca"], RATIONALE)
+    return validate_proposal(
+        "oca", VALID_PAYLOADS["oca"], RATIONALE, quote_last=100.0
+    )
 
 
 @pytest.mark.asyncio

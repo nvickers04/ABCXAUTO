@@ -1,9 +1,8 @@
-"""Linear think, screen facts, and the setup-card playbook.
+"""Linear think and screen facts.
 
 Paper RTH / premarket stay-up keeps the live chat across successful looks.
-Empty / junk: stop calling the model; chat kept until a poke. Overnight drop it. Refused send tickets do not ride. Cards
-carry their own P&L so a revision is a decision about evidence rather than
-about whole-book drift.
+Empty / junk: stop calling the model; chat kept until a poke. Overnight drop it.
+Refused send tickets do not ride.
 """
 
 from __future__ import annotations

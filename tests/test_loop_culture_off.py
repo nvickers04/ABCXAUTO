@@ -48,9 +48,6 @@ def _world(**kwargs) -> WorldState:
 
 
 def test_wake_book_playbook_have_no_assignment_paint(tmp_path, monkeypatch):
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
-    monkeypatch.setenv("ABCXAUTO_CARD_LOG_PATH", str(tmp_path / "cards.jsonl"))
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
     write_desk_brief(
         {
@@ -105,9 +102,6 @@ def test_wake_and_scan_do_not_assign_card_floors(tmp_path, monkeypatch):
     """Clerk does not tell Grok 'no ticket unless news-miss' or paint card_gap=."""
     from abcxauto.brain import _scan_gate_facts
 
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "live.json"))
-    monkeypatch.setenv("ABCXAUTO_CARD_LOG_PATH", str(tmp_path / "cards.jsonl"))
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
     write_desk_brief(
         {

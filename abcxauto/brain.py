@@ -1463,7 +1463,7 @@ async def _dispatch_tool_calls(
     snap: dict[str, Any],
     turn: BrainTurn,
 ) -> bool:
-    """Read tools in parallel; send / playbook stay serial and after facts.
+    """Read tools in parallel; send stays serial and after facts.
 
     A book event mid-message defers the reads, never the writes. A read is
     stale the moment the book moves and Grok has to ask again anyway; the send

@@ -486,7 +486,6 @@ def test_begin_run_premarket_writes_no_sit_clock(tmp_path, monkeypatch):
     from abcxauto.park_clock import load_alarm
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(tmp_path / "lab.json"))
     monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
     monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
     monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")

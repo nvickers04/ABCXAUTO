@@ -2729,10 +2729,6 @@ class ProTerminal:
         self.lbl_nb_playbook.color = self.lbl_playbook.color
         self.lbl_nb_playbook.tooltip = self.lbl_playbook.tooltip
 
-    def _notebook_setup_cards(self, lab: dict) -> list[dict]:
-        _ = lab
-        return []
-
     def _sync_notebook_types(self, lab: dict) -> None:
         _ = lab
         self.lbl_notebook_types.value = ""
@@ -2929,22 +2925,6 @@ class ProTerminal:
                 ])
             )
         self.col_sc_windows.controls = rows
-
-    @staticmethod
-    def _card_avg_r(row: dict) -> float | None:
-        """Mean R vs the card's declared max_loss_usd. None when risk is missing."""
-        retire = row.get("retire_if") if isinstance(row.get("retire_if"), dict) else {}
-        risk = retire.get("max_loss_usd")
-        n = int(row.get("resolved") or 0)
-        pnl = row.get("resolved_pnl")
-        try:
-            risk_f = float(risk)
-            pnl_f = float(pnl)
-        except (TypeError, ValueError):
-            return None
-        if risk_f <= 0 or n <= 0:
-            return None
-        return pnl_f / (n * risk_f)
 
     def _sync_sc_cards(self, sc: dict | None = None) -> None:
         _ = sc

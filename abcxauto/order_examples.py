@@ -372,7 +372,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "ORDER EXAMPLES (send tool — strategy + params)",
         "Stock entries: symbol+direction. Clerk will not invent omitted stop/target/qty. "
         "Bare opens become a bracket; exits stay exits. "
-        "New risk requires card= naming an existing playbook card (scorecard label, not law).",
+        "New risk requires card= naming a play (scorecard label, not a catalog).",
         "Use direction LONG|SHORT for bracket/market_bracket/oca/trailing.",
         "Stock exits: target_conId + quantity (partial trim OK; omit qty = full). After trim check stop_qty_fact.",
         "close_option: prefer conId; quantity may be partial. roll_option for lifecycle.",

@@ -326,29 +326,9 @@ def test_structure_lessons_paint_on_the_dashboard(pro):
 
 
 
-def test_notebook_page_survives_a_cleared_book(pro, monkeypatch, tmp_path):
-    """``clear_lab`` leaves revision 0 with empty cards / types — not a crash."""
-    lab = tmp_path / "playbook_lab.json"
-    lab.write_text(
-        json.dumps(
-            {
-                "mode": "explore",
-                "instructions": "",
-                "cards": [],
-                "types": {},
-                "ready_to_promote": False,
-                "promoted": False,
-                "revision": 0,
-                "written_at": "2026-08-20T16:04:01+00:00",
-                "ledger": [],
-                "paper_score": {},
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LAB_PATH", str(lab))
+def test_notebook_page_survives_a_cleared_book(pro):
+    """Empty notebook / scorecard card surfaces — persist is gone."""
     pro._sync_notebook_page(force=True)
-    # rev 0 is a real revision, not a missing one.
     assert (pro.lbl_notebook_head.value or "") == "—"
     assert "UNSENDABLE" not in (pro.lbl_notebook_meta.value or "")
     assert "lots at write: none" in (pro.lbl_notebook_lots.value or "")
