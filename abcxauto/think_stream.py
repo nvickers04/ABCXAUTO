@@ -2,7 +2,10 @@
 
 Headless prints to stdout (ASCII). ProEngine binds so the UI can show the same buffer.
 A short tail file lets Cursor review the stream without the window.
-An append-only per-ET-day file under data/state/think_session/ keeps the full stream.
+One append-only file per ET day under data/state/think_session/YYYY-MM-DD.txt
+keeps the paid look: think, tool names, tool args when present, the tool JSON
+the model paid to see, say. Bounces append a run banner; begin_run never wipes
+it. think_tail.txt stays an 8kb overwrite; think_live stays a 24kb RAM window.
 """
 
 from __future__ import annotations
@@ -112,6 +115,11 @@ def emit(kind: str, text: str) -> None:
         fns = list(_listeners)
         eng = _engine
         piece = _paint(kind, text)
+    # Day file is emit() itself — not a ProEngine side effect. Friday's
+    # keep-file appeared at first Pro paint; headless / pre-Pro looks never
+    # landed. Glass RAM / think_tail still require a bound engine.
+    if piece:
+        _append_think_session(piece)
     if eng is not None and piece:
         try:
             _append_engine_piece(eng, piece)
@@ -129,13 +137,24 @@ def emit(kind: str, text: str) -> None:
             logger.debug("think_stream listener failed", exc_info=True)
 
 
+def keep(text: str) -> None:
+    """Append to today's session keep-file. Does not touch RAM or the glass tail.
+
+    The run banner uses this so a bounce is grep-able before Pro binds.
+    Paid tool JSON goes through ``emit()`` so headless looks still land.
+    """
+    if not text:
+        return
+    piece = text if text.endswith("\n") else f"{text}\n"
+    _append_think_session(piece)
+
+
 def _append_engine_piece(eng: Any, piece: str) -> None:
     s = getattr(eng, "state", None)
     if s is None or not piece:
         return
     cur = getattr(s, "think_live", "") or ""
     s.think_live = (cur + piece)[-24000:]
-    _append_think_session(piece)
     _write_think_tail(s.think_live)
 
 
@@ -145,6 +164,71 @@ def _append_engine(eng: Any, kind: str, text: str) -> None:
 
 def _et_session_day() -> str:
     return datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
+
+# Operator wall clock on the run banner. Session *filename* stays ET.
+_DESK_TZ = ZoneInfo("America/Chicago")
+
+
+def _git_sha_short() -> str:
+    """Cheap HEAD for the bounce banner. Missing git is ``?``, not a crash."""
+    root = Path(__file__).resolve().parents[1]
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+        sha = (out.stdout or "").strip()
+        if 4 <= len(sha) <= 40 and all(c in "0123456789abcdefABCDEF" for c in sha):
+            return sha[:12]
+    except Exception:
+        logger.debug("git sha for run banner failed", exc_info=True)
+    try:
+        head = (root / ".git" / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref:"):
+            ref = head.split(":", 1)[1].strip()
+            raw = (root / ".git" / ref).read_text(encoding="utf-8").strip()
+        else:
+            raw = head
+        if raw and all(c in "0123456789abcdefABCDEF" for c in raw[:40]):
+            return raw[:12]
+    except OSError:
+        pass
+    return "?"
+
+
+def _run_banner_line(
+    *,
+    pid: int | None = None,
+    sha: str | None = None,
+    now: datetime | None = None,
+) -> str:
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    stamp = clock.astimezone(_DESK_TZ).strftime("%Y-%m-%d %H:%M")
+    pid_n = os.getpid() if pid is None else int(pid)
+    token = (sha if sha is not None else _git_sha_short()) or "?"
+    return f"=== run {stamp} CT pid={pid_n} sha={token} ===\n"
+
+
+def _keep_run_banner() -> None:
+    """One line in today's ET keep-file so a bounce is grep-able. Never a new file."""
+    line = _run_banner_line()
+    try:
+        path = _think_session_path()
+        if path.is_file() and path.stat().st_size:
+            keep("\n" + line)
+            return
+    except OSError:
+        pass
+    keep(line)
 
 
 def _think_session_path() -> Path:
@@ -231,7 +315,7 @@ def think_session_text(live: str = "") -> str:
 
 
 def _append_think_session(piece: str) -> None:
-    """Append this emit to today's ET file. The glass tail stays a short overwrite."""
+    """Append to today's ET file. begin_run must not truncate this file."""
     if not piece:
         return
     try:
@@ -563,6 +647,8 @@ def begin_run() -> dict[str, Any]:
 
     A fresh completed look stays on disk so a reload does not wipe
     the tape the next wake needs. Overnight and killed mid-turn still stale.
+    Today's think_session file is one ET day — bounces append a run banner;
+    this must not truncate or replace that file.
     """
     global _run
     prev = _read_json(LAST_TURN_PATH)
@@ -593,6 +679,7 @@ def begin_run() -> dict[str, Any]:
         RUN_PATH.write_text(json.dumps(_run, indent=2), encoding="utf-8")
     except OSError:
         logger.debug("run.json write failed", exc_info=True)
+    _keep_run_banner()
     return dict(_run)
 
 

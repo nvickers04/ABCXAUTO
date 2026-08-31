@@ -3519,6 +3519,196 @@ async def test_invoke_other_tool_emits_marker_only(monkeypatch):
     assert not any("should not dump" in t for t in got)
 
 
+def test_append_tool_result_emits_the_paid_json(tmp_path, monkeypatch):
+    """chat.append's payload must emit() into the day file — Pro not required."""
+    from types import SimpleNamespace
+
+    from abcxauto import brain
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(
+        brain,
+        "tool_result",
+        lambda result, tool_call_id=None: ("tr", result, tool_call_id),
+    )
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    ts.reset_speaker()
+    ts.bind_engine(None)
+    painted: list[tuple[str, str]] = []
+
+    def cap(kind: str, text: str, *_a) -> None:
+        painted.append((kind, text))
+
+    class Chat:
+        def __init__(self) -> None:
+            self.rows: list = []
+
+        def append(self, row) -> None:
+            self.rows.append(row)
+
+    chat = Chat()
+    paid = json.dumps(
+        {"ok": True, "hits": [{"symbol": "SNDK", "open_gap_pct": -6.5}]}
+    )
+    args = json.dumps({"arena": "mega_cap", "scan_code": "TOP_PERC_LOSE"})
+    tc = SimpleNamespace(
+        id="c1",
+        function=SimpleNamespace(name="scan", arguments=args),
+    )
+    ts.subscribe(cap)
+    try:
+        brain._append_tool_result(chat, tc, paid)
+    finally:
+        ts.unsubscribe(cap)
+        ts.reset_speaker()
+
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert paid in session
+    assert args in session
+    assert "screens=" not in session
+    assert chat.rows == [("tr", paid, "c1")]
+    assert any(paid in t for _k, t in painted)
+    assert any(args in t for _k, t in painted)
+    assert not (tmp_path / "think_tail.txt").exists()
+
+
+def test_append_tool_result_skips_empty_args_object(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from abcxauto import brain
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(
+        brain,
+        "tool_result",
+        lambda result, tool_call_id=None: result,
+    )
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    paid = json.dumps({"flat": True, "net_liquidation": 35000})
+    tc = SimpleNamespace(
+        id="c2",
+        function=SimpleNamespace(name="book", arguments="{}"),
+    )
+
+    class Chat:
+        def append(self, *_a, **_k) -> None:
+            pass
+
+    brain._append_tool_result(Chat(), tc, paid)
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert paid in session
+    assert "{}" not in session
+
+
+@pytest.mark.asyncio
+async def test_dispatch_emits_paid_json_into_the_day_file(tmp_path, monkeypatch):
+    """After _invoke_named_tool returns, the same string chat.append sees is emit()'d."""
+    from abcxauto import brain
+    from abcxauto import think_stream as ts
+    from abcxauto.brain import BrainTurn, _dispatch_tool_calls
+
+    paid = json.dumps({"ok": True, "symbol": "IWM", "last": 244.1})
+
+    async def fake_run(name, args, **_k):
+        return paid
+
+    monkeypatch.setattr(brain, "_run_tool", fake_run)
+    monkeypatch.setattr(
+        brain,
+        "tool_result",
+        lambda result, tool_call_id=None: ("tr", result, tool_call_id),
+    )
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+
+    class Fn:
+        def __init__(self, name: str, args: dict):
+            self.name = name
+            self.arguments = json.dumps(args)
+
+    class Call:
+        def __init__(self, cid: str, name: str, args: dict):
+            self.id = cid
+            self.function = Fn(name, args)
+
+    class Chat:
+        def __init__(self) -> None:
+            self.rows: list = []
+
+        def append(self, row) -> None:
+            self.rows.append(row)
+
+    chat = Chat()
+    painted: list[tuple[str, str]] = []
+
+    def cap(kind: str, text: str, *_a) -> None:
+        painted.append((kind, text))
+
+    ts.reset_speaker()
+    ts.bind_engine(None)
+    ts.subscribe(cap)
+    try:
+        await _dispatch_tool_calls(
+            [Call("c1", "quote", {"symbol": "IWM"})],
+            chat=chat,
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    finally:
+        ts.unsubscribe(cap)
+        ts.reset_speaker()
+
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert paid in session
+    assert '"symbol": "IWM"' in session
+    assert any("[quote]" in t for _k, t in painted)
+    assert any(paid in t for _k, t in painted)
+    assert chat.rows and chat.rows[0][1] == paid
+    assert not (tmp_path / "think_tail.txt").exists()
+
+
+def test_write_lab_playbook_invoke_is_marker_only_append_emits_paid(
+    tmp_path, monkeypatch
+):
+    """_invoke_named_tool stays marker-only. The paid result emit()s from append."""
+    from types import SimpleNamespace
+
+    from abcxauto import brain
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(
+        brain,
+        "tool_result",
+        lambda result, tool_call_id=None: result,
+    )
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    note = "Paper: prefer debit verticals on index ETFs."
+    paid = json.dumps({"status": "ok", "instructions": note})
+    tc = SimpleNamespace(
+        id="c3",
+        function=SimpleNamespace(
+            name="write_lab_playbook",
+            arguments=json.dumps({"instructions": note, "mode": "explore"}),
+        ),
+    )
+
+    class Chat:
+        def append(self, *_a, **_k) -> None:
+            pass
+
+    ts.reset_speaker()
+    ts.bind_engine(None)
+    try:
+        brain._append_tool_result(Chat(), tc, paid)
+    finally:
+        ts.reset_speaker()
+
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert note in session
+    assert paid in session
+
+
 def test_look_failed_question_empty_and_stream_error():
     assert BrainTurn(text="?").look_failed() is True
     assert BrainTurn(text="").look_failed() is True

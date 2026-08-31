@@ -3662,11 +3662,45 @@ async def _invoke_named_tool(
         return json.dumps({"error": f"{name} failed: {exc}"})
 
 
+def _tool_call_args_text(tc: Any) -> str:
+    """Raw args the model sent with this tool call. Empty ``{}`` is not worth keeping."""
+    fn = getattr(tc, "function", None)
+    raw = getattr(fn, "arguments", None) if fn is not None else None
+    if isinstance(raw, dict):
+        if not raw:
+            return ""
+        try:
+            raw = json.dumps(raw, default=str)
+        except (TypeError, ValueError):
+            return ""
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip()
+    if text in ("", "{}", "null", "[]"):
+        return ""
+    return text
+
+
+def _emit_paid_look(tc: Any, result: str) -> None:
+    """Same string ``chat.append`` paid for, via emit() into the ET day file.
+
+    Args when the tool call already has them. Glass/RAM still need Pro;
+    the day file does not.
+    """
+    args_text = _tool_call_args_text(tc)
+    if args_text:
+        think_emit("tool", args_text if args_text.endswith("\n") else f"{args_text}\n")
+    paid = str(result or "")
+    if paid:
+        think_emit("tool", paid if paid.endswith("\n") else f"{paid}\n")
+
+
 def _append_tool_result(chat: Any, tc: Any, result: str) -> None:
     try:
         chat.append(tool_result(result, tool_call_id=getattr(tc, "id", None)))
     except TypeError:
         chat.append(tool_result(result))
+    _emit_paid_look(tc, result)
 
 
 def _tool_key(name: str, args: dict[str, Any]) -> str:

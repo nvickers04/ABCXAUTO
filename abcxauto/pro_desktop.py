@@ -169,7 +169,11 @@ def stream_line_kind(line: str) -> str:
     s = (line or "").strip()
     if not s:
         return "blank"
-    if s.startswith("--- GROK") or s.startswith("--- CLERK"):
+    if (
+        s.startswith("--- GROK")
+        or s.startswith("--- CLERK")
+        or s.startswith("=== run")
+    ):
         return "banner"
     if s == "[think]":
         return "think"
