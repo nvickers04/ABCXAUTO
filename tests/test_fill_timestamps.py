@@ -298,6 +298,15 @@ def _journal_with_history(path):
              "symbol": "WMT", "side": "SLD"},
         ]
     )
+    # Ingest now aligns a +5h fill to its dispatch. The restamp script is for
+    # rows written before that — put the skew back on disk.
+    with sqlite3.connect(str(path)) as db:
+        db.execute(
+            "UPDATE fills SET ts=? WHERE exec_id=?",
+            ("2026-08-20T20:42:06.000Z", "skewed"),
+        )
+        db.commit()
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     return journal
 
 
