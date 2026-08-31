@@ -1,6 +1,6 @@
 """Background portfolio monitor: P&L snapshots + Grok review injections.
 
-Two loops in one task:
+Two clocks in one task:
 - every ``monitor_poll_s`` seconds: refresh a snapshot (positions, account
   P&L, open orders, protection audit) for the UI and for change detection;
 - every ``monitor_review_s`` seconds (market hours, or any time a position is
@@ -379,7 +379,7 @@ class PortfolioMonitor:
         )
 
     def _start_reconciler(self) -> None:
-        """Arm the fill-driven orphan sweep — the poll loop is too slow alone."""
+        """Arm the fill-driven orphan sweep — the poll clock is too slow alone."""
         try:
             from abcxauto.protect_reconciler import ProtectionReconciler
 
@@ -695,22 +695,14 @@ class PortfolioMonitor:
         if net_liq is not None and net_liq > 0:
             get_risk_gate().update_equity(net_liq)
 
-        journal = get_journal()
-        journal.record_snapshot(account or {}, positions, orders)
-
         fills: list = []
         # Cheap idempotent fill ingest (hasattr so fakes without get_fills stay green).
         if hasattr(self.connector, "get_fills"):
             try:
                 fills = await self.connector.get_fills() or []
-                journal.record_fills(fills)
             except Exception as e:
                 logger.warning(f"Monitor fill ingest failed: {e}")
                 fills = []
-        try:
-            journal.resolve_unfilled_sends(orders)
-        except Exception as e:
-            logger.warning(f"Monitor send-mark resolve failed: {e}")
 
         snapshot = {
             "connected": True,
@@ -721,6 +713,10 @@ class PortfolioMonitor:
             "fills": list(fills)[-20:],
             "protection": protection,
         }
+        try:
+            get_journal().ingest_look(snapshot)
+        except Exception as e:
+            logger.warning(f"Monitor look journal ingest failed: {e}")
         self.latest = snapshot
         self.session.emit({"type": "snapshot", "snapshot": snapshot})
         return snapshot

@@ -26,7 +26,7 @@ def _one_line(text: Any, n: int = 240) -> str:
 
 
 def format_cycle_digest(d: dict[str, Any]) -> str:
-    """Human cycle block: send, why, result, next sleep."""
+    """Human look block: send, why, result, next sleep."""
     j = d.get("judgment") or {}
     strat = str(d.get("strat") or d.get("action") or "-")
     stance = str(d.get("stance") or j.get("stance") or "").strip()
@@ -151,7 +151,7 @@ def apply_kill_switch(engine: Any) -> None:
 
 
 def run_headless() -> int:
-    """Connect paper IBKR and run autonomous cycles until SIGINT/SIGTERM."""
+    """Connect paper IBKR and stay up until SIGINT/SIGTERM."""
     from abcxauto.config import get_config, setup_file_logging
     from abcxauto.pro_engine import ProEngine
     from abcxauto.self_tune import ensure_immutable_floor

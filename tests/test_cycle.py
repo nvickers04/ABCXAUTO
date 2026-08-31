@@ -1,95 +1,31 @@
-"""Cycle shim — inventory helpers stay; launcher / sit-loop / hunt-window do not."""
+"""Inventory helpers live on agent_loop. ``cycle.py`` and ``run_cycle`` are gone."""
+
+from __future__ import annotations
+
+import importlib
 
 import pytest
 
-from abcxauto.cycle import (
+from abcxauto.agent_loop import (
     ALLOWED_ACTIONS,
     equity_of,
     format_position_inventory,
     normalize_action,
     pnl_of,
     risk_label,
-    run_cycle,
-    snap,
 )
 
 
-class FakeConnector:
-    connected = True
+def test_cycle_module_and_run_cycle_are_gone():
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("abcxauto.cycle")
+    import abcxauto.agent_loop as agent_loop
 
-    async def connect(self):
-        return True
-
-    async def get_positions(self):
-        return [{"symbol": "AAPL", "quantity": 10, "sec_type": "STK", "unrealized_pnl": 5.0}]
-
-    async def get_open_orders(self):
-        return []
-
-    async def get_account_summary(self):
-        return {"netliquidation": 50000, "unrealizedpnl": 12.5}
-
-    async def get_recent_executions(self):
-        return []
-
-
-@pytest.mark.asyncio
-async def test_snap_is_retired_noop(monkeypatch):
-    """cycle.snap must not launch a book look or arm a wake clock."""
-    started: list[str] = []
-
-    async def boom(*_a, **_k):
-        started.append("async")
-        raise AssertionError("cycle.snap must not look or send")
-
-    def boom_sync(*_a, **_k):
-        started.append("sync")
-        raise AssertionError("cycle.snap must not arm a nap clock")
-
-    monkeypatch.setattr("abcxauto.agent_loop._tool", boom)
-    monkeypatch.setattr("abcxauto.agent_loop.snap", boom)
-    monkeypatch.setattr("abcxauto.park_clock.set_wake", boom_sync)
-    monkeypatch.setattr("abcxauto.park_clock.ensure_next_look", boom_sync)
-
-    out = await snap(FakeConnector())
-    assert started == []
-    assert out.get("book_unreliable") is True
-    assert "cycle_snap_retired" in str(out.get("validation") or "")
-
-
-@pytest.mark.asyncio
-async def test_run_cycle_is_retired_noop(monkeypatch):
-    """Import-safe leftover: must not start a think cycle or a nap clock."""
-    started: list[str] = []
-
-    async def boom(*_a, **_k):
-        started.append("async")
-        raise AssertionError("cycle shim must not start think, snap, or send")
-
-    def boom_sync(*_a, **_k):
-        started.append("sync")
-        raise AssertionError("cycle shim must not arm a nap clock")
-
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", boom)
-    monkeypatch.setattr("abcxauto.agent_loop.snap", boom)
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", boom)
-    monkeypatch.setattr("abcxauto.brain.grok_turn", boom)
-    monkeypatch.setattr("abcxauto.park_clock.set_wake", boom_sync)
-    monkeypatch.setattr("abcxauto.park_clock.ensure_next_look", boom_sync)
-    monkeypatch.setattr("abcxauto.pacing.wait_for_pace", boom)
-    monkeypatch.setattr("asyncio.sleep", boom)
-
-    out = await run_cycle(1, FakeConnector(), None, [], 0.0)
-    assert started == []
-    assert out["strat"] == "skipped"
-    assert out["sends"] == 0
-    assert out["result"]["status"] == "skipped"
-    assert "cycle_shim_retired" in str(out["result"].get("note") or "")
-    assert out["inventory"] == format_position_inventory([])
+    assert not hasattr(agent_loop, "run_cycle")
 
 
 def test_cycle_has_no_sit_loop_or_hunt_window():
-    from abcxauto import cycle
+    import abcxauto.agent_loop as agent_loop
 
     for name in (
         "sit_loop",
@@ -98,16 +34,13 @@ def test_cycle_has_no_sit_loop_or_hunt_window():
         "SYSTEM_PROMPT",
         "apply_tweak",
         "TWEAKS",
-        "grok",
-        "grok_turn",
-        "execute_ticket",
-        "safe_execute",
-        "gate_ticket",
+        "run_cycle",
     ):
-        assert not hasattr(cycle, name)
-    assert "run_cycle" in cycle.__all__
-    assert "format_position_inventory" in cycle.__all__
-    assert cycle.run_cycle is not None
+        assert not hasattr(agent_loop, name)
+    assert hasattr(agent_loop, "format_position_inventory")
+    assert hasattr(agent_loop, "snap")
+    assert hasattr(agent_loop, "gate_ticket")
+    assert hasattr(agent_loop, "execute_ticket")
 
 
 def test_format_position_inventory_export():
@@ -164,10 +97,9 @@ def test_normalize_action_hold_not_in_allowlist():
 
 
 def test_no_dead_operator_tweak_surface():
-    from abcxauto import agent_loop, cycle
+    from abcxauto import agent_loop
 
     assert not hasattr(agent_loop, "TWEAKS")
-    assert not hasattr(cycle, "apply_tweak")
     assert "lab_min_pass_rate" not in dir(agent_loop)
     assert "prefer_bracket_only" not in dir(agent_loop)
 

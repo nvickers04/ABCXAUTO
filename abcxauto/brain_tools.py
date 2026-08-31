@@ -1,7 +1,7 @@
 """Grok tools: scan tape, option chain compact, AGENT_TOOLS, ``_run_tool``.
 
-Think loop / clip / wake / ``grok_turn`` stay in ``brain.py``. Look up clip
-and scan entry points on ``abcxauto.brain`` so tests can monkeypatch them.
+Clip, wake, and model calls stay in ``brain.py``. Look up clip and scan
+entry points on ``abcxauto.brain`` so tests can monkeypatch them.
 """
 
 from __future__ import annotations

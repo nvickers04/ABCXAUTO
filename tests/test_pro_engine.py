@@ -1,6 +1,6 @@
 """ProEngine integration on shipped path (no mocks of engine itself).
 
-Mocks only: agent_loop._tool, agent_loop.grok, get_ibkr_connector.
+Mocks only: agent_loop._tool, brain.grok_turn, get_ibkr_connector.
 """
 
 import asyncio
@@ -39,7 +39,7 @@ def _poke_book(eng, kind: str = "fill", detail: str = "SPY") -> None:
 
 @pytest.mark.asyncio
 async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_path):
-    """Engine.start() drives >=3 run_cycle with inventory+validation in records."""
+    """Engine.start() drives >=3 looks with inventory+validation in records."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_DEFAULT_LOOK_S", "0.05")
     monkeypatch.setattr("abcxauto.lab_playbook.playbook_next_look_s", lambda: None)
@@ -118,7 +118,6 @@ async def test_pro_engine_runs_cycles_with_inventory_and_tweak(monkeypatch, tmp_
         return []
 
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr(
         "abcxauto.pro_engine.GrokClient",
@@ -470,7 +469,6 @@ async def test_pro_engine_wires_portfolio_monitor(monkeypatch):
     monkeypatch.setattr("abcxauto.monitor.get_config", lambda: _MonCfg())
     monkeypatch.setattr("abcxauto.agent_loop.get_config", lambda: _MonCfg())
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr(
         "abcxauto.pro_engine.GrokClient",
@@ -608,7 +606,6 @@ async def test_start_after_connect_enables_autonomous(monkeypatch):
         return {"status": "held", "strategy": "hold"}
 
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(fake_grok))
     monkeypatch.setattr(
         "abcxauto.pro_engine.GrokClient",

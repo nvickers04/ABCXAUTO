@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from abcxauto.agent_loop import run_cycle
 from abcxauto.pro_desktop import ProTerminal
 
 PRO_SRC = Path(__file__).resolve().parents[1] / "abcxauto" / "pro_desktop.py"
@@ -659,7 +658,7 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
     from tests.conftest import grok_json_as_turn
 
     monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(fake_grok))
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(fake_grok))
 
     async def _noop_send(action, conn):
         return {"status": "executed", "strategy": action.get("strategy")}
@@ -669,10 +668,14 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(trading_mode="paper"),
     )
-    hist, prev = [], 0.0
+    from abcxauto.agent_loop import snap
+    from abcxauto.pro_engine import ProEngine
+
+    eng = ProEngine()
+    eng.conn = _Conn()
     for n in range(1, 4):
-        out = await run_cycle(n, _Conn(), object(), hist, prev)
-        prev = out["pnl"]
+        s = await snap(eng.conn)
+        out = await eng._host_think(n, object(), s)
         assert out.get("inventory")
     assert calls["grok"] >= 3
 

@@ -592,7 +592,7 @@ async def test_post_act_stk_scrape_closes_when_flat(monkeypatch, tmp_path):
 async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
-    from abcxauto.agent_loop import run_cycle
+    from abcxauto.pro_engine import ProEngine
 
     monkeypatch.setenv("ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "ev.jsonl"))
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
@@ -666,7 +666,7 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     from tests.conftest import grok_json_as_turn
 
     monkeypatch.setattr("abcxauto.agent_loop._tool", _tool)
-    monkeypatch.setattr("abcxauto.agent_loop.grok_turn", grok_json_as_turn(grok))
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_json_as_turn(grok))
     monkeypatch.setattr("abcxauto.agent_loop.send_action", boom)
     async def _opps(*_a, **_k):
         return [{"symbol": "QQQ", "bias": "LONG", "score": 0.9}]
@@ -691,7 +691,12 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     class Conn:
         connected = True
 
-    out = await run_cycle(1, Conn(), None, [], 0.0)
+    from abcxauto.agent_loop import snap
+
+    eng = ProEngine()
+    eng.conn = Conn()
+    s = await snap(eng.conn)
+    out = await eng._host_think(1, None, s)
     assert out["strat"] == "blocked"
     assert send_calls == []
     assert "geometry_stop_wrong_side" in str(out.get("structure_grade") or out.get("result"))
