@@ -241,6 +241,95 @@ def test_think_session_text_is_the_full_day_not_the_8kb_stub(tmp_path, monkeypat
     assert ts.think_session_text("") == session[-8000:]
 
 
+def test_emit_keeps_session_without_a_bound_engine(tmp_path, monkeypatch):
+    """The keep-file is the day's stream, not a ProEngine side effect."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    ts.bind_engine(None)
+    ts.emit("say", "NO_ENGINE_KEEP\n")
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert "NO_ENGINE_KEEP" in session
+    assert not (tmp_path / "think_tail.txt").exists() or (
+        (tmp_path / "think_tail.txt").read_text(encoding="utf-8") == ""
+    )
+
+
+def test_keep_writes_session_not_ram_or_tail(tmp_path, monkeypatch):
+    """Paid tool JSON is keep-file only. Glass RAM/tail stay the clipped stub."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 0.0)
+    monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    ts.reset_speaker()
+    st = SimpleNamespace(think_live="")
+    ts.bind_engine(SimpleNamespace(state=st))
+    painted: list[tuple[str, str]] = []
+
+    def cap(kind: str, text: str, *_a) -> None:
+        painted.append((kind, text))
+
+    ts.subscribe(cap)
+    try:
+        ts.emit("stage", "grok")
+        ts.emit("tool", "\n[scan]\n")
+        ts.keep('{"ok": true, "unique_paid": "SNDK_GAP"}\n')
+        ts.emit("say", "watching the gap\n")
+    finally:
+        ts.unsubscribe(cap)
+        ts.bind_engine(None)
+        ts.reset_speaker()
+
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    tail = (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
+    assert "SNDK_GAP" in session
+    assert "[scan]" in session
+    assert "watching the gap" in session
+    assert "SNDK_GAP" not in st.think_live
+    assert "SNDK_GAP" not in tail
+    assert "[scan]" in st.think_live
+    assert not any("SNDK_GAP" in t for _k, t in painted)
+
+
+def test_paid_keep_survives_ram_clip_and_begin_run(tmp_path, monkeypatch):
+    """A paid look stays on disk after the 8kb/24kb windows and a restart."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 0.0)
+    monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    ts.reset_speaker()
+    st = SimpleNamespace(think_live="")
+    ts.bind_engine(SimpleNamespace(state=st))
+    try:
+        ts.emit("stage", "grok")
+        ts.emit("say", "LOOK_ONE " + ("a" * 20000))
+        ts.keep('{"unique_paid": "SNDK_GAP", "hits": [{"symbol": "SNDK"}]}\n')
+        ts.emit("stage", "grok")
+        ts.emit("say", "LOOK_TWO " + ("b" * 6000))
+    finally:
+        ts.bind_engine(None)
+
+    tail = (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert len(tail) <= 8000
+    assert len(st.think_live) <= 24000
+    assert "LOOK_ONE" not in tail
+    assert "LOOK_ONE" not in st.think_live
+    assert "LOOK_TWO" in tail
+    assert "SNDK_GAP" in session
+    assert "LOOK_ONE" in session
+    assert "LOOK_TWO" in session
+
+    ts._run = {}
+    ts.begin_run()
+    after = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert "SNDK_GAP" in after
+    assert "LOOK_ONE" in after
+    assert (tmp_path / "think_tail.txt").read_text(encoding="utf-8") == ""
+
+
 def test_write_last_turn_skips_junk_failed_look(tmp_path, monkeypatch):
     """A failed empty/? look must not blank last_turn / desk_brief."""
     from abcxauto import think_stream as ts

@@ -2,7 +2,9 @@
 
 Headless prints to stdout (ASCII). ProEngine binds so the UI can show the same buffer.
 A short tail file lets Cursor review the stream without the window.
-An append-only per-ET-day file under data/state/think_session/ keeps the full stream.
+An append-only per-ET-day file under data/state/think_session/ keeps the paid look:
+think, tool names, tool args when present, the tool JSON the model paid to see, say.
+think_tail.txt stays an 8kb overwrite; think_live stays a 24kb RAM window.
 """
 
 from __future__ import annotations
@@ -112,6 +114,9 @@ def emit(kind: str, text: str) -> None:
         fns = list(_listeners)
         eng = _engine
         piece = _paint(kind, text)
+    # Session keep is not gated on ProEngine. RAM/tail still need a bind.
+    if piece:
+        _append_think_session(piece)
     if eng is not None and piece:
         try:
             _append_engine_piece(eng, piece)
@@ -129,13 +134,24 @@ def emit(kind: str, text: str) -> None:
             logger.debug("think_stream listener failed", exc_info=True)
 
 
+def keep(text: str) -> None:
+    """Append to today's session keep-file. Does not touch RAM or the glass tail.
+
+    Tool JSON that ``chat.append`` paid for lands here. Glass still paints the
+    ``[name]`` stub and the one trophy line; the 8kb/24kb windows stay clipped.
+    """
+    if not text:
+        return
+    piece = text if text.endswith("\n") else f"{text}\n"
+    _append_think_session(piece)
+
+
 def _append_engine_piece(eng: Any, piece: str) -> None:
     s = getattr(eng, "state", None)
     if s is None or not piece:
         return
     cur = getattr(s, "think_live", "") or ""
     s.think_live = (cur + piece)[-24000:]
-    _append_think_session(piece)
     _write_think_tail(s.think_live)
 
 
@@ -231,7 +247,7 @@ def think_session_text(live: str = "") -> str:
 
 
 def _append_think_session(piece: str) -> None:
-    """Append this emit to today's ET file. The glass tail stays a short overwrite."""
+    """Append to today's ET file. begin_run must not truncate this file."""
     if not piece:
         return
     try:

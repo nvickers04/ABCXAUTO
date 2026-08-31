@@ -26,7 +26,7 @@ from xai_sdk.chat import developer, system, tool, tool_result, user
 from abcxauto.llm import GrokClient, build_system_prompt
 from abcxauto.opportunity_scan import criteria_scan, normalize_tickers
 from abcxauto.order_examples import format_order_examples, ticket_strategy_names
-from abcxauto.think_stream import emit as think_emit
+from abcxauto.think_stream import emit as think_emit, keep as think_keep
 from abcxauto.tools import run_readonly_tool
 from abcxauto.tool_args import (
     CANDLE_CAP,
@@ -3662,11 +3662,44 @@ async def _invoke_named_tool(
         return json.dumps({"error": f"{name} failed: {exc}"})
 
 
+def _tool_call_args_text(tc: Any) -> str:
+    """Raw args the model sent with this tool call. Empty ``{}`` is not worth keeping."""
+    fn = getattr(tc, "function", None)
+    raw = getattr(fn, "arguments", None) if fn is not None else None
+    if isinstance(raw, dict):
+        if not raw:
+            return ""
+        try:
+            raw = json.dumps(raw, default=str)
+        except (TypeError, ValueError):
+            return ""
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip()
+    if text in ("", "{}", "null", "[]"):
+        return ""
+    return text
+
+
+def _keep_paid_look(tc: Any, result: str) -> None:
+    """Session keep-file gets the paid args + result. Glass stays the ``[name]`` stub."""
+    chunks: list[str] = []
+    args_text = _tool_call_args_text(tc)
+    if args_text:
+        chunks.append(args_text)
+    paid = str(result or "").rstrip("\n")
+    if paid:
+        chunks.append(paid)
+    if chunks:
+        think_keep("\n".join(chunks) + "\n")
+
+
 def _append_tool_result(chat: Any, tc: Any, result: str) -> None:
     try:
         chat.append(tool_result(result, tool_call_id=getattr(tc, "id", None)))
     except TypeError:
         chat.append(tool_result(result))
+    _keep_paid_look(tc, result)
 
 
 def _tool_key(name: str, args: dict[str, Any]) -> str:
