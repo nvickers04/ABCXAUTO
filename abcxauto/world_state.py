@@ -1636,13 +1636,48 @@ def wake_fact_line(text: str) -> str:
     return str(text or "").splitlines()[0].strip() if text else ""
 
 
-def _is_closest_stop_fact_line(text: str) -> bool:
-    bit = wake_fact_line(text).lower()
+def _lead_body(text: str) -> str:
+    """First-line body: drop ``fact:`` prefix and a trailing period."""
+    bit = wake_fact_line(text)
     if not bit:
-        return False
-    if "closest_stop" in bit:
-        return True
-    return bit.startswith("stop_dist") or bit.startswith("stop_dist=")
+        return ""
+    bit = bit.rstrip(".").strip()
+    if bit.lower().startswith("fact:"):
+        bit = bit.split(":", 1)[1].strip()
+    return bit
+
+
+def _csv_identity(raw: str) -> frozenset[str]:
+    """Membership of a comma-separated lead (order and string form do not matter)."""
+    return frozenset(x.strip() for x in str(raw or "").split(",") if x.strip())
+
+
+def parse_desk_fact(raw: Any) -> dict[str, Any] | None:
+    """Lead-fact identity: closest_stop tick, missing-order set, unprotected list.
+
+    None when the first line is not a collapsible lead (session=, session_cap,
+    halt). Identity is the set/list/tick, not the poke string.
+    """
+    body = _lead_body(str(raw or ""))
+    if not body:
+        return None
+    stop = parse_closest_stop(raw)
+    if stop is not None:
+        return {"kind": "closest_stop", "stop": stop}
+    low = body.lower()
+    if low.startswith("working_order_missing"):
+        rest = body.split(None, 1)[1] if " " in body else ""
+        items = _csv_identity(rest)
+        if not items:
+            return None
+        return {"kind": "working_order_missing", "items": items}
+    if low.startswith("unprotected="):
+        items = _csv_identity(body.split("=", 1)[1])
+        items = frozenset(x for x in items if x.lower() != "none")
+        if not items:
+            return None
+        return {"kind": "unprotected", "items": items}
+    return None
 
 
 def parse_closest_stop(raw: Any) -> dict[str, Any] | None:
@@ -1719,23 +1754,42 @@ def closest_stop_moved_more_than_a_tick(
 
 
 def desk_fact_is_duplicate(prev: Any, cur: Any) -> bool:
-    """Same closest_stop / stop_dist fact line, including last-tick last noise.
+    """True when the collapsible lead-fact identity did not move.
 
-    Other wakes (session=, unprotected=) are not collapsed here.
+    closest_stop: same ident, stop within a tick (last/dist noise is not a
+    move). working_order_missing: same SET of labels. unprotected: same
+    LIST of names. First occurrence still lands. session= / session_cap /
+    halt are not collapsed.
     """
-    b = wake_fact_line(str(cur or ""))
-    if not _is_closest_stop_fact_line(b):
+    b = parse_desk_fact(cur)
+    if b is None:
         return False
-    a = wake_fact_line(str(prev or ""))
-    if a and a == b:
-        return True
-    if not a:
+    a = parse_desk_fact(prev)
+    if a is None:
         return False
-    return not closest_stop_moved_more_than_a_tick(a, b)
+    if a.get("kind") != b.get("kind"):
+        return False
+    kind = str(a.get("kind") or "")
+    if kind == "closest_stop":
+        return not closest_stop_moved_more_than_a_tick(prev, cur)
+    if kind in ("working_order_missing", "unprotected"):
+        return a.get("items") == b.get("items")
+    return False
+
+
+def desk_fact_changed(prev: Any, cur: Any) -> bool:
+    """True when a collapsible lead fact actually moved (first occurrence counts).
+
+    Unparseable leads are not a change — stay-up sits; fill / order_change
+    still poke on their own.
+    """
+    if parse_desk_fact(cur) is None:
+        return False
+    return not desk_fact_is_duplicate(prev, cur)
 
 
 def omit_duplicate_fact_lead(prev: Any, text: str) -> str:
-    """Keep one identical ``fact: closest_stop`` line; drop a later copy."""
+    """Keep one identical collapsible lead line; drop a later copy."""
     raw = str(text or "")
     if not desk_fact_is_duplicate(prev, raw):
         return raw

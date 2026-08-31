@@ -1,7 +1,8 @@
 """Grok owns the book via tools. The shell is facts + send gates.
 
 Paper RTH / premarket stay-up continues the live chat across successful
-looks. Overnight / after-close / empty-junk / dead stream drop it.
+looks. Overnight / after-close / park drop it. Empty-junk retries once
+in the same chat, then sits.
 Tickets go through ``execute_ticket`` → ``send_action``. IBKR tools are
 live. scan() is one tape this look (merged hits + on_book); candles
 are IBKR hist or the live 5s stream (error if both miss); news is ~15
@@ -649,9 +650,12 @@ def _piece(obj: Any, *names: str) -> str:
     return ""
 
 
-async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str]:
+async def stream_round(
+    chat: Any, *, stage: str = "grok", emit_stage: bool = True
+) -> tuple[str, Any, str]:
     """Stream one model step. Returns (assistant text, response, stop_reason)."""
-    think_emit("stage", stage)
+    if emit_stage:
+        think_emit("stage", stage)
     o = ""
     saw_think = False
     saw_say = False
@@ -715,7 +719,8 @@ async def stream_round(chat: Any, *, stage: str = "grok") -> tuple[str, Any, str
             think_emit("tool", "\n[truncated: max_tokens]\n")
     except Exception:
         logger.debug("finish_reason probe failed", exc_info=True)
-    think_emit("stage_end", stage)
+    if emit_stage:
+        think_emit("stage_end", stage)
     if not o:
         # Some SDK finishes put the spoken say on the completed message only.
         for obj in (last_ch, last_resp):
@@ -800,7 +805,7 @@ def _stay_up_session_label(session: str) -> str:
 
 
 def _remember_desk_fact(g: Any, chat: Any, wake: str) -> None:
-    """Last closest_stop / stop_dist fact this chat already heard."""
+    """Last collapsible lead fact this chat already heard."""
     text = str(wake or "")
     if g is not None:
         g._last_desk_fact = text
@@ -823,16 +828,16 @@ def _chat_last_desk_fact(g: Any, chat: Any = None) -> str:
 
 
 def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
-    """Keep the live chat when the look actually said something or sent.
+    """Keep the live chat on paper stay-up, including empty / '?' idle.
 
-    Park, overnight, and a true empty / lone '?' drop it so the next
-    think is a cold start. A ``failed`` / dead-stream stamp on a real
-    say or send/fill is not a drop. An ended look (duplicate closest_stop
-    fact) keeps the chat — a look may end with no send.
+    Park and overnight drop it so the next think is a cold start. A
+    ``failed`` / dead-stream stamp on a real say or send/fill is not a
+    drop. An ended look (duplicate lead fact) keeps the chat — a look
+    may end with no send. Stay-up junk retries in this chat, then sits.
     """
     if turn.ended:
         return
-    if turn.parked or _look_is_empty_or_question(turn):
+    if turn.parked:
         _reset_chat(g)
         return
     try:
@@ -842,6 +847,9 @@ def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
             return
     except Exception:
         logger.debug("stay-up chat keep check failed", exc_info=True)
+    if _look_is_empty_or_question(turn):
+        _reset_chat(g)
+        return
     _reset_chat(g)
 
 
@@ -899,8 +907,8 @@ def _open_wake(
 
             prev = _chat_last_desk_fact(g, live)
             if desk_fact_is_duplicate(prev, wake):
-                # Same closest_stop / stop_dist fact. A look may end — do
-                # not append a fresh go-do-desk developer turn.
+                # Same lead-fact identity (set / list / tick). A look may
+                # end — do not append a fresh go-do-desk developer turn.
                 g._wake_n = int(getattr(g, "_wake_n", 0) or 0) + 1
                 return live
             live.append(developer(wake))
@@ -928,7 +936,8 @@ async def _inject_live_poke(
     ev = take_interrupt()
     if ev is None:
         return False
-    if str(ev.kind or "").strip().lower() == "stop_dist":
+    kind = str(ev.kind or "").strip().lower()
+    if kind not in ("fill", "order_change"):
         from abcxauto.world_state import desk_fact_is_duplicate, worst_wake_fact
 
         try:
@@ -945,7 +954,7 @@ async def _inject_live_poke(
         )
         prev = _chat_last_desk_fact(None, chat)
         if desk_fact_is_duplicate(prev, fact):
-            # Stop has not moved more than a tick. Last-tick last is not a poke.
+            # Lead-fact identity unchanged. Do not stream, do not wipe cache.
             return False
     note_wake(ev)
     turn.interrupted = True
@@ -1631,16 +1640,18 @@ async def _grok_turn_impl(
                 chat, connector=connector, world=world, snap=snap, turn=turn
             )
             if not ok:
-                # stop_dist poke omitted — a look may end with no send.
+                # Duplicate lead fact — a look may end with no send.
                 turn.ended = True
                 _finish_look_chat(g, turn, session=session)
                 return turn
         else:
-            # Duplicate closest_stop fact. Do not start a fresh go-do-desk.
+            # Duplicate lead-fact identity. Do not start a fresh go-do-desk.
             turn.ended = True
             _finish_look_chat(g, turn, session=session)
             return turn
     ran_out = True
+    silent_round = False
+    junk_retried = False
     while turn.steps < MAX_TOOL_STEPS:
         turn.steps += 1
         try:
@@ -1651,7 +1662,10 @@ async def _grok_turn_impl(
                     chat, connector=connector, world=world, snap=snap, turn=turn
                 )
                 continue
-            text, response, stop = await stream_round(chat)
+            text, response, stop = await stream_round(
+                chat, emit_stage=not silent_round
+            )
+            silent_round = False
         except Exception as exc:
             # A dead empty stream ends the look. A look that already spoke
             # or sent still keeps the stay-up chat.
@@ -1664,7 +1678,10 @@ async def _grok_turn_impl(
         # Keep every spoken chunk, including a later empty/interrupt/loop
         # stop. Junk is the whole look, not the last assistant turn.
         if text:
-            turn.text = (turn.text + "\n" + text).strip()
+            if _look_text_is_junk(turn.text):
+                turn.text = text.strip()
+            else:
+                turn.text = (turn.text + "\n" + text).strip()
         if stop == "interrupt":
             await _inject_live_poke(
                 chat, connector=connector, world=world, snap=snap, turn=turn
@@ -1680,7 +1697,16 @@ async def _grok_turn_impl(
                 logger.debug("chat.append(response) failed", exc_info=True)
         calls = list(getattr(response, "tool_calls", None) or []) if response is not None else []
         if not calls:
-            # Grok stopped asking for facts — the think is done.
+            if (
+                not junk_retried
+                and not turn.parked
+                and not turn.ended
+                and _look_is_empty_or_question(turn)
+            ):
+                # Same chat, once. No new --- GROK --- re-intro.
+                junk_retried = True
+                silent_round = True
+                continue
             ran_out = False
             break
         interrupted = await _dispatch_tool_calls(
@@ -1704,8 +1730,8 @@ async def _grok_turn_impl(
         and not turn.failed
         and _look_is_empty_or_question(turn)
     ):
-        turn.failed = True
-        logger.warning("look failed: empty or junk assistant text")
+        # Idle in this chat. Do not stamp failed — that cold-restarts.
+        logger.warning("look idle: empty or junk assistant text")
     _finish_look_chat(g, turn, session=session)
     if not turn.sends:
         if str(turn.last_strat or "").lower() == "hold":

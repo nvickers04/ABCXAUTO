@@ -2462,11 +2462,11 @@ def test_finish_look_chat_overnight_and_dead_stream_drop():
     assert getattr(g, "chat", None) is None
     chat = _ensure_chat(g, kind="boot")
     _finish_look_chat(g, BrainTurn(stream_error="RESOURCE_EXHAUSTED"), session="regular")
-    assert getattr(g, "chat", None) is None
+    assert getattr(g, "chat", None) is chat
 
 
-def test_finish_look_chat_junk_empty_failed_drop():
-    """True empty / lone '?' drop the live chat. A real say does not."""
+def test_finish_look_chat_junk_empty_keeps_stay_up_chat():
+    """Stay-up idle keeps the live chat. A real say also keeps it."""
     from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
 
     g, created = _stub_chat_client()
@@ -2474,7 +2474,7 @@ def test_finish_look_chat_junk_empty_failed_drop():
     _finish_look_chat(g, BrainTurn(text="watching IWM"), session="regular")
     assert getattr(g, "chat", None) is chat
 
-    for dead in (
+    for idle in (
         BrainTurn(text=""),
         BrainTurn(text="?"),
         BrainTurn(text="  "),
@@ -2482,12 +2482,12 @@ def test_finish_look_chat_junk_empty_failed_drop():
         BrainTurn(failed=True, text="?"),
     ):
         g.chat = chat
-        _finish_look_chat(g, dead, session="regular")
-        assert getattr(g, "chat", None) is None, dead
+        _finish_look_chat(g, idle, session="regular")
+        assert getattr(g, "chat", None) is chat, idle
 
     g.chat = chat
     _finish_look_chat(g, BrainTurn(text=""), session="premarket")
-    assert getattr(g, "chat", None) is None
+    assert getattr(g, "chat", None) is chat
     assert len(created) == 1
 
 
@@ -2795,6 +2795,56 @@ def test_resume_duplicate_closest_stop_does_not_append_a_fresh_desk():
     _open_wake(g, _PYPL_FACT_TICK, resume=True)
     assert len(got) == 1
     _open_wake(g, _PYPL_FACT_STOP_MOVED, resume=True)
+    assert len(got) == 2
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
+_WOM_FACT = (
+    "fact: working_order_missing QQQ 260918C500 long 1,SPY STK long 10.\n"
+    "session=regular flat=False unprotected=none ibkr=up."
+)
+_WOM_FACT_SWAPPED = (
+    "fact: working_order_missing SPY STK long 10,QQQ 260918C500 long 1.\n"
+    "session=regular flat=False unprotected=none ibkr=up."
+)
+_WOM_FACT_CHANGED = (
+    "fact: working_order_missing QQQ 260918C500 long 1.\n"
+    "session=regular flat=False unprotected=none ibkr=up."
+)
+
+
+def test_resume_duplicate_wom_set_does_not_append_a_fresh_desk():
+    """Unchanged missing-order SET is one fact. Order of labels is not a look."""
+    from abcxauto.brain import _open_wake
+    from abcxauto.llm import SYSTEM_PROMPT
+    from abcxauto.park_clock import clear_interrupt
+    from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+
+    clear_interrupt()
+    got: list[object] = []
+
+    class Chat:
+        def append(self, msg, **_k):
+            got.append(msg)
+
+    class _ChatNS:
+        @staticmethod
+        def create(**_k):
+            return Chat()
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+    )
+    _open_wake(g, _WOM_FACT)
+    assert len(got) == 1
+    _open_wake(g, _WOM_FACT, resume=True)
+    assert len(got) == 1
+    _open_wake(g, _WOM_FACT_SWAPPED, resume=True)
+    assert len(got) == 1
+    _open_wake(g, _WOM_FACT_CHANGED, resume=True)
     assert len(got) == 2
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
@@ -3749,14 +3799,17 @@ def test_look_failed_question_empty_and_stream_error():
 
 
 @pytest.mark.asyncio
-async def test_question_mark_turn_is_failed():
+async def test_question_mark_turn_retries_then_idles():
     from abcxauto.brain import grok_turn
 
     class Chat:
+        rounds = 0
+
         def append(self, *_a, **_k):
             pass
 
         async def stream(self):
+            type(self).rounds += 1
             yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
                 content="?", reasoning_content=""
             )
@@ -3766,14 +3819,15 @@ async def test_question_mark_turn_is_failed():
         model="grok-4.6",
         temperature=0.3,
         max_tokens=256,
-        chat=Chat(),
+        chat=None,
         _wake_n=1,
     )
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
-    assert turn.failed is True
+    assert turn.failed is False
     assert turn.look_failed() is True
     assert turn.parked is False
-    assert getattr(g, "chat", None) is None
+    assert getattr(g, "chat", None) is not None
+    assert Chat.rounds == 2
 
 
 @pytest.mark.asyncio
@@ -3848,35 +3902,38 @@ async def test_resource_exhausted_turn_is_failed():
     assert turn.failed is True
     assert turn.look_failed() is True
     assert turn.parked is False
-    assert getattr(g, "chat", None) is None
+    assert getattr(g, "chat", None) is not None
 
 
 def _stay_up_chat_client(*, replies: list[str] | None = None):
     bag = list(replies or ["watching the book"])
     created: list[object] = []
-    n = {"i": 0}
 
     class Chat:
-        def __init__(self, text: str):
+        def __init__(self, replies: list[str]):
             self.appended: list[object] = []
             self.rounds = 0
-            self._text = text
+            self._replies = list(replies)
+            self._i = 0
 
         def append(self, msg, **_k):
             self.appended.append(msg)
 
         async def stream(self):
             self.rounds += 1
+            if self._i < len(self._replies):
+                text = self._replies[self._i]
+                self._i += 1
+            else:
+                text = self._replies[-1] if self._replies else ""
             yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
-                content=self._text, reasoning_content=""
+                content=text, reasoning_content=""
             )
 
     class _ChatNS:
         @staticmethod
         def create(**_k):
-            i = min(n["i"], len(bag) - 1)
-            n["i"] += 1
-            chat = Chat(bag[i])
+            chat = Chat(bag)
             created.append(chat)
             return chat
 
@@ -3966,21 +4023,76 @@ async def test_resume_duplicate_closest_stop_look_may_end_with_no_send():
 
 
 @pytest.mark.asyncio
-async def test_junk_stay_up_look_drops_chat_next_resume_is_cold():
-    """Empty/? stay-up look drops the live chat. Resume after that is a new think."""
+async def test_resume_duplicate_wom_set_look_may_end_with_no_send():
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
 
     clear_interrupt()
-    g, created = _stay_up_chat_client(replies=["?", "watching the book"])
+    g, created = _stay_up_chat_client()
     first = await grok_turn(
-        g, connector=None, world=_world(), snap={}, wake="session=regular send."
+        g, connector=None, world=_world(), snap={}, wake=_WOM_FACT
     )
-    assert first.look_failed() is True
-    assert first.failed is True
-    assert g.chat is None
+    assert first.ended is False
+    live = g.chat
+    rounds = int(getattr(live, "rounds", 0) or 0)
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake=_WOM_FACT_SWAPPED,
+        resume=True,
+    )
+    assert second.ended is True
+    assert second.look_failed() is False
+    assert second.failed is False
+    assert g.chat is live
     assert len(created) == 1
-    dead = created[0]
+    assert int(getattr(live, "rounds", 0) or 0) == rounds
+    third = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake=_WOM_FACT_CHANGED,
+        resume=True,
+    )
+    assert third.ended is False
+    assert third.look_failed() is False
+    assert g.chat is live
+    assert int(getattr(live, "rounds", 0) or 0) > rounds
+
+
+@pytest.mark.asyncio
+async def test_junk_stay_up_look_retries_same_chat_then_idles():
+    """Empty/? retries the same chat once. Still junk → idle, chat kept, not cold."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+    from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
+
+    clear_interrupt()
+    painted: list[str] = []
+
+    def cap(kind: str, text: str, piece: str = "") -> None:
+        painted.append(piece or text)
+
+    reset_speaker()
+    subscribe(cap)
+    g, created = _stay_up_chat_client(replies=["?", "?"])
+    try:
+        first = await grok_turn(
+            g, connector=None, world=_world(), snap={}, wake="session=regular send."
+        )
+    finally:
+        unsubscribe(cap)
+        reset_speaker()
+    assert first.look_failed() is True
+    assert first.failed is False
+    assert g.chat is created[0]
+    assert len(created) == 1
+    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+    grok_banners = [p for p in painted if "--- GROK ---" in p]
+    assert len(grok_banners) == 1
 
     second = await grok_turn(
         g,
@@ -3990,14 +4102,33 @@ async def test_junk_stay_up_look_drops_chat_next_resume_is_cold():
         wake="session=regular send.",
         resume=True,
     )
-    assert second.look_failed() is False
-    assert g.chat is created[1]
-    assert g.chat is not dead
-    assert len(created) == 2
+    # Duplicate session= still appends; idle junk does not cold-start.
+    assert g.chat is created[0]
+    assert len(created) == 1
+    assert second.failed is False
 
 
 @pytest.mark.asyncio
-async def test_empty_stay_up_look_drops_chat():
+async def test_junk_retry_same_chat_recovers_without_a_new_look():
+    """A real say on the in-look retry is the same billed look, same chat."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    g, created = _stay_up_chat_client(replies=["?", "watching the book"])
+    turn = await grok_turn(
+        g, connector=None, world=_world(), snap={}, wake="session=regular send."
+    )
+    assert turn.look_failed() is False
+    assert turn.failed is False
+    assert "watching the book" in (turn.text or "")
+    assert g.chat is created[0]
+    assert len(created) == 1
+    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+
+
+@pytest.mark.asyncio
+async def test_empty_stay_up_look_idles_in_chat():
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
 
@@ -4007,8 +4138,10 @@ async def test_empty_stay_up_look_drops_chat():
         g, connector=None, world=_world(), snap={}, wake="session=regular send."
     )
     assert turn.look_failed() is True
-    assert g.chat is None
+    assert turn.failed is False
+    assert g.chat is created[0]
     assert len(created) == 1
+    assert int(getattr(created[0], "rounds", 0) or 0) == 2
 
 
 @pytest.mark.asyncio
@@ -4166,8 +4299,8 @@ async def test_send_then_empty_final_keeps_chat(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_chat_start_error_drops_live_chat():
-    """A dead stay-up append must not leave the junk chat for the next resume."""
+async def test_chat_start_error_keeps_stay_up_chat():
+    """A dead stay-up append keeps the chat. The next poke resumes it."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
 
@@ -4194,7 +4327,7 @@ async def test_chat_start_error_drops_live_chat():
     )
     assert turn.failed is True
     assert turn.stream_error
-    assert g.chat is None
+    assert g.chat is live
 
 
 @pytest.mark.asyncio

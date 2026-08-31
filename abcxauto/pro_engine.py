@@ -849,13 +849,13 @@ class ProEngine:
         return True
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
-        """Stay-up keeps the process. Duplicate FACT waits for a poke.
+        """Stay-up keeps the process. Next look is a poke or a changed lead fact.
 
         Paper RTH / premarket stay on this process. A good look writes no
-        grok_wake.json. A spoken or send look keeps the chat. A duplicate
-        closest_stop look ends with no send and waits — not a fresh
-        go-do-desk. True empty / lone '?' drop the chat and start another
-        look now. Overnight park is park_clock after a closed skip.
+        grok_wake.json. Stay-up may sit — the runner does not self-schedule.
+        Duplicate lead-fact looks end with no send and wait. Junk retries
+        in the same chat (brain) then idles here: never ``_cold_next``.
+        Overnight park is park_clock after a closed skip.
         """
         session = self._resolve_session(session)
         self._last_session = session
@@ -873,7 +873,7 @@ class ProEngine:
         except (TypeError, ValueError):
             sends = 0
         # A spoken say or a send/fill is a finished look. Do not wipe chat.
-        # Duplicate closest_stop (_ended) waits for a poke, not a fresh desk.
+        # Duplicate lead fact (_ended) waits for a poke, not a fresh desk.
         ended = bool(payload.get("_ended"))
         finished = ended or sends > 0 or not _look_text_is_junk(rationale)
         if finished:
@@ -884,12 +884,8 @@ class ProEngine:
             self._cold_next = True
             return 0.0
         if stay:
-            if ended:
-                self._resume_think = False
-                self._cold_next = False
-            else:
-                self._resume_think = True
-                self._cold_next = bool(failed or parked or stream_err)
+            self._resume_think = False
+            self._cold_next = False
         else:
             self._cold_next = bool(failed or parked or stream_err)
         if not failed:
@@ -901,6 +897,48 @@ class ProEngine:
         if self._idle_on_session_cap(session):
             return 0.0
         return 0.0
+
+    async def _stay_up_lead_changed(self, g: Any) -> bool:
+        """True when a collapsible lead fact moved since the last look."""
+        from abcxauto.agent_loop import snap as take_snap
+        from abcxauto.world_state import (
+            build_world_state,
+            day_facts,
+            desk_fact_changed,
+            worst_wake_fact,
+        )
+
+        if self.conn is None:
+            return False
+        try:
+            s = await take_snap(self.conn)
+        except Exception:
+            logger.debug("stay-up lead snap failed", exc_info=True)
+            return False
+        if not isinstance(s, dict):
+            return False
+        world = build_world_state(
+            cycle=0, snap=s, opportunities=[], news_items=[]
+        )
+        try:
+            from abcxauto.scorecard import compute_scorecard
+
+            sc = compute_scorecard(equity=getattr(world, "net_liquidation", None))
+            day = day_facts(world, sc)
+        except Exception:
+            day = day_facts(world, None)
+        fact = worst_wake_fact(
+            unprotected=list(getattr(world, "unprotected", None) or []),
+            day=day,
+            session=str(getattr(world, "session_status", "") or ""),
+        )
+        prev = ""
+        chat = getattr(g, "chat", None) if g is not None else None
+        if chat is not None:
+            prev = str(getattr(chat, "_abcx_last_desk_fact", "") or "")
+        if not prev and g is not None:
+            prev = str(getattr(g, "_last_desk_fact", "") or "")
+        return desk_fact_changed(prev, fact)
 
     async def _host_think(
         self, n: int, g: Any, s: dict, *, resume: bool = False
@@ -1211,24 +1249,29 @@ class ProEngine:
                                 clear_park()
                             except Exception:
                                 pass
-                            # A look may end. Wait for a poke (or pulse) —
-                            # do not dump a fresh go-do-desk developer turn.
+                            # Stay-up may sit. Wait for a poke or a lead
+                            # fact that actually changed — do not dump a
+                            # fresh go-do-desk developer turn.
                             wait = float(PULSE_S)
                             self.state.status = "On"
                             ev = self._wake_event
+                            timed_out = True
                             if ev is not None:
                                 try:
                                     await asyncio.wait_for(ev.wait(), timeout=wait)
                                 except asyncio.TimeoutError:
-                                    pass
+                                    timed_out = True
                                 else:
+                                    timed_out = False
                                     ev.clear()
                             else:
                                 await asyncio.sleep(wait)
-                            if peek_interrupt() is None:
-                                # Pulse look. Duplicate closest_stop ends
-                                # inside grok_turn with no send.
-                                self._resume_think = True
+                            if peek_interrupt() is not None:
+                                continue
+                            if timed_out:
+                                if await self._stay_up_lead_changed(g):
+                                    self._resume_think = True
+                                continue
                             continue
                         wait = float(PULSE_S)
                         self.state.status = "On"
@@ -1310,7 +1353,7 @@ class ProEngine:
                             tokens=max(0, billed_tokens_now() - before_tok),
                         )
                     if out.get("_ended"):
-                        # Duplicate closest_stop fact. A look may end.
+                        # Duplicate lead fact. A look may end.
                         self._rearm_after_think(out, session=session)
                         continue
                     if out.get("_parked"):

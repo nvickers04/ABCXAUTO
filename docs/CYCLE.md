@@ -25,14 +25,14 @@ GROK     tools (facts + send + self_tune + write_lab_playbook). Wake is a short 
     |
 SEND     send → gates → IBKR. Journal write is code, not a Grok tool.
     |
-LOOK     Finished RTH look writes no grok_wake.json. Empty/? retries on this process.
-         Overnight skip parks. Stay-up has no sit clock.
+LOOK     Finished RTH look writes no grok_wake.json. Stay-up may sit.
+         Empty/? retries the same chat once, then idles. Overnight skip parks.
 ```
 
         Paper RTH / premarket stay-up continues the live chat across successful
-        looks. Empty / junk / dead stream drop it so the next think is cold.
-        Overnight / after-close also drop the chat. Repeat reads inside a think are
-        served from cache, cleared on any mutating tool or live poke. Stall/loop
+        looks. Empty / junk retries the same chat once, then sits. Overnight /
+        after-close drop the chat. Repeat reads inside a think are served from
+        cache, cleared on any mutating tool or live book poke. Stall/loop
         detectors, a 64-step runaway ceiling, and per-tool timeouts stay. There
         is no stream time box. A session look/token cap (Settings) stops new
         looks when hit — idle / park-ready, chat kept, no sit clock.
@@ -41,7 +41,7 @@ LOOK     Finished RTH look writes no grok_wake.json. Empty/? retries on this pro
 After a think:
 
 - Closed / postmarket: no Grok (unprotected still interrupts); park until premarket
-- Paper RTH / premarket: stay up on this process. Empty / `?` retries immediately
+- Paper RTH / premarket: stay up on this process. Empty / `?` retries the same chat once, then sits. Next look is fill / order_change / unprotected / a lead fact that actually changed.
 - Session look/token cap hit: stay idle. Chat kept. No grok_wake / set_wake.
 - Session-card opening print is a send gate, not a park
 - Last hour to the open is stay-up, not a sit clock

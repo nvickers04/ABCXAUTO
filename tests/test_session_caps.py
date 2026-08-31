@@ -181,7 +181,7 @@ async def test_session_look_cap_stops_further_looks_and_writes_no_sit_clock(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
-    update_agent_config(session_look_cap=2, persist=False)
+    update_agent_config(session_look_cap=1, persist=False)
     dropped = {"n": 0}
     chats: list[object] = []
     stamps: list[float] = []
@@ -214,17 +214,17 @@ async def test_session_look_cap_stops_further_looks_and_writes_no_sit_clock(
     eng = ProEngine()
     assert eng.start() is None
     deadline = time.time() + 4
-    while time.time() < deadline and len(stamps) < 3:
+    while time.time() < deadline and len(stamps) < 2:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    # Hold idle long enough that a third look would have happened.
+    # Hold idle long enough that a second look would have happened.
     idle_until = time.time() + 0.4
     while time.time() < idle_until:
         eng.drain_apply()
         await asyncio.sleep(0.05)
     eng.stop_engine()
     eng.drain_apply()
-    assert len(stamps) == 2
+    assert len(stamps) == 1
     assert dropped["n"] == 0
     assert chats and chats[-1] is not None
     assert eng._resume_think is False
