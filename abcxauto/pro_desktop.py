@@ -150,8 +150,6 @@ STREAM_TAIL_CHARS = 8000
 # Wrapped tool output at 13px Consolas in a narrow column is hard to read; the
 # stream is the surface the operator actually sits and reads.
 STREAM_FONT_SIZE = 14
-# Hidden plain-text fallback stays short so Flet is not shipping the day twice.
-STREAM_RAW_TAIL_CHARS = 1800
 # Markers think_stream/brain emit. The text is Grok's — we colour it, never
 # rewrite it. Anything unlisted paints as prose, so a new marker still shows.
 STREAM_ALARM = (
@@ -528,8 +526,8 @@ class ProTerminal:
             font_family="Consolas",
         )
         self.btn_copy_stream = self._btn("Copy stream", outlined=True, on_click=self._copy_stream)
-        # The spine: one control per stream line so markers can be styled. The
-        # raw label above stays the plain-text fallback and the empty state.
+        # The spine: one control per stream line so markers can be styled.
+        # think_live is the empty-state label only — never a sliced day.
         self.col_stream = ft.Column(spacing=0, tight=True)
         self._stream_lines_key = ""
         self._stream_follow = True
@@ -2612,7 +2610,21 @@ class ProTerminal:
     def _copy_stream_text(self) -> str:
         """What Copy stream puts on the clipboard: the full day, not the 8kb stub."""
         live = str(getattr(self.engine.state, "think_live", "") or "")
-        return think_session_text(live) or str(self.think_live.value or "")
+        return think_session_text(live=live) or str(self.think_live.value or "")
+
+    def _pane_stream_text(self) -> str:
+        """Visible Grok stream: today's keep-file lines, not think_live[-24000:]."""
+        bits: list[str] = []
+        for node in getattr(self.col_stream, "controls", None) or []:
+            val = getattr(node, "value", None)
+            if isinstance(val, str) and val:
+                bits.append(val)
+                continue
+            content = getattr(node, "content", None)
+            cval = getattr(content, "value", None)
+            if isinstance(cval, str) and cval:
+                bits.append(cval)
+        return "\n".join(bits)
 
     def _copy_stream(self, _=None) -> None:
         text = self._copy_stream_text()
@@ -3740,7 +3752,7 @@ class ProTerminal:
     def _sync_think_stream(self) -> None:
         live = str(getattr(self.engine.state, "think_live", "") or "")
         status = str(getattr(self.engine.state, "status", "") or "").strip()
-        body = think_session_text(live)
+        body = think_session_text(live=live)
         n = len(body)
         self.lbl_stream_status.value = f"{n:,} chars" + (f" · {status}" if status else "")
         if body == getattr(self, "_think_sync_key", None):
@@ -3755,18 +3767,19 @@ class ProTerminal:
             self.col_stream.controls = []
             self._stream_lines_key = ""
         else:
-            # Hidden fallback stays a short stub. The spine and Copy read `body`.
-            self.think_live.value = shown[-STREAM_RAW_TAIL_CHARS:]
-            self.think_live.color = TEXT
+            # Empty-state label only. The spine is the day; do not slice it.
+            self.think_live.value = ""
             self.think_live.visible = False
             self._sync_stream_lines(body)
+            if getattr(self, "_stream_follow", True):
+                self.think_scroll.auto_scroll = True
 
     def _sync_stream_lines(self, body: str) -> None:
         """One control per stream line so markers read at a glance.
 
         Every line is painted with its own text — no marker is rewritten,
         stripped or reordered. Only whitespace-only lines become spacing.
-        The operator scrolls the whole session, not an 8kb / 180-line window.
+        The operator scrolls the whole session, not an 8kb / 24kb window.
         """
         lines = body.splitlines()
         key = "\n".join(lines)

@@ -189,6 +189,11 @@ def test_pane_and_copy_read_full_session_not_glass_tail(pro, tmp_path, monkeypat
     painted = "\n".join(_texts(pro.col_stream))
     assert "LOOK_ONE" in painted
     assert "LOOK_TWO" in painted
+    assert painted != live
+    assert painted != (pro.engine.state.think_live or "")[-24000:]
+    assert "LOOK_ONE" not in (pro.engine.state.think_live or "")[-24000:]
+    assert pro.think_live.visible is False
+    assert "LOOK_ONE" in pro._pane_stream_text()
     status = (pro.lbl_stream_status.value or "").replace(",", "")
     assert str(len(session)) in status
     copied = pro._copy_stream_text()
@@ -276,8 +281,7 @@ def test_buffer_arriving_hides_the_fallback_but_keeps_it_readable(pro):
     pro.engine.state.think_live = BUFFER
     pro._sync_think_stream()
     assert pro.think_live.visible is False
-    # Hidden fallback stays a short stub; Copy and the spine read the session.
-    assert "Bought WMT 70" in (pro.think_live.value or "")
+    assert "Bought WMT 70" in "\n".join(_texts(pro.col_stream))
     assert "Bought WMT 70" in pro._copy_stream_text()
 
 

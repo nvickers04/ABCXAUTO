@@ -490,12 +490,14 @@ def test_stream_line_widget_follows_tokens(headless_pro):
     headless_pro._think_sync_key = ""
     headless_pro._sync_think_stream()
     assert headless_pro.think_live is widget
-    assert "alpha" in (headless_pro.think_live.value or "")
-    assert "gamma" in (headless_pro.think_live.value or "")
+    assert headless_pro.think_live.visible is False
+    pane = headless_pro._pane_stream_text()
+    assert "alpha" in pane
+    assert "gamma" in pane
     headless_pro.engine.state.think_live = "alpha\nbeta\ngamma\ndelta"
     headless_pro._sync_think_stream()
     assert headless_pro.think_live is widget
-    assert "delta" in (headless_pro.think_live.value or "")
+    assert "delta" in headless_pro._pane_stream_text()
 
 
 def test_stream_paints_full_buffer_not_just_a_tail(headless_pro):
