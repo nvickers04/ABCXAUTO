@@ -315,6 +315,16 @@ class ProEngine:
             self._think_parked = False
             self._resume_think = True
             self._cold_next = False
+            # Stay-up sits on `_wake_event.wait`. Book pokes set it;
+            # operator Start must too or the desk paints "Grok on"
+            # while the worker stays mid-wait with no look.
+            ev = self._wake_event
+            if ev is not None:
+                loop = self._worker_loop
+                if loop is not None and loop.is_running():
+                    loop.call_soon_threadsafe(ev.set)
+                else:
+                    ev.set()
             self._note("START", "Grok running")
             return None
         self._gen += 1
