@@ -113,7 +113,8 @@ class Config:
     model: str = "grok-4.6"  # ABCXAUTO_MODEL is the env form; see get_config()
     temperature: float = 0.3
     max_tokens: int = 8192
-    # Per stay-up session (premarket / RTH). Hit stays idle. Not a per-turn cap.
+    # Per stay-up session (premarket / RTH). Overnight honors a hit.
+    # Paper stay-up does not idle the desk. Not a per-turn cap.
     session_look_cap: int = 160
     session_token_cap: int = 2_500_000
 

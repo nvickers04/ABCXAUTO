@@ -407,3 +407,111 @@ async def test_stub_session_skips_grok_review_keeps_panic(monkeypatch):
     reset_risk_gate()
 
 
+def test_working_order_ids_reads_oid5():
+    from abcxauto.monitor import _working_order_ids
+
+    assert _working_order_ids(
+        [{"order_id": 5, "action": "BUY", "order_type": "STP"}]
+    ) == {"5"}
+    assert _working_order_ids([{"orderId": 9}]) == {"9"}
+    assert _working_order_ids([{"permId": "p1"}]) == {"p1"}
+    assert _working_order_ids([]) == set()
+
+
+def test_detect_pace_wakes_order_change_fill_unprotected():
+    from types import SimpleNamespace
+
+    from abcxauto.monitor import PortfolioMonitor
+    from abcxauto.risk_gates import reset_risk_gate
+
+    reset_risk_gate()
+    wakes: list[str] = []
+    mon = PortfolioMonitor(
+        SimpleNamespace(emit=lambda *_a, **_k: None),
+        SimpleNamespace(),
+        on_wake=wakes.append,
+    )
+    empty = {
+        "protection": {"unprotected_symbols": []},
+        "fills": [],
+        "positions": [],
+        "open_orders": [],
+    }
+    mon._detect_pace_wakes(empty)
+    assert wakes == []
+    mon._detect_pace_wakes(
+        {
+            **empty,
+            "open_orders": [
+                {"order_id": 5, "action": "BUY", "order_type": "STP"},
+            ],
+        }
+    )
+    assert wakes == ["order_change"]
+    mon._detect_pace_wakes(
+        {
+            **empty,
+            "open_orders": [
+                {"order_id": 5, "action": "BUY", "order_type": "STP"},
+            ],
+        }
+    )
+    assert wakes == ["order_change"]
+    mon._detect_pace_wakes(
+        {
+            **empty,
+            "open_orders": [
+                {"order_id": 5, "action": "BUY", "order_type": "STP"},
+            ],
+            "fills": [{"exec_id": "e1", "symbol": "IWM"}],
+        }
+    )
+    assert wakes == ["order_change"]
+    mon._detect_pace_wakes(
+        {
+            **empty,
+            "open_orders": [
+                {"order_id": 5, "action": "BUY", "order_type": "STP"},
+            ],
+            "fills": [
+                {"exec_id": "e1", "symbol": "IWM"},
+                {"exec_id": "e2", "symbol": "IWM"},
+            ],
+        }
+    )
+    assert wakes == ["order_change", "fill"]
+    mon._detect_pace_wakes(
+        {
+            "protection": {"unprotected_symbols": ["SPY"]},
+            "fills": [
+                {"exec_id": "e1", "symbol": "IWM"},
+                {"exec_id": "e2", "symbol": "IWM"},
+            ],
+            "positions": [{"symbol": "SPY", "quantity": 1}],
+            "open_orders": [
+                {"order_id": 5, "action": "BUY", "order_type": "STP"},
+            ],
+        }
+    )
+    assert wakes == ["order_change", "fill", "unprotected"]
+
+
+def test_detect_pace_wakes_without_callback_is_silent():
+    from types import SimpleNamespace
+
+    from abcxauto.monitor import PortfolioMonitor
+
+    mon = PortfolioMonitor(
+        SimpleNamespace(emit=lambda *_a, **_k: None),
+        SimpleNamespace(),
+    )
+    mon._detect_pace_wakes(
+        {
+            "protection": {},
+            "fills": [],
+            "positions": [],
+            "open_orders": [{"order_id": 5}],
+        }
+    )
+
+

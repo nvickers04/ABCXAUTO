@@ -522,7 +522,7 @@ class ProEngine:
     def request_wake(self, reason: str) -> None:
         """Interrupt pulse sleep for a whitelisted pace wake (monitor → engine)."""
         from abcxauto.pacing import WakeGate
-        from abcxauto.park_clock import BookEvent, note_interrupt
+        from abcxauto.park_clock import BookEvent, note_interrupt, paper_stay_up
 
         if (
             not self.state.autonomous
@@ -534,7 +534,12 @@ class ProEngine:
         try:
             from abcxauto.session_caps import is_capped
 
-            if is_capped(session=str(getattr(self, "_last_session", "") or "")):
+            sess = self._resolve_session(
+                str(getattr(self, "_last_session", "") or "")
+            )
+            # Paper RTH / premarket stay-up must still poke. Overnight /
+            # closed / postmarket may still honor the cap.
+            if is_capped(session=sess) and not paper_stay_up(sess):
                 return
         except Exception:
             pass
@@ -543,7 +548,8 @@ class ProEngine:
         if not self._wake_gate.try_wake(reason):
             return
         self._wake_reason = str(reason or "").strip().lower()
-        # Mid-turn poke into the live xAI episode (fill / unprotected).
+        # Mid-turn poke into the live xAI episode (fill / order_change /
+        # unprotected). halt / flat_confirmed are not live pokes.
         note_interrupt(BookEvent(self._wake_reason, self._wake_reason))
         ev = self._wake_event
         if ev is not None:
@@ -892,10 +898,19 @@ class ProEngine:
         return resolve_stay_up_session(session)
 
     def _idle_on_session_cap(self, session: str = "", *, note: bool = True) -> bool:
-        """True when this session is out of looks or tokens. Idle, keep chat."""
+        """True when overnight/closed should sit on a hit cap. Paper stay-up does not.
+
+        The cap still paints on the wake (session_cap remaining). A hit in
+        paper RTH / premarket must not Idle the desk with no GROK.
+        """
+        from abcxauto.park_clock import paper_stay_up
         from abcxauto.session_caps import is_capped
 
-        if not is_capped(session=session):
+        sess = self._resolve_session(session)
+        if not is_capped(session=sess):
+            self._session_capped = False
+            return False
+        if paper_stay_up(sess):
             self._session_capped = False
             return False
         first = not bool(getattr(self, "_session_capped", False))

@@ -127,6 +127,25 @@ def _order_id(order: Dict[str, Any] | None) -> Optional[int]:
         return None
 
 
+def _working_order_ids(orders: Any) -> set[str]:
+    """Stable ids for pace order_change (new BUY STP oid5, cancel, replace)."""
+    keys: set[str] = set()
+    for o in orders or []:
+        if not isinstance(o, dict):
+            continue
+        oid = _order_id(o)
+        if oid is not None:
+            keys.add(str(oid))
+            continue
+        raw = o.get("perm_id")
+        if raw is None:
+            raw = o.get("permId")
+        bit = str(raw or "").strip()
+        if bit:
+            keys.add(bit)
+    return keys
+
+
 def _is_option_lot(position: Dict[str, Any] | None) -> bool:
     sec = _sec_type(position)
     return sec.startswith("OPT") or sec in ("FOP", "BAG")
@@ -359,6 +378,8 @@ class PortfolioMonitor:
         self._last_unprotected_nudge_ts: float = 0.0
         self._prev_unprotected: set[str] = set()
         self._prev_fill_keys: set[str] = set()
+        self._prev_order_keys: set[str] = set()
+        self._orders_seeded: bool = False
         self._prev_halted: bool = False
         self._prev_had_plan: bool | None = None
         self.reconciler: Any = None
@@ -463,6 +484,12 @@ class PortfolioMonitor:
             self._emit_wake("fill")
         if fill_keys:
             self._prev_fill_keys = fill_keys
+
+        order_keys = _working_order_ids(snapshot.get("open_orders"))
+        if self._orders_seeded and order_keys != self._prev_order_keys:
+            self._emit_wake("order_change")
+        self._orders_seeded = True
+        self._prev_order_keys = order_keys
 
         try:
             from abcxauto.trade_plan import load_trade_plan

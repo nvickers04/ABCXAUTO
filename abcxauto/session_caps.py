@@ -1,8 +1,10 @@
 """Per-session look and token ceilings.
 
 A flat stay-up grind can think all RTH and still lose the scorecard.
-These caps are the hard stop: when either is hit the desk stays idle /
-park-ready. Chat is kept. No sit clock. Overnight park stays park_clock.
+These caps still paint on the wake (looks/tokens left). Overnight /
+closed / postmarket may idle / park-ready on a hit. Paper RTH /
+premarket stay-up does not sit the desk on this cap. Chat is kept.
+No sit clock. Overnight park stays park_clock.
 
 Session key is ET date + market label (premarket / regular). Premarket
 and RTH each get a budget so stay-up through the open still trades.
