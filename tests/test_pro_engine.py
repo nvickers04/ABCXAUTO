@@ -1152,21 +1152,26 @@ async def test_start_on_sitting_worker_enters_a_look(monkeypatch, tmp_path):
     while time.time() < deadline and calls["n"] < 1:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    assert calls["n"] == 1
-    sit_until = time.time() + 0.4
-    while time.time() < sit_until:
+    sit_deadline = time.time() + 3
+    while time.time() < sit_deadline:
         eng.drain_apply()
+        ev = getattr(eng, "_wake_event", None)
+        if calls["n"] == 1 and ev is not None and ev._waiters:
+            break
         await asyncio.sleep(0.05)
-    assert calls["n"] == 1
+    else:
+        raise AssertionError("worker never sat on _wake_event")
+    worker = eng.worker
     assert eng.start() is None
     # PULSE_S is 10s. A real Start poke must look well before that.
     deadline = time.time() + 2
     while time.time() < deadline and calls["n"] < 2:
         eng.drain_apply()
         await asyncio.sleep(0.05)
+    assert calls["n"] == 2
+    assert worker is eng.worker
     eng.stop_engine()
     eng.drain_apply()
-    assert calls["n"] == 2
 
 
 @pytest.mark.asyncio
@@ -1193,7 +1198,16 @@ async def test_pause_then_start_resumes_think_path(monkeypatch, tmp_path):
     while time.time() < deadline and calls["n"] < 1:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    assert calls["n"] == 1
+    sit_deadline = time.time() + 3
+    while time.time() < sit_deadline:
+        eng.drain_apply()
+        ev = getattr(eng, "_wake_event", None)
+        if calls["n"] == 1 and ev is not None and ev._waiters:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("worker never sat on _wake_event")
+    worker = eng.worker
     eng.pause_engine()
     idle_until = time.time() + 0.4
     while time.time() < idle_until:
@@ -1205,9 +1219,10 @@ async def test_pause_then_start_resumes_think_path(monkeypatch, tmp_path):
     while time.time() < deadline and calls["n"] < 2:
         eng.drain_apply()
         await asyncio.sleep(0.05)
+    assert calls["n"] == 2
+    assert worker is eng.worker
     eng.stop_engine()
     eng.drain_apply()
-    assert calls["n"] == 2
 
 
 @pytest.mark.asyncio
