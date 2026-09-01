@@ -141,7 +141,7 @@ def test_finish_look_chat_keep_from_107_still_holds():
 
 
 def test_rearm_spoken_look_keeps_chat_flag_when_capped():
-    """#107 chat keep: a spoken look at the cap is idle, not a wipe."""
+    """#107 chat keep: a spoken look at the cap sits stay-up, not a wipe."""
     update_agent_config(session_look_cap=2, persist=False)
     note_look("regular")
     note_look("regular")
@@ -157,8 +157,8 @@ def test_rearm_spoken_look_keeps_chat_flag_when_capped():
     assert wait == 0.0
     assert eng._resume_think is False
     assert eng._cold_next is False
-    assert eng._session_capped is True
-    assert eng.state.status == "Idle"
+    assert eng._session_capped is False
+    assert eng.state.status != "Idle"
 
 
 def test_rearm_send_look_keeps_chat_flag_when_capped():
@@ -173,13 +173,114 @@ def test_rearm_send_look_keeps_chat_flag_when_capped():
     assert wait == 0.0
     assert eng._resume_think is False
     assert eng._cold_next is False
+    assert eng._session_capped is False
+    assert eng.state.status != "Idle"
+
+
+def test_idle_on_session_cap_skips_paper_stay_up():
+    update_agent_config(session_look_cap=1, persist=False)
+    note_look("regular")
+    assert is_capped("regular") is True
+    eng = ProEngine()
+    assert eng._idle_on_session_cap("regular") is False
+    assert eng._session_capped is False
+    assert eng.state.status != "Idle"
+    note_look("premarket")
+    assert eng._idle_on_session_cap("premarket") is False
+    assert eng._session_capped is False
+
+
+def test_idle_on_session_cap_honors_closed():
+    update_agent_config(session_look_cap=1, persist=False)
+    note_look("closed")
+    assert is_capped("closed") is True
+    eng = ProEngine()
+    assert eng._idle_on_session_cap("closed") is True
     assert eng._session_capped is True
+    assert eng.state.status == "Idle"
+
+
+def test_rearm_closed_look_idles_when_capped():
+    update_agent_config(session_look_cap=1, persist=False)
+    note_look("closed")
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {"_failed": False, "rationale": "parked", "sends": 0},
+        session="closed",
+    )
+    assert wait == 0.0
+    assert eng._resume_think is False
+    assert eng._session_capped is True
+    assert eng.state.status == "Idle"
+
+
+def _armed_wake_engine(*, session: str = "regular") -> ProEngine:
+    from abcxauto.pacing import WakeGate
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    eng = ProEngine()
+    eng.state.autonomous = True
+    eng._last_session = session
+    eng._wake_event = asyncio.Event()
+    eng._wake_gate = WakeGate(debounce_s=0)
+    return eng
+
+
+@pytest.mark.parametrize("reason", ["fill", "order_change", "unprotected"])
+def test_request_wake_loop21_reasons_set_event(reason):
+    from abcxauto.park_clock import peek_interrupt
+
+    eng = _armed_wake_engine()
+    eng.request_wake(reason)
+    assert eng._wake_event.is_set()
+    assert eng._wake_reason == reason
+    poke = peek_interrupt()
+    assert poke is not None
+    assert poke.kind == reason
+
+
+def test_request_wake_non_whitelist_does_not_set_event():
+    eng = _armed_wake_engine()
+    eng.request_wake("news")
+    assert not eng._wake_event.is_set()
+    assert eng._wake_reason == ""
+
+
+@pytest.mark.parametrize("reason", ["halt", "flat_confirmed"])
+def test_request_wake_non_poke_sets_event_without_live_poke(reason):
+    from abcxauto.park_clock import peek_interrupt
+
+    eng = _armed_wake_engine()
+    eng.request_wake(reason)
+    assert eng._wake_event.is_set()
+    assert peek_interrupt() is None
+
+
+def test_request_wake_paper_rth_capped_is_not_noop():
+    update_agent_config(session_look_cap=1, persist=False)
+    note_look("regular")
+    assert is_capped("regular") is True
+    eng = _armed_wake_engine(session="regular")
+    eng.request_wake("order_change")
+    assert eng._wake_event.is_set()
+    assert eng._wake_reason == "order_change"
+
+
+def test_request_wake_closed_capped_is_noop():
+    update_agent_config(session_look_cap=1, persist=False)
+    note_look("closed")
+    assert is_capped("closed") is True
+    eng = _armed_wake_engine(session="closed")
+    eng.request_wake("fill")
+    assert not eng._wake_event.is_set()
 
 
 @pytest.mark.asyncio
-async def test_session_look_cap_stops_further_looks_and_writes_no_sit_clock(
+async def test_paper_rth_cap_does_not_skip_order_change_look(
     monkeypatch, tmp_path
 ):
+    """Paper stay-up at the cap still looks on order_change. No sit clock."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     update_agent_config(session_look_cap=1, persist=False)
     dropped = {"n": 0}
@@ -190,6 +291,9 @@ async def test_session_look_cap_stops_further_looks_and_writes_no_sit_clock(
         dropped["n"] += 1
 
     async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import take_interrupt
+
+        take_interrupt()
         stamps.append(time.monotonic())
         chats.append(getattr(g, "chat", None))
         return {
@@ -214,21 +318,29 @@ async def test_session_look_cap_stops_further_looks_and_writes_no_sit_clock(
     eng = ProEngine()
     assert eng.start() is None
     deadline = time.time() + 4
-    while time.time() < deadline and len(stamps) < 2:
+    while time.time() < deadline and len(stamps) < 1:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    # Hold idle long enough that a second look would have happened.
+    assert len(stamps) == 1
     idle_until = time.time() + 0.4
     while time.time() < idle_until:
         eng.drain_apply()
         await asyncio.sleep(0.05)
+    assert len(stamps) == 1
+    assert eng._session_capped is False
+    assert is_capped("regular") is True
+    loop = getattr(eng, "_worker_loop", None)
+    assert loop is not None
+    loop.call_soon_threadsafe(eng.request_wake, "order_change")
+    deadline = time.time() + 4
+    while time.time() < deadline and len(stamps) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
     eng.stop_engine()
     eng.drain_apply()
-    assert len(stamps) == 1
+    assert len(stamps) == 2
     assert dropped["n"] == 0
     assert chats and chats[-1] is not None
-    assert eng._resume_think is False
-    assert eng._session_capped is True
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None
@@ -236,7 +348,7 @@ async def test_session_look_cap_stops_further_looks_and_writes_no_sit_clock(
 
 
 @pytest.mark.asyncio
-async def test_token_cap_stops_looks_without_wiping_chat(monkeypatch, tmp_path):
+async def test_token_cap_paper_rth_still_looks_on_fill(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     update_agent_config(session_look_cap=160, session_token_cap=50_000, persist=False)
     toks = {"n": 0}
@@ -247,6 +359,9 @@ async def test_token_cap_stops_looks_without_wiping_chat(monkeypatch, tmp_path):
     )
 
     async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import take_interrupt
+
+        take_interrupt()
         stamps.append(time.monotonic())
         toks["n"] += 50_000
         return {
@@ -262,17 +377,27 @@ async def test_token_cap_stops_looks_without_wiping_chat(monkeypatch, tmp_path):
     eng = ProEngine()
     assert eng.start() is None
     deadline = time.time() + 4
-    while time.time() < deadline and len(stamps) < 2:
+    while time.time() < deadline and len(stamps) < 1:
         eng.drain_apply()
         await asyncio.sleep(0.05)
+    assert len(stamps) == 1
     idle_until = time.time() + 0.4
     while time.time() < idle_until:
         eng.drain_apply()
         await asyncio.sleep(0.05)
+    assert len(stamps) == 1
+    assert eng._session_capped is False
+    assert is_capped("regular") is True
+    loop = getattr(eng, "_worker_loop", None)
+    assert loop is not None
+    loop.call_soon_threadsafe(eng.request_wake, "fill")
+    deadline = time.time() + 4
+    while time.time() < deadline and len(stamps) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
     eng.stop_engine()
     eng.drain_apply()
-    assert len(stamps) == 1
-    assert eng._session_capped is True
+    assert len(stamps) == 2
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None
@@ -280,7 +405,7 @@ async def test_token_cap_stops_looks_without_wiping_chat(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_premarket_cap_does_not_sit_the_open(monkeypatch, tmp_path):
-    """Hit in premarket stays idle; regular is a fresh budget. No sit clock."""
+    """Hit in premarket writes no sit clock. Paper stay-up does not Idle."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     update_agent_config(session_look_cap=1, persist=False)
     state = {"session": "premarket"}
@@ -296,6 +421,9 @@ async def test_premarket_cap_does_not_sit_the_open(monkeypatch, tmp_path):
         return _stay_up_snap(state["session"])
 
     async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import take_interrupt
+
+        take_interrupt()
         stamps.append(state["session"])
         return {
             "cycle": n,
@@ -334,8 +462,16 @@ async def test_premarket_cap_does_not_sit_the_open(monkeypatch, tmp_path):
         eng.drain_apply()
         await asyncio.sleep(0.05)
     assert stamps == ["premarket"]
-    assert eng._session_capped is True
+    assert eng._session_capped is False
+    idle_until = time.time() + 0.3
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert stamps == ["premarket"]
     state["session"] = "regular"
+    loop = getattr(eng, "_worker_loop", None)
+    assert loop is not None
+    loop.call_soon_threadsafe(eng.request_wake, "unprotected")
     deadline = time.time() + 4
     while time.time() < deadline and len(stamps) < 2:
         eng.drain_apply()

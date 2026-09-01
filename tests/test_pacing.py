@@ -16,8 +16,12 @@ def test_wake_whitelist_and_debounce():
     assert g.try_wake("fill", now_mono=10.0) is True
     assert g.try_wake("fill", now_mono=12.0) is False
     assert g.try_wake("fill", now_mono=30.0) is True
-    assert g.try_wake("unprotected", now_mono=31.0) is True
-    assert g.try_wake("unprotected", now_mono=31.5) is True  # urgent always
+    assert g.try_wake("order_change", now_mono=31.0) is True
+    assert g.try_wake("order_change", now_mono=32.0) is False
+    assert g.try_wake("unprotected", now_mono=46.0) is True
+    assert g.try_wake("unprotected", now_mono=46.5) is True  # urgent always
+    assert g.try_wake("halt", now_mono=47.0) is True
+    assert g.try_wake("book_move", now_mono=48.0) is False
 
 
 @pytest.mark.asyncio

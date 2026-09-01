@@ -11,7 +11,13 @@ import math
 import time
 
 URGENT_WAKES = frozenset({"unprotected", "halt"})
-WAKE_WHITELIST = frozenset({"unprotected", "fill", "halt", "flat_confirmed"})
+WAKE_WHITELIST = frozenset({
+    "unprotected",
+    "fill",
+    "order_change",
+    "halt",
+    "flat_confirmed",
+})
 _WAKE_DEBOUNCE_S = 15.0
 # Stay-up / retry class: tens of seconds. Not a half-hour nap.
 STAY_UP_RETRY_CAP_S = 45.0
