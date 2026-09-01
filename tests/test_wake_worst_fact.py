@@ -308,3 +308,101 @@ def test_duplicate_unprotected_list_is_identity_not_string():
     assert omit_duplicate_fact_lead(a, changed) == changed
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
+
+def test_snap_worst_fact_lists_each_open_lot_with_structure_dte_upnl():
+    """Wake / worst-fact path lists every lot. Age is a fact, not a flatten."""
+    from datetime import date, datetime, timedelta, timezone
+
+    from abcxauto.park_clock import note_wake
+    from abcxauto.world_state import (
+        WorldState,
+        day_facts,
+        format_wake,
+        lot_labels,
+        worst_fact_open_lots,
+        worst_wake_fact,
+    )
+
+    opened = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+    positions = [
+        {
+            "symbol": "IWM",
+            "secType": "OPT",
+            "quantity": 1,
+            "expiration": "20260918",
+            "right": "C",
+            "strike": 245.0,
+            "unrealizedPNL": -42.0,
+            "opened_at": opened,
+        },
+        {
+            "symbol": "IWM",
+            "secType": "OPT",
+            "quantity": -1,
+            "expiration": "20260918",
+            "right": "C",
+            "strike": 250.0,
+            "unrealizedPNL": 18.5,
+            "opened_at": opened,
+        },
+        {
+            "symbol": "AAPL",
+            "secType": "STK",
+            "quantity": 20,
+            "unrealizedPNL": -80.0,
+            "opened_at": opened,
+        },
+    ]
+    labels = lot_labels(positions)
+    assert len(labels) == 3
+    dte = (date(2026, 9, 18) - date.today()).days
+    assert any("vert" in x and f"DTE={dte}" in x and "uPnL=-42" in x for x in labels)
+    assert any("vert" in x and "uPnL=18.5" in x for x in labels)
+    assert any("AAPL STK" in x and "uPnL=-80" in x and "days_held=4" in x for x in labels)
+    assert all("flatten" not in x.lower() for x in labels)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=False,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=100_000.0,
+        daily_pnl=0.0,
+        positions=positions,
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    day = day_facts(world)
+    lots = worst_fact_open_lots(day)
+    assert len(lots) == 3
+    assert lots == day["open_lots"]
+    fact = worst_wake_fact(unprotected=[], day=day, session="regular")
+    assert "flatten" not in fact.lower()
+    note_wake(None)
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day=day,
+    )
+    for lot in lots:
+        assert lot in text
+        assert "flatten" not in lot.lower()
+    assert "open_lots=" in text
+    assert "days_held=4" in text
+    assert f"DTE={dte}" in text
+    assert "uPnL=-42" in text
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+

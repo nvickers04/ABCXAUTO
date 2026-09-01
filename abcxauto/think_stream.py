@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -92,6 +93,59 @@ def reset_speaker() -> None:
     global _speaker
     with _lock:
         _speaker = ""
+
+
+_TOOL_CHIP_RE = re.compile(r"^\[([a-z][a-z0-9_]*)(?:\s|=|\])", re.I | re.M)
+
+
+def empty_grok_segment(buf: str) -> bool:
+    """True when the last ``--- GROK ---`` has no think/say prose after it."""
+    text = str(buf or "")
+    last = text.rfind("--- GROK")
+    if last < 0:
+        return False
+    return _grok_segment_empty(text[last:])
+
+
+def empty_grok_after_tools(buf: str) -> bool:
+    """Hung empty GROK after tools returned. Recover signal, not a sit clock.
+
+    Typical keepfile::
+
+        --- GROK ---
+        [book]
+        [quote]
+        --- GROK ---
+
+    The last banner is empty. Tools already landed. Worker still up.
+    """
+    text = str(buf or "")
+    last = text.rfind("--- GROK")
+    if last < 0:
+        return False
+    if not _grok_segment_empty(text[last:]):
+        return False
+    before = text[:last]
+    prev = before.rfind("--- GROK")
+    look_before = before[prev:] if prev >= 0 else before
+    return bool(_TOOL_CHIP_RE.search(look_before))
+
+
+def _grok_segment_empty(seg: str) -> bool:
+    lines = [ln.strip() for ln in str(seg or "").splitlines()]
+    if lines and lines[0].startswith("--- GROK"):
+        lines = lines[1:]
+    for ln in lines:
+        if not ln:
+            continue
+        if ln in ("[think]", "[say]"):
+            continue
+        if ln.startswith("--- GROK"):
+            continue
+        if ln.startswith("[stream "):
+            continue
+        return False
+    return True
 
 
 def _paint(kind: str, text: str) -> str:
@@ -1021,7 +1075,7 @@ def write_desk_brief(payload: dict[str, Any]) -> None:
         "strat": payload.get("strat"),
         "sends": sends,
         "send_calls": send_calls,
-        "open_lots": list(payload.get("open_lots") or [])[:16],
+        "open_lots": list(payload.get("open_lots") or [])[:32],
         "net_liquidation": payload.get("net_liquidation"),
         "mix": payload.get("mix") if isinstance(payload.get("mix"), dict) else {},
         "rationale": (payload.get("rationale") or "")[:800],

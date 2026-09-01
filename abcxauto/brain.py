@@ -19,6 +19,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import time
 from copy import deepcopy
@@ -116,6 +117,27 @@ _OVERLOAD_MARKERS = (
     "503",
 )
 
+# Transient stream death mid-look. Not capacity (llm.py already bursts that).
+# Same chat, same look — do not sit dead with an empty tip.
+STREAM_ABORT_TRIES = 3
+STREAM_ABORT_BACKOFF_S = 1.0
+_STREAM_ABORT_MARKERS = (
+    "unavailable",
+    "connection aborted",
+    "iocp",
+    "forcibly closed",
+    "network name is no longer available",
+    "semaphore timeout period has expired",
+    "rst_stream",
+    "connection reset by peer",
+)
+
+# Empty --- GROK --- after tools. Short dead wait, then stream_round again.
+# Not a sit clock, not _cold_next, not a new messages list.
+EMPTY_GROK_TRIES = 2
+EMPTY_GROK_DEAD_S = 2.0
+EMPTY_GROK_RECOVER_TRIES = 2
+
 
 def provider_overloaded(err: Any) -> bool:
     """True when xAI refused for capacity — back off long, do not re-ask."""
@@ -123,6 +145,32 @@ def provider_overloaded(err: Any) -> bool:
     if not blob:
         return False
     return any(m in blob for m in _OVERLOAD_MARKERS)
+
+
+def is_stream_abort_error(err: Any) -> bool:
+    """True for UNAVAILABLE / connection-aborted / IOCP-style mid-look death."""
+    blob = str(err or "").lower()
+    if not blob:
+        return False
+    if is_capacity_error_blob(blob):
+        return False
+    return any(m in blob for m in _STREAM_ABORT_MARKERS)
+
+
+def is_capacity_error_blob(blob: str) -> bool:
+    """RESOURCE_EXHAUSTED / at-capacity — llm.py already retries those."""
+    return "resource_exhausted" in blob or "at capacity" in blob
+
+
+def empty_grok_dead_s() -> float:
+    """Short hung-empty wait. Env override for tests. Never a sit clock."""
+    raw = (os.environ.get("ABCXAUTO_EMPTY_GROK_DEAD_S") or "").strip()
+    if raw:
+        try:
+            return max(0.0, min(30.0, float(raw)))
+        except ValueError:
+            pass
+    return float(EMPTY_GROK_DEAD_S)
 
 
 def _look_text_is_junk(text: str) -> bool:
@@ -1180,6 +1228,7 @@ async def grok_turn(
     snap: dict[str, Any],
     wake: str,
     resume: bool = False,
+    recover: bool = False,
 ) -> BrainTurn:
     """Call the model on one kept chat. send() is the only broker path.
 
@@ -1189,7 +1238,8 @@ async def grok_turn(
     with no tool_calls: stop calling the model. Chat kept. Do not call
     the model again because it spoke. A poke does not start a new
     messages list. A fresh BrainTurn still drops refused send tickets so
-    they cannot be the next look's send target.
+    they cannot be the next look's send target. ``recover`` re-enters
+    stream_round on the open chat — no wake re-intro, no new messages list.
     """
     return await _grok_turn_impl(
         g,
@@ -1199,6 +1249,7 @@ async def grok_turn(
         wake=wake,
         turn=BrainTurn(),
         resume=resume,
+        recover=recover,
     )
 
 
@@ -1210,8 +1261,9 @@ def grok_turn_kwargs(
     snap: dict[str, Any],
     wake: str,
     resume: bool = False,
+    recover: bool = False,
 ) -> dict[str, Any]:
-    """Keyword args for grok_turn. Omit resume when the callee does not accept it."""
+    """Keyword args for grok_turn. Omit resume/recover when the callee lacks them."""
     kwargs: dict[str, Any] = {
         "connector": connector,
         "world": world,
@@ -1222,11 +1274,11 @@ def grok_turn_kwargs(
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
         return kwargs
-    if "resume" in params:
+    var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    if "resume" in params or var_kw:
         kwargs["resume"] = resume
-        return kwargs
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        kwargs["resume"] = resume
+    if "recover" in params or var_kw:
+        kwargs["recover"] = recover
     return kwargs
 
 
@@ -1549,6 +1601,7 @@ async def _grok_turn_impl(
     wake: str,
     turn: BrainTurn | None = None,
     resume: bool = False,
+    recover: bool = False,
 ) -> BrainTurn:
     turn = turn or BrainTurn()
     # Rejected clerk tickets must not ride to the next look.
@@ -1568,39 +1621,47 @@ async def _grok_turn_impl(
     live_before = getattr(g, "chat", None)
     # A live chat is this look. A poke does not start a new messages list.
     resume = bool(resume) or live_before is not None
-    try:
-        chat = _open_wake(g, wake, session=session, resume=resume)
-    except Exception as exc:
-        logger.exception("chat start failed")
-        turn.last_act = {}
-        turn.last_result = {"status": "error", "note": f"chat_error: {exc}"}
-        turn.failed = True
-        turn.stream_error = str(exc)
-        _finish_look_chat(g, turn, session=session)
-        return turn
-    appended = bool(getattr(g, "_wake_appended", False))
-    lead = str(wake or "").splitlines()[0].strip() if wake else ""
-    if appended and lead:
-        think_emit("tool", f"{lead}\n")
-    if resume and not appended:
-        from abcxauto.park_clock import peek_interrupt
+    recover = bool(recover) and live_before is not None
+    if recover:
+        # Re-enter stream_round on the paid chat. No wake re-intro.
+        chat = live_before
+        g._wake_appended = False
+    else:
+        try:
+            chat = _open_wake(g, wake, session=session, resume=resume)
+        except Exception as exc:
+            logger.exception("chat start failed")
+            turn.last_act = {}
+            turn.last_result = {"status": "error", "note": f"chat_error: {exc}"}
+            turn.failed = True
+            turn.stream_error = str(exc)
+            _finish_look_chat(g, turn, session=session)
+            return turn
+        appended = bool(getattr(g, "_wake_appended", False))
+        lead = str(wake or "").splitlines()[0].strip() if wake else ""
+        if appended and lead:
+            think_emit("tool", f"{lead}\n")
+        if resume and not appended:
+            from abcxauto.park_clock import peek_interrupt
 
-        if peek_interrupt() is not None:
-            ok = await _inject_live_poke(
-                chat, connector=connector, world=world, snap=snap, turn=turn
-            )
-            if not ok:
-                # Duplicate lead fact — a look may end with no send.
+            if peek_interrupt() is not None:
+                ok = await _inject_live_poke(
+                    chat, connector=connector, world=world, snap=snap, turn=turn
+                )
+                if not ok:
+                    # Duplicate lead fact — a look may end with no send.
+                    turn.ended = True
+                    _finish_look_chat(g, turn, session=session)
+                    return turn
+            else:
+                # Duplicate lead-fact identity. Do not start a fresh go-do-desk.
                 turn.ended = True
                 _finish_look_chat(g, turn, session=session)
                 return turn
-        else:
-            # Duplicate lead-fact identity. Do not start a fresh go-do-desk.
-            turn.ended = True
-            _finish_look_chat(g, turn, session=session)
-            return turn
     billed_before = _model_usage_calls()
     ran_out = True
+    abort_tries = 0
+    empty_tries = 0
     while turn.steps < MAX_TOOL_STEPS:
         turn.steps += 1
         try:
@@ -1613,6 +1674,22 @@ async def _grok_turn_impl(
                 continue
             text, response, stop = await stream_round(chat)
         except Exception as exc:
+            if (
+                is_stream_abort_error(exc)
+                and abort_tries < STREAM_ABORT_TRIES
+            ):
+                abort_tries += 1
+                logger.warning(
+                    "stream abort retry %s/%s same chat: %s",
+                    abort_tries,
+                    STREAM_ABORT_TRIES,
+                    exc,
+                )
+                think_emit("tool", f"\n[stream retry: {exc}]\n")
+                turn.stream_error = ""
+                turn.failed = False
+                await asyncio.sleep(STREAM_ABORT_BACKOFF_S)
+                continue
             # A dead empty stream ends the look. A look that already spoke
             # or sent still keeps the stay-up chat.
             logger.exception("stream_round failed")
@@ -1643,6 +1720,21 @@ async def _grok_turn_impl(
                 logger.debug("chat.append(response) failed", exc_info=True)
         calls = list(getattr(response, "tool_calls", None) or []) if response is not None else []
         if not calls:
+            # Empty GROK after tools is hung, not a checkpoint. Short wait,
+            # then stream_round again on this chat. A real say sits.
+            if (
+                turn.tool_trace
+                and _look_is_empty_or_question(turn)
+                and empty_tries < EMPTY_GROK_TRIES
+            ):
+                empty_tries += 1
+                logger.warning(
+                    "empty GROK after tools — recover %s/%s same chat",
+                    empty_tries,
+                    EMPTY_GROK_TRIES,
+                )
+                await asyncio.sleep(empty_grok_dead_s())
+                continue
             # Words (or empty) and no tools: stop calling the model. Chat
             # stays. Next call is fill / order_change / unprotected / poke
             # with this chat plus a fresh snap. Do not call again because it spoke.
