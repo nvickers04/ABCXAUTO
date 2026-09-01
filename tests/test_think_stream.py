@@ -28,6 +28,11 @@ def test_empty_grok_after_tools_is_the_hung_keepfile():
         "[option_facts]\n"
         "--- GROK ---\n"
     )
+    after_send = (
+        "--- GROK ---\n"
+        "[send]\n"
+        "--- GROK ---\n"
+    )
     spoken = (
         "--- GROK ---\n"
         "[book]\n"
@@ -35,11 +40,20 @@ def test_empty_grok_after_tools_is_the_hung_keepfile():
         "[say]\n"
         "holding IWM vert\n"
     )
+    spoken_after_send = (
+        "--- GROK ---\n"
+        "[send]\n"
+        "--- GROK ---\n"
+        "[say]\n"
+        "QQQ calendar working\n"
+    )
     empty_no_tools = "--- GROK ---\n"
     assert empty_grok_after_tools(hung) is True
     assert empty_grok_after_tools(after_facts) is True
+    assert empty_grok_after_tools(after_send) is True
     assert empty_grok_segment(hung) is True
     assert empty_grok_after_tools(spoken) is False
+    assert empty_grok_after_tools(spoken_after_send) is False
     assert empty_grok_after_tools(empty_no_tools) is False
     assert empty_grok_after_tools("") is False
 
