@@ -108,7 +108,7 @@ def empty_grok_segment(buf: str) -> bool:
 
 
 def empty_grok_after_tools(buf: str) -> bool:
-    """Hung empty GROK after tools returned. Recover signal, not a sit clock.
+    """Hung empty GROK after tools and/or send returned. Not a sit clock.
 
     Typical keepfile::
 
@@ -117,7 +117,11 @@ def empty_grok_after_tools(buf: str) -> bool:
         [quote]
         --- GROK ---
 
-    The last banner is empty. Tools already landed. Worker still up.
+        --- GROK ---
+        [send]
+        --- GROK ---
+
+    The last banner is empty. Tools or send already landed. Worker still up.
     """
     text = str(buf or "")
     last = text.rfind("--- GROK")

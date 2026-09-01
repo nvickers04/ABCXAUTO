@@ -965,20 +965,17 @@ class ProEngine:
         return empty_grok_dead_s()
 
     def _same_chat_recover_needed(self, out: dict | None, g: Any) -> bool:
-        """Empty GROK after tools, or UNAVAILABLE/IOCP, with a live chat.
+        """Empty GROK after tools/send, or UNAVAILABLE/IOCP, with a live chat.
 
-        Re-enter think on this chat. Not _cold_next. Not a sit clock.
+        A send does not complete the look. A trailing bare --- GROK ---
+        after clerk results is hung — re-enter this chat. Not _cold_next.
+        A [say] with content (last banner not empty) may sit.
         """
         if g is None or getattr(g, "chat", None) is None:
             return False
         payload = out if isinstance(out, dict) else {}
         if payload.get("_ended") or payload.get("_parked"):
             return False
-        try:
-            if int(payload.get("sends") or 0) > 0:
-                return False
-        except (TypeError, ValueError):
-            pass
         from abcxauto.brain import (
             EMPTY_GROK_RECOVER_TRIES,
             _look_text_is_junk,
@@ -988,21 +985,26 @@ class ProEngine:
         streak = int(getattr(self, "_recover_streak", 0) or 0)
         if streak >= EMPTY_GROK_RECOVER_TRIES:
             return False
-        rationale = str(payload.get("rationale") or "")
-        spoken = not _look_text_is_junk(rationale)
-        if spoken:
-            return False
-        if is_stream_abort_error(payload.get("_stream_error") or ""):
-            return True
-        tools = list(payload.get("tool_trace") or [])
-        if tools and _look_text_is_junk(rationale):
-            return True
         live = str(getattr(self.state, "think_live", "") or "")
         if live:
             from abcxauto.think_stream import empty_grok_after_tools
 
             if empty_grok_after_tools(live):
                 return True
+        if payload.get("_empty_grok"):
+            return True
+        if is_stream_abort_error(payload.get("_stream_error") or ""):
+            return True
+        rationale = str(payload.get("rationale") or "")
+        if not _look_text_is_junk(rationale):
+            return False
+        tools = list(payload.get("tool_trace") or [])
+        try:
+            sends = int(payload.get("sends") or 0)
+        except (TypeError, ValueError):
+            sends = 0
+        if tools or sends > 0:
+            return True
         return False
 
     def _arm_same_chat_recover(self) -> None:
@@ -1164,6 +1166,7 @@ class ProEngine:
             "_failed": failed and not parked,
             "_ended": bool(getattr(turn, "ended", False)),
             "_stream_error": str(getattr(turn, "stream_error", "") or ""),
+            "_empty_grok": bool(getattr(turn, "trailing_empty_grok", False)),
             "_recover": recover,
         }
 

@@ -2440,6 +2440,22 @@ async def test_stream_round_breaks_on_think_loop():
     assert text == ""
 
 
+@pytest.mark.asyncio
+async def test_stream_round_empty_banner_is_empty_not_ok():
+    """GROK banner then silence — no think, no say, no tool. Not a timeout."""
+    from abcxauto import brain
+
+    class Chat:
+        async def stream(self):
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="", reasoning_content=""
+            )
+
+    text, _resp, reason = await brain.stream_round(Chat())
+    assert text == ""
+    assert reason == "empty"
+
+
 def test_open_wake_resets_dead_chat():
     from abcxauto.brain import _open_wake
 
@@ -3934,10 +3950,13 @@ async def test_fill_interrupt_mid_say_keeps_spoken_text():
 @pytest.mark.asyncio
 async def test_send_then_empty_final_keeps_chat(monkeypatch):
     """A successful send/fill keeps chat when the last assistant turn is empty."""
+    from abcxauto import brain
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
 
     clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
 
     async def filled(*_a, **_k):
         return {"status": "filled", "success": True, "filled": True}
@@ -3987,6 +4006,9 @@ async def test_send_then_empty_final_keeps_chat(monkeypatch):
     assert turn.failed is False
     assert turn.look_failed() is False
     assert getattr(g, "chat", None) is not None
+    # Empty GROK after send re-enters this chat (not look-end sit).
+    assert g.chat.n > 2
+    assert turn.trailing_empty_grok is True
 
 
 @pytest.mark.asyncio
@@ -4279,6 +4301,110 @@ async def test_empty_grok_after_tools_reenters_think_same_chat(monkeypatch):
     assert turn.look_failed() is False
     assert "holding IWM" in (turn.text or "")
     assert g.chat is chat
+    assert turn.trailing_empty_grok is False
+
+
+@pytest.mark.asyncio
+async def test_empty_grok_after_send_reenters_think_same_chat(monkeypatch):
+    """Empty GROK after a successful send: same-chat re-enter, not look-end sit.
+
+    Production 2026-09-01: clerk returned send results, then a bare
+    --- GROK --- with no think/say/tool. #147 keyed recover on
+    _look_is_empty_or_question, which is False after send/fill.
+    """
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+
+    async def filled(*_a, **_k):
+        return {"status": "submitted", "success": True, "order_id": 12}
+
+    monkeypatch.setattr("abcxauto.agent_loop.execute_ticket", filled)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(
+            name="send",
+            arguments=json.dumps(
+                {
+                    "strategy": "calendar_spread",
+                    "params": {"symbol": "QQQ", "quantity": 1},
+                    "rationale": "QQQ calendar",
+                }
+            ),
+        )
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+            elif self.n == 2:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="QQQ calendar working. Watching the fill.",
+                    reasoning_content="",
+                )
+
+    chat = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: chat)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=chat,
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert turn.sends
+    assert chat.n == 3
+    assert turn.failed is False
+    assert turn.look_failed() is False
+    assert "QQQ calendar working" in (turn.text or "")
+    assert g.chat is chat
+    assert turn.trailing_empty_grok is False
+
+
+def test_empty_grok_round_after_send_is_not_look_end():
+    """#147 gate: _look_is_empty_or_question is False after send. This class still recovers."""
+    from abcxauto.brain import (
+        BrainTurn,
+        _empty_grok_round_after_work,
+        _look_is_empty_or_question,
+    )
+
+    sent = BrainTurn(
+        text="",
+        sends=[{"result": {"status": "submitted", "success": True}}],
+        tool_trace=["send"],
+    )
+    assert _look_is_empty_or_question(sent) is False
+    assert _empty_grok_round_after_work(sent, "", "empty") is True
+    assert _empty_grok_round_after_work(sent, "", "ok") is False
+    spoken = BrainTurn(
+        text="QQQ calendar working.",
+        sends=[{"result": {"status": "submitted", "success": True}}],
+        tool_trace=["send"],
+    )
+    assert _empty_grok_round_after_work(spoken, "QQQ calendar working.", "ok") is False
+    tools_only = BrainTurn(text="", tool_trace=["book"])
+    assert _empty_grok_round_after_work(tools_only, "", "empty") is True
+    bare = BrainTurn(text="")
+    assert _empty_grok_round_after_work(bare, "", "empty") is False
 
 
 @pytest.mark.asyncio

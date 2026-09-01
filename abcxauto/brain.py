@@ -93,6 +93,8 @@ class BrainTurn:
     # IBKR allows one scanner sub at a time. Parallel scan() calls in one
     # think collapse through this lock into one bag.
     scan_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Last stream_round was a bare --- GROK --- after tools/send. Not a sit.
+    trailing_empty_grok: bool = False
 
     def look_failed(self) -> bool:
         """True empty / lone '?' only. A real say or send/fill is not junk.
@@ -132,7 +134,8 @@ _STREAM_ABORT_MARKERS = (
     "connection reset by peer",
 )
 
-# Empty --- GROK --- after tools. Short dead wait, then stream_round again.
+# Empty --- GROK --- after tools and/or send. Short dead wait, then
+# stream_round again on this chat. A send does not complete the look.
 # Not a sit clock, not _cold_next, not a new messages list.
 EMPTY_GROK_TRIES = 2
 EMPTY_GROK_DEAD_S = 2.0
@@ -171,6 +174,25 @@ def empty_grok_dead_s() -> float:
         except ValueError:
             pass
     return float(EMPTY_GROK_DEAD_S)
+
+
+def _empty_grok_round_after_work(
+    turn: "BrainTurn", text: str, stop: str
+) -> bool:
+    """True when this stream_round was a bare GROK after tools and/or send.
+
+    A send/fill does not complete the look. A [say] this round does.
+    ``stop==empty`` is GROK-banner-then-silence — not a timeout, not junk-look.
+    """
+    if not (turn.tool_trace or turn.sends):
+        return False
+    if stop in ("interrupt", "loop"):
+        return False
+    if stop == "empty":
+        return True
+    if stop == "stalled" and _look_text_is_junk(text):
+        return True
+    return False
 
 
 def _look_text_is_junk(text: str) -> bool:
@@ -745,6 +767,9 @@ async def stream_round(
             if extra:
                 o = extra
                 break
+    # Bare --- GROK --- : stream ended with no think, no say. Not a timeout.
+    if reason == "ok" and not saw_think and not saw_say and not o:
+        reason = "empty"
     try:
         from abcxauto.memory import get_journal
         from abcxauto.scorecard import estimate_cost_usd, usage_from_response
@@ -1720,16 +1745,17 @@ async def _grok_turn_impl(
                 logger.debug("chat.append(response) failed", exc_info=True)
         calls = list(getattr(response, "tool_calls", None) or []) if response is not None else []
         if not calls:
-            # Empty GROK after tools is hung, not a checkpoint. Short wait,
-            # then stream_round again on this chat. A real say sits.
-            if (
-                turn.tool_trace
-                and _look_is_empty_or_question(turn)
-                and empty_tries < EMPTY_GROK_TRIES
-            ):
+            # Empty GROK after tools/send is hung, not a checkpoint and not
+            # a completed look. #147 keyed this on _look_is_empty_or_question,
+            # which is False after send/fill — so a bare --- GROK --- after
+            # clerk results broke out and stay-up sat. Gate on THIS round:
+            # no think, no say, no tool. A [say] this round sits.
+            empty_after_work = _empty_grok_round_after_work(turn, text, stop)
+            turn.trailing_empty_grok = empty_after_work
+            if empty_after_work and empty_tries < EMPTY_GROK_TRIES:
                 empty_tries += 1
                 logger.warning(
-                    "empty GROK after tools — recover %s/%s same chat",
+                    "empty GROK after tools/send — recover %s/%s same chat",
                     empty_tries,
                     EMPTY_GROK_TRIES,
                 )
@@ -1740,6 +1766,7 @@ async def _grok_turn_impl(
             # with this chat plus a fresh snap. Do not call again because it spoke.
             ran_out = False
             break
+        turn.trailing_empty_grok = False
         interrupted = await _dispatch_tool_calls(
             calls,
             chat=chat,
