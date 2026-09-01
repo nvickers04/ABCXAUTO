@@ -646,6 +646,42 @@ async def test_start_after_connect_enables_autonomous(monkeypatch):
     eng.drain_apply()
 
 
+class _AliveWorker:
+    def is_alive(self) -> bool:
+        return True
+
+
+def test_start_on_live_worker_sets_wake_event():
+    """Start on a sitting worker must poke `_wake_event`, not only `_resume_think`."""
+    eng = ProEngine()
+    eng.worker = _AliveWorker()
+    eng._wake_event = asyncio.Event()
+    assert not eng._wake_event.is_set()
+    assert eng.start() is None
+    assert eng._resume_think is True
+    assert not eng.pause.is_set()
+    assert eng._wake_event.is_set()
+    assert eng.state.autonomous is True
+    assert eng.state.running is True
+    assert eng.state.status == "Thinking"
+
+
+def test_pause_then_start_clears_pause_and_sets_wake():
+    """Pause → Start must leave the sit wait, not paint Grok on mid-wait."""
+    eng = ProEngine()
+    eng.worker = _AliveWorker()
+    eng._wake_event = asyncio.Event()
+    eng.pause_engine()
+    assert eng.pause.is_set()
+    assert eng.state.autonomous is False
+    assert eng.start() is None
+    assert not eng.pause.is_set()
+    assert eng._resume_think is True
+    assert eng._wake_event.is_set()
+    assert eng.state.autonomous is True
+    assert eng.state.running is True
+
+
 def _stay_up_snap(session: str) -> dict:
     return {
         "account": {"netliquidation": 100000, "unrealizedpnl": 0},
@@ -1090,6 +1126,88 @@ async def test_paper_regular_stay_up_looks_without_a_clock(monkeypatch, tmp_path
 
     assert load_alarm().wake_at is None
     assert not (tmp_path / "wake.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_start_on_sitting_worker_enters_a_look(monkeypatch, tmp_path):
+    """Operator Start on a stay-up sit must host a look without waiting PULSE_S."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    calls = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "looking",
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and calls["n"] < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert calls["n"] == 1
+    sit_until = time.time() + 0.4
+    while time.time() < sit_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert calls["n"] == 1
+    assert eng.start() is None
+    # PULSE_S is 10s. A real Start poke must look well before that.
+    deadline = time.time() + 2
+    while time.time() < deadline and calls["n"] < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_pause_then_start_resumes_think_path(monkeypatch, tmp_path):
+    """Pause → Start on a live worker must enter another look."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    calls = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "looking",
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and calls["n"] < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert calls["n"] == 1
+    eng.pause_engine()
+    idle_until = time.time() + 0.4
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert calls["n"] == 1
+    assert eng.start() is None
+    deadline = time.time() + 2
+    while time.time() < deadline and calls["n"] < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert calls["n"] == 2
 
 
 @pytest.mark.asyncio
