@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS fills (
     sent_price REAL,
     signed_slippage REAL,
     spread_paid REAL,
-    fill_label TEXT
+    fill_label TEXT,
+    quote_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS decisions (
@@ -185,6 +186,7 @@ _FILL_MARK_COLS = (
     ("signed_slippage", "REAL"),
     ("spread_paid", "REAL"),
     ("fill_label", "TEXT"),
+    ("quote_reason", "TEXT"),
 )
 
 _UNFILLED_GRACE_S = 15.0
@@ -263,6 +265,27 @@ def _et_calendar_date(value: Any = None) -> Optional[str]:
         return dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
     except Exception:
         return dt.astimezone(timezone.utc).date().isoformat()
+
+
+def _et_day_utc_range(session_date: str) -> Optional[Tuple[str, str]]:
+    """UTC [start, end) for an America/New_York calendar date ``YYYY-MM-DD``."""
+    text = str(session_date or "").strip()
+    if len(text) < 10:
+        return None
+    try:
+        y, m, d = int(text[0:4]), int(text[5:7]), int(text[8:10])
+        from zoneinfo import ZoneInfo
+
+        et = ZoneInfo("America/New_York")
+        start = datetime(y, m, d, 0, 0, 0, tzinfo=et)
+        end = start + timedelta(days=1)
+    except Exception:
+        return None
+    lo = _utc_iso(start)
+    hi = _utc_iso(end)
+    if not lo or not hi:
+        return None
+    return lo, hi
 
 
 # ib_insync can hand over TWS UTC digits as local time. The fill then sits one
@@ -391,6 +414,7 @@ def _sql_fill_dict(row: sqlite3.Row) -> dict:
         "bid": _get("bid"),
         "ask": _get("ask"),
         "fill_label": _get("fill_label"),
+        "quote_reason": _get("quote_reason"),
     }
 
 
@@ -936,8 +960,9 @@ class TradeJournal:
                                 ts, exec_id, order_id, symbol, sec_type, side,
                                 quantity, price, commission, realized_pnl,
                                 ibkr_last, bid, ask, sent_price,
-                                signed_slippage, spread_paid, fill_label
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                signed_slippage, spread_paid, fill_label,
+                                quote_reason
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 fill_ts,
@@ -957,6 +982,7 @@ class TradeJournal:
                                 fill_marks.get("signed_slippage"),
                                 fill_marks.get("spread_paid"),
                                 fill_marks.get("fill_label"),
+                                fill_marks.get("quote_reason"),
                             ),
                         )
                         inserted += int(cur.rowcount or 0)
@@ -985,12 +1011,21 @@ class TradeJournal:
             return 0
 
     def _fill_mark_values(self, mark: Optional[dict], fill: dict) -> dict:
-        """This send's NBBO vs this fill. Parent-bracket quotes stay off closers."""
+        """Fill-time IBKR bid/ask, else this send's NBBO. Never invent a mid.
+
+        Parent-bracket quotes stay off closers. A last-only or mid-only
+        print is not bid/ask — those stay null with ``quote_reason``.
+        """
         from abcxauto.send_marks import (
+            QUOTE_REASON_IBKR_LIVE,
+            QUOTE_REASON_INCOMPLETE,
+            QUOTE_REASON_NO_QUOTE,
+            QUOTE_REASON_SEND_NBBO,
             apply_fill_to_marks,
             compute_marks,
             finite_px,
             public_marks,
+            quote_reason_of,
         )
 
         empty = {
@@ -1005,30 +1040,50 @@ class TradeJournal:
                 "fill_label",
             )
         }
+        empty["quote_reason"] = fill.get("quote_reason") or QUOTE_REASON_NO_QUOTE
+        fill_bid = finite_px(fill.get("bid"))
+        fill_ask = finite_px(fill.get("ask"))
+        if fill_bid is not None and fill_ask is not None:
+            pub = public_marks(
+                compute_marks(
+                    {
+                        "last": fill.get("ibkr_last") or fill.get("last"),
+                        "bid": fill_bid,
+                        "ask": fill_ask,
+                    },
+                    sent_price=fill.get("sent_price"),
+                    fill_price=fill.get("price"),
+                    side=fill.get("side"),
+                    status="filled" if fill.get("price") is not None else "",
+                )
+            )
+            pub["quote_reason"] = (
+                fill.get("quote_reason") or QUOTE_REASON_IBKR_LIVE
+            )
+            return pub
         if isinstance(mark, dict):
             filled = apply_fill_to_marks(
                 mark,
                 fill_price=fill.get("price"),
                 side=fill.get("side") or mark.get("side"),
             )
-            return public_marks(filled)
-        quote = {
-            "last": fill.get("ibkr_last") or fill.get("last"),
-            "bid": fill.get("bid"),
-            "ask": fill.get("ask"),
-            "mid": fill.get("mid"),
-        }
-        if not any(finite_px(quote[k]) for k in ("last", "bid", "ask", "mid")):
+            pub = public_marks(filled)
+            if finite_px(pub.get("bid")) is not None and finite_px(pub.get("ask")) is not None:
+                pub["quote_reason"] = QUOTE_REASON_SEND_NBBO
+                return pub
+        if fill_bid is not None or fill_ask is not None:
+            empty["bid"] = fill_bid
+            empty["ask"] = fill_ask
+            empty["ibkr_last"] = finite_px(fill.get("ibkr_last") or fill.get("last"))
+            empty["quote_reason"] = fill.get("quote_reason") or QUOTE_REASON_INCOMPLETE
             return empty
-        return public_marks(
-            compute_marks(
-                quote,
-                sent_price=fill.get("sent_price"),
-                fill_price=fill.get("price"),
-                side=fill.get("side"),
-                status="filled" if fill.get("price") is not None else "",
-            )
+        given = str(fill.get("quote_reason") or "").strip()
+        empty["quote_reason"] = given or quote_reason_of(
+            bid=fill.get("bid"), ask=fill.get("ask")
         )
+        if empty["quote_reason"] == QUOTE_REASON_IBKR_LIVE:
+            empty["quote_reason"] = QUOTE_REASON_NO_QUOTE
+        return empty
 
     def _apply_fill_to_send_mark_locked(
         self,
@@ -1186,6 +1241,12 @@ class TradeJournal:
         taken = bag.get("taken_at")
         ts = taken if isinstance(taken, str) and taken.strip() else None
         self.record_snapshot(account, positions, open_orders, ts=ts)
+        nl = _account_float(account, "netliquidation", "NetLiquidation")
+        if nl is not None:
+            try:
+                self.ensure_session_start_nl(nl, ts=ts)
+            except Exception:
+                logger.exception("journal.ingest_look session-start NL failed")
         inserted = self.record_fills(fills)
         resolved = 0
         try:
@@ -1929,7 +1990,7 @@ class TradeJournal:
                     """
                     SELECT ts, exec_id, order_id, symbol, sec_type, side,
                            quantity, price, commission, realized_pnl,
-                           ibkr_last, bid, ask, fill_label
+                           ibkr_last, bid, ask, fill_label, quote_reason
                     FROM fills
                     WHERE realized_pnl IS NOT NULL AND ABS(realized_pnl) > 1e-9
                     ORDER BY ts ASC, id ASC
@@ -1963,7 +2024,7 @@ class TradeJournal:
                     """
                     SELECT ts, exec_id, order_id, symbol, sec_type, side,
                            quantity, price, commission, realized_pnl,
-                           ibkr_last, bid, ask, fill_label
+                           ibkr_last, bid, ask, fill_label, quote_reason
                     FROM fills
                     ORDER BY ts ASC, id ASC
                     LIMIT ?
@@ -2112,6 +2173,11 @@ class TradeJournal:
             except (TypeError, ValueError):
                 nl = None
         same = bool(last and str(last.get("model") or "") == name)
+        if nl is not None:
+            try:
+                self.ensure_session_start_nl(nl, ts=ts)
+            except Exception:
+                logger.exception("journal.ensure_model_session session-start NL failed")
         if same and last is not None and last.get("net_liquidation") is not None:
             self._pending_session = None
             return last
@@ -2158,6 +2224,75 @@ class TradeJournal:
         except Exception:
             logger.exception("journal.ensure_model_session failed")
             return last
+
+    def first_nl_on_et_day(
+        self, session_date: str
+    ) -> tuple[Optional[float], Optional[str]]:
+        """First usable NetLiq snapshot on an ET calendar day. (None, None) if none."""
+        bounds = _et_day_utc_range(session_date)
+        if bounds is None:
+            return None, None
+        lo, hi = bounds
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT ts, net_liquidation FROM snapshots
+                    WHERE net_liquidation IS NOT NULL
+                      AND net_liquidation > 0
+                      AND ts >= ? AND ts < ?
+                    ORDER BY id ASC LIMIT 1
+                    """,
+                    (lo, hi),
+                ).fetchone()
+            if not row or row["net_liquidation"] is None:
+                return None, None
+            return float(row["net_liquidation"]), str(row["ts"] or "") or None
+        except Exception:
+            logger.exception("journal.first_nl_on_et_day failed")
+            return None, None
+
+    def ensure_session_start_nl(
+        self,
+        net_liquidation: Any,
+        *,
+        ts: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Write today's first usable NL into snapshots if the day has none.
+
+        Scorecard session start is ``nav_at_or_after`` the RTH bell (or a
+        same-day snap before the bell). One snapshot is the day baseline;
+        later ``record_snapshot`` calls still write the path.
+        """
+        if not self.enabled:
+            return None
+        try:
+            nl = float(net_liquidation)
+        except (TypeError, ValueError):
+            return None
+        if nl != nl or nl <= 0:
+            return None
+        stamp = _row_ts(ts)
+        day = _et_calendar_date(stamp)
+        if not day:
+            return None
+        existing_nl, existing_ts = self.first_nl_on_et_day(day)
+        if existing_nl is not None:
+            return {
+                "ts": existing_ts,
+                "net_liquidation": existing_nl,
+                "session_date": day,
+            }
+        self.record_snapshot(
+            account={"NetLiquidation": nl},
+            ts=stamp,
+        )
+        return {
+            "ts": stamp,
+            "net_liquidation": nl,
+            "session_date": day,
+        }
 
     def closed_fill_stats_since(self, since_iso: str) -> dict:
         """Closed-fill stats for tickets this desk dispatched.

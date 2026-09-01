@@ -489,7 +489,18 @@ class IBKRQueriesMixin:
                         row["local_symbol"] = local
                         row["localSymbol"] = local
                 out.append(row)
-            return out
+            try:
+                from abcxauto.send_marks import attach_fill_quotes
+
+                return await attach_fill_quotes(out, self)
+            except Exception:
+                logger.debug("fill quote attach failed", exc_info=True)
+                from abcxauto.send_marks import QUOTE_REASON_NO_QUOTE
+
+                for row in out:
+                    if isinstance(row, dict) and not row.get("quote_reason"):
+                        row["quote_reason"] = QUOTE_REASON_NO_QUOTE
+                return out
         except Exception as e:
             logger.error(f"Failed to get fills: {e}")
             return []

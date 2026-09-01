@@ -579,6 +579,47 @@ class ProEngine:
         self.state.ibkr_account_name = aname or ("IBKR" if aid else "")
         self.ui.put(("ibkr_account", {"id": aid, "name": self.state.ibkr_account_name}))
 
+    async def _stamp_session_start_nl(self) -> None:
+        """First usable account NL of the ET day → journal snapshots.
+
+        Scorecard session ``book_return_pct`` reads snapshots via
+        ``nav_at_or_after``, not session_markers. Paper 7497 account only.
+        """
+        conn = self.conn
+        fn = getattr(conn, "get_account_summary", None) if conn is not None else None
+        if not callable(fn):
+            return
+        account = await fn()
+        if not isinstance(account, dict):
+            return
+        nl = None
+        for key in ("netliquidation", "NetLiquidation", "net_liquidation"):
+            raw = account.get(key)
+            if raw is None:
+                continue
+            try:
+                nl = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if nl == nl and nl > 0:
+                break
+            nl = None
+        if nl is None:
+            return
+        from abcxauto.memory import get_journal
+
+        journal = get_journal()
+        journal.ensure_session_start_nl(nl)
+        try:
+            from abcxauto.config import get_config
+
+            journal.ensure_model_session(
+                str(getattr(get_config(), "model", "") or ""),
+                net_liquidation=nl,
+            )
+        except Exception:
+            logger.debug("session marker after start NL failed", exc_info=True)
+
     def drain_apply(self) -> ViewState:
         while not self.ui.empty():
             kind, data = self.ui.get_nowait()
@@ -1125,6 +1166,10 @@ class ProEngine:
             self.ui.put(("conn", True))
             self.state.connected = True
             self._publish_ibkr_account()
+            try:
+                await self._stamp_session_start_nl()
+            except Exception:
+                logger.debug("session-start NL stamp failed", exc_info=True)
             if not self.state.autonomous:
                 self.state.running = False
                 self.state.status = "Connected"
