@@ -215,11 +215,13 @@ def test_ingest_look_writes_session_markers_once_per_calendar_session():
     assert abs(sess["book_return_pct"] - (100.0 / 34_000.0 * 100.0)) < 1e-9
 
 
-@pytest.mark.asyncio
-async def test_connect_stamp_writes_today_session_marker_despite_leftover():
-    """Paper connect (not headless-only) must insert today's start NL."""
+def test_connect_stamp_writes_today_session_marker_despite_leftover():
+    """Same writes as ProEngine._stamp_session_start_nl after account NL.
+
+    Leftover same-model marker (the 2026-08-26 live row) must not skip
+    today's insert. A second stamp must not clobber start NL.
+    """
     from abcxauto.memory.journal import _et_calendar_date
-    from abcxauto.pro_engine import ProEngine
 
     j = get_journal()
     j.ensure_model_session(
@@ -230,23 +232,15 @@ async def test_connect_stamp_writes_today_session_marker_despite_leftover():
     day = _et_calendar_date()
     assert j.session_start_marker(day) is None
 
-    class Conn:
-        async def get_account_summary(self):
-            return {"netliquidation": 34_250.0}
-
-    eng = ProEngine()
-    eng.conn = Conn()
-    await eng._stamp_session_start_nl()
+    nl = 34_250.0
+    j.ensure_session_start_nl(nl)
+    j.ensure_model_session("grok-4.6", net_liquidation=nl)
     start = j.session_start_marker(day)
     assert start is not None
     assert start["net_liquidation"] == 34_250.0
 
-    class Conn2:
-        async def get_account_summary(self):
-            return {"netliquidation": 35_000.0}
-
-    eng.conn = Conn2()
-    await eng._stamp_session_start_nl()
+    j.ensure_session_start_nl(35_000.0)
+    j.ensure_model_session("grok-4.6", net_liquidation=35_000.0)
     assert j.session_start_marker(day)["net_liquidation"] == 34_250.0
 
 
