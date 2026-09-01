@@ -33,6 +33,12 @@ FILL_LABEL_AT_BID = "at_bid"
 FILL_LABEL_AT_ASK = "at_ask"
 FILL_LABEL_OUTSIDE = "outside_spread"
 
+# Honest fill quote: real IBKR bid/ask, or null + reason. Never invent a mid.
+QUOTE_REASON_IBKR_LIVE = "ibkr_live"
+QUOTE_REASON_SEND_NBBO = "send_nbbo"
+QUOTE_REASON_NO_QUOTE = "no_ibkr_quote"
+QUOTE_REASON_INCOMPLETE = "incomplete_nbbo"
+
 STATUS_WORKING = "working"
 STATUS_FILLED = "filled"
 STATUS_MISSED = "missed"
@@ -380,6 +386,127 @@ def mark_missed(marks: Mapping[str, Any]) -> dict[str, Any]:
     out["spread_paid"] = None
     out["fill_label"] = FILL_LABEL_MISSED
     out["status"] = STATUS_MISSED
+    return out
+
+
+def quote_reason_of(
+    *,
+    bid: Any = None,
+    ask: Any = None,
+    source: str = "",
+) -> str:
+    """Why bid/ask are present or null. Incomplete sides stay incomplete."""
+    b = finite_px(bid)
+    a = finite_px(ask)
+    if b is not None and a is not None:
+        return source or QUOTE_REASON_IBKR_LIVE
+    if b is not None or a is not None:
+        return QUOTE_REASON_INCOMPLETE
+    return QUOTE_REASON_NO_QUOTE
+
+
+def stamp_ibkr_quote(fill: Mapping[str, Any], quote: Any = None) -> dict[str, Any]:
+    """Copy IBKR bid/ask onto a fill. Never invent a mid as bid/ask."""
+    out = dict(fill) if isinstance(fill, Mapping) else {}
+    have_b = finite_px(out.get("bid"))
+    have_a = finite_px(out.get("ask"))
+    if have_b is not None and have_a is not None:
+        out["quote_reason"] = out.get("quote_reason") or QUOTE_REASON_IBKR_LIVE
+        return out
+    blob = quote if isinstance(quote, Mapping) else {}
+    err = str(blob.get("error") or "").strip() if blob else ""
+    bid = finite_px(blob.get("bid"))
+    ask = finite_px(blob.get("ask"))
+    last = finite_px(blob.get("last"))
+    if bid is not None:
+        out["bid"] = bid
+    if ask is not None:
+        out["ask"] = ask
+    if last is not None:
+        out["ibkr_last"] = last
+        out["last"] = last
+    # Mid on the quote is not a bid or an ask.
+    out["quote_reason"] = quote_reason_of(
+        bid=out.get("bid"),
+        ask=out.get("ask"),
+        source=QUOTE_REASON_IBKR_LIVE,
+    )
+    if out["quote_reason"] == QUOTE_REASON_NO_QUOTE and err:
+        out["quote_reason"] = err
+    return out
+
+
+def _fill_quote_key(fill: Mapping[str, Any]) -> tuple:
+    sec = str(fill.get("sec_type") or fill.get("secType") or "STK").upper()
+    if sec in ("OPT", "FOP"):
+        return (
+            "OPT",
+            str(fill.get("symbol") or "").upper(),
+            str(fill.get("expiration") or ""),
+            fill.get("strike"),
+            str(fill.get("right") or "").upper()[:1],
+        )
+    return ("STK", str(fill.get("symbol") or "").upper())
+
+
+async def _fetch_fill_quote(connector: Any, fill: Mapping[str, Any]) -> dict[str, Any]:
+    """One IBKR live quote for this fill's contract. Empty/error → fail closed."""
+    if connector is None:
+        return {"error": QUOTE_REASON_NO_QUOTE}
+    sec = str(fill.get("sec_type") or fill.get("secType") or "STK").upper()
+    symbol = str(fill.get("symbol") or "").strip().upper()
+    if not symbol:
+        return {"error": QUOTE_REASON_NO_QUOTE}
+    if sec in ("OPT", "FOP"):
+        opt = getattr(connector, "get_live_option_quote", None)
+        exp = fill.get("expiration")
+        strike = fill.get("strike")
+        right = fill.get("right")
+        if callable(opt) and exp not in (None, "") and strike not in (None, "") and right:
+            try:
+                raw = opt(symbol, exp, strike, right)
+                if inspect.isawaitable(raw):
+                    raw = await raw
+                if isinstance(raw, dict):
+                    return raw
+            except Exception:
+                logger.debug("fill quote option failed symbol=%s", symbol, exc_info=True)
+            return {"error": QUOTE_REASON_NO_QUOTE}
+    fn = getattr(connector, "get_live_quote", None)
+    if not callable(fn):
+        return {"error": QUOTE_REASON_NO_QUOTE}
+    try:
+        try:
+            raw = fn(symbol, fresh=False)
+        except TypeError:
+            raw = fn(symbol)
+        if inspect.isawaitable(raw):
+            raw = await raw
+        if isinstance(raw, dict):
+            return raw
+    except Exception:
+        logger.debug("fill quote failed symbol=%s", symbol, exc_info=True)
+    return {"error": QUOTE_REASON_NO_QUOTE}
+
+
+async def attach_fill_quotes(fills: Any, connector: Any = None) -> list:
+    """Stamp IBKR bid/ask on each fill, or leave null with quote_reason.
+
+    Paper 7497 live ticks only. A mid-only print is not bid/ask.
+    """
+    rows = [f for f in (fills or []) if isinstance(f, Mapping)]
+    cache: dict[tuple, dict[str, Any]] = {}
+    out: list = []
+    for fill in rows:
+        if finite_px(fill.get("bid")) is not None and finite_px(fill.get("ask")) is not None:
+            stamped = dict(fill)
+            stamped["quote_reason"] = fill.get("quote_reason") or QUOTE_REASON_IBKR_LIVE
+            out.append(stamped)
+            continue
+        key = _fill_quote_key(fill)
+        if key not in cache:
+            cache[key] = await _fetch_fill_quote(connector, fill)
+        out.append(stamp_ibkr_quote(fill, cache[key]))
     return out
 
 
