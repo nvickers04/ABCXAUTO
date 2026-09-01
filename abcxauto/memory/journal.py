@@ -2150,6 +2150,49 @@ class TradeJournal:
             logger.exception("journal.last_session_marker failed")
             return None
 
+    def session_start_marker(self, session_date: str) -> Optional[dict]:
+        """First ``session_markers`` row with usable NL on an ET calendar day."""
+        return self._session_marker_on_et_day(session_date, require_nl=True)
+
+    def _session_marker_on_et_day(
+        self,
+        session_date: str,
+        *,
+        require_nl: bool,
+    ) -> Optional[dict]:
+        bounds = _et_day_utc_range(session_date)
+        if bounds is None:
+            return None
+        lo, hi = bounds
+        extra = ""
+        if require_nl:
+            extra = "AND net_liquidation IS NOT NULL AND net_liquidation > 0"
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    f"""
+                    SELECT id, ts, model, net_liquidation FROM session_markers
+                    WHERE ts >= ? AND ts < ?
+                      {extra}
+                    ORDER BY id ASC LIMIT 1
+                    """,
+                    (lo, hi),
+                ).fetchone()
+            if not row:
+                return None
+            nl = row["net_liquidation"]
+            return {
+                "id": int(row["id"]),
+                "ts": str(row["ts"] or ""),
+                "model": str(row["model"] or ""),
+                "net_liquidation": float(nl) if nl is not None else None,
+                "session_date": session_date,
+            }
+        except Exception:
+            logger.exception("journal.session_marker_on_et_day failed")
+            return None
+
     def ensure_model_session(
         self,
         model: str,
@@ -2161,23 +2204,28 @@ class TradeJournal:
 
         A boot call with no book print must not persist ``net_liquidation=None``.
         Wait for a snapshot NL, or skip the stamp.
+
+        Calendar-session start NL is ``ensure_session_start_nl`` — same model
+        plus a leftover marker from another ET day must still write today's
+        ``session_markers`` row. Read ``last`` after that write so the
+        same-model early return cannot skip a new calendar session.
         """
         name = str(model or "").strip()
         if not name or not self.enabled:
             return self.last_session_marker()
-        last = self.last_session_marker()
         nl: Optional[float] = None
         if net_liquidation is not None:
             try:
                 nl = float(net_liquidation)
             except (TypeError, ValueError):
                 nl = None
-        same = bool(last and str(last.get("model") or "") == name)
         if nl is not None:
             try:
-                self.ensure_session_start_nl(nl, ts=ts)
+                self.ensure_session_start_nl(nl, ts=ts, model=name)
             except Exception:
                 logger.exception("journal.ensure_model_session session-start NL failed")
+        last = self.last_session_marker()
+        same = bool(last and str(last.get("model") or "") == name)
         if same and last is not None and last.get("net_liquidation") is not None:
             self._pending_session = None
             return last
@@ -2258,12 +2306,19 @@ class TradeJournal:
         net_liquidation: Any,
         *,
         ts: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> Optional[dict]:
-        """Write today's first usable NL into snapshots if the day has none.
+        """Insert today's first usable NL into ``session_markers``. One row per ET day.
 
-        Scorecard session start is ``nav_at_or_after`` the RTH bell (or a
-        same-day snap before the bell). One snapshot is the day baseline;
-        later ``record_snapshot`` calls still write the path.
+        #145 wrote a snapshot when the ET day had none, then returned if any
+        snap already existed. ``ingest_look`` always ``record_snapshot`` first,
+        so that branch never reached ``session_markers``. Same-model
+        ``ensure_model_session`` then returned the leftover marker (last live
+        row 2026-08-26) and skipped the insert. Today's start NL never landed.
+
+        Subsequent looks the same calendar session must not clobber the start
+        NL. A first-of-day snapshot is still seeded when the day has none so
+        nav windows keep a path.
         """
         if not self.enabled:
             return None
@@ -2277,22 +2332,99 @@ class TradeJournal:
         day = _et_calendar_date(stamp)
         if not day:
             return None
-        existing_nl, existing_ts = self.first_nl_on_et_day(day)
-        if existing_nl is not None:
-            return {
-                "ts": existing_ts,
-                "net_liquidation": existing_nl,
-                "session_date": day,
-            }
-        self.record_snapshot(
-            account={"NetLiquidation": nl},
-            ts=stamp,
-        )
-        return {
-            "ts": stamp,
-            "net_liquidation": nl,
-            "session_date": day,
-        }
+        existing = self.session_start_marker(day)
+        if existing is not None:
+            return existing
+        name = str(model or "").strip()
+        if not name:
+            try:
+                from abcxauto.config import get_config
+
+                name = str(getattr(get_config(), "model", "") or "").strip()
+            except Exception:
+                name = ""
+        bounds = _et_day_utc_range(day)
+        if bounds is None:
+            return None
+        lo, hi = bounds
+        seeded: Optional[dict] = None
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT id, ts, model, net_liquidation FROM session_markers
+                    WHERE ts >= ? AND ts < ?
+                      AND net_liquidation IS NOT NULL
+                      AND net_liquidation > 0
+                    ORDER BY id ASC LIMIT 1
+                    """,
+                    (lo, hi),
+                ).fetchone()
+                if row is not None:
+                    got = row["net_liquidation"]
+                    return {
+                        "id": int(row["id"]),
+                        "ts": str(row["ts"] or ""),
+                        "model": str(row["model"] or ""),
+                        "net_liquidation": float(got) if got is not None else None,
+                        "session_date": day,
+                    }
+                hollow = conn.execute(
+                    """
+                    SELECT id, ts, model FROM session_markers
+                    WHERE ts >= ? AND ts < ?
+                      AND (net_liquidation IS NULL OR net_liquidation <= 0)
+                    ORDER BY id ASC LIMIT 1
+                    """,
+                    (lo, hi),
+                ).fetchone()
+                if hollow is not None:
+                    conn.execute(
+                        """
+                        UPDATE session_markers
+                        SET net_liquidation = ?
+                        WHERE id = ?
+                          AND (net_liquidation IS NULL OR net_liquidation <= 0)
+                        """,
+                        (nl, int(hollow["id"])),
+                    )
+                    conn.commit()
+                    seeded = {
+                        "id": int(hollow["id"]),
+                        "ts": str(hollow["ts"] or ""),
+                        "model": str(hollow["model"] or name),
+                        "net_liquidation": nl,
+                        "session_date": day,
+                    }
+                else:
+                    conn.execute(
+                        """
+                        INSERT INTO session_markers (ts, model, net_liquidation)
+                        VALUES (?, ?, ?)
+                        """,
+                        (stamp, name, nl),
+                    )
+                    conn.commit()
+                    seeded = {
+                        "ts": stamp,
+                        "model": name,
+                        "net_liquidation": nl,
+                        "session_date": day,
+                    }
+        except Exception:
+            logger.exception("journal.ensure_session_start_nl session_markers failed")
+            return None
+        try:
+            existing_nl, _existing_ts = self.first_nl_on_et_day(day)
+            if existing_nl is None:
+                self.record_snapshot(
+                    account={"NetLiquidation": nl},
+                    ts=stamp,
+                )
+        except Exception:
+            logger.exception("journal.ensure_session_start_nl snapshot seed failed")
+        return seeded
 
     def closed_fill_stats_since(self, since_iso: str) -> dict:
         """Closed-fill stats for tickets this desk dispatched.

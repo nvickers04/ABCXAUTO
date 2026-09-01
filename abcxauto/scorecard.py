@@ -569,10 +569,25 @@ def compute_scorecard(
         start_nl = None
         start_obs = None
         try:
-            if hasattr(journal, "nav_at_or_after"):
-                start_nl, start_obs = journal.nav_at_or_after(start_ts)
+            fn = getattr(journal, "session_start_marker", None)
+            if callable(fn):
+                marker = fn(session_date)
+                if isinstance(marker, dict) and marker.get("net_liquidation") is not None:
+                    try:
+                        cand = float(marker["net_liquidation"])
+                    except (TypeError, ValueError):
+                        cand = None
+                    if cand is not None and cand > 0:
+                        start_nl = cand
+                        start_obs = str(marker.get("ts") or "") or None
         except Exception:
             start_nl, start_obs = None, None
+        if start_nl is None:
+            try:
+                if hasattr(journal, "nav_at_or_after"):
+                    start_nl, start_obs = journal.nav_at_or_after(start_ts)
+            except Exception:
+                start_nl, start_obs = None, None
         if start_nl is None:
             try:
                 if hasattr(journal, "nav_at_or_before"):

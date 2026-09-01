@@ -125,14 +125,123 @@ def test_ensure_session_start_nl_writes_once_per_et_day():
     assert first["session_date"] == "2026-08-31"
     again = j.ensure_session_start_nl(36_000.0, ts="2026-08-31T18:00:00.000Z")
     assert again["net_liquidation"] == 35_000.0
+    marker = j.session_start_marker("2026-08-31")
+    assert marker is not None
+    assert marker["net_liquidation"] == 35_000.0
     nl, ts = j.first_nl_on_et_day("2026-08-31")
     assert nl == 35_000.0
     assert str(ts).startswith("2026-08-31")
     with sqlite3.connect(j.path) as conn:
-        n = conn.execute(
+        snaps = conn.execute(
             "SELECT COUNT(*) FROM snapshots WHERE net_liquidation IS NOT NULL"
         ).fetchone()[0]
-    assert n == 1
+        marks = conn.execute("SELECT COUNT(*) FROM session_markers").fetchone()[0]
+        start_nl = conn.execute(
+            "SELECT net_liquidation FROM session_markers ORDER BY id ASC LIMIT 1"
+        ).fetchone()[0]
+    assert snaps == 1
+    assert marks == 1
+    assert start_nl == 35_000.0
+
+
+def test_ingest_look_writes_session_markers_once_per_calendar_session():
+    """Production miss: leftover same-model marker + today's snaps, no today row.
+
+    ``ensure_model_session`` returned the 2026-08-26 row because the model
+    did not change. ``ensure_session_start_nl`` saw the snap ``ingest_look``
+    just wrote and skipped ``session_markers``. First look must insert
+    today's start NL; the second look must not clobber it.
+    """
+    j = get_journal()
+    leftover = j.ensure_model_session(
+        "grok-4.6",
+        net_liquidation=35_175.48,
+        ts="2026-08-26T13:45:39.000Z",
+    )
+    assert leftover is not None
+    assert leftover["net_liquidation"] == 35_175.48
+    assert j.session_start_marker("2026-09-01") is None
+
+    j.record_snapshot(
+        account={"NetLiquidation": 34_000.0, "DailyPnL": 0.0},
+        ts="2026-09-01T14:00:00.000Z",
+    )
+    # Snapshot alone is the current bug: today's path exists, start row does not.
+    assert j.session_start_marker("2026-09-01") is None
+
+    first = j.ingest_look(
+        {
+            "account": {"netliquidation": 34_000.0, "dailypnl": 0.0},
+            "positions": [],
+            "open_orders": [],
+            "fills": [],
+            "taken_at": "2026-09-01T14:05:00.000Z",
+        }
+    )
+    assert first["fills_inserted"] == 0
+    start = j.session_start_marker("2026-09-01")
+    assert start is not None
+    assert start["net_liquidation"] == 34_000.0
+    assert str(start["ts"]).startswith("2026-09-01")
+
+    j.ingest_look(
+        {
+            "account": {"netliquidation": 34_100.0, "dailypnl": 100.0},
+            "positions": [],
+            "open_orders": [],
+            "fills": [],
+            "taken_at": "2026-09-01T18:00:00.000Z",
+        }
+    )
+    again = j.session_start_marker("2026-09-01")
+    assert again["net_liquidation"] == 34_000.0
+    with sqlite3.connect(j.path) as conn:
+        nls = [
+            r[0]
+            for r in conn.execute(
+                "SELECT net_liquidation FROM session_markers ORDER BY id"
+            ).fetchall()
+        ]
+    assert nls[0] == 35_175.48
+    assert nls[-1] == 34_000.0
+    assert 34_100.0 not in nls
+
+    now = datetime(2026, 9, 1, 20, 0, tzinfo=timezone.utc)
+    sc = compute_scorecard(equity=34_100.0, journal=j, now=now)
+    sess = sc["session"]
+    assert sess["session_date"] == "2026-09-01"
+    assert sess["startup_nl"] == 34_000.0
+    assert sess["end_nl"] == 34_100.0
+    assert abs(sess["book_return_pct"] - (100.0 / 34_000.0 * 100.0)) < 1e-9
+
+
+def test_connect_stamp_writes_today_session_marker_despite_leftover():
+    """Same writes as ProEngine._stamp_session_start_nl after account NL.
+
+    Leftover same-model marker (the 2026-08-26 live row) must not skip
+    today's insert. A second stamp must not clobber start NL.
+    """
+    from abcxauto.memory.journal import _et_calendar_date
+
+    j = get_journal()
+    j.ensure_model_session(
+        "grok-4.6",
+        net_liquidation=35_175.48,
+        ts="2026-08-26T13:45:39.000Z",
+    )
+    day = _et_calendar_date()
+    assert j.session_start_marker(day) is None
+
+    nl = 34_250.0
+    j.ensure_session_start_nl(nl)
+    j.ensure_model_session("grok-4.6", net_liquidation=nl)
+    start = j.session_start_marker(day)
+    assert start is not None
+    assert start["net_liquidation"] == 34_250.0
+
+    j.ensure_session_start_nl(35_000.0)
+    j.ensure_model_session("grok-4.6", net_liquidation=35_000.0)
+    assert j.session_start_marker(day)["net_liquidation"] == 34_250.0
 
 
 def test_book_return_pct_null_when_start_nl_missing():
