@@ -181,10 +181,10 @@ def test_book_return_pct_computable_when_start_nl_and_fills_present():
     assert sess["startup_nl"] == 35_000.0
     assert sess["end_nl"] == 35_100.0
     assert abs(sess["book_return_pct"] - (100.0 / 35_000.0 * 100.0)) < 1e-9
-    listed = j.listed_fills()
-    assert listed[0]["bid"] == 52.55
-    assert listed[0]["ask"] == 52.65
-    assert listed[0]["commission"] == 1.0
+    listed = {row["exec_id"]: row for row in j.listed_fills()}
+    assert listed["e1"]["bid"] == 52.55
+    assert listed["e1"]["ask"] == 52.65
+    assert listed["e1"]["commission"] == 1.0
 
 
 @pytest.mark.asyncio
