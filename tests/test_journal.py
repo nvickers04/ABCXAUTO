@@ -719,7 +719,11 @@ def test_ensure_fills_hollow_legacy_marker(journal, tmp_path):
         conn.commit()
     finally:
         conn.close()
-    filled = journal.ensure_model_session("grok-4.6", net_liquidation=35_000.0)
+    filled = journal.ensure_model_session(
+        "grok-4.6",
+        net_liquidation=35_000.0,
+        ts="2026-08-19T12:50:52.000Z",
+    )
     assert filled == {
         "ts": "2026-08-19T12:50:52.000Z",
         "model": "grok-4.6",
@@ -830,20 +834,37 @@ def test_session_markers_ensure_and_last(journal, tmp_path):
         "model": "grok-4.6",
         "net_liquidation": 35_000.0,
     }
-    # Same model → no new marker
-    again = journal.ensure_model_session("grok-4.6", net_liquidation=36_000.0)
-    assert again == first
-    assert journal.last_session_marker() == first
-
-    # Model change stamps a new session
-    switched = journal.ensure_model_session(
-        "grok-4",
-        net_liquidation=35_100.0,
+    # Same model, same ET day → no new marker and start NL is not clobbered
+    again = journal.ensure_model_session(
+        "grok-4.6",
+        net_liquidation=36_000.0,
         ts="2026-08-19T18:00:00.000Z",
     )
+    assert again == first
+    assert journal.last_session_marker() == first
+    assert journal.session_start_marker("2026-08-19")["net_liquidation"] == 35_000.0
+
+    # Same model, new ET day → calendar start row (the #145 live miss)
+    next_day = journal.ensure_model_session(
+        "grok-4.6",
+        net_liquidation=35_100.0,
+        ts="2026-08-20T13:35:00.000Z",
+    )
+    assert next_day["net_liquidation"] == 35_100.0
+    assert str(next_day.get("ts") or "").startswith("2026-08-20")
+    assert journal.session_start_marker("2026-08-20")["net_liquidation"] == 35_100.0
+    assert journal.session_start_marker("2026-08-19")["net_liquidation"] == 35_000.0
+
+    # Model change stamps a new session; calendar start NL stays the first row
+    switched = journal.ensure_model_session(
+        "grok-4",
+        net_liquidation=35_200.0,
+        ts="2026-08-20T18:00:00.000Z",
+    )
     assert switched["model"] == "grok-4"
-    assert switched["net_liquidation"] == 35_100.0
+    assert switched["net_liquidation"] == 35_200.0
     assert journal.last_session_marker() == switched
+    assert journal.session_start_marker("2026-08-20")["net_liquidation"] == 35_100.0
 
     conn = sqlite3.connect(str(tmp_path / "journal.db"))
     try:
@@ -856,8 +877,8 @@ def test_session_markers_ensure_and_last(journal, tmp_path):
         ]
     finally:
         conn.close()
-    assert n == 2
-    assert models == ["grok-4.6", "grok-4"]
+    assert n == 3
+    assert models == ["grok-4.6", "grok-4.6", "grok-4"]
 
 
 def test_dispatched_order_ids_and_closing_fills_split_manual_exits(journal):

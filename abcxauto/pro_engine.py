@@ -592,10 +592,10 @@ class ProEngine:
         self.ui.put(("ibkr_account", {"id": aid, "name": self.state.ibkr_account_name}))
 
     async def _stamp_session_start_nl(self) -> None:
-        """First usable account NL of the ET day → journal snapshots.
+        """First usable account NL of the ET day → journal session_markers.
 
-        Scorecard session ``book_return_pct`` reads snapshots via
-        ``nav_at_or_after``, not session_markers. Paper 7497 account only.
+        Scorecard session ``book_return_pct`` reads that row (snapshots via
+        ``nav_at_or_after`` only if the row is missing). Paper 7497 only.
         """
         conn = self.conn
         fn = getattr(conn, "get_account_summary", None) if conn is not None else None
