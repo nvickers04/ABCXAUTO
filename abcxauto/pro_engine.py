@@ -262,6 +262,8 @@ class ProEngine:
         self._last_session = ""
         self._fail_streak = 0
         self._session_capped = False
+        self._recover_same_chat = False
+        self._recover_streak = 0
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
         from abcxauto.think_stream import bind_engine
@@ -936,6 +938,7 @@ class ProEngine:
         if finished:
             failed = False
             stream_err = ""
+            self._recover_streak = 0
         if parked and not stay:
             self._fail_streak = 0
             self._cold_next = True
@@ -954,6 +957,59 @@ class ProEngine:
         if self._idle_on_session_cap(session):
             return 0.0
         return 0.0
+
+    @staticmethod
+    def _empty_grok_dead_s() -> float:
+        from abcxauto.brain import empty_grok_dead_s
+
+        return empty_grok_dead_s()
+
+    def _same_chat_recover_needed(self, out: dict | None, g: Any) -> bool:
+        """Empty GROK after tools, or UNAVAILABLE/IOCP, with a live chat.
+
+        Re-enter think on this chat. Not _cold_next. Not a sit clock.
+        """
+        if g is None or getattr(g, "chat", None) is None:
+            return False
+        payload = out if isinstance(out, dict) else {}
+        if payload.get("_ended") or payload.get("_parked"):
+            return False
+        try:
+            if int(payload.get("sends") or 0) > 0:
+                return False
+        except (TypeError, ValueError):
+            pass
+        from abcxauto.brain import (
+            EMPTY_GROK_RECOVER_TRIES,
+            _look_text_is_junk,
+            is_stream_abort_error,
+        )
+
+        streak = int(getattr(self, "_recover_streak", 0) or 0)
+        if streak >= EMPTY_GROK_RECOVER_TRIES:
+            return False
+        rationale = str(payload.get("rationale") or "")
+        spoken = not _look_text_is_junk(rationale)
+        if spoken:
+            return False
+        if is_stream_abort_error(payload.get("_stream_error") or ""):
+            return True
+        tools = list(payload.get("tool_trace") or [])
+        if tools and _look_text_is_junk(rationale):
+            return True
+        live = str(getattr(self.state, "think_live", "") or "")
+        if live:
+            from abcxauto.think_stream import empty_grok_after_tools
+
+            if empty_grok_after_tools(live):
+                return True
+        return False
+
+    def _arm_same_chat_recover(self) -> None:
+        self._recover_streak = int(getattr(self, "_recover_streak", 0) or 0) + 1
+        self._recover_same_chat = True
+        self._resume_think = True
+        self._cold_next = False
 
     async def _stay_up_lead_changed(self, g: Any) -> bool:
         """True when a collapsible lead fact moved since the last look."""
@@ -1040,6 +1096,8 @@ class ProEngine:
             day=day,
         )
         self.state.status = "Thinking"
+        recover = bool(getattr(self, "_recover_same_chat", False))
+        self._recover_same_chat = False
         turn = await grok_turn(
             g,
             **grok_turn_kwargs(
@@ -1048,7 +1106,8 @@ class ProEngine:
                 world=world,
                 snap=s,
                 wake=wake,
-                resume=resume,
+                resume=resume or recover,
+                recover=recover,
             ),
         )
         parked = bool(getattr(turn, "parked", False))
@@ -1105,6 +1164,7 @@ class ProEngine:
             "_failed": failed and not parked,
             "_ended": bool(getattr(turn, "ended", False)),
             "_stream_error": str(getattr(turn, "stream_error", "") or ""),
+            "_recover": recover,
         }
 
     async def _do_panic(self) -> None:
@@ -1421,11 +1481,19 @@ class ProEngine:
                 before_tok = billed_tokens_now()
                 try:
                     out = await self._host_think(n, g, s, resume=resume)
-                    if not out.get("_ended"):
+                    if not out.get("_recover"):
+                        self._recover_same_chat = False
+                    if not out.get("_ended") and not out.get("_recover"):
                         note_look(
                             session=session,
                             tokens=max(0, billed_tokens_now() - before_tok),
                         )
+                    if stay and self._same_chat_recover_needed(out, g):
+                        await asyncio.sleep(self._empty_grok_dead_s())
+                        if self._same_chat_recover_needed(out, g):
+                            self._arm_same_chat_recover()
+                            self._note("LOOK", "empty GROK — same chat")
+                            continue
                     if out.get("_ended"):
                         # Duplicate lead fact. A look may end.
                         self._rearm_after_think(out, session=session)

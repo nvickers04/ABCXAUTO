@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from abcxauto.config import get_config, resolve_effective_posture, risk_envelope_snapshot
@@ -1033,12 +1033,139 @@ def lot_ident(pos: dict[str, Any] | None) -> str:
     return f"{sym} {sec} {side} {qty_s}"
 
 
-def lot_labels(positions: list[dict] | None, *, limit: int = 16) -> list[str]:
-    """Short lot identities for wake / last_turn. Not a rank."""
-    labels: list[str] = []
-    for p in positions or []:
-        if not isinstance(p, dict):
+def lot_dte(pos: dict[str, Any] | None) -> int | None:
+    """Days to expiration. None for STK or an unparseable expiry."""
+    if not isinstance(pos, dict):
+        return None
+    sec = str(pos.get("secType") or pos.get("sec_type") or pos.get("sec") or "STK").upper()
+    if sec not in ("OPT", "FOP"):
+        return None
+    raw = _opt_exp_key(pos)
+    if len(raw) != 8 or not raw.isdigit():
+        return None
+    try:
+        exp = date(int(raw[:4]), int(raw[4:6]), int(raw[6:8]))
+    except ValueError:
+        return None
+    return (exp - date.today()).days
+
+
+def lot_structure_name(
+    pos: dict[str, Any] | None,
+    positions: list[dict] | None = None,
+) -> str:
+    """Book geometry for one lot: STK / vert / cal / combo / call / put."""
+    if not isinstance(pos, dict):
+        return ""
+    sec = str(pos.get("secType") or pos.get("sec_type") or pos.get("sec") or "STK").upper()
+    if sec == "STK":
+        return "STK"
+    if sec not in ("OPT", "FOP"):
+        return sec or "opt"
+    book = list(positions or [])
+    if vertical_partner(pos, book) is not None:
+        return "vert"
+    mate = combo_partner(pos, book)
+    if mate is not None:
+        if _opt_exp_key(mate) != _opt_exp_key(pos):
+            return "cal"
+        return "combo"
+    right = str(pos.get("right") or "")[:1].upper()
+    if right == "C":
+        return "call"
+    if right == "P":
+        return "put"
+    return "opt"
+
+
+def _iso_days_held(raw: Any) -> int | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()
+    if age < 0:
+        return 0
+    return int(age // 86400)
+
+
+def _plan_symbol(plan: Any) -> str:
+    if isinstance(plan, dict):
+        return str(plan.get("symbol") or "").upper()
+    return str(getattr(plan, "symbol", "") or "").upper()
+
+
+def _plan_opened_at(plan: Any) -> Any:
+    if isinstance(plan, dict):
+        return plan.get("opened_at")
+    return getattr(plan, "opened_at", None)
+
+
+def lot_days_held(
+    pos: dict[str, Any] | None,
+    *,
+    fills: list[dict] | None = None,
+    plans: list[Any] | None = None,
+) -> int | None:
+    """Days since open when a timestamp is known. Context only — not a flatten."""
+    if not isinstance(pos, dict):
+        return None
+    for key in ("opened_at", "open_time", "open_ts", "time"):
+        held = _iso_days_held(pos.get(key))
+        if held is not None:
+            return held
+    cid = _row_con_id(pos)
+    oldest: int | None = None
+    if cid:
+        for f in fills or []:
+            if not isinstance(f, dict):
+                continue
+            fid = str(f.get("conId") or f.get("con_id") or "")
+            if fid != cid:
+                continue
+            held = _iso_days_held(f.get("ts") or f.get("time") or f.get("opened_at"))
+            if held is None:
+                continue
+            oldest = held if oldest is None else max(oldest, held)
+    if oldest is not None:
+        return oldest
+    sym = str(pos.get("symbol") or "").upper()
+    if not sym:
+        return None
+    for plan in plans or []:
+        if _plan_symbol(plan) != sym:
             continue
+        held = _iso_days_held(_plan_opened_at(plan))
+        if held is not None:
+            return held
+    return None
+
+
+def _fmt_lot_num(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def lot_labels(
+    positions: list[dict] | None,
+    *,
+    limit: int = 32,
+    fills: list[dict] | None = None,
+    plans: list[Any] | None = None,
+) -> list[str]:
+    """Wake / last_turn lot facts: identity + structure / DTE / uPnL / days_held.
+
+    Age and marks are context. This does not flatten or rank.
+    """
+    book = [p for p in (positions or []) if isinstance(p, dict)]
+    labels: list[str] = []
+    for p in book:
         row = compact_position(p, extra=True)
         try:
             qty = float(row.get("qty") or 0)
@@ -1050,10 +1177,30 @@ def lot_labels(positions: list[dict] | None, *, limit: int = 16) -> list[str]:
         extra = _lot_mtm_suffix(row, qty)
         if extra:
             ident = f"{ident}{extra}"
-        labels.append(ident)
+        bits = [ident]
+        struct = lot_structure_name(p, book)
+        tokens = {t.upper() for t in ident.replace(",", " ").split()}
+        if struct and struct.upper() not in tokens:
+            bits.append(struct)
+        dte = lot_dte(p)
+        if dte is not None:
+            bits.append(f"DTE={dte}")
+        upnl = lot_upnl(p)
+        if upnl is not None:
+            bits.append(f"uPnL={_fmt_lot_num(upnl)}")
+        held = lot_days_held(p, fills=fills, plans=plans)
+        if held is not None:
+            bits.append(f"days_held={held}")
+        labels.append(" ".join(bits))
         if len(labels) >= limit:
             break
     return labels
+
+
+def worst_fact_open_lots(day: dict[str, Any] | None) -> list[str]:
+    """Every open lot the wake / worst-fact path must address. Context only."""
+    d = day if isinstance(day, dict) else {}
+    return [str(x).strip() for x in (d.get("open_lots") or []) if str(x).strip()]
 
 
 def account_float(account: dict[str, Any] | None, *keys: str) -> float | None:
@@ -1242,7 +1389,18 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "structures": conc["structures"],
         "by_name": conc["by_name"],
         "cloned": conc["cloned"],
-        "open_lots": lot_labels(getattr(world, "positions", None)),
+        "open_lots": lot_labels(
+            getattr(world, "positions", None),
+            fills=getattr(world, "fills", None),
+            plans=(
+                list(getattr(world, "trade_plans", None) or [])
+                or (
+                    [getattr(world, "trade_plan")]
+                    if getattr(world, "trade_plan", None)
+                    else []
+                )
+            ),
+        ),
         "mix": structure_mix(getattr(world, "positions", None)),
         "capacity": dict(getattr(world, "capacity", None) or {}),
         # Ceiling knob — not the working size. Wake prints max_risk=, not risk/trade=.
@@ -1830,8 +1988,8 @@ def format_wake(
     _ = cycle
     unprot = ",".join(unprotected) if unprotected else "none"
     day = day if isinstance(day, dict) else {}
-    lots = day.get("open_lots") or []
-    lot_s = ",".join(str(x) for x in lots[:12]) if lots else ""
+    lots = worst_fact_open_lots(day)
+    lot_s = ",".join(lots) if lots else ""
     mix_s = format_mix(day.get("mix") if isinstance(day.get("mix"), dict) else {})
     cap = day.get("capacity") if isinstance(day.get("capacity"), dict) else {}
     open_n = cap.get("open_count", cap.get("open"))
@@ -2156,7 +2314,14 @@ class WorldState:
             "structure_cooldown": dict(self.structure_cooldown),
             "taken_at": self.taken_at,
             "mix": structure_mix(self.positions),
-            "open_lots": lot_labels(self.positions),
+            "open_lots": lot_labels(
+                self.positions,
+                fills=self.fills,
+                plans=(
+                    list(self.trade_plans or [])
+                    or ([self.trade_plan] if self.trade_plan else [])
+                ),
+            ),
         }
 
 

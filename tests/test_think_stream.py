@@ -9,9 +9,39 @@ from abcxauto.think_stream import (
     ascii_text,
     bind_engine,
     emit,
+    empty_grok_after_tools,
+    empty_grok_segment,
     subscribe,
     unsubscribe,
 )
+
+
+def test_empty_grok_after_tools_is_the_hung_keepfile():
+    hung = (
+        "--- GROK ---\n"
+        "[book]\n"
+        "[quote]\n"
+        "--- GROK ---\n"
+    )
+    after_facts = (
+        "--- GROK ---\n"
+        "[option_facts]\n"
+        "--- GROK ---\n"
+    )
+    spoken = (
+        "--- GROK ---\n"
+        "[book]\n"
+        "--- GROK ---\n"
+        "[say]\n"
+        "holding IWM vert\n"
+    )
+    empty_no_tools = "--- GROK ---\n"
+    assert empty_grok_after_tools(hung) is True
+    assert empty_grok_after_tools(after_facts) is True
+    assert empty_grok_segment(hung) is True
+    assert empty_grok_after_tools(spoken) is False
+    assert empty_grok_after_tools(empty_no_tools) is False
+    assert empty_grok_after_tools("") is False
 
 
 def test_ascii_text_is_cp1252_safe():
@@ -137,7 +167,9 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     assert last["book_unreliable"] is True
     assert last["skip_reason"] == "book_unreliable"
     assert last["flat"] is True
-    assert last["open_lots"] == ["IWM 260821C306 long 1"]
+    assert last["open_lots"][0].startswith("IWM 260821C306 long 1")
+    assert "call" in last["open_lots"][0]
+    assert "DTE=" in last["open_lots"][0]
     ts.write_last_turn({
         "cycle": 4,
         "strat": "in_progress",
@@ -160,7 +192,9 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     assert live["strat"] == "in_progress"
     assert live["stale"] is False
     assert live["ibkr_connected"] is True
-    assert live["open_lots"] == ["QQQ 260821C735 long 1"]
+    assert live["open_lots"][0].startswith("QQQ 260821C735 long 1")
+    assert "call" in live["open_lots"][0]
+    assert "DTE=" in live["open_lots"][0]
     assert live["mix"].get("long_c") == 1
     assert live.get("previous_strat") == "skipped"
     brief = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
@@ -168,7 +202,7 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
 
     assert_no_cycle_keys(brief)
     assert brief["strat"] == "skipped"
-    assert brief["open_lots"] == ["IWM 260821C306 long 1"]
+    assert brief["open_lots"][0].startswith("IWM 260821C306 long 1")
 
 
 def test_think_session_keeps_looks_the_tail_window_drops(tmp_path, monkeypatch):

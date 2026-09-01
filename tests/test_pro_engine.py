@@ -1699,3 +1699,98 @@ def test_settings_change_rebuilds_brain_and_monitor(monkeypatch):
     eng._monitor_key = eng._monitor_fingerprint()
     eng._stop_monitor()
     assert eng._monitor_key == ()  # a stopped monitor cannot look current
+
+
+@pytest.mark.asyncio
+async def test_empty_grok_live_worker_reenters_think_without_cold(monkeypatch, tmp_path):
+    """Empty GROK after tools + live worker: same-chat recover. No _cold_next."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
+    resumes: list[bool] = []
+    traces: list[list[str]] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        resumes.append(resume)
+        if len(resumes) == 1:
+            traces.append(["book", "quote"])
+            return {
+                "cycle": n,
+                "pnl": 0,
+                "equity": 100000,
+                "_failed": True,
+                "rationale": "",
+                "tool_trace": ["book", "quote"],
+                "sends": 0,
+            }
+        traces.append(["book", "quote"])
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "holding IWM vert. No ticket.",
+            "tool_trace": ["book", "quote"],
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.3
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) == 2
+    assert resumes[0] is True
+    assert resumes[1] is True
+    assert traces[0] == ["book", "quote"]
+    assert eng._cold_next is False
+    assert eng._recover_same_chat is False
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is None
+
+
+def test_same_chat_recover_needed_is_empty_after_tools_not_spoken():
+    eng = ProEngine()
+    g = SimpleNamespace(chat=object())
+    assert (
+        eng._same_chat_recover_needed(
+            {"rationale": "", "tool_trace": ["book", "quote"], "sends": 0},
+            g,
+        )
+        is True
+    )
+    assert (
+        eng._same_chat_recover_needed(
+            {
+                "_stream_error": "StatusCode.UNAVAILABLE connection aborted",
+                "rationale": "",
+                "sends": 0,
+            },
+            g,
+        )
+        is True
+    )
+    assert (
+        eng._same_chat_recover_needed(
+            {"rationale": "holding IWM. Watching the book.", "sends": 0},
+            g,
+        )
+        is False
+    )
+    assert eng._same_chat_recover_needed(
+        {"rationale": "", "tool_trace": ["book"], "sends": 0},
+        SimpleNamespace(chat=None),
+    ) is False
+    eng._cold_next = True
+    eng._arm_same_chat_recover()
+    assert eng._cold_next is False
+    assert eng._resume_think is True
+    assert eng._recover_same_chat is True

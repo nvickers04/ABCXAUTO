@@ -4160,3 +4160,158 @@ async def test_closed_look_drops_chat_after_think():
     )
     assert g.chat is None
     assert len(created) == 1
+
+
+def test_stream_abort_error_detects_unavailable_iocp_not_capacity():
+    from abcxauto.brain import is_stream_abort_error
+
+    assert is_stream_abort_error("StatusCode.UNAVAILABLE") is True
+    assert is_stream_abort_error("connection aborted") is True
+    assert is_stream_abort_error("IOCP completion port failed") is True
+    assert is_stream_abort_error(
+        "An existing connection was forcibly closed by the remote host"
+    ) is True
+    assert is_stream_abort_error("connection reset by peer") is True
+    assert is_stream_abort_error("StatusCode.RESOURCE_EXHAUSTED") is False
+    assert is_stream_abort_error("connection reset") is False
+    assert is_stream_abort_error("") is False
+
+
+@pytest.mark.asyncio
+async def test_stream_abort_retries_same_chat(monkeypatch):
+    """UNAVAILABLE / IOCP mid-look retries stream_round on this chat."""
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "STREAM_ABORT_BACKOFF_S", 0.0)
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                raise RuntimeError("StatusCode.UNAVAILABLE connection aborted IOCP")
+                yield  # async generator
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="watching IWM. Holding the vert.",
+                reasoning_content="",
+            )
+
+    chat = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: chat)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=chat,
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert chat.n == 2
+    assert turn.failed is False
+    assert turn.look_failed() is False
+    assert "watching IWM" in (turn.text or "")
+    assert g.chat is chat
+    assert not turn.stream_error
+
+
+@pytest.mark.asyncio
+async def test_empty_grok_after_tools_reenters_think_same_chat(monkeypatch):
+    """Empty GROK after tools: short dead wait, then stream_round on this chat."""
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name, "last": 248.1})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="book", arguments="{}")
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+            elif self.n == 2:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="holding IWM vert. No ticket.",
+                    reasoning_content="",
+                )
+
+    chat = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: chat)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=chat,
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert "book" in turn.tool_trace
+    assert chat.n == 3
+    assert turn.failed is False
+    assert turn.look_failed() is False
+    assert "holding IWM" in (turn.text or "")
+    assert g.chat is chat
+
+
+@pytest.mark.asyncio
+async def test_recover_flag_reenters_same_chat_without_wake_reintro():
+    """recover=True streams on the open chat. Same wake is not a cold wipe."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    g, created = _stay_up_chat_client(
+        replies=["watching IWM", "still holding the vert"]
+    )
+    first = await grok_turn(
+        g, connector=None, world=_world(), snap={}, wake="session=regular send."
+    )
+    assert first.look_failed() is False
+    live = g.chat
+    assert live is created[0]
+    wake_n = int(getattr(g, "_wake_n", 0) or 0)
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake="session=regular send.",
+        resume=True,
+        recover=True,
+    )
+    assert second.ended is False
+    assert second.look_failed() is False
+    assert "still holding the vert" in (second.text or "")
+    assert g.chat is live
+    assert len(created) == 1
+    # Recover must not open a new chat or append a fresh desk wake.
+    assert int(getattr(g, "_wake_n", 0) or 0) == wake_n
+    assert getattr(g, "_wake_appended", True) is False
