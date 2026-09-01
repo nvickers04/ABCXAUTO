@@ -23,6 +23,7 @@ from threading import Lock
 
 from ib_insync import IB, Order, Trade, Fill
 
+from abcxauto.aio import bind_thread_loop
 from abcxauto.broker.connection import (
     DisconnectCause,
     TradingModePortError,
@@ -1339,6 +1340,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
         try:
             self._loop = asyncio.get_running_loop()
+            bind_thread_loop(self._loop)
         except RuntimeError:
             pass
 
