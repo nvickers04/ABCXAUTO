@@ -905,10 +905,17 @@ def test_estimate_notional_bracket(monkeypatch):
 
 
 def _market_bracket(
-    qty=10, stop=95.0, target=110.0, direction="LONG", price_hint=None, *, quote_last=None
+    qty=10,
+    stop=95.0,
+    target=110.0,
+    direction="LONG",
+    price_hint=None,
+    *,
+    quote_last=None,
+    symbol="NVDA",
 ):
     params = {
-        "symbol": "NVDA",
+        "symbol": symbol,
         "quantity": qty,
         "direction": direction,
         "stop_price": stop,
@@ -1258,6 +1265,297 @@ def test_defined_risk_only_rejects_ratio_and_short_straddle(monkeypatch):
     )
     ok_close, _ = check_defined_risk_only(close_short)
     assert ok_close is True
+
+
+def _siri_market_bracket():
+    """2026-09-02 miss: market_bracket STK SIRI qty 10 around 29.75."""
+    return validate_proposal(
+        "market_bracket",
+        {
+            "symbol": "SIRI",
+            "quantity": 10,
+            "direction": "LONG",
+            "stop_price": 28.50,
+            "target_price": 31.00,
+            "card": "siri-miss",
+        },
+        RATIONALE,
+        quote_last=29.75,
+    )
+
+
+def _on_book_stk(symbol="SIRI", qty=10):
+    return {"symbol": symbol, "quantity": qty, "sec_type": "STK", "secType": "STK"}
+
+
+def test_defined_risk_only_rejects_market_bracket_stk(monkeypatch):
+    """Production miss: defined_risk_only True still returned ok for STK entry."""
+    from abcxauto.llm import SYSTEM_PROMPT
+    from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+
+    cfg = _cfg(defined_risk_only=True, risk_gates_enabled=True)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    mb = _siri_market_bracket()
+    ok, why = check_defined_risk_only(mb)
+    assert ok is False
+    assert "defined_risk_only" in why
+    assert "STK" in why or "market_bracket" in why
+    assert cfg.defined_risk_only is True
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
+@pytest.mark.asyncio
+async def test_defined_risk_only_rejects_market_bracket_pre_trade(monkeypatch):
+    cfg = _cfg(defined_risk_only=True, risk_gates_enabled=True)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    gate = reset_risk_gate()
+    ok, why = await gate.pre_trade_check(_siri_market_bracket(), FakeConnector())
+    assert ok is False
+    assert "defined_risk_only" in why
+    assert cfg.defined_risk_only is True
+
+
+@pytest.mark.asyncio
+async def test_defined_risk_only_rejects_naked_bracket_stk(monkeypatch):
+    cfg = _cfg(defined_risk_only=True, risk_gates_enabled=True)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    ok, why = check_defined_risk_only(_bracket(symbol="SIRI"))
+    assert ok is False
+    assert "defined_risk_only" in why
+    gate = reset_risk_gate()
+    ok2, why2 = await gate.pre_trade_check(_bracket(symbol="INTC"), FakeConnector())
+    assert ok2 is False
+    assert "defined_risk_only" in why2
+
+
+@pytest.mark.asyncio
+async def test_defined_risk_only_rejects_stk_when_paper_gates_off(monkeypatch):
+    """Paper may turn risk_gates_enabled off; defined_risk_only still fires."""
+    from abcxauto.executor import execute_proposal
+
+    cfg = _cfg(defined_risk_only=True, risk_gates_enabled=False)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    class GW(FakeConnector):
+        async def place_market_bracket(self, **kwargs):
+            raise AssertionError("market_bracket STK must not place under defined_risk_only")
+
+    gate = reset_risk_gate()
+    ok, why = await gate.pre_trade_check(_siri_market_bracket(), GW())
+    assert ok is False
+    assert "defined_risk_only" in why
+
+    result = await execute_proposal(_siri_market_bracket(), GW())
+    assert result.get("status") == "rejected"
+    assert "defined_risk_only" in str(result.get("error") or "")
+    assert cfg.defined_risk_only is True
+
+
+def test_defined_risk_only_allows_last_stop_on_existing_stk(monkeypatch):
+    cfg = _cfg(defined_risk_only=True, risk_gates_enabled=True)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    oca = validate_proposal(
+        "oca",
+        {
+            "symbol": "SIRI",
+            "quantity": 10,
+            "direction": "LONG",
+            "stop_price": 28.50,
+            "target_price": 31.00,
+        },
+        RATIONALE,
+        quote_last=29.75,
+    )
+    ok, why = check_defined_risk_only(oca)
+    assert ok is True, why
+
+    stop = validate_proposal(
+        "stop_order",
+        {
+            "symbol": "CNH",
+            "action": "SELL",
+            "quantity": 5,
+            "stop_price": 10.0,
+            "closing_position": True,
+        },
+        RATIONALE,
+    )
+    ok_stop, why_stop = check_defined_risk_only(stop)
+    assert ok_stop is True, why_stop
+
+    trail = validate_proposal(
+        "trailing_stop",
+        {
+            "symbol": "SOFI",
+            "quantity": 10,
+            "direction": "LONG",
+            "trail_percent": 2.0,
+        },
+        RATIONALE,
+    )
+    ok_trail, why_trail = check_defined_risk_only(trail)
+    assert ok_trail is True, why_trail
+
+    cover = validate_proposal(
+        "protective_put",
+        {
+            "symbol": "INTC",
+            "expiration": "20260718",
+            "strike": 20.0,
+            "shares": 100,
+        },
+        RATIONALE,
+    )
+    ok_cover, why_cover = check_defined_risk_only(cover)
+    assert ok_cover is True, why_cover
+    assert cfg.defined_risk_only is True
+
+
+@pytest.mark.asyncio
+async def test_defined_risk_only_execute_last_stop_on_existing_stk(monkeypatch):
+    from abcxauto.executor import execute_proposal
+    from abcxauto.protect import last_stop_block_reason
+
+    cfg = _cfg(defined_risk_only=True, risk_gates_enabled=True)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    class GW(FakeConnector):
+        def __init__(self):
+            super().__init__(
+                positions=[
+                    _on_book_stk("CNH", 20),
+                    _on_book_stk("INTC", 15),
+                    _on_book_stk("NU", 40),
+                    _on_book_stk("SOFI", 25),
+                    _on_book_stk("SIRI", 10),
+                ]
+            )
+            self.placed = []
+
+        async def place_oca(self, **kwargs):
+            self.placed.append(kwargs)
+            return {"success": True, "order_id": 9001, "stop_id": 9001, "target_id": 9002}
+
+    oca = validate_proposal(
+        "oca",
+        {
+            "symbol": "SIRI",
+            "quantity": 10,
+            "direction": "LONG",
+            "stop_price": 28.50,
+            "target_price": 31.00,
+        },
+        RATIONALE,
+        quote_last=29.75,
+    )
+    result = await execute_proposal(oca, GW())
+    assert result.get("success") is True
+    assert result.get("order_id") == 9001
+    assert cfg.defined_risk_only is True
+
+    covering = [
+        {
+            "order_id": 9001,
+            "symbol": "SIRI",
+            "sec_type": "STK",
+            "action": "SELL",
+            "quantity": 10,
+            "order_type": "STP",
+        }
+    ]
+    block = last_stop_block_reason(9001, covering, [_on_book_stk("SIRI", 10)])
+    assert block is not None
+    assert "only working stop" in block
+
+
+def test_defined_risk_only_allows_named_vertical_calendar_butterfly_iron(monkeypatch):
+    cfg = _cfg(defined_risk_only=True, risk_gates_enabled=True)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    for name in (
+        "vertical_spread",
+        "calendar_spread",
+        "butterfly",
+        "iron_condor",
+        "iron_butterfly",
+    ):
+        prop = validate_proposal(name, VALID_PAYLOADS[name], RATIONALE)
+        ok, why = check_defined_risk_only(prop)
+        assert ok is True, f"{name}: {why}"
+    assert cfg.defined_risk_only is True
+
+
+def test_defined_risk_only_stays_true_after_reject(monkeypatch):
+    from abcxauto.self_tune import apply_self_tune
+
+    cfg = _cfg(defined_risk_only=True)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    ok, why = check_defined_risk_only(_siri_market_bracket())
+    assert ok is False
+    assert "defined_risk_only" in why
+    assert cfg.defined_risk_only is True
+    assert get_config().defined_risk_only is True
+
+    out = apply_self_tune({"defined_risk_only": False}, persist=False)
+    assert get_config().defined_risk_only is True
+    assert out["status"] == "blocked" or "defined_risk_only" in (out.get("rejected") or {})
+
+
+@pytest.mark.asyncio
+async def test_paper_must_not_place_on_7496_defined_risk_stays_on(monkeypatch):
+    from abcxauto.send import send_action
+
+    cfg = _cfg(
+        defined_risk_only=True,
+        trading_mode="paper",
+        ibkr_port=7496,
+    )
+    monkeypatch.setattr("abcxauto.send.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+
+    async def _must_not_execute(*_a, **_k):
+        raise AssertionError("safe_execute must not run on paper + 7496")
+
+    monkeypatch.setattr("abcxauto.send.safe_execute", _must_not_execute)
+
+    class Conn:
+        connected = True
+
+        def place_order(self, *a, **k):
+            raise AssertionError("7496 must not place")
+
+    result = await send_action(
+        {
+            "strategy": "market_bracket",
+            "params": {
+                "symbol": "SIRI",
+                "quantity": 10,
+                "direction": "LONG",
+                "stop_price": 28.50,
+                "target_price": 31.00,
+            },
+            "rationale": "must not reach live",
+        },
+        Conn(),
+    )
+    assert result["status"] == "blocked"
+    assert result.get("reason_code") == "live_port_paper"
+    assert "7496" in str(result.get("note") or "")
+    assert cfg.defined_risk_only is True
+    assert cfg.trading_mode == "paper"
+    assert cfg.ibkr_port == 7496
 
 
 def test_estimate_notional_csp_and_option_limit():
