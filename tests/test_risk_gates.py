@@ -1291,7 +1291,6 @@ def _on_book_stk(symbol="SIRI", qty=10):
 def test_defined_risk_only_rejects_market_bracket_stk(monkeypatch):
     """Production miss: defined_risk_only True still returned ok for STK entry."""
     from abcxauto.llm import SYSTEM_PROMPT
-    from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
 
     cfg = _cfg(defined_risk_only=True, risk_gates_enabled=True)
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
@@ -1303,7 +1302,12 @@ def test_defined_risk_only_rejects_market_bracket_stk(monkeypatch):
     assert "defined_risk_only" in why
     assert "STK" in why or "market_bracket" in why
     assert cfg.defined_risk_only is True
-    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+    assert SYSTEM_PROMPT == (
+        "You own an Interactive Brokers {mode} book. Strategy is yours.\n"
+        "Live only follows a promoted playbook. Risk is code.\n"
+        "send tickets that match ORDER EXAMPLES.\n"
+        "Size vs max_risk_per_trade_pct of NetLiq.\n"
+    )
 
 
 @pytest.mark.asyncio
