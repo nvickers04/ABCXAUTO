@@ -756,6 +756,13 @@ def test_settings_fields_cover_every_operator_knob(headless_pro):
     assert "1-25" not in mop_hint
     assert "this book" in mop_hint
     assert "0 = off" in mop_hint
+    for key in (
+        "max_risk_per_trade_pct",
+        "max_position_pct",
+        "max_option_premium_pct",
+    ):
+        hint = next(h for k, _l, h in RISK_FIELDS if k == key)
+        assert "0 = off" in hint
     assert "trading_mode" not in headless_pro.fields
     assert "ibkr_port" not in headless_pro.fields
     assert "live_confirm" not in headless_pro.fields
