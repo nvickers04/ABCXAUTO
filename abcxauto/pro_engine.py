@@ -1217,6 +1217,9 @@ class ProEngine:
         if gen != self._gen:
             return
         self._worker_loop = asyncio.get_running_loop()
+        from abcxauto.aio import bind_thread_loop
+
+        bind_thread_loop(self._worker_loop)
         from abcxauto.pacing import WakeGate
 
         self._wake_event = asyncio.Event()
