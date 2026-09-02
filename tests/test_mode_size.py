@@ -16,7 +16,9 @@ from abcxauto.mode_size import (
     MODE_SIZE_CEILING_EXPLORE,
     MODE_SIZE_FLOOR,
     exploit_may_widen,
+    implied_size_pct_nl,
     live_marks_match_paper,
+    max_risk_per_trade_off,
     mode_size_ceiling,
     mode_size_ticket_error,
     working_size_ceiling,
@@ -309,3 +311,337 @@ def test_system_prompt_does_not_bake_the_mode_number():
     assert "8" not in SYSTEM_PROMPT
     assert "explore" not in SYSTEM_PROMPT
     assert "exploit" not in SYSTEM_PROMPT
+
+
+# Production 2026-09-02: Noah set max_risk=0. Grok sized a named vertical.
+# agent_loop passed underlying last (~570) into implied_size_pct_nl with
+# option multiplier 100 → ~85% of NL. Ceiling was self_tune size_pct_nl
+# 0.5 — a shadow cap, not leftover max_risk. Named gate mode_size_ticket_error.
+_PROD_NL = 67_000.0
+_PROD_UNDERLYING = 570.0
+_PROD_PREMIUM = 2.50
+_PROD_QTY = 5
+_SHADOW = 0.5
+
+
+def _named_vertical(**over) -> dict:
+    p = {
+        "card": "spy debit vertical",
+        "symbol": "SPY",
+        "expiration": "20260718",
+        "long_strike": 500.0,
+        "short_strike": 505.0,
+        "right": "C",
+        "quantity": _PROD_QTY,
+        "limit_price": 5.0,
+    }
+    p.update(over)
+    return p
+
+
+def _arm_shadow_cap_max_risk_off():
+    from abcxauto.config import update_risk_config
+    from abcxauto.self_tune import apply_self_tune
+
+    update_risk_config(
+        max_risk_per_trade_pct=0,
+        defined_risk_only=True,
+        persist=True,
+        _skip_clamp=True,
+    )
+    out = apply_self_tune({"size_pct_nl": _SHADOW}, persist=True)
+    assert out["status"] == "ok"
+    assert out["applied"]["size_pct_nl"] == _SHADOW
+    assert get_config().max_risk_per_trade_pct == 0.0
+    assert get_config().defined_risk_only is True
+    assert get_config().ibkr_port == 7497
+    assert get_config().trading_mode == "paper"
+    assert working_size_ceiling() == _SHADOW
+    assert max_risk_per_trade_off() is True
+
+
+def test_option_implied_units_are_premium_not_underlying_notional():
+    """Wrong units: qty × underlying × 100 / NL × 100 ≈ 85. Right: premium × 100."""
+    from abcxauto.send import option_size_mark
+
+    wrong = implied_size_pct_nl(
+        1, _PROD_NL, _PROD_UNDERLYING, multiplier=100.0
+    )
+    right = implied_size_pct_nl(1, _PROD_NL, _PROD_PREMIUM, multiplier=100.0)
+    assert wrong == pytest.approx(85.0746, rel=1e-4)
+    assert right == pytest.approx(0.37313, rel=1e-3)
+    assert wrong > MODE_SIZE_CEILING_EXPLORE
+    assert right < _SHADOW
+
+    px, mult = option_size_mark(
+        "vertical_spread",
+        _named_vertical(quantity=1, limit_price=_PROD_PREMIUM),
+        _PROD_UNDERLYING,
+    )
+    assert px == _PROD_PREMIUM
+    assert mult == 100.0
+    # Missing premium: do not fall back to the stock last.
+    none_px, none_mult = option_size_mark(
+        "vertical_spread",
+        {"symbol": "SPY", "quantity": 1, "expiration": "20260718"},
+        _PROD_UNDERLYING,
+    )
+    assert none_px is None
+    assert none_mult == 100.0
+    stk_px, stk_mult = option_size_mark(
+        "market_bracket", {"symbol": "AAPL", "quantity": 10}, 50.0
+    )
+    assert stk_px == 50.0
+    assert stk_mult == 1.0
+
+
+def test_option_premium_not_underlying_when_max_risk_on():
+    """Units fix: a 1-lot debit must not look like 85% of NL just because last is 570."""
+    from abcxauto.config import update_risk_config
+
+    update_risk_config(max_risk_per_trade_pct=2.0, persist=True, _skip_clamp=True)
+    apply_self_tune({"size_pct_nl": _SHADOW}, persist=True)
+    assert max_risk_per_trade_off() is False
+    assert working_size_ceiling() == _SHADOW
+    note = mode_size_ticket_error(
+        _named_vertical(quantity=1, limit_price=_PROD_PREMIUM),
+        net_liq=_PROD_NL,
+        price=_PROD_UNDERLYING,
+        strategy="vertical_spread",
+    )
+    assert note == ""
+    # Same ticket without premium still must not invent 85% from the stock last.
+    no_prem = mode_size_ticket_error(
+        {"card": "spy debit vertical", "symbol": "SPY", "quantity": 1},
+        net_liq=_PROD_NL,
+        price=_PROD_UNDERLYING,
+        strategy="vertical_spread",
+    )
+    assert no_prem == ""
+
+
+def test_mode_size_does_not_veto_defined_risk_option_when_max_risk_off():
+    """size_pct_nl 0.5 must not stand in as a clerk max-risk while the knob is 0."""
+    _arm_shadow_cap_max_risk_off()
+    grok_sized = implied_size_pct_nl(
+        _PROD_QTY, _PROD_NL, 5.0, multiplier=100.0
+    )
+    assert grok_sized > _SHADOW
+    assert grok_sized < MODE_SIZE_CEILING_EXPLORE
+
+    for name in (
+        "vertical_spread",
+        "calendar_spread",
+        "butterfly",
+        "iron_condor",
+        "iron_butterfly",
+    ):
+        note = mode_size_ticket_error(
+            _named_vertical(),
+            net_liq=_PROD_NL,
+            price=_PROD_UNDERLYING,
+            strategy=name,
+        )
+        assert note == "", f"{name}: {note}"
+
+    # apply must not shrink Grok's contracts either.
+    params = _named_vertical()
+    apply_note = apply_size_pct_nl(
+        params,
+        net_liq=_PROD_NL,
+        price=_PROD_UNDERLYING,
+        strategy="vertical_spread",
+    )
+    assert apply_note is None
+    assert params["quantity"] == _PROD_QTY
+
+
+def test_mode_size_still_rejects_lottery_stk_when_max_risk_is_on():
+    from abcxauto.config import update_risk_config
+
+    update_risk_config(max_risk_per_trade_pct=2.0, persist=True, _skip_clamp=True)
+    apply_self_tune({"size_pct_nl": _SHADOW}, persist=True)
+    assert max_risk_per_trade_off() is False
+    note = mode_size_ticket_error(
+        {"card": "learn", "size_pct_nl": 12.0, "quantity": 240},
+        net_liq=100_000.0,
+        price=50.0,
+        strategy="market_bracket",
+    )
+    assert note
+    assert "mode_size" in note
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_named_vertical_not_blocked_by_size_pct_nl_shadow(
+    monkeypatch,
+):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.look_snapshot import begin_look, record_look_tool
+
+    _arm_shadow_cap_max_risk_off()
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok", "order_id": 7001}
+
+    async def underlying_last(_act, _snap, connector=None):
+        return _PROD_UNDERLYING
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.agent_loop._quote_for_action", underlying_last)
+
+    snap = {
+        "account": {"netliquidation": _PROD_NL},
+        "positions": [],
+        "open_orders": [],
+        "ibkr_live_quotes": {"SPY": _PROD_UNDERLYING},
+    }
+    begin_look(snap)
+    record_look_tool(
+        snap,
+        "option_quote",
+        {
+            "symbol": "SPY",
+            "ibkr": {"last": 5.0, "bid": 4.9, "ask": 5.1, "mid": 5.0},
+        },
+    )
+    result = await execute_ticket(
+        {
+            "action": "vertical_spread",
+            "strategy": "vertical_spread",
+            "params": _named_vertical(),
+            "rationale": "spy debit vertical",
+        },
+        object(),
+        _world(),
+        snap,
+    )
+    assert result.get("status") == "ok", result
+    assert sent
+    assert sent[0]["strategy"] == "vertical_spread"
+    assert int(sent[0]["params"]["quantity"]) == _PROD_QTY
+    assert "mode_size" not in str(result.get("note") or "")
+    assert get_config().defined_risk_only is True
+    assert get_config().max_risk_per_trade_pct == 0.0
+    assert get_config().ibkr_port == 7497
+
+
+def test_defined_risk_only_still_rejects_stk_and_allows_last_stop_when_max_risk_off(
+    monkeypatch,
+):
+    from abcxauto.proposals import validate_proposal
+    from abcxauto.risk_gates import check_defined_risk_only
+    from tests.test_proposals import RATIONALE, VALID_PAYLOADS
+
+    _arm_shadow_cap_max_risk_off()
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", get_config)
+    monkeypatch.setattr("abcxauto.proposals.get_config", get_config)
+
+    mb = validate_proposal(
+        "market_bracket",
+        {
+            "symbol": "SIRI",
+            "quantity": 10,
+            "direction": "LONG",
+            "stop_price": 28.50,
+            "target_price": 31.00,
+        },
+        RATIONALE,
+        quote_last=29.75,
+    )
+    ok, why = check_defined_risk_only(mb)
+    assert ok is False
+    assert "defined_risk_only" in why
+
+    oca = validate_proposal(
+        "oca",
+        {
+            "symbol": "SIRI",
+            "quantity": 10,
+            "direction": "LONG",
+            "stop_price": 28.50,
+            "target_price": 31.00,
+        },
+        RATIONALE,
+        quote_last=29.75,
+    )
+    ok_oca, why_oca = check_defined_risk_only(oca)
+    assert ok_oca is True, why_oca
+
+    stop = validate_proposal(
+        "stop_order",
+        {
+            "symbol": "CNH",
+            "action": "SELL",
+            "quantity": 5,
+            "stop_price": 10.0,
+            "closing_position": True,
+        },
+        RATIONALE,
+    )
+    ok_stop, why_stop = check_defined_risk_only(stop)
+    assert ok_stop is True, why_stop
+
+    for name in (
+        "vertical_spread",
+        "calendar_spread",
+        "butterfly",
+        "iron_condor",
+        "iron_butterfly",
+    ):
+        prop = validate_proposal(name, VALID_PAYLOADS[name], RATIONALE)
+        ok_n, why_n = check_defined_risk_only(prop)
+        assert ok_n is True, f"{name}: {why_n}"
+    assert get_config().defined_risk_only is True
+    assert get_config().max_risk_per_trade_pct == 0.0
+
+
+@pytest.mark.asyncio
+async def test_paper_must_not_place_on_7496_with_shadow_cap_off(monkeypatch):
+    from abcxauto.send import send_action
+
+    _arm_shadow_cap_max_risk_off()
+    cfg = Config(
+        **{
+            **get_config().__dict__,
+            "trading_mode": "paper",
+            "ibkr_port": 7496,
+            "defined_risk_only": True,
+            "max_risk_per_trade_pct": 0.0,
+        }
+    )
+    monkeypatch.setattr("abcxauto.send.get_config", lambda: cfg)
+
+    async def _must_not_execute(*_a, **_k):
+        raise AssertionError("safe_execute must not run on paper + 7496")
+
+    monkeypatch.setattr("abcxauto.send.safe_execute", _must_not_execute)
+
+    class Conn:
+        connected = True
+
+        def place_order(self, *a, **k):
+            raise AssertionError("7496 must not place")
+
+        async def place_vertical_spread(self, **k):
+            raise AssertionError("7496 must not place")
+
+    result = await send_action(
+        {
+            "strategy": "vertical_spread",
+            "params": _named_vertical(),
+            "rationale": "must not reach live",
+        },
+        Conn(),
+    )
+    assert result["status"] == "blocked"
+    assert result.get("reason_code") == "live_port_paper"
+    assert "7496" in str(result.get("note") or "")
+    assert cfg.defined_risk_only is True
+    assert cfg.trading_mode == "paper"
+    assert cfg.ibkr_port == 7496
+    assert cfg.max_risk_per_trade_pct == 0.0

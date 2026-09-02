@@ -30,6 +30,7 @@ __all__ = [
     "notional_from_size_pct_nl",
     "qty_from_size_pct_nl",
     "apply_size_pct_nl",
+    "option_size_mark",
 ]
 
 
@@ -72,6 +73,16 @@ def qty_from_size_pct_nl(
     return qty if qty >= 1 else None
 
 
+# Premium on the ticket — not underlying last. Credit keys may be signed.
+_OPTION_PREMIUM_KEYS = (
+    "limit_price",
+    "credit",
+    "net_credit",
+    "premium",
+    "net_premium",
+)
+
+
 def _option_multiplier(strategy: str, params: dict[str, Any]) -> float:
     from abcxauto.strategy_params import OPTION_STRATEGIES
 
@@ -83,6 +94,32 @@ def _option_multiplier(strategy: str, params: dict[str, Any]) -> float:
     return 1.0
 
 
+def option_size_mark(
+    strategy: str,
+    params: dict[str, Any] | None,
+    fallback: Any = None,
+) -> tuple[float | None, float]:
+    """(price, multiplier) for % of NL.
+
+    Equity: last × 1. Options: premium × 100 (the contract multiplier).
+    Never fall back to underlying last × 100 — that is stock-equivalent
+    notional, not defined-risk, and is incomparable to ``size_pct_nl``.
+    """
+    p = params if isinstance(params, dict) else {}
+    mult = _option_multiplier(strategy, p)
+    if mult == 100.0:
+        for key in _OPTION_PREMIUM_KEYS:
+            raw = p.get(key)
+            try:
+                px = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(px) and px != 0:
+                return abs(px), 100.0
+        return None, 100.0
+    return _pos_float(fallback), 1.0
+
+
 def apply_size_pct_nl(
     params: dict[str, Any],
     *,
@@ -92,8 +129,10 @@ def apply_size_pct_nl(
 ) -> dict[str, Any] | None:
     """Fill ``quantity`` from ``size_pct_nl`` × current NL. None if unused.
 
-    Mode bit clamps lottery % even when paper gates are off. A qty already
-    inside the band is left alone (#110). Over-ceiling qty is reduced.
+    Mode bit clamps lottery % even when paper gates are off, except when
+    max_risk_per_trade_pct is 0 (off) — Grok's qty / % stands. A qty
+    already inside the band is left alone (#110). Over-ceiling qty is
+    reduced. Options size off premium × 100, not underlying last.
     Does not bake 1% or 25% as the working size.
     """
     if not isinstance(params, dict):
@@ -101,19 +140,25 @@ def apply_size_pct_nl(
     from abcxauto.mode_size import (
         clamp_size_pct_nl,
         implied_size_pct_nl,
+        max_risk_per_trade_off,
         working_size_ceiling,
     )
 
+    cap_off = max_risk_per_trade_off()
     card = params.get("card")
     ceiling = working_size_ceiling(card=card, type=strategy)
     pct_in = params.get(SEND_SIZE_PCT_NL)
-    clamped_pct, clamp_note = clamp_size_pct_nl(
-        pct_in, card=card, type=strategy
-    )
-    if clamp_note and clamped_pct is not None:
-        params[SEND_SIZE_PCT_NL] = float(clamped_pct)
+    if cap_off:
+        clamped_pct = _pos_float(pct_in)
+        clamp_note = None
+    else:
+        clamped_pct, clamp_note = clamp_size_pct_nl(
+            pct_in, card=card, type=strategy
+        )
+        if clamp_note and clamped_pct is not None:
+            params[SEND_SIZE_PCT_NL] = float(clamped_pct)
     pct = params.get(SEND_SIZE_PCT_NL)
-    mult = _option_multiplier(strategy, params)
+    px_mark, mult = option_size_mark(strategy, params, price)
 
     raw_qty = params.get("quantity")
     try:
@@ -124,12 +169,14 @@ def apply_size_pct_nl(
         has_qty = False
 
     if has_qty:
+        if cap_off:
+            return None
         implied = implied_size_pct_nl(
-            qty_n, net_liq, price, multiplier=mult
+            qty_n, net_liq, px_mark, multiplier=mult
         )
         if implied is not None and implied > ceiling + 1e-6:
             new_qty = qty_from_size_pct_nl(
-                ceiling, net_liq, price, multiplier=mult
+                ceiling, net_liq, px_mark, multiplier=mult
             )
             if new_qty is None:
                 return None
@@ -154,7 +201,7 @@ def apply_size_pct_nl(
     qty = qty_from_size_pct_nl(
         use_pct,
         net_liq,
-        price,
+        px_mark,
         multiplier=mult,
     )
     if qty is None or notional is None:
