@@ -474,16 +474,22 @@ def _size_from_risk(
     if dist <= 0:
         return 0
     try:
-        risk_pct = float(getattr(cfg, "max_risk_per_trade_pct", 1.0) or 1.0)
+        risk_pct = float(getattr(cfg, "max_risk_per_trade_pct", 0.0) or 0.0)
     except (TypeError, ValueError):
-        risk_pct = 1.0
+        risk_pct = 0.0
     try:
-        pos_pct = float(getattr(cfg, "max_position_pct", 20.0) or 20.0)
+        pos_pct = float(getattr(cfg, "max_position_pct", 0.0) or 0.0)
     except (TypeError, ValueError):
-        pos_pct = 20.0
-    risk_qty = int((eq * (risk_pct / 100.0)) / dist)
-    cap_qty = int((eq * (pos_pct / 100.0)) / quote)
-    qty = min(risk_qty, cap_qty)
+        pos_pct = 0.0
+    # 0 = off: skip that ceiling. Do not invent 1% / 20% old_size_defaults.
+    caps: list[int] = []
+    if risk_pct > 0:
+        caps.append(int((eq * (risk_pct / 100.0)) / dist))
+    if pos_pct > 0:
+        caps.append(int((eq * (pos_pct / 100.0)) / quote))
+    if not caps:
+        return 0
+    qty = min(caps)
     return qty if qty >= 1 else 0
 
 

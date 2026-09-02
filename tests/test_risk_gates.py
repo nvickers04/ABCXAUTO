@@ -1093,6 +1093,52 @@ async def test_risk_per_trade_cap(gate, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_zero_off_pct_ceilings_skip_size_gates(monkeypatch):
+    """Floors on; 0 skips risk/position/premium ceilings like mop 0 skips slots."""
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_config",
+        lambda: _cfg(
+            sizing_floors=True,
+            max_risk_per_trade_pct=0,
+            max_position_pct=0,
+            max_option_premium_pct=0,
+            max_symbol_concentration_pct=0,
+            max_arena_concentration_pct=0,
+            daily_loss_limit_pct=0,
+            max_open_positions=0,
+            cash_only=False,
+        ),
+    )
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
+    gate = reset_risk_gate()
+    conn = FakeConnector(
+        account={
+            "netliquidation": 100_000.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 100_000.0,
+        }
+    )
+    ok, reason = await gate.pre_trade_check(
+        _bracket(qty=10_000, entry=100.0, stop=95.0, target=110.0), conn
+    )
+    assert ok is True, reason
+    opt = validate_proposal(
+        "buy_option",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "strike": 500.0,
+            "right": "C",
+            "quantity": 50,
+            "limit_price": 10.0,
+        },
+        RATIONALE,
+    )
+    ok, reason = await gate.pre_trade_check(opt, conn)
+    assert ok is True, reason
+
+
+@pytest.mark.asyncio
 async def test_salvage_knobs_disabled(gate, monkeypatch):
     monkeypatch.setattr(
         "abcxauto.risk_gates.get_config",

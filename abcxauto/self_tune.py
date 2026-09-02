@@ -1,11 +1,15 @@
 """Agent self-modification — live knobs only, no human approval.
 
-Immutable floor (code): daily-loss halt, max position %, defined-risk,
-cash-only, auto-panic, fail-closed, exits never blocked, live gated.
+Immutable floor (code): daily-loss halt, defined-risk, cash-only,
+auto-panic, fail-closed, exits never blocked, live gated.
 max_open_positions is not a floor: 0 = off; a positive N is a ceiling
-Grok or the operator chose. The agent may *tighten* risk. It cannot
-weaken the immutable risk floor. Cadence is park_clock (overnight only);
-process % dials do not exist.
+Grok or the operator chose. max_risk_per_trade_pct, max_position_pct,
+and max_option_premium_pct are the same class: 0 = off (skip that
+ceiling); a positive pct still clamps to RISK_FLOOR. size_pct_nl is
+Grok's working size — not a RISK_FLOOR field, not old_size_defaults.
+The agent may *tighten* risk. It cannot weaken the immutable risk
+floor. Cadence is park_clock (overnight only); process % dials do
+not exist.
 """
 
 from __future__ import annotations
@@ -30,6 +34,13 @@ RISK_FLOOR: dict[str, tuple[float, float]] = {
 # 0 = off (no count refuse). A positive integer is a ceiling Grok/operator
 # chose. No baked 15. No invented 25. Same on paper and live.
 MAX_OPEN_POSITIONS_RANGE = (0,)
+# 0 = off (skip that send/sizing ceiling). Same physics as mop.
+# Positive still clamps to RISK_FLOOR. Not a 0.25 floor, not unsupervised 25%.
+_ZERO_OFF_RISK_KEYS = frozenset({
+    "max_risk_per_trade_pct",
+    "max_position_pct",
+    "max_option_premium_pct",
+})
 
 # Booleans the agent cannot turn off. risk_gates_enabled is live-locked;
 # paper honors an operator-off so Grok's chosen % of NL can send.
@@ -142,6 +153,7 @@ def clamp_risk_to_floor(
     """Clamp a risk knob so it cannot weaken the immutable floor.
 
     ``cfg`` remains for call-site compat. mop is not paper/live forked.
+    For ``_ZERO_OFF_RISK_KEYS``, 0 = off: do not lift to the RISK_FLOOR min.
     """
     if key == "max_open_positions":
         n = _i(value)
@@ -156,6 +168,9 @@ def clamp_risk_to_floor(
     raw = _f(value)
     if raw is None:
         return None, None
+    # 0 = off. Do not clamp 0 up to 0.25 / 1 / 5. Positive still floor-clamps.
+    if key in _ZERO_OFF_RISK_KEYS and raw == 0:
+        return 0.0, None
     lo, hi = RISK_FLOOR[key]
     clamped = max(lo, min(hi, raw))
     note = {"raw": raw, "clamped": clamped} if clamped != raw else None
@@ -294,6 +309,8 @@ def apply_self_tune(
             session_caps_payload[key] = wanted
             continue
         if key == _SIZE_PCT_NL_KEY:
+            # Grok owns this working size. Never rewrite via RISK_FLOOR,
+            # old_size_defaults, or unsupervised 25%.
             from abcxauto.mode_size import (
                 MODE_SIZE_FLOOR,
                 mode_size_ceiling,
@@ -457,6 +474,10 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
     live = _live_desk(cfg)
     for key, (lo, hi) in RISK_FLOOR.items():
         cur = _f(getattr(cfg, key, None))
+        # 0 = off for risk/position/premium. Do not replace with 25.
+        # Do not lift to the floor min. Missing/None/negative still repair.
+        if key in _ZERO_OFF_RISK_KEYS and cur == 0:
+            continue
         if cur is None or cur <= 0 or cur > hi:
             fixes[key] = UNSUPERVISED_DEFAULTS[key]
         elif (
@@ -584,12 +605,15 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
 
     def _pct(key: str) -> dict[str, Any]:
         lo, hi = RISK_FLOOR[key]
-        return {
+        out: dict[str, Any] = {
             "now": getattr(c, key, None),
             "min": lo,
             "max": hi,
             "unit": "pct_nl",
         }
+        if key in _ZERO_OFF_RISK_KEYS:
+            out["off"] = 0
+        return out
 
     mop_now = getattr(c, "max_open_positions", None)
     mop_lever: dict[str, Any] = {

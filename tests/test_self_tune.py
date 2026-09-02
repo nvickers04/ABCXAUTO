@@ -122,6 +122,10 @@ def test_levers_snapshot_shows_now_and_range():
     assert risk["min"] == 0.25
     assert risk["max"] == 25.0
     assert risk["now"] is not None
+    assert snap["max_risk_per_trade_pct"]["off"] == 0
+    assert snap["max_position_pct"]["off"] == 0
+    assert snap["max_option_premium_pct"]["off"] == 0
+    assert "off" not in snap["daily_loss_limit_pct"]
     assert snap["max_open_positions"]["min"] == MAX_OPEN_POSITIONS_RANGE[0]
     assert snap["max_open_positions"]["min"] == 0
     assert snap["max_open_positions"]["off"] == 0
@@ -200,6 +204,100 @@ def test_clamp_risk_to_floor_cannot_raise_past_ceiling():
     v0, note0 = clamp_risk_to_floor("max_open_positions", 0, cfg=live)
     assert v0 == 0
     assert note0 is None
+
+
+def test_zero_off_pct_ceilings_survive_get_config(tmp_path, monkeypatch):
+    """0 = off for risk/position/premium. Not a 0.25 floor, not unsupervised 25%."""
+    from abcxauto.config import update_risk_config
+
+    keys = (
+        "max_risk_per_trade_pct",
+        "max_position_pct",
+        "max_option_premium_pct",
+    )
+    for key in keys:
+        v, note = clamp_risk_to_floor(key, 0)
+        assert v == 0.0
+        assert note is None
+
+    v, note = clamp_risk_to_floor("max_risk_per_trade_pct", 0.1)
+    assert v == 0.25
+    assert note is not None
+    v, note = clamp_risk_to_floor("max_risk_per_trade_pct", 2.0)
+    assert v == 2.0
+    assert note is None
+    v, note = clamp_risk_to_floor("max_option_premium_pct", 2.0)
+    assert v == 2.0
+    assert note is None
+
+    cfg0 = SimpleNamespace(
+        daily_loss_limit_pct=25.0,
+        max_position_pct=0.0,
+        max_risk_per_trade_pct=0.0,
+        max_peak_drawdown_pct=25.0,
+        max_option_premium_pct=0.0,
+        max_symbol_concentration_pct=25.0,
+        max_arena_concentration_pct=25.0,
+        max_open_positions=0,
+        risk_gates_enabled=True,
+        auto_panic_on_breach=True,
+        defined_risk_only=True,
+        cash_only=True,
+        scan_fetch_cap=8,
+        trading_budget_usd=0.0,
+        trading_mode="paper",
+        ibkr_port=7497,
+        is_paper=True,
+        sizing_floors=False,
+    )
+    fixes = floor_clamp_config_fields(cfg0)
+    for key in keys:
+        assert key not in fixes
+
+    cfg_neg = SimpleNamespace(**{**vars(cfg0), "max_risk_per_trade_pct": -1.0})
+    assert floor_clamp_config_fields(cfg_neg)["max_risk_per_trade_pct"] == 25.0
+
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    get_config.cache_clear()
+    update_risk_config(
+        max_risk_per_trade_pct=0,
+        max_position_pct=0,
+        max_option_premium_pct=0,
+        persist=True,
+        _skip_clamp=True,
+    )
+    cfg = get_config()
+    assert cfg.max_risk_per_trade_pct == 0.0
+    assert cfg.max_position_pct == 0.0
+    assert cfg.max_option_premium_pct == 0.0
+    ensure_immutable_floor(persist=True)
+    cfg = get_config()
+    assert cfg.max_risk_per_trade_pct == 0.0
+    assert cfg.max_position_pct == 0.0
+    assert cfg.max_option_premium_pct == 0.0
+
+    off = apply_self_tune(
+        {
+            "max_risk_per_trade_pct": 0,
+            "max_position_pct": 0,
+            "max_option_premium_pct": 0,
+        },
+        persist=False,
+    )
+    assert off["status"] == "ok"
+    assert get_config().max_risk_per_trade_pct == 0.0
+    assert get_config().max_position_pct == 0.0
+    assert get_config().max_option_premium_pct == 0.0
+    two = apply_self_tune({"max_risk_per_trade_pct": 2.0}, persist=False)
+    assert two["status"] == "ok"
+    assert get_config().max_risk_per_trade_pct == 2.0
+    lift = apply_self_tune({"max_risk_per_trade_pct": 0.1}, persist=False)
+    assert lift["status"] == "ok"
+    assert get_config().max_risk_per_trade_pct == 0.25
 
 
 def test_clamp_risk_to_floor_rejects_nonfinite():

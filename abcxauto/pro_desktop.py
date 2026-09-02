@@ -119,13 +119,13 @@ FLOOR_GATES = (
     ("auto_panic_on_breach", "Auto-panic on breach"),
 )
 RISK_FIELDS = (
-    ("max_risk_per_trade_pct", "Max risk / trade", "% of NetLiq, 0.25 – 25"),
+    ("max_risk_per_trade_pct", "Max risk / trade", "% of NetLiq, 0 = off, else 0.25 – 25"),
     ("daily_loss_limit_pct", "Daily loss limit", "% of NetLiq, 0.5 – 25"),
-    ("max_position_pct", "Max position", "% of NetLiq, 5 – 25"),
+    ("max_position_pct", "Max position", "% of NetLiq, 0 = off, else 5 – 25"),
     ("max_symbol_concentration_pct", "Max per name", "% of NetLiq, all lots, 5 – 25"),
     ("max_arena_concentration_pct", "Max per arena", "% of NetLiq, one sector/theme arena, 5 – 25"),
     ("max_peak_drawdown_pct", "Peak drawdown", "% of NetLiq, 2 – 25"),
-    ("max_option_premium_pct", "Max option premium", "% of NetLiq, 1 – 25"),
+    ("max_option_premium_pct", "Max option premium", "% of NetLiq, 0 = off, else 1 – 25"),
     ("max_open_positions", "Max open lots", "0 = off — Grok may set N for this book"),
 )
 # ProEngine._note kinds. Anything not listed still paints its message in MUTED,
