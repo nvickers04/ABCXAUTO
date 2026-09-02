@@ -4379,6 +4379,196 @@ async def test_empty_grok_after_send_reenters_think_same_chat(monkeypatch):
     assert turn.trailing_empty_grok is False
 
 
+@pytest.mark.asyncio
+async def test_empty_grok_after_option_quote_reenters_think_same_chat(monkeypatch):
+    """Production 2026-09-02: option_quote then think-only GROK sat hung.
+
+    #148 required stop==empty (no think). Grok often thinks after quotes
+    with no [say] / no send. Re-enter this chat.
+    """
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name, "bid": 1.2, "ask": 1.3})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(
+            name="option_quote",
+            arguments=json.dumps(
+                {
+                    "symbol": "SPY",
+                    "expiration": "20260904",
+                    "strike": 765,
+                    "right": "C",
+                }
+            ),
+        )
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                    content="pulling SPY 765/770C", reasoning_content=""
+                )
+            elif self.n == 2:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content="IV on the 765C looks rich."
+                )
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="No ticket. Watching SPY 765C.",
+                    reasoning_content="",
+                )
+
+    chat = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: chat)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=chat,
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert "option_quote" in turn.tool_trace
+    assert chat.n == 3
+    assert turn.failed is False
+    assert turn.look_failed() is False
+    assert "No ticket" in (turn.text or "")
+    assert g.chat is chat
+    assert turn.trailing_empty_grok is False
+    assert getattr(g, "_chat_had_work", False) is True
+
+
+@pytest.mark.asyncio
+async def test_empty_grok_after_quote_or_book_reenters_same_chat(monkeypatch):
+    """Same class as option_quote: empty/think-only after any completed tool."""
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name, "last": 248.1})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    for tool_name in ("quote", "book"):
+
+        class TC:
+            id = "1"
+            function = SimpleNamespace(name=tool_name, arguments="{}")
+
+        class Chat:
+            n = 0
+
+            def append(self, *_a, **_k):
+                pass
+
+            async def stream(self):
+                self.n += 1
+                if self.n == 1:
+                    yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                        content="", reasoning_content=""
+                    )
+                elif self.n == 2:
+                    yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                        content="", reasoning_content=""
+                    )
+                else:
+                    yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                        content=f"{tool_name} in. Holding.",
+                        reasoning_content="",
+                    )
+
+        chat = Chat()
+        g = SimpleNamespace(
+            client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: chat)),
+            model="grok-4.6",
+            temperature=0.3,
+            max_tokens=256,
+            chat=chat,
+            _wake_n=1,
+        )
+        turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+        assert tool_name in turn.tool_trace
+        assert chat.n == 3
+        assert f"{tool_name} in" in (turn.text or "")
+        assert g.chat is chat
+
+
+@pytest.mark.asyncio
+async def test_empty_grok_after_tools_does_not_loop_forever(monkeypatch):
+    """Always-empty after option_quote re-enters, then stops. No burn loop."""
+    from abcxauto import brain
+    from abcxauto.brain import EMPTY_GROK_TRIES, grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="option_quote", arguments="{}")
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+            else:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content="still looking at the 765C"
+                )
+
+    chat = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: chat)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=chat,
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    # 1 tool round + original empty + EMPTY_GROK_TRIES retries.
+    assert chat.n == 1 + 1 + EMPTY_GROK_TRIES
+    assert turn.trailing_empty_grok is True
+    assert g.chat is chat
+    assert turn.sends == []
+
+
 def test_empty_grok_round_after_send_is_not_look_end():
     """#147 gate: _look_is_empty_or_question is False after send. This class still recovers."""
     from abcxauto.brain import (
@@ -4394,7 +4584,8 @@ def test_empty_grok_round_after_send_is_not_look_end():
     )
     assert _look_is_empty_or_question(sent) is False
     assert _empty_grok_round_after_work(sent, "", "empty") is True
-    assert _empty_grok_round_after_work(sent, "", "ok") is False
+    # Think-only / no say after send is hung. #148 required stop==empty.
+    assert _empty_grok_round_after_work(sent, "", "ok") is True
     spoken = BrainTurn(
         text="QQQ calendar working.",
         sends=[{"result": {"status": "submitted", "success": True}}],
@@ -4403,6 +4594,15 @@ def test_empty_grok_round_after_send_is_not_look_end():
     assert _empty_grok_round_after_work(spoken, "QQQ calendar working.", "ok") is False
     tools_only = BrainTurn(text="", tool_trace=["book"])
     assert _empty_grok_round_after_work(tools_only, "", "empty") is True
+    assert _empty_grok_round_after_work(tools_only, "", "ok") is True
+    quoted = BrainTurn(text="", tool_trace=["option_quote"])
+    assert _empty_grok_round_after_work(quoted, "", "empty") is True
+    assert _empty_grok_round_after_work(quoted, "", "ok") is True
+    # Recover re-entry: fresh BrainTurn, work already on the kept chat.
+    bare_recover = BrainTurn(text="")
+    assert _empty_grok_round_after_work(
+        bare_recover, "", "empty", chat_had_work=True
+    ) is True
     bare = BrainTurn(text="")
     assert _empty_grok_round_after_work(bare, "", "empty") is False
 

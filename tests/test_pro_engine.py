@@ -1817,6 +1817,118 @@ async def test_empty_grok_after_send_live_worker_reenters_without_cold(
     assert load_alarm().wake_at is None
 
 
+@pytest.mark.asyncio
+async def test_empty_grok_after_option_quote_live_worker_reenters_without_cold(
+    monkeypatch, tmp_path
+):
+    """Empty/think-only GROK after option_quote: same-chat recover. No _cold_next.
+
+    Production 2026-09-02 pid 30296: inner stop==empty missed think-only,
+    engine sat because rationale from the tool-call round was not junk.
+    """
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
+    resumes: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        resumes.append(resume)
+        if len(resumes) == 1:
+            self.state.think_live = (
+                "--- GROK ---\n[option_quote]\n--- GROK ---\n[think]\n"
+                "IV on SPY 765C\n"
+            )
+            return {
+                "cycle": n,
+                "pnl": 0,
+                "equity": 100000,
+                "_failed": False,
+                "rationale": "pulling SPY 765/770C",
+                "tool_trace": ["option_quote"],
+                "sends": 0,
+            }
+        self.state.think_live = (
+            "--- GROK ---\n[option_quote]\n--- GROK ---\n[say]\n"
+            "No ticket. Watching SPY 765C.\n"
+        )
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "No ticket. Watching SPY 765C.",
+            "tool_trace": ["option_quote"],
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.3
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) == 2
+    assert resumes[0] is True
+    assert resumes[1] is True
+    assert eng._cold_next is False
+    assert eng._recover_same_chat is False
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is None
+
+
+@pytest.mark.asyncio
+async def test_empty_grok_recover_does_not_loop_forever(monkeypatch, tmp_path):
+    """Engine recover after option_quote caps at EMPTY_GROK_RECOVER_TRIES."""
+    from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
+    resumes: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        resumes.append(resume)
+        self.state.think_live = (
+            "--- GROK ---\n[option_quote]\n--- GROK ---\n[think]\n"
+            "still looking at the 765C\n"
+        )
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "_empty_grok": True,
+            "rationale": "pulling SPY 765/770C",
+            "tool_trace": ["option_quote"],
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 1 + EMPTY_GROK_RECOVER_TRIES + 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.4
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) == 1 + EMPTY_GROK_RECOVER_TRIES
+    assert eng._cold_next is False
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is None
+
+
 def test_same_chat_recover_needed_is_empty_after_tools_not_spoken():
     eng = ProEngine()
     g = SimpleNamespace(chat=object())
@@ -1894,3 +2006,87 @@ def test_same_chat_recover_needed_is_empty_after_tools_not_spoken():
     assert eng._cold_next is False
     assert eng._resume_think is True
     assert eng._recover_same_chat is True
+
+
+def test_same_chat_recover_needed_after_option_quote_think_only_with_prior_say():
+    """Production 2026-09-02: option_quote, prior say, think-only last GROK.
+
+    #148 required junk whole-look rationale or stop==empty. Rationale from
+    the tool-call round is not junk; think-only is not stop==empty. Recover.
+    """
+    eng = ProEngine()
+    g = SimpleNamespace(chat=object())
+    eng.state.think_live = (
+        "--- GROK ---\n[option_quote]\n--- GROK ---\n[think]\nIV on SPY 765C\n"
+    )
+    assert (
+        eng._same_chat_recover_needed(
+            {
+                "rationale": "pulling SPY 765/770C",
+                "tool_trace": ["option_quote"],
+                "sends": 0,
+            },
+            g,
+        )
+        is True
+    )
+    # Fat option_quote JSON wiped the chip from the 24kb window.
+    eng.state.think_live = ("{" + "x" * 200 + "}\n") * 80 + "--- GROK ---\n"
+    assert (
+        eng._same_chat_recover_needed(
+            {
+                "rationale": "pulling SPY 765/770C",
+                "tool_trace": ["option_quote"],
+                "sends": 0,
+            },
+            g,
+        )
+        is True
+    )
+    # quote / book — same class.
+    for name in ("quote", "book"):
+        eng.state.think_live = f"--- GROK ---\n[{name}]\n--- GROK ---\n"
+        assert (
+            eng._same_chat_recover_needed(
+                {"rationale": "checking tape", "tool_trace": [name], "sends": 0},
+                g,
+            )
+            is True
+        )
+    # Spoken last banner still sits.
+    eng.state.think_live = (
+        "--- GROK ---\n[option_quote]\n--- GROK ---\n[say]\nholding SPY 765C\n"
+    )
+    assert (
+        eng._same_chat_recover_needed(
+            {
+                "rationale": "holding SPY 765C",
+                "tool_trace": ["option_quote"],
+                "sends": 0,
+            },
+            g,
+        )
+        is False
+    )
+
+
+def test_same_chat_recover_caps_streak_no_infinite_loop():
+    from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
+    from abcxauto.config import get_config
+
+    eng = ProEngine()
+    g = SimpleNamespace(chat=object())
+    out = {
+        "rationale": "pulling SPY 765/770C",
+        "tool_trace": ["option_quote"],
+        "sends": 0,
+        "_empty_grok": True,
+    }
+    eng.state.think_live = "--- GROK ---\n[option_quote]\n--- GROK ---\n"
+    assert eng._same_chat_recover_needed(out, g) is True
+    for _ in range(EMPTY_GROK_RECOVER_TRIES):
+        eng._arm_same_chat_recover()
+    assert eng._same_chat_recover_needed(out, g) is False
+    cfg = get_config()
+    assert cfg.defined_risk_only is True
+    assert cfg.ibkr_port != 7496
