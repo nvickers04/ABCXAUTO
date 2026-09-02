@@ -99,7 +99,10 @@ _TOOL_CHIP_RE = re.compile(r"^\[([a-z][a-z0-9_]*)(?:\s|=|\])", re.I | re.M)
 
 
 def empty_grok_segment(buf: str) -> bool:
-    """True when the last ``--- GROK ---`` has no think/say prose after it."""
+    """True when the last ``--- GROK ---`` has no [say] after it.
+
+    [think] tokens are not a spoken checkpoint. A [say] with content sits.
+    """
     text = str(buf or "")
     last = text.rfind("--- GROK")
     if last < 0:
@@ -118,10 +121,22 @@ def empty_grok_after_tools(buf: str) -> bool:
         --- GROK ---
 
         --- GROK ---
+        [option_quote]
+        --- GROK ---
+
+        --- GROK ---
         [send]
         --- GROK ---
 
-    The last banner is empty. Tools or send already landed. Worker still up.
+        --- GROK ---
+        [option_quote]
+        --- GROK ---
+        [think]
+        IV on the 765C
+
+    The last banner has no [say]. Tools or send already landed. Worker still up.
+    Fat option_quote JSON can wipe chips from the 24kb think_live window —
+    engine recover then uses tool_trace + empty last banner, not this helper.
     """
     text = str(buf or "")
     last = text.rfind("--- GROK")
@@ -136,19 +151,32 @@ def empty_grok_after_tools(buf: str) -> bool:
 
 
 def _grok_segment_empty(seg: str) -> bool:
+    """True when this GROK banner has no [say] content and no tool chip.
+
+    [think] prose is not a checkpoint. A [say] with content sits. A tool
+    chip in this segment means clerk results are still landing, not hung.
+    """
     lines = [ln.strip() for ln in str(seg or "").splitlines()]
     if lines and lines[0].startswith("--- GROK"):
         lines = lines[1:]
+    in_say = False
     for ln in lines:
         if not ln:
-            continue
-        if ln in ("[think]", "[say]"):
             continue
         if ln.startswith("--- GROK"):
             continue
         if ln.startswith("[stream "):
             continue
-        return False
+        if ln == "[think]":
+            in_say = False
+            continue
+        if ln == "[say]":
+            in_say = True
+            continue
+        if _TOOL_CHIP_RE.match(ln):
+            return False
+        if in_say:
+            return False
     return True
 
 

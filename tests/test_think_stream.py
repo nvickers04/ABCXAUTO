@@ -28,10 +28,22 @@ def test_empty_grok_after_tools_is_the_hung_keepfile():
         "[option_facts]\n"
         "--- GROK ---\n"
     )
+    after_quote = (
+        "--- GROK ---\n"
+        "[option_quote]\n"
+        "--- GROK ---\n"
+    )
     after_send = (
         "--- GROK ---\n"
         "[send]\n"
         "--- GROK ---\n"
+    )
+    think_only_after_quote = (
+        "--- GROK ---\n"
+        "[option_quote]\n"
+        "--- GROK ---\n"
+        "[think]\n"
+        "IV on SPY 765C\n"
     )
     spoken = (
         "--- GROK ---\n"
@@ -50,10 +62,14 @@ def test_empty_grok_after_tools_is_the_hung_keepfile():
     empty_no_tools = "--- GROK ---\n"
     assert empty_grok_after_tools(hung) is True
     assert empty_grok_after_tools(after_facts) is True
+    assert empty_grok_after_tools(after_quote) is True
     assert empty_grok_after_tools(after_send) is True
+    assert empty_grok_after_tools(think_only_after_quote) is True
     assert empty_grok_segment(hung) is True
+    assert empty_grok_segment(think_only_after_quote) is True
     assert empty_grok_after_tools(spoken) is False
     assert empty_grok_after_tools(spoken_after_send) is False
+    assert empty_grok_segment(spoken) is False
     assert empty_grok_after_tools(empty_no_tools) is False
     assert empty_grok_after_tools("") is False
 
