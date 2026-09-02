@@ -2,8 +2,14 @@
 
 Grok still chooses ``size_pct_nl``. This module is the floor/ceiling that
 choice is clamped to — on send (``apply_size_pct_nl``) and via ``self_tune``.
-It runs even when paper risk gates are off. 25% is the live walk-away
-ceiling for the risk knobs, not the working size.
+It runs even when paper risk gates are off, except when
+``max_risk_per_trade_pct`` is 0 (off): then Grok sizes and this module
+does not veto. 25% is the live walk-away ceiling for the risk knobs,
+not the working size.
+
+Option implied % of NL is premium × 100 (the contract multiplier), never
+underlying last × 100. That stock-equivalent notional is incomparable to
+``size_pct_nl`` and produced the production ``mode_size ~85 > 0.5`` miss.
 """
 
 from __future__ import annotations
@@ -120,6 +126,26 @@ def tuned_size_pct_nl() -> float | None:
     return _pos_float(raw)
 
 
+def max_risk_per_trade_off(cfg: Any = None) -> bool:
+    """True when ``max_risk_per_trade_pct`` is 0 = off. Grok sizes.
+
+    Same physics as mop 0. The self_tune ``size_pct_nl`` shadow must not
+    stand in as a second clerk max-risk while this knob is off.
+    """
+    if cfg is None:
+        try:
+            from abcxauto.config import get_config
+
+            cfg = get_config()
+        except Exception:
+            return False
+    try:
+        v = float(getattr(cfg, "max_risk_per_trade_pct", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(v) and v <= 0
+
+
 def working_size_ceiling(
     *,
     card: Any = None,
@@ -204,7 +230,14 @@ def mode_size_ticket_error(
     price: Any = None,
     strategy: str = "",
 ) -> str:
-    """Reject if the ticket is still over the mode ceiling after clamp."""
+    """Reject if the ticket is still over the mode ceiling after clamp.
+
+    One writer. When max_risk is off this returns empty — Grok's qty stands.
+    Option implied uses premium × 100, not the underlying last agent_loop
+    quoted for geometry.
+    """
+    if max_risk_per_trade_off():
+        return ""
     p = params if isinstance(params, dict) else {}
     card = p.get("card")
     ceiling = working_size_ceiling(card=card, type=strategy)
@@ -212,16 +245,17 @@ def mode_size_ticket_error(
     if pct is not None and pct > ceiling + 1e-6:
         return f"mode_size {pct} > {ceiling}"
     try:
-        from abcxauto.send import _option_multiplier
+        from abcxauto.send import option_size_mark
     except Exception:
-        def _option_multiplier(_s, _p):
-            return 1.0
+        def option_size_mark(_s, _p, fallback=None):
+            return _pos_float(fallback), 1.0
 
+    px, mult = option_size_mark(strategy, p, price)
     implied = implied_size_pct_nl(
         p.get("quantity"),
         net_liq,
-        price,
-        multiplier=_option_multiplier(strategy, p),
+        px,
+        multiplier=mult,
     )
     if implied is not None and implied > ceiling + 1e-6:
         return f"mode_size {implied} > {ceiling}"
