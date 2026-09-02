@@ -2392,7 +2392,9 @@ async def test_stream_round_breaks_when_stalled(monkeypatch):
     blob = "".join(painted)
     assert "?" not in blob
     assert "…" not in blob
-    assert reason in ("stalled", "ok")
+    # No chunk: idle limit → stalled, or wait_for cancel closes the
+    # agen → StopAsyncIteration → empty (bare GROK, same hung class).
+    assert reason in ("stalled", "ok", "empty")
 
 
 def test_stream_is_looping_ready_spam():
