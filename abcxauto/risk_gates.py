@@ -79,15 +79,21 @@ def is_exit_or_management(proposal: OrderProposal) -> bool:
 
 
 def check_defined_risk_only(proposal: OrderProposal) -> Tuple[bool, str]:
-    """Gate: when defined_risk_only, reject unlimited-risk option shapes.
+    """Gate: when defined_risk_only, reject unlimited-risk option shapes
+    and new undefined STK risk (naked stock entries, including market_bracket).
 
-    Operator control knob — not strategy taste. Returns (ok, reason).
+    Last-stop / protective stop / cover on an existing lot is not new STK
+    risk — exits, oca, trailing, and named option overlays still pass.
+    Named defined-risk option plays (vertical, calendar, butterfly, iron)
+    still pass. Operator control knob — not strategy taste. Returns (ok, reason).
     """
     cfg = get_config()
     if not getattr(cfg, "defined_risk_only", False):
         return True, "defined_risk_off"
-    if getattr(proposal.params, "closing_position", False):
-        return True, "closing"
+    if is_exit_or_management(proposal):
+        if getattr(proposal.params, "closing_position", False):
+            return True, "closing"
+        return True, "management"
     strat = str(proposal.strategy or "")
     if strat in _DEFINED_RISK_FORBIDDEN:
         return False, (
@@ -101,6 +107,11 @@ def check_defined_risk_only(proposal: OrderProposal) -> Tuple[bool, str]:
                 f"defined_risk_only: short {strat} rejected "
                 "(use action=BUY or disable defined_risk_only)"
             )
+    if strat not in OPTION_STRATEGIES:
+        return False, (
+            f"defined_risk_only: {strat} is undefined STK risk "
+            "(operator gate)"
+        )
     return True, "ok"
 
 
@@ -673,15 +684,16 @@ class RiskGate:
             return True, "exit/management bypass"
 
         cfg = get_config()
+        # defined_risk_only is an operator hard gate, not a paper-gates toggle.
+        ok_dr, why_dr = check_defined_risk_only(proposal)
+        if not ok_dr:
+            return False, why_dr
+
         if not cfg.risk_gates_enabled:
             return True, "risk gates disabled"
 
         if self.is_halted:
             return False, f"Trading halted: {self.halt_reason}"
-
-        ok_dr, why_dr = check_defined_risk_only(proposal)
-        if not ok_dr:
-            return False, why_dr
 
         try:
             account = await connector.get_account_summary()

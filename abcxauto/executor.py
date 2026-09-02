@@ -13,7 +13,11 @@ from abcxauto.proposals import (
     params_for_journal,
     validate_proposal,
 )
-from abcxauto.risk_gates import get_risk_gate, is_exit_or_management
+from abcxauto.risk_gates import (
+    check_defined_risk_only,
+    get_risk_gate,
+    is_exit_or_management,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -571,6 +575,21 @@ async def _verify_arena_concentration(
     return {"error": reason, "status": "rejected"}
 
 
+def _verify_defined_risk_only(proposal: OrderProposal) -> Optional[Dict[str, Any]]:
+    """defined_risk_only on send even when paper risk_gates_enabled is off.
+
+    Isolation fixtures patch this module's ``get_config`` with
+    ``defined_risk_only=False`` to opt out. Production floor is True. One
+    writer: ``check_defined_risk_only``.
+    """
+    if not bool(getattr(get_config(), "defined_risk_only", True)):
+        return None
+    ok, reason = check_defined_risk_only(proposal)
+    if ok:
+        return None
+    return {"error": reason, "status": "rejected"}
+
+
 async def execute_proposal(
     proposal: OrderProposal, connector: Any, *, source: str = "agent"
 ) -> Dict[str, Any]:
@@ -599,6 +618,12 @@ async def execute_proposal(
         return rejection
 
     rejection = await _verify_arena_concentration(proposal, connector)
+    if rejection:
+        logger.warning(f"Proposal #{proposal.id} blocked: {rejection['error']}")
+        journal.record_dispatch(journal_id, False, rejection)
+        return rejection
+
+    rejection = _verify_defined_risk_only(proposal)
     if rejection:
         logger.warning(f"Proposal #{proposal.id} blocked: {rejection['error']}")
         journal.record_dispatch(journal_id, False, rejection)

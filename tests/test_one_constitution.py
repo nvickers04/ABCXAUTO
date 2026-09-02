@@ -56,6 +56,7 @@ def test_defined_risk_and_cash_only_fire_on_both_ports(monkeypatch):
                 "trading_mode": mode,
                 "defined_risk_only": True,
                 "cash_only": True,
+                "risk_posture": "balanced",
             }
         )
         monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda c=cfg: c)
@@ -65,6 +66,22 @@ def test_defined_risk_and_cash_only_fire_on_both_ports(monkeypatch):
         ok, why = check_defined_risk_only(ratio)
         assert ok is False
         assert "defined_risk_only" in why
+        mb = validate_proposal(
+            "market_bracket",
+            {
+                "symbol": "SIRI",
+                "quantity": 10,
+                "direction": "LONG",
+                "stop_price": 28.50,
+                "target_price": 31.00,
+            },
+            RATIONALE,
+            quote_last=29.75,
+        )
+        ok_stk, why_stk = check_defined_risk_only(mb)
+        assert ok_stk is False
+        assert "defined_risk_only" in why_stk
+        assert cfg.defined_risk_only is True
 
 
 
