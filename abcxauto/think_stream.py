@@ -110,6 +110,23 @@ def empty_grok_segment(buf: str) -> bool:
     return _grok_segment_empty(text[last:])
 
 
+def empty_or_junk_grok_tip(buf: str) -> bool:
+    """Last ``--- GROK ---`` is silent, think-only, empty, or a junk ``?`` say.
+
+    Wall-clock recover uses the tip content, not ``stream_round``'s stop
+    code. A [say] with real words still sits. A tool chip in this segment
+    means clerk results are still landing.
+    """
+    text = str(buf or "")
+    last = text.rfind("--- GROK")
+    if last < 0:
+        return False
+    seg = text[last:]
+    if _grok_segment_empty(seg):
+        return True
+    return _grok_segment_junk_say(seg)
+
+
 def empty_grok_after_tools(buf: str) -> bool:
     """Hung empty GROK after tools and/or send returned. Not a sit clock.
 
@@ -178,6 +195,34 @@ def _grok_segment_empty(seg: str) -> bool:
         if in_say:
             return False
     return True
+
+
+def _grok_segment_junk_say(seg: str) -> bool:
+    """True when this GROK banner's [say] is empty or a lone '?'."""
+    lines = [ln.strip() for ln in str(seg or "").splitlines()]
+    if lines and lines[0].startswith("--- GROK"):
+        lines = lines[1:]
+    said: list[str] = []
+    in_say = False
+    for ln in lines:
+        if not ln:
+            continue
+        if ln.startswith("--- GROK"):
+            continue
+        if ln.startswith("[stream "):
+            continue
+        if ln == "[think]":
+            in_say = False
+            continue
+        if ln == "[say]":
+            in_say = True
+            continue
+        if _TOOL_CHIP_RE.match(ln):
+            return False
+        if in_say:
+            said.append(ln)
+    raw = "\n".join(said).strip()
+    return (not raw) or raw == "?"
 
 
 def _paint(kind: str, text: str) -> str:

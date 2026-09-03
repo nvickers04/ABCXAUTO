@@ -95,6 +95,8 @@ class BrainTurn:
     scan_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Last stream_round had no [say] after tools/send. Not a sit.
     trailing_empty_grok: bool = False
+    # Fill / order_change / unprotected / desk-fact inject landed on this chat.
+    poked: bool = False
 
     def look_failed(self) -> bool:
         """True empty / lone '?' only. A real say or send/fill is not junk.
@@ -138,9 +140,15 @@ _STREAM_ABORT_MARKERS = (
 # send, …). Short dead wait, then stream_round again on this chat. A
 # send does not complete the look. [think] without [say] is hung.
 # Not a sit clock, not _cold_next, not a new messages list.
+# A poke / desk-fact inject on a kept chat is the same class — #153
+# keyed recover on this-round tool_trace, so a post-poke empty sat.
 EMPTY_GROK_TRIES = 2
 EMPTY_GROK_DEAD_S = 2.0
 EMPTY_GROK_RECOVER_TRIES = 2
+# Wall-clock for a GROK tip with no [say]. Not stream stop==empty.
+# Matches STREAM_CHUNK_S * STREAM_IDLE_LIMIT so a silent banner aborts
+# even when think tokens keep resetting the per-chunk idle counter.
+SILENT_GROK_TIP_S = float(STREAM_CHUNK_S * STREAM_IDLE_LIMIT)
 
 
 def provider_overloaded(err: Any) -> bool:
@@ -177,32 +185,57 @@ def empty_grok_dead_s() -> float:
     return float(EMPTY_GROK_DEAD_S)
 
 
+def silent_grok_tip_s() -> float:
+    """Wall-clock to abort a GROK tip with no [say]. Env override for tests."""
+    raw = (os.environ.get("ABCXAUTO_SILENT_GROK_TIP_S") or "").strip()
+    if raw:
+        try:
+            return max(0.0, min(120.0, float(raw)))
+        except ValueError:
+            pass
+    return float(SILENT_GROK_TIP_S)
+
+
 def _empty_grok_round_after_work(
     turn: "BrainTurn",
     text: str,
     stop: str,
     *,
     chat_had_work: bool = False,
+    live_chat: bool = False,
+    poked: bool = False,
 ) -> bool:
-    """True when this stream_round had no [say] after tools and/or send.
+    """True when this stream_round had no [say] after work on this chat.
 
-    Work on this BrainTurn *or* this kept chat counts — recover re-enters
-    grok_turn with a fresh BrainTurn, so tool_trace would otherwise be empty
-    after option_quote already landed on the messages.
+    Work is this-round tools/send, work already on the kept messages,
+    a live poke / desk-fact inject, or a kept chat that already had GROK
+    (``live_chat``). Recover re-enters grok_turn with a fresh BrainTurn,
+    so tool_trace would otherwise be empty after option_quote or a poke
+    already landed on the messages.
 
     A send/fill does not complete the look. A [say] this round does.
     [think] without [say] is hung — not a checkpoint. ``stop==empty`` is
     GROK-banner-then-silence. #148 required stop==empty, so think-only
-    after option_quote sat.
+    after option_quote sat. #153 required this-round tools, so a poke
+    on a spoken look sat idle.
     """
-    if not (turn.tool_trace or turn.sends or chat_had_work):
+    if not (
+        turn.tool_trace
+        or turn.sends
+        or chat_had_work
+        or live_chat
+        or poked
+        or bool(getattr(turn, "poked", False))
+    ):
         return False
     if stop in ("interrupt", "loop"):
         return False
-    if stop == "empty":
+    if stop in ("empty", "silent"):
         return True
     # This round produced no spoken say. Think-only / whitespace / stall
-    # after a completed tool is hung — same class as a bare banner.
+    # after a completed tool, poke, or prior GROK is hung — same class
+    # as a bare banner. stop==ok / stalled still counts; do not require
+    # stop==empty.
     return _look_text_is_junk(text)
 
 
@@ -716,6 +749,7 @@ async def stream_round(
     agen = chat.stream().__aiter__()
     idle = 0
     reason = "ok"
+    tip_t0 = time.monotonic()
     while True:
         try:
             from abcxauto.park_clock import peek_interrupt
@@ -725,6 +759,18 @@ async def stream_round(
                 break
         except Exception:
             pass
+        silent_s = silent_grok_tip_s()
+        if (
+            silent_s > 0
+            and not saw_say
+            and not o
+            and (time.monotonic() - tip_t0) >= silent_s
+        ):
+            # Wall-clock hung tip — think dribble resets STREAM_IDLE but
+            # never [say]. stop==empty is not required.
+            think_emit("tool", "\n[stream silent]\n")
+            reason = "empty"
+            break
         try:
             resp, ch = await asyncio.wait_for(anext(agen), timeout=STREAM_CHUNK_S)
         except StopAsyncIteration:
@@ -733,7 +779,7 @@ async def stream_round(
             idle += 1
             if idle >= STREAM_IDLE_LIMIT:
                 think_emit("tool", "\n[stream stalled]\n")
-                reason = "stalled"
+                reason = "empty" if not saw_say and not o else "stalled"
                 break
             continue
         idle = 0
@@ -778,8 +824,9 @@ async def stream_round(
             if extra:
                 o = extra
                 break
-    # Bare --- GROK --- : stream ended with no think, no say. Not a timeout.
-    if reason == "ok" and not saw_think and not saw_say and not o:
+    # Hung GROK tip: no [say]. Think-only / stall / banner-then-silence
+    # are the same class. Do not require stop==empty from the SDK.
+    if reason in ("ok", "stalled") and not saw_say and not o:
         reason = "empty"
     try:
         from abcxauto.memory import get_journal
@@ -1678,6 +1725,13 @@ async def _grok_turn_impl(
         lead = str(wake or "").splitlines()[0].strip() if wake else ""
         if appended and lead:
             think_emit("tool", f"{lead}\n")
+        if live_before is not None and appended:
+            # Desk-fact inject on a kept chat. Empty GROK after this is hung.
+            turn.poked = True
+            try:
+                g._chat_had_work = True
+            except Exception:
+                logger.debug("chat work stamp failed", exc_info=True)
         if resume and not appended:
             from abcxauto.park_clock import peek_interrupt
 
@@ -1690,6 +1744,11 @@ async def _grok_turn_impl(
                     turn.ended = True
                     _finish_look_chat(g, turn, session=session)
                     return turn
+                turn.poked = True
+                try:
+                    g._chat_had_work = True
+                except Exception:
+                    logger.debug("chat work stamp failed", exc_info=True)
             else:
                 # Duplicate lead-fact identity. Do not start a fresh go-do-desk.
                 turn.ended = True
@@ -1705,9 +1764,15 @@ async def _grok_turn_impl(
             from abcxauto.park_clock import peek_interrupt
 
             if peek_interrupt() is not None:
-                await _inject_live_poke(
+                ok = await _inject_live_poke(
                     chat, connector=connector, world=world, snap=snap, turn=turn
                 )
+                if ok:
+                    turn.poked = True
+                    try:
+                        g._chat_had_work = True
+                    except Exception:
+                        logger.debug("chat work stamp failed", exc_info=True)
                 continue
             text, response, stop = await stream_round(chat)
         except Exception as exc:
@@ -1743,9 +1808,11 @@ async def _grok_turn_impl(
             else:
                 turn.text = (turn.text + "\n" + text).strip()
         if stop == "interrupt":
-            await _inject_live_poke(
+            ok = await _inject_live_poke(
                 chat, connector=connector, world=world, snap=snap, turn=turn
             )
+            if ok:
+                turn.poked = True
             continue
         if stop == "loop":
             ran_out = False
@@ -1761,24 +1828,35 @@ async def _grok_turn_impl(
             # and not a completed look. #147 keyed this on
             # _look_is_empty_or_question (False after send). #148 gated on
             # stop==empty (no think AND no say), so think-only after
-            # option_quote / quote / book sat. Gate on THIS round: no say,
-            # no tool. [think] is not a checkpoint. A [say] this round sits.
+            # option_quote / quote / book sat. #153 gated on this-round
+            # tools, so a poke / fact inject on a kept chat sat idle.
+            # Gate on THIS round: no say, no tool. [think] is not a
+            # checkpoint. A [say] this round sits. stop==empty is not
+            # required — wall-clock silent / stall / junk tip count.
             empty_after_work = _empty_grok_round_after_work(
                 turn,
                 text,
                 stop,
                 chat_had_work=bool(getattr(g, "_chat_had_work", False)),
+                live_chat=live_before is not None,
+                poked=bool(getattr(turn, "poked", False)),
             )
             turn.trailing_empty_grok = empty_after_work
             if empty_after_work and empty_tries < EMPTY_GROK_TRIES:
                 empty_tries += 1
                 logger.warning(
-                    "empty GROK after tools/send — recover %s/%s same chat",
+                    "empty GROK after tools/send/poke — recover %s/%s same chat",
                     empty_tries,
                     EMPTY_GROK_TRIES,
                 )
                 await asyncio.sleep(empty_grok_dead_s())
                 continue
+            if empty_after_work:
+                logger.error(
+                    "empty GROK after tools/send/poke — cannot continue "
+                    "same chat after %s recovers",
+                    empty_tries,
+                )
             # Words (or empty) and no tools: stop calling the model. Chat
             # stays. Next call is fill / order_change / unprotected / poke
             # with this chat plus a fresh snap. Do not call again because it spoke.
@@ -1793,15 +1871,21 @@ async def _grok_turn_impl(
             snap=snap,
             turn=turn,
         )
-        if turn.tool_trace or turn.sends:
+        if turn.tool_trace or turn.sends or turn.poked:
             try:
                 g._chat_had_work = True
             except Exception:
                 logger.debug("chat work stamp failed", exc_info=True)
         if interrupted:
-            await _inject_live_poke(
+            ok = await _inject_live_poke(
                 chat, connector=connector, world=world, snap=snap, turn=turn
             )
+            if ok:
+                turn.poked = True
+                try:
+                    g._chat_had_work = True
+                except Exception:
+                    logger.debug("chat work stamp failed", exc_info=True)
     if ran_out:
         turn.tool_budget_hit = True
         think_emit("tool", "\n[think stopped: step ceiling]\n")

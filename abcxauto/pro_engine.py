@@ -264,6 +264,7 @@ class ProEngine:
         self._session_capped = False
         self._recover_same_chat = False
         self._recover_streak = 0
+        self._recover_gave_up = False
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
         from abcxauto.think_stream import bind_engine
@@ -980,17 +981,15 @@ class ProEngine:
         return empty_grok_dead_s()
 
     def _same_chat_recover_needed(self, out: dict | None, g: Any) -> bool:
-        """Empty GROK after any completed tool, or UNAVAILABLE/IOCP, live chat.
+        """Hung empty/junk GROK tip on a live chat — re-enter, do not sit.
 
-        A send does not complete the look. A trailing GROK with no [say]
-        after clerk results is hung — re-enter this chat. Not _cold_next.
-        [think] without [say] is hung. A [say] with content may sit.
+        Detection is the last GROK tip (empty / think-only / junk '?') plus
+        this-round junk rationale, not ``stream_round`` stop==empty.
 
-        #148 dropped the sends>0 skip but still sat when rationale was the
-        earlier tool-call say (not junk) and stop was not empty (think-only
-        after option_quote). Work on this look + last banner with no say
-        is enough — do not require junk whole-look rationale or chips in
-        the 24kb think_live window.
+        A poke / desk-fact inject on a kept chat is the same class as
+        tools/send. #153 required this-round tool_trace, so a post-poke
+        empty sat idle. A [say] with content still sits. Duplicate lead
+        fact (``_ended``) still sits.
         """
         if g is None or getattr(g, "chat", None) is None:
             return False
@@ -1003,16 +1002,16 @@ class ProEngine:
             is_stream_abort_error,
         )
 
-        streak = int(getattr(self, "_recover_streak", 0) or 0)
-        if streak >= EMPTY_GROK_RECOVER_TRIES:
-            return False
         tools = list(payload.get("tool_trace") or [])
         try:
             sends = int(payload.get("sends") or 0)
         except (TypeError, ValueError):
             sends = 0
-        had_work = bool(tools or sends > 0)
+        had_work = bool(tools or sends > 0 or payload.get("_poked"))
         live = str(getattr(self.state, "think_live", "") or "")
+        rationale = str(payload.get("rationale") or "")
+        junk_say = _look_text_is_junk(rationale)
+        hung = False
         if live:
             from abcxauto.think_stream import (
                 empty_grok_after_tools,
@@ -1020,21 +1019,31 @@ class ProEngine:
             )
 
             if empty_grok_after_tools(live):
-                return True
-            # Fat option_quote JSON can wipe [option_quote] from think_live.
-            # Last banner with no [say] after work is still hung.
-            if had_work and empty_grok_segment(live):
-                return True
+                hung = True
+            elif had_work and empty_grok_segment(live):
+                hung = True
         if payload.get("_empty_grok"):
-            return True
+            hung = True
         if is_stream_abort_error(payload.get("_stream_error") or ""):
-            return True
-        rationale = str(payload.get("rationale") or "")
-        if not _look_text_is_junk(rationale):
+            hung = True
+        if junk_say:
+            # This round empty/? on a live stay-up chat. Recover even when
+            # the poke painted no [fill] chip and this BrainTurn has no tools.
+            hung = True
+        streak = int(getattr(self, "_recover_streak", 0) or 0)
+        if streak >= EMPTY_GROK_RECOVER_TRIES:
+            if hung and not bool(getattr(self, "_recover_gave_up", False)):
+                self._recover_gave_up = True
+                logger.error(
+                    "empty/junk GROK — cannot continue same chat after %s recovers",
+                    streak,
+                )
+                try:
+                    self._note("LOOK", "empty/junk GROK — cannot continue")
+                except Exception:
+                    pass
             return False
-        if had_work:
-            return True
-        return False
+        return bool(hung)
 
     def _arm_same_chat_recover(self) -> None:
         self._recover_streak = int(getattr(self, "_recover_streak", 0) or 0) + 1
@@ -1196,6 +1205,7 @@ class ProEngine:
             "_ended": bool(getattr(turn, "ended", False)),
             "_stream_error": str(getattr(turn, "stream_error", "") or ""),
             "_empty_grok": bool(getattr(turn, "trailing_empty_grok", False)),
+            "_poked": bool(getattr(turn, "poked", False)),
             "_recover": recover,
         }
 
@@ -1515,6 +1525,9 @@ class ProEngine:
 
                 before_tok = billed_tokens_now()
                 try:
+                    if not getattr(self, "_recover_same_chat", False):
+                        self._recover_streak = 0
+                        self._recover_gave_up = False
                     out = await self._host_think(n, g, s, resume=resume)
                     if not out.get("_recover"):
                         self._recover_same_chat = False
