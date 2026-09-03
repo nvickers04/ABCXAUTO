@@ -31,7 +31,8 @@ RISK_CONFIG_KEYS = frozenset({
     "max_symbol_concentration_pct",
     "max_arena_concentration_pct",
 })
-# Knobs Grok may retune via self_tune (clamped to the walk-away floor).
+# Risk % knobs clamped to the walk-away floor on the operator write path.
+# Grok self_tune cannot persist OPERATOR_DISK_KEYS over the file.
 SET_RISK_KEYS = frozenset({
     "max_risk_per_trade_pct",
     "daily_loss_limit_pct",
@@ -471,7 +472,10 @@ def get_config() -> Config:
     """Env-backed config plus file-persisted risk knobs, agent_state, session overrides.
 
     Precedence: ``.env`` defaults < ``risk_settings.json`` < ``agent_state.json``
-    < session overrides. So the ``model`` the operator applies from Pro Settings
+    < session overrides. Operator disk knobs (mop / size% / premium% /
+    daily-loss / session_token_cap / floors / defined-risk / cash-only /
+    mode+port) are not taken from ``agent_state`` and ``self_tune`` cannot
+    persist over the file. The ``model`` the operator applies from Pro Settings
     beats ``ABCXAUTO_MODEL``, and ``scan_fetch_cap`` from ``self_tune`` beats both.
     """
     base = _load_env_config()

@@ -55,8 +55,9 @@ def test_set_risk_no_approval_needed(tmp_path, monkeypatch):
     clear_runtime_overrides()
 
     out = set_risk_knobs({"max_risk_per_trade_pct": 0.5}, persist=False)
-    assert out["status"] == "ok"
-    assert get_config().max_risk_per_trade_pct == 0.5
+    assert "max_risk_per_trade_pct" in (out.get("rejected") or {})
+    assert "max_risk_per_trade_pct" not in (out.get("applied") or {})
+    assert get_config().max_risk_per_trade_pct != 0.5
 
 
 def test_set_risk_tightens_inside_floor(tmp_path, monkeypatch):
@@ -67,8 +68,9 @@ def test_set_risk_tightens_inside_floor(tmp_path, monkeypatch):
 
     out = set_risk_knobs({"max_risk_per_trade_pct": 0.75, "max_peak_drawdown_pct": 5.0})
     assert out["status"] == "ok"
-    assert out["applied"]["max_risk_per_trade_pct"] == 0.75
-    assert get_config().max_risk_per_trade_pct == 0.75
+    assert "max_risk_per_trade_pct" not in (out.get("applied") or {})
+    assert "max_risk_per_trade_pct" in (out.get("rejected") or {})
+    assert get_config().max_risk_per_trade_pct != 0.75
     assert get_config().max_peak_drawdown_pct == 5.0
 
 
@@ -79,9 +81,9 @@ def test_set_risk_clamps_over_ceiling(tmp_path, monkeypatch):
     load_risk_settings(path)
 
     out = set_risk_knobs({"max_risk_per_trade_pct": 50.0})
-    assert out["status"] == "ok"
-    assert out["applied"]["max_risk_per_trade_pct"] == 25.0
-    assert out["clamped"]
+    assert "max_risk_per_trade_pct" in (out.get("rejected") or {})
+    assert "max_risk_per_trade_pct" not in (out.get("applied") or {})
+    assert get_config().max_risk_per_trade_pct == 25.0
 
 
 def test_executor_set_risk(tmp_path, monkeypatch):
@@ -99,12 +101,13 @@ def test_executor_set_risk(tmp_path, monkeypatch):
 
     result = asyncio.run(
         safe_execute(
-            {"strategy": "set_risk", "params": {"max_risk_per_trade_pct": 0.5}},
+            {"strategy": "set_risk", "params": {"max_peak_drawdown_pct": 6.0}},
             _C(),
         )
     )
     assert result["status"] == "ok"
-    assert get_config().max_risk_per_trade_pct == 0.5
+    assert get_config().max_peak_drawdown_pct == 6.0
+    assert get_config().max_risk_per_trade_pct == 25.0
 
 
 def test_live_keeps_defensive_identity(tmp_path, monkeypatch):

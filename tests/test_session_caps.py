@@ -94,9 +94,9 @@ def test_grok_may_tighten_not_weaken_session_caps():
     out = apply_self_tune({"session_look_cap": 40, "session_token_cap": 100_000})
     assert out["status"] == "ok"
     assert out["applied"]["session_look_cap"] == 40
-    assert out["applied"]["session_token_cap"] == 100_000
+    assert "session_token_cap" not in (out.get("applied") or {})
     assert get_config().session_look_cap == 40
-    assert get_config().session_token_cap == 100_000
+    assert get_config().session_token_cap == 400_000
 
 
 def test_caps_are_not_in_system_prompt_or_wake():

@@ -72,11 +72,13 @@ def test_cannot_weaken_daily_loss(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
     clear_risk_settings(path=path)
     load_risk_settings(path)
+    from abcxauto.config import update_risk_config
+
+    update_risk_config(daily_loss_limit_pct=25.0, persist=True)
     out = apply_self_tune({"daily_loss_limit_pct": 50.0}, persist=True)
-    assert out["status"] == "ok"
-    hi = RISK_FLOOR["daily_loss_limit_pct"][1]
-    assert get_config().daily_loss_limit_pct == hi
-    assert "daily_loss_limit_pct" in out["clamped"]
+    assert get_config().daily_loss_limit_pct == 25.0
+    assert "daily_loss_limit_pct" in (out.get("rejected") or {})
+    assert "daily_loss_limit_pct" not in (out.get("applied") or {})
 
 
 def test_cannot_disable_defined_risk():
@@ -86,13 +88,17 @@ def test_cannot_disable_defined_risk():
 
 
 def test_paper_self_tune_mop_is_not_capped_at_25():
-    """Grok-chosen N is not shoved into a baked 25. 0 stays off."""
-    out = apply_self_tune({"max_open_positions": 99}, persist=False)
-    assert out["status"] == "ok"
+    """Operator mop is not shoved into a baked 25. Grok cannot rewrite it. 0 stays off."""
+    from abcxauto.config import update_capacity_config
+
+    update_capacity_config(max_open_positions=99, persist=True)
+    out = apply_self_tune({"max_open_positions": 8}, persist=True)
+    assert "max_open_positions" in (out.get("rejected") or {})
     assert get_config().max_open_positions == 99
     assert get_config().max_open_positions != 25
-    off = apply_self_tune({"max_open_positions": 0}, persist=False)
-    assert off["status"] == "ok"
+    update_capacity_config(max_open_positions=0, persist=True)
+    off = apply_self_tune({"max_open_positions": 8}, persist=True)
+    assert "max_open_positions" in (off.get("rejected") or {})
     assert get_config().max_open_positions == 0
 
 
@@ -157,9 +163,14 @@ def test_live_levers_snapshot_does_not_invent_25():
 
 
 def test_can_tighten_risk():
-    out = apply_self_tune({"max_risk_per_trade_pct": 0.5}, persist=False)
-    assert out["status"] == "ok"
-    assert get_config().max_risk_per_trade_pct == 0.5
+    """Grok cannot persist over operator max_risk. File wins. 0 stays 0."""
+    from abcxauto.config import update_risk_config
+
+    update_risk_config(max_risk_per_trade_pct=0, persist=True, _skip_clamp=True)
+    out = apply_self_tune({"max_risk_per_trade_pct": 0.5}, persist=True)
+    assert "max_risk_per_trade_pct" in (out.get("rejected") or {})
+    assert "max_risk_per_trade_pct" not in (out.get("applied") or {})
+    assert get_config().max_risk_per_trade_pct == 0.0
 
 
 def test_dead_pacing_and_control_dials_are_rejected():
@@ -282,22 +293,25 @@ def test_zero_off_pct_ceilings_survive_get_config(tmp_path, monkeypatch):
 
     off = apply_self_tune(
         {
-            "max_risk_per_trade_pct": 0,
-            "max_position_pct": 0,
-            "max_option_premium_pct": 0,
+            "max_risk_per_trade_pct": 0.5,
+            "max_position_pct": 5.0,
+            "max_option_premium_pct": 1.0,
         },
-        persist=False,
+        persist=True,
     )
-    assert off["status"] == "ok"
+    rejected = off.get("rejected") or {}
+    assert "max_risk_per_trade_pct" in rejected
+    assert "max_position_pct" in rejected
+    assert "max_option_premium_pct" in rejected
     assert get_config().max_risk_per_trade_pct == 0.0
     assert get_config().max_position_pct == 0.0
     assert get_config().max_option_premium_pct == 0.0
-    two = apply_self_tune({"max_risk_per_trade_pct": 2.0}, persist=False)
-    assert two["status"] == "ok"
-    assert get_config().max_risk_per_trade_pct == 2.0
-    lift = apply_self_tune({"max_risk_per_trade_pct": 0.1}, persist=False)
-    assert lift["status"] == "ok"
-    assert get_config().max_risk_per_trade_pct == 0.25
+    two = apply_self_tune({"max_risk_per_trade_pct": 2.0}, persist=True)
+    assert "max_risk_per_trade_pct" in (two.get("rejected") or {})
+    assert get_config().max_risk_per_trade_pct == 0.0
+    lift = apply_self_tune({"max_risk_per_trade_pct": 0.1}, persist=True)
+    assert "max_risk_per_trade_pct" in (lift.get("rejected") or {})
+    assert get_config().max_risk_per_trade_pct == 0.0
 
 
 def test_clamp_risk_to_floor_rejects_nonfinite():
@@ -316,15 +330,16 @@ def test_malicious_self_tune_cannot_weaken_floor_or_go_live(tmp_path, monkeypatc
     monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
     clear_risk_settings(path=path)
     load_risk_settings(path)
-    apply_self_tune(
-        {
-            "max_risk_per_trade_pct": 0.5,
-            "max_position_pct": 5.0,
-            "daily_loss_limit_pct": 1.0,
-            "max_open_positions": 2,
-        },
+    from abcxauto.config import update_capacity_config, update_risk_config
+
+    update_risk_config(
+        max_risk_per_trade_pct=0.5,
+        max_position_pct=5.0,
+        daily_loss_limit_pct=1.0,
         persist=True,
+        _skip_clamp=True,
     )
+    update_capacity_config(max_open_positions=2, persist=True)
 
     payload = {
         "trading_mode": "live",
@@ -358,11 +373,11 @@ def test_malicious_self_tune_cannot_weaken_floor_or_go_live(tmp_path, monkeypatc
     assert cfg.ibkr_port == 7497
     assert cfg.is_paper is True
     assert not cfg.live_confirm
-    assert cfg.max_risk_per_trade_pct <= RISK_FLOOR["max_risk_per_trade_pct"][1]
-    assert cfg.max_position_pct <= RISK_FLOOR["max_position_pct"][1]
-    assert cfg.daily_loss_limit_pct <= RISK_FLOOR["daily_loss_limit_pct"][1]
-    # A Grok-chosen mop is not shoved into 25 on paper or live.
-    assert cfg.max_open_positions == 10_000
+    assert cfg.max_risk_per_trade_pct == 0.5
+    assert cfg.max_position_pct == 5.0
+    assert cfg.daily_loss_limit_pct == 1.0
+    # Operator mop is not shoved into 25, and Grok cannot rewrite it.
+    assert cfg.max_open_positions == 2
     assert math.isfinite(cfg.max_risk_per_trade_pct)
     assert math.isfinite(cfg.max_position_pct)
     assert math.isfinite(cfg.daily_loss_limit_pct)
@@ -370,6 +385,7 @@ def test_malicious_self_tune_cannot_weaken_floor_or_go_live(tmp_path, monkeypatc
     assert cfg.max_position_pct != 1e9
     assert cfg.daily_loss_limit_pct != 100
     assert cfg.max_open_positions != 25
+    assert cfg.max_open_positions != 10_000
     assert cfg.defined_risk_only is True
     assert cfg.cash_only is True
     assert cfg.risk_gates_enabled is True
@@ -437,15 +453,17 @@ def test_nested_malicious_risk_blob_clamps_and_stays_paper():
     cfg = get_config()
     assert cfg.trading_mode == "paper"
     assert cfg.ibkr_port == 7497
+    # Nested operator knobs are ignored — defaults stay, mop is not 99.
     assert cfg.max_risk_per_trade_pct == RISK_FLOOR["max_risk_per_trade_pct"][1]
     assert cfg.max_position_pct == RISK_FLOOR["max_position_pct"][1]
     assert cfg.daily_loss_limit_pct == RISK_FLOOR["daily_loss_limit_pct"][1]
-    assert cfg.max_open_positions == 99
+    assert cfg.max_open_positions == 0
     rejected = out.get("rejected") or {}
     assert "trading_mode" in rejected
     assert "ibkr_port" in rejected
     applied = out.get("applied") or {}
-    assert applied.get("max_risk_per_trade_pct") == RISK_FLOOR["max_risk_per_trade_pct"][1]
+    assert "max_risk_per_trade_pct" not in applied
+    assert "max_open_positions" not in applied
 
 
 def test_floor_clamp_repairs_nonfinite():
@@ -474,9 +492,12 @@ def test_floor_clamp_repairs_nonfinite():
 
 
 def test_set_risk_alias_no_approval():
-    out = set_risk_knobs({"max_risk_per_trade_pct": 0.6}, persist=False)
+    out = set_risk_knobs({"max_peak_drawdown_pct": 8.0}, persist=False)
     assert out["status"] == "ok"
-    assert get_config().max_risk_per_trade_pct == 0.6
+    assert get_config().max_peak_drawdown_pct == 8.0
+    blocked = set_risk_knobs({"max_risk_per_trade_pct": 0.6}, persist=False)
+    assert "max_risk_per_trade_pct" in (blocked.get("rejected") or {})
+    assert get_config().max_risk_per_trade_pct != 0.6
 
 
 def test_nested_self_tune_universe(tmp_path, monkeypatch):
@@ -849,9 +870,12 @@ def test_grok_may_set_open_positions_to_two(tmp_path, monkeypatch):
 
 
 def test_can_self_tune_open_positions_to_three():
+    from abcxauto.config import update_capacity_config
+
+    update_capacity_config(max_open_positions=2, persist=True)
     out = apply_self_tune({"max_open_positions": 3}, persist=False)
-    assert out["status"] == "ok"
-    assert get_config().max_open_positions == 3
+    assert "max_open_positions" in (out.get("rejected") or {})
+    assert get_config().max_open_positions == 2
 
 
 def test_self_tune_still_cannot_disable_live_floor_or_mode():
@@ -953,7 +977,9 @@ def test_slot_cap_armed_is_positive_mop_only():
 
 
 def test_live_self_tune_mop_zero_stays_off(tmp_path, monkeypatch):
-    """Live self_tune 0 is off — not restored to 15, not capped at 25."""
+    """Live operator mop 0 stays off — Grok cannot restore 15 or cap at 25."""
+    from abcxauto.config import update_capacity_config
+
     path = tmp_path / "risk.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
@@ -962,8 +988,9 @@ def test_live_self_tune_mop_zero_stays_off(tmp_path, monkeypatch):
     clear_risk_settings(path=path)
     load_risk_settings(path)
     get_config.cache_clear()
-    out = apply_self_tune({"max_open_positions": 0}, persist=False)
-    assert out["status"] == "ok"
+    update_capacity_config(max_open_positions=0, persist=True)
+    out = apply_self_tune({"max_open_positions": 8}, persist=False)
+    assert "max_open_positions" in (out.get("rejected") or {})
     assert get_config().max_open_positions == 0
     assert get_config().max_open_positions != 15
     assert get_config().max_open_positions != 25
