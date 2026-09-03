@@ -128,10 +128,11 @@ async def test_floors_off_skips_pct_but_blocks_unknown_option_and_short(monkeypa
     cfg = _cfg(
         sizing_floors=False,
         trading_mode="paper",
+        ibkr_port=7497,
         risk_posture="balanced",
         max_position_pct=1.0,
         max_risk_per_trade_pct=0.5,
-        daily_loss_limit_pct=1.0,
+        daily_loss_limit_pct=25.0,
         max_peak_drawdown_pct=1.0,
         cash_only=True,
         max_open_positions=0,
@@ -143,7 +144,7 @@ async def test_floors_off_skips_pct_but_blocks_unknown_option_and_short(monkeypa
     conn = FakeConnector(
         account={
             "netliquidation": 10_000.0,
-            "dailypnl": -500.0,  # would trip daily-loss if floors on
+            "dailypnl": 0.0,  # daily-loss is always-on; keep PnL above the floor
             "TotalCashValue": 100.0,
         }
     )
@@ -176,6 +177,38 @@ async def test_floors_off_skips_pct_but_blocks_unknown_option_and_short(monkeypa
     ok, reason = await gate.pre_trade_check(buy, conn)
     assert ok is False
     assert reason == "size_unknown_notional"
+
+
+@pytest.mark.asyncio
+async def test_floors_off_still_halts_daily_loss_walk_away(monkeypatch):
+    """Paper sizing_floors off must not skip the 25% daily-loss breaker."""
+    cfg = _cfg(
+        sizing_floors=False,
+        trading_mode="paper",
+        ibkr_port=7497,
+        daily_loss_limit_pct=25.0,
+        max_peak_drawdown_pct=15.0,
+        max_symbol_concentration_pct=15.0,
+        cash_only=False,
+        max_open_positions=0,
+        defined_risk_only=False,
+    )
+    assert cfg.sizing_floors is False
+    assert sizing_floors_active(cfg) is False
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    gate = reset_risk_gate()
+    net_liq = 100_000.0
+    conn = FakeConnector(
+        account={
+            "netliquidation": net_liq,
+            "dailypnl": -(cfg.daily_loss_limit_pct / 100.0) * net_liq,
+        }
+    )
+    ok, reason = await gate.pre_trade_check(_bracket(), conn)
+    assert ok is False
+    assert "daily_loss" in reason.lower()
+    assert gate.halt_kind == "daily_loss"
 
 
 @pytest.mark.asyncio

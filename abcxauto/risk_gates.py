@@ -18,6 +18,11 @@ sector/theme/cap bucket from arenas we already scan, as a % of NL. Per-name
 cannot see NVDA+SMCI+ARM+AVGO as four names in one bet. Scan sorts are not
 buckets. This check lives on send even when paper ``risk_gates_enabled`` is
 off — same class as mode_size, not the floors-gated per-name helper.
+
+Daily-loss halt (``daily_loss_limit_pct``) is the walk-away breaker. It
+runs on new entries whenever the pct is positive — paper and live, even
+when ``sizing_floors`` is off. 0 is not an off switch (RISK_FLOOR).
+Peak-drawdown and per-name concentration stay floors-gated.
 """
 
 from __future__ import annotations
@@ -712,13 +717,11 @@ class RiskGate:
             return False, "Risk gate fail-closed: NetLiquidation unavailable or non-positive"
         # Missing DailyPnL is flat (IBKR often omits it early session). A
         # present but non-finite tag is unknown — fail-closed when the
-        # breaker is armed, and never treat NaN as "no loss".
+        # daily-loss breaker is armed (not gated on sizing_floors), and
+        # never treat NaN as "no loss".
         floors_on = sizing_floors_active(cfg)
-        if (
-            pnl_state == "unreadable"
-            and floors_on
-            and cfg.daily_loss_limit_pct > 0
-        ):
+        breaker_on = cfg.daily_loss_limit_pct > 0
+        if pnl_state == "unreadable" and breaker_on:
             return False, "Risk gate fail-closed: DailyPnL unreadable"
         if daily_pnl is None:
             daily_pnl = 0.0
@@ -732,7 +735,7 @@ class RiskGate:
             if opt_notional is None:
                 return False, "size_unknown_notional"
 
-        if floors_on and cfg.daily_loss_limit_pct > 0:
+        if breaker_on:
             limit = -(cfg.daily_loss_limit_pct / 100.0) * book
             if daily_pnl <= limit:
                 day_pct = _pct_of_nl(daily_pnl, book)
