@@ -3861,6 +3861,8 @@ async def test_spoken_say_then_later_empty_round_keeps_chat(monkeypatch):
     from abcxauto.park_clock import clear_interrupt
 
     clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
 
     async def fake_read(name, args, **_k):
         return json.dumps({"ok": name})
@@ -3905,12 +3907,15 @@ async def test_spoken_say_then_later_empty_round_keeps_chat(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fill_interrupt_mid_say_keeps_spoken_text():
+async def test_fill_interrupt_mid_say_keeps_spoken_text(monkeypatch):
     """A fill poke mid-stream must not drop the spoken say from junk/keep."""
+    from abcxauto import brain
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
 
     clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
 
     class Chat:
         n = 0
@@ -4607,6 +4612,21 @@ def test_empty_grok_round_after_send_is_not_look_end():
     ) is True
     bare = BrainTurn(text="")
     assert _empty_grok_round_after_work(bare, "", "empty") is False
+    # 2026-09-03 14:03 CT: poke / fact inject on a kept chat with prior GROK.
+    # #153 required this-round tools, so empty after poke sat idle.
+    assert _empty_grok_round_after_work(bare, "", "empty", live_chat=True) is True
+    assert _empty_grok_round_after_work(bare, "", "ok", live_chat=True) is True
+    assert _empty_grok_round_after_work(bare, "", "stalled", live_chat=True) is True
+    poked = BrainTurn(text="", poked=True)
+    assert _empty_grok_round_after_work(poked, "", "empty") is True
+    assert _empty_grok_round_after_work(poked, "", "ok") is True
+    spoken_live = BrainTurn(text="watching NU STK")
+    assert (
+        _empty_grok_round_after_work(
+            spoken_live, "watching NU STK", "ok", live_chat=True
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -4643,3 +4663,176 @@ async def test_recover_flag_reenters_same_chat_without_wake_reintro():
     # Recover must not open a new chat or append a fresh desk wake.
     assert int(getattr(g, "_wake_n", 0) or 0) == wake_n
     assert getattr(g, "_wake_appended", True) is False
+
+
+@pytest.mark.asyncio
+async def test_empty_after_poke_on_prior_grok_reenters_same_chat(monkeypatch):
+    """2026-09-03 ~14:03 CT pid 12108: poke on a looking chat, then empty GROK.
+
+    Prior GROK had a real say (NU STK / IBIT / XLF on the book). Lead poked
+    the book. Next GROK was empty/junk, zero tickets. #153 recovered empty
+    after tools in the same grok_turn, not after a poke/fact inject on a
+    kept chat. Re-enter this chat with the poke still on the messages.
+    """
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+    g, created = _scripted_chat_client(
+        rounds=[
+            "watching NU STK 11, IBIT 47C, XLF 59C. No ticket yet.",
+            "",
+            "lots still on. NU STK 11. No ticket.",
+        ]
+    )
+    first = await grok_turn(
+        g, connector=None, world=_world(), snap={}, wake="session=regular send."
+    )
+    assert "NU STK" in (first.text or "")
+    assert first.trailing_empty_grok is False
+    live = g.chat
+    assert live is created[0]
+    note_interrupt(BookEvent("order_change", "NU STK 11, IBIT 47C, XLF 59C"))
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake="session=regular send.",
+        resume=True,
+    )
+    assert g.chat is live
+    assert len(created) == 1
+    assert second.poked is True
+    assert second.look_failed() is False
+    assert "lots still on" in (second.text or "")
+    assert int(getattr(live, "rounds", 0) or 0) >= 3
+    assert second.trailing_empty_grok is False
+    clear_interrupt()
+
+
+@pytest.mark.asyncio
+async def test_empty_after_poke_then_tools_reenters_same_chat(monkeypatch):
+    """Poke, then a read tool, then empty GROK: same-chat recover, then a say."""
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import BookEvent, clear_interrupt, note_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name, "lots": ["NU STK 11", "IBIT 47C", "XLF 59C"]})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="book", arguments="{}")
+
+    g, created = _scripted_chat_client(
+        rounds=[
+            "watching NU STK 11. Checking the book.",
+            ("", [TC()]),
+            "",
+            "book in. NU STK 11 still on. No ticket.",
+        ]
+    )
+    first = await grok_turn(
+        g, connector=None, world=_world(), snap={}, wake="session=regular send."
+    )
+    assert "NU STK" in (first.text or "")
+    live = g.chat
+    note_interrupt(BookEvent("order_change", "NU STK 11, IBIT 47C, XLF 59C"))
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake="session=regular send.",
+        resume=True,
+    )
+    assert g.chat is live
+    assert "book" in second.tool_trace
+    assert "book in" in (second.text or "")
+    assert second.look_failed() is False
+    assert second.trailing_empty_grok is False
+    clear_interrupt()
+
+
+@pytest.mark.asyncio
+async def test_silent_grok_tip_wall_clock_aborts_without_stop_empty(monkeypatch):
+    """Think dribble with no [say] aborts on wall-clock, not only stop==empty."""
+    import asyncio
+
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn, stream_round
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.02)
+    monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 50)
+    monkeypatch.setenv("ABCXAUTO_SILENT_GROK_TIP_S", "0.08")
+
+    class Chat:
+        n = 0
+
+        async def stream(self):
+            self.n += 1
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="", reasoning_content="IV on the 47C"
+            )
+            await asyncio.sleep(2.0)
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="never reached", reasoning_content=""
+            )
+
+    chat = Chat()
+    t0 = asyncio.get_event_loop().time()
+    text, _resp, stop = await stream_round(chat, emit_stage=True)
+    elapsed = asyncio.get_event_loop().time() - t0
+    assert stop == "empty"
+    assert not (text or "").strip()
+    assert elapsed < 1.0
+    # grok_turn on a kept chat recovers the silent tip.
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+
+    class RecoverChat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content="still thinking"
+                )
+                await asyncio.sleep(2.0)
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="lots still on. No ticket.",
+                reasoning_content="",
+            )
+
+    live = RecoverChat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: live)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=live,
+        _wake_n=1,
+        _chat_had_work=False,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert "lots still on" in (turn.text or "")
+    assert turn.look_failed() is False
+    assert g.chat is live
+    assert live.n >= 2
+

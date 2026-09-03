@@ -1352,8 +1352,15 @@ async def test_paper_premarket_stay_up_writes_no_sit_clock(monkeypatch, tmp_path
 
 @pytest.mark.asyncio
 async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
-    """After empty/? the host sits in the same chat. No sit clock. No _cold_next."""
+    """Junk/empty recovers same chat (bounded), then sits. Never _cold_next.
+
+    2026-09-03 14:03 CT: junk-idle parked the look with no recover after a
+    poke. Recover first; after EMPTY_GROK_RECOVER_TRIES, sit. Chat kept.
+    """
+    from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
+
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
     times: list[float] = []
     resumes: list[bool] = []
     ensure_calls: list[object] = []
@@ -1365,6 +1372,7 @@ async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
     async def think(self, n, g, s, *, resume=False):
         times.append(time.monotonic())
         resumes.append(resume)
+        g.chat = g.chat or object()
         return {
             "cycle": n,
             "pnl": 0,
@@ -1378,8 +1386,9 @@ async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
     monkeypatch.setattr("abcxauto.park_clock.set_wake", boom_ensure)
     eng = ProEngine()
     assert eng.start() is None
+    want = 1 + EMPTY_GROK_RECOVER_TRIES
     deadline = time.time() + 4
-    while time.time() < deadline and len(times) < 1:
+    while time.time() < deadline and len(times) < want:
         eng.drain_apply()
         await asyncio.sleep(0.05)
     idle_until = time.time() + 0.4
@@ -1388,8 +1397,8 @@ async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
         await asyncio.sleep(0.05)
     eng.stop_engine()
     eng.drain_apply()
-    assert len(times) == 1
-    assert resumes == [True]
+    assert len(times) == want
+    assert resumes == [True] * want
     assert eng._cold_next is False
     assert eng._resume_think is False
     assert ensure_calls == []
@@ -1401,12 +1410,16 @@ async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_failed_look_idles_without_set_wake_clock(monkeypatch, tmp_path):
+    from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
+
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.4")
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
     times: list[float] = []
 
     async def think(self, n, g, s, *, resume=False):
         times.append(time.monotonic())
+        g.chat = g.chat or object()
         return {
             "cycle": n,
             "pnl": 0,
@@ -1419,8 +1432,9 @@ async def test_failed_look_idles_without_set_wake_clock(monkeypatch, tmp_path):
     _wire_stay_up_engine(monkeypatch, session="regular", think=think)
     eng = ProEngine()
     assert eng.start() is None
+    want = 1 + EMPTY_GROK_RECOVER_TRIES
     deadline = time.time() + 4
-    while time.time() < deadline and len(times) < 1:
+    while time.time() < deadline and len(times) < want:
         eng.drain_apply()
         await asyncio.sleep(0.05)
     idle_until = time.time() + 0.4
@@ -1429,7 +1443,7 @@ async def test_failed_look_idles_without_set_wake_clock(monkeypatch, tmp_path):
         await asyncio.sleep(0.05)
     eng.stop_engine()
     eng.drain_apply()
-    assert len(times) == 1
+    assert len(times) == want
     assert eng._cold_next is False
     from abcxauto.park_clock import load_alarm
 
@@ -1537,6 +1551,111 @@ async def test_fill_poke_after_sit_opens_a_look(monkeypatch, tmp_path):
     eng.drain_apply()
     assert len(resumes) == 2
     assert eng._cold_next is False
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is None
+
+
+@pytest.mark.asyncio
+async def test_empty_after_poke_with_prior_grok_live_worker_reenters(
+    monkeypatch, tmp_path
+):
+    """2026-09-03 ~14:03 CT pid 12108: spoken GROK, book poke, empty tip.
+
+    Think_live has prior [say] then a bare GROK after a desk-fact inject
+    (no [fill] chip). This-round tool_trace is empty. #153 sat. Recover
+    same chat, then a real say. Zero tickets on the hung tip.
+    """
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
+    resumes: list[bool] = []
+    traces: list[list[str]] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import take_interrupt
+
+        take_interrupt()
+        g.chat = g.chat or object()
+        resumes.append(resume)
+        if len(resumes) == 1:
+            self.state.think_live = (
+                "--- GROK ---\n[say]\nwatching NU STK 11, IBIT 47C, XLF 59C\n"
+            )
+            traces.append([])
+            return {
+                "cycle": n,
+                "pnl": 0,
+                "equity": 100000,
+                "_failed": False,
+                "rationale": "watching NU STK 11, IBIT 47C, XLF 59C",
+                "tool_trace": [],
+                "sends": 0,
+            }
+        if len(resumes) == 2:
+            self.state.think_live = (
+                "--- GROK ---\n[say]\nwatching NU STK 11, IBIT 47C, XLF 59C\n"
+                "unprotected=NU STK\n"
+                "--- GROK ---\n"
+            )
+            traces.append([])
+            return {
+                "cycle": n,
+                "pnl": 0,
+                "equity": 100000,
+                "_failed": True,
+                "rationale": "",
+                "tool_trace": [],
+                "sends": 0,
+                "_poked": True,
+            }
+        self.state.think_live = (
+            "--- GROK ---\n[say]\nwatching NU STK 11, IBIT 47C, XLF 59C\n"
+            "unprotected=NU STK\n"
+            "--- GROK ---\n[say]\nlots still on. No ticket.\n"
+        )
+        traces.append([])
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "lots still on. No ticket.",
+            "tool_trace": [],
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.25
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert len(resumes) == 1
+    _poke_book(eng, "order_change", "NU STK 11, IBIT 47C, XLF 59C")
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 3:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.3
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) == 3
+    assert resumes[0] is True
+    assert resumes[1] is True
+    assert resumes[2] is True
+    assert eng._cold_next is False
+    assert eng._recover_same_chat is False
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is None
 
 
 @pytest.mark.asyncio
@@ -1961,6 +2080,42 @@ def test_same_chat_recover_needed_is_empty_after_tools_not_spoken():
         {"rationale": "", "tool_trace": ["book"], "sends": 0},
         SimpleNamespace(chat=None),
     ) is False
+    # 2026-09-03 14:03 CT: poke / fact inject, empty this round, prior GROK
+    # on the kept chat. No this-round tool_trace. Recover anyway.
+    assert (
+        eng._same_chat_recover_needed(
+            {"rationale": "", "tool_trace": [], "sends": 0, "_poked": True},
+            g,
+        )
+        is True
+    )
+    assert (
+        eng._same_chat_recover_needed(
+            {"rationale": "?", "tool_trace": [], "sends": 0},
+            g,
+        )
+        is True
+    )
+    eng.state.think_live = (
+        "--- GROK ---\n[say]\nwatching NU STK 11\n"
+        "unprotected=NU STK\n"
+        "--- GROK ---\n"
+    )
+    assert (
+        eng._same_chat_recover_needed(
+            {"rationale": "", "tool_trace": [], "sends": 0},
+            g,
+        )
+        is True
+    )
+    # Duplicate lead fact still sits.
+    assert (
+        eng._same_chat_recover_needed(
+            {"rationale": "", "_ended": True, "sends": 0},
+            g,
+        )
+        is False
+    )
     # Production 2026-09-01: send_calls>0 then bare --- GROK ---. #147
     # returned False here and stay-up sat.
     assert (

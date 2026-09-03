@@ -11,6 +11,7 @@ from abcxauto.think_stream import (
     emit,
     empty_grok_after_tools,
     empty_grok_segment,
+    empty_or_junk_grok_tip,
     subscribe,
     unsubscribe,
 )
@@ -72,6 +73,33 @@ def test_empty_grok_after_tools_is_the_hung_keepfile():
     assert empty_grok_segment(spoken) is False
     assert empty_grok_after_tools(empty_no_tools) is False
     assert empty_grok_after_tools("") is False
+
+
+def test_empty_or_junk_grok_tip_is_silent_think_only_or_question():
+    """Wall-clock recover looks at the tip, not stream stop==empty."""
+    empty = "--- GROK ---\n"
+    think_only = "--- GROK ---\n[think]\nIV on IBIT 47C\n"
+    junk = "--- GROK ---\n[say]\n?\n"
+    spoken = "--- GROK ---\n[say]\nwatching NU STK 11\n"
+    after_poke = (
+        "--- GROK ---\n"
+        "watching NU STK 11\n"
+        "unprotected=NU STK\n"
+        "--- GROK ---\n"
+    )
+    after_tools = "--- GROK ---\n[book]\n--- GROK ---\n"
+    landing = "--- GROK ---\n[book]\n"
+    assert empty_or_junk_grok_tip(empty) is True
+    assert empty_or_junk_grok_tip(think_only) is True
+    assert empty_or_junk_grok_tip(junk) is True
+    assert empty_or_junk_grok_tip(spoken) is False
+    assert empty_or_junk_grok_tip(after_poke) is True
+    assert empty_or_junk_grok_tip(after_tools) is True
+    assert empty_or_junk_grok_tip(landing) is False
+    assert empty_or_junk_grok_tip("") is False
+    # Fact inject is not a [tool] chip — empty_grok_after_tools misses it.
+    assert empty_grok_after_tools(after_poke) is False
+    assert empty_grok_segment(after_poke) is True
 
 
 def test_ascii_text_is_cp1252_safe():
