@@ -2726,7 +2726,7 @@ def test_self_tune_tool_is_flat():
     assert "params" not in props
     desc = str(getattr(_tool_fn("self_tune"), "description", "") or "")
     assert "mode band" in desc
-    assert "tighten only" in desc
+    assert "tightens only" in desc
     assert "baked 15/25" not in desc
 
 
