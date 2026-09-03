@@ -196,6 +196,16 @@ def _isolate_open_risk_and_structure_files(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_cancel_guard():
+    """10147 / look-budget cancel state is process-life; do not leak across tests."""
+    from abcxauto.protect import reset_cancel_guard_for_tests
+
+    reset_cancel_guard_for_tests()
+    yield
+    reset_cancel_guard_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_desk_state(tmp_path, monkeypatch):
     """Pytest must not clobber the live last_turn / wake files."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "grok_wake.json"))

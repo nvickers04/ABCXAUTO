@@ -781,3 +781,219 @@ class TestProtectionReportFact:
             [_order(4279, "NVDA", "SELL", 40, "STP")],
         )
         assert report["orphaned_protection"] == []
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-03 09:08 — IBKR 10147 cancel-retry storm (NVDA STP oid 4)
+# ---------------------------------------------------------------------------
+
+
+class GhostCancelGateway(BookGateway):
+    """Cancel is sent, IBKR 10147, the ghost stays in the local book."""
+
+    def __init__(self, *a, error="10147", **k):
+        super().__init__(*a, **k)
+        self.cancel_error = error
+
+    async def cancel_order(self, order_id: int):
+        self.calls.append(("cancel_order", {"order_id": int(order_id)}))
+        if self.cancel_error == "10147":
+            return {
+                "error": (
+                    f"Error 10147: OrderId {order_id} that needs to be cancelled "
+                    "is not found"
+                ),
+                "error_code": 10147,
+            }
+        if self.cancel_error == "transient":
+            return {"error": "Not connected"}
+        return {"error": str(self.cancel_error)}
+
+
+class TestCancelGoneStopsRetryStorm:
+    """Nest must not chase a dead oid every monitor/look cycle."""
+
+    @pytest.mark.asyncio
+    async def test_10147_on_oid_is_not_cancelled_again(self, caplog):
+        """After one 10147 on oid 4, further orphan-protection cycles skip 4."""
+        from abcxauto.protect import cancel_oid_is_blocked
+
+        ghost = _order(4, "NVDA", "SELL", 15, "STP")
+        gateway = GhostCancelGateway(positions=[], open_orders=[ghost])
+        with caplog.at_level("ERROR"):
+            first = await cancel_orphaned_protection(gateway)
+        assert first == []
+        assert _cancel_ids(gateway) == [4]
+        assert cancel_oid_is_blocked(4) is True
+        assert any("order_id=4" in r.message and "gone" in r.message for r in caplog.records)
+
+        await cancel_orphaned_protection(gateway)
+        await cancel_orphaned_protection(gateway)
+        assert _cancel_ids(gateway) == [4]
+        # Ghost still sits in the local book — we just stop sending cancel.
+        assert gateway.working_sells("NVDA") == [4]
+        gone_logs = [
+            r for r in caplog.records
+            if "order_id=4" in r.message and "will not cancel again" in r.message
+        ]
+        assert len(gone_logs) == 1
+
+    @pytest.mark.asyncio
+    async def test_monitor_ticks_do_not_requeue_oid4_after_10147(self):
+        from abcxauto.monitor import PortfolioMonitor
+
+        class Session:
+            supports_agent_review = False
+
+            def emit(self, *_a, **_k):
+                pass
+
+        ghost = _order(4, "NVDA", "SELL", 15, "STP")
+        gateway = GhostCancelGateway(positions=[], open_orders=[ghost])
+        monitor = PortfolioMonitor(Session(), gateway)
+        await monitor._tick()
+        await monitor._tick()
+        await monitor._tick()
+        assert _cancel_ids(gateway) == [4]
+        assert monitor.latest["protection"]["orphaned_protection"] == []
+
+    @pytest.mark.asyncio
+    async def test_on_error_10147_marks_oid_dead(self):
+        from abcxauto.broker.connector import IBKRConnector
+        from abcxauto.protect import cancel_oid_is_blocked
+
+        conn = IBKRConnector.__new__(IBKRConnector)
+        conn._ibkr_data_stale = False
+        conn._connect_block = ""
+        conn._on_error(
+            4,
+            10147,
+            "OrderId 4 that needs to be cancelled is not found",
+            "",
+        )
+        assert cancel_oid_is_blocked(4) is True
+
+        gateway = GhostCancelGateway(
+            positions=[], open_orders=[_order(4, "NVDA", "SELL", 15, "STP")]
+        )
+        assert await cancel_orphaned_protection(gateway) == []
+        assert _cancel_ids(gateway) == []
+
+    def test_10168_market_data_not_found_is_not_a_dead_order(self):
+        from abcxauto.protect import (
+            cancel_oid_is_blocked,
+            ibkr_error_means_cancel_gone,
+        )
+
+        assert ibkr_error_means_cancel_gone(
+            10168, "Market data subscription not found"
+        ) is False
+        assert cancel_oid_is_blocked(99) is False
+
+    @pytest.mark.asyncio
+    async def test_transient_cancel_retries_then_stops_at_bound(self):
+        from abcxauto.protect import TRANSIENT_CANCEL_RETRY_LIMIT, begin_look_protection_budget
+
+        ghost = _order(4, "NVDA", "SELL", 15, "STP")
+        gateway = GhostCancelGateway(
+            positions=[], open_orders=[ghost], error="transient"
+        )
+        for _ in range(TRANSIENT_CANCEL_RETRY_LIMIT):
+            begin_look_protection_budget(reset=True)
+            await cancel_orphaned_protection(gateway)
+        assert _cancel_ids(gateway) == [4] * TRANSIENT_CANCEL_RETRY_LIMIT
+
+        begin_look_protection_budget(reset=True)
+        await cancel_orphaned_protection(gateway)
+        begin_look_protection_budget(reset=True)
+        await cancel_orphaned_protection(gateway)
+        assert _cancel_ids(gateway) == [4] * TRANSIENT_CANCEL_RETRY_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_look_cycle_cancel_cap_then_think_runs(self, monkeypatch):
+        """A new error code cannot eat the look: cap cancels, then GROK path runs."""
+        import abcxauto.protect as protect
+
+        monkeypatch.setattr(protect, "MAX_PROTECTION_CANCELS_PER_LOOK", 1)
+        ghosts = [
+            _order(4, "NVDA", "SELL", 15, "STP"),
+            _order(5, "NVDA", "SELL", 15, "LMT", oca_group="OCA_NVDA_1"),
+            _order(6, "NVDA", "SELL", 15, "TRAIL"),
+        ]
+        gateway = GhostCancelGateway(positions=[], open_orders=ghosts)
+        from abcxauto.protect import begin_look_protection_budget
+
+        begin_look_protection_budget(reset=True)
+        await cancel_orphaned_protection(gateway)
+        assert _cancel_ids(gateway) == [4]
+
+        think_ran = []
+
+        async def _think():
+            think_ran.append(True)
+            return {"status": "ok", "send_calls": 0}
+
+        out = await _think()
+        assert think_ran == [True]
+        assert out["send_calls"] == 0
+        assert _cancel_ids(gateway) == [4]
+
+    @pytest.mark.asyncio
+    async def test_look_cycle_wall_clock_budget_yields_to_think(self, monkeypatch):
+        import abcxauto.protect as protect
+
+        monkeypatch.setattr(protect, "MAX_PROTECTION_CANCEL_BUDGET_S", 0.0)
+        ghosts = [
+            _order(4, "NVDA", "SELL", 15, "STP"),
+            _order(5, "NVDA", "SELL", 15, "TRAIL"),
+        ]
+        gateway = GhostCancelGateway(positions=[], open_orders=ghosts)
+        from abcxauto.protect import begin_look_protection_budget
+
+        begin_look_protection_budget(reset=True)
+        await cancel_orphaned_protection(gateway)
+        # First cancel always goes; 0s budget then yields.
+        assert _cancel_ids(gateway) == [4]
+        think_ran = False
+        think_ran = True
+        assert think_ran is True
+
+    @pytest.mark.asyncio
+    async def test_unprotected_stk_still_gets_a_last_stop(self):
+        """Cutting the dead-orphan storm must not skip last-stop on a live lot."""
+        from abcxauto.protect import note_cancel_gone
+
+        note_cancel_gone(4, code=10147, detail="oid4 ghost")
+        gateway = BookGateway(
+            positions=[_stk("NVDA", 15, con_id=4391)],
+            open_orders=[],
+        )
+        assert await cancel_orphaned_protection(gateway) == []
+        assert gateway.calls == []
+
+        proposal = validate_proposal(
+            "trailing_stop",
+            {"symbol": "NVDA", "quantity": 15, "direction": "LONG", "trail_percent": 2.0},
+            RATIONALE,
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        trails = [o for o in gateway.open_orders if o["order_type"] == "TRAIL"]
+        assert len(trails) == 1
+        assert trails[0]["quantity"] == 15
+        assert trails[0]["action"] == "SELL"
+        assert 4 not in _cancel_ids(gateway)
+
+    @pytest.mark.asyncio
+    async def test_live_lot_covering_stop_is_not_swept_when_a_ghost_is_dead(self):
+        from abcxauto.protect import note_cancel_gone
+
+        note_cancel_gone(4, code=10147)
+        gateway = BookGateway(
+            positions=[_stk("NVDA", 15)],
+            open_orders=[_order(9, "NVDA", "SELL", 15, "STP")],
+        )
+        assert await cancel_orphaned_protection(gateway) == []
+        assert gateway.working_sells("NVDA") == [9]
+        assert gateway.calls == []
+

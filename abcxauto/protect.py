@@ -17,13 +17,235 @@ leftover after flatten is not.
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _NAKED_OPEN = frozenset({"market_order", "limit_order", "stop_order"})
 # Same slack as trade_plan stacked-stop cover and the protection report.
 _COVER_QTY_SLACK = 0.51
 _FILL_SIDES = {"BUY": "BUY", "BOT": "BUY", "SELL": "SELL", "SLD": "SELL"}
 _STOP_TYPES = frozenset({"STP", "STP LMT", "TRAIL", "TRAIL LIMIT"})
+
+# IBKR 10147: "OrderId that needs to be cancelled is not found / does not exist".
+# 2026-09-03 09:08 paper 7497: nest retried NVDA STP oid 4 every cycle; 72× 10147
+# starved the look (0 model calls, send_calls=1). Once gone, never re-queue.
+PERMANENT_CANCEL_GONE_CODES = frozenset({10147})
+# Transient cancel failures (disconnect, timeout, TWS busy) retry this many
+# times per order_id, then that id is skipped for the rest of the process.
+TRANSIENT_CANCEL_RETRY_LIMIT = 3
+# Hard cap so a new error code cannot eat the look: after this many cancel
+# *attempts* or this many seconds of protection maintenance, remaining
+# orphans wait and GROK think runs.
+MAX_PROTECTION_CANCELS_PER_LOOK = 8
+MAX_PROTECTION_CANCEL_BUDGET_S = 2.0
+
+_cancel_gone_oids: set[int] = set()
+_cancel_gone_logged: set[int] = set()
+_transient_cancel_fails: dict[int, int] = {}
+_transient_logged: set[int] = set()
+_look_cancel_attempts = 0
+_look_budget_t0: float | None = None
+_look_budget_logged = False
+_look_budget_active = False
+
+
+def reset_cancel_guard_for_tests() -> None:
+    """Drop process-life cancel state. Tests only."""
+    global _look_cancel_attempts, _look_budget_t0, _look_budget_logged
+    global _look_budget_active
+    _cancel_gone_oids.clear()
+    _cancel_gone_logged.clear()
+    _transient_cancel_fails.clear()
+    _transient_logged.clear()
+    _look_cancel_attempts = 0
+    _look_budget_t0 = None
+    _look_budget_logged = False
+    _look_budget_active = False
+
+
+def _as_oid(order_id: Any) -> int | None:
+    try:
+        oid = int(order_id)
+    except (TypeError, ValueError):
+        return None
+    return oid if oid > 0 else None
+
+
+def _error_text_means_gone(blob: str) -> bool:
+    b = str(blob or "").lower()
+    if "10147" in b:
+        return True
+    if "needs to be cancelled is not found" in b:
+        return True
+    if "not found" in b or "does not exist" in b or "no such order" in b:
+        return True
+    return False
+
+
+def ibkr_error_means_cancel_gone(code: Any, message: str = "") -> bool:
+    """True for 10147 and equivalent permanent 'order gone' cancel errors.
+
+    Must not match unrelated IBKR 'not found' texts (e.g. 10168 market data).
+    """
+    try:
+        c = int(code)
+    except (TypeError, ValueError):
+        c = -1
+    if c in PERMANENT_CANCEL_GONE_CODES:
+        return True
+    blob = str(message or "").lower()
+    if "10147" in blob or "needs to be cancelled is not found" in blob:
+        return True
+    if c == 10148:
+        return any(
+            s in blob
+            for s in ("filled", "cancelled", "canceled", "inactive", "apicancelled")
+        )
+    return False
+
+
+def cancel_result_means_gone(result: Any) -> bool:
+    """True when a cancel_order return value means the id is gone at IBKR."""
+    if not isinstance(result, dict):
+        return False
+    if result.get("order_gone") or result.get("already_gone"):
+        return True
+    if ibkr_error_means_cancel_gone(
+        result.get("error_code") or result.get("code"),
+        str(result.get("error") or result.get("message") or ""),
+    ):
+        return True
+    return _error_text_means_gone(str(result.get("error") or ""))
+
+
+def note_cancel_gone(
+    order_id: Any, *, code: Any = None, detail: str = ""
+) -> None:
+    """Mark ``order_id`` dead for this process. Log once, loudly."""
+    oid = _as_oid(order_id)
+    if oid is None:
+        return
+    _cancel_gone_oids.add(oid)
+    _transient_cancel_fails.pop(oid, None)
+    if oid in _cancel_gone_logged:
+        return
+    _cancel_gone_logged.add(oid)
+    why = detail or (f"IBKR {code}" if code is not None else "order not found")
+    logger.error(
+        "orphan-protection: order_id=%s is gone at IBKR (%s) — "
+        "will not cancel again this process",
+        oid,
+        why,
+    )
+
+
+def note_cancel_transient_fail(order_id: Any, *, detail: str = "") -> int:
+    """Count a non-gone cancel failure. At the bound, skip this id this process."""
+    oid = _as_oid(order_id)
+    if oid is None:
+        return 0
+    n = int(_transient_cancel_fails.get(oid, 0)) + 1
+    _transient_cancel_fails[oid] = n
+    if n >= TRANSIENT_CANCEL_RETRY_LIMIT and oid not in _transient_logged:
+        _transient_logged.add(oid)
+        logger.error(
+            "orphan-protection: order_id=%s cancel failed %s times (%s) — "
+            "stop retrying this process (transient bound=%s)",
+            oid,
+            n,
+            detail or "transient",
+            TRANSIENT_CANCEL_RETRY_LIMIT,
+        )
+    else:
+        logger.warning(
+            "orphan-protection: cancel %s failed (%s/%s): %s",
+            oid,
+            n,
+            TRANSIENT_CANCEL_RETRY_LIMIT,
+            detail or "transient",
+        )
+    return n
+
+
+def note_cancel_ok(order_id: Any) -> None:
+    oid = _as_oid(order_id)
+    if oid is None:
+        return
+    _transient_cancel_fails.pop(oid, None)
+
+
+def cancel_oid_is_blocked(order_id: Any) -> bool:
+    """True when this process must not send another cancel for ``order_id``."""
+    oid = _as_oid(order_id)
+    if oid is None:
+        return False
+    if oid in _cancel_gone_oids:
+        return True
+    return int(_transient_cancel_fails.get(oid, 0)) >= TRANSIENT_CANCEL_RETRY_LIMIT
+
+
+def begin_look_protection_budget(*, reset: bool = True) -> None:
+    """Start (or inherit) the per-look cancel window."""
+    global _look_cancel_attempts, _look_budget_t0, _look_budget_logged
+    global _look_budget_active
+    if _look_budget_active and not reset:
+        return
+    _look_cancel_attempts = 0
+    _look_budget_t0 = None
+    _look_budget_logged = False
+    _look_budget_active = True
+
+
+def end_look_protection_budget() -> None:
+    global _look_budget_active
+    _look_budget_active = False
+
+
+def _log_budget_exhausted() -> None:
+    global _look_budget_logged
+    if _look_budget_logged:
+        return
+    _look_budget_logged = True
+    elapsed = 0.0
+    if _look_budget_t0 is not None:
+        elapsed = time.monotonic() - _look_budget_t0
+    logger.warning(
+        "protection maintenance budget exhausted this look: %s cancel attempts "
+        "/ %.2fs (cap %s / %.1fs) — GROK think runs; remaining orphans wait",
+        _look_cancel_attempts,
+        elapsed,
+        MAX_PROTECTION_CANCELS_PER_LOOK,
+        MAX_PROTECTION_CANCEL_BUDGET_S,
+    )
+
+
+def claim_protection_cancel(order_id: Any) -> bool:
+    """Reserve one nest cancel. False → skip (blocked, or look budget gone)."""
+    global _look_cancel_attempts, _look_budget_t0
+    oid = _as_oid(order_id)
+    if oid is None or cancel_oid_is_blocked(oid):
+        return False
+    if not _look_budget_active:
+        begin_look_protection_budget()
+    now = time.monotonic()
+    if _look_budget_t0 is None:
+        _look_budget_t0 = now
+        elapsed = 0.0
+    else:
+        elapsed = now - _look_budget_t0
+    # First attempt always goes; after that the wall-clock cap applies so a
+    # 0s test budget still allows one cancel then yields to GROK think.
+    if _look_cancel_attempts >= MAX_PROTECTION_CANCELS_PER_LOOK:
+        _log_budget_exhausted()
+        return False
+    if _look_cancel_attempts > 0 and elapsed >= MAX_PROTECTION_CANCEL_BUDGET_S:
+        _log_budget_exhausted()
+        return False
+    _look_cancel_attempts += 1
+    return True
 
 
 def _params(act: dict) -> dict[str, Any]:
@@ -375,6 +597,8 @@ def orphaned_protection_rows(
             continue
         oid = _order_id_of(o)
         if oid is None or oid in seen:
+            continue
+        if cancel_oid_is_blocked(oid):
             continue
         seen.add(oid)
         rows.append({

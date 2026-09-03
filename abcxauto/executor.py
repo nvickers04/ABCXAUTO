@@ -376,29 +376,79 @@ def _working_stop_oid(order: Dict[str, Any]) -> Optional[int]:
 
 
 async def _cancel_order_ids(
-    connector: Any, ids: list[int], *, log_label: str
+    connector: Any,
+    ids: list[int],
+    *,
+    log_label: str,
+    bounded: bool = False,
 ) -> list[int]:
-    """Cancel working order ids. Never used to flatten a position."""
+    """Cancel working order ids. Never used to flatten a position.
+
+    ``bounded=True`` is nest last-stop / orphan maintenance: 10147 marks the
+    id dead for this process, transient failures retry up to
+    ``TRANSIENT_CANCEL_RETRY_LIMIT``, and a look-cycle cap stops a storm
+    from delaying GROK think.
+    """
+    from abcxauto.protect import (
+        cancel_oid_is_blocked,
+        cancel_result_means_gone,
+        claim_protection_cancel,
+        note_cancel_gone,
+        note_cancel_ok,
+        note_cancel_transient_fail,
+    )
+
     cancel = getattr(connector, "cancel_order", None)
     if cancel is None:
         logger.warning("%s: connector has no cancel_order", log_label)
         return []
     cancelled: list[int] = []
     for oid in ids:
+        if bounded and cancel_oid_is_blocked(oid):
+            logger.info("%s: skip order_id=%s (gone / retry bound)", log_label, oid)
+            continue
+        if bounded and not claim_protection_cancel(oid):
+            logger.warning(
+                "%s: look-cycle cancel budget exhausted — remaining ids wait, "
+                "GROK think runs",
+                log_label,
+            )
+            break
         try:
             cres = await cancel(order_id=oid)
         except TypeError:
             try:
                 cres = await cancel(oid)
             except Exception as e:
-                logger.warning("%s: cancel %s failed: %s", log_label, oid, e)
+                if bounded:
+                    note_cancel_transient_fail(oid, detail=str(e))
+                else:
+                    logger.warning("%s: cancel %s failed: %s", log_label, oid, e)
                 continue
         except Exception as e:
-            logger.warning("%s: cancel %s failed: %s", log_label, oid, e)
+            if bounded:
+                note_cancel_transient_fail(oid, detail=str(e))
+            else:
+                logger.warning("%s: cancel %s failed: %s", log_label, oid, e)
+            continue
+        if isinstance(cres, dict) and cres.get("already_gone"):
+            note_cancel_gone(oid, detail=str(cres.get("error") or "already gone"))
             continue
         if isinstance(cres, dict) and cres.get("error"):
-            logger.warning("%s: cancel %s: %s", log_label, oid, cres.get("error"))
+            err = str(cres.get("error") or "")
+            if bounded and cancel_result_means_gone(cres):
+                note_cancel_gone(
+                    oid,
+                    code=cres.get("error_code") or cres.get("code"),
+                    detail=err,
+                )
+            elif bounded:
+                note_cancel_transient_fail(oid, detail=err)
+            else:
+                logger.warning("%s: cancel %s: %s", log_label, oid, err)
             continue
+        if bounded:
+            note_cancel_ok(oid)
         cancelled.append(oid)
         logger.info("%s: cancelled order_id=%s", log_label, oid)
     return cancelled
@@ -496,7 +546,7 @@ async def _replace_protective_exits_after_place(
     if not to_cancel:
         return []
     return await _cancel_order_ids(
-        connector, to_cancel, log_label="replace-on-place"
+        connector, to_cancel, log_label="replace-on-place", bounded=False
     )
 
 
@@ -770,13 +820,15 @@ async def collapse_stacked_protective_exits(
     Prefers the newest covering order_id. Does not flatten the position and
     never cancels the last remaining covering stop. Returns cancelled ids.
     """
+    from abcxauto.protect import begin_look_protection_budget
     from abcxauto.trade_plan import stacked_stop_cancel_ids
 
     ids = stacked_stop_cancel_ids(positions, open_orders)
     if not ids:
         return []
+    begin_look_protection_budget(reset=False)
     return await _cancel_order_ids(
-        connector, ids, log_label="collapse stacked exits"
+        connector, ids, log_label="collapse stacked exits", bounded=True
     )
 
 
@@ -826,7 +878,12 @@ async def cancel_orphaned_protection(
     (a lot can lag its own fill), a live-socket check when the whole ledger is
     empty, and the shared last-stop rule.
     """
-    from abcxauto.protect import last_stop_block_reason, orphaned_protection_ids
+    from abcxauto.protect import (
+        begin_look_protection_budget,
+        cancel_oid_is_blocked,
+        last_stop_block_reason,
+        orphaned_protection_ids,
+    )
 
     if positions is None or open_orders is None:
         try:
@@ -874,11 +931,14 @@ async def cancel_orphaned_protection(
             # two views of the book disagree — keep the stop and say so.
             logger.error("orphan-protection sweep refused %s: %s", oid, blocked)
             continue
+        if cancel_oid_is_blocked(oid):
+            continue
         safe.append(oid)
     if not safe:
         return []
+    begin_look_protection_budget(reset=False)
     return await _cancel_order_ids(
-        connector, safe, log_label="orphan-protection"
+        connector, safe, log_label="orphan-protection", bounded=True
     )
 
 

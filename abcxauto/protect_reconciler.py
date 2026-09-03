@@ -250,9 +250,11 @@ class ProtectionReconciler:
 
     async def sweep_now(self, symbol: str, *, actions: Any = None) -> list[int]:
         """One immediate sweep of ``symbol``. Returns cancelled order ids."""
+        from abcxauto.protect import begin_look_protection_budget
         from abcxauto.executor import cancel_orphaned_protection
 
         symbol = str(symbol or "").strip().upper()
+        begin_look_protection_budget(reset=True)
         cancelled = await cancel_orphaned_protection(
             self.connector,
             symbols={symbol},
