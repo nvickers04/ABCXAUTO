@@ -2714,19 +2714,20 @@ def test_send_tool_says_one_ticket_per_call():
 
 def test_self_tune_tool_is_flat():
     props = _tool_props("self_tune")
-    assert "max_risk_per_trade_pct" in props
+    assert "max_risk_per_trade_pct" not in props
+    assert "max_open_positions" not in props
+    assert "daily_loss_limit_pct" not in props
+    assert "session_token_cap" not in props
     assert "session_look_cap" in props
-    assert "session_token_cap" in props
     assert "size_pct_nl" in props
+    assert "max_peak_drawdown_pct" in props
     assert "enabled_arenas" in props
     assert "controls" not in props
     assert "params" not in props
     desc = str(getattr(_tool_fn("self_tune"), "description", "") or "")
-    assert "this book's NL" in desc
-    assert "baked 15/25" in desc
-    assert "together, not pick-one" in desc
-    assert "tighten only" in desc
     assert "mode band" in desc
+    assert "tighten only" in desc
+    assert "baked 15/25" not in desc
 
 
 @pytest.mark.asyncio
@@ -2743,7 +2744,7 @@ async def test_self_tune_tool_applies_flat_knobs(monkeypatch):
     raw = await _run_tool(
         "self_tune",
         {
-            "max_risk_per_trade_pct": 0.75,
+            "size_pct_nl": 3.0,
             "enabled_arenas": ["index_etfs"],
             "rationale": "cut size",
         },
@@ -2754,7 +2755,7 @@ async def test_self_tune_tool_applies_flat_knobs(monkeypatch):
     )
     data = json.loads(raw)
     assert data["status"] == "ok"
-    assert seen["params"]["max_risk_per_trade_pct"] == 0.75
+    assert seen["params"]["size_pct_nl"] == 3.0
     assert seen["params"]["enabled_arenas"] == ["index_etfs"]
     assert "controls" not in seen["params"]
     assert seen["rationale"] == "cut size"
@@ -2773,14 +2774,14 @@ async def test_set_risk_alias_is_self_tune_tool(monkeypatch):
     turn = BrainTurn()
     await _run_tool(
         "set_risk",
-        {"max_risk_per_trade_pct": 0.5},
+        {"size_pct_nl": 3.0},
         connector=None,
         world=_world(),
         snap={},
         turn=turn,
     )
     assert turn.last_strat == "self_tune"
-    assert seen["params"]["max_risk_per_trade_pct"] == 0.5
+    assert seen["params"]["size_pct_nl"] == 3.0
 
 
 @pytest.mark.asyncio

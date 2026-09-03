@@ -1016,22 +1016,14 @@ AGENT_TOOLS = [
         name="self_tune",
         description=(
             "Retune knobs now. Floor cannot be weakened. "
-            "max_open_positions is concurrent lots for this book's NL — "
-            "not a baked 15/25. Size (size_pct_nl on send / self_tune) "
-            "and slots are together, not pick-one. size_pct_nl tightens "
-            "the explore/exploit mode band. session_look_cap / "
-            "session_token_cap tighten only. Not a ticket — send is the book."
+            "size_pct_nl tightens the explore/exploit mode band. "
+            "session_look_cap tightens only. Not a ticket — send is the book."
         ),
         parameters=_schema(
             {
-                "max_risk_per_trade_pct": {"type": "number"},
-                "daily_loss_limit_pct": {"type": "number"},
-                "max_position_pct": {"type": "number"},
                 "max_peak_drawdown_pct": {"type": "number"},
-                "max_option_premium_pct": {"type": "number"},
                 "max_symbol_concentration_pct": {"type": "number"},
                 "max_arena_concentration_pct": {"type": "number"},
-                "max_open_positions": {"type": "integer"},
                 "size_pct_nl": {
                     "type": "number",
                     "description": (
@@ -1041,7 +1033,6 @@ AGENT_TOOLS = [
                     ),
                 },
                 "session_look_cap": {"type": "integer"},
-                "session_token_cap": {"type": "integer"},
                 "enabled_arenas": _SYMBOLS_SCHEMA,
                 "custom_symbols": _SYMBOLS_SCHEMA,
                 "exclude_symbols": _SYMBOLS_SCHEMA,

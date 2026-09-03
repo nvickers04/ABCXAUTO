@@ -8,7 +8,8 @@ No sit clock. Overnight park stays park_clock.
 
 Session key is ET date + market label (premarket / regular). Premarket
 and RTH each get a budget so stay-up through the open still trades.
-Grok may tighten the knobs via self_tune; it cannot raise them.
+Grok may tighten ``session_look_cap`` via self_tune; it cannot raise it.
+``session_token_cap`` is an operator disk knob — file wins.
 Remaining looks/tokens feed the wake worst-fact line. Knob names stay off
 the system prompt.
 """

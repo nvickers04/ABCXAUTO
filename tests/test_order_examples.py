@@ -39,7 +39,7 @@ def test_hold_absent_from_catalog():
 
 def test_set_risk_present():
     assert "set_risk" in ORDER_EXAMPLES
-    assert "max_risk_per_trade_pct" in ORDER_EXAMPLES["set_risk"]
+    assert "size_pct_nl" in ORDER_EXAMPLES["set_risk"]
 
 
 def test_self_tune_present():

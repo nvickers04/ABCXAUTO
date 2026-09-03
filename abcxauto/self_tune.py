@@ -2,14 +2,19 @@
 
 Immutable floor (code): daily-loss halt, defined-risk, cash-only,
 auto-panic, fail-closed, exits never blocked, live gated.
+Operator disk knobs are source of truth. File wins over the model for
+mop / size% / premium% / daily-loss / session_token_cap / floors /
+defined-risk / cash-only / mode+port. self_tune cannot persist over
+them; a payload that includes them is ignored for those fields and
+the rest of a legitimate tune still applies. 0 stays 0 (off) for the
+size knobs. daily_loss 25 stays 25 — not a 0.5 clamp, not 0=off.
 max_open_positions is not a floor: 0 = off; a positive N is a ceiling
-Grok or the operator chose. max_risk_per_trade_pct, max_position_pct,
-and max_option_premium_pct are the same class: 0 = off (skip that
-ceiling); a positive pct still clamps to RISK_FLOOR. size_pct_nl is
-Grok's working size — not a RISK_FLOOR field, not old_size_defaults.
-The agent may *tighten* risk. It cannot weaken the immutable risk
-floor. Cadence is park_clock (overnight only); process % dials do
-not exist.
+the operator chose. max_risk_per_trade_pct, max_position_pct, and
+max_option_premium_pct are the same class: 0 = off (skip that
+ceiling); a positive pct still clamps to RISK_FLOOR on the operator
+path. size_pct_nl is Grok's working size — not a RISK_FLOOR field,
+not old_size_defaults, and not a clerk max-risk while that knob is 0.
+Cadence is park_clock (overnight only); process % dials do not exist.
 """
 
 from __future__ import annotations
@@ -83,15 +88,35 @@ def slot_cap_armed(cfg: Any = None) -> bool:
     except (TypeError, ValueError):
         n = 0
     return n > 0
+
+
 # Mode/port are operator-only. Extra keys here are rejects, not knobs.
 _LIVE_GATED: frozenset[str] = frozenset({
     "trading_mode",
     "live_confirm",
     "ibkr_port",
 })
+# File wins. Grok cannot write these — RAM or disk. 2026-09-03 paper 7497
+# reload tax: self_tune rewrote mop/risk/pos/prem/dll and killed a look.
+OPERATOR_DISK_KEYS: frozenset[str] = frozenset({
+    "max_open_positions",
+    "max_risk_per_trade_pct",
+    "max_position_pct",
+    "max_option_premium_pct",
+    "daily_loss_limit_pct",
+    "session_token_cap",
+    "sizing_floors",
+    "defined_risk_only",
+    "cash_only",
+    "ibkr_port",
+    "trading_mode",
+})
+_OPERATOR_DISK_REJECT = "operator disk — file wins"
+# agent_state.json may hold Grok working size + scan depth. Never operator knobs.
+_AGENT_STATE_KEYS = frozenset({"scan_fetch_cap", "size_pct_nl"})
 
 SCAN_FETCH_CAP_RANGE = (1, 8)
-# Session look/token caps: Grok may tighten (lower), never raise.
+# Session look cap: Grok may tighten (lower), never raise. Token cap is operator disk.
 
 # Working send ceiling Grok may tighten. Not a Config field, not 25%.
 _SIZE_PCT_NL_KEY = "size_pct_nl"
@@ -122,6 +147,32 @@ _SELF_TUNE_ALIASES = frozenset({
 
 def is_self_tune_strategy(name: str) -> bool:
     return str(name or "").strip().lower() in _SELF_TUNE_ALIASES
+
+
+def is_operator_disk_key(key: str) -> bool:
+    return str(key or "") in OPERATOR_DISK_KEYS
+
+
+def _file_wins_operator_keys() -> None:
+    """Drop session overrides for operator disk knobs so the file shows through."""
+    from abcxauto import config as cfg_mod
+
+    for key in OPERATOR_DISK_KEYS:
+        cfg_mod._runtime_overrides.pop(key, None)
+
+
+def _strip_operator_disk(payload: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in payload.items() if k not in OPERATOR_DISK_KEYS}
+
+
+def _log_ignored_operator_keys(keys: list[str]) -> None:
+    """One line per tune that tried to overwrite the file. Not once per field."""
+    if not keys:
+        return
+    logger.warning(
+        "self_tune ignored operator disk keys (file wins): %s",
+        ",".join(sorted(set(keys))),
+    )
 
 
 def _f(value: Any) -> float | None:
@@ -225,6 +276,7 @@ def apply_self_tune(
     rejected: dict[str, str] = {}
     cfg = get_config()
     before: dict[str, Any] = {}
+    ignored_operator: list[str] = []
 
     risk_payload: dict[str, Any] = {}
     controls_payload: dict[str, Any] = {}
@@ -234,6 +286,10 @@ def apply_self_tune(
     universe_payload: dict[str, Any] = {}
 
     for key, value in flat.items():
+        if key in OPERATOR_DISK_KEYS:
+            rejected[key] = _OPERATOR_DISK_REJECT
+            ignored_operator.append(key)
+            continue
         if key in LOCKED_TRUE:
             if value in (False, 0, "0", "false", "False", "off", "no"):
                 rejected[key] = "immutable floor — cannot disable"
@@ -340,14 +396,22 @@ def apply_self_tune(
         })
 
     persist_kw = {"persist": persist}
+    risk_payload = _strip_operator_disk(risk_payload)
+    controls_payload = _strip_operator_disk(controls_payload)
+    session_caps_payload = _strip_operator_disk(session_caps_payload)
+    _log_ignored_operator_keys(ignored_operator)
+    _file_wins_operator_keys()
 
     if risk_payload:
         # Skip posture envelope clamp — floor already applied.
+        # Peak DD / name concentration must not arm sizing_floors.
         update_risk_config(**risk_payload, **persist_kw, _skip_clamp=True)
         applied.update(risk_payload)
+        _file_wins_operator_keys()
     if controls_payload:
         update_capacity_config(**controls_payload, **persist_kw)
         applied.update(controls_payload)
+        _file_wins_operator_keys()
     if scan_cap is not None:
         from abcxauto.config import _runtime_overrides
 
@@ -364,6 +428,7 @@ def apply_self_tune(
 
         update_agent_config(**session_caps_payload, persist=persist)
         applied.update(session_caps_payload)
+        _file_wins_operator_keys()
     if size_pct is not None:
         extra_size = {_SIZE_PCT_NL_KEY: size_pct}
         if persist:
@@ -405,6 +470,7 @@ def apply_self_tune(
     except Exception:
         logger.debug("journal self_tune record failed", exc_info=True)
 
+    _file_wins_operator_keys()
     after = {k: getattr(get_config(), k, None) for k in list(applied) if k != "universe"}
     if size_pct is not None:
         after[_SIZE_PCT_NL_KEY] = size_pct
@@ -421,11 +487,18 @@ def apply_self_tune(
 
 
 def _persist_agent_state(extra: dict[str, Any]) -> None:
-    """Persist scan_fetch_cap beside risk_settings (agent-owned)."""
+    """Persist scan_fetch_cap / size_pct_nl beside risk_settings (agent-owned).
+
+    Operator disk knobs never land here. File wins for those keys.
+    """
     import json
     from pathlib import Path
 
     from abcxauto.config import _REPO_ROOT
+
+    extra = {k: v for k, v in dict(extra or {}).items() if k in _AGENT_STATE_KEYS}
+    if not extra:
+        return
 
     path = Path(
         __import__("os").environ.get("ABCXAUTO_AGENT_STATE_PATH")
@@ -439,6 +512,8 @@ def _persist_agent_state(extra: dict[str, Any]) -> None:
                 current = {}
         except Exception:
             current = {}
+    for key in OPERATOR_DISK_KEYS:
+        current.pop(key, None)
     current.update(extra)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -458,7 +533,9 @@ def load_agent_state() -> dict[str, Any]:
         return {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+        return {k: v for k, v in raw.items() if k not in OPERATOR_DISK_KEYS}
     except Exception:
         return {}
 
