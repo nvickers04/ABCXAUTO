@@ -540,6 +540,167 @@ async def test_daily_loss_breach_trips_halt(gate):
     assert ok is False
 
 
+def _paper_floors_off(**overrides) -> Config:
+    """Paper 7497 with sizing_floors off. Daily-loss stays armed."""
+    return _cfg(
+        trading_mode="paper",
+        ibkr_port=7497,
+        sizing_floors=False,
+        risk_gates_enabled=True,
+        daily_loss_limit_pct=25.0,
+        max_open_positions=0,
+        defined_risk_only=False,
+        cash_only=False,
+        **overrides,
+    )
+
+
+def _stop_order_exit():
+    return validate_proposal("stop_order", VALID_PAYLOADS["stop_order"], RATIONALE)
+
+
+def _close_option():
+    return validate_proposal("close_option", VALID_PAYLOADS["close_option"], RATIONALE)
+
+
+def _closing_position_vertical():
+    return validate_proposal(
+        "vertical_spread",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "long_strike": 500.0,
+            "short_strike": 505.0,
+            "right": "C",
+            "quantity": 1,
+            "limit_price": 2.0,
+            "closing_position": True,
+        },
+        RATIONALE,
+    )
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_halts_new_entry_when_paper_floors_are_off(monkeypatch):
+    """Disk 25% walk-away must refuse new risk on paper even if sizing_floors is false."""
+    g = reset_risk_gate()
+    cfg = _paper_floors_off()
+    assert cfg.sizing_floors is False
+    assert sizing_floors_active(cfg) is False
+    assert cfg.ibkr_port == 7497
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    net_liq = 100_000.0
+    limit = -(cfg.daily_loss_limit_pct / 100.0) * net_liq
+    conn = FakeConnector(
+        account={"netliquidation": net_liq, "dailypnl": limit},
+        positions=[_lot("NVDA", mv=50_000.0)],
+    )
+    ok, reason = await g.pre_trade_check(_bracket(), conn)
+    assert ok is False
+    assert "daily_loss" in reason.lower()
+    assert g.is_halted is True
+    assert g.halt_kind == "daily_loss"
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_allows_exits_when_paper_floors_are_off(monkeypatch):
+    """oca / last-stop / close_option / closing_position must still pass."""
+    g = reset_risk_gate()
+    cfg = _paper_floors_off()
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    net_liq = 100_000.0
+    conn = FakeConnector(
+        account={
+            "netliquidation": net_liq,
+            "dailypnl": -(cfg.daily_loss_limit_pct / 100.0) * net_liq,
+        }
+    )
+    ok, _ = await g.pre_trade_check(_bracket(), conn)
+    assert ok is False
+    assert g.halt_kind == "daily_loss"
+
+    for proposal in (
+        _oca(),
+        _stop_order_exit(),
+        validate_proposal(
+            "trailing_stop", VALID_PAYLOADS["trailing_stop"], RATIONALE
+        ),
+        _close_option(),
+        _closing_position_vertical(),
+        _market_order_exit(),
+    ):
+        ok, reason = await g.pre_trade_check(proposal, conn)
+        assert ok is True, f"{proposal.strategy} blocked: {reason}"
+
+
+@pytest.mark.asyncio
+async def test_daily_loss_above_floor_does_not_block_when_floors_off(monkeypatch):
+    g = reset_risk_gate()
+    cfg = _paper_floors_off()
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    net_liq = 100_000.0
+    just_above = -(cfg.daily_loss_limit_pct / 100.0) * net_liq + 0.01
+    conn = FakeConnector(account={"netliquidation": net_liq, "dailypnl": just_above})
+    ok, reason = await g.pre_trade_check(_bracket(), conn)
+    assert ok is True, reason
+    assert g.is_halted is False
+
+
+@pytest.mark.asyncio
+async def test_peak_drawdown_stays_floors_gated_on_paper(monkeypatch):
+    """sizing_floors false must not arm peak-dd as a side effect of walk-away."""
+    g = reset_risk_gate()
+    cfg = _paper_floors_off(max_peak_drawdown_pct=15.0)
+    assert cfg.max_peak_drawdown_pct == 15.0
+    assert cfg.sizing_floors is False
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    g.update_equity(100_000.0)
+    conn = FakeConnector(account={"netliquidation": 80_000.0, "dailypnl": 0.0})
+    ok, reason = await g.pre_trade_check(_bracket(), conn)
+    assert ok is True, reason
+    assert "drawdown" not in reason.lower()
+    assert g.is_halted is False
+
+
+@pytest.mark.asyncio
+async def test_name_concentration_stays_floors_gated_on_paper(monkeypatch):
+    """sizing_floors false must not arm per-name concentration."""
+    g = reset_risk_gate()
+    cfg = _paper_floors_off(max_symbol_concentration_pct=15.0)
+    assert cfg.max_symbol_concentration_pct == 15.0
+    assert cfg.sizing_floors is False
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    conn = FakeConnector(
+        account={"netliquidation": 100_000.0, "dailypnl": 0.0},
+        positions=[_lot("NVDA", mv=50_000.0)],
+    )
+    ok, reason = await g.pre_trade_check(_bracket(qty=80, entry=100.0), conn)
+    assert ok is True, reason
+    assert "concentration" not in reason.lower()
+
+
+def test_paper_walk_away_does_not_flip_sizing_floors_or_open_7496():
+    cfg = _paper_floors_off()
+    assert cfg.sizing_floors is False
+    assert sizing_floors_active(cfg) is False
+    assert cfg.ibkr_port == 7497
+    assert cfg.ibkr_port not in (7496, 4001)
+    assert cfg.trading_mode == "paper"
+    disk = get_config()
+    assert disk.sizing_floors is False
+    assert disk.ibkr_port != 7496
+
+
 @pytest.mark.asyncio
 async def test_position_sizing_rejection(gate):
     # 10% of 100k = 10k; 200 shares * 100 = 20k > 10k
@@ -773,6 +934,39 @@ async def test_unreadable_dailypnl_fail_closed_does_not_latch(gate):
     conn.account = {"netliquidation": 100_000.0, "dailypnl": 0.0}
     ok, reason = await gate.pre_trade_check(_bracket(), conn)
     assert ok is True, reason
+
+
+@pytest.mark.asyncio
+async def test_unreadable_dailypnl_fail_closed_when_floors_off(monkeypatch):
+    """Unknown DailyPnL fail-closes with the breaker, not with sizing_floors."""
+    g = reset_risk_gate()
+    cfg = _paper_floors_off()
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    conn = FakeConnector(
+        account={"netliquidation": 100_000.0, "dailypnl": float("nan")}
+    )
+    ok, reason = await g.pre_trade_check(_bracket(), conn)
+    assert ok is False
+    assert "fail-closed" in reason.lower()
+    assert "dailypnl" in reason.lower()
+    assert g.is_halted is False
+    assert cfg.sizing_floors is False
+
+
+@pytest.mark.asyncio
+async def test_missing_dailypnl_treated_as_flat_when_floors_off(monkeypatch):
+    """IBKR omits DailyPnL early session — still 0, not unknown."""
+    g = reset_risk_gate()
+    cfg = _paper_floors_off()
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    conn = FakeConnector(
+        account={"netliquidation": 100_000.0, "TotalCashValue": 100_000.0}
+    )
+    ok, reason = await g.pre_trade_check(_bracket(), conn)
+    assert ok is True, reason
+    assert g.is_halted is False
 
 
 @pytest.mark.asyncio
