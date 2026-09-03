@@ -549,8 +549,10 @@ class PortfolioMonitor:
         if not orphans:
             return
         try:
+            from abcxauto.protect import begin_look_protection_budget
             from abcxauto.executor import cancel_orphaned_protection
 
+            begin_look_protection_budget(reset=True)
             cancelled = await cancel_orphaned_protection(
                 self.connector,
                 positions=snapshot.get("positions") or [],
@@ -559,17 +561,21 @@ class PortfolioMonitor:
         except Exception:
             logger.exception("orphan-protection sweep failed")
             return
-        if not cancelled:
-            return
-        logger.warning(
-            "orphan-protection: cancelled %s working exit(s) on a flat book: %s",
-            len(cancelled), cancelled,
-        )
-        drop = set(cancelled)
+        from abcxauto.protect import cancel_oid_is_blocked
+
+        drop = set(cancelled or [])
         remaining = [
-            o for o in (snapshot.get("open_orders") or [])
-            if _order_id(o) not in drop
+            o
+            for o in (snapshot.get("open_orders") or [])
+            if _order_id(o) not in drop and not cancel_oid_is_blocked(_order_id(o))
         ]
+        if cancelled:
+            logger.warning(
+                "orphan-protection: cancelled %s working exit(s) on a flat book: %s",
+                len(cancelled), cancelled,
+            )
+        if remaining == (snapshot.get("open_orders") or []):
+            return
         snapshot["open_orders"] = remaining
         snapshot["protection"] = build_protection_report(
             snapshot.get("positions") or [], remaining

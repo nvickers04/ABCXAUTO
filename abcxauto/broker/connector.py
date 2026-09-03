@@ -352,20 +352,30 @@ class IBKRQueriesMixin:
 
     async def cancel_order(self, order_id: int) -> Dict[str, Any]:
         """Cancel an open order."""
+        from abcxauto.protect import cancel_oid_is_blocked, note_cancel_gone
+
         if not await self._ensure_connected():
             return {'error': 'Not connected'}
 
         try:
+            oid = int(order_id)
+        except (TypeError, ValueError):
+            return {'error': f'Invalid order_id {order_id}'}
+        if cancel_oid_is_blocked(oid):
+            return {'success': True, 'order_id': oid, 'already_gone': True}
+
+        try:
             for trade in self.ib.openTrades():
-                if trade.order.orderId == order_id:
+                if trade.order.orderId == oid:
                     if hasattr(self, "_cancel_order_with_tracking"):
                         self._cancel_order_with_tracking(trade.order, source="cancel_order")
                     else:
                         self.ib.cancelOrder(trade.order)
-                    return {'success': True, 'order_id': order_id}
-            return {'error': f'Order {order_id} not found'}
+                    return {'success': True, 'order_id': oid}
+            note_cancel_gone(oid, detail="not found in openTrades")
+            return {'error': f'Order {oid} not found', 'order_gone': True}
         except Exception as e:
-            logger.error(f"Failed to cancel order {order_id}: {e}")
+            logger.error(f"Failed to cancel order {oid}: {e}")
             return {'error': str(e)}
 
     async def get_open_orders(self) -> List[Dict[str, Any]]:
@@ -379,9 +389,17 @@ class IBKRQueriesMixin:
             await _safe_sleep(0.3)
 
             orders = []
+            from abcxauto.protect import cancel_oid_is_blocked
+
             for t in self.ib.openTrades():
                 status = t.orderStatus.status
                 if status not in ACTIVE_STATUSES:
+                    continue
+                try:
+                    oid = int(t.order.orderId)
+                except (TypeError, ValueError):
+                    oid = None
+                if oid is not None and cancel_oid_is_blocked(oid):
                     continue
 
                 lmt_price = t.order.lmtPrice
@@ -979,6 +997,12 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         msg_l = str(errorString or "").lower()
         if "scanner subscription" in msg_l and "cancel" in msg_l:
             logger.debug(f"IBKR [{errorCode}] scanner settle: {errorString}")
+            return
+
+        from abcxauto.protect import ibkr_error_means_cancel_gone, note_cancel_gone
+
+        if ibkr_error_means_cancel_gone(errorCode, errorString):
+            note_cancel_gone(reqId, code=errorCode, detail=errorString)
             return
 
         if errorCode in self._SUPPRESSED_ERROR_CODES:

@@ -631,6 +631,27 @@ def test_size_if_stop_is_knob_math_not_a_ticket():
     assert size_if_stop(last=91.5, stop=91.5, equity=37000.0, cfg=cfg) == {}
 
 
+def test_10147_and_not_found_are_cancel_gone():
+    from abcxauto.protect import (
+        cancel_oid_is_blocked,
+        cancel_result_means_gone,
+        ibkr_error_means_cancel_gone,
+        note_cancel_gone,
+        TRANSIENT_CANCEL_RETRY_LIMIT,
+    )
+
+    assert ibkr_error_means_cancel_gone(
+        10147, "OrderId 4 that needs to be cancelled is not found"
+    )
+    assert cancel_result_means_gone(
+        {"error": "Order 4 not found", "order_gone": True}
+    )
+    assert not ibkr_error_means_cancel_gone(10168, "Market data subscription not found")
+    note_cancel_gone(4, code=10147)
+    assert cancel_oid_is_blocked(4)
+    assert TRANSIENT_CANCEL_RETRY_LIMIT == 3
+
+
 
 
 @pytest.mark.asyncio

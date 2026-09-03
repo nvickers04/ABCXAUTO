@@ -333,6 +333,7 @@ async def snap(c: Any) -> dict:
                 continue
     base["candle_source"] = candle_source
     base["portfolio_state"] = build_book_from_snap(base)
+    await _reconcile_protection_after_snap(c, base)
     return base
 
 
@@ -913,8 +914,11 @@ async def _reconcile_protection_after_snap(c: Any, s: dict) -> None:
     Stacked exits and orphaned exits are the same defect seen from two sides,
     so both collapse before Grok reads the book. Never flattens.
     """
+    from abcxauto.protect import begin_look_protection_budget
+
     if _book_unreliable(snap=s):
         return
+    begin_look_protection_budget(reset=True)
     try:
         from abcxauto.executor import (
             cancel_orphaned_protection,
@@ -934,13 +938,18 @@ async def _reconcile_protection_after_snap(c: Any, s: dict) -> None:
         cancelled += await cancel_orphaned_protection(
             c, positions=s.get("positions") or [], open_orders=surviving
         )
-        if not cancelled:
-            return
+        from abcxauto.protect import cancel_oid_is_blocked
+
         drop = set(cancelled)
-        s["open_orders"] = [
-            o for o in (s.get("open_orders") or [])
+        remaining = [
+            o
+            for o in (s.get("open_orders") or [])
             if _order_id_of(o) not in drop
+            and not cancel_oid_is_blocked(_order_id_of(o))
         ]
+        if remaining == (s.get("open_orders") or []) and not cancelled:
+            return
+        s["open_orders"] = remaining
         pl = s.get("positions") or []
         ol = s.get("open_orders") or []
         s["protection"] = build_protection_report(pl, ol)
