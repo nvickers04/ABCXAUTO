@@ -1,8 +1,9 @@
 """RTH thin sender vs research (premarket / AH / closed).
 
 Same session clock as the desk (``regular`` / ``premarket`` / ``postmarket`` /
-``closed``). Research has no broker send path. The research brief is COLOR
-for RTH, never a trigger. Do not grow SYSTEM_PROMPT from here.
+``closed``). Research has no broker send path. RTH may use news/scan/web as
+COLOR; the research brief is prior-session COLOR on wake, never a trigger.
+Do not grow SYSTEM_PROMPT from here.
 """
 
 from __future__ import annotations
@@ -815,8 +816,14 @@ def write_research_brief(
     world: Any = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Overwrite ``data/state/research_brief.json``. No order tickets."""
+    """Overwrite ``data/state/research_brief.json``. No order tickets.
+
+    Premarket / AH / closed only. RTH web/news/scan are COLOR on the look;
+    they do not rebuild this brief.
+    """
     sess = desk_session(session)
+    if sess == RTH_SESSION:
+        return {}
     bag = _bag(snap)
     if world is not None:
         for pos in getattr(world, "positions", None) or []:
@@ -974,16 +981,26 @@ def _public_http_url(url: str) -> str:
     return raw
 
 
+WEB_USE = "color_not_live_trigger"
+
+
+def _web_payload(**fields: Any) -> dict[str, Any]:
+    row = dict(fields)
+    row.setdefault("source", "web")
+    row.setdefault("use", WEB_USE)
+    return row
+
+
 async def fetch_public_page(url: str) -> dict[str, Any]:
-    """Thin research-only GET. Title + short text. Not a crawler."""
+    """Thin public GET. Title + short text. COLOR, not a live trigger. Not a crawler."""
     try:
         target = _public_http_url(url)
     except ValueError as exc:
-        return {"error": str(exc), "url": str(url or ""), "source": "web"}
+        return _web_payload(error=str(exc), url=str(url or ""))
     try:
         import httpx
     except Exception as exc:
-        return {"error": f"httpx unavailable: {exc}", "url": target, "source": "web"}
+        return _web_payload(error=f"httpx unavailable: {exc}", url=target)
     try:
         async with httpx.AsyncClient(timeout=WEB_TIMEOUT_S, follow_redirects=True) as client:
             resp = await client.get(
@@ -991,7 +1008,7 @@ async def fetch_public_page(url: str) -> dict[str, Any]:
                 headers={"User-Agent": "ABCXAUTO-research/1.0"},
             )
     except Exception as exc:
-        return {"error": f"fetch failed: {exc}", "url": target, "source": "web"}
+        return _web_payload(error=f"fetch failed: {exc}", url=target)
     body = resp.content[:WEB_MAX_BYTES] if resp.content else b""
     try:
         html = body.decode(resp.encoding or "utf-8", errors="replace")
@@ -1009,11 +1026,9 @@ async def fetch_public_page(url: str) -> dict[str, Any]:
         m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
         if m:
             title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(1))).strip()
-    return {
-        "url": str(resp.url) if getattr(resp, "url", None) else target,
-        "status": int(getattr(resp, "status_code", 0) or 0),
-        "title": title[:200],
-        "text": text[:WEB_TEXT_CAP],
-        "source": "web",
-        "use": "research_expectancy_not_send",
-    }
+    return _web_payload(
+        url=str(resp.url) if getattr(resp, "url", None) else target,
+        status=int(getattr(resp, "status_code", 0) or 0),
+        title=title[:200],
+        text=text[:WEB_TEXT_CAP],
+    )

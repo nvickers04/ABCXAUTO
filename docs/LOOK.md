@@ -50,6 +50,7 @@ After a think:
 ## Hard (code)
 
 - Unprotected STK → last-stop first; hold forbidden until it rests at IBKR. Paper RTH + flat → hold is not a ticket. Combo close (`closing_position`) is one BAG, not new risk
+- RTH may use news/scan/web as COLOR; the brief remains prior-session color on wake
 - Capacity, defined-risk, cash-only, size/loss floors, fail-closed
 - New risk without params.card naming a play (scorecard label, not a catalog)
 - IBKR live last for ticket geometry (not MDA)

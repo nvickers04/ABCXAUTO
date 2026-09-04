@@ -841,13 +841,13 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
 
 
 def _web_tool() -> Any:
-    """Research-only public page fetch. Not a crawler. Not on the RTH tool list."""
+    """Public page fetch. COLOR on research and RTH. Not a crawler. Not a send trigger."""
     return tool(
         name="web",
         description=(
             "Fetch one public http(s) URL (title + short text). "
-            "Research expectancy only — cite the source in the brief. "
-            "Not send geometry. Prefer news/scan first."
+            "Color only, never a live trigger. Not send geometry. "
+            "Prefer news/scan first."
         ),
         parameters=_schema(
             {
@@ -1073,8 +1073,8 @@ def _send_strategy_names_for_look() -> list[str]:
 def agent_tools(*, session: str = "") -> list:
     """Tools this look. Overnight park is code, not a Grok clock.
 
-    Research (premarket / AH / closed) omits ``send`` and adds ``web``.
-    RTH keeps the thin sender.
+    Research (premarket / AH / closed) omits ``send``. RTH keeps ``send``.
+    ``web`` is COLOR on both (not a live trigger).
     """
     from abcxauto.desk_mode import is_research_session
 
@@ -1090,8 +1090,7 @@ def agent_tools(*, session: str = "") -> list:
             out.append(_send_tool(names))
         else:
             out.append(t)
-    if research:
-        out.append(_web_tool())
+    out.append(_web_tool())
     return out
 
 def _stash_live(
@@ -2075,19 +2074,16 @@ async def _run_tool(
         turn.last_strat = strat
         return _hub()._clip(result)
     if name == "web":
-        from abcxauto.desk_mode import fetch_public_page, is_research_session
+        from abcxauto.desk_mode import WEB_USE, fetch_public_page
 
-        sess = str(getattr(world, "session_status", "") or "")
-        if not is_research_session(sess):
-            return json.dumps({
-                "error": "web is research-only",
-                "source": "web",
-                "use": "research_expectancy_not_send",
-            })
         url = str(args.get("url") or "").strip()
         page = await fetch_public_page(url)
+        if not isinstance(page, dict):
+            page = {"error": str(page), "source": "web", "use": WEB_USE}
+        else:
+            page.setdefault("use", WEB_USE)
         if isinstance(snap, dict):
-            snap["research_web"] = dict(page) if isinstance(page, dict) else {}
+            snap["research_web"] = dict(page)
         return _hub()._clip(page)
     return json.dumps({"error": f"unknown tool {name}"})
 
