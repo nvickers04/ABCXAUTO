@@ -265,6 +265,7 @@ class ProEngine:
         self._recover_same_chat = False
         self._recover_streak = 0
         self._recover_gave_up = False
+        self._inventory_wake = False
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
         from abcxauto.think_stream import bind_engine
@@ -962,9 +963,11 @@ class ProEngine:
         grok_wake.json. Duplicate lead-fact looks end with no send.
         Words with no tool_calls already stopped the model. RTH stay-up
         waits for fill / order_change / unprotected / operator poke or a
-        changed lead fact. Research keep-looking is the stay-up pulse
-        timeout (desk_mode.research_keep_looking), not a fake poke and not
-        an immediate mill here. Chat is kept. Overnight park is park_clock
+        changed lead fact — except a spoken CLOSE/EXIT on an open lot with
+        zero sends, which re-enters the same chat with lots on the wake.
+        Research keep-looking is the stay-up pulse timeout
+        (desk_mode.research_keep_looking), not a fake poke and not an
+        immediate mill here. Chat is kept. Overnight park is park_clock
         after a closed skip.
         """
         session = self._resolve_session(session)
@@ -984,17 +987,43 @@ class ProEngine:
             sends = 0
         # A spoken say or a send/fill is a finished look. Do not wipe chat.
         # Duplicate lead fact (_ended) waits for a poke, not a fresh desk.
+        # CLOSE/EXIT named on an open lot with no send is not finished.
         ended = bool(payload.get("_ended"))
-        finished = ended or sends > 0 or not _look_text_is_junk(rationale)
+        close_no_send = False
+        if stay and not ended:
+            try:
+                from abcxauto.desk_mode import (
+                    is_rth_session,
+                    look_spoken_close_without_send,
+                )
+
+                close_no_send = is_rth_session(session) and look_spoken_close_without_send(
+                    payload
+                )
+            except Exception:
+                close_no_send = False
+        finished = (ended or sends > 0 or not _look_text_is_junk(rationale)) and (
+            not close_no_send
+        )
         if finished:
             failed = False
             stream_err = ""
             self._recover_streak = 0
+            self._recover_gave_up = False
         if parked and not stay:
             self._fail_streak = 0
             self._cold_next = True
             return 0.0
-        if stay:
+        if stay and close_no_send:
+            self._resume_think = True
+            self._cold_next = False
+            self._inventory_wake = True
+            self._recover_same_chat = False
+            try:
+                self._note("LOOK", "CLOSE/EXIT with no send — same chat")
+            except Exception:
+                pass
+        elif stay:
             self._resume_think = False
             self._cold_next = False
         else:
@@ -1025,6 +1054,10 @@ class ProEngine:
         tools/send. #153 required this-round tool_trace, so a post-poke
         empty sat idle. A [say] with content still sits. Duplicate lead
         fact (``_ended``) still sits.
+
+        After EMPTY_GROK_RECOVER_TRIES this returns False so the caller
+        can drop the chat and look again. Sitting with the chat kept
+        freezes the tip — nest alive, look dead.
         """
         if g is None or getattr(g, "chat", None) is None:
             return False
@@ -1069,14 +1102,10 @@ class ProEngine:
         if streak >= EMPTY_GROK_RECOVER_TRIES:
             if hung and not bool(getattr(self, "_recover_gave_up", False)):
                 self._recover_gave_up = True
-                logger.error(
-                    "empty/junk GROK — cannot continue same chat after %s recovers",
+                logger.warning(
+                    "empty/junk GROK — same-chat recover exhausted after %s",
                     streak,
                 )
-                try:
-                    self._note("LOOK", "empty/junk GROK — cannot continue")
-                except Exception:
-                    pass
             return False
         return bool(hung)
 
@@ -1085,6 +1114,61 @@ class ProEngine:
         self._recover_same_chat = True
         self._resume_think = True
         self._cold_next = False
+        self._inventory_wake = False
+
+    def _drop_empty_junk_keep_looking(self, out: dict | None, g: Any) -> bool:
+        """Same-chat empty/junk recover exhausted: drop chat, look again cold.
+
+        Sitting with the chat kept freezes the tip. The nest is still up;
+        that is not a live look. Next look is a new conversation on this
+        process — not a fill / order_change / unprotected poke.
+        """
+        if not bool(getattr(self, "_recover_gave_up", False)):
+            return False
+        payload = out if isinstance(out, dict) else {}
+        if payload.get("_ended") or payload.get("_parked"):
+            return False
+        from abcxauto.brain import drop_live_chat
+
+        try:
+            drop_live_chat(g)
+        except Exception:
+            logger.debug("drop live chat after empty/junk failed", exc_info=True)
+        self._recover_streak = 0
+        self._recover_gave_up = False
+        self._recover_same_chat = False
+        self._inventory_wake = False
+        self._cold_next = True
+        self._resume_think = True
+        logger.warning("empty/junk GROK — drop chat, keep looking")
+        try:
+            self._note("LOOK", "empty/junk GROK — new chat, keep looking")
+        except Exception:
+            pass
+        return True
+
+    def _with_inventory_wake(
+        self,
+        wake: str,
+        positions: list | None,
+        day: dict | None = None,
+    ) -> str:
+        """Lead the next same-chat wake with open lots after spoken CLOSE/EXIT."""
+        if not getattr(self, "_inventory_wake", False):
+            return wake
+        self._inventory_wake = False
+        from abcxauto.desk_mode import inventory_wake_fact
+
+        lots = None
+        if isinstance(day, dict):
+            lots = day.get("open_lots")
+        fact = inventory_wake_fact(positions, open_lots=lots)
+        if not fact:
+            return wake
+        body = str(wake or "")
+        if body.startswith(fact):
+            return body
+        return f"{fact}\n{body}" if body else fact
 
     async def _stay_up_lead_changed(self, g: Any) -> bool:
         """True when a collapsible lead fact moved since the last look."""
@@ -1181,6 +1265,9 @@ class ProEngine:
             unprotected=world.unprotected,
             ibkr_up=bool(getattr(self.conn, "connected", False)),
             day=day,
+        )
+        wake = self._with_inventory_wake(
+            wake, s.get("positions") or [], day if isinstance(day, dict) else None
         )
         self.state.status = "Thinking"
         recover = bool(getattr(self, "_recover_same_chat", False))
@@ -1606,6 +1693,9 @@ class ProEngine:
                             self._arm_same_chat_recover()
                             self._note("LOOK", "empty GROK — same chat")
                             continue
+                    if stay and self._drop_empty_junk_keep_looking(out, g):
+                        await asyncio.sleep(self._empty_grok_dead_s())
+                        continue
                     if out.get("_ended"):
                         # Duplicate lead fact. A look may end.
                         self._rearm_after_think(out, session=session)

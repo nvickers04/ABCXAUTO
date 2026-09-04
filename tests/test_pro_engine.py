@@ -889,6 +889,144 @@ def test_rearm_spoken_look_is_resume_not_cold():
     assert wait == 0.0
 
 
+def _ibit_xlf_positions():
+    return [
+        {"symbol": "IBIT", "quantity": 10, "sec_type": "STK", "con_id": 11},
+        {"symbol": "XLF", "quantity": 20, "sec_type": "STK", "con_id": 22},
+    ]
+
+
+def test_rearm_spoken_close_without_send_reenters_same_chat():
+    """CLOSE/EXIT on open lots with sends==0 is not a finished stay-up look."""
+    pos = _ibit_xlf_positions()
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "CLOSE IBIT. EXIT XLF.",
+            "sends": 0,
+            "positions": pos,
+        },
+        session="regular",
+    )
+    assert wait == 0.0
+    assert eng._resume_think is True
+    assert eng._cold_next is False
+    assert eng._inventory_wake is True
+    # A send on the close is a finished look — sit for a real poke.
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "CLOSE IBIT. EXIT XLF.",
+            "sends": 1,
+            "positions": pos,
+        },
+        session="regular",
+    )
+    assert eng._resume_think is False
+    assert eng._cold_next is False
+    assert not getattr(eng, "_inventory_wake", False)
+    # Spoken-no-tool that is not close/exit still sits, even with lots.
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "Standing down. Watching IBIT and XLF. No ticket.",
+            "sends": 0,
+            "positions": pos,
+        },
+        session="regular",
+    )
+    assert eng._resume_think is False
+    assert eng._cold_next is False
+    assert not getattr(eng, "_inventory_wake", False)
+
+
+def test_rearm_accepted_say_resets_recover_streak():
+    """A send or accepted non-junk say clears the empty/junk recover streak."""
+    eng = ProEngine()
+    eng._recover_streak = 2
+    eng._recover_gave_up = True
+    eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+        },
+        session="regular",
+    )
+    assert eng._recover_streak == 0
+    assert eng._recover_gave_up is False
+    eng._recover_streak = 2
+    eng._rearm_after_think(
+        {"rationale": "CLOSE IBIT. EXIT XLF.", "sends": 1, "positions": _ibit_xlf_positions()},
+        session="regular",
+    )
+    assert eng._recover_streak == 0
+    # Unaccepted CLOSE/EXIT is not a finished look — streak stays.
+    eng._recover_streak = 1
+    eng._rearm_after_think(
+        {
+            "rationale": "CLOSE IBIT. EXIT XLF.",
+            "sends": 0,
+            "positions": _ibit_xlf_positions(),
+        },
+        session="regular",
+    )
+    assert eng._recover_streak == 1
+
+
+def test_drop_empty_junk_keep_looking_colds_new_chat():
+    """Exhausted empty/junk recover must not sit frozen on the tip."""
+    eng = ProEngine()
+    g = SimpleNamespace(chat=object(), _wake_n=3)
+    eng._recover_gave_up = True
+    eng._recover_streak = 2
+    eng._recover_same_chat = True
+    assert eng._drop_empty_junk_keep_looking({"rationale": "?"}, g) is True
+    assert g.chat is None
+    assert eng._recover_streak == 0
+    assert eng._recover_gave_up is False
+    assert eng._recover_same_chat is False
+    assert eng._cold_next is True
+    assert eng._resume_think is True
+    # Ended / parked still sit — not this path.
+    g2 = SimpleNamespace(chat=object())
+    eng._recover_gave_up = True
+    assert eng._drop_empty_junk_keep_looking({"_ended": True, "rationale": "?"}, g2) is False
+    assert g2.chat is not None
+    """A send or accepted non-junk say clears the empty/junk recover streak."""
+    eng = ProEngine()
+    eng._recover_streak = 2
+    eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+        },
+        session="regular",
+    )
+    assert eng._recover_streak == 0
+    eng._recover_streak = 2
+    eng._rearm_after_think(
+        {"rationale": "CLOSE IBIT. EXIT XLF.", "sends": 1, "positions": _ibit_xlf_positions()},
+        session="regular",
+    )
+    assert eng._recover_streak == 0
+    # Unaccepted CLOSE/EXIT is not a finished look — streak stays.
+    eng._recover_streak = 1
+    eng._rearm_after_think(
+        {
+            "rationale": "CLOSE IBIT. EXIT XLF.",
+            "sends": 0,
+            "positions": _ibit_xlf_positions(),
+        },
+        session="regular",
+    )
+    assert eng._recover_streak == 1
+
+
 def test_rearm_send_or_fill_look_is_resume_not_cold():
     """A send/fill keeps stay-up on the same chat even if rationale is empty."""
     eng = ProEngine()
@@ -954,6 +1092,78 @@ async def test_spoken_no_send_look_sits_without_cold(monkeypatch, tmp_path):
 
     assert load_alarm().wake_at is None
     assert eng._resume_think is False
+
+
+@pytest.mark.asyncio
+async def test_spoken_close_without_send_reenters_same_chat(monkeypatch, tmp_path):
+    """CLOSE/EXIT on open lots + sends==0 is not finished. Same chat, lots on wake."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    pos = _ibit_xlf_positions()
+    resumes: list[bool] = []
+    inventory_flags: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import peek_interrupt
+
+        resumes.append(resume)
+        inventory_flags.append(bool(getattr(self, "_inventory_wake", False)))
+        assert peek_interrupt() is None
+        g.chat = g.chat or object()
+        if len(resumes) == 1:
+            return {
+                "cycle": n,
+                "pnl": 0,
+                "equity": 100000,
+                "_failed": False,
+                "rationale": "CLOSE IBIT. EXIT XLF. Stream going quiet.",
+                "sends": 0,
+                "positions": pos,
+                "tool_trace": ["book", "quote"],
+            }
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "Working the close tickets.",
+            "sends": 1,
+            "positions": pos,
+            "tool_trace": ["send"],
+        }
+
+    async def fake_snap(_c):
+        snap = _stay_up_snap("regular")
+        snap["positions"] = pos
+        return snap
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+
+    def boom_poke(*_a, **_k):
+        raise AssertionError("CLOSE/EXIT re-enter must not invent a book poke")
+
+    monkeypatch.setattr("abcxauto.park_clock.note_interrupt", boom_poke)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.3
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) == 2
+    assert resumes == [True, True]
+    assert inventory_flags[1] is True
+    from abcxauto.park_clock import load_alarm, peek_interrupt
+
+    assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
+    assert eng._cold_next is False
 
 
 def test_rearm_failed_look_idles_without_cold_next(monkeypatch):
@@ -1098,6 +1308,37 @@ async def test_host_think_resume_sends_book_facts_not_yield_resume(monkeypatch):
     assert "yield resume" not in wake
     assert "session=" in wake
     assert "flat=" in wake
+
+
+@pytest.mark.asyncio
+async def test_host_think_inventory_wake_leads_with_open_lots(monkeypatch):
+    """Spoken CLOSE/EXIT re-enter puts open lots on the wake, not a poke."""
+    from abcxauto.brain import BrainTurn
+    from abcxauto.park_clock import peek_interrupt
+
+    got: dict[str, object] = {}
+
+    async def grok_turn(*_a, **k):
+        got["wake"] = str(k.get("wake") or "")
+        got["resume"] = k.get("resume")
+        got["recover"] = k.get("recover")
+        return BrainTurn(text="working the close")
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    eng._inventory_wake = True
+    snap = _stay_up_snap("regular")
+    snap["positions"] = _ibit_xlf_positions()
+    await eng._host_think(2, SimpleNamespace(chat=object()), snap, resume=True)
+    wake = str(got.get("wake") or "")
+    assert got.get("resume") is True
+    assert got.get("recover") is False
+    assert wake.startswith("open_lots=")
+    assert "IBIT" in wake
+    assert "XLF" in wake
+    assert eng._inventory_wake is False
+    assert peek_interrupt() is None
 
 
 @pytest.mark.asyncio
@@ -1400,11 +1641,11 @@ async def test_paper_premarket_stay_up_writes_no_sit_clock(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
-    """Junk/empty recovers same chat (bounded), then sits. Never _cold_next.
+async def test_junk_look_after_recovers_drops_chat_keeps_looking(monkeypatch, tmp_path):
+    """Junk/empty recovers same chat (bounded), then drops chat and keeps looking.
 
-    2026-09-03 14:03 CT: junk-idle parked the look with no recover after a
-    poke. Recover first; after EMPTY_GROK_RECOVER_TRIES, sit. Chat kept.
+    Sitting with chat kept after EMPTY_GROK_RECOVER_TRIES freezes the tip.
+    Cold next on this process. Never ensure_next_look / sit clock.
     """
     from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
 
@@ -1412,6 +1653,7 @@ async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
     times: list[float] = []
     resumes: list[bool] = []
+    chats: list[object] = []
     ensure_calls: list[object] = []
 
     def boom_ensure(*_a, **_k):
@@ -1421,6 +1663,7 @@ async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
     async def think(self, n, g, s, *, resume=False):
         times.append(time.monotonic())
         resumes.append(resume)
+        chats.append(g.chat)
         g.chat = g.chat or object()
         return {
             "cycle": n,
@@ -1435,39 +1678,41 @@ async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
     monkeypatch.setattr("abcxauto.park_clock.set_wake", boom_ensure)
     eng = ProEngine()
     assert eng.start() is None
-    want = 1 + EMPTY_GROK_RECOVER_TRIES
+    want = 1 + EMPTY_GROK_RECOVER_TRIES + 1
     deadline = time.time() + 4
     while time.time() < deadline and len(times) < want:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    idle_until = time.time() + 0.4
-    while time.time() < idle_until:
-        eng.drain_apply()
-        await asyncio.sleep(0.05)
+    looking = bool(eng.worker and eng.worker.is_alive())
     eng.stop_engine()
     eng.drain_apply()
-    assert len(times) == want
-    assert resumes == [True] * want
-    assert eng._cold_next is False
-    assert eng._resume_think is False
+    assert len(times) >= want
+    same = 1 + EMPTY_GROK_RECOVER_TRIES
+    assert resumes[:same] == [True] * same
+    assert resumes[same] is False
+    assert chats[same] is None
+    assert looking
     assert ensure_calls == []
-    from abcxauto.park_clock import load_alarm
+    from abcxauto.park_clock import load_alarm, peek_interrupt
 
     assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
     assert not getattr(eng, "_session_capped", False)
 
 
 @pytest.mark.asyncio
-async def test_failed_look_idles_without_set_wake_clock(monkeypatch, tmp_path):
+async def test_failed_look_keeps_looking_without_set_wake_clock(monkeypatch, tmp_path):
     from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.4")
     monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
     times: list[float] = []
+    resumes: list[bool] = []
 
     async def think(self, n, g, s, *, resume=False):
         times.append(time.monotonic())
+        resumes.append(resume)
         g.chat = g.chat or object()
         return {
             "cycle": n,
@@ -1481,19 +1726,17 @@ async def test_failed_look_idles_without_set_wake_clock(monkeypatch, tmp_path):
     _wire_stay_up_engine(monkeypatch, session="regular", think=think)
     eng = ProEngine()
     assert eng.start() is None
-    want = 1 + EMPTY_GROK_RECOVER_TRIES
+    want = 1 + EMPTY_GROK_RECOVER_TRIES + 1
     deadline = time.time() + 4
     while time.time() < deadline and len(times) < want:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    idle_until = time.time() + 0.4
-    while time.time() < idle_until:
-        eng.drain_apply()
-        await asyncio.sleep(0.05)
+    looking = bool(eng.worker and eng.worker.is_alive())
     eng.stop_engine()
     eng.drain_apply()
-    assert len(times) == want
-    assert eng._cold_next is False
+    assert len(times) >= want
+    assert resumes[1 + EMPTY_GROK_RECOVER_TRIES] is False
+    assert looking
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None
@@ -1879,6 +2122,61 @@ async def test_rth_spoken_no_tool_still_waits_for_real_poke(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_rth_spoken_no_tool_with_open_lots_still_waits(monkeypatch, tmp_path):
+    """Open lots + spoken-no-tool that is not CLOSE/EXIT still waits for a poke."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+    pos = _ibit_xlf_positions()
+    calls: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        calls.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "Standing down. Watching IBIT and XLF. No ticket.",
+            "sends": 0,
+            "positions": pos,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+
+    async def fake_snap(_c):
+        snap = _stay_up_snap("regular")
+        snap["positions"] = pos
+        return snap
+
+    monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+
+    async def no_lead(_self, _g):
+        return False
+
+    monkeypatch.setattr("abcxauto.pro_engine.ProEngine._stay_up_lead_changed", no_lead)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.4
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(calls) == 1
+    assert eng._resume_think is False
+    assert eng._cold_next is False
+    from abcxauto.park_clock import load_alarm, peek_interrupt
+
+    assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
+
+
+@pytest.mark.asyncio
 async def test_overnight_park_does_not_keep_looking_after_brief(monkeypatch, tmp_path):
     """Closed park stays parked. Keep-looking is not an overnight mill."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
@@ -2199,15 +2497,22 @@ async def test_empty_grok_after_option_quote_live_worker_reenters_without_cold(
 
 @pytest.mark.asyncio
 async def test_empty_grok_recover_does_not_loop_forever(monkeypatch, tmp_path):
-    """Engine recover after option_quote caps at EMPTY_GROK_RECOVER_TRIES."""
+    """Same-chat recover caps at EMPTY_GROK_RECOVER_TRIES, then cold next.
+
+    Infinite same-chat recover is forbidden. Permanent sit after exhaust
+    freezes the tip — drop chat and keep looking instead.
+    """
     from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
     resumes: list[bool] = []
+    chats: list[object] = []
 
     async def think(self, n, g, s, *, resume=False):
         resumes.append(resume)
+        chats.append(g.chat)
+        g.chat = g.chat or object()
         self.state.think_live = (
             "--- GROK ---\n[option_quote]\n--- GROK ---\n[think]\n"
             "still looking at the 765C\n"
@@ -2226,21 +2531,24 @@ async def test_empty_grok_recover_does_not_loop_forever(monkeypatch, tmp_path):
     _wire_stay_up_engine(monkeypatch, session="regular", think=think)
     eng = ProEngine()
     assert eng.start() is None
+    want = 1 + EMPTY_GROK_RECOVER_TRIES + 1
     deadline = time.time() + 4
-    while time.time() < deadline and len(resumes) < 1 + EMPTY_GROK_RECOVER_TRIES + 2:
+    while time.time() < deadline and len(resumes) < want:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    idle_until = time.time() + 0.4
-    while time.time() < idle_until:
-        eng.drain_apply()
-        await asyncio.sleep(0.05)
+    looking = bool(eng.worker and eng.worker.is_alive())
     eng.stop_engine()
     eng.drain_apply()
-    assert len(resumes) == 1 + EMPTY_GROK_RECOVER_TRIES
-    assert eng._cold_next is False
-    from abcxauto.park_clock import load_alarm
+    assert len(resumes) >= want
+    same = 1 + EMPTY_GROK_RECOVER_TRIES
+    assert resumes[:same] == [True] * same
+    assert resumes[same] is False
+    assert chats[same] is None
+    assert looking
+    from abcxauto.park_clock import load_alarm, peek_interrupt
 
     assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
 
 
 def test_same_chat_recover_needed_is_empty_after_tools_not_spoken():
@@ -2437,6 +2745,12 @@ def test_same_chat_recover_caps_streak_no_infinite_loop():
     for _ in range(EMPTY_GROK_RECOVER_TRIES):
         eng._arm_same_chat_recover()
     assert eng._same_chat_recover_needed(out, g) is False
+    assert eng._recover_gave_up is True
+    assert eng._drop_empty_junk_keep_looking(out, g) is True
+    assert g.chat is None
+    assert eng._cold_next is True
+    assert eng._resume_think is True
+    assert eng._recover_streak == 0
     cfg = get_config()
     assert cfg.defined_risk_only is True
     assert cfg.ibkr_port != 7496

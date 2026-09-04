@@ -183,6 +183,161 @@ def research_keep_looking(session: str = "") -> bool:
     return True
 
 
+# Spoken CLOSE/EXIT on an open lot is not a finished RTH look when send never
+# ran. Detection is code (say text + lots + sends==0), not a prompt sermon.
+_CLOSE_OR_EXIT_RE = re.compile(
+    r"\b(?:close|closing|closed|exit|exiting|exited)\b",
+    re.IGNORECASE,
+)
+_MARKET_CLOSE_NOISE_RE = re.compile(
+    r"\b(?:until(?:\s+the)?|market|session|after[- ]hours?|rth)\s+close\b"
+    r"|\bclose\s+of\s+(?:rth|regular|session|market)\b",
+    re.IGNORECASE,
+)
+_CLOSE_THE_BOOK_RE = re.compile(
+    r"\b(?:close|closing|exit|exiting)\s+"
+    r"(?:the\s+)?(?:lot|lots|position|positions|book|both|all)\b",
+    re.IGNORECASE,
+)
+
+
+def _qty_open(row: dict[str, Any]) -> bool:
+    try:
+        qty = float(row.get("quantity", row.get("position", 0)) or 0)
+    except (TypeError, ValueError):
+        return False
+    return abs(qty) >= 1e-9
+
+
+def _live_positions(positions: list[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in positions or []:
+        if isinstance(row, dict) and _qty_open(row):
+            out.append(row)
+    return out
+
+
+def _lot_name_tokens(
+    positions: list[Any] | None,
+    open_lots: list[Any] | None,
+) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: Any) -> None:
+        tok = str(raw or "").strip()
+        if not tok:
+            return
+        key = tok.upper()
+        if key in seen:
+            return
+        seen.add(key)
+        tokens.append(tok)
+
+    for row in _live_positions(positions):
+        add(row.get("symbol"))
+    for lab in open_lots or []:
+        head = str(lab or "").strip().split()
+        if head:
+            add(head[0])
+    return tokens
+
+
+def _had_send_tool(sends: int, tool_trace: list[Any] | None) -> bool:
+    if int(sends or 0) > 0:
+        return True
+    for raw in tool_trace or []:
+        name = str(raw or "").strip().split()[0].lower()
+        if name == "send":
+            return True
+    return False
+
+
+def spoken_close_without_send(
+    text: str = "",
+    *,
+    positions: list[Any] | None = None,
+    open_lots: list[Any] | None = None,
+    sends: int = 0,
+    tool_trace: list[Any] | None = None,
+) -> bool:
+    """True when the say names CLOSE/EXIT on an open lot and send never ran.
+
+    Market-close chatter ("until the close") is not a close decision.
+    A send tool call — filled or clerk-blocked — is a send.
+    """
+    if _had_send_tool(sends, tool_trace):
+        return False
+    blob = str(text or "")
+    if not blob.strip():
+        return False
+    lots = [str(x).strip() for x in (open_lots or []) if str(x).strip()]
+    live = _live_positions(positions)
+    if not live and not lots:
+        return False
+    cleaned = _MARKET_CLOSE_NOISE_RE.sub(" ", blob)
+    if not _CLOSE_OR_EXIT_RE.search(cleaned):
+        return False
+    tokens = _lot_name_tokens(live, lots)
+    if not tokens:
+        return False
+    for tok in tokens:
+        if re.search(rf"\b{re.escape(tok)}\b", blob, re.IGNORECASE):
+            return True
+    if re.search(r"\b(?:CLOSE|EXIT)\b", blob):
+        return True
+    return bool(_CLOSE_THE_BOOK_RE.search(cleaned))
+
+
+def look_spoken_close_without_send(payload: dict[str, Any] | None) -> bool:
+    """``_rearm_after_think`` payload: rationale/say + positions + sends."""
+    row = payload if isinstance(payload, dict) else {}
+    try:
+        sends = int(row.get("sends") or 0)
+    except (TypeError, ValueError):
+        sends = 0
+    text = str(row.get("rationale") or row.get("text") or "")
+    positions = list(row.get("positions") or [])
+    open_lots = list(row.get("open_lots") or [])
+    ws = row.get("world_state")
+    if isinstance(ws, dict):
+        if not open_lots:
+            open_lots = list(ws.get("open_lots") or [])
+        if not positions:
+            positions = list(ws.get("positions") or [])
+    return spoken_close_without_send(
+        text,
+        positions=positions,
+        open_lots=open_lots,
+        sends=sends,
+        tool_trace=list(row.get("tool_trace") or []),
+    )
+
+
+def inventory_wake_fact(
+    positions: list[Any] | None = None,
+    *,
+    open_lots: list[Any] | None = None,
+) -> str:
+    """Open lots as a wake lead. Not a fill / order_change / unprotected poke."""
+    lots = [str(x).strip() for x in (open_lots or []) if str(x).strip()]
+    if not lots:
+        try:
+            from abcxauto.world_state import lot_labels
+
+            lots = lot_labels(list(positions or []))
+        except Exception:
+            lots = []
+    if not lots:
+        for row in _live_positions(positions):
+            sym = str(row.get("symbol") or "").strip()
+            if sym:
+                lots.append(sym)
+    if not lots:
+        return ""
+    return "open_lots=" + ",".join(lots) + "."
+
+
 def desk_mode(session: str = "") -> str:
     return "rth" if is_rth_session(session) else "research"
 
