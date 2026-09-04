@@ -956,14 +956,16 @@ class ProEngine:
         return True
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
-        """Stay-up keeps the process. Next model call is a poke or a changed lead fact.
+        """Stay-up keeps the process. Rearm itself does not self-schedule.
 
         Paper RTH / premarket stay on this process. A good look writes no
-        grok_wake.json. Stay-up may sit — the runner does not self-schedule.
-        Duplicate lead-fact looks end with no send and wait. Words with no
-        tool_calls already stopped the model; this rearm waits for fill /
-        order_change / unprotected / operator poke. Chat is kept. Overnight
-        park is park_clock after a closed skip.
+        grok_wake.json. Duplicate lead-fact looks end with no send.
+        Words with no tool_calls already stopped the model. RTH stay-up
+        waits for fill / order_change / unprotected / operator poke or a
+        changed lead fact. Research keep-looking is the stay-up pulse
+        timeout (desk_mode.research_keep_looking), not a fake poke and not
+        an immediate mill here. Chat is kept. Overnight park is park_clock
+        after a closed skip.
         """
         session = self._resolve_session(session)
         self._last_session = session
@@ -1477,9 +1479,10 @@ class ProEngine:
                                 clear_park()
                             except Exception:
                                 pass
-                            # Stay-up may sit. Wait for a poke or a lead
-                            # fact that actually changed — do not dump a
-                            # fresh go-do-desk developer turn.
+                            # Stay-up pulse. RTH waits for a poke or a
+                            # lead fact that actually changed. Research
+                            # keep-looking re-enters on timeout — no fake
+                            # fill / order_change / unprotected poke.
                             wait = float(PULSE_S)
                             self.state.status = "On"
                             ev = self._wake_event
@@ -1497,7 +1500,14 @@ class ProEngine:
                             if peek_interrupt() is not None:
                                 continue
                             if timed_out:
-                                if await self._stay_up_lead_changed(g):
+                                keep_research = False
+                                try:
+                                    from abcxauto.desk_mode import research_keep_looking
+
+                                    keep_research = research_keep_looking(sess)
+                                except Exception:
+                                    keep_research = False
+                                if keep_research or await self._stay_up_lead_changed(g):
                                     self._resume_think = True
                                 continue
                             continue

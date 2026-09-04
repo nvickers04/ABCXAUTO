@@ -24,6 +24,7 @@ from abcxauto.desk_mode import (
     load_research_brief,
     note_research_tool,
     research_brief_stale,
+    research_keep_looking,
     research_send_block,
     rth_research_color,
     session_model,
@@ -61,6 +62,17 @@ def test_labeled_sessions_do_not_invent_a_second_clock():
         assert is_rth_session(sess) is False
         assert desk_mode(sess) == "research"
     assert desk_mode("regular") == "rth"
+
+
+def test_research_keep_looking_is_premarket_not_rth_or_park():
+    """Idle-after-brief is the defect. Overnight park still parks. RTH still waits."""
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+    assert research_keep_looking("premarket") is True
+    assert research_keep_looking("regular") is False
+    assert research_keep_looking("closed") is False
+    assert research_keep_looking("postmarket") is False
+    assert research_keep_looking("") is False
+    assert research_keep_looking("unknown") is False
 
 
 def test_session_model_falls_back_to_current_model():
