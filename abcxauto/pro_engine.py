@@ -267,6 +267,9 @@ class ProEngine:
         self._recover_gave_up = False
         self._inventory_wake = False
         self._ticket_wake = False
+        self._mill_wake = False
+        self._mill_streak = 0
+        self._mill_gave_up = False
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
         from abcxauto.think_stream import bind_engine
@@ -965,12 +968,14 @@ class ProEngine:
         Words with no tool_calls already stopped the model. RTH stay-up
         waits for fill / order_change / unprotected / operator poke or a
         changed lead fact — except a spoken CLOSE/EXIT on an open lot, or
-        a named ORDER EXAMPLES ticket (flat or with lots), with zero sends.
-        Those re-enter the same chat with lots / SEND-THE-TICKET on the wake.
-        Research keep-looking is the stay-up pulse timeout
-        (desk_mode.research_keep_looking), not a fake poke and not an
-        immediate mill here. Chat is kept. Overnight park is park_clock
-        after a closed skip.
+        a named ORDER EXAMPLES ticket (flat or with lots), with zero sends,
+        or a synthesize/decide mill with zero tools and zero send. Unpaid
+        tickets re-enter the same chat with lots / SEND-THE-TICKET. A mill
+        re-enters with TOOL-OR-SEND; after SYNTHESIZE_MILL_TRIES consecutive
+        mill turns, drop the chat and continue cold. Research keep-looking
+        is the stay-up pulse timeout (desk_mode.research_keep_looking), not a
+        fake poke. Chat is kept. Overnight park is park_clock after a closed
+        skip.
         """
         session = self._resolve_session(session)
         self._last_session = session
@@ -990,10 +995,12 @@ class ProEngine:
         # A spoken say or a send/fill is a finished look. Do not wipe chat.
         # Duplicate lead fact (_ended) waits for a poke, not a fresh desk.
         # CLOSE/EXIT on an open lot, or a named ticket, with no send is not
-        # finished — including when the book is flat.
+        # finished — including when the book is flat. A synthesize/decide
+        # mill with zero tools and zero send is not finished either.
         ended = bool(payload.get("_ended"))
         close_no_send = False
         ticket_no_send = False
+        mill_no_send = False
         if stay and not ended:
             try:
                 from abcxauto.desk_mode import (
@@ -1008,15 +1015,27 @@ class ProEngine:
             except Exception:
                 close_no_send = False
                 ticket_no_send = False
+            unpaid_now = close_no_send or ticket_no_send
+            if not unpaid_now:
+                try:
+                    from abcxauto.desk_mode import is_rth_session, look_synthesize_mill
+
+                    if is_rth_session(session):
+                        mill_no_send = look_synthesize_mill(payload)
+                except Exception:
+                    mill_no_send = False
         unpaid = close_no_send or ticket_no_send
-        finished = (ended or sends > 0 or not _look_text_is_junk(rationale)) and (
-            not unpaid
-        )
+        finished = (
+            ended or sends > 0 or not _look_text_is_junk(rationale)
+        ) and (not unpaid) and (not mill_no_send)
         if finished:
             failed = False
             stream_err = ""
             self._recover_streak = 0
             self._recover_gave_up = False
+            self._mill_streak = 0
+            self._mill_gave_up = False
+            self._mill_wake = False
         if parked and not stay:
             self._fail_streak = 0
             self._cold_next = True
@@ -1026,6 +1045,9 @@ class ProEngine:
             self._cold_next = False
             self._inventory_wake = bool(close_no_send)
             self._ticket_wake = bool(ticket_no_send)
+            self._mill_wake = False
+            self._mill_streak = 0
+            self._mill_gave_up = False
             self._recover_same_chat = False
             try:
                 if close_no_send:
@@ -1034,9 +1056,33 @@ class ProEngine:
                     self._note("LOOK", "ticket with no send — same chat")
             except Exception:
                 pass
+        elif stay and mill_no_send:
+            from abcxauto.desk_mode import SYNTHESIZE_MILL_TRIES
+
+            self._mill_streak = int(getattr(self, "_mill_streak", 0) or 0) + 1
+            self._inventory_wake = False
+            self._ticket_wake = False
+            self._recover_same_chat = False
+            if self._mill_streak >= SYNTHESIZE_MILL_TRIES:
+                self._mill_gave_up = True
+                self._mill_wake = False
+                self._resume_think = True
+                self._cold_next = True
+            else:
+                self._mill_gave_up = False
+                self._mill_wake = True
+                self._resume_think = True
+                self._cold_next = False
+                try:
+                    self._note("LOOK", "synthesize mill — same chat")
+                except Exception:
+                    pass
         elif stay:
             self._resume_think = False
             self._cold_next = False
+            self._mill_wake = False
+            self._mill_streak = 0
+            self._mill_gave_up = False
         else:
             self._cold_next = bool(failed or parked or stream_err)
         if not failed:
@@ -1127,6 +1173,7 @@ class ProEngine:
         self._cold_next = False
         self._inventory_wake = False
         self._ticket_wake = False
+        self._mill_wake = False
 
     def _drop_empty_junk_keep_looking(self, out: dict | None, g: Any) -> bool:
         """Same-chat empty/junk recover exhausted: drop chat, look again cold.
@@ -1151,6 +1198,9 @@ class ProEngine:
         self._recover_same_chat = False
         self._inventory_wake = False
         self._ticket_wake = False
+        self._mill_wake = False
+        self._mill_streak = 0
+        self._mill_gave_up = False
         self._cold_next = True
         self._resume_think = True
         logger.warning("empty/junk GROK — drop chat, keep looking")
@@ -1197,6 +1247,56 @@ class ProEngine:
         if body.startswith(fact):
             return body
         return f"{fact}\n{body}" if body else fact
+
+    def _with_mill_wake(self, wake: str) -> str:
+        """Lead the next same-chat wake after a synthesize mill. Forces tool or send."""
+        if not getattr(self, "_mill_wake", False):
+            return wake
+        self._mill_wake = False
+        from abcxauto.desk_mode import mill_wake_fact
+
+        fact = mill_wake_fact()
+        if not fact:
+            return wake
+        body = str(wake or "")
+        if body.startswith(fact):
+            return body
+        return f"{fact}\n{body}" if body else fact
+
+    def _drop_synthesize_mill_keep_looking(self, out: dict | None, g: Any) -> bool:
+        """Consecutive synthesize mills exhausted: drop chat, look again cold.
+
+        Same spirit as empty/junk exhaust. Not a fill / order_change /
+        unprotected poke. The mill wake already failed to force a tool or
+        send; a new conversation on this process continues looking.
+        """
+        if not bool(getattr(self, "_mill_gave_up", False)):
+            return False
+        payload = out if isinstance(out, dict) else {}
+        if payload.get("_ended") or payload.get("_parked"):
+            return False
+        from abcxauto.brain import drop_live_chat
+
+        try:
+            drop_live_chat(g)
+        except Exception:
+            logger.debug("drop live chat after synthesize mill failed", exc_info=True)
+        self._mill_streak = 0
+        self._mill_gave_up = False
+        self._mill_wake = False
+        self._recover_streak = 0
+        self._recover_gave_up = False
+        self._recover_same_chat = False
+        self._inventory_wake = False
+        self._ticket_wake = False
+        self._cold_next = True
+        self._resume_think = True
+        logger.warning("synthesize mill — drop chat, keep looking")
+        try:
+            self._note("LOOK", "synthesize mill — new chat, keep looking")
+        except Exception:
+            pass
+        return True
 
     async def _stay_up_lead_changed(self, g: Any) -> bool:
         """True when a collapsible lead fact moved since the last look."""
@@ -1294,8 +1394,9 @@ class ProEngine:
             ibkr_up=bool(getattr(self.conn, "connected", False)),
             day=day,
         )
-        # Ticket wake inside inventory wrap so CLOSE/EXIT still leads open_lots=.
+        # Ticket / mill wakes inside inventory wrap so CLOSE/EXIT still leads open_lots=.
         wake = self._with_ticket_wake(wake)
+        wake = self._with_mill_wake(wake)
         wake = self._with_inventory_wake(
             wake, s.get("positions") or [], day if isinstance(day, dict) else None
         )
@@ -1527,6 +1628,9 @@ class ProEngine:
                         session=str(getattr(self, "_last_session", "") or "")
                     )
                     self._brain_key = brain_key
+
+                if getattr(self, "_mill_gave_up", False):
+                    self._drop_synthesize_mill_keep_looking(None, g)
 
                 want_look = bool(getattr(self, "_resume_think", False))
                 cold = bool(getattr(self, "_cold_next", False))

@@ -1019,6 +1019,154 @@ def test_rearm_spoken_ticket_without_send_reenters_same_chat():
     assert not getattr(eng, "_ticket_wake", False)
 
 
+# Live desk oracle: [think] Let me synthesize a trading plan/the picture
+# → more prose → often names ticket → [stream silent], send=0.
+_SOFT_SPIN_MILL_SAY = (
+    "Let me synthesize a trading plan/the picture. "
+    "More prose. Stream going quiet."
+)
+_SOFT_SPIN_TICKET_SAY = (
+    "Let me synthesize a trading plan/the picture. "
+    "INTC market_bracket LONG 10 stop 35 target 42."
+)
+
+
+def test_rearm_synthesize_mill_reenters_same_chat():
+    """RTH mill + zero tools/send is not finished. Same chat, TOOL-OR-SEND."""
+    from abcxauto.desk_mode import SYNTHESIZE_MILL_TRIES
+
+    assert SYNTHESIZE_MILL_TRIES == 2
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": _SOFT_SPIN_MILL_SAY,
+            "sends": 0,
+            "positions": [],
+            "tool_trace": [],
+        },
+        session="regular",
+    )
+    assert wait == 0.0
+    assert eng._resume_think is True
+    assert eng._cold_next is False
+    assert eng._mill_wake is True
+    assert eng._mill_streak == 1
+    assert not getattr(eng, "_ticket_wake", False)
+    assert not getattr(eng, "_inventory_wake", False)
+    # Tools or send are not a mill — sit for a real poke.
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": _SOFT_SPIN_MILL_SAY,
+            "sends": 0,
+            "tool_trace": ["book", "quote"],
+        },
+        session="regular",
+    )
+    assert eng._resume_think is False
+    assert eng._cold_next is False
+    assert not getattr(eng, "_mill_wake", False)
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": _SOFT_SPIN_MILL_SAY,
+            "sends": 1,
+            "tool_trace": ["send"],
+        },
+        session="regular",
+    )
+    assert eng._resume_think is False
+    assert not getattr(eng, "_mill_wake", False)
+    # Spoken-no-tool that is not mill still sits.
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+            "positions": [],
+        },
+        session="regular",
+    )
+    assert eng._resume_think is False
+    assert not getattr(eng, "_mill_wake", False)
+    # Mill + named ticket stays #164 unpaid, not mill-cap.
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": _SOFT_SPIN_TICKET_SAY,
+            "sends": 0,
+            "positions": [],
+        },
+        session="regular",
+    )
+    assert eng._resume_think is True
+    assert eng._ticket_wake is True
+    assert not getattr(eng, "_mill_wake", False)
+    assert eng._mill_streak == 0
+    # Research keep-looking owns premarket. Mill is RTH-only.
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": _SOFT_SPIN_MILL_SAY,
+            "sends": 0,
+            "tool_trace": [],
+        },
+        session="premarket",
+    )
+    assert eng._resume_think is False
+    assert not getattr(eng, "_mill_wake", False)
+
+
+def test_rearm_synthesize_mill_caps_then_drops_chat():
+    """N=2 consecutive mill turns: first same-chat, second drop + cold continue."""
+    from abcxauto.config import get_config
+    from abcxauto.desk_mode import SYNTHESIZE_MILL_TRIES
+
+    payload = {
+        "_failed": False,
+        "rationale": _SOFT_SPIN_MILL_SAY,
+        "sends": 0,
+        "positions": [],
+        "tool_trace": [],
+    }
+    eng = ProEngine()
+    eng._rearm_after_think(payload, session="regular")
+    assert eng._mill_streak == 1
+    assert eng._mill_wake is True
+    assert eng._mill_gave_up is False
+    assert eng._resume_think is True
+    assert eng._cold_next is False
+    eng._rearm_after_think(payload, session="regular")
+    assert eng._mill_streak >= SYNTHESIZE_MILL_TRIES
+    assert eng._mill_gave_up is True
+    assert eng._mill_wake is False
+    assert eng._resume_think is True
+    assert eng._cold_next is True
+    g = SimpleNamespace(chat=object())
+    assert eng._drop_synthesize_mill_keep_looking(payload, g) is True
+    assert g.chat is None
+    assert eng._mill_streak == 0
+    assert eng._mill_gave_up is False
+    assert eng._cold_next is True
+    assert eng._resume_think is True
+    # Ended / parked still sit — not this path.
+    g2 = SimpleNamespace(chat=object())
+    eng._mill_gave_up = True
+    assert eng._drop_synthesize_mill_keep_looking(
+        {"_ended": True, "rationale": _SOFT_SPIN_MILL_SAY}, g2
+    ) is False
+    assert g2.chat is not None
+    cfg = get_config()
+    assert cfg.defined_risk_only is True
+    assert cfg.ibkr_port != 7496
+
+
 def test_rearm_accepted_say_resets_recover_streak():
     """A send or accepted non-junk say clears the empty/junk recover streak."""
     eng = ProEngine()
@@ -1318,6 +1466,149 @@ async def test_spoken_ticket_without_send_reenters_same_chat(monkeypatch, tmp_pa
     assert eng._cold_next is False
 
 
+@pytest.mark.asyncio
+async def test_synthesize_mill_reenters_same_chat(monkeypatch, tmp_path):
+    """Soft-spin mill + zero tools/send is not finished. Same chat, mill wake."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    resumes: list[bool] = []
+    mill_flags: list[bool] = []
+    chats: list[object] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import peek_interrupt
+
+        resumes.append(resume)
+        mill_flags.append(bool(getattr(self, "_mill_wake", False)))
+        assert peek_interrupt() is None
+        g.chat = g.chat or object()
+        chats.append(g.chat)
+        if len(resumes) == 1:
+            return {
+                "cycle": n,
+                "pnl": 0,
+                "equity": 100000,
+                "_failed": False,
+                "rationale": _SOFT_SPIN_MILL_SAY,
+                "sends": 0,
+                "positions": [],
+                "tool_trace": [],
+            }
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "Working a ticket.",
+            "sends": 1,
+            "positions": [],
+            "tool_trace": ["send"],
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+
+    def boom_poke(*_a, **_k):
+        raise AssertionError("mill re-enter must not invent a book poke")
+
+    monkeypatch.setattr("abcxauto.park_clock.note_interrupt", boom_poke)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.3
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) == 2
+    assert resumes == [True, True]
+    assert mill_flags[1] is True
+    assert chats[0] is chats[1]
+    from abcxauto.park_clock import load_alarm, peek_interrupt
+
+    assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
+    assert eng._cold_next is False
+
+
+@pytest.mark.asyncio
+async def test_synthesize_mill_cap_drops_chat_and_colds(monkeypatch, tmp_path):
+    """N consecutive mill turns drop the live chat and continue looking cold."""
+    from abcxauto.desk_mode import SYNTHESIZE_MILL_TRIES
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    resumes: list[bool] = []
+    mill_flags: list[bool] = []
+    chats: list[object] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import peek_interrupt
+
+        resumes.append(resume)
+        mill_flags.append(bool(getattr(self, "_mill_wake", False)))
+        assert peek_interrupt() is None
+        chats.append(g.chat)
+        g.chat = g.chat or object()
+        if len(resumes) <= SYNTHESIZE_MILL_TRIES:
+            return {
+                "cycle": n,
+                "pnl": 0,
+                "equity": 100000,
+                "_failed": False,
+                "rationale": _SOFT_SPIN_MILL_SAY,
+                "sends": 0,
+                "positions": [],
+                "tool_trace": [],
+            }
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+            "positions": [],
+            "tool_trace": ["book"],
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+
+    def boom_poke(*_a, **_k):
+        raise AssertionError("mill cap must not invent a book poke")
+
+    monkeypatch.setattr("abcxauto.park_clock.note_interrupt", boom_poke)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 6
+    while time.time() < deadline and len(resumes) < SYNTHESIZE_MILL_TRIES + 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.3
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) == SYNTHESIZE_MILL_TRIES + 1
+    assert resumes[0] is True
+    assert resumes[1] is True
+    assert resumes[2] is False
+    assert mill_flags[1] is True
+    assert mill_flags[2] is False
+    assert chats[0] is not None
+    assert chats[2] is None
+    from abcxauto.config import get_config
+    from abcxauto.park_clock import load_alarm, peek_interrupt
+
+    assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
+    cfg = get_config()
+    assert cfg.defined_risk_only is True
+    assert cfg.ibkr_port != 7496
+
+
 def test_rearm_failed_look_idles_without_cold_next(monkeypatch):
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "30")
     eng = ProEngine()
@@ -1520,6 +1811,37 @@ async def test_host_think_ticket_wake_leads_with_send_the_ticket(monkeypatch):
     assert wake.startswith(TICKET_WAKE_FACT)
     assert "SEND-THE-TICKET" in wake
     assert eng._ticket_wake is False
+    assert peek_interrupt() is None
+
+
+@pytest.mark.asyncio
+async def test_host_think_mill_wake_leads_with_tool_or_send(monkeypatch):
+    """Mill re-enter puts TOOL-OR-SEND on the wake, not a poke or a sermon."""
+    from abcxauto.brain import BrainTurn
+    from abcxauto.desk_mode import MILL_WAKE_FACT
+    from abcxauto.park_clock import peek_interrupt
+
+    got: dict[str, object] = {}
+
+    async def grok_turn(*_a, **k):
+        got["wake"] = str(k.get("wake") or "")
+        got["resume"] = k.get("resume")
+        got["recover"] = k.get("recover")
+        return BrainTurn(text="calling book")
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    eng._mill_wake = True
+    snap = _stay_up_snap("regular")
+    await eng._host_think(2, SimpleNamespace(chat=object()), snap, resume=True)
+    wake = str(got.get("wake") or "")
+    assert got.get("resume") is True
+    assert got.get("recover") is False
+    assert wake.startswith(MILL_WAKE_FACT)
+    assert "TOOL-OR-SEND" in wake
+    assert "let me synthesize" not in wake.lower()
+    assert eng._mill_wake is False
     assert peek_interrupt() is None
 
 
