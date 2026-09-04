@@ -265,6 +265,7 @@ class ProEngine:
         self._recover_same_chat = False
         self._recover_streak = 0
         self._recover_gave_up = False
+        self._inventory_wake = False
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
         from abcxauto.think_stream import bind_engine
@@ -962,9 +963,11 @@ class ProEngine:
         grok_wake.json. Duplicate lead-fact looks end with no send.
         Words with no tool_calls already stopped the model. RTH stay-up
         waits for fill / order_change / unprotected / operator poke or a
-        changed lead fact. Research keep-looking is the stay-up pulse
-        timeout (desk_mode.research_keep_looking), not a fake poke and not
-        an immediate mill here. Chat is kept. Overnight park is park_clock
+        changed lead fact — except a spoken CLOSE/EXIT on an open lot with
+        zero sends, which re-enters the same chat with lots on the wake.
+        Research keep-looking is the stay-up pulse timeout
+        (desk_mode.research_keep_looking), not a fake poke and not an
+        immediate mill here. Chat is kept. Overnight park is park_clock
         after a closed skip.
         """
         session = self._resolve_session(session)
@@ -984,8 +987,24 @@ class ProEngine:
             sends = 0
         # A spoken say or a send/fill is a finished look. Do not wipe chat.
         # Duplicate lead fact (_ended) waits for a poke, not a fresh desk.
+        # CLOSE/EXIT named on an open lot with no send is not finished.
         ended = bool(payload.get("_ended"))
-        finished = ended or sends > 0 or not _look_text_is_junk(rationale)
+        close_no_send = False
+        if stay and not ended:
+            try:
+                from abcxauto.desk_mode import (
+                    is_rth_session,
+                    look_spoken_close_without_send,
+                )
+
+                close_no_send = is_rth_session(session) and look_spoken_close_without_send(
+                    payload
+                )
+            except Exception:
+                close_no_send = False
+        finished = (ended or sends > 0 or not _look_text_is_junk(rationale)) and (
+            not close_no_send
+        )
         if finished:
             failed = False
             stream_err = ""
@@ -994,7 +1013,16 @@ class ProEngine:
             self._fail_streak = 0
             self._cold_next = True
             return 0.0
-        if stay:
+        if stay and close_no_send:
+            self._resume_think = True
+            self._cold_next = False
+            self._inventory_wake = True
+            self._recover_same_chat = False
+            try:
+                self._note("LOOK", "CLOSE/EXIT with no send — same chat")
+            except Exception:
+                pass
+        elif stay:
             self._resume_think = False
             self._cold_next = False
         else:
@@ -1085,6 +1113,30 @@ class ProEngine:
         self._recover_same_chat = True
         self._resume_think = True
         self._cold_next = False
+        self._inventory_wake = False
+
+    def _with_inventory_wake(
+        self,
+        wake: str,
+        positions: list | None,
+        day: dict | None = None,
+    ) -> str:
+        """Lead the next same-chat wake with open lots after spoken CLOSE/EXIT."""
+        if not getattr(self, "_inventory_wake", False):
+            return wake
+        self._inventory_wake = False
+        from abcxauto.desk_mode import inventory_wake_fact
+
+        lots = None
+        if isinstance(day, dict):
+            lots = day.get("open_lots")
+        fact = inventory_wake_fact(positions, open_lots=lots)
+        if not fact:
+            return wake
+        body = str(wake or "")
+        if body.startswith(fact):
+            return body
+        return f"{fact}\n{body}" if body else fact
 
     async def _stay_up_lead_changed(self, g: Any) -> bool:
         """True when a collapsible lead fact moved since the last look."""
@@ -1181,6 +1233,9 @@ class ProEngine:
             unprotected=world.unprotected,
             ibkr_up=bool(getattr(self.conn, "connected", False)),
             day=day,
+        )
+        wake = self._with_inventory_wake(
+            wake, s.get("positions") or [], day if isinstance(day, dict) else None
         )
         self.state.status = "Thinking"
         recover = bool(getattr(self, "_recover_same_chat", False))

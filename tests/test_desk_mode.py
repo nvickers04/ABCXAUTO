@@ -75,6 +75,60 @@ def test_research_keep_looking_is_premarket_not_rth_or_park():
     assert research_keep_looking("unknown") is False
 
 
+def _ibit_xlf_positions():
+    return [
+        {"symbol": "IBIT", "quantity": 10, "sec_type": "STK", "con_id": 11},
+        {"symbol": "XLF", "quantity": 20, "sec_type": "STK", "con_id": 22},
+    ]
+
+
+def test_spoken_close_without_send_needs_open_lot_and_no_send():
+    from abcxauto.desk_mode import (
+        inventory_wake_fact,
+        look_spoken_close_without_send,
+        spoken_close_without_send,
+    )
+
+    pos = _ibit_xlf_positions()
+    assert spoken_close_without_send(
+        "CLOSE IBIT. EXIT XLF.", positions=pos, sends=0
+    )
+    assert spoken_close_without_send(
+        "close IBIT / exit XLF", positions=pos, sends=0
+    )
+    assert spoken_close_without_send(
+        "Closing both lots. No ticket yet.", positions=pos, sends=0
+    )
+    assert spoken_close_without_send(
+        "CLOSE/EXIT the book.", positions=pos, sends=0
+    )
+    assert not spoken_close_without_send(
+        "CLOSE IBIT. EXIT XLF.", positions=pos, sends=1
+    )
+    assert not spoken_close_without_send(
+        "CLOSE IBIT.", positions=pos, sends=0, tool_trace=["send"]
+    )
+    assert not spoken_close_without_send("CLOSE IBIT.", positions=[], sends=0)
+    assert not spoken_close_without_send(
+        "Standing down. Watching IWM. No ticket.", positions=pos, sends=0
+    )
+    assert not spoken_close_without_send(
+        "Watching IBIT until the close. No ticket.", positions=pos, sends=0
+    )
+    assert look_spoken_close_without_send(
+        {
+            "rationale": "CLOSE IBIT and EXIT XLF.",
+            "sends": 0,
+            "positions": pos,
+        }
+    )
+    fact = inventory_wake_fact(pos)
+    assert fact.startswith("open_lots=")
+    assert "IBIT" in fact
+    assert "XLF" in fact
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
 def test_session_model_falls_back_to_current_model():
     cfg = get_config()
     assert cfg.model_rth == ""
