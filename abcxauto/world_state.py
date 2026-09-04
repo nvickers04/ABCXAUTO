@@ -2075,6 +2075,17 @@ def format_wake(
         # leftover say / prev= / unused= stay off wake.
     # Desk facts only — no trailing "send." (Grok reads that as an operator command).
     body = " ".join(parts)
+    try:
+        from abcxauto.desk_mode import desk_mode_wake_bit
+
+        full = True
+        if isinstance(day, dict) and day.get("research_brief_full") is False:
+            full = False
+        mode_bit = desk_mode_wake_bit(session, rth_full=full)
+        if mode_bit:
+            body = f"{body} {mode_bit}".strip()
+    except Exception:
+        logger.debug("desk mode wake bit failed", exc_info=True)
     lead = worst_wake_fact(unprotected=unprotected, day=day, session=session)
     if lead:
         if not lead.endswith("."):

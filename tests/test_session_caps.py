@@ -51,6 +51,25 @@ def test_premarket_and_regular_are_separate_budgets():
     note_look("premarket", tokens=10, now=now)
     assert usage("premarket", now=now)["looks"] == 1
     assert usage("regular", now=now.replace(hour=10))["looks"] == 0
+    assert usage("premarket", now=now)["looks"] == 1
+
+
+def test_legacy_single_row_caps_file_still_counts(tmp_path, monkeypatch):
+    path = tmp_path / "legacy_caps.json"
+    monkeypatch.setenv("ABCXAUTO_SESSION_CAPS_PATH", str(path))
+    reset_session_caps()
+    now = _et(2026, 8, 28, 10, 0)
+    key = session_key("regular", now=now)
+    path.write_text(
+        '{"key": "%s", "looks": 3, "tokens": 9}\n' % key,
+        encoding="utf-8",
+    )
+    snap = usage("regular", now=now)
+    assert snap["looks"] == 3
+    assert snap["tokens"] == 9
+    note_look("premarket", tokens=1, now=_et(2026, 8, 28, 8, 0))
+    assert usage("regular", now=now)["looks"] == 3
+    assert usage("premarket", now=_et(2026, 8, 28, 8, 0))["looks"] == 1
 
 
 def test_look_cap_stops_further_counts_from_gating():

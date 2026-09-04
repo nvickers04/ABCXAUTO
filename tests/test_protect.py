@@ -923,8 +923,70 @@ async def test_execute_ticket_without_session_does_not_invent_a_candles_gate(mon
 
 
 @pytest.mark.asyncio
-async def test_non_session_card_may_send_in_premarket(monkeypatch):
+async def test_non_session_card_may_send_in_rth(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
+    from abcxauto.world_state import WorldState
+
+    sent: list[dict] = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    result = await execute_ticket(
+        {
+            "action": "market_bracket",
+            "strategy": "market_bracket",
+            "params": {
+                "card": "generic STK market bracket",
+                "symbol": "SNDK",
+                "direction": "LONG",
+                "stop_price": 88.0,
+                "target_price": 93.0,
+                "quantity": 10,
+            },
+        },
+        object(),
+        world,
+        {
+            "account": {"netliquidation": 37000.0},
+            "positions": [],
+            "open_orders": [],
+            "ibkr_live_quotes": {"SNDK": 91.5},
+        },
+    )
+    assert result.get("status") == "ok"
+    assert sent
+
+
+@pytest.mark.asyncio
+async def test_research_session_execute_ticket_blocks_send(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.desk_mode import REASON_RESEARCH_NO_SEND
     from abcxauto.world_state import WorldState
 
     sent: list[dict] = []
@@ -979,8 +1041,9 @@ async def test_non_session_card_may_send_in_premarket(monkeypatch):
             "ibkr_live_quotes": {"SNDK": 91.5},
         },
     )
-    assert result.get("status") == "ok"
-    assert sent
+    assert result.get("status") == "blocked"
+    assert result.get("reason_code") == REASON_RESEARCH_NO_SEND
+    assert sent == []
 
 
 @pytest.mark.asyncio

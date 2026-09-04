@@ -23,7 +23,14 @@ which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process.
 
 ## Hard gates (code)
 
-- `send` is the only broker path
+- `send` is the only broker path. Premarket / after-hours / closed is
+  **research mode**: stronger `model_research` when set, MDA/news/odds/web
+  for an expectancy brief under `data/state/research_brief.json`, and
+  `send` fail-closes (`research_no_send`). RTH is the thin defined-risk
+  sender (`model_rth` or current `model`). The research brief is COLOR on
+  the RTH wake (prior-session, not a live trigger). Missing/stale brief:
+  RTH still runs. News/scan/web are never an automatic trigger.
+
 - Defined-risk and cash-only
 - Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %;
   optional capacity `max_open_positions` (default 0 = off; a positive N is Grok's ceiling)

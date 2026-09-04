@@ -734,6 +734,8 @@ def test_settings_fields_cover_every_operator_knob(headless_pro):
 
     assert AGENT_FIELD_KEYS == {
         "model",
+        "model_rth",
+        "model_research",
         "temperature",
         "max_tokens",
         "session_look_cap",

@@ -214,6 +214,7 @@ def _isolate_desk_state(tmp_path, monkeypatch):
 
     reset_session_caps()
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
     from abcxauto import think_stream as ts
 
     monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
