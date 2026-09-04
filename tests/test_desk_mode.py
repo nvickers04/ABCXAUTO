@@ -221,6 +221,26 @@ def test_synthesize_mill_zero_tools_zero_send_is_not_a_finished_look():
     )
     assert spoken_synthesize_mill("Let me decide whether to send.", sends=0)
     assert spoken_synthesize_mill("Time to decide on a ticket.", sends=0)
+    assert spoken_synthesize_mill("Let me continue gathering.", sends=0, tool_trace=[])
+    assert spoken_synthesize_mill("Let me analyze.", sends=0, tool_trace=[])
+    assert spoken_synthesize_mill("Keep gathering. Gather more.", sends=0)
+    assert spoken_synthesize_mill("Analyzing the tape.", sends=0)
+    assert spoken_synthesize_mill("Let me dig.", sends=0)
+    assert spoken_synthesize_mill("Keep looking at the data.", sends=0)
+    assert look_synthesize_mill(
+        {"rationale": "Let me continue gathering.", "sends": 0, "tool_trace": []}
+    )
+    assert look_synthesize_mill(
+        {"rationale": "Let me analyze.", "sends": 0, "tool_trace": []}
+    )
+    assert not spoken_synthesize_mill(
+        "Let me continue gathering.", sends=0, tool_trace=["book"]
+    )
+    assert not spoken_synthesize_mill(
+        "Let me analyze.", sends=0, tool_trace=["quote"]
+    )
+    assert not spoken_synthesize_mill("Keep looking at NVDA.", sends=0)
+    assert not spoken_synthesize_mill("Looking at the book.", sends=0)
     assert not spoken_synthesize_mill(
         _SOFT_SPIN_MILL_SAY, sends=0, tool_trace=["book"]
     )
@@ -235,10 +255,26 @@ def test_synthesize_mill_zero_tools_zero_send_is_not_a_finished_look():
         "I decided to wait. Watching IWM.", sends=0
     )
     # Mill + named ticket: mill matcher still sees mill language; unpaid
-    # owns the engine path.
+    # owns the engine path (including gather/analyze mill + a named ticket).
     assert spoken_synthesize_mill(_SOFT_SPIN_TICKET_SAY, sends=0)
     assert look_unpaid_ticket(
         {"rationale": _SOFT_SPIN_TICKET_SAY, "sends": 0, "positions": []}
+    )
+    gather_ticket = (
+        "Let me continue gathering. "
+        "INTC market_bracket LONG 10 stop 35 target 42."
+    )
+    analyze_ticket = (
+        "Let me analyze. "
+        "INTC market_bracket LONG 10 stop 35 target 42."
+    )
+    assert spoken_synthesize_mill(gather_ticket, sends=0, tool_trace=[])
+    assert look_unpaid_ticket(
+        {"rationale": gather_ticket, "sends": 0, "positions": []}
+    )
+    assert spoken_synthesize_mill(analyze_ticket, sends=0, tool_trace=[])
+    assert look_unpaid_ticket(
+        {"rationale": analyze_ticket, "sends": 0, "positions": []}
     )
     assert mill_wake_fact() == MILL_WAKE_FACT
     assert "TOOL-OR-SEND" in mill_wake_fact()

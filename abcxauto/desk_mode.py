@@ -371,7 +371,12 @@ _SYNTHESIZE_MILL_RE = re.compile(
     r"|\btrading\s+plans?\b"
     r"|\bthe\s+picture\b"
     r"|\b(?:let\s+me|time\s+to|need\s+to|going\s+to)\s+decide\b"
-    r"|\bdecide\s+(?:whether|on|what|how)\b",
+    r"|\bdecide\s+(?:whether|on|what|how)\b"
+    r"|\b(?:continue|keep)\s+gathering\b"
+    r"|\bgather\s+more\b"
+    r"|\banaly[sz](?:e|ing)\s+the\s+(?:market|tape|picture|data)\b"
+    r"|\blet\s+me\s+(?:continue|analy[sz]e|dig)\b"
+    r"|\bkeep\s+looking\s+at\s+the\s+data\b",
     re.IGNORECASE,
 )
 
@@ -541,9 +546,11 @@ def spoken_synthesize_mill(
 ) -> bool:
     """True when the say is a synthesize/decide mill and this look used no tool or send.
 
-    Tight language: synthesize / trading plan / the picture / let-me-decide.
-    A tool call or send is not a mill. Named unpaid tickets stay on
-    ``look_unpaid_ticket``. Bare "decided to wait" is not this matcher.
+    Tight language: synthesize / trading plan / the picture / let-me-decide /
+    continue-gathering / analyze-the-tape / let-me-continue|analyze|dig /
+    keep-looking-at-the-data. A tool call or send is not a mill. Named unpaid
+    tickets stay on ``look_unpaid_ticket``. Bare "decided to wait" or a real
+    tool look ("looking at NVDA") is not this matcher.
     """
     if _had_tool_or_send(sends, tool_trace):
         return False
