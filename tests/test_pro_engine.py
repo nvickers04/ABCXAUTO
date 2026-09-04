@@ -947,6 +947,58 @@ def test_rearm_accepted_say_resets_recover_streak():
     """A send or accepted non-junk say clears the empty/junk recover streak."""
     eng = ProEngine()
     eng._recover_streak = 2
+    eng._recover_gave_up = True
+    eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+        },
+        session="regular",
+    )
+    assert eng._recover_streak == 0
+    assert eng._recover_gave_up is False
+    eng._recover_streak = 2
+    eng._rearm_after_think(
+        {"rationale": "CLOSE IBIT. EXIT XLF.", "sends": 1, "positions": _ibit_xlf_positions()},
+        session="regular",
+    )
+    assert eng._recover_streak == 0
+    # Unaccepted CLOSE/EXIT is not a finished look — streak stays.
+    eng._recover_streak = 1
+    eng._rearm_after_think(
+        {
+            "rationale": "CLOSE IBIT. EXIT XLF.",
+            "sends": 0,
+            "positions": _ibit_xlf_positions(),
+        },
+        session="regular",
+    )
+    assert eng._recover_streak == 1
+
+
+def test_drop_empty_junk_keep_looking_colds_new_chat():
+    """Exhausted empty/junk recover must not sit frozen on the tip."""
+    eng = ProEngine()
+    g = SimpleNamespace(chat=object(), _wake_n=3)
+    eng._recover_gave_up = True
+    eng._recover_streak = 2
+    eng._recover_same_chat = True
+    assert eng._drop_empty_junk_keep_looking({"rationale": "?"}, g) is True
+    assert g.chat is None
+    assert eng._recover_streak == 0
+    assert eng._recover_gave_up is False
+    assert eng._recover_same_chat is False
+    assert eng._cold_next is True
+    assert eng._resume_think is True
+    # Ended / parked still sit — not this path.
+    g2 = SimpleNamespace(chat=object())
+    eng._recover_gave_up = True
+    assert eng._drop_empty_junk_keep_looking({"_ended": True, "rationale": "?"}, g2) is False
+    assert g2.chat is not None
+    """A send or accepted non-junk say clears the empty/junk recover streak."""
+    eng = ProEngine()
+    eng._recover_streak = 2
     eng._rearm_after_think(
         {
             "_failed": False,
@@ -1589,11 +1641,11 @@ async def test_paper_premarket_stay_up_writes_no_sit_clock(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
-    """Junk/empty recovers same chat (bounded), then sits. Never _cold_next.
+async def test_junk_look_after_recovers_drops_chat_keeps_looking(monkeypatch, tmp_path):
+    """Junk/empty recovers same chat (bounded), then drops chat and keeps looking.
 
-    2026-09-03 14:03 CT: junk-idle parked the look with no recover after a
-    poke. Recover first; after EMPTY_GROK_RECOVER_TRIES, sit. Chat kept.
+    Sitting with chat kept after EMPTY_GROK_RECOVER_TRIES freezes the tip.
+    Cold next on this process. Never ensure_next_look / sit clock.
     """
     from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
 
@@ -1601,6 +1653,7 @@ async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
     times: list[float] = []
     resumes: list[bool] = []
+    chats: list[object] = []
     ensure_calls: list[object] = []
 
     def boom_ensure(*_a, **_k):
@@ -1610,6 +1663,7 @@ async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
     async def think(self, n, g, s, *, resume=False):
         times.append(time.monotonic())
         resumes.append(resume)
+        chats.append(g.chat)
         g.chat = g.chat or object()
         return {
             "cycle": n,
@@ -1624,39 +1678,41 @@ async def test_junk_look_idles_without_cold_restart(monkeypatch, tmp_path):
     monkeypatch.setattr("abcxauto.park_clock.set_wake", boom_ensure)
     eng = ProEngine()
     assert eng.start() is None
-    want = 1 + EMPTY_GROK_RECOVER_TRIES
+    want = 1 + EMPTY_GROK_RECOVER_TRIES + 1
     deadline = time.time() + 4
     while time.time() < deadline and len(times) < want:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    idle_until = time.time() + 0.4
-    while time.time() < idle_until:
-        eng.drain_apply()
-        await asyncio.sleep(0.05)
+    looking = bool(eng.worker and eng.worker.is_alive())
     eng.stop_engine()
     eng.drain_apply()
-    assert len(times) == want
-    assert resumes == [True] * want
-    assert eng._cold_next is False
-    assert eng._resume_think is False
+    assert len(times) >= want
+    same = 1 + EMPTY_GROK_RECOVER_TRIES
+    assert resumes[:same] == [True] * same
+    assert resumes[same] is False
+    assert chats[same] is None
+    assert looking
     assert ensure_calls == []
-    from abcxauto.park_clock import load_alarm
+    from abcxauto.park_clock import load_alarm, peek_interrupt
 
     assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
     assert not getattr(eng, "_session_capped", False)
 
 
 @pytest.mark.asyncio
-async def test_failed_look_idles_without_set_wake_clock(monkeypatch, tmp_path):
+async def test_failed_look_keeps_looking_without_set_wake_clock(monkeypatch, tmp_path):
     from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.4")
     monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
     times: list[float] = []
+    resumes: list[bool] = []
 
     async def think(self, n, g, s, *, resume=False):
         times.append(time.monotonic())
+        resumes.append(resume)
         g.chat = g.chat or object()
         return {
             "cycle": n,
@@ -1670,19 +1726,17 @@ async def test_failed_look_idles_without_set_wake_clock(monkeypatch, tmp_path):
     _wire_stay_up_engine(monkeypatch, session="regular", think=think)
     eng = ProEngine()
     assert eng.start() is None
-    want = 1 + EMPTY_GROK_RECOVER_TRIES
+    want = 1 + EMPTY_GROK_RECOVER_TRIES + 1
     deadline = time.time() + 4
     while time.time() < deadline and len(times) < want:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    idle_until = time.time() + 0.4
-    while time.time() < idle_until:
-        eng.drain_apply()
-        await asyncio.sleep(0.05)
+    looking = bool(eng.worker and eng.worker.is_alive())
     eng.stop_engine()
     eng.drain_apply()
-    assert len(times) == want
-    assert eng._cold_next is False
+    assert len(times) >= want
+    assert resumes[1 + EMPTY_GROK_RECOVER_TRIES] is False
+    assert looking
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None
@@ -2096,6 +2150,11 @@ async def test_rth_spoken_no_tool_with_open_lots_still_waits(monkeypatch, tmp_pa
 
     monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)
     monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+
+    async def no_lead(_self, _g):
+        return False
+
+    monkeypatch.setattr("abcxauto.pro_engine.ProEngine._stay_up_lead_changed", no_lead)
     eng = ProEngine()
     assert eng.start() is None
     deadline = time.time() + 4
@@ -2438,15 +2497,22 @@ async def test_empty_grok_after_option_quote_live_worker_reenters_without_cold(
 
 @pytest.mark.asyncio
 async def test_empty_grok_recover_does_not_loop_forever(monkeypatch, tmp_path):
-    """Engine recover after option_quote caps at EMPTY_GROK_RECOVER_TRIES."""
+    """Same-chat recover caps at EMPTY_GROK_RECOVER_TRIES, then cold next.
+
+    Infinite same-chat recover is forbidden. Permanent sit after exhaust
+    freezes the tip — drop chat and keep looking instead.
+    """
     from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
     resumes: list[bool] = []
+    chats: list[object] = []
 
     async def think(self, n, g, s, *, resume=False):
         resumes.append(resume)
+        chats.append(g.chat)
+        g.chat = g.chat or object()
         self.state.think_live = (
             "--- GROK ---\n[option_quote]\n--- GROK ---\n[think]\n"
             "still looking at the 765C\n"
@@ -2465,21 +2531,24 @@ async def test_empty_grok_recover_does_not_loop_forever(monkeypatch, tmp_path):
     _wire_stay_up_engine(monkeypatch, session="regular", think=think)
     eng = ProEngine()
     assert eng.start() is None
+    want = 1 + EMPTY_GROK_RECOVER_TRIES + 1
     deadline = time.time() + 4
-    while time.time() < deadline and len(resumes) < 1 + EMPTY_GROK_RECOVER_TRIES + 2:
+    while time.time() < deadline and len(resumes) < want:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    idle_until = time.time() + 0.4
-    while time.time() < idle_until:
-        eng.drain_apply()
-        await asyncio.sleep(0.05)
+    looking = bool(eng.worker and eng.worker.is_alive())
     eng.stop_engine()
     eng.drain_apply()
-    assert len(resumes) == 1 + EMPTY_GROK_RECOVER_TRIES
-    assert eng._cold_next is False
-    from abcxauto.park_clock import load_alarm
+    assert len(resumes) >= want
+    same = 1 + EMPTY_GROK_RECOVER_TRIES
+    assert resumes[:same] == [True] * same
+    assert resumes[same] is False
+    assert chats[same] is None
+    assert looking
+    from abcxauto.park_clock import load_alarm, peek_interrupt
 
     assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
 
 
 def test_same_chat_recover_needed_is_empty_after_tools_not_spoken():
@@ -2676,6 +2745,12 @@ def test_same_chat_recover_caps_streak_no_infinite_loop():
     for _ in range(EMPTY_GROK_RECOVER_TRIES):
         eng._arm_same_chat_recover()
     assert eng._same_chat_recover_needed(out, g) is False
+    assert eng._recover_gave_up is True
+    assert eng._drop_empty_junk_keep_looking(out, g) is True
+    assert g.chat is None
+    assert eng._cold_next is True
+    assert eng._resume_think is True
+    assert eng._recover_streak == 0
     cfg = get_config()
     assert cfg.defined_risk_only is True
     assert cfg.ibkr_port != 7496

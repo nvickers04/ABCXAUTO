@@ -1009,6 +1009,7 @@ class ProEngine:
             failed = False
             stream_err = ""
             self._recover_streak = 0
+            self._recover_gave_up = False
         if parked and not stay:
             self._fail_streak = 0
             self._cold_next = True
@@ -1053,6 +1054,10 @@ class ProEngine:
         tools/send. #153 required this-round tool_trace, so a post-poke
         empty sat idle. A [say] with content still sits. Duplicate lead
         fact (``_ended``) still sits.
+
+        After EMPTY_GROK_RECOVER_TRIES this returns False so the caller
+        can drop the chat and look again. Sitting with the chat kept
+        freezes the tip — nest alive, look dead.
         """
         if g is None or getattr(g, "chat", None) is None:
             return False
@@ -1097,14 +1102,10 @@ class ProEngine:
         if streak >= EMPTY_GROK_RECOVER_TRIES:
             if hung and not bool(getattr(self, "_recover_gave_up", False)):
                 self._recover_gave_up = True
-                logger.error(
-                    "empty/junk GROK — cannot continue same chat after %s recovers",
+                logger.warning(
+                    "empty/junk GROK — same-chat recover exhausted after %s",
                     streak,
                 )
-                try:
-                    self._note("LOOK", "empty/junk GROK — cannot continue")
-                except Exception:
-                    pass
             return False
         return bool(hung)
 
@@ -1114,6 +1115,37 @@ class ProEngine:
         self._resume_think = True
         self._cold_next = False
         self._inventory_wake = False
+
+    def _drop_empty_junk_keep_looking(self, out: dict | None, g: Any) -> bool:
+        """Same-chat empty/junk recover exhausted: drop chat, look again cold.
+
+        Sitting with the chat kept freezes the tip. The nest is still up;
+        that is not a live look. Next look is a new conversation on this
+        process — not a fill / order_change / unprotected poke.
+        """
+        if not bool(getattr(self, "_recover_gave_up", False)):
+            return False
+        payload = out if isinstance(out, dict) else {}
+        if payload.get("_ended") or payload.get("_parked"):
+            return False
+        from abcxauto.brain import drop_live_chat
+
+        try:
+            drop_live_chat(g)
+        except Exception:
+            logger.debug("drop live chat after empty/junk failed", exc_info=True)
+        self._recover_streak = 0
+        self._recover_gave_up = False
+        self._recover_same_chat = False
+        self._inventory_wake = False
+        self._cold_next = True
+        self._resume_think = True
+        logger.warning("empty/junk GROK — drop chat, keep looking")
+        try:
+            self._note("LOOK", "empty/junk GROK — new chat, keep looking")
+        except Exception:
+            pass
+        return True
 
     def _with_inventory_wake(
         self,
@@ -1661,6 +1693,9 @@ class ProEngine:
                             self._arm_same_chat_recover()
                             self._note("LOOK", "empty GROK — same chat")
                             continue
+                    if stay and self._drop_empty_junk_keep_looking(out, g):
+                        await asyncio.sleep(self._empty_grok_dead_s())
+                        continue
                     if out.get("_ended"):
                         # Duplicate lead fact. A look may end.
                         self._rearm_after_think(out, session=session)
