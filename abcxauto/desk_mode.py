@@ -185,7 +185,9 @@ def research_keep_looking(session: str = "") -> bool:
 
 
 # Spoken CLOSE/EXIT on an open lot is not a finished RTH look when send never
-# ran. Detection is code (say text + lots + sends==0), not a prompt sermon.
+# ran. A named ORDER EXAMPLES ticket with zero send is the same class even
+# when the book is flat. Detection is code (say + sends==0 + tool_trace),
+# not a prompt sermon. Close/exit+lots stays its own path; ticket names widen it.
 _CLOSE_OR_EXIT_RE = re.compile(
     r"\b(?:close|closing|closed|exit|exiting|exited)\b",
     re.IGNORECASE,
@@ -290,8 +292,10 @@ def spoken_close_without_send(
     return bool(_CLOSE_THE_BOOK_RE.search(cleaned))
 
 
-def look_spoken_close_without_send(payload: dict[str, Any] | None) -> bool:
-    """``_rearm_after_think`` payload: rationale/say + positions + sends."""
+def _look_payload_parts(
+    payload: dict[str, Any] | None,
+) -> tuple[str, int, list[Any], list[Any], list[Any]]:
+    """Unpack stay-up look payload: say, sends, positions, open_lots, tool_trace."""
     row = payload if isinstance(payload, dict) else {}
     try:
         sends = int(row.get("sends") or 0)
@@ -306,12 +310,18 @@ def look_spoken_close_without_send(payload: dict[str, Any] | None) -> bool:
             open_lots = list(ws.get("open_lots") or [])
         if not positions:
             positions = list(ws.get("positions") or [])
+    return text, sends, positions, open_lots, list(row.get("tool_trace") or [])
+
+
+def look_spoken_close_without_send(payload: dict[str, Any] | None) -> bool:
+    """``_rearm_after_think`` payload: rationale/say + positions + sends."""
+    text, sends, positions, open_lots, trace = _look_payload_parts(payload)
     return spoken_close_without_send(
         text,
         positions=positions,
         open_lots=open_lots,
         sends=sends,
-        tool_trace=list(row.get("tool_trace") or []),
+        tool_trace=trace,
     )
 
 
@@ -337,6 +347,168 @@ def inventory_wake_fact(
     if not lots:
         return ""
     return "open_lots=" + ",".join(lots) + "."
+
+
+# Wake lead when a look named a sendable ticket and never called send.
+# Not a fill / order_change / unprotected poke. Forces the unpaid ticket path.
+TICKET_WAKE_FACT = "SEND-THE-TICKET open decision still unpaid."
+
+# Single-token ORDER EXAMPLES names that also appear as ordinary English.
+# Left out of the distinctive matcher so "relative to SPY" is not a ticket.
+_AMBIGUOUS_TICKET_STRATS = frozenset({
+    "oca",
+    "adaptive",
+    "relative",
+    "vwap",
+    "twap",
+    "iceberg",
+    "collar",
+    "straddle",
+    "strangle",
+    "butterfly",
+    "midprice",
+})
+_TICKET_ALIASES = (
+    r"stk\s+bracket",
+    r"stock\s+bracket",
+    r"put\s+spread",
+    r"call\s+spread",
+    r"iron\s+fly",
+    r"cash[-\s]secured\s+put",
+    r"covered\s+call",
+    r"protective\s+put",
+)
+_TICKER_RE = re.compile(r"\b([A-Z]{2,5})\b")
+_SYM_INTENT_RE = re.compile(
+    r"\b(?:buy|sell)\s+(?:the\s+|a\s+|an\s+)?([A-Z]{2,5})\b"
+    r"|\b([A-Z]{2,5})\s+(?:to\s+)?(?:buy|sell)\b"
+    r"|\b(?:long|short)\s+([A-Z]{2,5})\b"
+    r"|\b([A-Z]{2,5})\s+(?:long|short)\b",
+    re.IGNORECASE,
+)
+_SYM_OPTION_RE = re.compile(
+    r"\b([A-Z]{2,5})\s+(?:\d+(?:\.\d+)?\s+)?(puts?|calls?)\b"
+    r"|\b(puts?|calls?)\s+(?:spread\s+)?(?:on\s+)?([A-Z]{2,5})\b",
+    re.IGNORECASE,
+)
+_RESERVED_TICKERS = frozenset({
+    "AH", "ALL", "AND", "AT", "BAG", "BE", "BOTH", "BUY", "CALL", "CALLS",
+    "CASH", "CHAT", "CLOSE", "COVERED", "CSP", "DOWN", "ETF", "EXIT", "FILL",
+    "FLAT", "FLY", "FOK", "FOR", "FROM", "GTD", "IBKR", "ICEBERG", "IF",
+    "INTO", "IOC", "IRON", "IT", "KILL", "LIMIT", "LMT", "LOC", "LONG",
+    "LOOK", "LOO", "LOT", "LOTS", "MARKET", "MDA", "ME", "MKT", "MOC",
+    "MOO", "MY", "NO", "NONE", "NOT", "OCA", "OF", "ON", "OPEN", "OPT",
+    "OPTION", "OPTIONS", "OR", "ORDER", "PM", "POSITION", "POSITIONS",
+    "PRICE", "PROTECTIVE", "PUT", "PUTS", "QTY", "RATIO", "RELATIVE",
+    "ROLL", "RTH", "SAME", "SCAN", "SECURED", "SELL", "SEND", "SHORT",
+    "SIZE", "SNAP", "SO", "SPREAD", "STILL", "STK", "STOP", "STP",
+    "STRADDLE", "STRANGLE", "TARGET", "THAN", "THAT", "THE", "THEN",
+    "THIS", "TICKET", "TO", "TRAILING", "TWAP", "UNDER", "UNPAID", "UP",
+    "USD", "VS", "VWAP", "WATCHING", "WE", "WILL", "WITH", "YES",
+})
+_ticket_structure_re: re.Pattern[str] | None = None
+
+
+def _is_spoken_ticker(tok: str) -> bool:
+    key = str(tok or "").strip().upper()
+    if len(key) < 2 or len(key) > 5:
+        return False
+    if key in _RESERVED_TICKERS:
+        return False
+    if not re.fullmatch(r"[A-Z][A-Z0-9]{1,4}", key):
+        return False
+    return True
+
+
+def _spoken_tickers(text: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _TICKER_RE.finditer(str(text or "").upper()):
+        tok = m.group(1)
+        if not _is_spoken_ticker(tok) or tok in seen:
+            continue
+        seen.add(tok)
+        found.append(tok)
+    return found
+
+
+def _ticket_structure_pattern() -> re.Pattern[str]:
+    global _ticket_structure_re
+    if _ticket_structure_re is not None:
+        return _ticket_structure_re
+    from abcxauto.order_examples import ticket_strategy_names
+
+    parts: list[str] = []
+    for name in ticket_strategy_names():
+        token = str(name or "").strip()
+        if not token or token.lower() in _AMBIGUOUS_TICKET_STRATS:
+            continue
+        parts.append(re.escape(token))
+        spaced = token.replace("_", " ")
+        if spaced != token:
+            parts.append(re.escape(spaced).replace(r"\ ", r"[\s_]+"))
+    parts.extend(_TICKET_ALIASES)
+    parts.sort(key=len, reverse=True)
+    _ticket_structure_re = re.compile(
+        r"\b(?:%s)\b" % "|".join(parts) if parts else r"(?!)",
+        re.IGNORECASE,
+    )
+    return _ticket_structure_re
+
+
+def _captured_ticker(match: re.Match[str]) -> str:
+    for g in match.groups():
+        if g and _is_spoken_ticker(g):
+            return str(g).upper()
+    return ""
+
+
+def spoken_ticket_without_send(
+    text: str = "",
+    *,
+    sends: int = 0,
+    tool_trace: list[Any] | None = None,
+) -> bool:
+    """True when the say names a concrete ORDER EXAMPLES ticket and send never ran.
+
+    Flat book is enough — open lots are not required. CLOSE/EXIT+lots stays
+    on ``spoken_close_without_send``. A send tool call — filled or
+    clerk-blocked — is a send. Illegal STK still has to attempt send.
+    """
+    if _had_send_tool(sends, tool_trace):
+        return False
+    blob = str(text or "")
+    if not blob.strip():
+        return False
+    if not _spoken_tickers(blob):
+        return False
+    if _ticket_structure_pattern().search(blob):
+        return True
+    for m in _SYM_INTENT_RE.finditer(blob):
+        if _captured_ticker(m):
+            return True
+    for m in _SYM_OPTION_RE.finditer(blob):
+        if _captured_ticker(m):
+            return True
+    return False
+
+
+def look_spoken_ticket_without_send(payload: dict[str, Any] | None) -> bool:
+    """``_rearm_after_think`` payload: rationale/say + sends + tool_trace."""
+    text, sends, _positions, _lots, trace = _look_payload_parts(payload)
+    return spoken_ticket_without_send(text, sends=sends, tool_trace=trace)
+
+
+def look_unpaid_ticket(payload: dict[str, Any] | None) -> bool:
+    """CLOSE/EXIT on lots, or a named ticket, with zero send. Widen, not replace."""
+    return look_spoken_close_without_send(payload) or look_spoken_ticket_without_send(
+        payload
+    )
+
+
+def ticket_wake_fact() -> str:
+    """Lead the next same-chat wake. Not a fill / order_change / unprotected poke."""
+    return TICKET_WAKE_FACT
 
 
 def desk_mode(session: str = "") -> str:

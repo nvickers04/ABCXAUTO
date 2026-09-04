@@ -266,6 +266,7 @@ class ProEngine:
         self._recover_streak = 0
         self._recover_gave_up = False
         self._inventory_wake = False
+        self._ticket_wake = False
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
         from abcxauto.think_stream import bind_engine
@@ -963,8 +964,9 @@ class ProEngine:
         grok_wake.json. Duplicate lead-fact looks end with no send.
         Words with no tool_calls already stopped the model. RTH stay-up
         waits for fill / order_change / unprotected / operator poke or a
-        changed lead fact — except a spoken CLOSE/EXIT on an open lot with
-        zero sends, which re-enters the same chat with lots on the wake.
+        changed lead fact — except a spoken CLOSE/EXIT on an open lot, or
+        a named ORDER EXAMPLES ticket (flat or with lots), with zero sends.
+        Those re-enter the same chat with lots / SEND-THE-TICKET on the wake.
         Research keep-looking is the stay-up pulse timeout
         (desk_mode.research_keep_looking), not a fake poke and not an
         immediate mill here. Chat is kept. Overnight park is park_clock
@@ -987,23 +989,28 @@ class ProEngine:
             sends = 0
         # A spoken say or a send/fill is a finished look. Do not wipe chat.
         # Duplicate lead fact (_ended) waits for a poke, not a fresh desk.
-        # CLOSE/EXIT named on an open lot with no send is not finished.
+        # CLOSE/EXIT on an open lot, or a named ticket, with no send is not
+        # finished — including when the book is flat.
         ended = bool(payload.get("_ended"))
         close_no_send = False
+        ticket_no_send = False
         if stay and not ended:
             try:
                 from abcxauto.desk_mode import (
                     is_rth_session,
                     look_spoken_close_without_send,
+                    look_spoken_ticket_without_send,
                 )
 
-                close_no_send = is_rth_session(session) and look_spoken_close_without_send(
-                    payload
-                )
+                if is_rth_session(session):
+                    close_no_send = look_spoken_close_without_send(payload)
+                    ticket_no_send = look_spoken_ticket_without_send(payload)
             except Exception:
                 close_no_send = False
+                ticket_no_send = False
+        unpaid = close_no_send or ticket_no_send
         finished = (ended or sends > 0 or not _look_text_is_junk(rationale)) and (
-            not close_no_send
+            not unpaid
         )
         if finished:
             failed = False
@@ -1014,13 +1021,17 @@ class ProEngine:
             self._fail_streak = 0
             self._cold_next = True
             return 0.0
-        if stay and close_no_send:
+        if stay and unpaid:
             self._resume_think = True
             self._cold_next = False
-            self._inventory_wake = True
+            self._inventory_wake = bool(close_no_send)
+            self._ticket_wake = bool(ticket_no_send)
             self._recover_same_chat = False
             try:
-                self._note("LOOK", "CLOSE/EXIT with no send — same chat")
+                if close_no_send:
+                    self._note("LOOK", "CLOSE/EXIT with no send — same chat")
+                elif ticket_no_send:
+                    self._note("LOOK", "ticket with no send — same chat")
             except Exception:
                 pass
         elif stay:
@@ -1115,6 +1126,7 @@ class ProEngine:
         self._resume_think = True
         self._cold_next = False
         self._inventory_wake = False
+        self._ticket_wake = False
 
     def _drop_empty_junk_keep_looking(self, out: dict | None, g: Any) -> bool:
         """Same-chat empty/junk recover exhausted: drop chat, look again cold.
@@ -1138,6 +1150,7 @@ class ProEngine:
         self._recover_gave_up = False
         self._recover_same_chat = False
         self._inventory_wake = False
+        self._ticket_wake = False
         self._cold_next = True
         self._resume_think = True
         logger.warning("empty/junk GROK — drop chat, keep looking")
@@ -1163,6 +1176,21 @@ class ProEngine:
         if isinstance(day, dict):
             lots = day.get("open_lots")
         fact = inventory_wake_fact(positions, open_lots=lots)
+        if not fact:
+            return wake
+        body = str(wake or "")
+        if body.startswith(fact):
+            return body
+        return f"{fact}\n{body}" if body else fact
+
+    def _with_ticket_wake(self, wake: str) -> str:
+        """Lead the next same-chat wake after a named ticket with no send."""
+        if not getattr(self, "_ticket_wake", False):
+            return wake
+        self._ticket_wake = False
+        from abcxauto.desk_mode import ticket_wake_fact
+
+        fact = ticket_wake_fact()
         if not fact:
             return wake
         body = str(wake or "")
@@ -1266,6 +1294,8 @@ class ProEngine:
             ibkr_up=bool(getattr(self.conn, "connected", False)),
             day=day,
         )
+        # Ticket wake inside inventory wrap so CLOSE/EXIT still leads open_lots=.
+        wake = self._with_ticket_wake(wake)
         wake = self._with_inventory_wake(
             wake, s.get("positions") or [], day if isinstance(day, dict) else None
         )
