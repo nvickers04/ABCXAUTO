@@ -840,6 +840,27 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
     )
 
 
+def _web_tool() -> Any:
+    """Research-only public page fetch. Not a crawler. Not on the RTH tool list."""
+    return tool(
+        name="web",
+        description=(
+            "Fetch one public http(s) URL (title + short text). "
+            "Research expectancy only — cite the source in the brief. "
+            "Not send geometry. Prefer news/scan first."
+        ),
+        parameters=_schema(
+            {
+                "url": {
+                    "type": "string",
+                    "description": "Public http(s) page (press release, IR, SEC).",
+                }
+            },
+            ["url"],
+        ),
+    )
+
+
 # Catalog for this look.
 AGENT_TOOLS = [
     tool(
@@ -1050,17 +1071,27 @@ def _send_strategy_names_for_look() -> list[str]:
 
 
 def agent_tools(*, session: str = "") -> list:
-    """Tools this look. Overnight park is code, not a Grok clock."""
-    _ = session
+    """Tools this look. Overnight park is code, not a Grok clock.
+
+    Research (premarket / AH / closed) omits ``send`` and adds ``web``.
+    RTH keeps the thin sender.
+    """
+    from abcxauto.desk_mode import is_research_session
+
+    research = is_research_session(session)
     names = _send_strategy_names_for_look()
     out: list = []
     for t in AGENT_TOOLS:
         fn = getattr(t, "function", None)
         name = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
         if name == "send":
+            if research:
+                continue
             out.append(_send_tool(names))
         else:
             out.append(t)
+    if research:
+        out.append(_web_tool())
     return out
 
 def _stash_live(
@@ -1303,6 +1334,19 @@ async def _run_tool(
         st["combo"] = COMBO_FACT
         st["sends_this_turn"] = len(turn.sends)
         try:
+            from abcxauto.desk_mode import desk_mode, is_research_session
+
+            sess = str(
+                (st.get("session") or {}).get("session")
+                or world.session_status
+                or ""
+            )
+            st["desk_mode"] = desk_mode(sess)
+            st["send_allowed"] = not is_research_session(sess)
+        except Exception:
+            st["desk_mode"] = ""
+            st["send_allowed"] = True
+        try:
             from abcxauto.world_state import compact_working_orders, lot_labels
 
             st["open_lots"] = lot_labels(getattr(world, "positions", None))
@@ -1418,6 +1462,8 @@ async def _run_tool(
             positions=list(world.positions or snap.get("positions") or []),
         )
         payload["path"] = _hub()._path_block(world, get_config())
+        if isinstance(snap, dict):
+            snap["odds"] = dict(payload)
         return _hub()._clip(payload)
     if name == "scan":
         with_raw = args.get("with") or []
@@ -1949,6 +1995,23 @@ async def _run_tool(
             "facts": facts,
         })
     if name == "send":
+        from abcxauto.desk_mode import is_research_session, research_send_block
+
+        sess = str(getattr(world, "session_status", "") or "")
+        if is_research_session(sess):
+            blocked = research_send_block(session=sess)
+            turn.last_act = {
+                "action": "blocked",
+                "strategy": "blocked",
+                "params": {},
+                "rationale": blocked.get("note") or "",
+            }
+            turn.last_result = blocked
+            turn.last_strat = "blocked"
+            turn.sends.append(
+                {"act": dict(turn.last_act), "result": blocked, "strat": "blocked"}
+            )
+            return _hub()._clip(blocked)
         params = args.get("params") if isinstance(args.get("params"), dict) else {}
         act = {
             "action": str(args.get("strategy") or args.get("action") or "").strip(),
@@ -2011,6 +2074,21 @@ async def _run_tool(
         turn.last_result = result
         turn.last_strat = strat
         return _hub()._clip(result)
+    if name == "web":
+        from abcxauto.desk_mode import fetch_public_page, is_research_session
+
+        sess = str(getattr(world, "session_status", "") or "")
+        if not is_research_session(sess):
+            return json.dumps({
+                "error": "web is research-only",
+                "source": "web",
+                "use": "research_expectancy_not_send",
+            })
+        url = str(args.get("url") or "").strip()
+        page = await fetch_public_page(url)
+        if isinstance(snap, dict):
+            snap["research_web"] = dict(page) if isinstance(page, dict) else {}
+        return _hub()._clip(page)
     return json.dumps({"error": f"unknown tool {name}"})
 
 
@@ -2064,6 +2142,7 @@ __all__ = [
     'AGENT_TOOLS',
     '_send_strategy_names_for_look',
     'agent_tools',
+    '_web_tool',
     '_stash_live',
     '_stash_vol_bars',
     '_stash_vol_chain',

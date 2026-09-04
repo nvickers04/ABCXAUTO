@@ -149,7 +149,13 @@ class _RetrySession:
 class GrokClient:
     """Thin wrapper owning the AsyncClient and chat construction."""
 
-    def __init__(self, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        client: Any | None = None,
+        *,
+        model: str | None = None,
+        session: str = "",
+    ) -> None:
         cfg = get_config()
         if client is None:
             if not cfg.xai_api_key:
@@ -160,7 +166,12 @@ class GrokClient:
 
             client = AsyncClient(api_key=cfg.xai_api_key)
         self.client = _wrap_client(client)
-        self.model = cfg.model
+        chosen = str(model or "").strip()
+        if not chosen and str(session or "").strip():
+            from abcxauto.desk_mode import session_model
+
+            chosen = session_model(session, cfg)
+        self.model = chosen or cfg.model
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens
         self.chat = None

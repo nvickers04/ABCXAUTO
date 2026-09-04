@@ -136,6 +136,18 @@ def test_text_knobs_reject_blanks_and_whitespace():
     assert get_config().model
 
 
+def test_session_models_empty_falls_back_and_persists():
+    cfg = update_agent_config(model_rth="", model_research="grok-4.6-fast")
+    assert cfg.model_rth == ""
+    assert cfg.model_research == "grok-4.6-fast"
+    from abcxauto.desk_mode import session_model
+
+    assert session_model("regular", cfg) == cfg.model
+    assert session_model("premarket", cfg) == "grok-4.6-fast"
+    with pytest.raises(ValueError):
+        update_agent_config(model_research="grok 4.6")
+
+
 def test_cache_is_invalidated_so_env_edits_go_live(monkeypatch):
     before = get_config().temperature
     monkeypatch.setenv("ABCXAUTO_TEMPERATURE", str(before + 0.4))

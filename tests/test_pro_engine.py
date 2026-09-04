@@ -729,6 +729,55 @@ def _wire_stay_up_engine(monkeypatch, *, session: str, think, paper: bool = True
     # Every park is floored at min_look_s (30s, env-clamped at 5s), so a test
     # clock has to go under the floor directly or one look eats the deadline.
     monkeypatch.setattr("abcxauto.park_clock.min_look_s", lambda: 0.01)
+    if session in ("closed", "postmarket"):
+        # Labeled overnight snaps must not follow the wall-clock premarket roll.
+        monkeypatch.setattr(
+            "abcxauto.park_clock.infer_session_before_open",
+            lambda **_k: (session, 12 * 60.0),
+        )
+
+
+def _freeze_overnight_closed(monkeypatch) -> None:
+    """Closed skip tests must not follow the wall-clock premarket roll."""
+    monkeypatch.setattr(
+        "abcxauto.park_clock.infer_session_before_open",
+        lambda **_k: ("closed", 12 * 60.0),
+    )
+
+
+def test_desk_mode_brain_keeps_stub_chat_on_same_session():
+    """Stubs have no model — do not drop the live chat on every snap."""
+    eng = ProEngine()
+    chat = object()
+    g = SimpleNamespace(chat=chat)
+    out = eng._apply_desk_mode_brain(g, "", "regular")
+    assert out is g
+    assert g.chat is chat
+    again = eng._apply_desk_mode_brain(g, "regular", "regular")
+    assert again is g
+    assert g.chat is chat
+
+
+def test_desk_mode_brain_rebuilds_on_research_to_rth_roll(monkeypatch):
+    eng = ProEngine()
+    chat = object()
+    g = SimpleNamespace(chat=chat, model="grok-4.6")
+    dropped = {"n": 0}
+
+    def boom(client):
+        dropped["n"] += 1
+        client.chat = None
+
+    monkeypatch.setattr("abcxauto.brain.drop_live_chat", boom)
+    monkeypatch.setattr(
+        ProEngine,
+        "_new_grok",
+        lambda self, **_k: SimpleNamespace(chat=object(), model="grok-4.6"),
+    )
+    out = eng._apply_desk_mode_brain(g, "premarket", "regular")
+    assert dropped["n"] == 1
+    assert out is not g
+    assert getattr(eng, "_research_color_injected", True) is False
 
 
 def test_session_of_snap_reads_pulse_and_hours():
@@ -1454,6 +1503,7 @@ async def test_failed_look_idles_without_set_wake_clock(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_closed_session_skips_grok_and_keeps_a_clock(monkeypatch, tmp_path):
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    _freeze_overnight_closed(monkeypatch)
     calls = {"n": 0}
 
     async def think(self, n, g, s, *, resume=False):
@@ -1481,6 +1531,7 @@ async def test_closed_session_skips_grok_and_keeps_a_clock(monkeypatch, tmp_path
 async def test_closed_session_skip_drops_live_chat(monkeypatch, tmp_path):
     """Overnight skip is a park: the next think must not resume yesterday's chat."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    _freeze_overnight_closed(monkeypatch)
     brains: list[SimpleNamespace] = []
 
     def make_g():

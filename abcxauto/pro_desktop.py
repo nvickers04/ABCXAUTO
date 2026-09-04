@@ -86,6 +86,8 @@ CARD_STATUS_COLOR = {"working": GREEN, "testing": AMBER, "retired": MUTED}
 # Settings fields, grouped the way the page shows them. label, hint.
 BRAIN_FIELDS = (
     ("model", "Model", "beats ABCXAUTO_MODEL — next look rebuilds"),
+    ("model_rth", "RTH model", "empty = Model — thin sender"),
+    ("model_research", "Research model", "empty = Model — premarket/AH, no send"),
     ("temperature", "Temperature", "0.0 – 2.0"),
     ("max_tokens", "Max tokens", "1024 – 131072 per turn"),
 )
@@ -719,6 +721,8 @@ class ProTerminal:
         # ---- Settings page
         for key in (
             "model",
+            "model_rth",
+            "model_research",
             "temperature",
             "max_tokens",
             "monitor_poll_s",
@@ -732,7 +736,13 @@ class ProTerminal:
             self._num_field(
                 key,
                 width=150
-                if key in ("model", "ibkr_host", "session_token_cap")
+                if key in (
+                    "model",
+                    "model_rth",
+                    "model_research",
+                    "ibkr_host",
+                    "session_token_cap",
+                )
                 else 110,
             )
         for key in ("monitor_enabled", "monitor_extended_hours"):
@@ -3224,7 +3234,13 @@ class ProTerminal:
             )
             return
         value = (res.get("applied") or {}).get(key)
-        tail = " — next look" if key in ("model", "temperature", "max_tokens") else ""
+        tail = " — next look" if key in (
+            "model",
+            "model_rth",
+            "model_research",
+            "temperature",
+            "max_tokens",
+        ) else ""
         self._note_setting(f"{key} → {value}{tail}")
 
     def _toggle_floor_gate(self, key: str) -> None:

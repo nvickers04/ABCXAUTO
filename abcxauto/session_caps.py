@@ -70,59 +70,69 @@ def _empty(key: str) -> dict[str, Any]:
     return {"key": key, "looks": 0, "tokens": 0}
 
 
-def _load() -> dict[str, Any]:
+def _row_of(raw: Any, key: str = "") -> dict[str, Any]:
+    blob = raw if isinstance(raw, dict) else {}
+    try:
+        looks = max(0, int(blob.get("looks") or 0))
+    except (TypeError, ValueError):
+        looks = 0
+    try:
+        tokens = max(0, int(blob.get("tokens") or 0))
+    except (TypeError, ValueError):
+        tokens = 0
+    return {"key": str(blob.get("key") or key), "looks": looks, "tokens": tokens}
+
+
+def _load_table() -> dict[str, dict[str, Any]]:
+    """All session rows. Premarket and RTH keep separate budgets."""
     global _cache, _cache_path
     p = str(_path())
     if _cache is not None and _cache_path == p:
         return _cache
-    raw: dict[str, Any] = {}
+    table: dict[str, dict[str, Any]] = {}
     path = _path()
+    blob: dict[str, Any] = {}
     if path.is_file():
         try:
-            blob = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(blob, dict):
-                raw = blob
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                blob = raw
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            raw = {}
-    key = str(raw.get("key") or "")
-    try:
-        looks = max(0, int(raw.get("looks") or 0))
-    except (TypeError, ValueError):
-        looks = 0
-    try:
-        tokens = max(0, int(raw.get("tokens") or 0))
-    except (TypeError, ValueError):
-        tokens = 0
-    state = {"key": key, "looks": looks, "tokens": tokens}
-    _cache = state
+            blob = {}
+    sessions = blob.get("sessions") if isinstance(blob.get("sessions"), dict) else None
+    if sessions:
+        for raw_key, raw_row in sessions.items():
+            key = str(raw_key or "")
+            if not key:
+                continue
+            table[key] = _row_of(raw_row, key)
+    elif str(blob.get("key") or ""):
+        # Legacy single-row file from before dual-mode.
+        row = _row_of(blob)
+        table[str(blob.get("key"))] = row
+    _cache = table
     _cache_path = p
-    return state
+    return table
 
 
-def _save(state: dict[str, Any]) -> None:
+def _save_table(table: dict[str, dict[str, Any]]) -> None:
     global _cache, _cache_path
     path = _path()
+    clean: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_row in dict(table or {}).items():
+        key = str(raw_key or "")
+        if not key:
+            continue
+        clean[key] = _row_of(raw_row, key)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps(
-                {
-                    "key": str(state.get("key") or ""),
-                    "looks": int(state.get("looks") or 0),
-                    "tokens": int(state.get("tokens") or 0),
-                },
-                indent=2,
-            )
-            + "\n",
+            json.dumps({"sessions": clean}, indent=2) + "\n",
             encoding="utf-8",
         )
     except OSError:
         logger.debug("session_caps write failed", exc_info=True)
-    _cache = {
-        "key": str(state.get("key") or ""),
-        "looks": int(state.get("looks") or 0),
-        "tokens": int(state.get("tokens") or 0),
-    }
+    _cache = clean
     _cache_path = str(path)
 
 
@@ -157,11 +167,13 @@ def _caps() -> tuple[int, int]:
 
 def _state_for(session: str = "", *, now: datetime | None = None) -> dict[str, Any]:
     key = session_key(session, now=now)
-    state = _load()
-    if str(state.get("key") or "") != key:
-        state = _empty(key)
-        _save(state)
-    return state
+    table = _load_table()
+    row = table.get(key)
+    if not isinstance(row, dict) or str(row.get("key") or "") != key:
+        row = _empty(key)
+        table[key] = row
+        _save_table(table)
+    return row
 
 
 def billed_tokens_now() -> int:
@@ -222,5 +234,7 @@ def note_look(
     state = _state_for(session, now=now)
     state["looks"] = int(state.get("looks") or 0) + 1
     state["tokens"] = int(state.get("tokens") or 0) + add
-    _save(state)
+    table = _load_table()
+    table[str(state.get("key") or "")] = state
+    _save_table(table)
     return usage(session, now=now)

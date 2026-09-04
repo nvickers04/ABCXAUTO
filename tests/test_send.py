@@ -122,6 +122,7 @@ async def test_paper_ports_still_dispatch(monkeypatch, port):
 
     connector = _connector()
     ticket = _placeable_ticket()
+    ticket["_desk_session"] = "regular"
     result = await send_action(ticket, connector)
 
     assert result["status"] == "ok"

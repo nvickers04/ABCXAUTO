@@ -51,6 +51,8 @@ PERSISTED_OPERATOR_KEYS = RISK_CONFIG_KEYS | CAPACITY_KEYS
 # scan_fetch_cap is deliberately absent: self_tune is its only writer.
 AGENT_CONFIG_KEYS = frozenset({
     "model",
+    "model_rth",
+    "model_research",
     "temperature",
     "max_tokens",
     "session_look_cap",
@@ -99,6 +101,8 @@ _AGENT_INT_KEYS = frozenset({
     "ibkr_client_id",
 })
 _AGENT_TEXT_KEYS = frozenset({"model", "ibkr_host"})
+# Empty = fall back to ``model``. Operator may clear them.
+_AGENT_OPTIONAL_TEXT_KEYS = frozenset({"model_rth", "model_research"})
 RISK_POSTURES = frozenset({"defensive", "balanced", "aggressive"})
 _runtime_overrides: dict[str, Any] = {}
 _file_overrides: dict[str, Any] = {}
@@ -112,6 +116,9 @@ class Config:
     # xAI / Grok
     xai_api_key: str = ""
     model: str = "grok-4.6"  # ABCXAUTO_MODEL is the env form; see get_config()
+    # Session brains. Empty = use ``model`` (single-model desks keep working).
+    model_rth: str = ""
+    model_research: str = ""
     temperature: float = 0.3
     max_tokens: int = 8192
     # Per stay-up session (premarket / RTH). Overnight honors a hit.
@@ -252,6 +259,8 @@ def _load_env_config() -> Config:
     return Config(
         xai_api_key=_env("XAI_API_KEY") or _env("GROK_API_KEY"),
         model=_env("ABCXAUTO_MODEL", "grok-4.6"),
+        model_rth=_env("ABCXAUTO_MODEL_RTH"),
+        model_research=_env("ABCXAUTO_MODEL_RESEARCH"),
         temperature=float(_env("ABCXAUTO_TEMPERATURE", "0.3")),
         max_tokens=int(_env("ABCXAUTO_MAX_TOKENS", "8192")),
         session_look_cap=int(_env("ABCXAUTO_SESSION_LOOK_CAP", "160")),
@@ -363,6 +372,11 @@ def _coerce_agent_value(key: str, value: Any) -> Any:
         if isinstance(value, bool):
             return value
         return str(value).strip().lower() in ("1", "true", "yes", "on")
+    if key in _AGENT_OPTIONAL_TEXT_KEYS:
+        text = str(value or "").strip()
+        if text and any(c.isspace() for c in text):
+            raise ValueError(f"{key} must be a single token (empty = use model)")
+        return text
     if key in _AGENT_TEXT_KEYS:
         text = str(value or "").strip()
         if not text or any(c.isspace() for c in text):
@@ -476,7 +490,9 @@ def get_config() -> Config:
     daily-loss / session_token_cap / floors / defined-risk / cash-only /
     mode+port) are not taken from ``agent_state`` and ``self_tune`` cannot
     persist over the file. The ``model`` the operator applies from Pro Settings
-    beats ``ABCXAUTO_MODEL``, and ``scan_fetch_cap`` from ``self_tune`` beats both.
+    beats ``ABCXAUTO_MODEL``. ``model_rth`` / ``model_research`` select the
+    session brain when set; empty falls back to ``model``. ``scan_fetch_cap``
+    from ``self_tune`` beats both.
     """
     base = _load_env_config()
     agent_extra: dict[str, Any] = {}

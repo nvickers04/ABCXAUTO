@@ -2163,8 +2163,14 @@ def test_agent_tools_omit_set_wake_in_every_session():
 
     assert "set_wake" not in _names_of(AGENT_TOOLS)
     for sess in ("regular", "premarket", "postmarket", "closed"):
-        assert "set_wake" not in _names_of(agent_tools(session=sess)), sess
-        assert "send" in _names_of(agent_tools(session=sess)), sess
+        names = _names_of(agent_tools(session=sess))
+        assert "set_wake" not in names, sess
+        if sess == "regular":
+            assert "send" in names, sess
+            assert "web" not in names, sess
+        else:
+            assert "send" not in names, sess
+            assert "web" in names, sess
 
 
 @pytest.mark.asyncio
@@ -2532,7 +2538,10 @@ def test_new_chat_premarket_omits_set_wake():
         _wake_n=0,
     )
     _new_chat(g, session="premarket")
-    assert "set_wake" not in _names_of(captured.get("tools") or [])
+    names = _names_of(captured.get("tools") or [])
+    assert "set_wake" not in names
+    assert "send" not in names
+    assert "web" in names
 
 
 @pytest.mark.asyncio

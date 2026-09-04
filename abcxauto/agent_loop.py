@@ -449,6 +449,7 @@ _WORK_TOOLS = frozenset({
     "odds",
     "status",
     "self_tune",
+    "web",
 })
 
 
@@ -581,6 +582,17 @@ async def execute_ticket(
     snap: dict,
 ) -> dict:
     """Normalize, gate, geometry, then send_action. Never bypass the clerk."""
+    from abcxauto.desk_mode import is_research_session, research_send_block
+
+    sess = str(getattr(world, "session_status", "") or "")
+    if is_research_session(sess):
+        _record_clerk_block(
+            act,
+            str(act.get("strategy") or act.get("action") or ""),
+            f"research_no_send session={sess}",
+            stage="research_mode",
+        )
+        return research_send_block(session=sess)
     positions = list(snap.get("positions") or world.positions or [])
     orders = list(snap.get("open_orders") or world.open_orders or [])
     asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
@@ -787,6 +799,8 @@ async def execute_ticket(
             return result
 
     if strat in ALLOWED_ACTIONS:
+        if isinstance(act, dict):
+            act["_desk_session"] = sess
         result = await send_action(act, connector)
         rc = str((result or {}).get("reason_code") or "")
         st = str((result or {}).get("status") or "").lower()

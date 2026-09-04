@@ -1452,7 +1452,25 @@ async def _invoke_named_tool(
                 exc = tool_task.exception()
                 if exc is not None:
                     raise exc
-                return str(tool_task.result())
+                result = str(tool_task.result())
+                try:
+                    from abcxauto.desk_mode import (
+                        RESEARCH_TOOLS,
+                        is_research_session,
+                        note_research_tool,
+                        write_research_brief,
+                    )
+
+                    if name in RESEARCH_TOOLS:
+                        note_research_tool(snap, name, result, args=args)
+                        sess = str(getattr(world, "session_status", "") or "")
+                        if is_research_session(sess):
+                            write_research_brief(
+                                session=sess, snap=snap, turn=turn, world=world
+                            )
+                except Exception:
+                    logger.debug("research fact note failed", exc_info=True)
+                return result
     except asyncio.TimeoutError:
         logger.warning("tool %s timed out after %.0fs", name, timeout)
         return json.dumps({"error": f"{name} timed out", "timeout_s": timeout})
@@ -1898,6 +1916,15 @@ async def _grok_turn_impl(
         # Idle in this chat. Do not stamp failed — that cold-restarts.
         logger.warning("look idle: empty or junk assistant text")
     _bill_spoken_look_if_unbilled(turn, before_calls=billed_before)
+    try:
+        from abcxauto.desk_mode import is_research_session, write_research_brief
+
+        if is_research_session(session):
+            write_research_brief(
+                session=session, snap=snap, turn=turn, world=world
+            )
+    except Exception:
+        logger.debug("research brief write failed", exc_info=True)
     _finish_look_chat(g, turn, session=session)
     if not turn.sends:
         if str(turn.last_strat or "").lower() == "hold":

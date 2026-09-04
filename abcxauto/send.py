@@ -245,6 +245,8 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
 
     A paper desk pointed at 7496/4001 returns ``blocked`` and does not call
     ``safe_execute``. Live mode is left to the existing live blockers.
+    Research mode (premarket / AH / closed) fail-closes with
+    ``research_no_send`` and never reaches ``safe_execute``.
     """
     cfg = get_config()
     live_port = _paper_live_port(cfg)
@@ -259,4 +261,13 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
             "reason_code": "live_port_paper",
             "strategy": strategy or "blocked",
         }
+    from abcxauto.desk_mode import RESEARCH_SESSIONS, research_send_block
+
+    sess = ""
+    if isinstance(action, dict):
+        sess = str(action.get("_desk_session") or "").strip().lower()
+    if sess == "unknown":
+        sess = ""
+    if sess in RESEARCH_SESSIONS:
+        return research_send_block(session=sess)
     return await safe_execute(action, connector)

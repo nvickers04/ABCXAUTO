@@ -520,6 +520,39 @@ class ProEngine:
             int(getattr(cfg, "max_tokens", 0) or 0),
         )
 
+    def _new_grok(self, *, session: str = "") -> Any:
+        """Build a client for this session. Stubs that reject kwargs stay stubs."""
+        sess = str(session or "").strip()
+        try:
+            return GrokClient(session=sess) if sess else GrokClient()
+        except TypeError:
+            return GrokClient()
+
+    def _apply_desk_mode_brain(self, g: Any, prev_session: str, session: str) -> Any:
+        """Rebuild only on a research↔RTH roll or a real selected-model move.
+
+        Blank prev_session is not a roll. A client with no ``model`` (test
+        stubs) keeps the live chat. Do not drop chat on every snap.
+        """
+        from abcxauto.desk_mode import KNOWN_SESSIONS, desk_mode, session_model
+
+        prev = str(prev_session or "").strip().lower()
+        cur = str(session or "").strip().lower()
+        prev_mode = desk_mode(prev) if prev in KNOWN_SESSIONS else ""
+        cur_mode = desk_mode(cur) if cur in KNOWN_SESSIONS else ""
+        mode_rolled = bool(prev_mode and cur_mode and prev_mode != cur_mode)
+        want = session_model(cur) if cur in KNOWN_SESSIONS else ""
+        have = str(getattr(g, "model", "") or "") if g is not None else ""
+        model_moved = bool(have) and bool(want) and have != want
+        if g is not None and (mode_rolled or model_moved):
+            from abcxauto.brain import drop_live_chat
+
+            drop_live_chat(g)
+            g = self._new_grok(session=cur)
+        if mode_rolled and cur_mode == "rth":
+            self._research_color_injected = False
+        return g
+
     def request_wake(self, reason: str) -> None:
         """Interrupt pulse sleep for a whitelisted pace wake (monitor → engine)."""
         from abcxauto.pacing import WakeGate
@@ -1127,6 +1160,18 @@ class ProEngine:
             day = day_facts(world, sc)
         except Exception:
             day = None
+        if not isinstance(day, dict):
+            day = {}
+        try:
+            from abcxauto.desk_mode import is_rth_session
+
+            if is_rth_session(str(getattr(world, "session_status", "") or "")):
+                full = not bool(getattr(self, "_research_color_injected", False))
+                day["research_brief_full"] = full
+                if full:
+                    self._research_color_injected = True
+        except Exception:
+            logger.debug("research color flag failed", exc_info=True)
         wake = format_wake(
             cycle=n,
             session=world.session_status,
@@ -1359,7 +1404,9 @@ class ProEngine:
                 if g is None or brain_key != self._brain_key:
                     if g is not None:
                         self._note("BRAIN", f"model/limits changed → {brain_key[0]}")
-                    g = GrokClient()
+                    g = self._new_grok(
+                        session=str(getattr(self, "_last_session", "") or "")
+                    )
                     self._brain_key = brain_key
 
                 want_look = bool(getattr(self, "_resume_think", False))
@@ -1410,7 +1457,9 @@ class ProEngine:
                     str(getattr(self, "_last_session", "") or "")
                 )
                 inferred, mins_now = infer_session_before_open()
-                if inferred:
+                # Labeled snaps keep their label (same contract as desk_mode).
+                # Clock-fill only when the last snap had no session.
+                if not sess and inferred:
                     sess = inferred
                 honor = honor_park(session=sess, minutes_to_open=mins_now)
                 future_park = honor and bool(alarm.wake_at) and not alarm.due()
@@ -1479,7 +1528,12 @@ class ProEngine:
                 self._resume_think = False
                 self._cold_next = False
                 self._wake_reason = ""
+                prev_session = str(getattr(self, "_last_session", "") or "")
                 session = self._resolve_session(self._session_of_snap(s))
+                try:
+                    g = self._apply_desk_mode_brain(g, prev_session, session)
+                except Exception:
+                    logger.debug("session brain switch failed", exc_info=True)
                 self._last_session = session
                 from abcxauto.agent_loop import _wake_grok_for_session
                 from abcxauto.park_clock import (

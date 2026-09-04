@@ -18,7 +18,8 @@ Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro S
 
 ## Hard gates (code)
 
-- `send` is the only broker path
+- `send` is the only broker path. Premarket / AH / closed research has no
+  send; it writes `data/state/research_brief.json` (expectancy COLOR for RTH).
 - Defined-risk and cash-only
 - Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %; optional capacity `max_open_positions` (default 0 = off; a positive N is Grok's ceiling)
 - One name across every lot vs `max_symbol_concentration_pct` — `max_position_pct` only sees one ticket, so N orders in a name could stack past it. Stock and its options sum
