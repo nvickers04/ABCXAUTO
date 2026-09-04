@@ -130,6 +130,61 @@ def test_spoken_close_without_send_needs_open_lot_and_no_send():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
+def test_spoken_ticket_without_send_works_flat_and_does_not_mill_color():
+    from abcxauto.desk_mode import (
+        TICKET_WAKE_FACT,
+        look_spoken_close_without_send,
+        look_spoken_ticket_without_send,
+        look_unpaid_ticket,
+        spoken_close_without_send,
+        spoken_ticket_without_send,
+        ticket_wake_fact,
+    )
+
+    say = "INTC market_bracket LONG 10 stop 35 target 42."
+    assert spoken_ticket_without_send(say, sends=0)
+    assert look_spoken_ticket_without_send(
+        {"rationale": say, "sends": 0, "positions": []}
+    )
+    assert look_unpaid_ticket({"rationale": say, "sends": 0, "positions": []})
+    # Flat book: CLOSE/EXIT path stays blind; ticket path sees the named send.
+    assert not spoken_close_without_send(say, positions=[], sends=0)
+    assert spoken_ticket_without_send("NVDA STK bracket", sends=0)
+    assert spoken_ticket_without_send("SPY put spread debit.", sends=0)
+    assert spoken_ticket_without_send("SPY put", sends=0)
+    assert spoken_ticket_without_send("BUY NVDA 10", sends=0)
+    pos = _ibit_xlf_positions()
+    assert spoken_ticket_without_send(
+        "INTC market_bracket LONG.", sends=0
+    )
+    # Lots on the book do not hide a new named ticket.
+    assert look_unpaid_ticket(
+        {"rationale": "INTC market_bracket LONG.", "sends": 0, "positions": pos}
+    )
+    assert not spoken_ticket_without_send(say, sends=1)
+    assert not spoken_ticket_without_send(say, sends=0, tool_trace=["send"])
+    assert not spoken_ticket_without_send(
+        "Standing down. Watching IWM. No ticket.", sends=0
+    )
+    assert not spoken_ticket_without_send(
+        "Watching IBIT until the close. No ticket.", sends=0
+    )
+    assert not spoken_ticket_without_send("relative to SPY on the tape.", sends=0)
+    # CLOSE/EXIT with lots stays the close path, not this matcher.
+    assert spoken_close_without_send("CLOSE IBIT. EXIT XLF.", positions=pos, sends=0)
+    assert not spoken_ticket_without_send("CLOSE IBIT. EXIT XLF.", sends=0)
+    assert look_spoken_close_without_send(
+        {"rationale": "CLOSE IBIT. EXIT XLF.", "sends": 0, "positions": pos}
+    )
+    assert look_unpaid_ticket(
+        {"rationale": "CLOSE IBIT. EXIT XLF.", "sends": 0, "positions": pos}
+    )
+    assert ticket_wake_fact() == TICKET_WAKE_FACT
+    assert "SEND-THE-TICKET" in ticket_wake_fact()
+    assert "unpaid" in ticket_wake_fact()
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
 def test_session_model_falls_back_to_current_model():
     cfg = get_config()
     assert cfg.model_rth == ""

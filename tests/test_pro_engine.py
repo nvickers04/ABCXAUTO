@@ -941,6 +941,82 @@ def test_rearm_spoken_close_without_send_reenters_same_chat():
     assert eng._resume_think is False
     assert eng._cold_next is False
     assert not getattr(eng, "_inventory_wake", False)
+    assert not getattr(eng, "_ticket_wake", False)
+
+
+def test_rearm_spoken_ticket_without_send_reenters_same_chat():
+    """Named ORDER EXAMPLES ticket + sends==0 is not finished, even when flat."""
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "INTC market_bracket LONG 10 stop 35 target 42.",
+            "sends": 0,
+            "positions": [],
+        },
+        session="regular",
+    )
+    assert wait == 0.0
+    assert eng._resume_think is True
+    assert eng._cold_next is False
+    assert eng._ticket_wake is True
+    assert not getattr(eng, "_inventory_wake", False)
+    # A send on the ticket is a finished look — sit for a real poke.
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "INTC market_bracket LONG 10 stop 35 target 42.",
+            "sends": 1,
+            "positions": [],
+            "tool_trace": ["send"],
+        },
+        session="regular",
+    )
+    assert eng._resume_think is False
+    assert eng._cold_next is False
+    assert not getattr(eng, "_ticket_wake", False)
+    # Spoken-no-tool that is not a ticket still sits when flat.
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+            "positions": [],
+        },
+        session="regular",
+    )
+    assert eng._resume_think is False
+    assert eng._cold_next is False
+    assert not getattr(eng, "_ticket_wake", False)
+    # Lots on the book + a new named ticket (not CLOSE/EXIT) still re-enters.
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "INTC market_bracket LONG.",
+            "sends": 0,
+            "positions": _ibit_xlf_positions(),
+        },
+        session="regular",
+    )
+    assert eng._resume_think is True
+    assert eng._ticket_wake is True
+    assert not getattr(eng, "_inventory_wake", False)
+    # Research keep-looking owns premarket. This RTH unpaid path must not mill it.
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "INTC market_bracket LONG.",
+            "sends": 0,
+            "positions": [],
+        },
+        session="premarket",
+    )
+    assert eng._resume_think is False
+    assert not getattr(eng, "_ticket_wake", False)
 
 
 def test_rearm_accepted_say_resets_recover_streak():
@@ -971,6 +1047,17 @@ def test_rearm_accepted_say_resets_recover_streak():
             "rationale": "CLOSE IBIT. EXIT XLF.",
             "sends": 0,
             "positions": _ibit_xlf_positions(),
+        },
+        session="regular",
+    )
+    assert eng._recover_streak == 1
+    # Unaccepted named ticket is not a finished look — streak stays.
+    eng._recover_streak = 1
+    eng._rearm_after_think(
+        {
+            "rationale": "INTC market_bracket LONG.",
+            "sends": 0,
+            "positions": [],
         },
         session="regular",
     )
@@ -1166,6 +1253,71 @@ async def test_spoken_close_without_send_reenters_same_chat(monkeypatch, tmp_pat
     assert eng._cold_next is False
 
 
+@pytest.mark.asyncio
+async def test_spoken_ticket_without_send_reenters_same_chat(monkeypatch, tmp_path):
+    """Flat book + named ticket + sends==0 is not finished. Same chat, ticket wake."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    resumes: list[bool] = []
+    ticket_flags: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import peek_interrupt
+
+        resumes.append(resume)
+        ticket_flags.append(bool(getattr(self, "_ticket_wake", False)))
+        assert peek_interrupt() is None
+        assert not (s.get("positions") or [])
+        g.chat = g.chat or object()
+        if len(resumes) == 1:
+            return {
+                "cycle": n,
+                "pnl": 0,
+                "equity": 100000,
+                "_failed": False,
+                "rationale": "INTC market_bracket LONG 10 stop 35 target 42.",
+                "sends": 0,
+                "positions": [],
+                "tool_trace": ["book", "quote"],
+            }
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "Working the INTC ticket.",
+            "sends": 1,
+            "positions": [],
+            "tool_trace": ["send"],
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+
+    def boom_poke(*_a, **_k):
+        raise AssertionError("ticket re-enter must not invent a book poke")
+
+    monkeypatch.setattr("abcxauto.park_clock.note_interrupt", boom_poke)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(resumes) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.3
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(resumes) == 2
+    assert resumes == [True, True]
+    assert ticket_flags[1] is True
+    from abcxauto.park_clock import load_alarm, peek_interrupt
+
+    assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
+    assert eng._cold_next is False
+
+
 def test_rearm_failed_look_idles_without_cold_next(monkeypatch):
     monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "30")
     eng = ProEngine()
@@ -1338,6 +1490,36 @@ async def test_host_think_inventory_wake_leads_with_open_lots(monkeypatch):
     assert "IBIT" in wake
     assert "XLF" in wake
     assert eng._inventory_wake is False
+    assert peek_interrupt() is None
+
+
+@pytest.mark.asyncio
+async def test_host_think_ticket_wake_leads_with_send_the_ticket(monkeypatch):
+    """Named-ticket re-enter puts SEND-THE-TICKET on the wake, not a poke."""
+    from abcxauto.brain import BrainTurn
+    from abcxauto.desk_mode import TICKET_WAKE_FACT
+    from abcxauto.park_clock import peek_interrupt
+
+    got: dict[str, object] = {}
+
+    async def grok_turn(*_a, **k):
+        got["wake"] = str(k.get("wake") or "")
+        got["resume"] = k.get("resume")
+        got["recover"] = k.get("recover")
+        return BrainTurn(text="working the INTC ticket")
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok_turn)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    eng._ticket_wake = True
+    snap = _stay_up_snap("regular")
+    await eng._host_think(2, SimpleNamespace(chat=object()), snap, resume=True)
+    wake = str(got.get("wake") or "")
+    assert got.get("resume") is True
+    assert got.get("recover") is False
+    assert wake.startswith(TICKET_WAKE_FACT)
+    assert "SEND-THE-TICKET" in wake
+    assert eng._ticket_wake is False
     assert peek_interrupt() is None
 
 
