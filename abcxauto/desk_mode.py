@@ -256,6 +256,13 @@ def _had_send_tool(sends: int, tool_trace: list[Any] | None) -> bool:
     return False
 
 
+def _had_tool_or_send(sends: int, tool_trace: list[Any] | None) -> bool:
+    """True when this look called any tool or send. Mill must not fire."""
+    if _had_send_tool(sends, tool_trace):
+        return True
+    return any(str(raw or "").strip() for raw in (tool_trace or []))
+
+
 def spoken_close_without_send(
     text: str = "",
     *,
@@ -352,6 +359,21 @@ def inventory_wake_fact(
 # Wake lead when a look named a sendable ticket and never called send.
 # Not a fill / order_change / unprotected poke. Forces the unpaid ticket path.
 TICKET_WAKE_FACT = "SEND-THE-TICKET open decision still unpaid."
+
+# RTH synthesize/decide mill: zero tools and zero send is not a finished look.
+# Same-chat re-enter with a tool-or-send wake. After SYNTHESIZE_MILL_TRIES
+# consecutive mill turns, drop the chat and continue cold (empty/junk spirit).
+# Not a fill / order_change / unprotected poke. Not a "let me synthesize" sermon.
+MILL_WAKE_FACT = "TOOL-OR-SEND this look. Do not synthesize."
+SYNTHESIZE_MILL_TRIES = 2
+_SYNTHESIZE_MILL_RE = re.compile(
+    r"\bsynthesi[sz]e\b"
+    r"|\btrading\s+plans?\b"
+    r"|\bthe\s+picture\b"
+    r"|\b(?:let\s+me|time\s+to|need\s+to|going\s+to)\s+decide\b"
+    r"|\bdecide\s+(?:whether|on|what|how)\b",
+    re.IGNORECASE,
+)
 
 # Single-token ORDER EXAMPLES names that also appear as ordinary English.
 # Left out of the distinctive matcher so "relative to SPY" is not a ticket.
@@ -509,6 +531,37 @@ def look_unpaid_ticket(payload: dict[str, Any] | None) -> bool:
 def ticket_wake_fact() -> str:
     """Lead the next same-chat wake. Not a fill / order_change / unprotected poke."""
     return TICKET_WAKE_FACT
+
+
+def spoken_synthesize_mill(
+    text: str = "",
+    *,
+    sends: int = 0,
+    tool_trace: list[Any] | None = None,
+) -> bool:
+    """True when the say is a synthesize/decide mill and this look used no tool or send.
+
+    Tight language: synthesize / trading plan / the picture / let-me-decide.
+    A tool call or send is not a mill. Named unpaid tickets stay on
+    ``look_unpaid_ticket``. Bare "decided to wait" is not this matcher.
+    """
+    if _had_tool_or_send(sends, tool_trace):
+        return False
+    blob = str(text or "")
+    if not blob.strip():
+        return False
+    return bool(_SYNTHESIZE_MILL_RE.search(blob))
+
+
+def look_synthesize_mill(payload: dict[str, Any] | None) -> bool:
+    """``_rearm_after_think`` payload: mill language + zero tools + zero send."""
+    text, sends, _positions, _lots, trace = _look_payload_parts(payload)
+    return spoken_synthesize_mill(text, sends=sends, tool_trace=trace)
+
+
+def mill_wake_fact() -> str:
+    """Lead the next same-chat wake after a synthesize mill. Forces tool or send."""
+    return MILL_WAKE_FACT
 
 
 def desk_mode(session: str = "") -> str:

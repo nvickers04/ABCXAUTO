@@ -185,6 +185,67 @@ def test_spoken_ticket_without_send_works_flat_and_does_not_mill_color():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
+# Live desk oracle (last ~200KB): stream silent=14, synthesize=13, send=0.
+# Tip: [think] Let me synthesize a trading plan/the picture → prose → often
+# names a ticket → [stream silent] with zero send. Soft-spin: keep alive,
+# tokens burn, no action.
+_SOFT_SPIN_MILL_SAY = (
+    "Let me synthesize a trading plan/the picture. "
+    "More prose. Stream going quiet."
+)
+_SOFT_SPIN_TICKET_SAY = (
+    "Let me synthesize a trading plan/the picture. "
+    "INTC market_bracket LONG 10 stop 35 target 42."
+)
+
+
+def test_synthesize_mill_zero_tools_zero_send_is_not_a_finished_look():
+    """Soft-spin mill language with no tool_trace and sends==0 is a mill.
+
+    A look that called tools or send is not. Named-ticket mill language
+    stays unpaid (#164). Spoken-no-tool that is not mill is not.
+    """
+    from abcxauto.desk_mode import (
+        MILL_WAKE_FACT,
+        SYNTHESIZE_MILL_TRIES,
+        look_synthesize_mill,
+        look_unpaid_ticket,
+        mill_wake_fact,
+        spoken_synthesize_mill,
+    )
+
+    assert SYNTHESIZE_MILL_TRIES == 2
+    assert spoken_synthesize_mill(_SOFT_SPIN_MILL_SAY, sends=0)
+    assert look_synthesize_mill(
+        {"rationale": _SOFT_SPIN_MILL_SAY, "sends": 0, "tool_trace": []}
+    )
+    assert spoken_synthesize_mill("Let me decide whether to send.", sends=0)
+    assert spoken_synthesize_mill("Time to decide on a ticket.", sends=0)
+    assert not spoken_synthesize_mill(
+        _SOFT_SPIN_MILL_SAY, sends=0, tool_trace=["book"]
+    )
+    assert not spoken_synthesize_mill(_SOFT_SPIN_MILL_SAY, sends=1)
+    assert not spoken_synthesize_mill(
+        _SOFT_SPIN_MILL_SAY, sends=0, tool_trace=["quote"]
+    )
+    assert not spoken_synthesize_mill(
+        "Standing down. Watching IWM. No ticket.", sends=0
+    )
+    assert not spoken_synthesize_mill(
+        "I decided to wait. Watching IWM.", sends=0
+    )
+    # Mill + named ticket: mill matcher still sees mill language; unpaid
+    # owns the engine path.
+    assert spoken_synthesize_mill(_SOFT_SPIN_TICKET_SAY, sends=0)
+    assert look_unpaid_ticket(
+        {"rationale": _SOFT_SPIN_TICKET_SAY, "sends": 0, "positions": []}
+    )
+    assert mill_wake_fact() == MILL_WAKE_FACT
+    assert "TOOL-OR-SEND" in mill_wake_fact()
+    assert "synthesize" in mill_wake_fact().lower()
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
 def test_session_model_falls_back_to_current_model():
     cfg = get_config()
     assert cfg.model_rth == ""
