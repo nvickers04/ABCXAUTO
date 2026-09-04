@@ -2368,6 +2368,46 @@ def test_resume_duplicate_wom_set_does_not_append_a_fresh_desk():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
+_WOM_FACT_PREMARKET = (
+    "fact: working_order_missing QQQ 260918C500 long 1,SPY STK long 10.\n"
+    "session=premarket flat=False unprotected=none ibkr=up."
+)
+
+
+def test_research_keep_looking_open_wake_still_appends_same_fact():
+    """Research has no broker poke. Same lead fact still re-enters looking."""
+    from abcxauto.brain import _open_wake
+    from abcxauto.llm import SYSTEM_PROMPT
+    from abcxauto.park_clock import clear_interrupt
+    from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+
+    clear_interrupt()
+    got: list[object] = []
+
+    class Chat:
+        def append(self, msg, **_k):
+            got.append(msg)
+
+    class _ChatNS:
+        @staticmethod
+        def create(**_k):
+            return Chat()
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+    )
+    _open_wake(g, _WOM_FACT_PREMARKET, session="premarket")
+    assert len(got) == 1
+    _open_wake(g, _WOM_FACT_PREMARKET, session="premarket", resume=True)
+    assert len(got) == 2
+    _open_wake(g, _WOM_FACT, session="regular", resume=True)
+    assert len(got) == 2
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
 @pytest.mark.asyncio
 async def test_stream_round_breaks_when_stalled(monkeypatch):
     import asyncio
@@ -3610,6 +3650,114 @@ async def test_spoken_no_tool_say_ends_this_grok_turn_keeps_chat():
         assert wait == 0.0
     finally:
         bind_engine(None)
+
+
+@pytest.mark.asyncio
+async def test_research_spoken_no_tool_ends_this_turn_not_a_mill(tmp_path, monkeypatch):
+    """Words with no tool_calls still stop THIS grok_turn. Host pulse re-enters."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+    from abcxauto.pro_engine import ProEngine
+
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
+    clear_interrupt()
+    g, created = _scripted_chat_client(
+        rounds=["brief written. research_no_send.", "still looking NVDA"]
+    )
+    turn = await grok_turn(
+        g,
+        connector=None,
+        world=_world(session_status="premarket"),
+        snap={},
+        wake="session=premarket desk_mode=research.",
+    )
+    assert turn.ended is False
+    assert "brief written" in (turn.text or "")
+    assert "still looking NVDA" not in (turn.text or "")
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {"_failed": False, "rationale": turn.text, "sends": 0, "tool_trace": ["news"]},
+        session="premarket",
+    )
+    assert eng._resume_think is False
+    assert eng._cold_next is False
+    assert wait == 0.0
+
+
+@pytest.mark.asyncio
+async def test_research_keep_looking_resume_calls_model_without_poke(
+    tmp_path, monkeypatch
+):
+    """Host re-entry after a brief must look again. Same wake is not _ended."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt, peek_interrupt
+
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
+    clear_interrupt()
+    wake = (
+        "fact: working_order_missing QQQ 260918C500 long 1.\n"
+        "session=premarket flat=False unprotected=none ibkr=up."
+    )
+    g, created = _scripted_chat_client(
+        rounds=["wrote the brief", "news again — expectancy overwritten"]
+    )
+    first = await grok_turn(
+        g,
+        connector=None,
+        world=_world(session_status="premarket"),
+        snap={},
+        wake=wake,
+    )
+    assert first.ended is False
+    assert "wrote the brief" in (first.text or "")
+    assert peek_interrupt() is None
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(session_status="premarket"),
+        snap={},
+        wake=wake,
+        resume=True,
+    )
+    assert second.ended is False
+    assert "news again" in (second.text or "")
+    assert g.chat is created[0]
+    assert len(created) == 1
+    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+    assert peek_interrupt() is None
+
+
+@pytest.mark.asyncio
+async def test_rth_duplicate_lead_still_ends_without_poke():
+    """RTH same collapsible fact without a poke still ends the look."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    wake = (
+        "fact: working_order_missing QQQ 260918C500 long 1.\n"
+        "session=regular flat=False unprotected=none ibkr=up."
+    )
+    g, created = _scripted_chat_client(
+        rounds=["watching QQQ", "should not run"]
+    )
+    first = await grok_turn(
+        g, connector=None, world=_world(), snap={}, wake=wake
+    )
+    assert first.ended is False
+    assert "watching QQQ" in (first.text or "")
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap={},
+        wake=wake,
+        resume=True,
+    )
+    assert second.ended is True
+    assert "should not run" not in (second.text or "")
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
 
 
 @pytest.mark.asyncio

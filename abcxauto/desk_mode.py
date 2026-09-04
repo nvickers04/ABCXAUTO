@@ -157,6 +157,32 @@ def is_research_session(session: str = "") -> bool:
     return desk_session(session) != RTH_SESSION
 
 
+def research_keep_looking(session: str = "") -> bool:
+    """True when a finished research look must re-enter, not wait for a book poke.
+
+    Research has no sends, so fill / order_change never arrive. A looking
+    premarket session keeps looking (news / scan / web, overwrite the brief)
+    until RTH roll, operator stop, or an overnight park that still applies.
+    RTH spoken-no-tool still waits for a real poke. Closed / postmarket stay
+    parked. Blank labels do not clock-fill into a mill — the host passes the
+    resolved snap label.
+    """
+    raw = str(session or "").strip().lower()
+    if raw in ("", "unknown"):
+        return False
+    sess = desk_session(raw)
+    if sess == RTH_SESSION or sess not in RESEARCH_SESSIONS:
+        return False
+    try:
+        from abcxauto.park_clock import honor_park
+
+        if honor_park(session=sess):
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def desk_mode(session: str = "") -> str:
     return "rth" if is_rth_session(session) else "research"
 

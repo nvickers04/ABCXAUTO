@@ -1772,6 +1772,150 @@ async def test_pulse_timeout_unchanged_wom_set_sits(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_research_keep_looking_after_brief_without_poke(monkeypatch, tmp_path):
+    """Premarket brief must not nap waiting for a book poke that never comes."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
+    monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+    calls: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        from abcxauto.desk_mode import write_research_brief
+        from abcxauto.park_clock import peek_interrupt
+
+        write_research_brief(
+            session="premarket",
+            snap={
+                "news_items": [
+                    {
+                        "symbol": "NVDA",
+                        "headline": "NVDA beats estimates after hours",
+                        "publisher": "MDA",
+                    }
+                ]
+            },
+        )
+        assert peek_interrupt() is None
+        calls.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "research_no_send — brief written.",
+            "sends": 0,
+            "tool_trace": ["news", "scan"],
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="premarket", think=think)
+
+    async def fake_snap(_c):
+        return _stay_up_snap("premarket")
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(calls) >= 2
+    assert calls[0] is True
+    from abcxauto.desk_mode import load_research_brief
+    from abcxauto.park_clock import load_alarm, peek_interrupt
+
+    assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
+    brief = load_research_brief()
+    assert brief.get("expectancy")
+    assert brief.get("mode") == "research"
+
+
+@pytest.mark.asyncio
+async def test_rth_spoken_no_tool_still_waits_for_real_poke(monkeypatch, tmp_path):
+    """RTH spoken-no-tool stay-up is not a mill. Pulse timeout is not a look."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+    calls: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        calls.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "Standing down. Watching IWM. No ticket.",
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+
+    async def fake_snap(_c):
+        return _stay_up_snap("regular")
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.4
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(calls) == 1
+    assert eng._resume_think is False
+    assert eng._cold_next is False
+    from abcxauto.park_clock import load_alarm, peek_interrupt
+
+    assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
+
+
+@pytest.mark.asyncio
+async def test_overnight_park_does_not_keep_looking_after_brief(monkeypatch, tmp_path):
+    """Closed park stays parked. Keep-looking is not an overnight mill."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
+    monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+    from abcxauto.park_clock import set_wake
+
+    set_wake(wake_in_s=30, session="closed", flat=True)
+    calls = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "brief written",
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="closed", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 0.8
+    while time.time() < deadline:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert calls["n"] == 0
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is not None
+
+
+@pytest.mark.asyncio
 async def test_stay_up_lead_changed_detects_wom_set_identity(monkeypatch):
     from abcxauto.pro_engine import ProEngine
     from abcxauto.world_state import WAKE_FACT_PREFIX

@@ -1048,9 +1048,17 @@ def _open_wake(
             from abcxauto.world_state import desk_fact_is_duplicate
 
             prev = _chat_last_desk_fact(g, live)
-            if desk_fact_is_duplicate(prev, wake):
+            keep_research = False
+            try:
+                from abcxauto.desk_mode import research_keep_looking
+
+                keep_research = research_keep_looking(session)
+            except Exception:
+                keep_research = False
+            if desk_fact_is_duplicate(prev, wake) and not keep_research:
                 # Same lead-fact identity (set / list / tick). A look may
                 # end — do not append a fresh go-do-desk developer turn.
+                # Research keep-looking still appends: no broker poke will come.
                 g._wake_n = int(getattr(g, "_wake_n", 0) or 0) + 1
                 return live
             live.append(developer(wake))
