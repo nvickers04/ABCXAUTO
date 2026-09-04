@@ -15,6 +15,7 @@ from abcxauto.config import (
 )
 from abcxauto.desk_mode import (
     REASON_RESEARCH_NO_SEND,
+    WEB_USE,
     build_expectancy,
     desk_mode,
     desk_session,
@@ -439,51 +440,90 @@ async def test_web_fetch_is_thin_title_and_text(monkeypatch):
     assert page.get("title") == "Acme raises guidance"
     assert "earnings beat" in (page.get("text") or "")
     assert page.get("source") == "web"
+    assert page.get("use") == WEB_USE
     refused = await fetch_public_page("file:///etc/passwd")
     assert refused.get("error")
+    assert refused.get("use") == WEB_USE
+
+
+def _world(session: str):
+    from abcxauto.world_state import WorldState
+
+    return WorldState(
+        cycle=1,
+        session_status=session,
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+
+
+def _tool_names(session: str) -> set[str]:
+    from abcxauto.brain import agent_tools
+
+    names: set[str] = set()
+    for t in agent_tools(session=session):
+        fn = getattr(t, "function", None)
+        names.add(str(getattr(fn, "name", None) or getattr(t, "name", "") or ""))
+    return names
+
+
+def test_agent_tools_web_on_rth_and_research():
+    rth = _tool_names("regular")
+    assert "web" in rth
+    assert "send" in rth
+    assert "news" in rth
+    assert "scan" in rth
+    for sess in ("premarket", "postmarket", "closed"):
+        research = _tool_names(sess)
+        assert "web" in research, sess
+        assert "send" not in research, sess
+        assert "news" in research, sess
+        assert "scan" in research, sess
+
+
+def test_write_research_brief_skips_rth(tmp_path, monkeypatch):
+    path = tmp_path / "research_brief.json"
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(path))
+    snap = {
+        "news_items": [
+            {
+                "symbol": "TSLA",
+                "headline": "TSLA announces merger after hours",
+                "publisher": "MDA",
+            }
+        ]
+    }
+    out = write_research_brief(session="regular", snap=snap, now=datetime.now(timezone.utc))
+    assert out == {}
+    assert not path.is_file()
+    wrote = write_research_brief(session="premarket", snap=snap, now=datetime.now(timezone.utc))
+    assert wrote.get("session") == "premarket"
+    assert path.is_file()
 
 
 @pytest.mark.asyncio
-async def test_web_tool_is_research_only(monkeypatch):
+async def test_web_tool_fetches_in_rth_and_research(monkeypatch, tmp_path):
     import json
 
-    from abcxauto.brain import BrainTurn, _run_tool
-    from abcxauto.world_state import WorldState
+    from abcxauto.brain import BrainTurn, _invoke_named_tool, _run_tool
 
-    def _world(session: str) -> WorldState:
-        return WorldState(
-            cycle=1,
-            session_status=session,
-            flat=True,
-            needs_protection=False,
-            unprotected=[],
-            net_liquidation=37000.0,
-            daily_pnl=0.0,
-            positions=[],
-            open_orders=[],
-            opportunities=[],
-            news_items=[],
-            risk_posture="balanced",
-            effective_posture="balanced",
-            gates={},
-            envelope={},
-            regime={},
-            portfolio_risk={},
-            working_thesis="",
-            recent_decisions=[],
-            trade_plan=None,
-        )
-
-    rth = await _run_tool(
-        "web",
-        {"url": "https://example.com"},
-        connector=None,
-        world=_world("regular"),
-        snap={},
-        turn=BrainTurn(),
-    )
-    data = json.loads(rth)
-    assert "research-only" in str(data.get("error") or "")
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
 
     async def _ok(url):
         return {
@@ -491,10 +531,27 @@ async def test_web_tool_is_research_only(monkeypatch):
             "title": "IR",
             "text": "announces merger",
             "source": "web",
-            "use": "research_expectancy_not_send",
+            "use": WEB_USE,
         }
 
     monkeypatch.setattr("abcxauto.desk_mode.fetch_public_page", _ok)
+
+    rth_snap: dict = {}
+    rth = await _run_tool(
+        "web",
+        {"url": "https://example.com/ir"},
+        connector=None,
+        world=_world("regular"),
+        snap=rth_snap,
+        turn=BrainTurn(),
+    )
+    data = json.loads(rth)
+    assert "research-only" not in str(data.get("error") or "")
+    assert data.get("title") == "IR"
+    assert data.get("source") == "web"
+    assert data.get("use") == WEB_USE
+    assert rth_snap.get("research_web", {}).get("title") == "IR"
+
     raw = await _run_tool(
         "web",
         {"url": "https://example.com/ir"},
@@ -506,6 +563,32 @@ async def test_web_tool_is_research_only(monkeypatch):
     payload = json.loads(raw)
     assert payload.get("title") == "IR"
     assert payload.get("source") == "web"
+    assert payload.get("use") == WEB_USE
+
+    rth_path = tmp_path / "research_brief.json"
+    if rth_path.is_file():
+        rth_path.unlink()
+    await _invoke_named_tool(
+        "web",
+        {"url": "https://example.com/ir"},
+        5.0,
+        connector=None,
+        world=_world("regular"),
+        snap={},
+        turn=BrainTurn(),
+    )
+    assert not rth_path.is_file()
+
+    await _invoke_named_tool(
+        "web",
+        {"url": "https://example.com/ir"},
+        5.0,
+        connector=None,
+        world=_world("premarket"),
+        snap={},
+        turn=BrainTurn(),
+    )
+    assert rth_path.is_file()
 
 
 @pytest.mark.asyncio

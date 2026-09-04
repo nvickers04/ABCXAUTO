@@ -27,9 +27,9 @@ which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process.
   **research mode**: stronger `model_research` when set, MDA/news/odds/web
   for an expectancy brief under `data/state/research_brief.json`, and
   `send` fail-closes (`research_no_send`). RTH is the thin defined-risk
-  sender (`model_rth` or current `model`). The research brief is COLOR on
-  the RTH wake (prior-session, not a live trigger). Missing/stale brief:
-  RTH still runs. News/scan/web are never an automatic trigger.
+  sender (`model_rth` or current `model`). RTH may use news/scan/web as
+  COLOR; the brief remains prior-session color on wake. Missing/stale
+  brief: RTH still runs. News/scan/web are never an automatic trigger.
 
 - Defined-risk and cash-only
 - Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %;
@@ -83,7 +83,8 @@ IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 
 MDA ~15m delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
 
-Other: `odds` (Polymarket, not send geometry), `send`, `self_tune` (flat knobs).
+Other: `odds` (Polymarket, not send geometry), `web` (public page, COLOR not a
+live trigger), `send`, `self_tune` (flat knobs).
 
 Universe is a watchlist Grok can change via `self_tune`; `send` is not limited
 to it. Code writes `journal.db`; there is no `journal` tool.
