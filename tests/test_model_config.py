@@ -15,10 +15,13 @@ import pytest
 
 from abcxauto.config import (
     DEFAULT_MODEL,
+    DEFAULT_MODEL_XHIGH,
+    LAUNCH_MODEL_KEYS,
     RESERVED_CHAT_KEYS,
     agent_config_snapshot,
     coerce_model_params,
     get_config,
+    launch_model_knobs,
     load_risk_settings,
     risk_settings_path,
     set_agent_knobs,
@@ -32,8 +35,23 @@ from abcxauto.thin_rth_kill_look import rth_model_no_xhigh
 
 def test_default_model_is_one_constant():
     assert DEFAULT_MODEL == "grok-4.6"
+    assert DEFAULT_MODEL_XHIGH == "grok-4.6-xhigh"
     assert get_config().model == DEFAULT_MODEL
+    assert get_config().model_rth == ""
+    assert get_config().model_research == ""
+    assert get_config().model_params == {}
     assert session_model("regular", get_config()) == DEFAULT_MODEL
+    # xhigh stays a suffix the operator can set; launch does not bake 4.7.
+    cfg = SimpleNamespace(
+        model=DEFAULT_MODEL_XHIGH, model_rth="", model_research=""
+    )
+    assert session_model("premarket", cfg) == DEFAULT_MODEL_XHIGH
+    knobs = launch_model_knobs(reload=True)
+    assert knobs["model"] == DEFAULT_MODEL
+    assert knobs["model"] != "grok-4.7"
+    assert knobs["model_rth"] == ""
+    assert knobs["model_research"] == ""
+    assert knobs["model_params"] == {}
 
 
 def test_settings_can_select_a_later_model_id():
@@ -240,3 +258,70 @@ def test_brain_fingerprint_includes_params(monkeypatch):
     assert ProEngine._brain_fingerprint() != first
     box.model = "grok-4.7"
     assert ProEngine._brain_fingerprint()[0] == "grok-4.7"
+
+
+def test_launch_helpers_read_disk_not_hardcoded_default(monkeypatch):
+    """DESK / CloudAgent launch reloads risk_settings.json — not grok-4.6 only."""
+    update_agent_config(
+        model="grok-4.7",
+        model_rth="grok-4.7",
+        model_research="grok-4.7-xhigh",
+        model_params={"effort": "xhigh", "thinking": True},
+        persist=True,
+    )
+    from abcxauto import config as cfg_mod
+    from abcxauto import think_stream as ts
+
+    cfg_mod._runtime_overrides.clear()
+    get_config.cache_clear()
+    knobs = launch_model_knobs(reload=True)
+    assert set(knobs) >= set(LAUNCH_MODEL_KEYS)
+    assert knobs["model"] == "grok-4.7"
+    assert knobs["model_rth"] == "grok-4.7"
+    assert knobs["model_research"] == "grok-4.7-xhigh"
+    assert knobs["model_params"] == {"effort": "xhigh", "thinking": True}
+    assert knobs["model"] != DEFAULT_MODEL
+
+    client = SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: SimpleNamespace()))
+    g = GrokClient(client=client, session="premarket")
+    assert g.model == "grok-4.7-xhigh"
+    assert g.model_params["effort"] == "xhigh"
+
+    ts._run = {}
+    run = ts.begin_run()
+    assert run["model"] == "grok-4.7"
+    assert run["model_rth"] == "grok-4.7"
+    assert run["model_research"] == "grok-4.7-xhigh"
+    assert run["model_params"]["thinking"] is True
+    disk = json.loads(ts.RUN_PATH.read_text(encoding="utf-8"))
+    assert disk["model"] == "grok-4.7"
+    assert disk["model_params"]["effort"] == "xhigh"
+
+    from abcxauto.cursor_env import START_PRO_SOURCE
+    from abcxauto.pro_desktop import run_app
+    from abcxauto.supervisor import prepare_desk_start
+
+    assert "launch_model_knobs" in START_PRO_SOURCE
+    assert START_PRO_SOURCE.index("launch_model_knobs") < START_PRO_SOURCE.index(
+        "run_app"
+    )
+
+    monkeypatch.setattr("abcxauto.supervisor.reap_leftover_desk", lambda **_k: [])
+    monkeypatch.setattr("abcxauto.supervisor.clear_stale_desk_lock", lambda: None)
+    monkeypatch.setattr("abcxauto.supervisor.clear_operator_stop", lambda: None)
+    cfg_mod._runtime_overrides.clear()
+    get_config.cache_clear()
+    cfg_mod._file_overrides = {}
+    prepare_desk_start()
+    assert get_config().model == "grok-4.7"
+    assert get_config().model_research == "grok-4.7-xhigh"
+    assert get_config().model_params["effort"] == "xhigh"
+
+    probe = ts.RUN_PATH.parent / "launch-probe.txt"
+    monkeypatch.setenv("ABCXAUTO_LAUNCH_PROBE", str(probe))
+    cfg_mod._runtime_overrides.clear()
+    get_config.cache_clear()
+    cfg_mod._file_overrides = {}
+    run_app()
+    assert get_config().model == "grok-4.7"
+    assert get_config().model_params["thinking"] is True

@@ -199,7 +199,9 @@ def test_start_pro_script_autostarts_pro(monkeypatch, tmp_path):
     monkeypatch.delenv("ABCXAUTO_AUTOSTART", raising=False)
     path = write_start_pro_script(tmp_path / "logs" / "_start_pro.py")
     src = path.read_text(encoding="utf-8-sig")
+    assert "launch_model_knobs" in src
     assert "prepare_desk_start" in src
+    assert src.index("launch_model_knobs") < src.index("run_app")
     assert src.index("prepare_desk_start") < src.index("run_app")
     assert "_cleanup" not in src
     assert "cleanup_pro" not in src

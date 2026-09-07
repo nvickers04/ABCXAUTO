@@ -152,7 +152,7 @@ def apply_kill_switch(engine: Any) -> None:
 
 def run_headless() -> int:
     """Connect paper IBKR and stay up until SIGINT/SIGTERM."""
-    from abcxauto.config import get_config, setup_file_logging
+    from abcxauto.config import get_config, launch_model_knobs, setup_file_logging
     from abcxauto.pro_engine import ProEngine
     from abcxauto.self_tune import ensure_immutable_floor
     from abcxauto.think_stream import stdout_printer, subscribe
@@ -160,6 +160,7 @@ def run_headless() -> int:
     setup_file_logging()
     _quiet_ibkr_scanner_noise()
     subscribe(stdout_printer)
+    knobs = launch_model_knobs(reload=True)
     cfg = get_config()
     if not cfg.is_paper:
         print("Headless refuses live mode. Paper only (TWS 7497 / Gateway 4002).", flush=True)
@@ -172,7 +173,9 @@ def run_headless() -> int:
     try:
         from abcxauto.memory import get_journal
 
-        get_journal().ensure_model_session(str(getattr(cfg, "model", "") or ""))
+        get_journal().ensure_model_session(
+            str(knobs.get("model") or getattr(cfg, "model", "") or "")
+        )
     except Exception:
         pass
     engine = ProEngine()

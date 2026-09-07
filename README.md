@@ -14,7 +14,7 @@ Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of
 | **Code** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, overnight / after-close park |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No approval step. |
 
-Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` persists to `risk_settings.json`, which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process. There is no clerk.
+Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` / `model_rth` / `model_research` / `model_params` persist to `risk_settings.json`, which beats the env forms. Launch reloads those knobs. Default stays grok-4.6 (+ xhigh suffix) until the operator flips. Grok is the only RTH process. There is no clerk.
 
 ## Hard gates (code)
 

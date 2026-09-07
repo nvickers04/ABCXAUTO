@@ -50,7 +50,10 @@ CAPACITY_KEYS = frozenset({
 PERSISTED_OPERATOR_KEYS = RISK_CONFIG_KEYS | CAPACITY_KEYS
 # Default brain id. Operator Settings / env / risk_settings.json override it.
 # Flipping to grok-4.7 (or any later id) is a knob change, not a code hunt.
+# Stay on grok-4.6 + xhigh until the operator flips — do not bake 4.7 in.
 DEFAULT_MODEL = "grok-4.6"
+DEFAULT_MODEL_XHIGH = "grok-4.6-xhigh"
+LAUNCH_MODEL_KEYS = ("model", "model_rth", "model_research", "model_params")
 # Clerk-owned chat.create kwargs. model_params may not overwrite these.
 RESERVED_CHAT_KEYS = frozenset({
     "model",
@@ -576,6 +579,26 @@ def save_risk_settings(
 
 # Load once at import so Pro / agent see last Apply without an extra call.
 load_risk_settings()
+
+
+def launch_model_knobs(*, reload: bool = True) -> dict[str, Any]:
+    """Brain knobs a DESK / CloudAgent launch will think with.
+
+    Reloads ``risk_settings.json`` so Settings Apply on disk is the launch
+    path. Default remains ``DEFAULT_MODEL`` (grok-4.6). xhigh is an id
+    suffix / ``model_params`` value the operator already uses — not a 4.7
+    flip and not a hardcoded sole path.
+    """
+    if reload:
+        load_risk_settings()
+        _load_env_config.cache_clear()
+    cfg = get_config()
+    return {
+        "model": str(getattr(cfg, "model", "") or DEFAULT_MODEL),
+        "model_rth": str(getattr(cfg, "model_rth", "") or ""),
+        "model_research": str(getattr(cfg, "model_research", "") or ""),
+        "model_params": dict(getattr(cfg, "model_params", None) or {}),
+    }
 
 
 def get_config() -> Config:

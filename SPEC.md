@@ -22,7 +22,11 @@ the cost of the model. Same rules at $1k, $100k, or $1M.
 Do not grow the system prompt. Do not inject strategy menus or a Judge/Act form.
 Switch the brain from Pro Settings — `model` / `model_rth` / `model_research`
 / `model_params` persist to `risk_settings.json`, which beats the env forms.
-`self_tune` cannot overwrite those knobs. Grok is the only RTH process.
+DESK / CloudAgent launch (`_start_pro`, `prepare_desk_start`, `begin_run`,
+`run_app`, headless) reloads those knobs from disk — grok-4.6 is the default,
+not a hardcoded sole path. Default stays grok-4.6 (+ xhigh as a suffix the
+operator already uses) until they flip. `self_tune` cannot overwrite those
+knobs. Grok is the only RTH process.
 
 ## Hard gates (code)
 

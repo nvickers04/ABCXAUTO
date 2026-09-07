@@ -4384,6 +4384,12 @@ def write_launch_probe(path: str | Path) -> None:
 def run_app() -> None:
     setup_file_logging()
     try:
+        from abcxauto.config import launch_model_knobs
+
+        launch_model_knobs(reload=True)
+    except Exception:
+        logger.debug("launch model knobs on run_app failed", exc_info=True)
+    try:
         from abcxauto.headless import _quiet_ibkr_scanner_noise
 
         _quiet_ibkr_scanner_noise()
