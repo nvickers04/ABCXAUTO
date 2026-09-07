@@ -99,6 +99,8 @@ class BrainTurn:
     poked: bool = False
     kill_mode: str = ""
     kill_look_capped: bool = False
+    f10_tripped: bool = False
+    loop_halted: bool = False
 
     def look_failed(self) -> bool:
         """True empty / lone '?' only. A real say or send/fill is not junk.
@@ -106,7 +108,7 @@ class BrainTurn:
         A later empty assistant chunk, a leftover ``failed`` stamp, or a
         dead stream after a spoken/send look must not wipe the stay-up chat.
         """
-        if self.parked or self.ended:
+        if self.parked or self.ended or self.loop_halted:
             return False
         return _look_is_empty_or_question(self)
 
@@ -1733,6 +1735,10 @@ async def _grok_turn_impl(
     kill_mode = ""
     turn_cap = MAX_TOOL_STEPS
     tool_cap = 0
+    in_flight = bool(
+        snap.get("kill_entry_in_flight")
+        or getattr(world, "kill_entry_in_flight", False)
+    )
     try:
         from abcxauto.thin_rth_kill_look import (
             MODEL_TURNS_MAX,
@@ -1743,10 +1749,6 @@ async def _grok_turn_impl(
             max_tools,
         )
 
-        in_flight = bool(
-            snap.get("kill_entry_in_flight")
-            or getattr(world, "kill_entry_in_flight", False)
-        )
         kill_mode = _kill_mode(
             session,
             positions=list(getattr(world, "positions", None) or snap.get("positions") or []),
@@ -1764,6 +1766,77 @@ async def _grok_turn_impl(
     except Exception:
         logger.debug("kill-look turn cap failed", exc_info=True)
     live_before = getattr(g, "chat", None)
+    try:
+        from abcxauto.thin_rth_kill_look import (
+            REASON_F10,
+            record_f10_loop_halt,
+            skip_look_reason,
+        )
+
+        prot = snap.get("protection") if isinstance(snap.get("protection"), dict) else {}
+        unprotected = bool(
+            prot.get("unprotected_symbols")
+            or getattr(world, "unprotected", None)
+            or getattr(world, "needs_protection", False)
+        )
+        halt = skip_look_reason(
+            session,
+            positions=list(
+                getattr(world, "positions", None) or snap.get("positions") or []
+            ),
+            open_lots=list(getattr(world, "open_lots", None) or []),
+            same_look=bool(in_flight or live_before is not None),
+            unprotected=unprotected,
+            in_flight=in_flight,
+        )
+        if halt == REASON_F10:
+            turn.f10_tripped = True
+            turn.loop_halted = True
+            turn.last_strat = "skipped"
+            turn.last_act = {
+                "action": "skipped",
+                "strategy": "skipped",
+                "rationale": REASON_F10,
+            }
+            turn.last_result = {
+                "status": "skipped",
+                "reason_code": REASON_F10,
+                "note": REASON_F10,
+                "f10_tripped": True,
+                "loop_halted": True,
+            }
+            record_f10_loop_halt(session=session, snap=snap)
+            think_emit("tool", "\n[F10 loop halt — no new-risk looks]\n")
+            if live_before is not None:
+                _finish_look_chat(g, turn, session=session)
+            return turn
+    except Exception:
+        logger.debug("f10 loop halt pre-check failed", exc_info=True)
+        try:
+            from abcxauto.thin_rth_kill_look import REASON_F10, f10_open_look_halted
+
+            if f10_open_look_halted():
+                turn.f10_tripped = True
+                turn.loop_halted = True
+                turn.last_strat = "skipped"
+                turn.last_act = {
+                    "action": "skipped",
+                    "strategy": "skipped",
+                    "rationale": REASON_F10,
+                }
+                turn.last_result = {
+                    "status": "skipped",
+                    "reason_code": REASON_F10,
+                    "note": REASON_F10,
+                    "f10_tripped": True,
+                    "loop_halted": True,
+                }
+                think_emit("tool", "\n[F10 loop halt — no new-risk looks]\n")
+                if live_before is not None:
+                    _finish_look_chat(g, turn, session=session)
+                return turn
+        except Exception:
+            logger.debug("f10 loop halt fail-closed fallback failed", exc_info=True)
     # A live chat is this look. A poke does not start a new messages list.
     resume = bool(resume) or live_before is not None
     recover = bool(recover) and live_before is not None
@@ -1820,6 +1893,32 @@ async def _grok_turn_impl(
     abort_tries = 0
     empty_tries = 0
     while turn.steps < turn_cap:
+        try:
+            from abcxauto.thin_rth_kill_look import REASON_F10, skip_look_reason
+
+            prot = snap.get("protection") if isinstance(snap.get("protection"), dict) else {}
+            mid_halt = skip_look_reason(
+                session,
+                positions=list(
+                    getattr(world, "positions", None) or snap.get("positions") or []
+                ),
+                open_lots=list(getattr(world, "open_lots", None) or []),
+                same_look=True,
+                unprotected=bool(
+                    prot.get("unprotected_symbols")
+                    or getattr(world, "unprotected", None)
+                    or getattr(world, "needs_protection", False)
+                ),
+                in_flight=True,
+            )
+            if mid_halt == REASON_F10:
+                turn.f10_tripped = True
+                turn.loop_halted = True
+                think_emit("tool", "\n[F10 loop halt — no new-risk looks]\n")
+                ran_out = False
+                break
+        except Exception:
+            logger.debug("f10 mid-look halt check failed", exc_info=True)
         turn.steps += 1
         try:
             from abcxauto.park_clock import peek_interrupt

@@ -286,6 +286,17 @@ def normalize_session_row(
         errors.append("f10_ok")
         row["f10_ok"] = None
 
+    if "f10_tripped" in payload:
+        try:
+            row["f10_tripped"] = _as_bool(payload.get("f10_tripped"), name="f10_tripped")
+        except ValueError:
+            row["f10_tripped"] = None
+    if "loop_halted" in payload:
+        try:
+            row["loop_halted"] = _as_bool(payload.get("loop_halted"), name="loop_halted")
+        except ValueError:
+            row["loop_halted"] = None
+
     try:
         row["dd_pct"] = _as_float(payload.get("dd_pct"), name="dd_pct")
     except ValueError:

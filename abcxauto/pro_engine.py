@@ -1472,7 +1472,11 @@ class ProEngine:
         act = dict(turn.last_act or {})
         result = dict(turn.last_result or {})
         strat = str(turn.last_strat or act.get("strategy") or "")
-        if not getattr(turn, "sends", None) and strat.lower() not in ("blocked",):
+        if (
+            not getattr(turn, "sends", None)
+            and strat.lower() not in ("blocked",)
+            and not getattr(turn, "loop_halted", False)
+        ):
             # No send this look is yield, not a hold ticket.
             act = {}
             strat = ""
@@ -1516,6 +1520,8 @@ class ProEngine:
             "_empty_grok": bool(getattr(turn, "trailing_empty_grok", False)),
             "_poked": bool(getattr(turn, "poked", False)),
             "_recover": recover,
+            "f10_tripped": bool(getattr(turn, "f10_tripped", False)),
+            "loop_halted": bool(getattr(turn, "loop_halted", False)),
         }
 
     async def _do_panic(self) -> None:
@@ -1865,9 +1871,31 @@ class ProEngine:
                     except Exception:
                         logger.debug("kill-look skip failed", exc_info=True)
                         skip = ""
+                    if not skip:
+                        try:
+                            from abcxauto.thin_rth_kill_look import (
+                                REASON_F10,
+                                f10_open_look_halted,
+                            )
+
+                            if f10_open_look_halted():
+                                skip = REASON_F10
+                        except Exception:
+                            logger.debug("f10 skip fail-closed failed", exc_info=True)
                     if skip:
                         self._note("SKIP", skip)
                         self.state.skip_reason = skip
+                        if skip == "NO_SEND:f10":
+                            try:
+                                from abcxauto.thin_rth_kill_look import (
+                                    record_f10_loop_halt,
+                                )
+
+                                record_f10_loop_halt(
+                                    session=session, skip_reason=skip, snap=s
+                                )
+                            except Exception:
+                                logger.debug("f10 halt persist failed", exc_info=True)
                         continue
 
                 n += 1

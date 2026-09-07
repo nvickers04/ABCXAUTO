@@ -472,6 +472,92 @@ def live_f10_gate() -> dict[str, Any]:
     )
 
 
+def f10_hard_tripped(gate: dict[str, Any] | None = None) -> bool:
+    """True for the hard $2 F10 fuse (not preferred $1, not unreadable)."""
+    if isinstance(gate, dict) and str(gate.get("reason_code") or "") == REASON_F10:
+        return True
+    try:
+        from abcxauto.session_caps import f10_loop_halted
+
+        if f10_loop_halted():
+            return True
+    except Exception:
+        logger.debug("f10 latch read failed", exc_info=True)
+    return False
+
+
+def f10_open_look_halted(f10: dict[str, Any] | None = None) -> bool:
+    """True when subsequent OPEN / new-risk looks must not call the model."""
+    try:
+        from abcxauto.session_caps import f10_loop_halted
+
+        if f10_loop_halted():
+            return True
+    except Exception:
+        logger.debug("f10 latch read failed", exc_info=True)
+    gate = f10 if isinstance(f10, dict) else live_f10_gate()
+    return str(gate.get("reason_code") or "") == REASON_F10
+
+
+def mark_f10_hard_trip(gate: dict[str, Any] | None = None) -> bool:
+    """Latch hard F10. Preferred / unreadable / window cap do not latch."""
+    if isinstance(gate, dict):
+        if str(gate.get("reason_code") or "") != REASON_F10:
+            return False
+    elif not f10_hard_tripped():
+        return False
+    try:
+        from abcxauto.session_caps import mark_f10_loop_halt
+
+        mark_f10_loop_halt()
+        return True
+    except Exception:
+        logger.debug("f10 latch write failed", exc_info=True)
+        return False
+
+
+def record_f10_loop_halt(
+    *,
+    session: str = "",
+    skip_reason: str = REASON_F10,
+    snap: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Latch + last_turn flags. Never raises. Exits are not this path."""
+    marked = False
+    try:
+        from abcxauto.session_caps import mark_f10_loop_halt
+
+        mark_f10_loop_halt()
+        marked = True
+    except Exception:
+        logger.debug("f10 latch write failed", exc_info=True)
+    blob = snap if isinstance(snap, dict) else {}
+    payload = {
+        "strat": "skipped",
+        "skip_reason": str(skip_reason or REASON_F10),
+        "validation": str(skip_reason or REASON_F10),
+        "rationale": str(skip_reason or REASON_F10),
+        "f10_tripped": True,
+        "loop_halted": True,
+        "sends": 0,
+        "positions": list(blob.get("positions") or []),
+        "open_lots": list(blob.get("open_lots") or []),
+        "reality_pulse": blob.get("reality_pulse") or {"session": {"status": session}},
+    }
+    try:
+        from abcxauto.think_stream import write_last_turn
+
+        write_last_turn(payload)
+    except Exception:
+        logger.debug("f10 last_turn persist failed", exc_info=True)
+    return {
+        "f10_tripped": True,
+        "loop_halted": True,
+        "skip_reason": str(skip_reason or REASON_F10),
+        "latched": marked,
+    }
+
+
 def kill_mode(
     session: str = "",
     *,
@@ -509,6 +595,13 @@ def kill_mode(
         return MODE_MANAGE
     if not kill_look_port_ok():
         return MODE_ABORT
+    try:
+        from abcxauto.session_caps import f10_loop_halted
+
+        if f10_loop_halted():
+            return MODE_ABORT
+    except Exception:
+        logger.debug("f10 latch read failed", exc_info=True)
     if entry_looks is None:
         from abcxauto.session_caps import kill_entry_looks
 
@@ -526,6 +619,8 @@ def kill_mode(
         return MODE_ABORT
     gate = f10 if isinstance(f10, dict) else live_f10_gate()
     if not gate.get("allow_new_risk", False):
+        if str(gate.get("reason_code") or "") == REASON_F10:
+            mark_f10_hard_trip(gate)
         return MODE_ABORT
     return MODE_OPEN
 
@@ -606,6 +701,15 @@ def skip_look_reason(
     )
     if mode == MODE_MANAGE:
         return ""
+    # RTH OPEN / ABORT only. Research_no_send stays; AH looks keep their own cap.
+    if mode != MODE_RESEARCH and f10_open_look_halted(f10):
+        try:
+            from abcxauto.session_caps import mark_f10_loop_halt
+
+            mark_f10_loop_halt()
+        except Exception:
+            logger.debug("f10 latch write failed", exc_info=True)
+        return REASON_F10
     if mode == MODE_OPEN:
         return ""
     if mode == MODE_ABORT:
@@ -685,6 +789,8 @@ def kill_look_send_block(
         }
     gate = f10 if isinstance(f10, dict) else live_f10_gate()
     if not gate.get("allow_new_risk", False):
+        if str(gate.get("reason_code") or "") == REASON_F10:
+            mark_f10_hard_trip(gate)
         return {
             "status": "blocked",
             "note": str(gate.get("note") or REASON_F10),

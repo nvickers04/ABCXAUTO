@@ -23,10 +23,13 @@ from abcxauto.desk_mode import (
 from abcxauto.llm import SYSTEM_PROMPT
 from abcxauto.session_caps import (
     consume_open_entry_look,
+    f10_loop_halted,
     kill_entry_looks,
+    mark_f10_loop_halt,
     note_research_look,
     research_week_looks,
     reset_session_caps,
+    usage,
 )
 from abcxauto.thin_rth_kill_look import (
     DIE_TOOLS,
@@ -57,6 +60,10 @@ from abcxauto.thin_rth_kill_look import (
     WINDOW_N,
     die_tool_block,
     f10_gate,
+    f10_hard_tripped,
+    f10_open_look_halted,
+    mark_f10_hard_trip,
+    record_f10_loop_halt,
     force_skip_or_manage,
     has_open_pcs_skew_lot,
     one_open_send_block,
@@ -189,7 +196,7 @@ def test_in_flight_open_can_still_send_after_consume(monkeypatch):
     assert kill_look_send_block(act, session="regular", f10=f10, in_flight=True) is None
     hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
     assert skip_look_reason("regular", positions=[], same_look=True, f10=hard) == (
-        REASON_ENTRY_BUDGET
+        REASON_F10
     )
 
 
@@ -595,3 +602,187 @@ def test_pro_engine_skip_reason_entry_budget(monkeypatch):
     eng2 = ProEngine()
     eng2._kill_entry_in_flight = True
     assert eng2._kill_look_skip_reason("regular", {"positions": []}) == ""
+
+
+def test_f10_trip_halts_open_look_exits_still_ok(monkeypatch):
+    """KEEP-1: hard F10 latches; OPEN looks skip; MANAGE / close still go."""
+    from abcxauto.pro_engine import ProEngine
+
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    assert hard["allow_new_risk"] is False
+    assert hard["reason_code"] == REASON_F10
+    assert f10_hard_tripped(hard) is True
+    assert f10_open_look_halted(hard) is True
+    assert skip_look_reason("regular", positions=[], f10=hard) == REASON_F10
+    assert f10_loop_halted() is True
+    assert usage("regular")["f10_tripped"] is True
+    assert usage("regular")["loop_halted"] is True
+    assert skip_look_reason("regular", positions=[], f10=_allow_f10()) == REASON_F10
+    assert skip_look_reason(
+        "regular", positions=[], same_look=True, f10=_allow_f10()
+    ) == REASON_F10
+    mill_eng = ProEngine()
+    mill_eng._mill_wake = True
+    assert mill_eng._kill_look_skip_reason(
+        "regular", {"positions": [], "protection": {}}
+    ) == REASON_F10
+    lot = _pcs_lot()
+    assert (
+        skip_look_reason(
+            "regular",
+            positions=[lot],
+            open_lots=["pcs-skew SPY vert"],
+            f10=hard,
+        )
+        == ""
+    )
+    close = {
+        "strategy": "vertical_spread",
+        "params": {**PCS_OPEN, "closing_position": True},
+        "card": PCS_CARD,
+    }
+    assert (
+        kill_look_send_block(
+            close,
+            session="regular",
+            positions=[lot],
+            open_lots=["pcs-skew SPY vert"],
+            f10=hard,
+        )
+        is None
+    )
+    blocked = kill_look_send_block(
+        {"strategy": "vertical_spread", "params": dict(PCS_OPEN), "card": PCS_CARD},
+        session="regular",
+        f10=hard,
+    )
+    assert blocked is not None
+    assert blocked["reason_code"] == REASON_F10
+    assert skip_look_reason("premarket", f10=hard) != REASON_F10
+    assert skip_look_reason("regular", positions=[], f10=hard, unprotected=True) == ""
+
+
+def test_f10_preferred_does_not_halt_loop(monkeypatch):
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    pref = f10_gate(0.80, est_this_look=0.35, window_cost=0.0)
+    assert pref["allow_new_risk"] is True
+    assert pref["preferred_trip"] is True
+    assert f10_hard_tripped(pref) is False
+    assert f10_open_look_halted(pref) is False
+    assert skip_look_reason("regular", positions=[], f10=pref) == ""
+    assert f10_loop_halted() is False
+    assert mark_f10_hard_trip(pref) is False
+
+
+def test_record_f10_loop_halt_last_turn_and_scorecard(monkeypatch):
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    out = record_f10_loop_halt(session="regular")
+    assert out["f10_tripped"] is True
+    assert out["loop_halted"] is True
+    assert out["skip_reason"] == REASON_F10
+    assert f10_loop_halted() is True
+    from abcxauto.think_stream import LAST_TURN_PATH
+
+    last = json.loads(LAST_TURN_PATH.read_text(encoding="utf-8"))
+    assert last["f10_tripped"] is True
+    assert last["loop_halted"] is True
+    assert last["skip_reason"] == REASON_F10
+    from abcxauto.pcs_kill_scorecard import normalize_session_row
+
+    row = normalize_session_row(
+        {
+            "session_id": "pcs-v0-20260907-01",
+            "session_date": "2026-09-07",
+            "NL": 100_000.0,
+            "conservative_pnl": 0.0,
+            "model_cost": 2.1,
+            "lambda": 0.0,
+            "credit": 0.0,
+            "max_loss": 0.0,
+            "send": "NO_SEND",
+            "send_reason": "NO_SEND:f10",
+            "qty": 0,
+            "f10_ok": False,
+            "dd_pct": 0.0,
+            "fill_mark": "ibkr_fill",
+            "session_start_NL": 100_000.0,
+            "ba_commission_USD": 0.0,
+            "f10_tripped": True,
+            "loop_halted": True,
+        }
+    )
+    assert row["f10_tripped"] is True
+    assert row["loop_halted"] is True
+    assert row["f10_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_f10_halt_skips_grok_turn_billing(monkeypatch):
+    """Already-tripped F10 must not open a billed chat."""
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    mark_f10_loop_halt()
+    from abcxauto.brain import grok_turn
+
+    calls = {"n": 0}
+
+    async def boom(*_a, **_k):
+        calls["n"] += 1
+        raise AssertionError("stream_round must not run after F10 loop halt")
+
+    monkeypatch.setattr("abcxauto.brain.stream_round", boom)
+    g = SimpleNamespace(chat=None, model="grok-4.6")
+    turn = await grok_turn(
+        g,
+        connector=None,
+        world=_world(session_status="regular"),
+        snap={"positions": [], "protection": {}},
+        wake="look",
+    )
+    assert calls["n"] == 0
+    assert turn.loop_halted is True
+    assert turn.f10_tripped is True
+    assert (turn.last_result or {}).get("reason_code") == REASON_F10
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_f10_blocks_new_risk_allows_close(monkeypatch):
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    from abcxauto.agent_loop import execute_ticket
+
+    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.live_f10_gate",
+        lambda: hard,
+    )
+    world = _world(session_status="regular", flat=True)
+    blocked = await execute_ticket(
+        {
+            "strategy": "vertical_spread",
+            "params": dict(PCS_OPEN),
+            "card": PCS_CARD,
+        },
+        object(),
+        world,
+        {"positions": []},
+    )
+    assert blocked.get("status") == "blocked"
+    assert blocked.get("reason_code") == REASON_F10
+    assert f10_loop_halted() is True
+    assert skip_look_reason("regular", positions=[], f10=hard) == REASON_F10
+    close = await execute_ticket(
+        {
+            "strategy": "vertical_spread",
+            "params": {**PCS_OPEN, "closing_position": True},
+            "card": PCS_CARD,
+        },
+        object(),
+        world,
+        {"positions": []},
+    )
+    assert close.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST}

@@ -1292,6 +1292,8 @@ def write_last_turn(out: dict[str, Any]) -> None:
                 out.get("book_unreliable") or gates.get("book_unreliable")
             ),
             "skip_reason": skip[:120],
+            "f10_tripped": bool(out.get("f10_tripped")),
+            "loop_halted": bool(out.get("loop_halted")),
             "flat": world.get("flat"),
             "net_liquidation": world.get("net_liquidation") or out.get("equity") or nl,
             "mix": _mix_of(out, world),

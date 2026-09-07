@@ -69,7 +69,22 @@ def session_key(session: str = "", *, now: datetime | None = None) -> str:
 
 
 def _empty(key: str) -> dict[str, Any]:
-    return {"key": key, "looks": 0, "tokens": 0, "kill_entry_looks": 0}
+    return {
+        "key": key,
+        "looks": 0,
+        "tokens": 0,
+        "kill_entry_looks": 0,
+        "f10_tripped": False,
+        "loop_halted": False,
+    }
+
+
+def _flag(raw: Any) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if raw in (1, "1", "true", "True", "yes", "on"):
+        return True
+    return False
 
 
 def _row_of(raw: Any, key: str = "") -> dict[str, Any]:
@@ -91,6 +106,8 @@ def _row_of(raw: Any, key: str = "") -> dict[str, Any]:
         "looks": looks,
         "tokens": tokens,
         "kill_entry_looks": kill_entry,
+        "f10_tripped": _flag(blob.get("f10_tripped")),
+        "loop_halted": _flag(blob.get("loop_halted")),
     }
 
 
@@ -215,6 +232,7 @@ def usage(session: str = "", *, now: datetime | None = None) -> dict[str, Any]:
     if tokens >= token_cap:
         why = "tokens" if not why else "looks+tokens"
     kill_entry = int(state.get("kill_entry_looks") or 0)
+    halt = _f10_halt_row(now=now)
     return {
         "key": str(state.get("key") or ""),
         "looks": looks,
@@ -225,6 +243,8 @@ def usage(session: str = "", *, now: datetime | None = None) -> dict[str, Any]:
         "tokens_left": max(0, token_cap - tokens),
         "kill_entry_looks": kill_entry,
         "kill_entry_left": max(0, KILL_ENTRY_LOOKS_MAX - kill_entry),
+        "f10_tripped": bool(halt.get("f10_tripped") or state.get("f10_tripped")),
+        "loop_halted": bool(halt.get("loop_halted") or state.get("loop_halted")),
         "hit": hit,
         "why": why,
     }
@@ -309,6 +329,38 @@ def research_week_looks(*, now: datetime | None = None) -> int:
         return max(0, int(row.get("looks") or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def f10_halt_key(*, now: datetime | None = None) -> str:
+    """One F10 latch per ET scored session. Shared by premarket and RTH."""
+    return f"{_et_date(now)}:f10"
+
+
+def _f10_halt_row(*, now: datetime | None = None) -> dict[str, Any]:
+    key = f10_halt_key(now=now)
+    table = _load_table()
+    row = table.get(key)
+    if not isinstance(row, dict):
+        return _empty(key)
+    return _row_of(row, key)
+
+
+def f10_loop_halted(*, now: datetime | None = None) -> bool:
+    """True after a hard F10 trip latched this scored session."""
+    row = _f10_halt_row(now=now)
+    return bool(row.get("f10_tripped") or row.get("loop_halted"))
+
+
+def mark_f10_loop_halt(*, now: datetime | None = None) -> dict[str, Any]:
+    """Latch F10 hard trip + loop halt for this scored session. Idempotent."""
+    key = f10_halt_key(now=now)
+    table = _load_table()
+    row = _row_of(table.get(key) or _empty(key), key)
+    row["f10_tripped"] = True
+    row["loop_halted"] = True
+    table[key] = row
+    _save_table(table)
+    return dict(row)
 
 
 def note_research_look(*, now: datetime | None = None) -> int:
