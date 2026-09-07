@@ -716,11 +716,45 @@ def test_record_f10_loop_halt_last_turn_and_scorecard(monkeypatch):
             "ba_commission_USD": 0.0,
             "f10_tripped": True,
             "loop_halted": True,
+            "model_cost_post_trip_USD": 0,
         }
     )
     assert row["f10_tripped"] is True
     assert row["loop_halted"] is True
+    assert row.get("model_cost_post_trip_USD") == 0
     assert row["f10_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_projected_hard_cross_skips_grok_turn_billing(monkeypatch):
+    """SPEC A: next billed look that would cross $2 must not call the model."""
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    assert hard["projected"] > F10_HARD_USD
+    monkeypatch.setattr("abcxauto.thin_rth_kill_look.live_f10_gate", lambda: hard)
+    from abcxauto.brain import grok_turn
+
+    calls = {"n": 0}
+
+    async def boom(*_a, **_k):
+        calls["n"] += 1
+        raise AssertionError("stream_round must not run when next look would cross $2")
+
+    monkeypatch.setattr("abcxauto.brain.stream_round", boom)
+    g = SimpleNamespace(chat=None, model="grok-4.6")
+    turn = await grok_turn(
+        g,
+        connector=None,
+        world=_world(session_status="regular"),
+        snap={"positions": [], "protection": {}},
+        wake="look",
+    )
+    assert calls["n"] == 0
+    assert turn.loop_halted is True
+    assert turn.f10_tripped is True
+    assert f10_loop_halted() is True
+    assert usage("regular")["model_cost_post_trip_usd"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -800,6 +834,43 @@ def test_f10_unreadable_fail_closes_loop(monkeypatch):
     assert f10_loop_halted() is True
     assert usage("regular")["model_cost_post_trip_usd"] == 0.0
     assert skip_look_reason("premarket", f10=unread) == REASON_MODEL_COST
+
+
+def test_f10_nonfinite_fail_closes_loop(monkeypatch):
+    """SPEC D: NaN / inf model_cost fail-closes and sticky-latches."""
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    nan = f10_gate(float("nan"), est_this_look=0.35, window_cost=0.0)
+    assert nan["allow_new_risk"] is False
+    assert nan["reason_code"] == REASON_MODEL_COST
+    inf = f10_gate(float("inf"), est_this_look=0.35, window_cost=0.0)
+    assert inf["allow_new_risk"] is False
+    assert inf["reason_code"] == REASON_MODEL_COST
+    win_inf = f10_gate(0.0, est_this_look=0.35, window_cost=float("inf"))
+    assert win_inf["allow_new_risk"] is False
+    assert win_inf["reason_code"] == REASON_MODEL_COST
+    assert skip_look_reason("regular", positions=[], f10=inf) == REASON_MODEL_COST
+    assert f10_loop_halted() is True
+    assert usage("regular")["model_cost_post_trip_usd"] == 0.0
+    blocked = kill_look_send_block(
+        {"strategy": "vertical_spread", "params": dict(PCS_OPEN), "card": PCS_CARD},
+        session="regular",
+        f10=inf,
+    )
+    assert blocked is not None
+    assert blocked["reason_code"] == REASON_MODEL_COST
+    assert (
+        kill_look_send_block(
+            {
+                "strategy": "vertical_spread",
+                "params": {**PCS_OPEN, "closing_position": True},
+                "card": PCS_CARD,
+            },
+            session="regular",
+            f10=inf,
+        )
+        is None
+    )
 
 
 def test_is_f10_look_halt_covers_hard_and_unreadable():

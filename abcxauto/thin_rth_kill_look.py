@@ -7,6 +7,7 @@ RTH no-xhigh / AH-rare, F10 $2 hard / $1 preferred. Paper 7497. Not looking.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from typing import Any
@@ -400,7 +401,7 @@ def f10_gate(
             "note": "model_cost unreadable — fail-closed",
             "projected": None,
         }
-    if so_far != so_far or est != est or so_far < 0 or est < 0:
+    if not math.isfinite(so_far) or not math.isfinite(est) or so_far < 0 or est < 0:
         return {
             "allow_new_risk": False,
             "preferred_trip": False,
@@ -426,7 +427,7 @@ def f10_gate(
             "note": "window model_cost unreadable — fail-closed",
             "projected": None,
         }
-    if win != win or win < 0:
+    if not math.isfinite(win) or win < 0:
         return {
             "allow_new_risk": False,
             "preferred_trip": False,
