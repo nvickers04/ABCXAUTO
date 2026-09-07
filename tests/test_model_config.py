@@ -27,10 +27,10 @@ from abcxauto.config import (
     set_agent_knobs,
     update_agent_config,
 )
-from abcxauto.desk_mode import session_model
+from abcxauto.desk_mode import session_model, session_model_params
 from abcxauto.llm import GrokClient, chat_create_kwargs, create_chat
 from abcxauto.self_tune import OPERATOR_DISK_KEYS, apply_self_tune
-from abcxauto.thin_rth_kill_look import rth_model_no_xhigh
+from abcxauto.thin_rth_kill_look import rth_model_no_xhigh, rth_params_no_xhigh
 
 
 def test_default_model_is_one_constant():
@@ -40,7 +40,11 @@ def test_default_model_is_one_constant():
     assert get_config().model_rth == ""
     assert get_config().model_research == ""
     assert get_config().model_params == {}
+    assert get_config().model_params_rth == {}
+    assert get_config().model_params_research == {}
     assert session_model("regular", get_config()) == DEFAULT_MODEL
+    assert session_model_params("regular", get_config()) == {}
+    assert session_model_params("premarket", get_config()) == {}
     # xhigh stays a suffix the operator can set; launch does not bake 4.7.
     cfg = SimpleNamespace(
         model=DEFAULT_MODEL_XHIGH, model_rth="", model_research=""
@@ -52,6 +56,8 @@ def test_default_model_is_one_constant():
     assert knobs["model_rth"] == ""
     assert knobs["model_research"] == ""
     assert knobs["model_params"] == {}
+    assert knobs["model_params_rth"] == {}
+    assert knobs["model_params_research"] == {}
 
 
 def test_settings_can_select_a_later_model_id():
@@ -214,6 +220,8 @@ def test_self_tune_cannot_overwrite_brain_or_params():
         model_rth="rth-brain",
         model_research="research-brain",
         model_params={"reasoning_effort": "high"},
+        model_params_rth={"effort": "low"},
+        model_params_research={"effort": "xhigh"},
         persist=True,
     )
     out = apply_self_tune(
@@ -222,12 +230,21 @@ def test_self_tune_cannot_overwrite_brain_or_params():
             "model_rth": "hijack-rth",
             "model_research": "hijack-research",
             "model_params": {"reasoning_effort": "low"},
+            "model_params_rth": {"effort": "xhigh"},
+            "model_params_research": {"effort": "low"},
             "defined_risk_only": False,
         },
         persist=True,
     )
     rejected = out.get("rejected") or {}
-    for key in ("model", "model_rth", "model_research", "model_params"):
+    for key in (
+        "model",
+        "model_rth",
+        "model_research",
+        "model_params",
+        "model_params_rth",
+        "model_params_research",
+    ):
         assert key in OPERATOR_DISK_KEYS
         assert key in rejected
         assert "operator disk" in rejected[key]
@@ -236,6 +253,8 @@ def test_self_tune_cannot_overwrite_brain_or_params():
     assert cfg.model_rth == "rth-brain"
     assert cfg.model_research == "research-brain"
     assert cfg.model_params == {"reasoning_effort": "high"}
+    assert cfg.model_params_rth == {"effort": "low"}
+    assert cfg.model_params_research == {"effort": "xhigh"}
     assert cfg.defined_risk_only is True
     assert before.defined_risk_only is True
 
@@ -267,6 +286,8 @@ def test_launch_helpers_read_disk_not_hardcoded_default(monkeypatch):
         model_rth="grok-4.7",
         model_research="grok-4.7-xhigh",
         model_params={"effort": "xhigh", "thinking": True},
+        model_params_rth={"effort": "low"},
+        model_params_research={"effort": "xhigh", "thinking": True},
         persist=True,
     )
     from abcxauto import config as cfg_mod
@@ -280,6 +301,8 @@ def test_launch_helpers_read_disk_not_hardcoded_default(monkeypatch):
     assert knobs["model_rth"] == "grok-4.7"
     assert knobs["model_research"] == "grok-4.7-xhigh"
     assert knobs["model_params"] == {"effort": "xhigh", "thinking": True}
+    assert knobs["model_params_rth"] == {"effort": "low"}
+    assert knobs["model_params_research"]["effort"] == "xhigh"
     assert knobs["model"] != DEFAULT_MODEL
 
     client = SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: SimpleNamespace()))
@@ -325,3 +348,76 @@ def test_launch_helpers_read_disk_not_hardcoded_default(monkeypatch):
     run_app()
     assert get_config().model == "grok-4.7"
     assert get_config().model_params["thinking"] is True
+    assert get_config().model_params_rth == {"effort": "low"}
+    assert get_config().model_params_research["effort"] == "xhigh"
+
+
+def test_session_params_fall_back_to_shared():
+    cfg = update_agent_config(
+        model_params={"effort": "high", "thinking": True},
+        model_params_rth={},
+        model_params_research={},
+        persist=False,
+    )
+    assert session_model_params("premarket", cfg) == {
+        "effort": "high",
+        "thinking": True,
+    }
+    cfg = update_agent_config(
+        model_params={"effort": "high"},
+        model_params_rth={"effort": "low"},
+        model_params_research={"effort": "xhigh", "future_knob": 1},
+        persist=False,
+    )
+    assert session_model_params("premarket", cfg) == {
+        "effort": "xhigh",
+        "future_knob": 1,
+    }
+    client = SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: SimpleNamespace()))
+    g = GrokClient(client=client, session="premarket")
+    assert g.model_params["effort"] == "xhigh"
+    assert g.model_params["future_knob"] == 1
+
+
+def test_rth_params_cannot_defeat_xhigh_strip_or_f10(monkeypatch):
+    raw = {"effort": "xhigh", "reasoning_effort": "xhigh", "thinking": True}
+    assert rth_params_no_xhigh(raw, enabled=True) == {"thinking": True}
+    assert rth_params_no_xhigh("not-json", enabled=True) == {}
+    assert rth_params_no_xhigh(None, enabled=True) == {}
+    kept = rth_params_no_xhigh(raw, enabled=False)
+    assert kept["effort"] == "xhigh"
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.kill_look_enabled", lambda: True
+    )
+    cfg = SimpleNamespace(
+        model_params={"effort": "xhigh", "thinking": True},
+        model_params_rth={"effort": "xhigh", "thinking": True},
+        model_params_research={"effort": "xhigh"},
+    )
+    rth = session_model_params("regular", cfg)
+    assert rth == {"thinking": True}
+    assert rth.get("effort") != "xhigh"
+    assert session_model_params("premarket", cfg) == {"effort": "xhigh"}
+    client = SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: SimpleNamespace()))
+    update_agent_config(
+        model_params_rth={"effort": "xhigh", "thinking": True},
+        persist=False,
+    )
+    g = GrokClient(client=client, session="regular")
+    assert g.model_params.get("effort") != "xhigh"
+    assert g.model_params.get("thinking") is True
+
+
+def test_env_session_params_load(monkeypatch):
+    monkeypatch.setenv(
+        "ABCXAUTO_MODEL_PARAMS_RTH",
+        json.dumps({"effort": "low"}),
+    )
+    monkeypatch.setenv(
+        "ABCXAUTO_MODEL_PARAMS_RESEARCH",
+        json.dumps({"effort": "xhigh"}),
+    )
+    get_config.cache_clear()
+    cfg = get_config()
+    assert cfg.model_params_rth == {"effort": "low"}
+    assert cfg.model_params_research == {"effort": "xhigh"}

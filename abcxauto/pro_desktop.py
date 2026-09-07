@@ -93,7 +93,17 @@ BRAIN_FIELDS = (
     (
         "model_params",
         "Model params",
-        'JSON object — effort/thinking/etc. Empty = none. Next look rebuilds',
+        "JSON object — shared effort/thinking. Empty = none. Next look rebuilds",
+    ),
+    (
+        "model_params_rth",
+        "RTH params",
+        "JSON object — empty = Model params. xhigh stripped when RTH thin is on",
+    ),
+    (
+        "model_params_research",
+        "Research params",
+        "JSON object — empty = Model params. Premarket/AH only",
     ),
 )
 PACING_FIELDS = (
@@ -729,6 +739,8 @@ class ProTerminal:
             "model_rth",
             "model_research",
             "model_params",
+            "model_params_rth",
+            "model_params_research",
             "temperature",
             "max_tokens",
             "monitor_poll_s",
@@ -747,6 +759,8 @@ class ProTerminal:
                     "model_rth",
                     "model_research",
                     "model_params",
+                    "model_params_rth",
+                    "model_params_research",
                     "ibkr_host",
                     "session_token_cap",
                 )
@@ -3112,8 +3126,12 @@ class ProTerminal:
                 f" · session cap {getattr(cfg, 'session_look_cap', '—')} looks / "
                 f"{getattr(cfg, 'session_token_cap', '—')} tok"
             )
-        params = getattr(cfg, "model_params", None) or {}
-        params_bit = f" · +params {','.join(sorted(params))}" if params else ""
+        bits: list[str] = []
+        for name in ("model_params", "model_params_rth", "model_params_research"):
+            blob = getattr(cfg, name, None) or {}
+            if blob:
+                bits.append(f"{name} {','.join(sorted(blob))}")
+        params_bit = (" · " + " · ".join(bits)) if bits else ""
         self.lbl_settings_brain.value = (
             f"{getattr(cfg, 'model', '—')} · temp {getattr(cfg, 'temperature', '—')} · "
             f"{getattr(cfg, 'max_tokens', '—')} tokens/turn"
@@ -3251,6 +3269,8 @@ class ProTerminal:
             "model_rth",
             "model_research",
             "model_params",
+            "model_params_rth",
+            "model_params_research",
             "temperature",
             "max_tokens",
         ) else ""

@@ -53,7 +53,14 @@ PERSISTED_OPERATOR_KEYS = RISK_CONFIG_KEYS | CAPACITY_KEYS
 # Stay on grok-4.6 + xhigh until the operator flips — do not bake 4.7 in.
 DEFAULT_MODEL = "grok-4.6"
 DEFAULT_MODEL_XHIGH = "grok-4.6-xhigh"
-LAUNCH_MODEL_KEYS = ("model", "model_rth", "model_research", "model_params")
+LAUNCH_MODEL_KEYS = (
+    "model",
+    "model_rth",
+    "model_research",
+    "model_params",
+    "model_params_rth",
+    "model_params_research",
+)
 # Clerk-owned chat.create kwargs. model_params may not overwrite these.
 RESERVED_CHAT_KEYS = frozenset({
     "model",
@@ -70,6 +77,8 @@ AGENT_CONFIG_KEYS = frozenset({
     "model_rth",
     "model_research",
     "model_params",
+    "model_params_rth",
+    "model_params_research",
     "temperature",
     "max_tokens",
     "session_look_cap",
@@ -120,7 +129,11 @@ _AGENT_INT_KEYS = frozenset({
 _AGENT_TEXT_KEYS = frozenset({"model", "ibkr_host"})
 # Empty = fall back to ``model``. Operator may clear them.
 _AGENT_OPTIONAL_TEXT_KEYS = frozenset({"model_rth", "model_research"})
-_AGENT_JSON_OBJECT_KEYS = frozenset({"model_params"})
+_AGENT_JSON_OBJECT_KEYS = frozenset({
+    "model_params",
+    "model_params_rth",
+    "model_params_research",
+})
 _MODEL_PARAM_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODEL_PARAMS_MAX_KEYS = 32
 _MODEL_PARAMS_MAX_CHARS = 4096
@@ -140,9 +153,11 @@ class Config:
     # Session brains. Empty = use ``model`` (single-model desks keep working).
     model_rth: str = ""
     model_research: str = ""
-    # Extra chat.create kwargs (reasoning_effort, future effort/thinking, …).
-    # JSON object. Unknown keys pass through; reserved clerk keys are dropped.
+    # Extra chat.create kwargs (effort + future keys). JSON object.
+    # Session maps fall back to ``model_params`` when empty.
     model_params: dict[str, Any] = field(default_factory=dict)
+    model_params_rth: dict[str, Any] = field(default_factory=dict)
+    model_params_research: dict[str, Any] = field(default_factory=dict)
     temperature: float = 0.3
     max_tokens: int = 8192
     # Per stay-up session (premarket / RTH). Overnight honors a hit.
@@ -288,7 +303,9 @@ def _load_env_config() -> Config:
         model=_env("ABCXAUTO_MODEL", DEFAULT_MODEL),
         model_rth=_env("ABCXAUTO_MODEL_RTH"),
         model_research=_env("ABCXAUTO_MODEL_RESEARCH"),
-        model_params=_env_model_params(),
+        model_params=_env_model_params("ABCXAUTO_MODEL_PARAMS"),
+        model_params_rth=_env_model_params("ABCXAUTO_MODEL_PARAMS_RTH"),
+        model_params_research=_env_model_params("ABCXAUTO_MODEL_PARAMS_RESEARCH"),
         temperature=float(_env("ABCXAUTO_TEMPERATURE", "0.3")),
         max_tokens=int(_env("ABCXAUTO_MAX_TOKENS", "8192")),
         session_look_cap=int(_env("ABCXAUTO_SESSION_LOOK_CAP", "160")),
@@ -452,14 +469,14 @@ def coerce_model_params(value: Any) -> dict[str, Any]:
     return out
 
 
-def _env_model_params() -> dict[str, Any]:
-    raw = _env("ABCXAUTO_MODEL_PARAMS")
+def _env_model_params(name: str = "ABCXAUTO_MODEL_PARAMS") -> dict[str, Any]:
+    raw = _env(name)
     if not raw:
         return {}
     try:
         return coerce_model_params(raw)
     except (TypeError, ValueError) as exc:
-        logger.warning("Ignoring invalid ABCXAUTO_MODEL_PARAMS: %s", exc)
+        logger.warning("Ignoring invalid %s: %s", name, exc)
         return {}
 
 
@@ -582,12 +599,13 @@ load_risk_settings()
 
 
 def launch_model_knobs(*, reload: bool = True) -> dict[str, Any]:
-    """Brain knobs a DESK / CloudAgent launch will think with.
+    """Brain knobs a DESK launch will think with.
 
     Reloads ``risk_settings.json`` so Settings Apply on disk is the launch
     path. Default remains ``DEFAULT_MODEL`` (grok-4.6). xhigh is an id
     suffix / ``model_params`` value the operator already uses — not a 4.7
-    flip and not a hardcoded sole path.
+    flip and not a hardcoded sole path. This is a desk knob reload, not a
+    Cursor CloudAgent / Grok Bot launch rewire.
     """
     if reload:
         load_risk_settings()
@@ -598,6 +616,10 @@ def launch_model_knobs(*, reload: bool = True) -> dict[str, Any]:
         "model_rth": str(getattr(cfg, "model_rth", "") or ""),
         "model_research": str(getattr(cfg, "model_research", "") or ""),
         "model_params": dict(getattr(cfg, "model_params", None) or {}),
+        "model_params_rth": dict(getattr(cfg, "model_params_rth", None) or {}),
+        "model_params_research": dict(
+            getattr(cfg, "model_params_research", None) or {}
+        ),
     }
 
 
@@ -611,8 +633,10 @@ def get_config() -> Config:
     persist over the file. The ``model`` the operator applies from Pro Settings
     beats ``ABCXAUTO_MODEL``. ``model_rth`` / ``model_research`` select the
     session brain when set; empty falls back to ``model``. ``model_params``
-    is extra ``chat.create`` kwargs (JSON object). Unknown future keys pass
-    through. ``scan_fetch_cap`` from ``self_tune`` beats both.
+    / ``model_params_rth`` / ``model_params_research`` are extra
+    ``chat.create`` kwargs (JSON object; session maps fall back to shared).
+    Unknown future keys pass through. ``scan_fetch_cap`` from ``self_tune``
+    beats both.
     """
     base = _load_env_config()
     agent_extra: dict[str, Any] = {}

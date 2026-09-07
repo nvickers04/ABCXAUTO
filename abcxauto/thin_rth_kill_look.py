@@ -128,6 +128,32 @@ def rth_model_no_xhigh(model: str, *, enabled: bool | None = None) -> str:
     return stripped or DEFAULT_MODEL
 
 
+def _is_xhigh_param(key: str, value: Any) -> bool:
+    name = str(key or "").strip().lower()
+    blob = str(value or "").strip().lower()
+    if name in {"effort", "reasoning_effort"} and "xhigh" in blob:
+        return True
+    return isinstance(value, str) and "xhigh" in value.lower()
+
+
+def rth_params_no_xhigh(params: Any, *, enabled: bool | None = None) -> dict[str, Any]:
+    """RTH thin: drop xhigh effort so params cannot undo ``rth_model_no_xhigh`` / F10.
+
+    Invalid / empty maps fail-closed to ``{}``.
+    """
+    try:
+        from abcxauto.config import coerce_model_params
+
+        cleaned = coerce_model_params(params) if params else {}
+    except (TypeError, ValueError):
+        cleaned = {}
+    if enabled is False:
+        return cleaned
+    if enabled is None and not kill_look_enabled():
+        return cleaned
+    return {k: v for k, v in cleaned.items() if not _is_xhigh_param(k, v)}
+
+
 def kill_look_rth(session: str = "", *, enabled: bool | None = None) -> bool:
     if enabled is False:
         return False

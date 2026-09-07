@@ -3,7 +3,9 @@
 Grok owns a paper IBKR book. Silent code is facts, hard gates, and the overnight park.
 Brain is the `model` knob (default grok-4.6; Settings / `ABCXAUTO_MODEL` can
 point at grok-4.7 when xAI publishes it). Extra `chat.create` kwargs live in
-`model_params` (JSON object). Mainline is `master`. There is no clerk process.
+`model_params` / `model_params_rth` / `model_params_research` (JSON objects;
+session maps fall back to shared). Mainline is `master`. There is no clerk
+process.
 
 Paper (TWS **7497**) is the book. Live (TWS **7496**, confirm phrase, a different
 client id) is the same constitution on the live socket. It never copies paper fills.
@@ -22,11 +24,14 @@ the cost of the model. Same rules at $1k, $100k, or $1M.
 Do not grow the system prompt. Do not inject strategy menus or a Judge/Act form.
 Switch the brain from Pro Settings — `model` / `model_rth` / `model_research`
 / `model_params` persist to `risk_settings.json`, which beats the env forms.
-DESK / CloudAgent launch (`_start_pro`, `prepare_desk_start`, `begin_run`,
-`run_app`, headless) reloads those knobs from disk — grok-4.6 is the default,
-not a hardcoded sole path. Default stays grok-4.6 (+ xhigh as a suffix the
-operator already uses) until they flip. `self_tune` cannot overwrite those
-knobs. Grok is the only RTH process.
+DESK launch (`_start_pro`, `prepare_desk_start`, `begin_run`, `run_app`,
+headless) reloads those knobs from disk — grok-4.6 is the default, not a
+hardcoded sole path. Session `model_params_rth` / `model_params_research`
+fall back to shared `model_params`. RTH thin still strips xhigh from the
+id and from RTH params (F10 stays armed). Default stays grok-4.6 (+ xhigh
+as a suffix the operator already uses) until they flip. `self_tune` cannot
+overwrite those knobs. Desk knobs only — this does not rewire Cursor
+CloudAgent / Grok Bot launch. Grok is the only RTH process.
 
 ## Hard gates (code)
 
