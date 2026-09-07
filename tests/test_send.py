@@ -119,10 +119,12 @@ async def test_paper_ports_still_dispatch(monkeypatch, port):
     monkeypatch.setattr("abcxauto.send.safe_execute", _record)
 
     from abcxauto.send import send_action
+    from abcxauto.send_preview import bind_place_token
 
     connector = _connector()
     ticket = _placeable_ticket()
     ticket["_desk_session"] = "regular"
+    bind_place_token(ticket)
     result = await send_action(ticket, connector)
 
     assert result["status"] == "ok"
@@ -147,9 +149,12 @@ async def test_live_mode_is_not_enabled_by_send(monkeypatch):
     monkeypatch.setattr("abcxauto.send.safe_execute", _record)
 
     from abcxauto.send import send_action
+    from abcxauto.send_preview import bind_place_token
 
     connector = _connector()
-    result = await send_action(_placeable_ticket(), connector)
+    ticket = _placeable_ticket()
+    bind_place_token(ticket)
+    result = await send_action(ticket, connector)
 
     assert dispatched == [True]
     assert result["status"] == "blocked"
