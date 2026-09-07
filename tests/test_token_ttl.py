@@ -222,34 +222,28 @@ async def test_send_fresh_token_still_dispatches(monkeypatch):
 
     monkeypatch.setattr("abcxauto.send.safe_execute", _record)
     from abcxauto.send import send_action
+    from abcxauto.send_preview import bind_place_token
 
-    rec = issue_place_token(kind="place", ttl_s=60, now=1_700_000_500.0)
+    clock = {"now": 1_700_000_500.0}
+    monkeypatch.setattr("abcxauto.token_ttl.time.time", lambda: clock["now"])
     ticket = _placeable_ticket()
-    ticket["place_token"] = rec["id"]
-    monkeypatch.setattr(
-        "abcxauto.token_ttl.time.time",
-        lambda: 1_700_000_500.0 + 1,
-    )
+    bind_place_token(ticket)
+    clock["now"] = clock["now"] + 1
     result = await send_action(ticket, _connector())
     assert result["status"] == "ok"
     assert len(dispatched) == 1
 
 
 @pytest.mark.asyncio
-async def test_send_without_token_still_dispatches(monkeypatch):
-    """KEEP-3 is not merged — no token required yet."""
-    dispatched = []
-
-    async def _record(action, connector):
-        dispatched.append(True)
-        return {"status": "ok", "note": "dispatched"}
-
-    monkeypatch.setattr("abcxauto.send.safe_execute", _record)
+async def test_send_without_token_fails_closed_keep3(monkeypatch):
+    """KEEP-3 merged — new risk requires a hash-bound preview token."""
+    monkeypatch.setattr("abcxauto.send.safe_execute", _safe_execute_must_not_run)
     from abcxauto.send import send_action
+    from abcxauto.send_preview import REASON_PREVIEW_TOKEN
 
     result = await send_action(_placeable_ticket(), _connector())
-    assert result["status"] == "ok"
-    assert dispatched == [True]
+    assert result["status"] == "blocked"
+    assert result["reason_code"] == REASON_PREVIEW_TOKEN
 
 
 @pytest.mark.asyncio

@@ -277,18 +277,30 @@ def ticket_is_exit(action: Any) -> bool:
     return strat in _EXIT_OR_MANAGE
 
 
-def place_token_block(action: Any, *, now: Any = None) -> dict[str, Any] | None:
+def place_token_block(
+    action: Any,
+    *,
+    now: Any = None,
+    consume: bool = True,
+) -> dict[str, Any] | None:
     """Send-path gate. No token on the ticket → None (KEEP-3 not required).
 
     A presented token that is expired, used, or unreadable blocks place.
     Exits skip the gate.
+
+    ``consume=False`` evaluates TTL without spending the token so KEEP-3
+    can still refuse a hash mismatch without burning the authorization.
     """
     marker = extract_action_token(action)
     if marker is _ABSENT:
         return None
     if ticket_is_exit(action):
         return None
-    verdict = consume_place_token(marker, now=now)
+    verdict = (
+        consume_place_token(marker, now=now)
+        if consume
+        else evaluate_place_token(marker, now=now)
+    )
     if verdict.get("ok"):
         return None
     reason = str(verdict.get("reason") or REASON_TOKEN_INVALID)
@@ -308,6 +320,8 @@ def place_token_block(action: Any, *, now: Any = None) -> dict[str, Any] | None:
         "reason_code": reason,
         "note": notes.get(reason, "place token refused"),
         "strategy": strat or "blocked",
+        "would_refuse": [reason],
+        "token_used": reason == REASON_TOKEN_USED,
     }
 
 

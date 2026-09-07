@@ -221,6 +221,21 @@ CREATE TABLE IF NOT EXISTS pcs_fill_events (
     include_in_pnl_mean INTEGER,
     payload_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS send_previews (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    preview_id TEXT NOT NULL UNIQUE,
+    preview_hash TEXT NOT NULL,
+    strategy TEXT,
+    symbol TEXT,
+    max_loss REAL,
+    would_refuse_json TEXT,
+    verdict TEXT,
+    token_used INTEGER NOT NULL DEFAULT 0,
+    used_ts TEXT,
+    source TEXT
+);
 """
 
 _FILL_MARK_COLS = (
@@ -704,6 +719,38 @@ class TradeJournal:
                     "CREATE INDEX IF NOT EXISTS idx_pcs_fill_events_lifecycle "
                     "ON pcs_fill_events(lifecycle_id, event)"
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS send_previews (
+                        id INTEGER PRIMARY KEY,
+                        ts TEXT NOT NULL,
+                        preview_id TEXT NOT NULL UNIQUE,
+                        preview_hash TEXT NOT NULL,
+                        strategy TEXT,
+                        symbol TEXT,
+                        max_loss REAL,
+                        would_refuse_json TEXT,
+                        verdict TEXT,
+                        token_used INTEGER NOT NULL DEFAULT 0,
+                        used_ts TEXT,
+                        source TEXT
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_send_previews_hash "
+                    "ON send_previews(preview_hash)"
+                )
+                _ensure_columns(
+                    conn,
+                    "proposals",
+                    (
+                        ("preview_id", "TEXT"),
+                        ("preview_hash", "TEXT"),
+                        ("would_refuse_json", "TEXT"),
+                        ("token_used", "INTEGER"),
+                    ),
+                )
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.commit()
             self._initialized = True
@@ -794,6 +841,119 @@ class TradeJournal:
                 conn.commit()
         except Exception:
             logger.exception("journal.record_gate_decision failed")
+
+    def record_send_preview(
+        self,
+        *,
+        preview_id: str = "",
+        preview_hash: str = "",
+        strategy: str = "",
+        symbol: str = "",
+        max_loss: Any = None,
+        would_refuse: Any = None,
+        verdict: str = "",
+        token_used: bool = False,
+        source: str = "",
+        ts: Optional[str] = None,
+    ) -> Optional[int]:
+        """KEEP-3 preview row. Never raises."""
+        if not self.enabled:
+            return None
+        try:
+            self._ensure_schema()
+            pid = str(preview_id or "").strip()
+            if not pid:
+                return None
+            refuse_json = _json_dumps(would_refuse) if would_refuse is not None else None
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO send_previews (
+                        ts, preview_id, preview_hash, strategy, symbol,
+                        max_loss, would_refuse_json, verdict, token_used,
+                        source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _row_ts(ts),
+                        pid,
+                        str(preview_hash or ""),
+                        strategy,
+                        symbol,
+                        max_loss,
+                        refuse_json,
+                        verdict or None,
+                        1 if token_used else 0,
+                        source or None,
+                    ),
+                )
+                conn.commit()
+                return int(cur.lastrowid)
+        except Exception:
+            logger.exception("journal.record_send_preview failed")
+            return None
+
+    def mark_preview_token_used(
+        self,
+        preview_id: str,
+        *,
+        ts: Optional[str] = None,
+    ) -> None:
+        """Stamp token_used on a preview row. Never raises."""
+        if not self.enabled:
+            return
+        pid = str(preview_id or "").strip()
+        if not pid:
+            return
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE send_previews
+                    SET token_used = 1, used_ts = ?
+                    WHERE preview_id = ?
+                    """,
+                    (_row_ts(ts), pid),
+                )
+                conn.commit()
+        except Exception:
+            logger.exception("journal.mark_preview_token_used failed")
+
+    def get_send_preview(self, preview_id: str) -> Optional[dict]:
+        """Latest send_previews row for ``preview_id``, or None."""
+        pid = str(preview_id or "").strip()
+        if not pid or not self.enabled:
+            return None
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT preview_id, preview_hash, strategy, symbol,
+                           max_loss, would_refuse_json, verdict,
+                           token_used, used_ts, source, ts
+                    FROM send_previews
+                    WHERE preview_id = ?
+                    """,
+                    (pid,),
+                ).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            raw = item.get("would_refuse_json")
+            if raw:
+                try:
+                    item["would_refuse"] = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    item["would_refuse"] = raw
+            else:
+                item["would_refuse"] = []
+            item["token_used"] = bool(item.get("token_used"))
+            return item
+        except Exception:
+            logger.exception("journal.get_send_preview failed")
+            return None
 
     def record_dispatch(
         self,

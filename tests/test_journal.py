@@ -51,6 +51,7 @@ def test_schema_creation(journal, tmp_path):
         "send_mark_orders",
         "pcs_kill_sessions",
         "pcs_fill_events",
+        "send_previews",
     } <= tables
 
 
@@ -81,6 +82,30 @@ def test_record_proposal_round_trip(journal, tmp_path):
     assert json.loads(row[7])["entry_price"] == 100.0
     assert row[8] == 1
     assert row[9] == "ok"
+
+
+def test_record_send_preview_round_trip(journal, tmp_path):
+    pid = journal.record_send_preview(
+        preview_id="prv_test1",
+        preview_hash="abc123",
+        strategy="vertical_spread",
+        symbol="SPY",
+        max_loss=375.0,
+        would_refuse=["new risk requires params.card naming a play"],
+        verdict="refuse",
+        token_used=False,
+        source="preview",
+    )
+    assert isinstance(pid, int) and pid > 0
+    row = journal.get_send_preview("prv_test1")
+    assert row is not None
+    assert row["preview_id"] == "prv_test1"
+    assert row["preview_hash"] == "abc123"
+    assert row["would_refuse"] == ["new risk requires params.card naming a play"]
+    assert row["token_used"] is False
+    journal.mark_preview_token_used("prv_test1")
+    used = journal.get_send_preview("prv_test1")
+    assert used["token_used"] is True
 
 
 def test_record_gate_decision_round_trip(journal, tmp_path):
