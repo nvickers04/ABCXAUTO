@@ -476,6 +476,19 @@ def window_aggregates(
     else:
         verdict = "FAIL"
 
+    cancel_all_invoked = False
+    working_orders_after_abort = None
+    if abort_fuse != "none":
+        try:
+            from abcxauto.abort_fuse import abort_cancel_overlay
+
+            overlay = abort_cancel_overlay()
+            cancel_all_invoked = bool(overlay.get("cancel_all_invoked"))
+            working_orders_after_abort = overlay.get("working_orders_after_abort")
+        except Exception:
+            cancel_all_invoked = False
+            working_orders_after_abort = None
+
     return {
         "n": n_all,
         "n_valid": len(valid),
@@ -495,6 +508,8 @@ def window_aggregates(
         "mean_session_score": mean_score,
         "verdict": verdict,
         "abort_fuse": abort_fuse,
+        "cancel_all_invoked": cancel_all_invoked,
+        "working_orders_after_abort": working_orders_after_abort,
         "rows": normalized,
     }
 

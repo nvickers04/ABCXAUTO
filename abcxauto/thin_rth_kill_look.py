@@ -56,6 +56,8 @@ TOOLS_MANAGE_MAX = 4
 EST_THIS_LOOK_USD = 0.35
 
 REASON_F10 = "NO_SEND:f10"
+REASON_DD = "NO_SEND:dd_fuse"
+REASON_QTY0 = "NO_SEND:qty0_streak"
 REASON_MODEL_COST = "NO_SEND:model_cost_cap"
 REASON_ALLOWLIST = "kill_look_allowlist"
 REASON_ENTRY_BUDGET = "kill_look_entry_budget"
@@ -277,12 +279,22 @@ def _is_closing(params: dict[str, Any]) -> bool:
     return params.get("closing_position") is True
 
 
+def _abort_send_reason(abort_fuse: str = "") -> str:
+    token = str(abort_fuse or "").strip()
+    if token == "DD30":
+        return REASON_DD
+    if token == "QTY0_STREAK":
+        return REASON_QTY0
+    return REASON_F10
+
+
 def pcs_send_ok(
     strategy: str = "",
     params: dict[str, Any] | None = None,
     card: Any = None,
     *,
     mode: str = "",
+    abort_fuse: str = "",
 ) -> tuple[bool, str]:
     """Legal kill-look send: pcs-skew put vertical BAG, or closing_position."""
     from abcxauto.agent_loop import is_new_risk
@@ -297,7 +309,7 @@ def pcs_send_ok(
     if mode == MODE_MANAGE:
         return False, REASON_ALLOWLIST
     if mode == MODE_ABORT:
-        return False, REASON_F10
+        return False, _abort_send_reason(abort_fuse)
     if strat != PCS_STRATEGY:
         return False, REASON_ALLOWLIST
     if not is_pcs_ticket(strat, dumped, dumped.get("card")):
@@ -469,12 +481,15 @@ def kill_mode(
     f10: dict[str, Any] | None = None,
     now=None,
     in_flight: bool = False,
+    abort_fuse: str | None = None,
 ) -> str:
     """OPEN / MANAGE / ABORT / research / empty (contract off).
 
     ``in_flight`` is look #1 after consume (mill/unpaid/recover included).
     Entry budget still refuses a *new* look; it must not refuse the SEND on
     the look that already spent the budget.
+    Named scorecard abort fuses stop new-risk looks even in-flight. Open
+    lots stay MANAGE so exits are not blocked.
     """
     if not kill_look_enabled():
         return ""
@@ -499,6 +514,15 @@ def kill_mode(
 
         entry_looks = kill_entry_looks(session, now=now)
     if int(entry_looks or 0) >= RTH_ENTRY_LOOKS_MAX and not in_flight:
+        return MODE_ABORT
+    if abort_fuse is None:
+        try:
+            from abcxauto.abort_fuse import scorecard_abort_fuse
+
+            abort_fuse = scorecard_abort_fuse()
+        except Exception:
+            abort_fuse = "none"
+    if str(abort_fuse or "") in {"F10", "DD30", "QTY0_STREAK"}:
         return MODE_ABORT
     gate = f10 if isinstance(f10, dict) else live_f10_gate()
     if not gate.get("allow_new_risk", False):
@@ -556,12 +580,21 @@ def skip_look_reason(
     now=None,
     f10: dict[str, Any] | None = None,
     in_flight: bool = False,
+    abort_fuse: str | None = None,
 ) -> str:
     """Non-empty = do not call the model. Unprotected last-stop still looks."""
     if not kill_look_enabled():
         return ""
     if unprotected:
         return ""
+    fuse = abort_fuse
+    if fuse is None:
+        try:
+            from abcxauto.abort_fuse import scorecard_abort_fuse
+
+            fuse = scorecard_abort_fuse()
+        except Exception:
+            fuse = "none"
     mode = kill_mode(
         session,
         positions=positions,
@@ -569,13 +602,21 @@ def skip_look_reason(
         now=now,
         f10=f10,
         in_flight=bool(in_flight or same_look),
+        abort_fuse=fuse,
     )
     if mode == MODE_MANAGE:
         return ""
     if mode == MODE_OPEN:
         return ""
     if mode == MODE_ABORT:
-        # $ / port / spent look. Mill of look #1 is OPEN via in_flight, not this branch.
+        # Named scorecard fuses. Live F10 / port / spent look stay entry-budget
+        # so look-#1 mill tests keep their existing skip code.
+        if fuse == "DD30":
+            return REASON_DD
+        if fuse == "QTY0_STREAK":
+            return REASON_QTY0
+        if fuse == "F10":
+            return REASON_F10
         return REASON_ENTRY_BUDGET
     if mode == MODE_RESEARCH:
         from abcxauto.session_caps import research_week_looks
@@ -596,6 +637,7 @@ def kill_look_send_block(
     open_lots: list[Any] | None = None,
     f10: dict[str, Any] | None = None,
     in_flight: bool = False,
+    abort_fuse: str | None = None,
 ) -> dict[str, Any] | None:
     """Clerk block for illegal new pcs-skew risk. Exits still go."""
     if not kill_look_rth(session):
@@ -617,14 +659,23 @@ def kill_look_send_block(
             "reason_code": REASON_PORT,
             "strategy": "blocked",
         }
+    fuse = abort_fuse
+    if fuse is None:
+        try:
+            from abcxauto.abort_fuse import scorecard_abort_fuse
+
+            fuse = scorecard_abort_fuse()
+        except Exception:
+            fuse = "none"
     mode = kill_mode(
         session,
         positions=positions,
         open_lots=open_lots,
         f10=f10,
         in_flight=in_flight,
+        abort_fuse=fuse,
     )
-    ok, why = pcs_send_ok(strat, params, card, mode=mode)
+    ok, why = pcs_send_ok(strat, params, card, mode=mode, abort_fuse=str(fuse or ""))
     if not ok:
         return {
             "status": "blocked",

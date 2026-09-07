@@ -141,6 +141,8 @@ def test_window_mean_session_score_vs_net_conservative():
     assert win["mean_session_score"] != win["net_conservative"]
     assert win["verdict"] == "PASS"
     assert win["abort_fuse"] == "none"
+    assert win["cancel_all_invoked"] is False
+    assert win["working_orders_after_abort"] is None
     assert pcs_kill_window_aggregates(rows)["verdict"] == "PASS"
 
 
@@ -168,6 +170,8 @@ def test_fuse_f10_abort():
     assert win["f10_breach_count"] == 1
     assert win["verdict"] == "ABORT"
     assert win["abort_fuse"] == "F10"
+    assert win["cancel_all_invoked"] is False
+    assert win["working_orders_after_abort"] is None
 
 
 def test_fuse_dd30_abort():

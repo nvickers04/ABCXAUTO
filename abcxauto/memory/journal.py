@@ -3000,6 +3000,8 @@ class TradeJournal:
                 "mean_session_score": None,
                 "verdict": "FAIL",
                 "abort_fuse": "none",
+                "cancel_all_invoked": False,
+                "working_orders_after_abort": None,
                 "rows": [],
             }
 
