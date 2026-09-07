@@ -23,7 +23,7 @@ from abcxauto.send_preview import (
     ticket_max_loss,
     ticket_preview_hash,
 )
-from abcxauto.token_ttl import DEFAULT_PLACE_TOKEN_TTL_S
+from abcxauto.token_ttl import DEFAULT_PLACE_TOKEN_TTL_S, issue_place_token
 from abcxauto.thin_rth_kill_look import F10_HARD_USD, F10_PREFERRED_USD
 from abcxauto.world_state import WorldState
 
@@ -411,6 +411,29 @@ def test_ttl_issue_failure_fail_closed_no_local_mint(monkeypatch):
     import abcxauto.send_preview as sp
 
     assert not hasattr(sp, "_store")
+
+
+@pytest.mark.asyncio
+async def test_expired_keep4_token_cannot_place(monkeypatch):
+    """H0: KEEP-4 issue_place_token past TTL cannot place."""
+    monkeypatch.setattr("abcxauto.send.safe_execute", _safe_execute_must_not_run)
+    from abcxauto.send import send_action
+
+    now = 1_700_000_400.0
+    ticket = _vertical()
+    digest = ticket_preview_hash(ticket)
+    rec = issue_place_token(
+        kind="preview",
+        payload={"preview_hash": digest, "preview_id": "prv_keep4_expired"},
+        ttl_s=60,
+        now=now,
+    )
+    ticket["preview_token"] = rec["id"]
+    monkeypatch.setattr("abcxauto.token_ttl.time.time", lambda: now + 60)
+    result = await send_action(ticket, _connector())
+    assert result["status"] == "blocked"
+    assert result.get("reason_code") == REASON_TOKEN_EXPIRED
+    assert REASON_TOKEN_EXPIRED in (result.get("would_refuse") or [])
 
 
 @pytest.mark.asyncio
