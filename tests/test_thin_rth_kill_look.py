@@ -660,7 +660,7 @@ def test_f10_trip_halts_open_look_exits_still_ok(monkeypatch):
     )
     assert blocked is not None
     assert blocked["reason_code"] == REASON_F10
-    assert skip_look_reason("premarket", f10=hard) != REASON_F10
+    assert skip_look_reason("premarket", f10=hard) == REASON_F10
     assert skip_look_reason("regular", positions=[], f10=hard, unprotected=True) == ""
 
 
@@ -691,6 +691,8 @@ def test_record_f10_loop_halt_last_turn_and_scorecard(monkeypatch):
     assert last["f10_tripped"] is True
     assert last["loop_halted"] is True
     assert last["skip_reason"] == REASON_F10
+    assert float(last.get("model_cost_post_trip_USD") or 0) == 0.0
+    assert out["model_cost_post_trip_USD"] == 0.0
     from abcxauto.pcs_kill_scorecard import normalize_session_row
 
     row = normalize_session_row(

@@ -114,6 +114,7 @@ def test_f10_loop_halt_latches_scored_session(tmp_path, monkeypatch):
     row = mark_f10_loop_halt(now=now)
     assert row["f10_tripped"] is True
     assert row["loop_halted"] is True
+    assert row.get("model_cost_post_trip_usd", 0) == 0
     assert f10_halt_key(now=now) == "2026-09-07:f10"
     assert f10_loop_halted(now=now) is True
     assert usage("premarket", now=_et(2026, 9, 7, 8, 0))["loop_halted"] is True
