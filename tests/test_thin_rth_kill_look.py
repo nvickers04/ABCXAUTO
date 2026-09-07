@@ -62,6 +62,7 @@ from abcxauto.thin_rth_kill_look import (
     f10_gate,
     f10_hard_tripped,
     f10_open_look_halted,
+    is_f10_look_halt,
     mark_f10_hard_trip,
     record_f10_loop_halt,
     force_skip_or_manage,
@@ -799,6 +800,82 @@ def test_f10_unreadable_fail_closes_loop(monkeypatch):
     assert f10_loop_halted() is True
     assert usage("regular")["model_cost_post_trip_usd"] == 0.0
     assert skip_look_reason("premarket", f10=unread) == REASON_MODEL_COST
+
+
+def test_is_f10_look_halt_covers_hard_and_unreadable():
+    assert is_f10_look_halt(REASON_F10) is True
+    assert is_f10_look_halt(REASON_MODEL_COST) is True
+    assert is_f10_look_halt(REASON_ENTRY_BUDGET) is False
+    assert is_f10_look_halt("") is False
+
+
+@pytest.mark.asyncio
+async def test_unreadable_model_cost_skips_grok_turn_billing(monkeypatch):
+    """SPEC D: unreadable cost must not open a billed new-risk chat."""
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    unread = f10_gate(None, est_this_look=0.35, window_cost=0.0)
+    monkeypatch.setattr("abcxauto.thin_rth_kill_look.live_f10_gate", lambda: unread)
+    from abcxauto.brain import grok_turn
+
+    calls = {"n": 0}
+
+    async def boom(*_a, **_k):
+        calls["n"] += 1
+        raise AssertionError("stream_round must not run after unreadable F10 halt")
+
+    monkeypatch.setattr("abcxauto.brain.stream_round", boom)
+    g = SimpleNamespace(chat=None, model="grok-4.6")
+    turn = await grok_turn(
+        g,
+        connector=None,
+        world=_world(session_status="regular"),
+        snap={"positions": [], "protection": {}},
+        wake="look",
+    )
+    assert calls["n"] == 0
+    assert turn.loop_halted is True
+    assert turn.f10_tripped is True
+    assert f10_loop_halted() is True
+    assert usage("regular")["model_cost_post_trip_usd"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_unreadable_latches_exit_ok(monkeypatch):
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    from abcxauto.agent_loop import execute_ticket
+
+    unread = f10_gate(None, est_this_look=0.35, window_cost=0.0)
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.live_f10_gate",
+        lambda: unread,
+    )
+    world = _world(session_status="regular", flat=True)
+    blocked = await execute_ticket(
+        {
+            "strategy": "vertical_spread",
+            "params": dict(PCS_OPEN),
+            "card": PCS_CARD,
+        },
+        object(),
+        world,
+        {"positions": []},
+    )
+    assert blocked.get("status") == "blocked"
+    assert blocked.get("reason_code") == REASON_MODEL_COST
+    assert f10_loop_halted() is True
+    close = await execute_ticket(
+        {
+            "strategy": "vertical_spread",
+            "params": {**PCS_OPEN, "closing_position": True},
+            "card": PCS_CARD,
+        },
+        object(),
+        world,
+        {"positions": []},
+    )
+    assert close.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST, REASON_MODEL_COST}
 
 
 def test_hygiene_port_not_live_7496():

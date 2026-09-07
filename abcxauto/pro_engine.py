@@ -1885,7 +1885,9 @@ class ProEngine:
                     if skip:
                         self._note("SKIP", skip)
                         self.state.skip_reason = skip
-                        if skip == "NO_SEND:f10":
+                        from abcxauto.thin_rth_kill_look import is_f10_look_halt
+
+                        if is_f10_look_halt(skip):
                             try:
                                 from abcxauto.thin_rth_kill_look import (
                                     record_f10_loop_halt,

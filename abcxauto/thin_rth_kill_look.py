@@ -500,6 +500,11 @@ def f10_open_look_halted(f10: dict[str, Any] | None = None) -> bool:
     return why in (REASON_F10, REASON_MODEL_COST)
 
 
+def is_f10_look_halt(reason: str = "") -> bool:
+    """True when skip/send reason must stop billed new-risk looks."""
+    return str(reason or "") in (REASON_F10, REASON_MODEL_COST)
+
+
 def mark_f10_hard_trip(gate: dict[str, Any] | None = None) -> bool:
     """Latch hard F10. Preferred / unreadable / window cap do not latch."""
     if isinstance(gate, dict):
@@ -796,8 +801,16 @@ def kill_look_send_block(
         }
     gate = f10 if isinstance(f10, dict) else live_f10_gate()
     if not gate.get("allow_new_risk", False):
-        if str(gate.get("reason_code") or "") == REASON_F10:
+        why = str(gate.get("reason_code") or "")
+        if why == REASON_F10:
             mark_f10_hard_trip(gate)
+        elif why == REASON_MODEL_COST:
+            try:
+                from abcxauto.session_caps import mark_f10_loop_halt
+
+                mark_f10_loop_halt()
+            except Exception:
+                logger.debug("f10 model_cost latch write failed", exc_info=True)
         return {
             "status": "blocked",
             "note": str(gate.get("note") or REASON_F10),
