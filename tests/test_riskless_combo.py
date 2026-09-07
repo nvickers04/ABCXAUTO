@@ -296,11 +296,14 @@ async def test_closing_iron_also_blocked_while_one_working():
 @pytest.mark.asyncio
 async def test_send_action_does_not_place_second():
     gw = FakeGW([_working_iron(oid=7395)])
+    from abcxauto.send_preview import bind_place_token
+
     ticket = {
         "strategy": "iron_condor",
         "params": dict(VALID_PAYLOADS["iron_condor"]),
         "rationale": "paper resend",
     }
+    bind_place_token(ticket)
     result = await send_action(ticket, gw)
     assert result.get("reason_code") == REASON_CODE
     assert result.get("status") == "rejected"

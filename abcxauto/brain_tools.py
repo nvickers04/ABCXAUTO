@@ -834,6 +834,20 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
                     ),
                 },
                 "rationale": {"type": "string"},
+                "preview": {
+                    "type": "boolean",
+                    "description": (
+                        "Readonly dry-run: pass/refuse, max_loss, would_refuse, "
+                        "preview_token. Never places."
+                    ),
+                },
+                "preview_token": {
+                    "type": "string",
+                    "description": (
+                        "Single-use token from preview. Required to place new "
+                        "risk. Bound to ticket hash (legs, qty, side, card, limit)."
+                    ),
+                },
             },
             ["strategy"],
         ),
@@ -2053,6 +2067,11 @@ async def _run_tool(
         bind_send_card(act, extra=args.get("card"))
         if args.get("target_conId"):
             act["target_conId"] = str(args.get("target_conId"))
+        if args.get("preview") in (True, 1, "1", "true", "True", "yes", "on"):
+            act["preview"] = True
+        token = args.get("preview_token") or args.get("place_token")
+        if token not in (None, ""):
+            act["preview_token"] = str(token).strip()
         try:
             from abcxauto.thin_rth_kill_look import (
                 REASON_TOOLS,

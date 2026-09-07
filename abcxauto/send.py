@@ -248,7 +248,10 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
     Research mode (premarket / AH / closed) fail-closes with
     ``research_no_send`` and never reaches ``safe_execute``.
     A presented dry-run / approval / place token that is expired, used,
-    or unreadable fail-closes here (KEEP-4). Exits skip that gate.
+    or unreadable fail-closes here (KEEP-4) before KEEP-3 authorize.
+    New-risk place then requires a single-use preview token bound to the
+    ticket hash (KEEP-3). A preview request never reaches
+    ``safe_execute``. Exits skip both token gates.
     """
     cfg = get_config()
     live_port = _paper_live_port(cfg)
@@ -273,8 +276,15 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
     if sess in RESEARCH_SESSIONS:
         return research_send_block(session=sess)
     from abcxauto.token_ttl import place_token_block
+    from abcxauto.send_preview import authorize_place, stamp_place_result
 
-    token_block = place_token_block(action)
+    # KEEP-4 TTL first. Evaluate only — a hash mismatch must not spend
+    # the token. Expired / used / unreadable still fail-closed here.
+    token_block = place_token_block(action, consume=False)
     if token_block is not None:
         return token_block
-    return await safe_execute(action, connector)
+    blocked = authorize_place(action)
+    if blocked is not None:
+        return blocked
+    result = await safe_execute(action, connector)
+    return stamp_place_result(result, action)

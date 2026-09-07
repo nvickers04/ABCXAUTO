@@ -583,6 +583,17 @@ async def execute_ticket(
 ) -> dict:
     """Normalize, gate, geometry, then send_action. Never bypass the clerk."""
     from abcxauto.desk_mode import is_research_session, research_send_block
+    from abcxauto.send_preview import (
+        bind_place_token,
+        extract_place_token,
+        is_preview_request,
+        needs_place_token,
+        preview_ticket,
+        stamp_place_result,
+    )
+
+    if is_preview_request(act):
+        return preview_ticket(act, world=world, snap=snap, source="execute_ticket")
 
     sess = str(getattr(world, "session_status", "") or "")
     if is_research_session(sess):
@@ -842,7 +853,10 @@ async def execute_ticket(
     if strat in ALLOWED_ACTIONS:
         if isinstance(act, dict):
             act["_desk_session"] = sess
+        if needs_place_token(act) and not extract_place_token(act):
+            bind_place_token(act, source="execute_ticket")
         result = await send_action(act, connector)
+        result = stamp_place_result(result, act)
         rc = str((result or {}).get("reason_code") or "")
         st = str((result or {}).get("status") or "").lower()
         if rc:

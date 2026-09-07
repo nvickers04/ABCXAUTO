@@ -291,8 +291,10 @@ async def test_rth_send_reaches_executor(monkeypatch):
 
     monkeypatch.setattr("abcxauto.send.safe_execute", _record)
     from abcxauto.send import send_action
+    from abcxauto.send_preview import bind_place_token
 
     ticket = {**_placeable_ticket(), "_desk_session": "regular"}
+    bind_place_token(ticket)
     result = await send_action(ticket, _connector())
     assert result["status"] == "ok"
     assert len(dispatched) == 1
