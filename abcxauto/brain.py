@@ -29,7 +29,7 @@ from typing import Any
 
 from xai_sdk.chat import developer, system, tool, tool_result, user
 
-from abcxauto.llm import GrokClient, build_system_prompt
+from abcxauto.llm import GrokClient, build_system_prompt, chat_create_kwargs, create_chat
 from abcxauto.opportunity_scan import criteria_scan, normalize_tickers
 from abcxauto.order_examples import format_order_examples, ticket_strategy_names
 from abcxauto.think_stream import emit as think_emit
@@ -898,18 +898,10 @@ def _bill_spoken_look_if_unbilled(turn: BrainTurn, *, before_calls: int) -> None
 
 async def grok(g: GrokClient, p: str, *, stage: str = "grok") -> str:
     """One-shot streamed reply (tests / no tools). Hot path is grok_turn."""
-    create_kw: dict[str, Any] = {
-        "model": g.model,
-        "messages": [system(build_system_prompt()), user(p)],
-        "temperature": g.temperature,
-        "max_tokens": int(g.max_tokens or 8192),
-        "include": ["verbose_streaming"],
-    }
-    try:
-        chat = g.client.chat.create(**create_kw)
-    except TypeError:
-        create_kw.pop("include", None)
-        chat = g.client.chat.create(**create_kw)
+    create_kw = chat_create_kwargs(
+        g, messages=[system(build_system_prompt()), user(p)]
+    )
+    chat = create_chat(g.client, **create_kw)
     text, _, _ = await stream_round(chat, stage=stage)
     return text
 
@@ -998,19 +990,12 @@ def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
 
 
 def _new_chat(g: GrokClient, *, session: str = "") -> Any:
-    create_kw: dict[str, Any] = {
-        "model": g.model,
-        "messages": [system(brain_system_prompt())],
-        "tools": list(agent_tools(session=session)),
-        "temperature": g.temperature,
-        "max_tokens": int(g.max_tokens or 8192),
-        "include": ["verbose_streaming"],
-    }
-    try:
-        chat = g.client.chat.create(**create_kw)
-    except TypeError:
-        create_kw.pop("include", None)
-        chat = g.client.chat.create(**create_kw)
+    create_kw = chat_create_kwargs(
+        g,
+        messages=[system(brain_system_prompt())],
+        tools=agent_tools(session=session),
+    )
+    chat = create_chat(g.client, **create_kw)
     g.chat = chat
     g._wake_n = 1
     return chat

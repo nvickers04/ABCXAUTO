@@ -9,7 +9,7 @@ import random
 import time
 from typing import Any, Callable
 
-from abcxauto.config import get_config
+from abcxauto.config import DEFAULT_MODEL, RESERVED_CHAT_KEYS, get_config
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,61 @@ async def _stream_with_capacity_retry(factory: Callable[[], Any]) -> Any:
     raise last
 
 
+def chat_create_kwargs(
+    g: Any,
+    *,
+    messages: Any,
+    tools: Any | None = None,
+) -> dict[str, Any]:
+    """Core chat.create kwargs plus operator ``model_params``.
+
+    Dedicated knobs (model / temperature / max_tokens / include / tools /
+    messages) win. Extra keys from ``g.model_params`` pass through so a
+    later Grok release can add effort/thinking without a code hunt.
+    """
+    kw: dict[str, Any] = {
+        "model": g.model,
+        "messages": messages,
+        "temperature": g.temperature,
+        "max_tokens": int(g.max_tokens or 8192),
+        "include": ["verbose_streaming"],
+    }
+    if tools is not None:
+        kw["tools"] = list(tools)
+    extras = getattr(g, "model_params", None) or {}
+    if isinstance(extras, dict):
+        for key, value in extras.items():
+            if key in RESERVED_CHAT_KEYS or key in kw:
+                continue
+            kw[key] = value
+    return kw
+
+
+def create_chat(client: Any, **kwargs: Any) -> Any:
+    """``chat.create`` that ignores unknown kwargs instead of crashing.
+
+    Tries the full set (so a newer SDK accepts future params). On
+    ``TypeError``, drop ``include`` first (older clients), then drop
+    extras that are not clerk-owned.
+    """
+    create = client.chat.create
+    try:
+        return create(**kwargs)
+    except TypeError:
+        if "include" in kwargs:
+            no_include = dict(kwargs)
+            no_include.pop("include", None)
+            try:
+                return create(**no_include)
+            except TypeError:
+                kwargs = no_include
+        extra_keys = [k for k in kwargs if k not in RESERVED_CHAT_KEYS]
+        if extra_keys:
+            slim = {k: v for k, v in kwargs.items() if k in RESERVED_CHAT_KEYS}
+            return create(**slim)
+        raise
+
+
 def _wrap_client(client: Any) -> Any:
     if getattr(client, "_abcx_capacity_retry", False):
         return client
@@ -171,9 +226,10 @@ class GrokClient:
             from abcxauto.desk_mode import session_model
 
             chosen = session_model(session, cfg)
-        self.model = chosen or cfg.model
+        self.model = chosen or cfg.model or DEFAULT_MODEL
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens
+        self.model_params = dict(getattr(cfg, "model_params", None) or {})
         self.chat = None
         self._wake_n = 0
         self._wake_appended = False

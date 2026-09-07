@@ -110,6 +110,11 @@ OPERATOR_DISK_KEYS: frozenset[str] = frozenset({
     "cash_only",
     "ibkr_port",
     "trading_mode",
+    # #159: Settings owns the brain. Grok cannot rewrite model id or params.
+    "model",
+    "model_rth",
+    "model_research",
+    "model_params",
 })
 _OPERATOR_DISK_REJECT = "operator disk — file wins"
 # agent_state.json may hold Grok working size + scan depth. Never operator knobs.

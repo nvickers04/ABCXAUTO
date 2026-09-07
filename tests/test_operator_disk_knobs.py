@@ -113,6 +113,10 @@ def test_operator_disk_key_set():
         "cash_only",
         "ibkr_port",
         "trading_mode",
+        "model",
+        "model_rth",
+        "model_research",
+        "model_params",
     ):
         assert is_operator_disk_key(key)
         assert key in OPERATOR_DISK_KEYS

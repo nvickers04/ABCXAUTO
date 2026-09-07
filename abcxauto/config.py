@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, fields, replace
+import re
+from dataclasses import dataclass, field, fields, replace
 from functools import lru_cache
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -47,12 +48,28 @@ CAPACITY_KEYS = frozenset({
     "max_open_positions",
 })
 PERSISTED_OPERATOR_KEYS = RISK_CONFIG_KEYS | CAPACITY_KEYS
+# Default brain id. Operator Settings / env / risk_settings.json override it.
+# Flipping to grok-4.7 (or any later id) is a knob change, not a code hunt.
+# Stay on grok-4.6 + xhigh until the operator flips — do not bake 4.7 in.
+DEFAULT_MODEL = "grok-4.6"
+DEFAULT_MODEL_XHIGH = "grok-4.6-xhigh"
+LAUNCH_MODEL_KEYS = ("model", "model_rth", "model_research", "model_params")
+# Clerk-owned chat.create kwargs. model_params may not overwrite these.
+RESERVED_CHAT_KEYS = frozenset({
+    "model",
+    "messages",
+    "tools",
+    "include",
+    "temperature",
+    "max_tokens",
+})
 # Brain / pacing / link knobs the operator sets from Pro Settings.
 # scan_fetch_cap is deliberately absent: self_tune is its only writer.
 AGENT_CONFIG_KEYS = frozenset({
     "model",
     "model_rth",
     "model_research",
+    "model_params",
     "temperature",
     "max_tokens",
     "session_look_cap",
@@ -103,6 +120,10 @@ _AGENT_INT_KEYS = frozenset({
 _AGENT_TEXT_KEYS = frozenset({"model", "ibkr_host"})
 # Empty = fall back to ``model``. Operator may clear them.
 _AGENT_OPTIONAL_TEXT_KEYS = frozenset({"model_rth", "model_research"})
+_AGENT_JSON_OBJECT_KEYS = frozenset({"model_params"})
+_MODEL_PARAM_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MODEL_PARAMS_MAX_KEYS = 32
+_MODEL_PARAMS_MAX_CHARS = 4096
 RISK_POSTURES = frozenset({"defensive", "balanced", "aggressive"})
 _runtime_overrides: dict[str, Any] = {}
 _file_overrides: dict[str, Any] = {}
@@ -115,10 +136,13 @@ _DEFAULT_FILE_LOG_PATH = _REPO_ROOT / "logs" / "app.log"
 class Config:
     # xAI / Grok
     xai_api_key: str = ""
-    model: str = "grok-4.6"  # ABCXAUTO_MODEL is the env form; see get_config()
+    model: str = DEFAULT_MODEL  # ABCXAUTO_MODEL is the env form; see get_config()
     # Session brains. Empty = use ``model`` (single-model desks keep working).
     model_rth: str = ""
     model_research: str = ""
+    # Extra chat.create kwargs (reasoning_effort, future effort/thinking, …).
+    # JSON object. Unknown keys pass through; reserved clerk keys are dropped.
+    model_params: dict[str, Any] = field(default_factory=dict)
     temperature: float = 0.3
     max_tokens: int = 8192
     # Per stay-up session (premarket / RTH). Overnight honors a hit.
@@ -261,9 +285,10 @@ def _load_env_config() -> Config:
     load_dotenv()
     return Config(
         xai_api_key=_env("XAI_API_KEY") or _env("GROK_API_KEY"),
-        model=_env("ABCXAUTO_MODEL", "grok-4.6"),
+        model=_env("ABCXAUTO_MODEL", DEFAULT_MODEL),
         model_rth=_env("ABCXAUTO_MODEL_RTH"),
         model_research=_env("ABCXAUTO_MODEL_RESEARCH"),
+        model_params=_env_model_params(),
         temperature=float(_env("ABCXAUTO_TEMPERATURE", "0.3")),
         max_tokens=int(_env("ABCXAUTO_MAX_TOKENS", "8192")),
         session_look_cap=int(_env("ABCXAUTO_SESSION_LOOK_CAP", "160")),
@@ -370,12 +395,82 @@ def broker_link_connected() -> bool:
         return False
 
 
+def _json_safe_param(value: Any, *, depth: int = 0) -> bool:
+    if depth > 4:
+        return False
+    if value is None or isinstance(value, (bool, str)):
+        return True
+    if isinstance(value, int) and not isinstance(value, bool):
+        return True
+    if isinstance(value, float):
+        return value == value and value not in (float("inf"), float("-inf"))
+    if isinstance(value, list):
+        return all(_json_safe_param(v, depth=depth + 1) for v in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(k, str) and _json_safe_param(v, depth=depth + 1)
+            for k, v in value.items()
+        )
+    return False
+
+
+def coerce_model_params(value: Any) -> dict[str, Any]:
+    """JSON object of extra chat.create kwargs. Unknown keys stay.
+
+    Empty / missing → {}. Reserved clerk keys (model, messages, tools,
+    include, temperature, max_tokens) are dropped so dedicated knobs win.
+    """
+    if value is None or value == "":
+        return {}
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text == "{}":
+            return {}
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"model_params must be a JSON object: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("model_params must be a JSON object")
+    if len(value) > _MODEL_PARAMS_MAX_KEYS:
+        raise ValueError(f"model_params has too many keys (max {_MODEL_PARAMS_MAX_KEYS})")
+    out: dict[str, Any] = {}
+    for raw_key, raw_val in value.items():
+        key = str(raw_key).strip()
+        if not key or not _MODEL_PARAM_KEY_RE.match(key):
+            raise ValueError(
+                f"model_params key {raw_key!r} must be a Python identifier"
+            )
+        if key in RESERVED_CHAT_KEYS:
+            continue
+        if not _json_safe_param(raw_val):
+            raise ValueError(f"model_params.{key} is not JSON-safe")
+        out[key] = raw_val
+    blob = json.dumps(out, sort_keys=True, default=str)
+    if len(blob) > _MODEL_PARAMS_MAX_CHARS:
+        raise ValueError("model_params JSON is too large")
+    return out
+
+
+def _env_model_params() -> dict[str, Any]:
+    raw = _env("ABCXAUTO_MODEL_PARAMS")
+    if not raw:
+        return {}
+    try:
+        return coerce_model_params(raw)
+    except (TypeError, ValueError) as exc:
+        logger.warning("Ignoring invalid ABCXAUTO_MODEL_PARAMS: %s", exc)
+        return {}
+
+
 def _coerce_agent_value(key: str, value: Any) -> Any:
     """Normalize one agent knob to its Config field type. Raises on garbage."""
     if key in _AGENT_BOOL_KEYS:
         if isinstance(value, bool):
             return value
         return str(value).strip().lower() in ("1", "true", "yes", "on")
+    if key in _AGENT_JSON_OBJECT_KEYS:
+        return coerce_model_params(value)
     if key in _AGENT_OPTIONAL_TEXT_KEYS:
         text = str(value or "").strip()
         if text and any(c.isspace() for c in text):
@@ -486,6 +581,26 @@ def save_risk_settings(
 load_risk_settings()
 
 
+def launch_model_knobs(*, reload: bool = True) -> dict[str, Any]:
+    """Brain knobs a DESK / CloudAgent launch will think with.
+
+    Reloads ``risk_settings.json`` so Settings Apply on disk is the launch
+    path. Default remains ``DEFAULT_MODEL`` (grok-4.6). xhigh is an id
+    suffix / ``model_params`` value the operator already uses — not a 4.7
+    flip and not a hardcoded sole path.
+    """
+    if reload:
+        load_risk_settings()
+        _load_env_config.cache_clear()
+    cfg = get_config()
+    return {
+        "model": str(getattr(cfg, "model", "") or DEFAULT_MODEL),
+        "model_rth": str(getattr(cfg, "model_rth", "") or ""),
+        "model_research": str(getattr(cfg, "model_research", "") or ""),
+        "model_params": dict(getattr(cfg, "model_params", None) or {}),
+    }
+
+
 def get_config() -> Config:
     """Env-backed config plus file-persisted risk knobs, agent_state, session overrides.
 
@@ -495,8 +610,9 @@ def get_config() -> Config:
     mode+port) are not taken from ``agent_state`` and ``self_tune`` cannot
     persist over the file. The ``model`` the operator applies from Pro Settings
     beats ``ABCXAUTO_MODEL``. ``model_rth`` / ``model_research`` select the
-    session brain when set; empty falls back to ``model``. ``scan_fetch_cap``
-    from ``self_tune`` beats both.
+    session brain when set; empty falls back to ``model``. ``model_params``
+    is extra ``chat.create`` kwargs (JSON object). Unknown future keys pass
+    through. ``scan_fetch_cap`` from ``self_tune`` beats both.
     """
     base = _load_env_config()
     agent_extra: dict[str, Any] = {}

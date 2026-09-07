@@ -793,6 +793,12 @@ def begin_run() -> dict[str, Any]:
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
+        from abcxauto.config import launch_model_knobs
+
+        _run.update(launch_model_knobs(reload=True))
+    except Exception:
+        logger.debug("launch model knobs on begin_run failed", exc_info=True)
+    try:
         RUN_PATH.parent.mkdir(parents=True, exist_ok=True)
         RUN_PATH.write_text(json.dumps(_run, indent=2), encoding="utf-8")
     except OSError:

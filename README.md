@@ -2,7 +2,7 @@
 
 **Grok owns a paper IBKR book. Silent code is facts, hard gates, and the overnight park.**
 
-Grok (the `model` knob, default grok-4.6) invents tickets and standing notes. Live is the **7496** socket after the confirm phrase and a different client id. Same constitution as paper **7497**. It never copies paper fills.
+Grok (the `model` knob, default grok-4.6; set `grok-4.7` in Settings when xAI publishes it) invents tickets and standing notes. Live is the **7496** socket after the confirm phrase and a different client id. Same constitution as paper **7497**. It never copies paper fills.
 
 Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of NetLiq**. Book return % must beat the cost of the model.
 
@@ -14,7 +14,7 @@ Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of
 | **Code** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, overnight / after-close park |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No approval step. |
 
-Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` persists to `risk_settings.json`, which beats the `ABCXAUTO_MODEL` env form. Grok is the only RTH process. There is no clerk.
+Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` / `model_rth` / `model_research` / `model_params` persist to `risk_settings.json`, which beats the env forms. Launch reloads those knobs. Default stays grok-4.6 (+ xhigh suffix) until the operator flips. Grok is the only RTH process. There is no clerk.
 
 ## Hard gates (code)
 
@@ -125,7 +125,10 @@ Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** 
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ABCXAUTO_MODEL` | `grok-4.6` | Brain — Pro Settings `model` wins over this |
+| `ABCXAUTO_MODEL` | `grok-4.6` | Brain id — Pro Settings `model` wins over this. Set `grok-4.7` when available |
+| `ABCXAUTO_MODEL_RTH` | (empty) | RTH id; empty = `model`. Settings `model_rth` |
+| `ABCXAUTO_MODEL_RESEARCH` | (empty) | Premarket/AH id; empty = `model`. Settings `model_research` |
+| `ABCXAUTO_MODEL_PARAMS` | `{}` | Extra `chat.create` kwargs as JSON (`reasoning_effort`, future effort/thinking). Settings `model_params`. Unknown keys pass through |
 | `IBKR_PORT` | `7497` | Paper TWS |
 | `IBKR_CLIENT_ID` | `42` | One id per process |
 | `ABCXAUTO_MAX_OPEN_POSITIONS` | `0` | Slot cap (0 = off; Grok may set a positive ceiling) |

@@ -14,7 +14,9 @@ START_PRO_PATH = _REPO / "logs" / "_start_pro.py"
 START_PRO_SOURCE = """import os
 os.environ["ABCXAUTO_AUTOSTART"] = "1"
 os.environ.pop("ABCXAUTO_LAUNCH_PROBE", None)
+from abcxauto.config import launch_model_knobs
 from abcxauto.supervisor import prepare_desk_start, claim_desk_lock, release_desk_lock
+launch_model_knobs(reload=True)
 prepare_desk_start()
 if not claim_desk_lock():
     raise SystemExit(0)

@@ -561,6 +561,12 @@ def prepare_desk_start(*, exclude: set[int] | None = None) -> list[int]:
     """One tree on Start: drop stale lock/stop, reap leftovers, then launch."""
     clear_stale_desk_lock()
     clear_operator_stop()
+    try:
+        from abcxauto.config import launch_model_knobs
+
+        launch_model_knobs(reload=True)
+    except Exception:
+        logger.debug("launch model knobs on prepare_desk_start failed", exc_info=True)
     return reap_leftover_desk(exclude=exclude)
 
 

@@ -123,7 +123,9 @@ def rth_model_no_xhigh(model: str, *, enabled: bool | None = None) -> str:
     if enabled is None and not kill_look_enabled():
         return token
     stripped = _XHIGH_RE.sub("", token).replace("--", "-").strip("-")
-    return stripped or "grok-4.6"
+    from abcxauto.config import DEFAULT_MODEL
+
+    return stripped or DEFAULT_MODEL
 
 
 def kill_look_rth(session: str = "", *, enabled: bool | None = None) -> bool:

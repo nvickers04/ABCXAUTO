@@ -171,7 +171,9 @@ def test_process_tree_pids_skips_tws(monkeypatch):
 def test_start_pro_source_reaps_before_run_app():
     from abcxauto.cursor_env import START_PRO_SOURCE
 
+    assert "launch_model_knobs" in START_PRO_SOURCE
     assert "prepare_desk_start" in START_PRO_SOURCE
+    assert START_PRO_SOURCE.index("launch_model_knobs") < START_PRO_SOURCE.index("run_app")
     assert START_PRO_SOURCE.index("prepare_desk_start") < START_PRO_SOURCE.index("run_app")
     assert "cleanup_pro" not in START_PRO_SOURCE
     assert "_cleanup" not in START_PRO_SOURCE
