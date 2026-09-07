@@ -247,6 +247,8 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
     ``safe_execute``. Live mode is left to the existing live blockers.
     Research mode (premarket / AH / closed) fail-closes with
     ``research_no_send`` and never reaches ``safe_execute``.
+    A presented dry-run / approval / place token that is expired, used,
+    or unreadable fail-closes here (KEEP-4). Exits skip that gate.
     """
     cfg = get_config()
     live_port = _paper_live_port(cfg)
@@ -270,4 +272,9 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
         sess = ""
     if sess in RESEARCH_SESSIONS:
         return research_send_block(session=sess)
+    from abcxauto.token_ttl import place_token_block
+
+    token_block = place_token_block(action)
+    if token_block is not None:
+        return token_block
     return await safe_execute(action, connector)
