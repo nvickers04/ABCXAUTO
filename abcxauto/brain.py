@@ -1769,7 +1769,7 @@ async def _grok_turn_impl(
     try:
         from abcxauto.thin_rth_kill_look import (
             REASON_F10,
-            REASON_MODEL_COST,
+            is_f10_look_halt,
             record_f10_loop_halt,
             skip_look_reason,
         )
@@ -1790,7 +1790,7 @@ async def _grok_turn_impl(
             unprotected=unprotected,
             in_flight=in_flight,
         )
-        if halt in (REASON_F10, REASON_MODEL_COST):
+        if is_f10_look_halt(halt):
             turn.f10_tripped = True
             turn.loop_halted = True
             turn.last_strat = "skipped"
@@ -1895,7 +1895,7 @@ async def _grok_turn_impl(
     empty_tries = 0
     while turn.steps < turn_cap:
         try:
-            from abcxauto.thin_rth_kill_look import REASON_F10, skip_look_reason
+            from abcxauto.thin_rth_kill_look import is_f10_look_halt, skip_look_reason
 
             prot = snap.get("protection") if isinstance(snap.get("protection"), dict) else {}
             mid_halt = skip_look_reason(
@@ -1912,7 +1912,7 @@ async def _grok_turn_impl(
                 ),
                 in_flight=True,
             )
-            if mid_halt in (REASON_F10, REASON_MODEL_COST):
+            if is_f10_look_halt(mid_halt):
                 turn.f10_tripped = True
                 turn.loop_halted = True
                 think_emit("tool", "\n[F10 loop halt — no new-risk looks]\n")

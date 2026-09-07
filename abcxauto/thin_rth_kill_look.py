@@ -7,6 +7,7 @@ RTH no-xhigh / AH-rare, F10 $2 hard / $1 preferred. Paper 7497. Not looking.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from typing import Any
@@ -400,7 +401,7 @@ def f10_gate(
             "note": "model_cost unreadable — fail-closed",
             "projected": None,
         }
-    if so_far != so_far or est != est or so_far < 0 or est < 0:
+    if not math.isfinite(so_far) or not math.isfinite(est) or so_far < 0 or est < 0:
         return {
             "allow_new_risk": False,
             "preferred_trip": False,
@@ -426,7 +427,7 @@ def f10_gate(
             "note": "window model_cost unreadable — fail-closed",
             "projected": None,
         }
-    if win != win or win < 0:
+    if not math.isfinite(win) or win < 0:
         return {
             "allow_new_risk": False,
             "preferred_trip": False,
@@ -498,6 +499,11 @@ def f10_open_look_halted(f10: dict[str, Any] | None = None) -> bool:
     gate = f10 if isinstance(f10, dict) else live_f10_gate()
     why = str(gate.get("reason_code") or "")
     return why in (REASON_F10, REASON_MODEL_COST)
+
+
+def is_f10_look_halt(reason: str = "") -> bool:
+    """True when skip/send reason must stop billed new-risk looks."""
+    return str(reason or "") in (REASON_F10, REASON_MODEL_COST)
 
 
 def mark_f10_hard_trip(gate: dict[str, Any] | None = None) -> bool:
@@ -770,6 +776,33 @@ def kill_look_send_block(
             "reason_code": REASON_PORT,
             "strategy": "blocked",
         }
+    gate = f10 if isinstance(f10, dict) else live_f10_gate()
+    if not gate.get("allow_new_risk", False):
+        why = str(gate.get("reason_code") or "")
+        if why == REASON_F10:
+            mark_f10_hard_trip(gate)
+        elif why == REASON_MODEL_COST:
+            try:
+                from abcxauto.session_caps import mark_f10_loop_halt
+
+                mark_f10_loop_halt()
+            except Exception:
+                logger.debug("f10 model_cost latch write failed", exc_info=True)
+        return {
+            "status": "blocked",
+            "note": str(gate.get("note") or REASON_F10),
+            "reason_code": str(gate.get("reason_code") or REASON_F10),
+            "strategy": "blocked",
+            "preferred_trip": bool(gate.get("preferred_trip")),
+        }
+    if gate.get("preferred_trip"):
+        logger.warning("F10 preferred $1 tripwire (hard still $2)")
+        try:
+            from abcxauto.think_stream import emit as think_emit
+
+            think_emit("tool", "\n[F10 preferred $1 tripwire — hard still $2]\n")
+        except Exception:
+            logger.debug("F10 preferred think emit failed", exc_info=True)
     fuse = abort_fuse
     if fuse is None:
         try:
@@ -794,25 +827,6 @@ def kill_look_send_block(
             "reason_code": why,
             "strategy": "blocked",
         }
-    gate = f10 if isinstance(f10, dict) else live_f10_gate()
-    if not gate.get("allow_new_risk", False):
-        if str(gate.get("reason_code") or "") == REASON_F10:
-            mark_f10_hard_trip(gate)
-        return {
-            "status": "blocked",
-            "note": str(gate.get("note") or REASON_F10),
-            "reason_code": str(gate.get("reason_code") or REASON_F10),
-            "strategy": "blocked",
-            "preferred_trip": bool(gate.get("preferred_trip")),
-        }
-    if gate.get("preferred_trip"):
-        logger.warning("F10 preferred $1 tripwire (hard still $2)")
-        try:
-            from abcxauto.think_stream import emit as think_emit
-
-            think_emit("tool", "\n[F10 preferred $1 tripwire — hard still $2]\n")
-        except Exception:
-            logger.debug("F10 preferred think emit failed", exc_info=True)
     return None
 
 
