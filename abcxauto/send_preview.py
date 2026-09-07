@@ -455,6 +455,7 @@ def _ttl_helpers():
         consume_place_token as ttl_consume,
         evaluate_place_token,
         issue_place_token,
+        token_expired,
     )
 
     return {
@@ -463,6 +464,7 @@ def _ttl_helpers():
         "expired": ttl_expired,
         "invalid": ttl_invalid,
         "issue": issue_place_token,
+        "token_expired": token_expired,
         "used": ttl_used,
     }
 
@@ -503,7 +505,11 @@ def consume_place_token(
     *,
     now: Any = None,
 ) -> tuple[bool, dict[str, Any]]:
-    """TTL evaluate first, then hash. Mismatch does not spend the token."""
+    """Liveness SoT is KEEP-4 evaluate/consume/token_expired, then hash.
+
+    No local token mirror. Expired refuses before place. Mismatch does
+    not spend the token.
+    """
     key = str(token or "").strip()
     if not key:
         return False, {
@@ -534,9 +540,26 @@ def consume_place_token(
             "would_refuse": [REASON_PREVIEW_INVALID],
             "token_used": False,
         }
+    record = verdict.get("record")
+    if isinstance(record, dict) and helpers["token_expired"](
+        record.get("issued_at"),
+        expires_at=record.get("expires_at"),
+        now=now,
+        ttl_s=record.get("ttl_s"),
+    ):
+        payload = _payload_of(record)
+        return False, {
+            "status": "blocked",
+            "reason_code": REASON_TOKEN_EXPIRED,
+            "note": "place token expired — unused authorization is dead",
+            "preview_id": payload.get("preview_id"),
+            "preview_hash": payload.get("preview_hash"),
+            "would_refuse": [REASON_TOKEN_EXPIRED],
+            "token_used": False,
+        }
     if not verdict.get("ok"):
         reason = str(verdict.get("reason") or helpers["invalid"])
-        payload = _payload_of(verdict.get("record"))
+        payload = _payload_of(record if isinstance(record, dict) else verdict.get("record"))
         if reason == helpers["expired"]:
             reason_code = REASON_TOKEN_EXPIRED
             note = "place token expired — unused authorization is dead"
