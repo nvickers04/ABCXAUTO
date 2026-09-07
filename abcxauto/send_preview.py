@@ -11,8 +11,10 @@ preview and no token bound to the ticket hash. This module:
 Exits / management never need a token. F9/F10 are not softened — kill-look
 refuses appear in would_refuse. Looking and 7496 stay off.
 
-KEEP-4 (``token_ttl``) is the liveness clock. This module stays the
-hash + preview owner and must not mint a TTL-less token on the place path.
+KEEP-4 (``token_ttl``) is the only liveness clock (H-TTL). This module
+does not keep a local token store — a hash/used row here must not
+authorize place after TTL expiry. Hash bind stays here; expiry refuses
+before place.
 """
 
 from __future__ import annotations
@@ -75,12 +77,9 @@ _LEG_KEYS = (
     "entry_price",
 )
 
-_store: dict[str, dict[str, Any]] = {}
-
 
 def reset_preview_state() -> None:
-    """Drop in-process tokens. Tests only."""
-    _store.clear()
+    """Drop KEEP-4 in-process tokens. Tests only. No local store."""
     try:
         from abcxauto.token_ttl import reset_place_tokens_for_tests
 
@@ -475,18 +474,8 @@ def _payload_of(record: Any) -> dict[str, Any]:
     return dict(payload) if isinstance(payload, dict) else {}
 
 
-def _cache_hash(token: str, preview_hash: str, preview_id: str) -> None:
-    """Hash mirror only. Never a liveness source — TTL already said ok."""
-    if not token:
-        return
-    _store[token] = {
-        "preview_hash": preview_hash,
-        "preview_id": preview_id,
-    }
-
-
 def _issue_token(preview_hash: str, preview_id: str, *, now: Any = None) -> str:
-    """Mint via KEEP-4 only. No TTL-less local fallback when importable."""
+    """Mint via KEEP-4 only. No local token row — H-TTL."""
     try:
         helpers = _ttl_helpers()
     except ImportError:
@@ -505,7 +494,6 @@ def _issue_token(preview_hash: str, preview_id: str, *, now: Any = None) -> str:
     if not token:
         logger.error("token_ttl issue returned no id — fail-closed")
         return ""
-    _cache_hash(token, preview_hash, preview_id)
     return token
 
 
@@ -611,7 +599,6 @@ def consume_place_token(
             "would_refuse": [reason_code],
             "token_used": reason == helpers["used"],
         }
-    _cache_hash(key, stored, preview_id)
     try:
         from abcxauto.memory import get_journal
 

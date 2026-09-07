@@ -362,11 +362,13 @@ def test_collect_would_refuse_reports_kill_look_without_softening():
 
 
 @pytest.mark.asyncio
-async def test_expired_token_same_hash_cannot_place(monkeypatch):
-    """Issue → advance past TTL → same-hash place is blocked expired."""
+async def test_h_ttl_expired_same_hash_cannot_place(monkeypatch):
+    """H-TTL: issue → past TTL → same-hash place is blocked expired."""
     monkeypatch.setattr("abcxauto.send.safe_execute", _safe_execute_must_not_run)
     from abcxauto.send import send_action
+    import abcxauto.send_preview as sp
 
+    assert not hasattr(sp, "_store")
     clock = {"now": 1_700_000_400.0}
     monkeypatch.setattr("abcxauto.token_ttl.time.time", lambda: clock["now"])
     ticket = _vertical()
@@ -374,13 +376,6 @@ async def test_expired_token_same_hash_cannot_place(monkeypatch):
     token = bind["preview_token"]
     assert token
     assert ticket_preview_hash(ticket) == bind["preview_hash"]
-    from abcxauto.send_preview import _store
-
-    _store[token] = {
-        "preview_hash": bind["preview_hash"],
-        "preview_id": bind["preview_id"],
-        "used": False,
-    }
     clock["now"] = clock["now"] + DEFAULT_PLACE_TOKEN_TTL_S
     result = await send_action(ticket, _connector())
     assert result["status"] == "blocked"
@@ -388,19 +383,16 @@ async def test_expired_token_same_hash_cannot_place(monkeypatch):
     assert REASON_TOKEN_EXPIRED in (result.get("would_refuse") or [])
 
 
-def test_local_store_cannot_bypass_ttl(monkeypatch):
+def test_h_ttl_no_local_store_and_expiry_refuses_before_place(monkeypatch):
+    """H-TTL: no send_preview token table; KEEP-4 expiry refuses consume."""
+    import abcxauto.send_preview as sp
+
+    assert not hasattr(sp, "_store")
     clock = {"now": 1_700_000_400.0}
     monkeypatch.setattr("abcxauto.token_ttl.time.time", lambda: clock["now"])
     ticket = _vertical()
     bind = bind_place_token(ticket)
     token = bind["preview_token"]
-    from abcxauto.send_preview import _store
-
-    _store[token] = {
-        "preview_hash": bind["preview_hash"],
-        "preview_id": bind["preview_id"],
-        "used": False,
-    }
     clock["now"] = clock["now"] + DEFAULT_PLACE_TOKEN_TTL_S
     ok, meta = consume_place_token(token, bind["preview_hash"])
     assert ok is False
@@ -416,9 +408,9 @@ def test_ttl_issue_failure_fail_closed_no_local_mint(monkeypatch):
     ticket = _vertical()
     bind = bind_place_token(ticket)
     assert not bind.get("preview_token")
-    from abcxauto.send_preview import _store
+    import abcxauto.send_preview as sp
 
-    assert _store == {}
+    assert not hasattr(sp, "_store")
 
 
 @pytest.mark.asyncio
