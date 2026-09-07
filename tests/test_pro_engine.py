@@ -1123,6 +1123,29 @@ def test_rearm_synthesize_mill_reenters_same_chat():
     assert not getattr(eng, "_mill_wake", False)
 
 
+def test_rearm_gather_spin_die_tools_is_mill_on_kill_look(monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
+    from abcxauto.desk_mode import SYNTHESIZE_MILL_TRIES
+    from abcxauto.pro_engine import ProEngine
+
+    assert SYNTHESIZE_MILL_TRIES == 2
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": "Gathering more scan color.",
+            "sends": 0,
+            "positions": [],
+            "tool_trace": ["scan"],
+        },
+        session="regular",
+    )
+    assert wait == 0.0
+    assert eng._resume_think is True
+    assert eng._mill_wake is True
+    assert eng._mill_streak == 1
+
+
 def test_rearm_synthesize_mill_caps_then_drops_chat():
     """N=2 consecutive mill turns: first same-chat, second drop + cold continue."""
     from abcxauto.config import get_config

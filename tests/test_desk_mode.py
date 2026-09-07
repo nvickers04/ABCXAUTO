@@ -216,6 +216,7 @@ def test_synthesize_mill_zero_tools_zero_send_is_not_a_finished_look():
 
     assert SYNTHESIZE_MILL_TRIES == 2
     assert spoken_synthesize_mill(_SOFT_SPIN_MILL_SAY, sends=0)
+    assert spoken_synthesize_mill("Let me gather the tape.", sends=0)
     assert look_synthesize_mill(
         {"rationale": _SOFT_SPIN_MILL_SAY, "sends": 0, "tool_trace": []}
     )

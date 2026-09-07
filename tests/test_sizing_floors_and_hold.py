@@ -287,7 +287,7 @@ def test_send_enum_never_includes_hold():
     from abcxauto.brain import agent_tools, brain_system_prompt
     from abcxauto.order_examples import ticket_strategy_names
 
-    enum = _send_strategy_enum(agent_tools())
+    enum = _send_strategy_enum(agent_tools(session="regular"))
     assert "hold" not in enum
     assert "market_bracket" in enum
     assert "hold" not in ticket_strategy_names()

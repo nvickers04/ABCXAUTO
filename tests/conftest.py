@@ -206,6 +206,13 @@ def _reset_cancel_guard():
 
 
 @pytest.fixture(autouse=True)
+def _pcs_kill_look_off_unless_marked(monkeypatch, request):
+    """Kill-look contract is production-on; unit tests opt in via env or mark."""
+    marked = request.node.get_closest_marker("pcs_kill_look") is not None
+    monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1" if marked else "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_desk_state(tmp_path, monkeypatch):
     """Pytest must not clobber the live last_turn / wake files."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "grok_wake.json"))

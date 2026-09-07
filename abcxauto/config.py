@@ -125,6 +125,9 @@ class Config:
     # Paper stay-up does not idle the desk. Not a per-turn cap.
     session_look_cap: int = 160
     session_token_cap: int = 2_500_000
+    # pcs-skew Arm v0 kill-window LOOK contract. Env ABCXAUTO_PCS_KILL_LOOK.
+    # Not a Settings knob Grok can raise. Default on; pytest isolates it off.
+    pcs_kill_look: bool = True
 
     # MarketData.app
     marketdata_token: str = ""
@@ -265,6 +268,7 @@ def _load_env_config() -> Config:
         max_tokens=int(_env("ABCXAUTO_MAX_TOKENS", "8192")),
         session_look_cap=int(_env("ABCXAUTO_SESSION_LOOK_CAP", "160")),
         session_token_cap=int(_env("ABCXAUTO_SESSION_TOKEN_CAP", "2500000")),
+        pcs_kill_look=_env_bool("ABCXAUTO_PCS_KILL_LOOK", True),
         marketdata_token=_env("MARKETDATA_TOKEN") or _env("MARKETDATA_API_KEY"),
         ibkr_host=_env("IBKR_HOST", "127.0.0.1"),
         ibkr_port=int(_env("IBKR_PORT", "7497")),
