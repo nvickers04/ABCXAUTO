@@ -1769,6 +1769,7 @@ async def _grok_turn_impl(
     try:
         from abcxauto.thin_rth_kill_look import (
             REASON_F10,
+            REASON_MODEL_COST,
             record_f10_loop_halt,
             skip_look_reason,
         )
@@ -1789,7 +1790,7 @@ async def _grok_turn_impl(
             unprotected=unprotected,
             in_flight=in_flight,
         )
-        if halt == REASON_F10:
+        if halt in (REASON_F10, REASON_MODEL_COST):
             turn.f10_tripped = True
             turn.loop_halted = True
             turn.last_strat = "skipped"
@@ -1911,7 +1912,7 @@ async def _grok_turn_impl(
                 ),
                 in_flight=True,
             )
-            if mid_halt == REASON_F10:
+            if mid_halt in (REASON_F10, REASON_MODEL_COST):
                 turn.f10_tripped = True
                 turn.loop_halted = True
                 think_emit("tool", "\n[F10 loop halt — no new-risk looks]\n")

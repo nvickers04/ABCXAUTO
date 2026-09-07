@@ -1294,6 +1294,7 @@ def write_last_turn(out: dict[str, Any]) -> None:
             "skip_reason": skip[:120],
             "f10_tripped": bool(out.get("f10_tripped")),
             "loop_halted": bool(out.get("loop_halted")),
+            "model_cost_post_trip_USD": float(out.get("model_cost_post_trip_USD") or 0.0),
             "flat": world.get("flat"),
             "net_liquidation": world.get("net_liquidation") or out.get("equity") or nl,
             "mix": _mix_of(out, world),

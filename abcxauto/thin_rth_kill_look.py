@@ -496,7 +496,8 @@ def f10_open_look_halted(f10: dict[str, Any] | None = None) -> bool:
     except Exception:
         logger.debug("f10 latch read failed", exc_info=True)
     gate = f10 if isinstance(f10, dict) else live_f10_gate()
-    return str(gate.get("reason_code") or "") == REASON_F10
+    why = str(gate.get("reason_code") or "")
+    return why in (REASON_F10, REASON_MODEL_COST)
 
 
 def mark_f10_hard_trip(gate: dict[str, Any] | None = None) -> bool:
@@ -539,6 +540,7 @@ def record_f10_loop_halt(
         "rationale": str(skip_reason or REASON_F10),
         "f10_tripped": True,
         "loop_halted": True,
+        "model_cost_post_trip_USD": 0.0,
         "sends": 0,
         "positions": list(blob.get("positions") or []),
         "open_lots": list(blob.get("open_lots") or []),
@@ -553,6 +555,7 @@ def record_f10_loop_halt(
     return {
         "f10_tripped": True,
         "loop_halted": True,
+        "model_cost_post_trip_USD": 0.0,
         "skip_reason": str(skip_reason or REASON_F10),
         "latched": marked,
     }
@@ -701,14 +704,18 @@ def skip_look_reason(
     )
     if mode == MODE_MANAGE:
         return ""
-    # RTH OPEN / ABORT only. Research_no_send stays; AH looks keep their own cap.
-    if mode != MODE_RESEARCH and f10_open_look_halted(f10):
+    # New-risk / OPEN / research-as-entry. MANAGE + unprotected still look.
+    if f10_open_look_halted(f10):
         try:
             from abcxauto.session_caps import mark_f10_loop_halt
 
             mark_f10_loop_halt()
         except Exception:
             logger.debug("f10 latch write failed", exc_info=True)
+        gate = f10 if isinstance(f10, dict) else live_f10_gate()
+        why = str(gate.get("reason_code") or "")
+        if why == REASON_MODEL_COST:
+            return REASON_MODEL_COST
         return REASON_F10
     if mode == MODE_OPEN:
         return ""

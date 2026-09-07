@@ -786,3 +786,18 @@ async def test_execute_ticket_f10_blocks_new_risk_allows_close(monkeypatch):
         {"positions": []},
     )
     assert close.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST}
+
+def test_f10_unreadable_fail_closes_loop(monkeypatch):
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    unread = f10_gate(None, est_this_look=0.35, window_cost=0.0)
+    assert unread["reason_code"] == REASON_MODEL_COST
+    assert f10_open_look_halted(unread) is True
+    assert skip_look_reason("regular", positions=[], f10=unread) == REASON_MODEL_COST
+    assert f10_loop_halted() is True
+    assert usage("regular")["model_cost_post_trip_usd"] == 0.0
+    assert skip_look_reason("premarket", f10=unread) == REASON_MODEL_COST
+
+
+def test_hygiene_port_not_live_7496():
+    assert get_config().ibkr_port != 7496

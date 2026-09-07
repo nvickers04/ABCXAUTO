@@ -76,7 +76,18 @@ def _empty(key: str) -> dict[str, Any]:
         "kill_entry_looks": 0,
         "f10_tripped": False,
         "loop_halted": False,
+        "model_cost_post_trip_usd": 0.0,
     }
+
+
+def _post_trip_usd(raw: Any) -> float:
+    try:
+        val = float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if val != val or val < 0:
+        return 0.0
+    return val
 
 
 def _flag(raw: Any) -> bool:
@@ -108,6 +119,7 @@ def _row_of(raw: Any, key: str = "") -> dict[str, Any]:
         "kill_entry_looks": kill_entry,
         "f10_tripped": _flag(blob.get("f10_tripped")),
         "loop_halted": _flag(blob.get("loop_halted")),
+        "model_cost_post_trip_usd": _post_trip_usd(blob.get("model_cost_post_trip_usd")),
     }
 
 
@@ -245,6 +257,11 @@ def usage(session: str = "", *, now: datetime | None = None) -> dict[str, Any]:
         "kill_entry_left": max(0, KILL_ENTRY_LOOKS_MAX - kill_entry),
         "f10_tripped": bool(halt.get("f10_tripped") or state.get("f10_tripped")),
         "loop_halted": bool(halt.get("loop_halted") or state.get("loop_halted")),
+        "model_cost_post_trip_usd": float(
+            halt.get("model_cost_post_trip_usd")
+            or state.get("model_cost_post_trip_usd")
+            or 0.0
+        ),
         "hit": hit,
         "why": why,
     }
@@ -358,6 +375,7 @@ def mark_f10_loop_halt(*, now: datetime | None = None) -> dict[str, Any]:
     row = _row_of(table.get(key) or _empty(key), key)
     row["f10_tripped"] = True
     row["loop_halted"] = True
+    row["model_cost_post_trip_usd"] = 0.0
     table[key] = row
     _save_table(table)
     return dict(row)

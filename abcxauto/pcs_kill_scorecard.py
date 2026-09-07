@@ -296,6 +296,12 @@ def normalize_session_row(
             row["loop_halted"] = _as_bool(payload.get("loop_halted"), name="loop_halted")
         except ValueError:
             row["loop_halted"] = None
+    if "model_cost_post_trip_USD" in payload or "model_cost_post_trip_usd" in payload:
+        raw = payload.get("model_cost_post_trip_USD", payload.get("model_cost_post_trip_usd"))
+        try:
+            row["model_cost_post_trip_USD"] = _as_float(raw, name="model_cost_post_trip_USD")
+        except ValueError:
+            row["model_cost_post_trip_USD"] = 0.0
 
     try:
         row["dd_pct"] = _as_float(payload.get("dd_pct"), name="dd_pct")
