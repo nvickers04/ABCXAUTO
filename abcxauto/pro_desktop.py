@@ -90,6 +90,11 @@ BRAIN_FIELDS = (
     ("model_research", "Research model", "empty = Model — premarket/AH, no send"),
     ("temperature", "Temperature", "0.0 – 2.0"),
     ("max_tokens", "Max tokens", "1024 – 131072 per turn"),
+    (
+        "model_params",
+        "Model params",
+        'JSON object — effort/thinking/etc. Empty = none. Next look rebuilds',
+    ),
 )
 PACING_FIELDS = (
     ("monitor_poll_s", "Monitor poll", "seconds, 5 – 900"),
@@ -723,6 +728,7 @@ class ProTerminal:
             "model",
             "model_rth",
             "model_research",
+            "model_params",
             "temperature",
             "max_tokens",
             "monitor_poll_s",
@@ -740,6 +746,7 @@ class ProTerminal:
                     "model",
                     "model_rth",
                     "model_research",
+                    "model_params",
                     "ibkr_host",
                     "session_token_cap",
                 )
@@ -813,6 +820,8 @@ class ProTerminal:
             return
         if isinstance(value, bool) or value is None:
             tf.value = ""
+        elif isinstance(value, dict):
+            tf.value = json.dumps(value, sort_keys=True) if value else ""
         elif isinstance(value, float):
             tf.value = f"{value:g}"
         else:
@@ -3103,9 +3112,12 @@ class ProTerminal:
                 f" · session cap {getattr(cfg, 'session_look_cap', '—')} looks / "
                 f"{getattr(cfg, 'session_token_cap', '—')} tok"
             )
+        params = getattr(cfg, "model_params", None) or {}
+        params_bit = f" · +params {','.join(sorted(params))}" if params else ""
         self.lbl_settings_brain.value = (
             f"{getattr(cfg, 'model', '—')} · temp {getattr(cfg, 'temperature', '—')} · "
             f"{getattr(cfg, 'max_tokens', '—')} tokens/turn"
+            + params_bit
             + sess_bit
             + (" · applies on the next look" if live else "")
         )
@@ -3238,6 +3250,7 @@ class ProTerminal:
             "model",
             "model_rth",
             "model_research",
+            "model_params",
             "temperature",
             "max_tokens",
         ) else ""

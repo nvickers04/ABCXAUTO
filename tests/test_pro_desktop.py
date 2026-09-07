@@ -736,6 +736,7 @@ def test_settings_fields_cover_every_operator_knob(headless_pro):
         "model",
         "model_rth",
         "model_research",
+        "model_params",
         "temperature",
         "max_tokens",
         "session_look_cap",

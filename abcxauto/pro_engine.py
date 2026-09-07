@@ -520,10 +520,17 @@ class ProEngine:
     @staticmethod
     def _brain_fingerprint() -> tuple:
         cfg = get_config()
+        params = getattr(cfg, "model_params", None) or {}
+        params_fp = (
+            json.dumps(params, sort_keys=True, default=str) if params else ""
+        )
         return (
             str(getattr(cfg, "model", "") or ""),
+            str(getattr(cfg, "model_rth", "") or ""),
+            str(getattr(cfg, "model_research", "") or ""),
             float(getattr(cfg, "temperature", 0.0) or 0.0),
             int(getattr(cfg, "max_tokens", 0) or 0),
+            params_fp,
         )
 
     def _new_grok(self, *, session: str = "") -> Any:

@@ -595,7 +595,9 @@ def session_model(session: str = "", cfg: Any = None) -> str:
         from abcxauto.config import get_config
 
         cfg = get_config()
-    base = _model_token(getattr(cfg, "model", None)) or "grok-4.6"
+    from abcxauto.config import DEFAULT_MODEL
+
+    base = _model_token(getattr(cfg, "model", None)) or DEFAULT_MODEL
     if is_rth_session(session):
         token = _model_token(getattr(cfg, "model_rth", None)) or base
         try:
