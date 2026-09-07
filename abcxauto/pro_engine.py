@@ -960,6 +960,38 @@ class ProEngine:
             self._note("CAP", "session look/token cap — idle")
         return True
 
+    def _kill_look_same_look(self) -> bool:
+        """Mill / unpaid / recover re-enter is the same look, not entry look #2."""
+        return bool(
+            getattr(self, "_mill_wake", False)
+            or getattr(self, "_ticket_wake", False)
+            or getattr(self, "_inventory_wake", False)
+            or getattr(self, "_recover_same_chat", False)
+        )
+
+    def _kill_look_skip_reason(self, session: str, snap: dict | None) -> str:
+        """Non-empty = do not call Grok (entry budget / AH cap)."""
+        from abcxauto.scorecard import estimate_tokens
+        from abcxauto.thin_rth_kill_look import skip_look_reason
+
+        blob = snap if isinstance(snap, dict) else {}
+        prot = blob.get("protection") if isinstance(blob.get("protection"), dict) else {}
+        prompt_n = 0
+        try:
+            from abcxauto.llm import SYSTEM_PROMPT
+
+            prompt_n = estimate_tokens(SYSTEM_PROMPT)
+        except Exception:
+            prompt_n = 0
+        return skip_look_reason(
+            session,
+            positions=list(blob.get("positions") or []),
+            open_lots=list(blob.get("open_lots") or []),
+            same_look=self._kill_look_same_look(),
+            unprotected=bool(prot.get("unprotected_symbols")),
+            prompt_tokens=prompt_n,
+        )
+
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
         """Stay-up keeps the process. Rearm itself does not self-schedule.
 
@@ -1018,10 +1050,11 @@ class ProEngine:
             unpaid_now = close_no_send or ticket_no_send
             if not unpaid_now:
                 try:
-                    from abcxauto.desk_mode import is_rth_session, look_synthesize_mill
+                    from abcxauto.desk_mode import is_rth_session
+                    from abcxauto.thin_rth_kill_look import look_kill_mill
 
                     if is_rth_session(session):
-                        mill_no_send = look_synthesize_mill(payload)
+                        mill_no_send = look_kill_mill(payload, session=session)
                 except Exception:
                     mill_no_send = False
         unpaid = close_no_send or ticket_no_send
@@ -1811,14 +1844,41 @@ class ProEngine:
                     self._note("SKIP", f"session={session or 'closed'} — no Grok")
                     continue
 
+                if not needs_prot:
+                    try:
+                        skip = self._kill_look_skip_reason(session, s)
+                    except Exception:
+                        logger.debug("kill-look skip failed", exc_info=True)
+                        skip = ""
+                    if skip:
+                        self._note("SKIP", skip)
+                        self.state.skip_reason = skip
+                        continue
+
                 n += 1
                 from abcxauto.session_caps import billed_tokens_now, note_look
+                from abcxauto.session_caps import consume_open_entry_look, note_research_look
 
                 before_tok = billed_tokens_now()
                 try:
                     if not getattr(self, "_recover_same_chat", False):
                         self._recover_streak = 0
                         self._recover_gave_up = False
+                    try:
+                        from abcxauto.thin_rth_kill_look import kill_mode
+
+                        mode = kill_mode(
+                            session,
+                            positions=list(s.get("positions") or []),
+                            open_lots=list(s.get("open_lots") or []),
+                        )
+                        if not self._kill_look_same_look():
+                            if mode == "open":
+                                consume_open_entry_look(session)
+                            elif mode == "research":
+                                note_research_look()
+                    except Exception:
+                        logger.debug("kill-look consume failed", exc_info=True)
                     out = await self._host_think(n, g, s, resume=resume)
                     if not out.get("_recover"):
                         self._recover_same_chat = False

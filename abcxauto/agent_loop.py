@@ -593,6 +593,43 @@ async def execute_ticket(
             stage="research_mode",
         )
         return research_send_block(session=sess)
+    try:
+        from abcxauto.thin_rth_kill_look import kill_look_send_block
+
+        blocked = kill_look_send_block(
+            act,
+            session=sess,
+            positions=list(snap.get("positions") or world.positions or []),
+            open_lots=list(getattr(world, "open_lots", None) or []),
+        )
+        if blocked is not None:
+            asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
+            _record_clerk_block(
+                act,
+                asked,
+                str(blocked.get("note") or blocked.get("reason_code") or ""),
+                stage="kill_look",
+            )
+            return blocked
+    except Exception:
+        logger.debug("kill-look send gate failed", exc_info=True)
+        try:
+            from abcxauto.thin_rth_kill_look import REASON_MODEL_COST, kill_look_rth
+
+            if kill_look_rth(sess):
+                params = act.get("params") if isinstance(act.get("params"), dict) else {}
+                asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
+                if is_new_risk(asked, params):
+                    note = "kill-look gate failed closed"
+                    _record_clerk_block(act, asked, note, stage="kill_look")
+                    return {
+                        "status": "blocked",
+                        "note": note,
+                        "reason_code": REASON_MODEL_COST,
+                        "strategy": "blocked",
+                    }
+        except Exception:
+            logger.debug("kill-look fail-closed fallback failed", exc_info=True)
     positions = list(snap.get("positions") or world.positions or [])
     orders = list(snap.get("open_orders") or world.open_orders or [])
     asked = str(act.get("strategy") or act.get("action") or "").strip().lower()

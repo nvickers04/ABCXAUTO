@@ -97,6 +97,8 @@ class BrainTurn:
     trailing_empty_grok: bool = False
     # Fill / order_change / unprotected / desk-fact inject landed on this chat.
     poked: bool = False
+    kill_mode: str = ""
+    kill_look_capped: bool = False
 
     def look_failed(self) -> bool:
         """True empty / lone '?' only. A real say or send/fill is not junk.
@@ -1728,6 +1730,27 @@ async def _grok_turn_impl(
         turn.failed = True
         return turn
     session = str(getattr(world, "session_status", "") or "")
+    kill_mode = ""
+    turn_cap = MAX_TOOL_STEPS
+    tool_cap = 0
+    try:
+        from abcxauto.thin_rth_kill_look import (
+            kill_mode as _kill_mode,
+            max_model_turns,
+            max_tools,
+        )
+
+        kill_mode = _kill_mode(
+            session,
+            positions=list(getattr(world, "positions", None) or snap.get("positions") or []),
+            open_lots=list(getattr(world, "open_lots", None) or []),
+        )
+        turn.kill_mode = kill_mode
+        if kill_mode in ("open", "manage"):
+            turn_cap = max(1, int(max_model_turns(kill_mode) or 1))
+            tool_cap = int(max_tools(kill_mode) or 0)
+    except Exception:
+        logger.debug("kill-look turn cap failed", exc_info=True)
     live_before = getattr(g, "chat", None)
     # A live chat is this look. A poke does not start a new messages list.
     resume = bool(resume) or live_before is not None
@@ -1784,7 +1807,7 @@ async def _grok_turn_impl(
     ran_out = True
     abort_tries = 0
     empty_tries = 0
-    while turn.steps < MAX_TOOL_STEPS:
+    while turn.steps < turn_cap:
         turn.steps += 1
         try:
             from abcxauto.park_clock import peek_interrupt
@@ -1849,6 +1872,11 @@ async def _grok_turn_impl(
             except Exception:
                 logger.debug("chat.append(response) failed", exc_info=True)
         calls = list(getattr(response, "tool_calls", None) or []) if response is not None else []
+        if tool_cap and len(turn.tool_trace) >= tool_cap and calls:
+            turn.kill_look_capped = True
+            think_emit("tool", "\n[think stopped: kill-look tool cap]\n")
+            ran_out = False
+            break
         if not calls:
             # Empty GROK after any completed tool is hung, not a checkpoint
             # and not a completed look. #147 keyed this on
@@ -1897,6 +1925,8 @@ async def _grok_turn_impl(
             snap=snap,
             turn=turn,
         )
+        if tool_cap and len(turn.tool_trace) >= tool_cap:
+            turn.kill_look_capped = True
         if turn.tool_trace or turn.sends or turn.poked:
             try:
                 g._chat_had_work = True

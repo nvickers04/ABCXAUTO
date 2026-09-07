@@ -34,6 +34,8 @@ DEFAULT_LOOK_CAP = 160
 DEFAULT_TOKEN_CAP = 2_500_000
 LOOK_CAP_RANGE = (1, 400)
 TOKEN_CAP_RANGE = (50_000, 10_000_000)
+# pcs-skew Arm v0: one RTH entry look per scored session. Not the 160 grind cap.
+KILL_ENTRY_LOOKS_MAX = 1
 
 _cache: dict[str, Any] | None = None
 _cache_path: str = ""
@@ -67,7 +69,7 @@ def session_key(session: str = "", *, now: datetime | None = None) -> str:
 
 
 def _empty(key: str) -> dict[str, Any]:
-    return {"key": key, "looks": 0, "tokens": 0}
+    return {"key": key, "looks": 0, "tokens": 0, "kill_entry_looks": 0}
 
 
 def _row_of(raw: Any, key: str = "") -> dict[str, Any]:
@@ -80,7 +82,16 @@ def _row_of(raw: Any, key: str = "") -> dict[str, Any]:
         tokens = max(0, int(blob.get("tokens") or 0))
     except (TypeError, ValueError):
         tokens = 0
-    return {"key": str(blob.get("key") or key), "looks": looks, "tokens": tokens}
+    try:
+        kill_entry = max(0, int(blob.get("kill_entry_looks") or 0))
+    except (TypeError, ValueError):
+        kill_entry = 0
+    return {
+        "key": str(blob.get("key") or key),
+        "looks": looks,
+        "tokens": tokens,
+        "kill_entry_looks": kill_entry,
+    }
 
 
 def _load_table() -> dict[str, dict[str, Any]]:
@@ -203,6 +214,7 @@ def usage(session: str = "", *, now: datetime | None = None) -> dict[str, Any]:
         why = "looks"
     if tokens >= token_cap:
         why = "tokens" if not why else "looks+tokens"
+    kill_entry = int(state.get("kill_entry_looks") or 0)
     return {
         "key": str(state.get("key") or ""),
         "looks": looks,
@@ -211,6 +223,8 @@ def usage(session: str = "", *, now: datetime | None = None) -> dict[str, Any]:
         "token_cap": token_cap,
         "looks_left": max(0, look_cap - looks),
         "tokens_left": max(0, token_cap - tokens),
+        "kill_entry_looks": kill_entry,
+        "kill_entry_left": max(0, KILL_ENTRY_LOOKS_MAX - kill_entry),
         "hit": hit,
         "why": why,
     }
@@ -238,3 +252,71 @@ def note_look(
     table[str(state.get("key") or "")] = state
     _save_table(table)
     return usage(session, now=now)
+
+
+def _iso_week_key(*, now: datetime | None = None) -> str:
+    from zoneinfo import ZoneInfo
+
+    clock = now or datetime.now(ZoneInfo("America/New_York"))
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=ZoneInfo("America/New_York"))
+    else:
+        clock = clock.astimezone(ZoneInfo("America/New_York"))
+    iso = clock.isocalendar()
+    return f"{iso.year}-W{iso.week:02d}:research"
+
+
+def kill_entry_looks(session: str = "", *, now: datetime | None = None) -> int:
+    state = _state_for(session, now=now)
+    try:
+        return max(0, int(state.get("kill_entry_looks") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def note_kill_entry_look(
+    session: str = "",
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Count one OPEN kill-look (new pcs-skew risk). Manage looks do not call this."""
+    state = _state_for(session, now=now)
+    cur = int(state.get("kill_entry_looks") or 0)
+    if cur < KILL_ENTRY_LOOKS_MAX:
+        state["kill_entry_looks"] = cur + 1
+        table = _load_table()
+        table[str(state.get("key") or "")] = state
+        _save_table(table)
+    return usage(session, now=now)
+
+
+def consume_open_entry_look(
+    session: str = "",
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Idempotent: first OPEN grok consumes the day's entry look."""
+    return note_kill_entry_look(session, now=now)
+
+
+def research_week_looks(*, now: datetime | None = None) -> int:
+    key = _iso_week_key(now=now)
+    table = _load_table()
+    row = table.get(key)
+    if not isinstance(row, dict):
+        return 0
+    try:
+        return max(0, int(row.get("looks") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def note_research_look(*, now: datetime | None = None) -> int:
+    """Count one AH/PM research look against the weekly cap."""
+    key = _iso_week_key(now=now)
+    table = _load_table()
+    row = table.get(key) or _empty(key)
+    row["looks"] = int(row.get("looks") or 0) + 1
+    table[key] = _row_of(row, key)
+    _save_table(table)
+    return int(table[key].get("looks") or 0)

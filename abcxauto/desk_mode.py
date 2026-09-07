@@ -175,6 +175,14 @@ def research_keep_looking(session: str = "") -> bool:
     if sess == RTH_SESSION or sess not in RESEARCH_SESSIONS:
         return False
     try:
+        from abcxauto.thin_rth_kill_look import kill_look_enabled
+
+        # Kill-window AH is one-shot (≤2/week), not a keep-looking mill.
+        if kill_look_enabled():
+            return False
+    except Exception:
+        pass
+    try:
         from abcxauto.park_clock import honor_park
 
         if honor_park(session=sess):
@@ -371,7 +379,12 @@ _SYNTHESIZE_MILL_RE = re.compile(
     r"|\btrading\s+plans?\b"
     r"|\bthe\s+picture\b"
     r"|\b(?:let\s+me|time\s+to|need\s+to|going\s+to)\s+decide\b"
-    r"|\bdecide\s+(?:whether|on|what|how)\b",
+    r"|\bdecide\s+(?:whether|on|what|how)\b"
+    r"|\bgather(?:ing)?\b"
+    r"|\b(?:keep\s+)?(?:scanning|browsing)\b"
+    r"|\bspin(?:ning)?\b"
+    r"|\bone\s+more\s+(?:scan|pass)\b"
+    r"|\bdecide(?:d)?\s+without\s+(?:a\s+)?send\b",
     re.IGNORECASE,
 )
 
@@ -584,7 +597,13 @@ def session_model(session: str = "", cfg: Any = None) -> str:
         cfg = get_config()
     base = _model_token(getattr(cfg, "model", None)) or "grok-4.6"
     if is_rth_session(session):
-        return _model_token(getattr(cfg, "model_rth", None)) or base
+        token = _model_token(getattr(cfg, "model_rth", None)) or base
+        try:
+            from abcxauto.thin_rth_kill_look import rth_model_no_xhigh
+
+            return rth_model_no_xhigh(token)
+        except Exception:
+            return token
     return _model_token(getattr(cfg, "model_research", None)) or base
 
 

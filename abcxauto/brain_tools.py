@@ -1065,8 +1065,16 @@ AGENT_TOOLS = [
 ]
 
 
-def _send_strategy_names_for_look() -> list[str]:
-    """send enum this look. Hold is never a ticket."""
+def _send_strategy_names_for_look(*, session: str = "") -> list[str]:
+    """send enum this look. Hold is never a ticket. Kill RTH is vertical_spread only."""
+    try:
+        from abcxauto.thin_rth_kill_look import send_strategy_names
+
+        names = send_strategy_names(session=session)
+        if names is not None:
+            return list(names)
+    except Exception:
+        logger.debug("kill-look send enum failed", exc_info=True)
     return [n for n in ticket_strategy_names() if n != "hold"]
 
 
@@ -1074,23 +1082,37 @@ def agent_tools(*, session: str = "") -> list:
     """Tools this look. Overnight park is code, not a Grok clock.
 
     Research (premarket / AH / closed) omits ``send``. RTH keeps ``send``.
-    ``web`` is COLOR on both (not a live trigger).
+    ``web`` is COLOR on both (not a live trigger) unless the RTH kill look
+    STAY allowlist is on (then DIE tools including web are omitted).
     """
     from abcxauto.desk_mode import is_research_session
 
     research = is_research_session(session)
-    names = _send_strategy_names_for_look()
+    names = _send_strategy_names_for_look(session=session)
+    stay: set[str] | None = None
+    try:
+        from abcxauto.thin_rth_kill_look import STAY_TOOLS, kill_look_rth
+
+        if kill_look_rth(session):
+            stay = set(STAY_TOOLS)
+    except Exception:
+        stay = None
     out: list = []
     for t in AGENT_TOOLS:
         fn = getattr(t, "function", None)
         name = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
+        if stay is not None and name not in stay:
+            continue
         if name == "send":
             if research:
                 continue
             out.append(_send_tool(names))
         else:
             out.append(t)
-    out.append(_web_tool())
+    if stay is None:
+        out.append(_web_tool())
+    elif "web" in stay:
+        out.append(_web_tool())
     return out
 
 def _stash_live(
@@ -1300,6 +1322,16 @@ async def _run_tool(
         args if isinstance(args, dict) else {},
         fallback_symbols=fallback_quote_symbols(world, snap),
     )
+
+    try:
+        from abcxauto.thin_rth_kill_look import die_tool_block
+
+        sess = str(getattr(world, "session_status", "") or "")
+        blocked = die_tool_block(name, session=sess)
+        if blocked is not None:
+            return _hub()._clip(blocked)
+    except Exception:
+        logger.debug("kill-look die-tool gate failed", exc_info=True)
 
     if name == "book":
         payload = _hub()._book_payload(world, tool_trace=turn.tool_trace, snap=snap)
@@ -2021,6 +2053,48 @@ async def _run_tool(
         bind_send_card(act, extra=args.get("card"))
         if args.get("target_conId"):
             act["target_conId"] = str(args.get("target_conId"))
+        try:
+            from abcxauto.thin_rth_kill_look import (
+                REASON_TOOLS,
+                force_skip_or_manage,
+                kill_look_rth,
+                turns_or_tools_breached,
+            )
+
+            if kill_look_rth(sess):
+                mode = str(getattr(turn, "kill_mode", "") or "")
+                breached = turns_or_tools_breached(
+                    mode,
+                    model_turns=int(getattr(turn, "steps", 0) or 0),
+                    tool_count=len(getattr(turn, "tool_trace", None) or []),
+                )
+                if not breached and getattr(turn, "kill_look_capped", False):
+                    breached = REASON_TOOLS
+                capped = force_skip_or_manage(
+                    mode,
+                    strategy=str(act.get("strategy") or ""),
+                    params=dict(params),
+                    breached=breached,
+                )
+                if capped is not None:
+                    turn.last_act = {
+                        "action": str(capped.get("strategy") or "blocked"),
+                        "strategy": str(capped.get("strategy") or "blocked"),
+                        "params": {},
+                        "rationale": str(capped.get("note") or ""),
+                    }
+                    turn.last_result = capped
+                    turn.last_strat = str(capped.get("strategy") or "blocked")
+                    turn.sends.append(
+                        {
+                            "act": dict(turn.last_act),
+                            "result": capped,
+                            "strat": turn.last_strat,
+                        }
+                    )
+                    return _hub()._clip(capped)
+        except Exception:
+            logger.debug("kill-look turn/tool cap failed", exc_info=True)
         result = await execute_ticket(act, connector, world, snap)
         strat = str(act.get("strategy") or result.get("strategy") or "")
         if not isinstance(result, dict):
