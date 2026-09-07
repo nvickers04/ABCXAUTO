@@ -750,6 +750,15 @@ async def execute_proposal(
     except Exception:
         logger.debug("send_marks quote failed", exc_info=True)
         quote = {}
+    pcs_lifecycle = None
+    try:
+        from abcxauto.pcs_fill_lambda import journal_pcs_pre_send_async
+
+        pcs_lifecycle = await journal_pcs_pre_send_async(
+            journal, connector, proposal, quote, proposal_id=journal_id
+        )
+    except Exception:
+        logger.debug("pcs fill-λ pre-send failed", exc_info=True)
     result = await method(**kwargs)
     logger.info(f"Proposal #{proposal.id} result: {result}")
     ok = _dispatch_succeeded(result)
@@ -779,6 +788,20 @@ async def execute_proposal(
             marks=marks,
             result=journal_result,
         )
+    try:
+        from abcxauto.pcs_fill_lambda import journal_pcs_post_send
+
+        journal_pcs_post_send(
+            journal,
+            proposal,
+            quote,
+            journal_result,
+            ok,
+            proposal_id=journal_id,
+            lifecycle_id=pcs_lifecycle,
+        )
+    except Exception:
+        logger.debug("pcs fill-λ post-send failed", exc_info=True)
 
     if (
         cfg.risk_gates_enabled

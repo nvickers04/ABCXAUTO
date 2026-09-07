@@ -1309,3 +1309,9 @@ async def _post_act_structure_and_plan(
                     close_trade_plan("scrape_suspect")
     except Exception:
         logger.exception("post_act structure/plan failed")
+    try:
+        from abcxauto.pcs_fill_lambda import follow_pcs_after_act
+
+        await follow_pcs_after_act(act, result, snap, connector)
+    except Exception:
+        logger.debug("post_act pcs fill-λ failed", exc_info=True)

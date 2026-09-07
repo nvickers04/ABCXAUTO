@@ -692,6 +692,12 @@ class PortfolioMonitor:
             get_journal().ingest_look(snapshot)
         except Exception as e:
             logger.warning(f"Monitor look journal ingest failed: {e}")
+        try:
+            from abcxauto.pcs_fill_lambda import refresh_pcs_manage
+
+            await refresh_pcs_manage(get_journal(), snapshot, self.connector)
+        except Exception:
+            logger.debug("monitor pcs manage check failed", exc_info=True)
         self.latest = snapshot
         self.session.emit({"type": "snapshot", "snapshot": snapshot})
         return snapshot

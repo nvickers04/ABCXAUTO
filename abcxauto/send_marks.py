@@ -519,6 +519,18 @@ async def capture_send_quote(connector: Any, proposal: Any) -> dict[str, Any]:
     symbol = str(dumped.get("symbol") or "").strip().upper()
     if not symbol:
         return {}
+    try:
+        from abcxauto.pcs_fill_lambda import capture_pcs_vertical_quote, is_pcs_ticket
+
+        strategy = str(getattr(proposal, "strategy", "") or dumped.get("strategy") or "")
+        card = getattr(proposal, "card", None) or dumped.get("card")
+        if is_pcs_ticket(strategy, dumped, card=card):
+            pcs = await capture_pcs_vertical_quote(connector, dumped)
+            # Do not fall through to the underlying STK print — that is not
+            # BAG geometry and must not graduate as a spread mid.
+            return pcs if isinstance(pcs, dict) else {}
+    except Exception:
+        logger.debug("send_marks pcs quote failed", exc_info=True)
     exp = dumped.get("expiration")
     strike = dumped.get("strike")
     right = dumped.get("right")

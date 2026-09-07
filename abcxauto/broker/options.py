@@ -511,6 +511,67 @@ class IBKROptionsMixin:
             except Exception:
                 pass
 
+    async def get_live_vertical_bag_quote(
+        self,
+        symbol: str,
+        expiration: str,
+        long_strike: float,
+        short_strike: float,
+        right: str,
+    ) -> Dict[str, Any]:
+        """IBKR stream snapshot for the vertical BAG. Never MDA."""
+        from abcxauto.broker.connection import safe_sleep as _safe_sleep
+        from abcxauto.broker.quotes import quote_from_ticker
+
+        sym = str(symbol or "").strip().upper()
+        exp = str(expiration or "").strip()
+        rgt = str(right or "").upper()[:1]
+        try:
+            long_k = float(long_strike)
+            short_k = float(short_strike)
+        except (TypeError, ValueError):
+            return {"error": "strikes required", "source": "ibkr"}
+        if not sym or not exp or rgt not in ("C", "P"):
+            return {"error": "symbol, expiration, strikes, right required", "source": "ibkr"}
+        if not await self._ensure_connected():
+            return {"error": "Not connected", "source": "ibkr", "symbol": sym}
+        combo = None
+        try:
+            options = await self._create_options(sym, exp, [(long_k, rgt), (short_k, rgt)])
+            legs = [
+                (opt.conId, 1, "BUY" if i == 0 else "SELL")
+                for i, opt in enumerate(options)
+            ]
+            combo = self._build_combo(sym, legs)
+            ticker = None
+            req = getattr(self.ib, "reqTickersAsync", None)
+            if callable(req):
+                tickers = await req(combo)
+                ticker = tickers[0] if tickers else None
+            if ticker is None:
+                ticker = self.ib.reqMktData(combo, "", True, False)
+                await _safe_sleep(0.8)
+            out = quote_from_ticker(ticker, symbol=sym)
+            out.update({
+                "expiration": exp,
+                "long_strike": long_k,
+                "short_strike": short_k,
+                "right": rgt,
+                "sec": "BAG",
+            })
+            if out.get("bid") is None and out.get("ask") is None and out.get("last") is None:
+                out["error"] = "no IBKR tick yet"
+            return out
+        except Exception as exc:
+            logger.warning("IBKR vertical BAG quote failed for %s: %s", sym, exc)
+            return {"error": str(exc), "source": "ibkr", "symbol": sym}
+        finally:
+            if combo is not None:
+                try:
+                    self.ib.cancelMktData(combo)
+                except Exception:
+                    pass
+
     # ========== VERTICAL SPREADS ==========
 
     async def place_vertical_spread(
