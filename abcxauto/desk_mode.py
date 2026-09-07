@@ -609,6 +609,34 @@ def session_model(session: str = "", cfg: Any = None) -> str:
     return _model_token(getattr(cfg, "model_research", None)) or base
 
 
+def _params_map(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    return dict(raw)
+
+
+def session_model_params(session: str = "", cfg: Any = None) -> dict[str, Any]:
+    """RTH/research ``model_params_*`` when set; else shared ``model_params``.
+
+    Invalid maps fail-closed to ``{}``. RTH thin strips xhigh effort so
+    params cannot undo ``rth_model_no_xhigh`` / F10.
+    """
+    if cfg is None:
+        from abcxauto.config import get_config
+
+        cfg = get_config()
+    shared = _params_map(getattr(cfg, "model_params", None))
+    if is_rth_session(session):
+        chosen = _params_map(getattr(cfg, "model_params_rth", None)) or shared
+        try:
+            from abcxauto.thin_rth_kill_look import rth_params_no_xhigh
+
+            return rth_params_no_xhigh(chosen)
+        except Exception:
+            return {}
+    return _params_map(getattr(cfg, "model_params_research", None)) or shared
+
+
 def research_send_block(*, session: str = "") -> dict[str, Any]:
     sess = desk_session(session)
     return {

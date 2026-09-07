@@ -222,14 +222,17 @@ class GrokClient:
             client = AsyncClient(api_key=cfg.xai_api_key)
         self.client = _wrap_client(client)
         chosen = str(model or "").strip()
-        if not chosen and str(session or "").strip():
-            from abcxauto.desk_mode import session_model
+        params = dict(getattr(cfg, "model_params", None) or {})
+        if str(session or "").strip():
+            from abcxauto.desk_mode import session_model, session_model_params
 
-            chosen = session_model(session, cfg)
+            if not chosen:
+                chosen = session_model(session, cfg)
+            params = session_model_params(session, cfg)
         self.model = chosen or cfg.model or DEFAULT_MODEL
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens
-        self.model_params = dict(getattr(cfg, "model_params", None) or {})
+        self.model_params = params
         self.chat = None
         self._wake_n = 0
         self._wake_appended = False

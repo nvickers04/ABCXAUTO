@@ -115,6 +115,8 @@ OPERATOR_DISK_KEYS: frozenset[str] = frozenset({
     "model_rth",
     "model_research",
     "model_params",
+    "model_params_rth",
+    "model_params_research",
 })
 _OPERATOR_DISK_REJECT = "operator disk — file wins"
 # agent_state.json may hold Grok working size + scan depth. Never operator knobs.

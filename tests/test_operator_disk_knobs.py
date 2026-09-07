@@ -117,6 +117,8 @@ def test_operator_disk_key_set():
         "model_rth",
         "model_research",
         "model_params",
+        "model_params_rth",
+        "model_params_research",
     ):
         assert is_operator_disk_key(key)
         assert key in OPERATOR_DISK_KEYS
