@@ -260,7 +260,10 @@ async def test_token_is_single_use(monkeypatch):
     assert first["status"] == "ok"
     replay = await send_action(ticket, _connector())
     assert replay["status"] == "blocked"
-    assert replay.get("reason_code") == REASON_PREVIEW_USED
+    # KEEP-4 TTL runs before authorize, so a spent token is token_used.
+    from abcxauto.token_ttl import REASON_TOKEN_USED
+
+    assert replay.get("reason_code") in (REASON_PREVIEW_USED, REASON_TOKEN_USED)
     assert len(dispatched) == 1
 
 
