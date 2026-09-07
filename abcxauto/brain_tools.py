@@ -2058,11 +2058,30 @@ async def _run_tool(
                 REASON_TOOLS,
                 force_skip_or_manage,
                 kill_look_rth,
+                one_open_send_block,
                 turns_or_tools_breached,
             )
 
             if kill_look_rth(sess):
                 mode = str(getattr(turn, "kill_mode", "") or "")
+                one = one_open_send_block(mode, turn)
+                if one is not None:
+                    turn.last_act = {
+                        "action": str(one.get("strategy") or "blocked"),
+                        "strategy": str(one.get("strategy") or "blocked"),
+                        "params": {},
+                        "rationale": str(one.get("note") or ""),
+                    }
+                    turn.last_result = one
+                    turn.last_strat = str(one.get("strategy") or "blocked")
+                    turn.sends.append(
+                        {
+                            "act": dict(turn.last_act),
+                            "result": one,
+                            "strat": turn.last_strat,
+                        }
+                    )
+                    return _hub()._clip(one)
                 breached = turns_or_tools_breached(
                     mode,
                     model_turns=int(getattr(turn, "steps", 0) or 0),

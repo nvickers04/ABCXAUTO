@@ -1735,20 +1735,32 @@ async def _grok_turn_impl(
     tool_cap = 0
     try:
         from abcxauto.thin_rth_kill_look import (
+            MODEL_TURNS_MAX,
+            TOOLS_MANAGE_MAX,
+            kill_look_rth,
             kill_mode as _kill_mode,
             max_model_turns,
             max_tools,
         )
 
+        in_flight = bool(
+            snap.get("kill_entry_in_flight")
+            or getattr(world, "kill_entry_in_flight", False)
+        )
         kill_mode = _kill_mode(
             session,
             positions=list(getattr(world, "positions", None) or snap.get("positions") or []),
             open_lots=list(getattr(world, "open_lots", None) or []),
+            in_flight=in_flight,
         )
         turn.kill_mode = kill_mode
-        if kill_mode in ("open", "manage"):
-            turn_cap = max(1, int(max_model_turns(kill_mode) or 1))
-            tool_cap = int(max_tools(kill_mode) or 0)
+        if kill_look_rth(session):
+            if kill_mode in ("open", "manage"):
+                turn_cap = max(1, int(max_model_turns(kill_mode) or 1))
+                tool_cap = int(max_tools(kill_mode) or 0)
+            else:
+                turn_cap = max(1, MODEL_TURNS_MAX)
+                tool_cap = int(TOOLS_MANAGE_MAX)
     except Exception:
         logger.debug("kill-look turn cap failed", exc_info=True)
     live_before = getattr(g, "chat", None)

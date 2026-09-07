@@ -270,6 +270,7 @@ class ProEngine:
         self._mill_wake = False
         self._mill_streak = 0
         self._mill_gave_up = False
+        self._kill_entry_in_flight = False
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
         from abcxauto.think_stream import bind_engine
@@ -990,6 +991,7 @@ class ProEngine:
             same_look=self._kill_look_same_look(),
             unprotected=bool(prot.get("unprotected_symbols")),
             prompt_tokens=prompt_n,
+            in_flight=bool(getattr(self, "_kill_entry_in_flight", False)),
         )
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
@@ -1069,6 +1071,7 @@ class ProEngine:
             self._mill_streak = 0
             self._mill_gave_up = False
             self._mill_wake = False
+            self._kill_entry_in_flight = False
         if parked and not stay:
             self._fail_streak = 0
             self._cold_next = True
@@ -1099,6 +1102,7 @@ class ProEngine:
             if self._mill_streak >= SYNTHESIZE_MILL_TRIES:
                 self._mill_gave_up = True
                 self._mill_wake = False
+                self._kill_entry_in_flight = False
                 self._resume_think = True
                 self._cold_next = True
             else:
@@ -1116,6 +1120,7 @@ class ProEngine:
             self._mill_wake = False
             self._mill_streak = 0
             self._mill_gave_up = False
+            self._kill_entry_in_flight = False
         else:
             self._cold_next = bool(failed or parked or stream_err)
         if not failed:
@@ -1875,10 +1880,17 @@ class ProEngine:
                         if not self._kill_look_same_look():
                             if mode == "open":
                                 consume_open_entry_look(session)
+                                self._kill_entry_in_flight = True
                             elif mode == "research":
                                 note_research_look()
                     except Exception:
                         logger.debug("kill-look consume failed", exc_info=True)
+                    try:
+                        s["kill_entry_in_flight"] = bool(
+                            getattr(self, "_kill_entry_in_flight", False)
+                        )
+                    except Exception:
+                        logger.debug("kill-look in_flight stamp failed", exc_info=True)
                     out = await self._host_think(n, g, s, resume=resume)
                     if not out.get("_recover"):
                         self._recover_same_chat = False
