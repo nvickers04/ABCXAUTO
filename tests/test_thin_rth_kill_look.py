@@ -540,6 +540,47 @@ async def test_execute_ticket_kill_look_blocks_non_pcs(monkeypatch):
     assert result.get("reason_code") == REASON_ALLOWLIST
 
 
+@pytest.mark.asyncio
+async def test_execute_ticket_in_flight_does_not_abort_legal_pcs(monkeypatch):
+    """Look #1 consume must not F10-abort the legal BAG. Later clerk gates may still block."""
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    consume_open_entry_look("regular")
+    from abcxauto.agent_loop import execute_ticket
+
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.live_f10_gate",
+        lambda: _allow_f10(),
+    )
+    world = _world(session_status="regular", flat=True)
+    ticket = {
+        "strategy": "vertical_spread",
+        "params": dict(PCS_OPEN),
+        "card": PCS_CARD,
+    }
+    aborted = await execute_ticket(ticket, object(), world, {"positions": []})
+    assert aborted.get("status") == "blocked"
+    assert aborted.get("reason_code") == REASON_F10
+    inflight = await execute_ticket(
+        ticket,
+        object(),
+        world,
+        {"positions": [], "kill_entry_in_flight": True},
+    )
+    assert inflight.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST, REASON_ENTRY_BUDGET}
+    close = await execute_ticket(
+        {
+            "strategy": "vertical_spread",
+            "params": {**PCS_OPEN, "closing_position": True},
+            "card": PCS_CARD,
+        },
+        object(),
+        world,
+        {"positions": []},
+    )
+    assert close.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST}
+
+
 def test_pro_engine_skip_reason_entry_budget(monkeypatch):
     _kill_on(monkeypatch)
     reset_session_caps()
