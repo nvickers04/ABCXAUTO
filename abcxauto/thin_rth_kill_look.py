@@ -775,30 +775,6 @@ def kill_look_send_block(
             "reason_code": REASON_PORT,
             "strategy": "blocked",
         }
-    fuse = abort_fuse
-    if fuse is None:
-        try:
-            from abcxauto.abort_fuse import scorecard_abort_fuse
-
-            fuse = scorecard_abort_fuse()
-        except Exception:
-            fuse = "none"
-    mode = kill_mode(
-        session,
-        positions=positions,
-        open_lots=open_lots,
-        f10=f10,
-        in_flight=in_flight,
-        abort_fuse=fuse,
-    )
-    ok, why = pcs_send_ok(strat, params, card, mode=mode, abort_fuse=str(fuse or ""))
-    if not ok:
-        return {
-            "status": "blocked",
-            "note": why,
-            "reason_code": why,
-            "strategy": "blocked",
-        }
     gate = f10 if isinstance(f10, dict) else live_f10_gate()
     if not gate.get("allow_new_risk", False):
         why = str(gate.get("reason_code") or "")
@@ -826,6 +802,30 @@ def kill_look_send_block(
             think_emit("tool", "\n[F10 preferred $1 tripwire — hard still $2]\n")
         except Exception:
             logger.debug("F10 preferred think emit failed", exc_info=True)
+    fuse = abort_fuse
+    if fuse is None:
+        try:
+            from abcxauto.abort_fuse import scorecard_abort_fuse
+
+            fuse = scorecard_abort_fuse()
+        except Exception:
+            fuse = "none"
+    mode = kill_mode(
+        session,
+        positions=positions,
+        open_lots=open_lots,
+        f10=f10,
+        in_flight=in_flight,
+        abort_fuse=fuse,
+    )
+    ok, why = pcs_send_ok(strat, params, card, mode=mode, abort_fuse=str(fuse or ""))
+    if not ok:
+        return {
+            "status": "blocked",
+            "note": why,
+            "reason_code": why,
+            "strategy": "blocked",
+        }
     return None
 
 
