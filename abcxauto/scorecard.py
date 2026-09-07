@@ -3,12 +3,21 @@
 Hero / session is the current ET regular session (RTH). Inception stays a
 window row and the promote floor — never the hero. vs SPY is a real print
 pair or blank; this module does not invent a SPY series.
+
+PCS Arm v0 N=20 kill scorecard logging lives in ``pcs_kill_scorecard``
+(journal-backed measurement only — not looking / not STRESS_PASS).
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+# Re-export kill-scorecard hooks for QA callers that already import scorecard.
+from abcxauto.pcs_kill_scorecard import (  # noqa: F401
+    normalize_session_row as normalize_pcs_kill_session,
+    window_aggregates as pcs_kill_window_aggregates,
+)
 
 # Short → long. Grok picks which window is enough; code only reports facts.
 # Promote / inception beating stays the full-book row on compute_scorecard.

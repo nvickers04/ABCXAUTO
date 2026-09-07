@@ -176,6 +176,17 @@ CREATE TABLE IF NOT EXISTS send_mark_orders (
     order_id INTEGER PRIMARY KEY,
     send_mark_id INTEGER NOT NULL REFERENCES send_marks(id)
 );
+
+CREATE TABLE IF NOT EXISTS pcs_kill_sessions (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    session_id TEXT NOT NULL UNIQUE,
+    session_date TEXT NOT NULL,
+    valid INTEGER NOT NULL,
+    send TEXT,
+    send_credited INTEGER NOT NULL DEFAULT 0,
+    row_json TEXT NOT NULL
+);
 """
 
 _FILL_MARK_COLS = (
@@ -599,6 +610,24 @@ class TradeJournal:
                 conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_send_marks_status "
                     "ON send_marks(status)"
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pcs_kill_sessions (
+                        id INTEGER PRIMARY KEY,
+                        ts TEXT NOT NULL,
+                        session_id TEXT NOT NULL UNIQUE,
+                        session_date TEXT NOT NULL,
+                        valid INTEGER NOT NULL,
+                        send TEXT,
+                        send_credited INTEGER NOT NULL DEFAULT 0,
+                        row_json TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_pcs_kill_sessions_date "
+                    "ON pcs_kill_sessions(session_date)"
                 )
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.commit()
@@ -2748,6 +2777,150 @@ class TradeJournal:
         except Exception:
             logger.exception("journal.recent_self_tunes failed")
             return []
+
+    def record_pcs_kill_session(
+        self,
+        payload: Any = None,
+        *,
+        ts: Optional[str] = None,
+    ) -> Optional[int]:
+        """Persist one PCS Arm v0 kill scorecard session row (QA logging only)."""
+        if not self.enabled:
+            return None
+        try:
+            from abcxauto.pcs_kill_scorecard import normalize_session_row
+
+            row = normalize_session_row(payload or {})
+            self._ensure_schema()
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO pcs_kill_sessions (
+                        ts, session_id, session_date, valid, send, send_credited, row_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        ts=excluded.ts,
+                        session_date=excluded.session_date,
+                        valid=excluded.valid,
+                        send=excluded.send,
+                        send_credited=excluded.send_credited,
+                        row_json=excluded.row_json
+                    """,
+                    (
+                        _row_ts(ts),
+                        str(row.get("session_id") or ""),
+                        str(row.get("session_date") or ""),
+                        1 if row.get("valid") else 0,
+                        row.get("send"),
+                        1 if row.get("send_credited") else 0,
+                        _json_dumps(row),
+                    ),
+                )
+                conn.commit()
+                # lastrowid is 0 on conflict-update; re-read id
+                rid = int(cur.lastrowid or 0)
+                if rid <= 0:
+                    got = conn.execute(
+                        "SELECT id FROM pcs_kill_sessions WHERE session_id = ?",
+                        (str(row.get("session_id") or ""),),
+                    ).fetchone()
+                    rid = int(got[0]) if got else 0
+                return rid or None
+        except Exception:
+            logger.exception("journal.record_pcs_kill_session failed")
+            return None
+
+    def list_pcs_kill_sessions(
+        self,
+        *,
+        limit: int = 20,
+        session_date: Optional[str] = None,
+        ascending: bool = True,
+    ) -> List[dict]:
+        """Return normalized PCS kill session rows (oldest-first by default)."""
+        try:
+            self._ensure_schema()
+            lim = max(1, int(limit))
+            with self._connect() as conn:
+                if session_date:
+                    sql = """
+                        SELECT id, ts, session_id, session_date, valid, send,
+                               send_credited, row_json
+                        FROM pcs_kill_sessions
+                        WHERE session_date = ?
+                        ORDER BY id ASC
+                        LIMIT ?
+                    """
+                    rows = conn.execute(sql, (str(session_date), lim)).fetchall()
+                else:
+                    sql = """
+                        SELECT id, ts, session_id, session_date, valid, send,
+                               send_credited, row_json
+                        FROM pcs_kill_sessions
+                        ORDER BY id ASC
+                        LIMIT ?
+                    """
+                    rows = conn.execute(sql, (lim,)).fetchall()
+            out: List[dict] = []
+            for raw in rows:
+                item = dict(raw)
+                blob = item.pop("row_json", None)
+                try:
+                    parsed = json.loads(blob) if blob else {}
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    parsed = {}
+                if not isinstance(parsed, dict):
+                    parsed = {}
+                parsed["journal_id"] = item.get("id")
+                parsed["ts"] = item.get("ts")
+                out.append(parsed)
+            if not ascending:
+                out.reverse()
+            return out
+        except Exception:
+            logger.exception("journal.list_pcs_kill_sessions failed")
+            return []
+
+    def pcs_kill_window(
+        self,
+        *,
+        limit: int = 20,
+        session_date: Optional[str] = None,
+        qty0_streak_limit: int = 5,
+    ) -> dict:
+        """Window aggregates + PASS/FAIL/ABORT over recorded PCS kill rows."""
+        try:
+            from abcxauto.pcs_kill_scorecard import window_aggregates
+
+            rows = self.list_pcs_kill_sessions(
+                limit=limit, session_date=session_date, ascending=True
+            )
+            return window_aggregates(
+                rows, qty0_streak_limit=qty0_streak_limit, normalize=False
+            )
+        except Exception:
+            logger.exception("journal.pcs_kill_window failed")
+            return {
+                "n": 0,
+                "n_valid": 0,
+                "sum_NL": 0.0,
+                "sum_conservative_pnl": 0.0,
+                "sum_model_cost": 0.0,
+                "net_conservative": 0.0,
+                "send_rate": 0.0,
+                "send_credited": 0,
+                "mean_lambda": None,
+                "mean_λ": None,
+                "max_dd_pct": None,
+                "qty0_streak_max": 0,
+                "qty0_streak_limit": int(qty0_streak_limit),
+                "f10_breach_count": 0,
+                "invalid_rows": 0,
+                "mean_session_score": None,
+                "verdict": "FAIL",
+                "abort_fuse": "none",
+                "rows": [],
+            }
 
 
 _journal: Optional[TradeJournal] = None
