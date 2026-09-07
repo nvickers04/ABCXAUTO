@@ -49,6 +49,8 @@ def test_schema_creation(journal, tmp_path):
         "session_markers",
         "send_marks",
         "send_mark_orders",
+        "pcs_kill_sessions",
+        "pcs_fill_events",
     } <= tables
 
 

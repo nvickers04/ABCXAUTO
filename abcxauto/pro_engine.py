@@ -1358,6 +1358,12 @@ class ProEngine:
         except Exception:
             logger.debug("look journal ingest failed", exc_info=True)
         try:
+            from abcxauto.pcs_fill_lambda import refresh_pcs_manage
+
+            await refresh_pcs_manage(get_journal(), s, getattr(self, "conn", None))
+        except Exception:
+            logger.debug("look pcs manage check failed", exc_info=True)
+        try:
             from abcxauto.think_stream import seed_snap_from_last_turn
 
             seed_snap_from_last_turn(s)

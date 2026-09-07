@@ -187,6 +187,40 @@ CREATE TABLE IF NOT EXISTS pcs_kill_sessions (
     send_credited INTEGER NOT NULL DEFAULT 0,
     row_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS pcs_fill_events (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    event TEXT NOT NULL,
+    lifecycle_id TEXT,
+    dedupe_key TEXT UNIQUE,
+    order_id INTEGER,
+    exec_id TEXT,
+    symbol TEXT,
+    strategy TEXT,
+    card TEXT,
+    side TEXT,
+    quote_source TEXT,
+    bid REAL,
+    ask REAL,
+    mid REAL,
+    half_spread REAL,
+    last REAL,
+    fill_price REAL,
+    credit REAL,
+    debit REAL,
+    lambda_declared REAL,
+    lambda_implied REAL,
+    lambda_stress REAL,
+    c_score REAL,
+    d_score REAL,
+    c_score_stress REAL,
+    d_score_stress REAL,
+    manage_rule TEXT,
+    evidence_valid INTEGER,
+    include_in_pnl_mean INTEGER,
+    payload_json TEXT
+);
 """
 
 _FILL_MARK_COLS = (
@@ -626,8 +660,49 @@ class TradeJournal:
                     """
                 )
                 conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pcs_fill_events (
+                        id INTEGER PRIMARY KEY,
+                        ts TEXT NOT NULL,
+                        event TEXT NOT NULL,
+                        lifecycle_id TEXT,
+                        dedupe_key TEXT UNIQUE,
+                        order_id INTEGER,
+                        exec_id TEXT,
+                        symbol TEXT,
+                        strategy TEXT,
+                        card TEXT,
+                        side TEXT,
+                        quote_source TEXT,
+                        bid REAL,
+                        ask REAL,
+                        mid REAL,
+                        half_spread REAL,
+                        last REAL,
+                        fill_price REAL,
+                        credit REAL,
+                        debit REAL,
+                        lambda_declared REAL,
+                        lambda_implied REAL,
+                        lambda_stress REAL,
+                        c_score REAL,
+                        d_score REAL,
+                        c_score_stress REAL,
+                        d_score_stress REAL,
+                        manage_rule TEXT,
+                        evidence_valid INTEGER,
+                        include_in_pnl_mean INTEGER,
+                        payload_json TEXT
+                    )
+                    """
+                )
+                conn.execute(
                     "CREATE INDEX IF NOT EXISTS idx_pcs_kill_sessions_date "
                     "ON pcs_kill_sessions(session_date)"
+                )
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_pcs_fill_events_lifecycle "
+                    "ON pcs_fill_events(lifecycle_id, event)"
                 )
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.commit()
@@ -1282,6 +1357,12 @@ class TradeJournal:
             resolved = self.resolve_unfilled_sends(open_orders, ts=ts)
         except Exception:
             logger.exception("journal.ingest_look resolve failed")
+        try:
+            from abcxauto.pcs_fill_lambda import ingest_pcs_from_look
+
+            ingest_pcs_from_look(self, bag)
+        except Exception:
+            logger.debug("journal.ingest_look pcs fill-λ failed", exc_info=True)
         return {"fills_inserted": int(inserted or 0), "sends_resolved": int(resolved or 0)}
 
     def recent_send_marks(self, limit: int = 50) -> List[dict]:
@@ -2921,6 +3002,204 @@ class TradeJournal:
                 "abort_fuse": "none",
                 "rows": [],
             }
+
+    def record_pcs_event(self, payload: Any = None, *, ts: Optional[str] = None) -> Optional[int]:
+        """Append one PCS fill-λ event. Never raises. Dedupe via dedupe_key."""
+        if not self.enabled or not isinstance(payload, dict):
+            return None
+        event = str(payload.get("event") or "").strip()
+        if not event:
+            return None
+        try:
+            self._ensure_schema()
+            ev = 1 if payload.get("evidence_valid") else (
+                0 if "evidence_valid" in payload else None
+            )
+            inc = 1 if payload.get("include_in_pnl_mean") else (
+                0 if "include_in_pnl_mean" in payload else None
+            )
+            oid = _coerce_order_id(payload.get("order_id"))
+            with self._connect() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO pcs_fill_events (
+                        ts, event, lifecycle_id, dedupe_key, order_id, exec_id,
+                        symbol, strategy, card, side, quote_source,
+                        bid, ask, mid, half_spread, last, fill_price,
+                        credit, debit, lambda_declared, lambda_implied,
+                        lambda_stress, c_score, d_score, c_score_stress,
+                        d_score_stress, manage_rule, evidence_valid,
+                        include_in_pnl_mean, payload_json
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    """,
+                    (
+                        _row_ts(ts or payload.get("ts")),
+                        event,
+                        str(payload.get("lifecycle_id") or "") or None,
+                        str(payload.get("dedupe_key") or "") or None,
+                        oid,
+                        None if payload.get("exec_id") in (None, "") else str(payload.get("exec_id")),
+                        str(payload.get("symbol") or "").upper()[:12] or None,
+                        str(payload.get("strategy") or "")[:60] or None,
+                        str(payload.get("card") or "")[:120] or None,
+                        payload.get("side"),
+                        payload.get("quote_source"),
+                        payload.get("bid"),
+                        payload.get("ask"),
+                        payload.get("mid"),
+                        payload.get("half_spread"),
+                        payload.get("last"),
+                        payload.get("fill_price"),
+                        payload.get("credit"),
+                        payload.get("debit"),
+                        payload.get("lambda_declared"),
+                        payload.get("lambda_implied"),
+                        payload.get("lambda_stress"),
+                        payload.get("c_score"),
+                        payload.get("d_score"),
+                        payload.get("c_score_stress"),
+                        payload.get("d_score_stress"),
+                        payload.get("manage_rule"),
+                        ev,
+                        inc,
+                        _json_dumps(payload),
+                    ),
+                )
+                conn.commit()
+                rid = int(cur.lastrowid or 0)
+                return rid or None
+        except Exception:
+            logger.exception("journal.record_pcs_event failed")
+            return None
+
+    def _pcs_row(self, raw: Any) -> dict:
+        item = dict(raw)
+        blob = item.pop("payload_json", None)
+        parsed: dict = {}
+        if blob:
+            try:
+                loaded = json.loads(blob) if isinstance(blob, str) else blob
+            except (TypeError, ValueError, json.JSONDecodeError):
+                loaded = {}
+            if isinstance(loaded, dict):
+                parsed = loaded
+        parsed.update({k: v for k, v in item.items() if v is not None})
+        if item.get("evidence_valid") is not None:
+            parsed["evidence_valid"] = bool(item.get("evidence_valid"))
+        if item.get("include_in_pnl_mean") is not None:
+            parsed["include_in_pnl_mean"] = bool(item.get("include_in_pnl_mean"))
+        return parsed
+
+    def pcs_events(
+        self,
+        *,
+        lifecycle_id: Optional[str] = None,
+        event: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[dict]:
+        """Newest-first PCS fill-λ events."""
+        try:
+            self._ensure_schema()
+            lim = max(1, int(limit))
+            clauses = []
+            args: list = []
+            if lifecycle_id:
+                clauses.append("lifecycle_id = ?")
+                args.append(str(lifecycle_id))
+            if event:
+                clauses.append("event = ?")
+                args.append(str(event))
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM pcs_fill_events
+                    {where}
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (*args, lim),
+                ).fetchall()
+            return [self._pcs_row(r) for r in rows]
+        except Exception:
+            logger.exception("journal.pcs_events failed")
+            return []
+
+    def pcs_open_lifecycle_id(self, geometry_key: str) -> Optional[str]:
+        """Open (no lifecycle_end) lifecycle for this PCS geometry."""
+        want = str(geometry_key or "").strip()
+        if not want:
+            return None
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT lifecycle_id, event, payload_json
+                    FROM pcs_fill_events
+                    WHERE lifecycle_id IS NOT NULL
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+            ended: set = set()
+            found: Optional[str] = None
+            for raw in rows:
+                lid = str(raw["lifecycle_id"] or "")
+                if not lid:
+                    continue
+                if str(raw["event"] or "") == "pcs_lifecycle_end":
+                    ended.add(lid)
+                    if found == lid:
+                        found = None
+                    continue
+                geo = ""
+                blob = raw["payload_json"]
+                try:
+                    parsed = json.loads(blob) if blob else {}
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    geo = str(parsed.get("geometry_key") or "")
+                if geo == want and lid not in ended:
+                    found = lid
+            return found
+        except Exception:
+            logger.exception("journal.pcs_open_lifecycle_id failed")
+            return None
+
+    def pcs_open_lifecycles(self) -> List[dict]:
+        """Latest row per lifecycle that has not recorded pcs_lifecycle_end."""
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM pcs_fill_events
+                    WHERE lifecycle_id IS NOT NULL
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+            ended: set = set()
+            latest: dict = {}
+            for raw in rows:
+                row = self._pcs_row(raw)
+                lid = str(row.get("lifecycle_id") or "")
+                if not lid:
+                    continue
+                if str(row.get("event") or "") == "pcs_lifecycle_end":
+                    ended.add(lid)
+                    latest.pop(lid, None)
+                    continue
+                if lid in ended:
+                    continue
+                latest[lid] = row
+            return list(latest.values())
+        except Exception:
+            logger.exception("journal.pcs_open_lifecycles failed")
+            return []
 
 
 _journal: Optional[TradeJournal] = None
