@@ -236,6 +236,44 @@ def _paper_live_port(cfg: Any) -> int | None:
     return None
 
 
+def _ttl_block_before_authorize(action: dict) -> Dict[str, Any] | None:
+    """KEEP-4 before KEEP-3. Refuse expired/used/invalid without spending.
+
+    Prefer ``place_token_block(..., consume=False)``. If this checkout's
+    ``token_ttl`` still has the consume-on-ok master signature, evaluate
+    first and only invoke the gate when it will refuse.
+    """
+    from abcxauto.token_ttl import (
+        TOKEN_ACTION_KEYS,
+        evaluate_place_token,
+        extract_action_token,
+        place_token_block,
+        ticket_is_exit,
+    )
+
+    try:
+        return place_token_block(action, consume=False)
+    except TypeError:
+        pass
+    if ticket_is_exit(action):
+        return None
+    presented = False
+    if isinstance(action, dict):
+        if any(key in action for key in TOKEN_ACTION_KEYS):
+            presented = True
+        else:
+            params = action.get("params")
+            presented = isinstance(params, dict) and any(
+                key in params for key in TOKEN_ACTION_KEYS
+            )
+    if not presented:
+        return None
+    verdict = evaluate_place_token(extract_action_token(action))
+    if verdict.get("ok"):
+        return None
+    return place_token_block(action)
+
+
 async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
     """Dispatch ``action`` through the single executor path.
 
@@ -275,12 +313,10 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
         sess = ""
     if sess in RESEARCH_SESSIONS:
         return research_send_block(session=sess)
-    from abcxauto.token_ttl import place_token_block
     from abcxauto.send_preview import authorize_place, stamp_place_result
 
-    # KEEP-4 TTL first. Evaluate only — a hash mismatch must not spend
-    # the token. Expired / used / unreadable still fail-closed here.
-    token_block = place_token_block(action, consume=False)
+    # KEEP-4 TTL first. A hash mismatch must not spend the token.
+    token_block = _ttl_block_before_authorize(action)
     if token_block is not None:
         return token_block
     blocked = authorize_place(action)
