@@ -160,6 +160,20 @@ def test_window_fail_when_edge_negative():
     assert win["abort_fuse"] == "none"
 
 
+def test_optional_f10_tripped_loop_halted_passthrough():
+    row = normalize_session_row(
+        _base_payload(f10_ok=False, send="NO_SEND", send_reason="NO_SEND:f10",
+                      f10_tripped=True, loop_halted=True,
+                      model_cost_post_trip_USD=0)
+    )
+    assert row["f10_tripped"] is True
+    assert row["loop_halted"] is True
+    assert row.get("model_cost_post_trip_USD") == 0
+    plain = normalize_session_row(_base_payload())
+    assert "f10_tripped" not in plain
+    assert "loop_halted" not in plain
+
+
 def test_fuse_f10_abort():
     rows = [
         _base_payload(session_id="pcs-v0-20260906-01", f10_ok=True),

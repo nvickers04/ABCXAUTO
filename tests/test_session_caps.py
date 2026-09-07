@@ -16,7 +16,10 @@ from abcxauto.pro_engine import ProEngine
 from abcxauto.session_caps import (
     DEFAULT_LOOK_CAP,
     DEFAULT_TOKEN_CAP,
+    f10_halt_key,
+    f10_loop_halted,
     is_capped,
+    mark_f10_loop_halt,
     note_look,
     reset_session_caps,
     session_key,
@@ -100,6 +103,26 @@ def test_usage_persists_across_reset_cache(tmp_path, monkeypatch):
     snap = usage("regular")
     assert snap["looks"] == 1
     assert snap["tokens"] == 100
+
+
+def test_f10_loop_halt_latches_scored_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_SESSION_CAPS_PATH", str(tmp_path / "caps.json"))
+    reset_session_caps()
+    now = _et(2026, 9, 7, 10, 0)
+    assert f10_loop_halted(now=now) is False
+    assert usage("regular", now=now)["f10_tripped"] is False
+    row = mark_f10_loop_halt(now=now)
+    assert row["f10_tripped"] is True
+    assert row["loop_halted"] is True
+    assert row.get("model_cost_post_trip_usd", 0) == 0
+    assert f10_halt_key(now=now) == "2026-09-07:f10"
+    assert f10_loop_halted(now=now) is True
+    assert usage("premarket", now=_et(2026, 9, 7, 8, 0))["loop_halted"] is True
+    assert usage("regular", now=now)["f10_tripped"] is True
+    reset_session_caps()
+    assert f10_loop_halted(now=now) is True
+    next_day = _et(2026, 9, 8, 10, 0)
+    assert f10_loop_halted(now=next_day) is False
 
 
 def test_grok_may_tighten_not_weaken_session_caps():
