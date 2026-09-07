@@ -629,6 +629,16 @@ def test_f10_trip_halts_open_look_exits_still_ok(monkeypatch):
     assert mill_eng._kill_look_skip_reason(
         "regular", {"positions": [], "protection": {}}
     ) == REASON_F10
+    unpaid_eng = ProEngine()
+    unpaid_eng._ticket_wake = True
+    assert unpaid_eng._kill_look_skip_reason(
+        "regular", {"positions": [], "protection": {}}
+    ) == REASON_F10
+    recover_eng = ProEngine()
+    recover_eng._recover_same_chat = True
+    assert recover_eng._kill_look_skip_reason(
+        "regular", {"positions": [], "protection": {}}
+    ) == REASON_F10
     lot = _pcs_lot()
     assert (
         skip_look_reason(
