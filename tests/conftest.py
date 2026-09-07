@@ -206,6 +206,16 @@ def _reset_cancel_guard():
 
 
 @pytest.fixture(autouse=True)
+def _reset_abort_fuse():
+    """Abort-fuse cancel overlay is process-life; do not leak across tests."""
+    from abcxauto.abort_fuse import reset_abort_fuse_for_tests
+
+    reset_abort_fuse_for_tests()
+    yield
+    reset_abort_fuse_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _pcs_kill_look_off_unless_marked(monkeypatch, request):
     """Kill-look contract is production-on; unit tests opt in via env or mark."""
     marked = request.node.get_closest_marker("pcs_kill_look") is not None

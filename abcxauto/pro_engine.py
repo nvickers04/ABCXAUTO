@@ -1810,6 +1810,16 @@ class ProEngine:
                 except Exception:
                     logger.debug("session brain switch failed", exc_info=True)
                 self._last_session = session
+                try:
+                    from abcxauto.abort_fuse import maybe_apply_abort_fuse
+
+                    await maybe_apply_abort_fuse(
+                        self.conn,
+                        positions=list(s.get("positions") or []),
+                        open_orders=list(s.get("open_orders") or []),
+                    )
+                except Exception:
+                    logger.debug("abort fuse cancel failed", exc_info=True)
                 from abcxauto.agent_loop import _wake_grok_for_session
                 from abcxauto.park_clock import (
                     clear_park,
