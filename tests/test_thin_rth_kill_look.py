@@ -43,6 +43,7 @@ from abcxauto.thin_rth_kill_look import (
     REASON_ENTRY_BUDGET,
     REASON_F10,
     REASON_MODEL_COST,
+    REASON_ONE_SEND,
     REASON_PORT,
     REASON_RESEARCH_PROMPT,
     REASON_RESEARCH_WEEK,
@@ -58,6 +59,7 @@ from abcxauto.thin_rth_kill_look import (
     f10_gate,
     force_skip_or_manage,
     has_open_pcs_skew_lot,
+    one_open_send_block,
     kill_look_enabled,
     kill_look_port_ok,
     kill_look_rth,
@@ -165,6 +167,30 @@ def test_look_budget_open_one_then_abort(monkeypatch):
     assert skip_look_reason("regular", positions=[], same_look=True) == ""
     consume_open_entry_look("regular")
     assert kill_entry_looks("regular") == 1
+
+
+def test_in_flight_open_can_still_send_after_consume(monkeypatch):
+    """Consume-before-think must not abort the legal look-#1 SEND."""
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    consume_open_entry_look("regular")
+    f10 = _allow_f10()
+    act = {
+        "strategy": "vertical_spread",
+        "params": dict(PCS_OPEN),
+        "card": PCS_CARD,
+    }
+    assert kill_mode("regular", positions=[], f10=f10) == MODE_ABORT
+    assert (
+        kill_mode("regular", positions=[], f10=f10, in_flight=True) == MODE_OPEN
+    )
+    blocked = kill_look_send_block(act, session="regular", f10=f10)
+    assert blocked is not None
+    assert kill_look_send_block(act, session="regular", f10=f10, in_flight=True) is None
+    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    assert skip_look_reason("regular", positions=[], same_look=True, f10=hard) == (
+        REASON_ENTRY_BUDGET
+    )
 
 
 def test_look_budget_manage_replaces_second_entry(monkeypatch):
@@ -383,6 +409,36 @@ async def test_run_tool_send_force_skip_on_tool_cap(monkeypatch):
     assert data.get("strategy") == "skipped"
 
 
+@pytest.mark.asyncio
+async def test_open_one_send_then_stop(monkeypatch):
+    _kill_on(monkeypatch)
+    from abcxauto.brain import BrainTurn, _run_tool
+
+    world = _world(session_status="regular", flat=True)
+    turn = BrainTurn()
+    turn.kill_mode = MODE_OPEN
+    turn.sends = [
+        {
+            "act": {"strategy": "vertical_spread"},
+            "result": {"status": "submitted"},
+            "strat": "vertical_spread",
+        }
+    ]
+    raw = await _run_tool(
+        "send",
+        {"strategy": "vertical_spread", "params": dict(PCS_OPEN), "card": PCS_CARD},
+        connector=None,
+        world=world,
+        snap={"positions": [], "kill_entry_in_flight": True},
+        turn=turn,
+    )
+    data = json.loads(raw)
+    assert data.get("reason_code") == REASON_ONE_SEND
+    assert data.get("strategy") == "skipped"
+    assert one_open_send_block(MODE_OPEN, turn) is not None
+    assert one_open_send_block(MODE_MANAGE, turn) is None
+
+
 def test_dual_mode_rth_strips_xhigh_ah_one_shot_and_week_cap(monkeypatch):
     _kill_on(monkeypatch)
     assert rth_model_no_xhigh("grok-4.6-xhigh") == "grok-4.6"
@@ -495,3 +551,6 @@ def test_pro_engine_skip_reason_entry_budget(monkeypatch):
     assert why == REASON_ENTRY_BUDGET
     eng._mill_wake = True
     assert eng._kill_look_skip_reason("regular", {"positions": []}) == ""
+    eng2 = ProEngine()
+    eng2._kill_entry_in_flight = True
+    assert eng2._kill_look_skip_reason("regular", {"positions": []}) == ""

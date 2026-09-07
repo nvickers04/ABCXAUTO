@@ -601,6 +601,10 @@ async def execute_ticket(
             session=sess,
             positions=list(snap.get("positions") or world.positions or []),
             open_lots=list(getattr(world, "open_lots", None) or []),
+            in_flight=bool(
+                snap.get("kill_entry_in_flight")
+                or getattr(world, "kill_entry_in_flight", False)
+            ),
         )
         if blocked is not None:
             asked = str(act.get("strategy") or act.get("action") or "").strip().lower()

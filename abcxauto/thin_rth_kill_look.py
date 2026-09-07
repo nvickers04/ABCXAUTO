@@ -65,6 +65,7 @@ REASON_DIE_TOOL = "kill_look_die_tool"
 REASON_TURNS = "kill_look_turns"
 REASON_TOOLS = "kill_look_tools"
 REASON_PORT = "kill_look_live_port"
+REASON_ONE_SEND = "kill_look_one_send"
 
 LIVE_PORTS = frozenset({7496, 4001})
 
@@ -467,8 +468,14 @@ def kill_mode(
     entry_looks: int | None = None,
     f10: dict[str, Any] | None = None,
     now=None,
+    in_flight: bool = False,
 ) -> str:
-    """OPEN / MANAGE / ABORT / research / empty (contract off)."""
+    """OPEN / MANAGE / ABORT / research / empty (contract off).
+
+    ``in_flight`` is look #1 after consume (mill/unpaid/recover included).
+    Entry budget still refuses a *new* look; it must not refuse the SEND on
+    the look that already spent the budget.
+    """
     if not kill_look_enabled():
         return ""
     try:
@@ -491,7 +498,7 @@ def kill_mode(
         from abcxauto.session_caps import kill_entry_looks
 
         entry_looks = kill_entry_looks(session, now=now)
-    if int(entry_looks or 0) >= RTH_ENTRY_LOOKS_MAX:
+    if int(entry_looks or 0) >= RTH_ENTRY_LOOKS_MAX and not in_flight:
         return MODE_ABORT
     gate = f10 if isinstance(f10, dict) else live_f10_gate()
     if not gate.get("allow_new_risk", False):
@@ -548,6 +555,7 @@ def skip_look_reason(
     prompt_tokens: int = 0,
     now=None,
     f10: dict[str, Any] | None = None,
+    in_flight: bool = False,
 ) -> str:
     """Non-empty = do not call the model. Unprotected last-stop still looks."""
     if not kill_look_enabled():
@@ -555,15 +563,19 @@ def skip_look_reason(
     if unprotected:
         return ""
     mode = kill_mode(
-        session, positions=positions, open_lots=open_lots, now=now, f10=f10
+        session,
+        positions=positions,
+        open_lots=open_lots,
+        now=now,
+        f10=f10,
+        in_flight=bool(in_flight or same_look),
     )
     if mode == MODE_MANAGE:
         return ""
     if mode == MODE_OPEN:
         return ""
     if mode == MODE_ABORT:
-        if same_look:
-            return ""
+        # $ / port / spent look. Mill of look #1 is OPEN via in_flight, not this branch.
         return REASON_ENTRY_BUDGET
     if mode == MODE_RESEARCH:
         from abcxauto.session_caps import research_week_looks
@@ -583,6 +595,7 @@ def kill_look_send_block(
     positions: list[Any] | None = None,
     open_lots: list[Any] | None = None,
     f10: dict[str, Any] | None = None,
+    in_flight: bool = False,
 ) -> dict[str, Any] | None:
     """Clerk block for illegal new pcs-skew risk. Exits still go."""
     if not kill_look_rth(session):
@@ -605,7 +618,11 @@ def kill_look_send_block(
             "strategy": "blocked",
         }
     mode = kill_mode(
-        session, positions=positions, open_lots=open_lots, f10=f10
+        session,
+        positions=positions,
+        open_lots=open_lots,
+        f10=f10,
+        in_flight=in_flight,
     )
     ok, why = pcs_send_ok(strat, params, card, mode=mode)
     if not ok:
@@ -626,7 +643,41 @@ def kill_look_send_block(
         }
     if gate.get("preferred_trip"):
         logger.warning("F10 preferred $1 tripwire (hard still $2)")
+        try:
+            from abcxauto.think_stream import emit as think_emit
+
+            think_emit("tool", "\n[F10 preferred $1 tripwire — hard still $2]\n")
+        except Exception:
+            logger.debug("F10 preferred think emit failed", exc_info=True)
     return None
+
+
+def open_send_used(turn: Any = None) -> bool:
+    """True when OPEN already placed a non-blocked ticket this look."""
+    for item in getattr(turn, "sends", None) or []:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        status = str(result.get("status") or "").lower()
+        strat = str(item.get("strat") or result.get("strategy") or "").lower()
+        if status in ("blocked", "rejected", "validated_block"):
+            continue
+        if strat in ("blocked", "skipped"):
+            continue
+        return True
+    return False
+
+
+def one_open_send_block(mode: str, turn: Any = None) -> dict[str, Any] | None:
+    """OPEN: one pcs-skew BAG then stop."""
+    if mode != MODE_OPEN or not open_send_used(turn):
+        return None
+    return {
+        "status": "blocked",
+        "note": "OPEN: one pcs-skew BAG then stop",
+        "reason_code": REASON_ONE_SEND,
+        "strategy": "skipped",
+    }
 
 
 def force_skip_or_manage(
