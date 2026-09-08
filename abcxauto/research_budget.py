@@ -120,17 +120,18 @@ def _flag(raw: Any) -> bool:
 
 
 def _verdict_of(raw: Any) -> str:
+    """Closed set. Missing / unknown → INCONCLUSIVE (Lead SPEC-OK)."""
     token = str(raw or "").strip().upper()
     if token in GATE_VERDICTS:
         return token
-    return ""
+    return GATE_INCONCLUSIVE
 
 
 def _empty_row(research_card_id: str, prove_window_id: str) -> dict[str, Any]:
     return {
         "research_card_id": str(research_card_id or "").strip(),
         "prove_window_id": str(prove_window_id or "").strip(),
-        "gate_verdict": "",
+        "gate_verdict": GATE_INCONCLUSIVE,
         "model_cost_window_USD": 0.0,
         "turns": 0,
         "tool_calls": 0,
@@ -238,7 +239,7 @@ def lineage_fields(row: dict[str, Any] | None) -> dict[str, Any]:
     return {
         "research_card_id": str(blob.get("research_card_id") or ""),
         "prove_window_id": str(blob.get("prove_window_id") or ""),
-        "gate_verdict": str(blob.get("gate_verdict") or ""),
+        "gate_verdict": _verdict_of(blob.get("gate_verdict")),
         "model_cost_window_USD": blob.get("model_cost_window_USD"),
     }
 
@@ -247,7 +248,7 @@ def open_research_card(
     research_card_id: str,
     prove_window_id: str,
     *,
-    gate_verdict: str = "",
+    gate_verdict: str = GATE_INCONCLUSIVE,
 ) -> dict[str, Any]:
     """Create or return the named-card ledger row. Cost starts billed 0."""
     card = str(research_card_id or "").strip()
@@ -259,18 +260,10 @@ def open_research_card(
     row = table.get(key)
     if not isinstance(row, dict):
         row = _empty_row(card, window)
-        verdict = _verdict_of(gate_verdict)
-        if verdict:
-            row["gate_verdict"] = verdict
+        row["gate_verdict"] = _verdict_of(gate_verdict)
         table[key] = row
         _save_table(table)
         return dict(row)
-    if gate_verdict:
-        verdict = _verdict_of(gate_verdict)
-        if verdict and not row.get("gate_verdict"):
-            row["gate_verdict"] = verdict
-            table[key] = row
-            _save_table(table)
     return dict(row)
 
 

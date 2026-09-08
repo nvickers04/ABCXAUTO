@@ -97,7 +97,8 @@ def test_fake_card_stub_turns_increment_ledger():
     row = open_research_card(CARD, WINDOW)
     assert row["research_card_id"] == CARD
     assert row["prove_window_id"] == WINDOW
-    assert row["gate_verdict"] == ""
+    assert row["gate_verdict"] == GATE_INCONCLUSIVE
+    assert row["gate_verdict"] in {GATE_PASS, GATE_FAIL, GATE_INCONCLUSIVE, GATE_KILL}
     assert parse_model_cost(row["model_cost_window_USD"]) == 0.0
     first = note_brief_turn(CARD, WINDOW, cost_usd=0.10, tool_calls=3)
     assert first["billed"] is True
@@ -206,9 +207,9 @@ def test_promote_refuses_missing_and_non_pass():
     assert missing["status"] == "refused"
     open_research_card(CARD, WINDOW)
     note_brief_turn(CARD, WINDOW, cost_usd=0.20)
-    for verdict in (GATE_FAIL, GATE_INCONCLUSIVE, GATE_KILL, ""):
-        if verdict:
-            set_gate_verdict(CARD, WINDOW, verdict)
+    assert card_row(CARD, WINDOW)["gate_verdict"] == GATE_INCONCLUSIVE
+    for verdict in (GATE_FAIL, GATE_INCONCLUSIVE, GATE_KILL):
+        set_gate_verdict(CARD, WINDOW, verdict)
         refused = lab_promote(CARD, WINDOW)
         assert refused["ok"] is False
         assert refused["allowed"] is False
