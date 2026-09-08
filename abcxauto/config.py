@@ -204,8 +204,8 @@ class Config:
     auto_panic_on_breach: bool = True
     defined_risk_only: bool = True
     cash_only: bool = True
-    # KEEP-5A hard portfolio defined-max-loss cap. Gate ON at 800 when unset.
-    # Operator may lower via OPERATOR_DISK. self_tune cannot raise.
+    # Display-only portfolio defined-max-loss figure. Default 800 is not a
+    # place/preview refuse. Operator disk may persist it; self_tune cannot.
     portfolio_cap_usd: float = 800.0
     max_peak_drawdown_pct: float = 25.0
     max_option_premium_pct: float = 25.0
@@ -241,7 +241,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _env_portfolio_cap_usd() -> float:
-    """Display default. Gate reads raw disk/env; garbage fail-closes there."""
+    """Display default. Not a place or preview refuse."""
     raw = _env("ABCXAUTO_PORTFOLIO_CAP_USD")
     if not raw:
         return 800.0
