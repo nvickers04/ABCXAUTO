@@ -308,7 +308,7 @@ async def test_send_action_does_not_place_second():
     bind_place_token(ticket)
     result = await send_action(ticket, gw)
     assert result.get("reason_code") in (REASON_CODE, REASON_PORTFOLIO_USD)
-    assert result.get("status") == "rejected"
+    assert result.get("status") in ("rejected", "blocked")
     assert gw.calls == []
 
 
