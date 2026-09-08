@@ -178,7 +178,7 @@ def test_hygiene_f10_port_prompt_lock():
     assert get_config().portfolio_cap_usd == 800.0
 
 
-def test_allowlist_still_refuses_non_pcs_skew(monkeypatch):
+def test_allowlist_refuses_incomplete_geom_and_undefined_stk(monkeypatch):
     monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
     monkeypatch.setattr(
         "abcxauto.thin_rth_kill_look.live_f10_gate",

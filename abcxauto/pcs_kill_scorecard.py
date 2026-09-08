@@ -26,6 +26,7 @@ SEND_REASON_OK = frozenset(
         "NO_SEND:f10",
         "NO_SEND:dd_fuse",
         "NO_SEND:qty0_streak",
+        # Logged judgement token only. Clerk does not refuse C<$1.
         "NO_SEND:credit_lt_floor",
         "NO_SEND:max_loss_gt_budget",
         "NO_SEND:lambda_breach",
