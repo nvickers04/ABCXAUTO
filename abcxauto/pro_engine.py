@@ -271,6 +271,7 @@ class ProEngine:
         self._mill_streak = 0
         self._mill_gave_up = False
         self._kill_entry_in_flight = False
+        self._force_first_look = False
         # Armed once per IBKR connect: first flat orphan sweep is skipped.
         self._flat_start_orphan_gate = False
         self._brain_key: tuple = ()
@@ -325,6 +326,7 @@ class ProEngine:
             self.state.status = "Thinking"
             self._think_parked = False
             self._resume_think = True
+            self._force_first_look = True
             self._cold_next = False
             # Stay-up sits on `_wake_event.wait`. Book pokes set it;
             # operator Start must too or the desk paints "Grok on"
@@ -348,6 +350,7 @@ class ProEngine:
         self.state.status = "Thinking"
         self._think_parked = False
         self._resume_think = True
+        self._force_first_look = True
         self._cold_next = False
         try:
             from abcxauto.park_clock import load_alarm, start_looks_now
@@ -359,6 +362,7 @@ class ProEngine:
                 # gate, not a think shutdown. Operator Start on a live
                 # worker still pokes (already=True returned above).
                 self._resume_think = False
+                self._force_first_look = False
                 self.state.status = "Waiting"
         except Exception:
             pass
@@ -1123,6 +1127,7 @@ class ProEngine:
             prompt_tokens=prompt_n,
             in_flight=bool(getattr(self, "_kill_entry_in_flight", False)),
             snap=blob,
+            bypass_entry_budget=bool(getattr(self, "_force_first_look", False)),
         )
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
@@ -2013,6 +2018,7 @@ class ProEngine:
                     self._note("SKIP", f"session={session or 'closed'} — no Grok")
                     continue
 
+                skip = ""
                 if not needs_prot:
                     try:
                         skip = self._kill_look_skip_reason(session, s)
@@ -2030,41 +2036,44 @@ class ProEngine:
                                 skip = REASON_F10
                         except Exception:
                             logger.debug("f10 skip fail-closed failed", exc_info=True)
-                    if skip:
-                        self._note("SKIP", skip)
-                        self.state.skip_reason = skip
-                        from abcxauto.thin_rth_kill_look import is_f10_look_halt
+                # Start/bounce one-shot is spent after the first look gate.
+                # Do not reset kill_entry_looks / RTH_ENTRY_LOOKS_MAX.
+                self._force_first_look = False
+                if skip:
+                    self._note("SKIP", skip)
+                    self.state.skip_reason = skip
+                    from abcxauto.thin_rth_kill_look import is_f10_look_halt
 
-                        if is_f10_look_halt(skip):
-                            try:
-                                from abcxauto.thin_rth_kill_look import (
-                                    record_f10_loop_halt,
-                                )
+                    if is_f10_look_halt(skip):
+                        try:
+                            from abcxauto.thin_rth_kill_look import (
+                                record_f10_loop_halt,
+                            )
 
-                                record_f10_loop_halt(
-                                    session=session, skip_reason=skip, snap=s
-                                )
-                            except Exception:
-                                logger.debug("f10 halt persist failed", exc_info=True)
-                        else:
-                            try:
-                                from abcxauto.research_budget import (
-                                    is_brief_look_halt,
-                                    mark_brief_loop_halt,
-                                    resolve_research_card,
-                                )
+                            record_f10_loop_halt(
+                                session=session, skip_reason=skip, snap=s
+                            )
+                        except Exception:
+                            logger.debug("f10 halt persist failed", exc_info=True)
+                    else:
+                        try:
+                            from abcxauto.research_budget import (
+                                is_brief_look_halt,
+                                mark_brief_loop_halt,
+                                resolve_research_card,
+                            )
 
-                                if is_brief_look_halt(skip):
-                                    card, window = resolve_research_card(snap=s)
-                                    mark_brief_loop_halt(
-                                        card, window, reason=skip
-                                    )
-                            except Exception:
-                                logger.debug(
-                                    "research brief halt persist failed",
-                                    exc_info=True,
+                            if is_brief_look_halt(skip):
+                                card, window = resolve_research_card(snap=s)
+                                mark_brief_loop_halt(
+                                    card, window, reason=skip
                                 )
-                        continue
+                        except Exception:
+                            logger.debug(
+                                "research brief halt persist failed",
+                                exc_info=True,
+                            )
+                    continue
 
                 n += 1
                 from abcxauto.session_caps import billed_tokens_now, note_look

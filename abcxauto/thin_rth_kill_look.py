@@ -848,8 +848,14 @@ def skip_look_reason(
     in_flight: bool = False,
     abort_fuse: str | None = None,
     snap: dict[str, Any] | None = None,
+    bypass_entry_budget: bool = False,
 ) -> str:
-    """Non-empty = do not call the model. Unprotected last-stop still looks."""
+    """Non-empty = do not call the model. Unprotected last-stop still looks.
+
+    ``bypass_entry_budget`` is the Operator Start / mid-RTH bounce one-shot:
+    spent ``kill_entry_looks`` must not abort that first look. F10, 7496,
+    nameless send, and later pulses stay hard.
+    """
     if unprotected:
         return ""
     # Named-card brief halt is independent of kill-look (no mill escape).
@@ -908,6 +914,9 @@ def skip_look_reason(
             return REASON_QTY0
         if fuse == "F10":
             return REASON_F10
+        # Start/bounce one-shot: spent entry only. Port 7496 stays abort.
+        if bypass_entry_budget and kill_look_port_ok():
+            return ""
         return REASON_ENTRY_BUDGET
     if mode == MODE_RESEARCH:
         from abcxauto.session_caps import research_week_looks

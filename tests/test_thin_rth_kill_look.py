@@ -179,6 +179,63 @@ def test_look_budget_open_one_then_abort(monkeypatch):
     assert kill_entry_looks("regular") == 1
 
 
+def test_start_bypass_spent_entry_budget_once(monkeypatch):
+    """Operator Start one-shot bypasses spent entry; later pulses do not reset it."""
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    consume_open_entry_look("regular")
+    assert kill_entry_looks("regular") == 1
+    assert (
+        skip_look_reason(
+            "regular",
+            positions=[],
+            f10=_allow_f10(),
+            bypass_entry_budget=True,
+        )
+        == ""
+    )
+    assert kill_entry_looks("regular") == 1
+    assert skip_look_reason(
+        "regular", positions=[], f10=_allow_f10(), bypass_entry_budget=False
+    ) == REASON_ENTRY_BUDGET
+
+
+def test_start_bypass_does_not_soften_f10(monkeypatch):
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    consume_open_entry_look("regular")
+    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    assert (
+        skip_look_reason(
+            "regular",
+            positions=[],
+            f10=hard,
+            bypass_entry_budget=True,
+        )
+        == REASON_F10
+    )
+
+
+def test_start_bypass_does_not_soften_7496(monkeypatch):
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    consume_open_entry_look("regular")
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: SimpleNamespace(ibkr_port=7496, pcs_kill_look=True),
+    )
+    assert kill_look_port_ok() is False
+    assert (
+        skip_look_reason(
+            "regular",
+            positions=[],
+            f10=_allow_f10(),
+            bypass_entry_budget=True,
+        )
+        == REASON_ENTRY_BUDGET
+    )
+
+
 def test_in_flight_open_can_still_send_after_consume(monkeypatch):
     """Consume-before-think must not abort the legal look-#1 SEND."""
     _kill_on(monkeypatch)
@@ -605,6 +662,16 @@ def test_pro_engine_skip_reason_entry_budget(monkeypatch):
     eng2 = ProEngine()
     eng2._kill_entry_in_flight = True
     assert eng2._kill_look_skip_reason("regular", {"positions": []}) == ""
+    start_eng = ProEngine()
+    start_eng._force_first_look = True
+    assert start_eng._kill_look_skip_reason(
+        "regular", {"positions": [], "protection": {}}
+    ) == ""
+    start_eng._force_first_look = False
+    assert start_eng._kill_look_skip_reason(
+        "regular", {"positions": [], "protection": {}}
+    ) == REASON_ENTRY_BUDGET
+    assert kill_entry_looks("regular") == 1
 
 
 def test_f10_trip_halts_open_look_exits_still_ok(monkeypatch):
