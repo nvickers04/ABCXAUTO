@@ -780,6 +780,54 @@ def test_desk_mode_brain_rebuilds_on_research_to_rth_roll(monkeypatch):
     assert getattr(eng, "_research_color_injected", True) is False
 
 
+def test_research_stay_up_rolled_to_rth_is_premarket_to_regular():
+    """A: last research stay-up + clock/snap regular is the RTH roll."""
+    eng = ProEngine()
+    assert eng._research_stay_up_rolled_to_rth("premarket", "regular") is True
+    assert eng._research_stay_up_rolled_to_rth("premarket", "premarket") is False
+    assert eng._research_stay_up_rolled_to_rth("regular", "regular") is False
+    assert eng._research_stay_up_rolled_to_rth("closed", "regular") is False
+    assert eng._research_stay_up_rolled_to_rth("postmarket", "regular") is False
+    assert eng._research_stay_up_rolled_to_rth("", "regular") is False
+
+
+def test_session_change_into_regular_resumes_stay_up(monkeypatch):
+    """B: session_change into regular is a hard stay-up interrupt."""
+    from abcxauto.park_clock import peek_interrupt
+
+    monkeypatch.setattr(
+        "abcxauto.park_clock.infer_session_before_open",
+        lambda **_k: ("", None),
+    )
+    monkeypatch.setattr("abcxauto.opportunity_scan.rth_now", lambda now=None: True)
+    eng = ProEngine()
+    eng.state.autonomous = True
+    eng._last_session = "premarket"
+    eng._resume_think = False
+    eng._wake_event = asyncio.Event()
+    eng.request_wake("session_change")
+    assert eng._resume_think is True
+    assert eng._wake_event.is_set()
+    assert eng._wake_reason == "session_change"
+    assert peek_interrupt() is None
+
+
+def test_session_change_does_not_resume_when_clock_still_premarket(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.park_clock.infer_session_before_open",
+        lambda **_k: ("premarket", 30.0),
+    )
+    monkeypatch.setattr("abcxauto.opportunity_scan.rth_now", lambda now=None: False)
+    eng = ProEngine()
+    eng.state.autonomous = True
+    eng._last_session = "premarket"
+    eng._resume_think = False
+    eng._wake_event = asyncio.Event()
+    eng.request_wake("session_change")
+    assert eng._resume_think is False
+    assert not eng._wake_event.is_set()
+
+
 def test_session_of_snap_reads_pulse_and_hours():
     eng = ProEngine()
     assert eng._session_of_snap(_stay_up_snap("regular")) == "regular"
@@ -2165,6 +2213,146 @@ async def test_paper_premarket_stay_up_writes_no_sit_clock(monkeypatch, tmp_path
 
     assert load_alarm().wake_at is None
 
+
+@pytest.mark.asyncio
+async def test_premarket_stay_up_rolls_to_rth_without_poke(monkeypatch, tmp_path):
+    """Finished premarket look + snap regular → RTH look within one pulse.
+
+    Falsifier: no book poke, keep-looking off, lead unchanged. Soften=FAIL.
+    """
+    from abcxauto.park_clock import peek_interrupt
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+    monkeypatch.setattr(
+        "abcxauto.desk_mode.research_keep_looking",
+        lambda *_a, **_k: False,
+    )
+
+    async def no_lead(_self, _g):
+        return False
+
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.ProEngine._stay_up_lead_changed", no_lead
+    )
+    state = {"session": "premarket"}
+    looks: list[str] = []
+    dropped = {"n": 0}
+
+    def boom(client):
+        dropped["n"] += 1
+        client.chat = None
+
+    async def think(self, n, g, s, *, resume=False):
+        assert peek_interrupt() is None
+        looks.append(str((s.get("market_hours") or {}).get("session") or ""))
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "premarket looking" if looks[-1] == "premarket" else "RTH looking",
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="premarket", think=think)
+
+    async def fake_snap(_c):
+        return _stay_up_snap(state["session"])
+
+    monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    monkeypatch.setattr("abcxauto.brain.drop_live_chat", boom)
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.GrokClient",
+        lambda **_k: SimpleNamespace(chat=object(), model="grok-4.6"),
+    )
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(looks) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    sit_deadline = time.time() + 3
+    while time.time() < sit_deadline:
+        eng.drain_apply()
+        ev = getattr(eng, "_wake_event", None)
+        if len(looks) == 1 and ev is not None and ev._waiters:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("worker never sat after premarket look")
+    assert looks == ["premarket"]
+    assert eng._last_session == "premarket"
+    assert eng._resume_think is False
+    assert peek_interrupt() is None
+    state["session"] = "regular"
+    deadline = time.time() + 2
+    while time.time() < deadline and len(looks) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert looks == ["premarket", "regular"]
+    assert dropped["n"] == 1
+    assert peek_interrupt() is None
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is None
+    assert not (tmp_path / "wake.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_premarket_snap_does_not_invent_rth_roll_from_wall_clock(
+    monkeypatch, tmp_path
+):
+    """Labeled premarket snap stays premarket. Wall-clock RTH is not a roll."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+    monkeypatch.setattr(
+        "abcxauto.desk_mode.research_keep_looking",
+        lambda *_a, **_k: False,
+    )
+    monkeypatch.setattr(
+        "abcxauto.park_clock.infer_session_before_open",
+        lambda **_k: ("", None),
+    )
+    monkeypatch.setattr("abcxauto.opportunity_scan.rth_now", lambda now=None: True)
+
+    async def no_lead(_self, _g):
+        return False
+
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.ProEngine._stay_up_lead_changed", no_lead
+    )
+    looks: list[str] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        looks.append(str((s.get("market_hours") or {}).get("session") or ""))
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "premarket looking",
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="premarket", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(looks) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.4
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert looks == ["premarket"]
+    assert eng._resume_think is False
 
 
 @pytest.mark.asyncio
