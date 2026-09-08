@@ -592,11 +592,27 @@ class ProEngine:
                 return
         except Exception:
             pass
+        reason_l = str(reason or "").strip().lower()
+        if reason_l == "session_change":
+            # Hard stay-up interrupt: research → regular. Same physics as
+            # the pulse clock/snap check. Not a mid-look live poke.
+            last = str(getattr(self, "_last_session", "") or "")
+            if self._research_stay_up_rolled_to_rth(last, self._clock_session()):
+                self._wake_reason = reason_l
+                self._resume_think = True
+                ev = self._wake_event
+                if ev is not None:
+                    ev.set()
+                try:
+                    self.ui.put(("log", "PACE WAKE: session_change"))
+                except Exception:
+                    pass
+            return
         if self._wake_gate is None:
             self._wake_gate = WakeGate()
         if not self._wake_gate.try_wake(reason):
             return
-        self._wake_reason = str(reason or "").strip().lower()
+        self._wake_reason = reason_l
         # Mid-turn poke into the live xAI episode (fill / order_change /
         # unprotected). halt / flat_confirmed are not live pokes.
         note_interrupt(BookEvent(self._wake_reason, self._wake_reason))
@@ -945,6 +961,65 @@ class ProEngine:
         from abcxauto.park_clock import resolve_stay_up_session
 
         return resolve_stay_up_session(session)
+
+    def _clock_session(self) -> str:
+        """ET clock label. Does not use sticky ``_last_session``."""
+        from abcxauto.park_clock import resolve_stay_up_session
+
+        return resolve_stay_up_session("")
+
+    def _research_stay_up_rolled_to_rth(
+        self, last_session: str = "", now_session: str = ""
+    ) -> bool:
+        """True when a finished research stay-up must start an RTH look.
+
+        Sticky ``_last_session=premarket`` plus ``_resume_think=False`` is
+        the tip-without-wake sit: the RTH pulse waits for poke / lead-fact,
+        and ``_apply_desk_mode_brain`` only runs once a look starts.
+        """
+        from abcxauto.desk_mode import is_research_session, is_rth_session
+        from abcxauto.park_clock import paper_stay_up
+
+        last = self._resolve_session(last_session)
+        now = str(now_session or "").strip().lower()
+        if now == "unknown":
+            now = ""
+        if now:
+            now = self._resolve_session(now)
+        else:
+            now = self._clock_session()
+        return bool(
+            paper_stay_up(last)
+            and is_research_session(last)
+            and is_rth_session(now)
+        )
+
+    async def _stay_up_now_session(self) -> str:
+        """Snap label when present; else ET clock. Not sticky ``_last_session``."""
+        labeled = ""
+        if self.conn is not None:
+            try:
+                s = await snap(self.conn)
+            except Exception:
+                s = None
+            if isinstance(s, dict):
+                labeled = self._resolve_session(self._session_of_snap(s))
+        return labeled or self._clock_session()
+
+    async def _resume_if_research_rolled_to_rth(self, last_session: str) -> bool:
+        """Arm ``_resume_think`` on research stay-up → regular. Chat drop is later."""
+        try:
+            now_sess = await self._stay_up_now_session()
+        except Exception:
+            now_sess = ""
+        if not self._research_stay_up_rolled_to_rth(last_session, now_sess):
+            return False
+        self._resume_think = True
+        try:
+            self._note("LOOK", "research→RTH roll — resume")
+        except Exception:
+            pass
+        return True
 
     def _idle_on_session_cap(self, session: str = "", *, note: bool = True) -> bool:
         """True when overnight/closed should sit on a hit cap. Paper stay-up does not.
@@ -1761,10 +1836,17 @@ class ProEngine:
                                 clear_park()
                             except Exception:
                                 pass
+                            # Research stay-up → RTH: clock/snap regular
+                            # forces a look. Do not wait for poke / lead.
+                            # Chat drop is _apply_desk_mode_brain on start.
+                            if await self._resume_if_research_rolled_to_rth(sess):
+                                continue
                             # Stay-up pulse. RTH waits for a poke or a
                             # lead fact that actually changed. Research
                             # keep-looking re-enters on timeout — no fake
                             # fill / order_change / unprotected poke.
+                            # session_change into regular is the same
+                            # physics as the roll check above.
                             wait = float(PULSE_S)
                             self.state.status = "On"
                             ev = self._wake_event
@@ -1789,7 +1871,14 @@ class ProEngine:
                                     keep_research = research_keep_looking(sess)
                                 except Exception:
                                     keep_research = False
-                                if keep_research or await self._stay_up_lead_changed(g):
+                                rolled = await self._resume_if_research_rolled_to_rth(
+                                    sess
+                                )
+                                if (
+                                    keep_research
+                                    or rolled
+                                    or await self._stay_up_lead_changed(g)
+                                ):
                                     self._resume_think = True
                                 continue
                             continue
