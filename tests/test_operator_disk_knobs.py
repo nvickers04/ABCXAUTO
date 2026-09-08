@@ -111,6 +111,7 @@ def test_operator_disk_key_set():
         "sizing_floors",
         "defined_risk_only",
         "cash_only",
+        "portfolio_cap_usd",
         "ibkr_port",
         "trading_mode",
         "model",
