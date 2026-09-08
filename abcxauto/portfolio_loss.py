@@ -1,10 +1,9 @@
-"""KEEP-5A: portfolio USD defined-max-loss firewall.
+"""Portfolio defined-max-loss math. Display only — never a place refuse.
 
 Deterministic sum: defined max-loss(open lots) + working new-risk
-+ candidate ≤ hard ``portfolio_cap_usd``. Over-cap new risk refuses.
-Closers / closing_position / unprotected last-stop always allowed —
-even at or over the cap. Unreadable max-loss on a counted row fail-closes
-new risk (never invent $0). Mid / mark / last are not max-loss evidence.
++ candidate. ``portfolio_cap_usd`` default $800 is not a clerk gate.
+Closers / closing_position / unprotected last-stop stay free.
+Mid / mark / last are not max-loss evidence.
 
 No IBKR import. Unit-testable with plain dicts.
 """
@@ -340,11 +339,11 @@ def resolve_portfolio_cap_usd(
     *,
     present: bool | None = None,
 ) -> dict[str, Any]:
-    """Resolve the hard USD cap.
+    """Resolve the display-only USD figure.
 
-    Unset → default 800 (gate ON). Present + finite ≥ 0 → use it, clamped
-    so it cannot raise above 800. Present + garbage / non-finite →
-    unreadable (fail-closed for new risk). Absent=off is rejected.
+    Unset → default 800 (not a refuse). Present + finite ≥ 0 → use it,
+    clamped so persist cannot raise above 800. Present + garbage /
+    non-finite → unreadable. Never a place or preview refuse.
     """
     if raw is _UNSET:
         saw = False if present is None else bool(present)
@@ -395,7 +394,7 @@ def load_portfolio_cap_raw() -> tuple[Any, bool]:
     """Raw operator-disk / env value. present=True even when garbage.
 
     File key wins. Env is used only when the file omits the key. Missing
-    both → (unset, False) so the gate defaults ON at $800.
+    both → (unset, False). Display default $800 is not a refuse.
     """
     try:
         from abcxauto.config import risk_settings_path
@@ -450,18 +449,20 @@ def portfolio_usd_check(
     portfolio_cap_usd: Any = _UNSET,
     cap_present: bool | None = None,
 ) -> dict[str, Any]:
-    """Pure firewall verdict. Plain dicts only.
+    """Display sum only. Plain dicts. Never refuses.
 
     ``portfolio_max_loss_usd`` = Σ open + Σ working new-risk + candidate.
-    Closers always ``allow``. Unreadable counted max-loss refuse new risk.
+    Closers stay free. Unreadable counted max-loss is a fact, not a refuse.
+    Over-cap vs ``portfolio_cap_usd`` is not a clerk refuse.
     """
     cap_info = resolve_portfolio_cap_usd(portfolio_cap_usd, present=cap_present)
     closer = is_portfolio_usd_closer(candidate)
+    cap = cap_info.get("cap")
     blob = {
         "allow": True,
         "portfolio_usd_refused": False,
         "portfolio_max_loss_usd": None,
-        "portfolio_cap_usd": cap_info.get("cap"),
+        "portfolio_cap_usd": cap,
         "reason": "",
         "reason_code": "",
         "open_usd": None,
@@ -475,14 +476,9 @@ def portfolio_usd_check(
         return blob
 
     if cap_info.get("unreadable") or not cap_info.get("ok"):
-        blob["allow"] = False
-        blob["portfolio_usd_refused"] = True
         blob["unreadable"] = True
-        blob["reason_code"] = REASON_PORTFOLIO_USD_CAP
-        blob["reason"] = "portfolio_cap_usd unreadable — fail-closed"
         return blob
 
-    cap = float(cap_info["cap"])
     open_sum, open_bad = _sum_defined(_dict_rows(open_lots), skip_exits=False)
     work_sum, work_bad = _sum_defined(_dict_rows(working), skip_exits=True)
     cand_loss = defined_max_loss_usd(candidate) if isinstance(candidate, dict) else None
@@ -493,46 +489,34 @@ def portfolio_usd_check(
     blob["candidate_usd"] = cand_loss
 
     if open_bad or work_bad or cand_bad:
-        blob["allow"] = False
-        blob["portfolio_usd_refused"] = True
         blob["unreadable"] = True
-        blob["reason_code"] = REASON_PORTFOLIO_USD_UNREADABLE
-        blob["reason"] = "portfolio defined max-loss unreadable — fail-closed"
         return blob
 
     total = float(open_sum or 0.0) + float(work_sum or 0.0) + float(cand_loss or 0.0)
     blob["portfolio_max_loss_usd"] = total
     blob["portfolio_cap_usd"] = cap
-    if total > cap:
-        blob["allow"] = False
-        blob["portfolio_usd_refused"] = True
-        blob["reason_code"] = REASON_PORTFOLIO_USD
-        blob["reason"] = f"{REASON_PORTFOLIO_USD} {total} > {cap}"
-        return blob
     return blob
 
 
 def stamp_portfolio_usd(out: dict[str, Any], check: dict[str, Any]) -> dict[str, Any]:
-    """Copy the journal / block-blob fields onto a preview or place result."""
+    """Copy display fields. Never stamps a USD refuse."""
     out["portfolio_max_loss_usd"] = check.get("portfolio_max_loss_usd")
     out["portfolio_cap_usd"] = check.get("portfolio_cap_usd")
-    out["portfolio_usd_refused"] = bool(check.get("portfolio_usd_refused"))
+    out["portfolio_usd_refused"] = False
     return out
 
 
 def portfolio_usd_block_blob(check: dict[str, Any], act: Any = None) -> dict[str, Any]:
-    """Fail-closed place / preview-pass-as-place refuse. Never writes."""
+    """Legacy helper. KEEP-5A refuse is deleted — never a place block."""
     strat = _strategy_of(act) or "blocked"
-    reason = str(check.get("reason") or check.get("reason_code") or REASON_PORTFOLIO_USD)
-    code = str(check.get("reason_code") or REASON_PORTFOLIO_USD)
     out = {
-        "status": "blocked",
-        "reason_code": code,
-        "note": reason,
+        "status": "ok",
+        "reason_code": "",
+        "note": "",
         "strategy": strat,
-        "would_refuse": [code],
-        "pass": False,
-        "refuse": True,
+        "would_refuse": [],
+        "pass": True,
+        "refuse": False,
     }
     stamp_portfolio_usd(out, check)
     return out
@@ -575,48 +559,14 @@ def portfolio_usd_place_block(
     world: Any = None,
     snap: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """None if place may proceed. A dict is fail-closed — never write."""
-    check = live_portfolio_usd_check(act, world=world, snap=snap)
-    if not check.get("portfolio_usd_refused"):
-        if isinstance(act, dict):
+    """Always None. KEEP-5A USD refuse is deleted — never blocks place."""
+    if isinstance(act, dict):
+        try:
+            check = live_portfolio_usd_check(act, world=world, snap=snap)
             stamp_portfolio_usd(act, check)
-        return None
-    blob = portfolio_usd_block_blob(check, act)
-    _journal_portfolio_usd(act, check, source="place")
-    return blob
-
-
-def _journal_portfolio_usd(act: Any, check: dict[str, Any], *, source: str) -> None:
-    try:
-        from abcxauto.memory import get_journal
-
-        params = _params_of(act)
-        journal = get_journal()
-        blob = {
-            PORTFOLIO_CAP_KEY: check.get("portfolio_cap_usd"),
-            "portfolio_max_loss_usd": check.get("portfolio_max_loss_usd"),
-            "portfolio_usd_refused": bool(check.get("portfolio_usd_refused")),
-        }
-        merged = dict(params)
-        merged.update(blob)
-        pid = journal.record_proposal(
-            source=f"portfolio_usd:{source}",
-            strategy=_strategy_of(act),
-            symbol=str(params.get("symbol") or ""),
-            direction=str(params.get("direction") or params.get("action") or ""),
-            quantity=params.get("quantity"),
-            params=merged,
-            validation_ok=not check.get("portfolio_usd_refused"),
-            validation_reason=str(check.get("reason") or check.get("reason_code") or ""),
-        )
-        if pid is not None:
-            journal.record_gate_decision(
-                pid,
-                not check.get("portfolio_usd_refused"),
-                str(check.get("reason") or check.get("reason_code") or ""),
-            )
-    except Exception:
-        logger.debug("portfolio usd journal failed", exc_info=True)
+        except Exception:
+            logger.debug("portfolio usd display stamp failed", exc_info=True)
+    return None
 
 
 __all__ = [

@@ -4,7 +4,7 @@ Immutable floor (code): daily-loss halt, defined-risk, cash-only,
 auto-panic, fail-closed, exits never blocked, live gated.
 Operator disk knobs are source of truth. File wins over the model for
 mop / size% / premium% / daily-loss / session_token_cap / floors /
-defined-risk / cash-only / portfolio_cap_usd / mode+port. self_tune cannot persist over
+defined-risk / cash-only / portfolio_cap_usd (display, not a refuse) / mode+port. self_tune cannot persist over
 them; a payload that includes them is ignored for those fields and
 the rest of a legitimate tune still applies. 0 stays 0 (off) for the
 size knobs. daily_loss 25 stays 25 — not a 0.5 clamp, not 0=off.

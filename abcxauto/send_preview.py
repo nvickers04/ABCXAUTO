@@ -443,31 +443,6 @@ def collect_would_refuse(
         except Exception:
             logger.debug("preview mode_size check failed", exc_info=True)
 
-    try:
-        from abcxauto.portfolio_loss import (
-            REASON_PORTFOLIO_USD_UNREADABLE,
-            is_new_risk_ticket,
-            live_portfolio_usd_check,
-        )
-
-        usd = live_portfolio_usd_check(work, world=world, snap=snap_d)
-        if usd.get("portfolio_usd_refused"):
-            reasons.append(str(usd.get("reason") or usd.get("reason_code") or ""))
-        elif usd.get("unreadable") and is_new_risk_ticket(work):
-            reasons.append(REASON_PORTFOLIO_USD_UNREADABLE)
-    except Exception:
-        logger.debug("preview portfolio usd check failed", exc_info=True)
-        try:
-            from abcxauto.portfolio_loss import (
-                REASON_PORTFOLIO_USD_UNREADABLE,
-                is_new_risk_ticket,
-            )
-
-            if is_new_risk_ticket(work):
-                reasons.append(REASON_PORTFOLIO_USD_UNREADABLE)
-        except Exception:
-            reasons.append("portfolio_usd_unreadable")
-
     return _dedupe(reasons)
 
 
@@ -744,7 +719,7 @@ def preview_ticket(
             source=source,
             portfolio_max_loss_usd=usd.get("portfolio_max_loss_usd"),
             portfolio_cap_usd=usd.get("portfolio_cap_usd"),
-            portfolio_usd_refused=bool(usd.get("portfolio_usd_refused")),
+            portfolio_usd_refused=False,
         )
     except Exception:
         logger.debug("preview journal failed", exc_info=True)
