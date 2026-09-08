@@ -793,8 +793,9 @@ def test_research_stay_up_rolled_to_rth_is_premarket_to_regular():
 
 def test_session_change_into_regular_resumes_stay_up(monkeypatch):
     """B: session_change into regular is a hard stay-up interrupt."""
-    from abcxauto.park_clock import peek_interrupt
+    from abcxauto.park_clock import clear_interrupt, peek_interrupt
 
+    clear_interrupt()
     monkeypatch.setattr(
         "abcxauto.park_clock.infer_session_before_open",
         lambda **_k: ("", None),
@@ -813,6 +814,9 @@ def test_session_change_into_regular_resumes_stay_up(monkeypatch):
 
 
 def test_session_change_does_not_resume_when_clock_still_premarket(monkeypatch):
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
     monkeypatch.setattr(
         "abcxauto.park_clock.infer_session_before_open",
         lambda **_k: ("premarket", 30.0),
@@ -2345,14 +2349,23 @@ async def test_premarket_snap_does_not_invent_rth_roll_from_wall_clock(
     while time.time() < deadline and len(looks) < 1:
         eng.drain_apply()
         await asyncio.sleep(0.05)
+    sit_deadline = time.time() + 3
+    while time.time() < sit_deadline:
+        eng.drain_apply()
+        ev = getattr(eng, "_wake_event", None)
+        if len(looks) == 1 and ev is not None and ev._waiters:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("worker never sat after premarket look")
     idle_until = time.time() + 0.4
     while time.time() < idle_until:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    eng.stop_engine()
-    eng.drain_apply()
     assert looks == ["premarket"]
     assert eng._resume_think is False
+    eng.stop_engine()
+    eng.drain_apply()
 
 
 @pytest.mark.asyncio
