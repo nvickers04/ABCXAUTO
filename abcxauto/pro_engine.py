@@ -1001,6 +1001,7 @@ class ProEngine:
             unprotected=bool(prot.get("unprotected_symbols")),
             prompt_tokens=prompt_n,
             in_flight=bool(getattr(self, "_kill_entry_in_flight", False)),
+            snap=blob,
         )
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:

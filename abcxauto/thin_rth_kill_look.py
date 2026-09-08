@@ -715,6 +715,7 @@ def skip_look_reason(
     f10: dict[str, Any] | None = None,
     in_flight: bool = False,
     abort_fuse: str | None = None,
+    snap: dict[str, Any] | None = None,
 ) -> str:
     """Non-empty = do not call the model. Unprotected last-stop still looks."""
     if unprotected:
@@ -724,7 +725,7 @@ def skip_look_reason(
         from abcxauto.research_budget import research_brief_skip_reason
 
         brief_halt = research_brief_skip_reason(
-            session, snap=None, now=now, unprotected=unprotected
+            session, snap=snap, now=now, unprotected=unprotected
         )
         if brief_halt:
             return brief_halt
@@ -787,7 +788,7 @@ def skip_look_reason(
             from abcxauto.research_budget import research_brief_skip_reason
 
             brief_halt = research_brief_skip_reason(
-                session, now=now, unprotected=unprotected
+                session, snap=snap, now=now, unprotected=unprotected
             )
             if brief_halt:
                 return brief_halt

@@ -132,6 +132,12 @@ def test_usd_trip_stops_further_billed_turns():
     ninth = note_brief_turn(CARD, WINDOW)
     assert ninth["billed"] is False
     assert card_row(CARD, WINDOW)["turns"] == 7
+    write_research_brief(
+        session="premarket",
+        snap={"news_items": []},
+        research_card_id=CARD,
+        prove_window_id=WINDOW,
+    )
     assert skip_look_reason("premarket") == REASON_BRIEF_LOOP
     assert research_keep_looking("premarket") is False
 

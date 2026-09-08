@@ -1801,6 +1801,7 @@ async def _grok_turn_impl(
             same_look=bool(in_flight or live_before is not None),
             unprotected=unprotected,
             in_flight=in_flight,
+            snap=snap,
         )
         if is_f10_look_halt(halt):
             turn.f10_tripped = True
@@ -1878,6 +1879,19 @@ async def _grok_turn_impl(
                     "loop_halted": True,
                 }
                 think_emit("tool", "\n[brief loop halt — no billed research turns]\n")
+                try:
+                    from abcxauto.desk_mode import write_research_brief
+
+                    write_research_brief(
+                        session=session,
+                        snap=snap,
+                        turn=turn,
+                        world=world,
+                        research_card_id=card,
+                        prove_window_id=window,
+                    )
+                except Exception:
+                    logger.debug("research brief halt stamp failed", exc_info=True)
                 if live_before is not None:
                     _finish_look_chat(g, turn, session=session)
                 return turn
@@ -1956,6 +1970,7 @@ async def _grok_turn_impl(
                     or getattr(world, "needs_protection", False)
                 ),
                 in_flight=True,
+                snap=snap,
             )
             if is_f10_look_halt(mid_halt):
                 turn.f10_tripped = True
