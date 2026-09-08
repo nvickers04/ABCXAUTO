@@ -375,12 +375,27 @@ def _working_stop_oid(order: Dict[str, Any]) -> Optional[int]:
         return None
 
 
+def _positions_ledger_is_flat(positions: Any) -> bool:
+    """True when no open lots remain (qty/position all zero or missing)."""
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            qty = float(p.get("quantity") if p.get("quantity") is not None else p.get("position") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(qty) > 1e-9:
+            return False
+    return True
+
+
 async def _cancel_order_ids(
     connector: Any,
     ids: list[int],
     *,
     log_label: str,
     bounded: bool = False,
+    clear_stale: bool = False,
 ) -> list[int]:
     """Cancel working order ids. Never used to flatten a position.
 
@@ -388,6 +403,9 @@ async def _cancel_order_ids(
     id dead for this process, transient failures retry up to
     ``TRANSIENT_CANCEL_RETRY_LIMIT``, and a look-cycle cap stops a storm
     from delaying GROK think.
+
+    ``clear_stale=True`` (flat-book orphan cancel): 10147 / order_gone settles
+    the local protect id quietly instead of a loud ERROR.
     """
     from abcxauto.protect import (
         cancel_oid_is_blocked,
@@ -432,7 +450,11 @@ async def _cancel_order_ids(
                 logger.warning("%s: cancel %s failed: %s", log_label, oid, e)
             continue
         if isinstance(cres, dict) and cres.get("already_gone"):
-            note_cancel_gone(oid, detail=str(cres.get("error") or "already gone"))
+            note_cancel_gone(
+                oid,
+                detail=str(cres.get("error") or "already gone"),
+                clear_stale=clear_stale,
+            )
             continue
         if isinstance(cres, dict) and cres.get("error"):
             err = str(cres.get("error") or "")
@@ -441,6 +463,7 @@ async def _cancel_order_ids(
                     oid,
                     code=cres.get("error_code") or cres.get("code"),
                     detail=err,
+                    clear_stale=clear_stale,
                 )
             elif bounded:
                 note_cancel_transient_fail(oid, detail=err)
@@ -959,9 +982,15 @@ async def cancel_orphaned_protection(
         safe.append(oid)
     if not safe:
         return []
+    # Flat ledger + 10147/order_gone = clear local stale protect id, not ERROR.
+    clear_stale = _positions_ledger_is_flat(positions)
     begin_look_protection_budget(reset=False)
     return await _cancel_order_ids(
-        connector, safe, log_label="orphan-protection", bounded=True
+        connector,
+        safe,
+        log_label="orphan-protection",
+        bounded=True,
+        clear_stale=clear_stale,
     )
 
 

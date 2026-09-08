@@ -122,9 +122,18 @@ def cancel_result_means_gone(result: Any) -> bool:
 
 
 def note_cancel_gone(
-    order_id: Any, *, code: Any = None, detail: str = ""
+    order_id: Any,
+    *,
+    code: Any = None,
+    detail: str = "",
+    clear_stale: bool = False,
 ) -> None:
-    """Mark ``order_id`` dead for this process. Log once, loudly."""
+    """Mark ``order_id`` dead for this process. Log once.
+
+    Flat-book protect cancel that hits 10147 / order_gone is ``clear_stale``:
+    the local id is already gone at IBKR, so settle quietly (INFO). Other
+    gone marks still log ERROR so unexpected cancel-miss stays visible.
+    """
     oid = _as_oid(order_id)
     if oid is None:
         return
@@ -134,6 +143,14 @@ def note_cancel_gone(
         return
     _cancel_gone_logged.add(oid)
     why = detail or (f"IBKR {code}" if code is not None else "order not found")
+    if clear_stale:
+        logger.info(
+            "orphan-protection: clear-stale order_id=%s already gone at IBKR (%s) — "
+            "local protect id cleared; will not cancel again this process",
+            oid,
+            why,
+        )
+        return
     logger.error(
         "orphan-protection: order_id=%s is gone at IBKR (%s) — "
         "will not cancel again this process",

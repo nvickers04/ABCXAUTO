@@ -652,6 +652,16 @@ def test_10147_and_not_found_are_cancel_gone():
     assert TRANSIENT_CANCEL_RETRY_LIMIT == 3
 
 
+def test_note_cancel_gone_clear_stale_is_quiet(caplog):
+    from abcxauto.protect import note_cancel_gone, reset_cancel_guard_for_tests
+
+    reset_cancel_guard_for_tests()
+    with caplog.at_level("INFO"):
+        note_cancel_gone(7, code=10147, detail="flat start", clear_stale=True)
+    assert any("clear-stale" in r.message and "order_id=7" in r.message for r in caplog.records)
+    assert not any(r.levelname == "ERROR" for r in caplog.records)
+
+
 
 
 @pytest.mark.asyncio
