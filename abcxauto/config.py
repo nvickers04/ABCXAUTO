@@ -26,6 +26,7 @@ RISK_CONFIG_KEYS = frozenset({
     "auto_panic_on_breach",
     "defined_risk_only",
     "cash_only",
+    "portfolio_cap_usd",
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
     "max_risk_per_trade_pct",
@@ -203,6 +204,9 @@ class Config:
     auto_panic_on_breach: bool = True
     defined_risk_only: bool = True
     cash_only: bool = True
+    # KEEP-5A hard portfolio defined-max-loss cap. Gate ON at 800 when unset.
+    # Operator may lower via OPERATOR_DISK. self_tune cannot raise.
+    portfolio_cap_usd: float = 800.0
     max_peak_drawdown_pct: float = 25.0
     max_option_premium_pct: float = 25.0
     max_risk_per_trade_pct: float = 25.0
@@ -234,6 +238,19 @@ def _env_bool(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw.lower() in ("1", "true", "yes", "on")
+
+
+def _env_portfolio_cap_usd() -> float:
+    """Display default. Gate reads raw disk/env; garbage fail-closes there."""
+    raw = _env("ABCXAUTO_PORTFOLIO_CAP_USD")
+    if not raw:
+        return 800.0
+    try:
+        from abcxauto.portfolio_loss import coerce_portfolio_cap_usd
+
+        return coerce_portfolio_cap_usd(raw)
+    except (TypeError, ValueError):
+        return 800.0
 
 
 def default_file_log_path() -> Path:
@@ -337,6 +354,7 @@ def _load_env_config() -> Config:
         auto_panic_on_breach=_env_bool("ABCXAUTO_AUTO_PANIC_ON_BREACH", True),
         defined_risk_only=_env_bool("ABCXAUTO_DEFINED_RISK_ONLY", True),
         cash_only=_env_bool("ABCXAUTO_CASH_ONLY", True),
+        portfolio_cap_usd=_env_portfolio_cap_usd(),
         max_peak_drawdown_pct=float(_env("ABCXAUTO_MAX_PEAK_DRAWDOWN_PCT", "25")),
         max_option_premium_pct=float(_env("ABCXAUTO_MAX_OPTION_PREMIUM_PCT", "25")),
         max_risk_per_trade_pct=float(_env("ABCXAUTO_MAX_RISK_PER_TRADE_PCT", "25")),
@@ -391,6 +409,10 @@ def _coerce_risk_value(key: str, value: Any) -> Any:
         return str(value).strip().lower() in ("1", "true", "yes", "on")
     if key == "max_open_positions":
         return int(max(0, min(10_000, int(float(value)))))
+    if key == "portfolio_cap_usd":
+        from abcxauto.portfolio_loss import coerce_portfolio_cap_usd
+
+        return coerce_portfolio_cap_usd(value)
     return float(value)
 
 
@@ -627,10 +649,10 @@ def get_config() -> Config:
     """Env-backed config plus file-persisted risk knobs, agent_state, session overrides.
 
     Precedence: ``.env`` defaults < ``risk_settings.json`` < ``agent_state.json``
-    < session overrides. Operator disk knobs (mop / size% / premium% /
+    < session overrides.     Operator disk knobs (mop / size% / premium% /
     daily-loss / session_token_cap / floors / defined-risk / cash-only /
-    mode+port) are not taken from ``agent_state`` and ``self_tune`` cannot
-    persist over the file. The ``model`` the operator applies from Pro Settings
+    portfolio_cap_usd / mode+port) are not taken from ``agent_state`` and
+    ``self_tune`` cannot persist over the file. The ``model`` the operator applies from Pro Settings
     beats ``ABCXAUTO_MODEL``. ``model_rth`` / ``model_research`` select the
     session brain when set; empty falls back to ``model``. ``model_params``
     / ``model_params_rth`` / ``model_params_research`` are extra

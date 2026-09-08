@@ -4,7 +4,7 @@ Immutable floor (code): daily-loss halt, defined-risk, cash-only,
 auto-panic, fail-closed, exits never blocked, live gated.
 Operator disk knobs are source of truth. File wins over the model for
 mop / size% / premium% / daily-loss / session_token_cap / floors /
-defined-risk / cash-only / mode+port. self_tune cannot persist over
+defined-risk / cash-only / portfolio_cap_usd / mode+port. self_tune cannot persist over
 them; a payload that includes them is ignored for those fields and
 the rest of a legitimate tune still applies. 0 stays 0 (off) for the
 size knobs. daily_loss 25 stays 25 — not a 0.5 clamp, not 0=off.
@@ -108,6 +108,7 @@ OPERATOR_DISK_KEYS: frozenset[str] = frozenset({
     "sizing_floors",
     "defined_risk_only",
     "cash_only",
+    "portfolio_cap_usd",
     "ibkr_port",
     "trading_mode",
     # #159: Settings owns the brain. Grok cannot rewrite model id or params.
@@ -136,6 +137,7 @@ UNSUPERVISED_DEFAULTS: dict[str, Any] = {
     "auto_panic_on_breach": True,
     "defined_risk_only": True,
     "cash_only": True,
+    "portfolio_cap_usd": 800.0,
     "daily_loss_limit_pct": 25.0,
     "max_position_pct": 25.0,
     "max_risk_per_trade_pct": 25.0,

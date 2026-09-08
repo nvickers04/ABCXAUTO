@@ -717,6 +717,7 @@ async def execute_ticket(
 
     impact = simulate_close_impact(act, positions)
     act["_live_positions"], act["_impact"] = positions, impact
+    act["_open_orders"] = list(snap.get("open_orders") or world.open_orders or [])
 
     quote_last = await _quote_for_action(act, snap, connector)
     params = act.get("params") if isinstance(act.get("params"), dict) else {}

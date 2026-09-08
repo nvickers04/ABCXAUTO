@@ -443,6 +443,31 @@ def collect_would_refuse(
         except Exception:
             logger.debug("preview mode_size check failed", exc_info=True)
 
+    try:
+        from abcxauto.portfolio_loss import (
+            REASON_PORTFOLIO_USD_UNREADABLE,
+            is_new_risk_ticket,
+            live_portfolio_usd_check,
+        )
+
+        usd = live_portfolio_usd_check(work, world=world, snap=snap_d)
+        if usd.get("portfolio_usd_refused"):
+            reasons.append(str(usd.get("reason") or usd.get("reason_code") or ""))
+        elif usd.get("unreadable") and is_new_risk_ticket(work):
+            reasons.append(REASON_PORTFOLIO_USD_UNREADABLE)
+    except Exception:
+        logger.debug("preview portfolio usd check failed", exc_info=True)
+        try:
+            from abcxauto.portfolio_loss import (
+                REASON_PORTFOLIO_USD_UNREADABLE,
+                is_new_risk_ticket,
+            )
+
+            if is_new_risk_ticket(work):
+                reasons.append(REASON_PORTFOLIO_USD_UNREADABLE)
+        except Exception:
+            reasons.append("portfolio_usd_unreadable")
+
     return _dedupe(reasons)
 
 
@@ -696,6 +721,14 @@ def preview_ticket(
     token = _issue_token(digest, preview_id) if passed else ""
     max_loss = ticket_max_loss(work)
     verdict = "pass" if passed else "refuse"
+    usd = {}
+    try:
+        from abcxauto.portfolio_loss import live_portfolio_usd_check
+
+        usd = live_portfolio_usd_check(work, world=world, snap=snap)
+    except Exception:
+        logger.debug("preview portfolio usd stamp failed", exc_info=True)
+        usd = {}
     try:
         from abcxauto.memory import get_journal
 
@@ -709,6 +742,9 @@ def preview_ticket(
             verdict=verdict,
             token_used=False,
             source=source,
+            portfolio_max_loss_usd=usd.get("portfolio_max_loss_usd"),
+            portfolio_cap_usd=usd.get("portfolio_cap_usd"),
+            portfolio_usd_refused=bool(usd.get("portfolio_usd_refused")),
         )
     except Exception:
         logger.debug("preview journal failed", exc_info=True)
@@ -730,6 +766,13 @@ def preview_ticket(
             else (would_refuse[0] if would_refuse else "preview refuse")
         ),
     }
+    if usd:
+        try:
+            from abcxauto.portfolio_loss import stamp_portfolio_usd
+
+            stamp_portfolio_usd(out, usd)
+        except Exception:
+            pass
     if not passed:
         out["reason_code"] = "preview_refuse"
     return out

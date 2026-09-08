@@ -144,6 +144,7 @@ RISK_FIELDS = (
     ("max_peak_drawdown_pct", "Peak drawdown", "% of NetLiq, 2 – 25"),
     ("max_option_premium_pct", "Max option premium", "% of NetLiq, 0 = off, else 1 – 25"),
     ("max_open_positions", "Max open lots", "0 = off — Grok may set N for this book"),
+    ("portfolio_cap_usd", "Portfolio max-loss $", "KEEP-5A hard USD cap. Default 800. Operator may lower, not raise"),
 )
 # ProEngine._note kinds. Anything not listed still paints its message in MUTED,
 # so a new note kind is visible the day it is added.

@@ -250,8 +250,9 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
     A presented dry-run / approval / place token that is expired, used,
     or unreadable fail-closes here (KEEP-4) before KEEP-3 authorize.
     New-risk place then requires a single-use preview token bound to the
-    ticket hash (KEEP-3). A preview request never reaches
-    ``safe_execute``. Exits skip both token gates.
+    ticket hash (KEEP-3). KEEP-5A portfolio USD max-loss runs after
+    authorize OK and before ``safe_execute``. A preview request never
+    reaches ``safe_execute``. Exits skip token and portfolio USD gates.
     """
     cfg = get_config()
     live_port = _paper_live_port(cfg)
@@ -289,5 +290,25 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
     blocked = authorize_place(action)
     if blocked is not None:
         return blocked
+    from abcxauto.portfolio_loss import (
+        REASON_PORTFOLIO_USD_UNREADABLE,
+        portfolio_usd_place_block,
+    )
+
+    try:
+        usd_block = portfolio_usd_place_block(action)
+    except Exception:
+        return {
+            "status": "blocked",
+            "reason_code": REASON_PORTFOLIO_USD_UNREADABLE,
+            "note": "portfolio USD check failed — fail-closed",
+            "strategy": action.get("strategy") or action.get("action") or "blocked",
+            "would_refuse": [REASON_PORTFOLIO_USD_UNREADABLE],
+            "portfolio_usd_refused": True,
+            "portfolio_max_loss_usd": None,
+            "portfolio_cap_usd": None,
+        }
+    if usd_block is not None:
+        return usd_block
     result = await safe_execute(action, connector)
     return stamp_place_result(result, action)

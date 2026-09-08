@@ -12,6 +12,7 @@ from abcxauto.config import Config, get_config
 from abcxauto.executor import execute_proposal
 from abcxauto.proposals import validate_proposal
 from abcxauto.risk_gates import get_risk_gate, reset_risk_gate
+from abcxauto.portfolio_loss import REASON_PORTFOLIO_USD
 from abcxauto.riskless_combo import (
     REASON_CODE,
     is_riskless_combo_202,
@@ -295,6 +296,7 @@ async def test_closing_iron_also_blocked_while_one_working():
 
 @pytest.mark.asyncio
 async def test_send_action_does_not_place_second():
+    # Either refuse proves no second place (KEEP-5A may fire before riskless cap).
     gw = FakeGW([_working_iron(oid=7395)])
     from abcxauto.send_preview import bind_place_token
 
@@ -305,8 +307,8 @@ async def test_send_action_does_not_place_second():
     }
     bind_place_token(ticket)
     result = await send_action(ticket, gw)
-    assert result.get("reason_code") == REASON_CODE
-    assert result.get("status") == "rejected"
+    assert result.get("reason_code") in (REASON_CODE, REASON_PORTFOLIO_USD)
+    assert result.get("status") in ("rejected", "blocked")
     assert gw.calls == []
 
 
