@@ -1075,7 +1075,19 @@ def test_named_card_allowlist_and_no_credit_floor(monkeypatch):
     )
     assert cheap_block is None
     ok, why = pcs_send_ok(
-        "not_a_real_strategy", NAMED_VERT, "spy-bp-750-745", mode=MODE_OPEN
+        "ratio_spread",
+        {
+            "symbol": "SPY",
+            "expiration": "20260918",
+            "long_strike": 500.0,
+            "short_strike": 510.0,
+            "right": "C",
+            "ratio": 2,
+            "quantity": 1,
+            "card": "named-ratio",
+        },
+        "named-ratio",
+        mode=MODE_OPEN,
     )
     assert ok is False
     assert why == REASON_ALLOWLIST
