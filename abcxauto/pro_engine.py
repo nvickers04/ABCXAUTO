@@ -1531,6 +1531,7 @@ class ProEngine:
             "_recover": recover,
             "f10_tripped": bool(getattr(turn, "f10_tripped", False)),
             "loop_halted": bool(getattr(turn, "loop_halted", False)),
+            "brief_loop_halted": bool(getattr(turn, "brief_loop_halted", False)),
         }
 
     async def _do_panic(self) -> None:
@@ -1907,6 +1908,24 @@ class ProEngine:
                                 )
                             except Exception:
                                 logger.debug("f10 halt persist failed", exc_info=True)
+                        else:
+                            try:
+                                from abcxauto.research_budget import (
+                                    is_brief_look_halt,
+                                    mark_brief_loop_halt,
+                                    resolve_research_card,
+                                )
+
+                                if is_brief_look_halt(skip):
+                                    card, window = resolve_research_card(snap=s)
+                                    mark_brief_loop_halt(
+                                        card, window, reason=skip
+                                    )
+                            except Exception:
+                                logger.debug(
+                                    "research brief halt persist failed",
+                                    exc_info=True,
+                                )
                         continue
 
                 n += 1

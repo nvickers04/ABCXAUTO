@@ -189,6 +189,13 @@ def research_keep_looking(session: str = "") -> bool:
             return False
     except Exception:
         return False
+    try:
+        from abcxauto.research_budget import brief_loop_halted
+
+        if brief_loop_halted():
+            return False
+    except Exception:
+        pass
     return True
 
 
@@ -1089,6 +1096,8 @@ def write_research_brief(
     turn: Any = None,
     world: Any = None,
     now: datetime | None = None,
+    research_card_id: str = "",
+    prove_window_id: str = "",
 ) -> dict[str, Any]:
     """Overwrite ``data/state/research_brief.json``. No order tickets.
 
@@ -1132,6 +1141,18 @@ def write_research_brief(
         "tickets": [],
         "tool_trace": list(getattr(turn, "tool_trace", None) or [])[:24],
     }
+    try:
+        from abcxauto.research_budget import stamp_brief_lineage
+
+        stamp_brief_lineage(
+            payload,
+            research_card_id=research_card_id,
+            prove_window_id=prove_window_id,
+            snap=snap if isinstance(snap, dict) else None,
+            now=now,
+        )
+    except Exception:
+        logger.debug("research brief lineage stamp failed", exc_info=True)
     p = research_brief_path()
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -1139,6 +1160,25 @@ def write_research_brief(
     except OSError:
         logger.debug("research_brief write failed", exc_info=True)
     return payload
+
+
+def promote_lab(
+    *,
+    research_card_id: str = "",
+    prove_window_id: str = "",
+    snap: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Promote/lab path. Refuses unless gate_verdict=PASS and cost is present."""
+    from abcxauto.research_budget import lab_promote, resolve_research_card
+
+    card, window = resolve_research_card(
+        research_card_id=research_card_id,
+        prove_window_id=prove_window_id,
+        snap=snap,
+        now=now,
+    )
+    return lab_promote(card, window)
 
 
 def rth_research_color(

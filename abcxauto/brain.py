@@ -101,6 +101,7 @@ class BrainTurn:
     kill_look_capped: bool = False
     f10_tripped: bool = False
     loop_halted: bool = False
+    brief_loop_halted: bool = False
 
     def look_failed(self) -> bool:
         """True empty / lone '?' only. A real say or send/fill is not junk.
@@ -1301,6 +1302,32 @@ def _path_block(world: WorldState, cfg: Any) -> dict[str, Any]:
         return {"n": 0, "note": "path unavailable"}
 
 
+def _bill_research_brief_round(
+    turn: BrainTurn,
+    *,
+    session: str,
+    snap: dict[str, Any] | None,
+    tool_calls: int = 0,
+) -> bool:
+    """Count one billed research model turn. True when the card is now halted."""
+    try:
+        from abcxauto.desk_mode import is_research_session, is_rth_session
+        from abcxauto.research_budget import note_brief_turn, resolve_research_card
+
+        if not is_research_session(session) or is_rth_session(session):
+            return False
+        card, window = resolve_research_card(snap=snap)
+        out = note_brief_turn(card, window, tool_calls=tool_calls)
+        if out.get("brief_loop_halted"):
+            turn.brief_loop_halted = True
+            turn.loop_halted = True
+            think_emit("tool", "\n[brief loop halt — no billed research turns]\n")
+            return True
+    except Exception:
+        logger.debug("research brief bill failed", exc_info=True)
+    return False
+
+
 async def grok_turn(
     g: GrokClient,
     *,
@@ -1823,6 +1850,39 @@ async def _grok_turn_impl(
                 return turn
         except Exception:
             logger.debug("f10 loop halt fail-closed fallback failed", exc_info=True)
+    try:
+        from abcxauto.desk_mode import is_research_session, is_rth_session
+        from abcxauto.research_budget import (
+            allow_brief_turn,
+            resolve_research_card,
+        )
+
+        if is_research_session(session) and not is_rth_session(session):
+            card, window = resolve_research_card(snap=snap)
+            gate = allow_brief_turn(card, window)
+            if not gate.get("allow"):
+                why = str(gate.get("reason_code") or "")
+                turn.brief_loop_halted = True
+                turn.loop_halted = True
+                turn.last_strat = "skipped"
+                turn.last_act = {
+                    "action": "skipped",
+                    "strategy": "skipped",
+                    "rationale": why,
+                }
+                turn.last_result = {
+                    "status": "skipped",
+                    "reason_code": why,
+                    "note": why,
+                    "brief_loop_halted": True,
+                    "loop_halted": True,
+                }
+                think_emit("tool", "\n[brief loop halt — no billed research turns]\n")
+                if live_before is not None:
+                    _finish_look_chat(g, turn, session=session)
+                return turn
+    except Exception:
+        logger.debug("research brief halt pre-check failed", exc_info=True)
     # A live chat is this look. A poke does not start a new messages list.
     resume = bool(resume) or live_before is not None
     recover = bool(recover) and live_before is not None
@@ -1905,6 +1965,21 @@ async def _grok_turn_impl(
                 break
         except Exception:
             logger.debug("f10 mid-look halt check failed", exc_info=True)
+        try:
+            from abcxauto.desk_mode import is_research_session, is_rth_session
+            from abcxauto.research_budget import allow_brief_turn, resolve_research_card
+
+            if is_research_session(session) and not is_rth_session(session):
+                card, window = resolve_research_card(snap=snap)
+                mid_brief = allow_brief_turn(card, window)
+                if not mid_brief.get("allow"):
+                    turn.brief_loop_halted = True
+                    turn.loop_halted = True
+                    think_emit("tool", "\n[brief loop halt — no billed research turns]\n")
+                    ran_out = False
+                    break
+        except Exception:
+            logger.debug("research brief mid-look halt check failed", exc_info=True)
         turn.steps += 1
         try:
             from abcxauto.park_clock import peek_interrupt
@@ -2000,6 +2075,9 @@ async def _grok_turn_impl(
                     empty_tries,
                     EMPTY_GROK_TRIES,
                 )
+                if _bill_research_brief_round(turn, session=session, snap=snap):
+                    ran_out = False
+                    break
                 await asyncio.sleep(empty_grok_dead_s())
                 continue
             if empty_after_work:
@@ -2011,9 +2089,13 @@ async def _grok_turn_impl(
             # Words (or empty) and no tools: stop calling the model. Chat
             # stays. Next call is fill / order_change / unprotected / poke
             # with this chat plus a fresh snap. Do not call again because it spoke.
+            if _bill_research_brief_round(turn, session=session, snap=snap):
+                ran_out = False
+                break
             ran_out = False
             break
         turn.trailing_empty_grok = False
+        tools_before = len(turn.tool_trace)
         interrupted = await _dispatch_tool_calls(
             calls,
             chat=chat,
@@ -2024,6 +2106,14 @@ async def _grok_turn_impl(
         )
         if tool_cap and len(turn.tool_trace) >= tool_cap:
             turn.kill_look_capped = True
+        if _bill_research_brief_round(
+            turn,
+            session=session,
+            snap=snap,
+            tool_calls=max(0, len(turn.tool_trace) - tools_before),
+        ):
+            ran_out = False
+            break
         if turn.tool_trace or turn.sends or turn.poked:
             try:
                 g._chat_had_work = True
