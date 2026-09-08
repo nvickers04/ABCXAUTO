@@ -271,6 +271,8 @@ class ProEngine:
         self._mill_streak = 0
         self._mill_gave_up = False
         self._kill_entry_in_flight = False
+        # Armed once per IBKR connect: first flat orphan sweep is skipped.
+        self._flat_start_orphan_gate = False
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
         from abcxauto.think_stream import bind_engine
@@ -624,6 +626,49 @@ class ProEngine:
         except Exception:
             pass
 
+    @staticmethod
+    def _book_is_flat(snapshot: dict | None) -> bool:
+        positions = (snapshot or {}).get("positions") or []
+        for row in positions:
+            if not isinstance(row, dict):
+                continue
+            try:
+                qty = float(row.get("quantity") or row.get("position") or 0)
+            except (TypeError, ValueError):
+                continue
+            if abs(qty) > 1e-9:
+                return False
+        return True
+
+    def _gate_flat_start_orphan_sweep(self, monitor: Any) -> None:
+        """Skip the first orphan-protect cancel on a clean flat book.
+
+        Every Pro start used to fire protect-cancel on a stale ghost oid
+        (classically oid 4) while flat → IBKR Error 10147 once per process.
+        Execution owns clear-stale of that ghost; App UI only gates the first
+        flat sweep. An open position arms real orphan cancel immediately.
+        """
+        if not bool(getattr(self, "_flat_start_orphan_gate", False)):
+            return
+        orig = getattr(monitor, "_sweep_orphaned_protection", None)
+        if not callable(orig):
+            return
+
+        async def _gated(snapshot: dict) -> None:
+            flat = self._book_is_flat(snapshot if isinstance(snapshot, dict) else {})
+            if flat and bool(getattr(self, "_flat_start_orphan_gate", False)):
+                self._flat_start_orphan_gate = False
+                logger.info(
+                    "flat-start orphan-protection sweep skipped "
+                    "(open-orders settle / no ghost cancel on clean book)"
+                )
+                return
+            # Open book — never block real orphan cancel.
+            self._flat_start_orphan_gate = False
+            await orig(snapshot)
+
+        monitor._sweep_orphaned_protection = _gated  # type: ignore[method-assign]
+
     def _start_monitor(self) -> None:
         """Start PortfolioMonitor on the current worker asyncio loop (mirror web.py)."""
         self._stop_monitor()
@@ -639,6 +684,7 @@ class ProEngine:
             self.monitor = PortfolioMonitor(
                 stub, self.conn, on_wake=self.request_wake
             )
+            self._gate_flat_start_orphan_sweep(self.monitor)
             self.monitor.start()
             # PortfolioMonitor snapshots the config, so remember what it was
             # built with — a Settings change has to rebuild it.
@@ -1698,6 +1744,8 @@ class ProEngine:
                 self._note("UNIVERSE", f"sandbox refreshed n={n} src={al.get('source')}")
             except Exception as ue:
                 self._note("UNIVERSE", f"refresh skipped: {ue}")
+            # First connect only — mid-loop monitor rebuilds must not re-arm.
+            self._flat_start_orphan_gate = True
             self._start_monitor()
         except Exception as e:
             msg = f"IBKR connect failed: {e}"

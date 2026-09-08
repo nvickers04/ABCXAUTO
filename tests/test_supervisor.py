@@ -318,6 +318,8 @@ def test_supervise_does_not_relaunch_into_a_live_pro(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sup.subprocess, "Popen", _popen)
     monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: list(live))
+    # Foreign pid 99 was never in our child's nest tree.
+    monkeypatch.setattr(sup, "process_tree_pids", lambda *_a, **_k: [])
     monkeypatch.setattr(sup, "useful_hours", lambda **_kw: True)
     monkeypatch.setattr(sup, "tws_listening", lambda *_a, **_kw: True)
     monkeypatch.setattr(sup, "operator_stopped", lambda: False)
@@ -326,6 +328,52 @@ def test_supervise_does_not_relaunch_into_a_live_pro(monkeypatch, tmp_path):
     assert supervise() == 1
     assert launches == [1]
     assert slept == []
+
+
+def test_supervise_reaps_leftover_nest_after_child_exit(monkeypatch, tmp_path):
+    """Child exit 1 leaves our nest pid up — reap it, then relaunch (not stay down)."""
+    monkeypatch.setenv("ABCXAUTO_DESK_OUT_PATH", str(tmp_path / "desk.out"))
+    codes = [1, 0]
+    launches: list[int] = []
+    live: list[int] = []
+    killed_trees: list[int] = []
+
+    def _popen(*_a, **_kw):
+        launches.append(1)
+        if len(launches) == 1:
+            # Nest flet/Pro still visible after the supervised child dies.
+            live[:] = [88]
+            return _Proc(codes.pop(0))
+        live.clear()
+        return _Proc(codes.pop(0))
+
+    def _kill_tree(root, *, exclude=None):
+        killed_trees.append(int(root))
+        if int(root) in live:
+            live.remove(int(root))
+        return [int(root)]
+
+    monkeypatch.setattr(sup.subprocess, "Popen", _popen)
+    monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: list(live))
+    monkeypatch.setattr(sup, "process_tree_pids", lambda *_a, **_k: [88])
+    monkeypatch.setattr(sup, "kill_pid_tree", _kill_tree)
+    monkeypatch.setattr(sup, "reap_leftover_desk", lambda **_k: [])
+    monkeypatch.setattr(sup, "kill_descendant_flet", lambda **_k: [])
+    monkeypatch.setattr(sup, "sweep_orphan_flet_windows", lambda: [])
+    monkeypatch.setattr(sup, "useful_hours", lambda **_kw: True)
+    monkeypatch.setattr(sup, "tws_listening", lambda *_a, **_kw: True)
+    monkeypatch.setattr(sup, "operator_stopped", lambda: False)
+    slept: list[float] = []
+    monkeypatch.setattr(sup.time, "sleep", slept.append)
+    assert supervise() == 0
+    assert launches == [1, 1]
+    assert 88 in killed_trees
+    assert slept == [15.0]
+    for h in logging.getLogger("abcxauto.desk_out").handlers:
+        h.flush()
+    body = (tmp_path / "desk.out").read_text(encoding="utf-8")
+    assert "reaping leftover nest pid 88" in body
+    assert "Pro still up" not in body
 
 
 def test_foreign_desk_pid_uses_lock_owner_without_killing(tmp_path, monkeypatch):
