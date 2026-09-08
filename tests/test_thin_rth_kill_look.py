@@ -6,6 +6,7 @@ Does not start looking, TWS, or 7496.
 
 from __future__ import annotations
 
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -42,6 +43,7 @@ from abcxauto.thin_rth_kill_look import (
     MODEL_TURNS_MAX,
     PCS_CARD,
     REASON_ALLOWLIST,
+    REASON_NAMELESS,
     REASON_DIE_TOOL,
     REASON_ENTRY_BUDGET,
     REASON_F10,
@@ -961,3 +963,139 @@ async def test_execute_ticket_unreadable_latches_exit_ok(monkeypatch):
 
 def test_hygiene_port_not_live_7496():
     assert get_config().ibkr_port != 7496
+
+
+NAMED_VERT = {
+    "symbol": "SPY",
+    "expiration": "20260918",
+    "long_strike": 745.0,
+    "short_strike": 750.0,
+    "right": "P",
+    "quantity": 1,
+    "limit_price": 0.85,
+    "card": "spy-bp-750-745",
+}
+
+
+def test_named_card_allowlist_and_no_credit_floor(monkeypatch):
+    """Named cards unlock; empty card refuses; C<$1 is not a credit-floor refuse."""
+    _kill_on(monkeypatch)
+    f10 = _allow_f10()
+
+    empty = {k: v for k, v in PCS_OPEN.items() if k != "card"}
+    ok, why = pcs_send_ok("vertical_spread", empty, None, mode=MODE_OPEN)
+    assert ok is False
+    assert why in {REASON_NAMELESS, REASON_ALLOWLIST}
+    ok, why = pcs_send_ok(
+        "vertical_spread", {**PCS_OPEN, "card": ""}, "", mode=MODE_OPEN
+    )
+    assert ok is False
+    assert why in {REASON_NAMELESS, REASON_ALLOWLIST}
+    ok, why = pcs_send_ok(
+        "vertical_spread", {**PCS_OPEN, "card": "   "}, "   ", mode=MODE_OPEN
+    )
+    assert ok is False
+    assert why in {REASON_NAMELESS, REASON_ALLOWLIST}
+    blocked_empty = kill_look_send_block(
+        {"strategy": "vertical_spread", "params": empty},
+        session="regular",
+        f10=f10,
+    )
+    assert blocked_empty is not None
+    assert blocked_empty["reason_code"] in {REASON_NAMELESS, REASON_ALLOWLIST}
+
+    ok, why = pcs_send_ok(
+        "vertical_spread", NAMED_VERT, "spy-bp-750-745", mode=MODE_OPEN
+    )
+    assert ok is True
+    named_act = {
+        "strategy": "vertical_spread",
+        "params": dict(NAMED_VERT),
+        "card": "spy-bp-750-745",
+    }
+    assert kill_look_send_block(named_act, session="regular", f10=f10) is None
+    ok, why = pcs_send_ok("vertical_spread", PCS_OPEN, PCS_CARD, mode=MODE_OPEN)
+    assert ok is True
+
+    incomplete = {
+        "symbol": "SPY",
+        "right": "P",
+        "quantity": 1,
+        "card": "spy-bp-750-745",
+    }
+    ok, why = pcs_send_ok(
+        "vertical_spread", incomplete, "spy-bp-750-745", mode=MODE_OPEN
+    )
+    assert ok is False
+    assert why == REASON_ALLOWLIST
+    missing_strikes = kill_look_send_block(
+        {
+            "strategy": "vertical_spread",
+            "params": incomplete,
+            "card": "spy-bp-750-745",
+        },
+        session="regular",
+        f10=f10,
+    )
+    assert missing_strikes is not None
+    assert missing_strikes["reason_code"] == REASON_ALLOWLIST
+
+    assert F10_HARD_USD == 2.0
+    assert get_config().ibkr_port != 7496
+    assert Config().ibkr_port != 7496
+
+    close = {**NAMED_VERT, "closing_position": True}
+    ok, why = pcs_send_ok(
+        "vertical_spread", close, "spy-bp-750-745", mode=MODE_ABORT
+    )
+    assert ok is True
+    assert why == "closing"
+    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    assert (
+        kill_look_send_block(
+            {
+                "strategy": "vertical_spread",
+                "params": close,
+                "card": "spy-bp-750-745",
+            },
+            session="regular",
+            f10=hard,
+        )
+        is None
+    )
+
+    cheap = {**PCS_OPEN, "limit_price": 0.50}
+    ok, why = pcs_send_ok("vertical_spread", cheap, PCS_CARD, mode=MODE_OPEN)
+    assert ok is True
+    assert why != "NO_SEND:credit_lt_floor"
+    cheap_block = kill_look_send_block(
+        {"strategy": "vertical_spread", "params": cheap, "card": PCS_CARD},
+        session="regular",
+        f10=f10,
+    )
+    assert cheap_block is None
+    ok, why = pcs_send_ok(
+        "ratio_spread",
+        {
+            "symbol": "SPY",
+            "expiration": "20260918",
+            "long_strike": 500.0,
+            "short_strike": 510.0,
+            "right": "C",
+            "ratio": 2,
+            "quantity": 1,
+            "card": "named-ratio",
+        },
+        "named-ratio",
+        mode=MODE_OPEN,
+    )
+    assert ok is False
+    assert why == REASON_ALLOWLIST
+
+    from abcxauto import thin_rth_kill_look as kl
+
+    src = inspect.getsource(kl)
+    assert "CREDIT_FLOOR" not in src
+    assert "min_credit" not in src
+    assert "credit_lt_floor" not in inspect.getsource(kl.pcs_send_ok)
+    assert "credit_lt_floor" not in inspect.getsource(kl.kill_look_send_block)

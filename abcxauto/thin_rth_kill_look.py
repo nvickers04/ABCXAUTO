@@ -61,6 +61,7 @@ REASON_DD = "NO_SEND:dd_fuse"
 REASON_QTY0 = "NO_SEND:qty0_streak"
 REASON_MODEL_COST = "NO_SEND:model_cost_cap"
 REASON_ALLOWLIST = "kill_look_allowlist"
+REASON_NAMELESS = "kill_look_nameless"
 REASON_ENTRY_BUDGET = "kill_look_entry_budget"
 REASON_RESEARCH_WEEK = "kill_look_research_week"
 REASON_RESEARCH_PROMPT = "kill_look_research_prompt"
@@ -294,7 +295,12 @@ def filter_agent_tool_names(
 
 
 def send_strategy_names(*, session: str = "") -> list[str] | None:
-    """None = default enum. Kill RTH send is vertical_spread only (close via param)."""
+    """None = default enum. Kill RTH send stays vertical_spread (close via param).
+
+    Named-card allowlist accepts other clerk-legal defined-risk ORDER EXAMPLES
+    schemas if they reach send. The tool enum expands only when a named-card
+    schema already in ORDER EXAMPLES needs a key other than vertical_spread.
+    """
     if not kill_look_rth(session):
         return None
     return [PCS_STRATEGY]
@@ -319,6 +325,124 @@ def _abort_send_reason(abort_fuse: str = "") -> str:
     return REASON_F10
 
 
+def normalize_kill_look_card(card: Any = None) -> str:
+    """Exact playbook card label. Lower/strip. Empty / whitespace is nameless."""
+    return str(card or "").strip().lower()
+
+
+# Geometry the clerk must see on the ticket — never invent strikes / exp / qty.
+_GEOM_FINITE = frozenset({
+    "quantity",
+    "contracts",
+    "shares",
+    "ratio",
+    "long_strike",
+    "short_strike",
+    "strike",
+    "put_long_strike",
+    "put_short_strike",
+    "call_short_strike",
+    "call_long_strike",
+    "center_strike",
+    "wing_width",
+    "put_strike",
+    "call_strike",
+    "lower_strike",
+    "middle_strike",
+    "upper_strike",
+    "near_strike",
+    "far_strike",
+})
+_GEOM_TEXT = frozenset({
+    "symbol",
+    "expiration",
+    "near_expiration",
+    "far_expiration",
+    "right",
+})
+_KILL_LOOK_FORBIDDEN = frozenset({"ratio_spread", "jade_lizard"})
+_KILL_LOOK_SHORT_OK_IF_LONG = frozenset({"straddle", "strangle"})
+
+
+def _finite_geom(raw: Any) -> float | None:
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val):
+        return None
+    return val
+
+
+def _clerk_legal_defined_risk(strategy: str, params: dict[str, Any]) -> bool:
+    """ORDER EXAMPLES / proposals defined-risk new-risk types. No invented names."""
+    from abcxauto.order_examples import NOT_TICKETS, ORDER_EXAMPLES
+    from abcxauto.proposals import MANAGEMENT_STRATEGIES, STRATEGIES
+    from abcxauto.strategy_params import OPTION_STRATEGIES
+
+    if strategy not in STRATEGIES or strategy not in ORDER_EXAMPLES:
+        return False
+    if strategy in NOT_TICKETS:
+        return False
+    if strategy in MANAGEMENT_STRATEGIES or strategy == "close_option":
+        return False
+    if strategy not in OPTION_STRATEGIES:
+        return False
+    if strategy in _KILL_LOOK_FORBIDDEN:
+        return False
+    if strategy in _KILL_LOOK_SHORT_OK_IF_LONG:
+        action = str(params.get("action") or "BUY").strip().upper()
+        if action == "SELL":
+            return False
+    return True
+
+
+def _ticket_schema_ok(strategy: str, params: dict[str, Any]) -> bool:
+    """Same pydantic model as ``validate_proposal`` / the place path."""
+    from pydantic import ValidationError
+
+    from abcxauto.proposals import STRATEGIES
+
+    entry = STRATEGIES.get(strategy)
+    if entry is None:
+        return False
+    model_cls = entry[0]
+    try:
+        model_cls(**params)
+    except (ValidationError, ValueError, TypeError):
+        return False
+    return True
+
+
+def _geometry_complete(strategy: str, params: dict[str, Any]) -> bool:
+    """Required geometry present and finite. Do not invent fills or strikes."""
+    from abcxauto.proposals import STRATEGIES
+
+    entry = STRATEGIES.get(strategy)
+    if entry is None:
+        return False
+    fields = entry[0].model_fields
+    for key in _GEOM_FINITE | _GEOM_TEXT:
+        if key not in fields:
+            continue
+        if key not in params or params.get(key) in (None, ""):
+            return False
+        raw = params.get(key)
+        if key in _GEOM_FINITE:
+            val = _finite_geom(raw)
+            if val is None:
+                return False
+        else:
+            token = str(raw or "").strip()
+            if not token:
+                return False
+            if "expiration" in key and not re.fullmatch(r"\d{8}", token):
+                return False
+            if key == "right" and token[:1].upper() not in {"C", "P"}:
+                return False
+    return True
+
+
 def pcs_send_ok(
     strategy: str = "",
     params: dict[str, Any] | None = None,
@@ -327,9 +451,12 @@ def pcs_send_ok(
     mode: str = "",
     abort_fuse: str = "",
 ) -> tuple[bool, str]:
-    """Legal kill-look send: pcs-skew put vertical BAG, or closing_position."""
+    """Legal kill-look new risk: named card + ORDER EXAMPLES schema + geometry.
+
+    Closers / non-new-risk skip the allowlist. Nameless freestyle is refused.
+    Credit quality is Grok judgement — no clerk dollar credit floor.
+    """
     from abcxauto.agent_loop import is_new_risk
-    from abcxauto.pcs_fill_lambda import is_pcs_ticket
 
     strat = str(strategy or "").strip().lower()
     dumped = dict(params or {})
@@ -341,11 +468,16 @@ def pcs_send_ok(
         return False, REASON_ALLOWLIST
     if mode == MODE_ABORT:
         return False, _abort_send_reason(abort_fuse)
-    if strat != PCS_STRATEGY:
+    card_norm = normalize_kill_look_card(dumped.get("card"))
+    if not card_norm:
+        return False, REASON_NAMELESS
+    if not _clerk_legal_defined_risk(strat, dumped):
         return False, REASON_ALLOWLIST
-    if not is_pcs_ticket(strat, dumped, dumped.get("card")):
+    if not _ticket_schema_ok(strat, dumped):
         return False, REASON_ALLOWLIST
-    return True, "pcs-skew"
+    if not _geometry_complete(strat, dumped):
+        return False, REASON_ALLOWLIST
+    return True, card_norm
 
 
 def session_model_cost_usd(*, since_iso: str = "") -> float | None:
@@ -808,7 +940,7 @@ def kill_look_send_block(
     in_flight: bool = False,
     abort_fuse: str | None = None,
 ) -> dict[str, Any] | None:
-    """Clerk block for illegal new pcs-skew risk. Exits still go."""
+    """Clerk block for illegal new named-card risk. Exits still go."""
     if not kill_look_rth(session):
         return None
     row = act if isinstance(act, dict) else {}
