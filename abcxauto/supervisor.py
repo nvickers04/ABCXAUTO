@@ -681,6 +681,14 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
                 target=tee_child_output, args=(stream,), daemon=True
             ).start()
         note(f"supervisor: child pid {child_pid} up")
+        # Snapshot the nest while the child is alive. After exit≠0 a leftover
+        # flet/Pro in this tree can still look like a foreign desk.
+        nest_pids: set[int] = set()
+        if child_pid:
+            try:
+                nest_pids = set(process_tree_pids(child_pid))
+            except Exception:
+                nest_pids = set()
         code = proc.wait()
         try:
             kill_descendant_flet(root=child_pid)
@@ -694,6 +702,20 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
             note("supervisor: operator stop — stay down")
             return int(code or 0)
         held = foreign_desk_pid(exclude={child_pid})
+        if held and held in nest_pids:
+            # Our crashed child's leftover nest/flet — reap it; do not stay
+            # down with a zombie Pro window.
+            try:
+                note(
+                    f"supervisor: reaping leftover nest pid {held} "
+                    f"after child exit {code}"
+                )
+                kill_pid_tree(held, exclude={child_pid})
+                reap_leftover_desk(exclude={child_pid})
+                sweep_orphan_flet_windows()
+            except Exception:
+                logger.debug("leftover nest reap skipped", exc_info=True)
+            held = foreign_desk_pid(exclude={child_pid})
         if held:
             note(
                 f"supervisor: Pro still up (pid {held}) after child exit {code} — stay down"

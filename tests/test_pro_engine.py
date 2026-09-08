@@ -505,6 +505,58 @@ async def test_pro_engine_wires_portfolio_monitor(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_flat_start_orphan_sweep_skipped_when_book_is_flat():
+    """First protect-cancel on a clean flat book is gated (no ghost 10147)."""
+    eng = ProEngine()
+    eng._flat_start_orphan_gate = True
+    calls: list[dict] = []
+
+    class _Mon:
+        async def _sweep_orphaned_protection(self, snapshot):
+            calls.append(snapshot)
+
+    mon = _Mon()
+    eng._gate_flat_start_orphan_sweep(mon)
+    flat = {"positions": [], "open_orders": [{"order_id": 4, "symbol": "NVDA"}]}
+    await mon._sweep_orphaned_protection(flat)
+    assert calls == []
+    assert eng._flat_start_orphan_gate is False
+    # Second tick (still flat) must run real orphan cancel.
+    await mon._sweep_orphaned_protection(flat)
+    assert calls == [flat]
+
+
+@pytest.mark.asyncio
+async def test_flat_start_orphan_sweep_runs_immediately_when_position_open():
+    """Open book must not lose real orphan-protection cancel on start."""
+    eng = ProEngine()
+    eng._flat_start_orphan_gate = True
+    calls: list[dict] = []
+
+    class _Mon:
+        async def _sweep_orphaned_protection(self, snapshot):
+            calls.append(snapshot)
+
+    mon = _Mon()
+    eng._gate_flat_start_orphan_sweep(mon)
+    open_book = {
+        "positions": [{"symbol": "NVDA", "quantity": 10}],
+        "open_orders": [],
+    }
+    await mon._sweep_orphaned_protection(open_book)
+    assert calls == [open_book]
+    assert eng._flat_start_orphan_gate is False
+
+
+def test_book_is_flat_helper():
+    eng = ProEngine()
+    assert eng._book_is_flat({"positions": []}) is True
+    assert eng._book_is_flat({"positions": [{"symbol": "AAPL", "quantity": 0}]}) is True
+    assert eng._book_is_flat({"positions": [{"symbol": "AAPL", "quantity": 2}]}) is False
+    assert eng._book_is_flat({"positions": [{"symbol": "AAPL", "position": -1}]}) is False
+
+
+@pytest.mark.asyncio
 async def test_connect_broker_no_cycles_without_xai(monkeypatch):
     """connect_broker links IBKR + monitor without requiring xAI or running cycles."""
 
