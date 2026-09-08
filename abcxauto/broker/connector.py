@@ -352,7 +352,7 @@ class IBKRQueriesMixin:
 
     async def cancel_order(self, order_id: int) -> Dict[str, Any]:
         """Cancel an open order."""
-        from abcxauto.protect import cancel_oid_is_blocked, note_cancel_gone
+        from abcxauto.protect import cancel_oid_is_blocked
 
         if not await self._ensure_connected():
             return {'error': 'Not connected'}
@@ -372,7 +372,8 @@ class IBKRQueriesMixin:
                     else:
                         self.ib.cancelOrder(trade.order)
                     return {'success': True, 'order_id': oid}
-            note_cancel_gone(oid, detail="not found in openTrades")
+            # Do not note_cancel_gone here — executor/protect classify flat-book
+            # 10147/order_gone as quiet clear-stale vs loud ERROR.
             return {'error': f'Order {oid} not found', 'order_gone': True}
         except Exception as e:
             logger.error(f"Failed to cancel order {oid}: {e}")
@@ -1002,7 +1003,12 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         from abcxauto.protect import ibkr_error_means_cancel_gone, note_cancel_gone
 
         if ibkr_error_means_cancel_gone(errorCode, errorString):
-            note_cancel_gone(reqId, code=errorCode, detail=errorString)
+            # Async 10147 after protect cancel: clear stale local id quietly.
+            # Executor also notes with flat-book clear_stale when it sees the
+            # cancel result first; either path must not scream start ERROR.
+            note_cancel_gone(
+                reqId, code=errorCode, detail=errorString, clear_stale=True
+            )
             return
 
         if errorCode in self._SUPPRESSED_ERROR_CODES:

@@ -815,17 +815,27 @@ class TestCancelGoneStopsRetryStorm:
 
     @pytest.mark.asyncio
     async def test_10147_on_oid_is_not_cancelled_again(self, caplog):
-        """After one 10147 on oid 4, further orphan-protection cycles skip 4."""
+        """After one 10147 on oid 4, further orphan-protection cycles skip 4.
+
+        Flat book + 10147 is clear-stale (INFO), not a loud start ERROR.
+        """
         from abcxauto.protect import cancel_oid_is_blocked
 
         ghost = _order(4, "NVDA", "SELL", 15, "STP")
         gateway = GhostCancelGateway(positions=[], open_orders=[ghost])
-        with caplog.at_level("ERROR"):
+        with caplog.at_level("INFO"):
             first = await cancel_orphaned_protection(gateway)
         assert first == []
         assert _cancel_ids(gateway) == [4]
         assert cancel_oid_is_blocked(4) is True
-        assert any("order_id=4" in r.message and "gone" in r.message for r in caplog.records)
+        assert any(
+            "clear-stale" in r.message and "order_id=4" in r.message
+            for r in caplog.records
+        )
+        assert not any(
+            r.levelname == "ERROR" and "order_id=4" in r.message
+            for r in caplog.records
+        )
 
         await cancel_orphaned_protection(gateway)
         await cancel_orphaned_protection(gateway)
@@ -837,6 +847,64 @@ class TestCancelGoneStopsRetryStorm:
             if "order_id=4" in r.message and "will not cancel again" in r.message
         ]
         assert len(gone_logs) == 1
+
+    @pytest.mark.asyncio
+    async def test_flat_book_order_gone_is_clear_stale_not_error(self, caplog):
+        """Flat ledger + order_gone flag clears stale protect id quietly."""
+        from abcxauto.protect import cancel_oid_is_blocked
+
+        class OrderGoneGateway(GhostCancelGateway):
+            async def cancel_order(self, order_id: int):
+                self.calls.append(("cancel_order", {"order_id": int(order_id)}))
+                return {
+                    "error": f"Order {order_id} not found",
+                    "order_gone": True,
+                }
+
+        ghost = _order(4, "NVDA", "SELL", 15, "STP")
+        gateway = OrderGoneGateway(positions=[], open_orders=[ghost])
+        with caplog.at_level("INFO"):
+            assert await cancel_orphaned_protection(gateway) == []
+        assert _cancel_ids(gateway) == [4]
+        assert cancel_oid_is_blocked(4) is True
+        assert any("clear-stale" in r.message for r in caplog.records)
+        assert not any(
+            r.levelname == "ERROR" and ("gone" in r.message or "10147" in r.message)
+            for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_real_orphan_still_cancels_when_order_exists(self):
+        """Open lot elsewhere must not block cancel of a real flat-symbol orphan."""
+        gateway = BookGateway(
+            positions=[_stk("AAPL", 10)],
+            open_orders=[_order(4, "NVDA", "SELL", 15, "STP")],
+        )
+        cancelled = await cancel_orphaned_protection(gateway)
+        assert cancelled == [4]
+        assert gateway.working_sells("NVDA") == []
+        assert gateway.working_sells("AAPL") == []
+
+    @pytest.mark.asyncio
+    async def test_nonflat_book_10147_still_marks_gone(self, caplog):
+        """With a live lot, 10147 still blocks retry (ERROR path kept)."""
+        from abcxauto.protect import cancel_oid_is_blocked
+
+        gateway = GhostCancelGateway(
+            positions=[_stk("AAPL", 10)],
+            open_orders=[_order(4, "NVDA", "SELL", 15, "STP")],
+        )
+        with caplog.at_level("ERROR"):
+            assert await cancel_orphaned_protection(gateway) == []
+        assert _cancel_ids(gateway) == [4]
+        assert cancel_oid_is_blocked(4) is True
+        assert any(
+            r.levelname == "ERROR"
+            and "order_id=4" in r.message
+            and "gone" in r.message
+            for r in caplog.records
+        )
+        assert not any("clear-stale" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_monitor_ticks_do_not_requeue_oid4_after_10147(self):
