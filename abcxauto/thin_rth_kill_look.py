@@ -64,6 +64,8 @@ REASON_ALLOWLIST = "kill_look_allowlist"
 REASON_ENTRY_BUDGET = "kill_look_entry_budget"
 REASON_RESEARCH_WEEK = "kill_look_research_week"
 REASON_RESEARCH_PROMPT = "kill_look_research_prompt"
+REASON_BRIEF_LOOP = "brief_loop_halted"
+REASON_BRIEF_COST = "brief_model_cost_missing"
 REASON_DIE_TOOL = "kill_look_die_tool"
 REASON_TURNS = "kill_look_turns"
 REASON_TOOLS = "kill_look_tools"
@@ -713,11 +715,23 @@ def skip_look_reason(
     f10: dict[str, Any] | None = None,
     in_flight: bool = False,
     abort_fuse: str | None = None,
+    snap: dict[str, Any] | None = None,
 ) -> str:
     """Non-empty = do not call the model. Unprotected last-stop still looks."""
-    if not kill_look_enabled():
-        return ""
     if unprotected:
+        return ""
+    # Named-card brief halt is independent of kill-look (no mill escape).
+    try:
+        from abcxauto.research_budget import research_brief_skip_reason
+
+        brief_halt = research_brief_skip_reason(
+            session, snap=snap, now=now, unprotected=unprotected
+        )
+        if brief_halt:
+            return brief_halt
+    except Exception:
+        logger.debug("research brief skip failed", exc_info=True)
+    if not kill_look_enabled():
         return ""
     fuse = abort_fuse
     if fuse is None:
@@ -770,6 +784,16 @@ def skip_look_reason(
             return REASON_RESEARCH_WEEK
         if not research_prompt_ok(prompt_tokens):
             return REASON_RESEARCH_PROMPT
+        try:
+            from abcxauto.research_budget import research_brief_skip_reason
+
+            brief_halt = research_brief_skip_reason(
+                session, snap=snap, now=now, unprotected=unprotected
+            )
+            if brief_halt:
+                return brief_halt
+        except Exception:
+            logger.debug("research brief skip failed", exc_info=True)
         return ""
     return ""
 

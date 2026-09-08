@@ -1001,6 +1001,7 @@ class ProEngine:
             unprotected=bool(prot.get("unprotected_symbols")),
             prompt_tokens=prompt_n,
             in_flight=bool(getattr(self, "_kill_entry_in_flight", False)),
+            snap=blob,
         )
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
@@ -1531,6 +1532,7 @@ class ProEngine:
             "_recover": recover,
             "f10_tripped": bool(getattr(turn, "f10_tripped", False)),
             "loop_halted": bool(getattr(turn, "loop_halted", False)),
+            "brief_loop_halted": bool(getattr(turn, "brief_loop_halted", False)),
         }
 
     async def _do_panic(self) -> None:
@@ -1907,6 +1909,24 @@ class ProEngine:
                                 )
                             except Exception:
                                 logger.debug("f10 halt persist failed", exc_info=True)
+                        else:
+                            try:
+                                from abcxauto.research_budget import (
+                                    is_brief_look_halt,
+                                    mark_brief_loop_halt,
+                                    resolve_research_card,
+                                )
+
+                                if is_brief_look_halt(skip):
+                                    card, window = resolve_research_card(snap=s)
+                                    mark_brief_loop_halt(
+                                        card, window, reason=skip
+                                    )
+                            except Exception:
+                                logger.debug(
+                                    "research brief halt persist failed",
+                                    exc_info=True,
+                                )
                         continue
 
                 n += 1
