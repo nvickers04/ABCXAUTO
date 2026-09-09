@@ -82,6 +82,10 @@ def _isolate_desk_evidence_and_latches(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_OPERATOR_STOP_PATH", str(tmp_path / "operator_stop.json"))
     monkeypatch.setenv("ABCXAUTO_DESK_LOCK_PATH", str(tmp_path / "desk.lock"))
     monkeypatch.setenv("ABCXAUTO_START_PRO_PATH", str(tmp_path / "logs" / "_start_pro.py"))
+    monkeypatch.setenv(
+        "ABCXAUTO_WORKING_MEMORY_PATH",
+        str(tmp_path / "working_memory.json"),
+    )
     _drop_repo_log_handlers()
     yield
     _drop_repo_log_handlers()

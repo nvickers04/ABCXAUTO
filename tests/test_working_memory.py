@@ -44,8 +44,8 @@ from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
 
 def _wm(tmp_path, monkeypatch):
     path = tmp_path / "working_memory.json"
+    monkeypatch.setenv("ABCXAUTO_WORKING_MEMORY_PATH", str(path))
     monkeypatch.setattr("abcxauto.working_memory.WORKING_MEMORY_PATH", path)
-    monkeypatch.delenv("ABCXAUTO_WORKING_MEMORY_PATH", raising=False)
     clear_working_memory()
     return path
 
