@@ -959,6 +959,35 @@ def test_scan_gap_pct_reads_live_quote_when_scan_row_omits_it():
     assert _scan_gap_pct(nested, "SNDK") == -7.1
 
 
+def test_clip_does_not_decorate_top_n_scan_rescue():
+    """#186 decorate-clip is dead — overflow pops fat keys, it does not slim to gap%."""
+    raw = _clip(
+        {
+            "ok": True,
+            "hits": [
+                {
+                    "symbol": f"X{i}",
+                    "last": 10.0 + i,
+                    "open_gap_pct": float(i),
+                    "pad": "n" * 400,
+                }
+                for i in range(40)
+            ],
+            "news": [{"headline": "n" * 400} for _ in range(10)],
+            "run": {"next": "send"},
+        }
+    )
+    data = json.loads(raw)
+    hits = data.get("hits")
+    if isinstance(hits, list) and hits:
+        slim = all(
+            isinstance(row, dict) and set(row) <= {"symbol", "gap%"} for row in hits
+        )
+        assert slim is False
+    else:
+        assert data.get("_clipped")
+
+
 def test_clip_keeps_run_when_hits_overflow():
     raw = _clip(
         {

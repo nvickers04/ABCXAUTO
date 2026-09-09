@@ -224,6 +224,10 @@ def test_scan_tool_schema_has_no_pe_and_no_tag_catalog():
     assert "tagvalue" not in blob
     assert "tagvalue" not in desc.lower()
     assert "sort=" not in desc.lower()
+    assert "thin" in desc.lower()
+    assert "gap%" in desc
+    assert "criteria" in desc.lower()
+    assert "symbols[]" in desc.lower() or "symbols" in desc.lower()
     # Expanded documented scanCodes listed for Grok.
     codes = known_scan_codes()
     assert "MOST_ACTIVE" in codes
@@ -315,7 +319,10 @@ async def test_scan_filters_echo_applied_and_reach_ibkr_spec(monkeypatch):
     assert seen["spec"]["marketCapAbove"] == 200_000_000_000.0
     assert data["persisted"] is False
     assert data["ranked"] is False
+    assert data.get("thin") is True
+    assert data.get("sort") == "MOST_ACTIVE"
     assert all("last" not in h and "bid" not in h for h in data["hits"])
+    assert all(len(h) <= 3 for h in data["hits"])
 
 
 @pytest.mark.asyncio

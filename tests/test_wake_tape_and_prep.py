@@ -437,9 +437,12 @@ async def test_scan_arena_most_active_ibkr_order_overlay_no_persist(
     assert data["symbols"] == ["TSLA", "AAPL", "AMD"]
     assert data["ranked"] is False
     assert data["persisted"] is False
+    assert data.get("thin") is True
     hits = {h["symbol"]: h for h in data["hits"]}
-    assert hits["AAPL"]["on_book"] is True
-    assert hits["TSLA"]["on_book"] is False
+    for hit in data["hits"]:
+        assert set(hit) <= {"symbol", "gap%", "rank"}
+        assert len(hit) <= 3
+        assert "on_book" not in hit
     # Kill condition: scan must not start quoting.
     assert "last" not in hits["AAPL"]
     assert "bid" not in hits["AAPL"]
@@ -516,7 +519,7 @@ async def test_scan_symbols_no_mda_candles_no_quotes(monkeypatch):
         unprotected=[],
         net_liquidation=1.0,
         daily_pnl=0.0,
-        positions=[],
+        positions=[{"symbol": "NVDA", "sec_type": "STK", "position": 10}],
         open_orders=[],
         opportunities=[],
         news_items=[],
@@ -542,6 +545,10 @@ async def test_scan_symbols_no_mda_candles_no_quotes(monkeypatch):
     )
     assert data["ok"] is True
     assert data["symbols"] == ["NVDA", "XLE"]
+    assert data.get("thin") is False
+    fat = {h["symbol"]: h for h in data["hits"]}
+    assert fat["NVDA"]["on_book"] is True
+    assert fat["XLE"]["on_book"] is False
     assert all("last" not in h and "bid" not in h for h in data["hits"])
     assert "mda_last" not in (data.get("hits") or [{}])[0]
 

@@ -173,6 +173,137 @@ def overlay_hits(
     return rows
 
 
+# Thin ranked default: symbol · gap% · at most one optional triage field.
+# gap% is the on-row IBKR/scanner metric (not a new quote). #186 decorate-clip is dead.
+THIN_RANKED_KEYS = frozenset({"symbol", "gap%", "rank"})
+_FAT_SCAN_KEYS = frozenset(
+    {
+        "last",
+        "bid",
+        "ask",
+        "open",
+        "close",
+        "ibkr",
+        "mda",
+        "session",
+        "spread",
+        "spread_pct",
+        "quote_source",
+        "change_pct",
+        "open_gap_pct",
+        "distance",
+        "benchmark",
+        "projection",
+        "legs",
+    }
+)
+# Prefer a true open-gap when already on the row; else change; else IBKR distance.
+_GAP_SOURCE_KEYS = (
+    "gap%",
+    "open_gap_pct",
+    "gap_pct",
+    "change_pct",
+    "change",
+    "distance",
+)
+THIN_RANK_MEANING = (
+    "gap% is the on-row scanner metric (open_gap_pct / change_pct / distance); "
+    "order is the IBKR scanCode"
+)
+SILENT_SCAN_NOTE = (
+    "flush default screens (MOST_ACTIVE, TOP_PERC_LOSE, TOP_PERC_GAIN); "
+    "pass arena|scan_code to state criteria and order — not a fat dump"
+)
+
+
+def parse_scan_gap(raw: Any) -> float | None:
+    """Parse a scanner/quote metric into a percent-like number."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        val = float(raw)
+        return val if val == val else None
+    text = str(raw).strip().replace(",", "")
+    if not text:
+        return None
+    if text.endswith("%"):
+        text = text[:-1].strip()
+    try:
+        val = float(text)
+    except ValueError:
+        return None
+    return val if val == val else None
+
+
+def row_gap_pct(row: dict[str, Any] | None) -> float | None:
+    """Map already-on-row distance / change / open_gap into one number."""
+    if not isinstance(row, dict):
+        return None
+    for key in _GAP_SOURCE_KEYS:
+        val = parse_scan_gap(row.get(key))
+        if val is not None:
+            return val
+    for nest_key in ("ibkr", "quote"):
+        nest = row.get(nest_key)
+        if not isinstance(nest, dict):
+            continue
+        for key in ("open_gap_pct", "gap_pct", "change_pct", "distance"):
+            val = parse_scan_gap(nest.get(key))
+            if val is not None:
+                return val
+    return None
+
+
+def is_thin_ranked_row(row: Any) -> bool:
+    """True when the row is the ranked-screen contract (no quote-heavy fat).
+
+    ``symbols[]`` drill-down always carries ``on_book`` from overlay and is
+    not thin even when quotes missed. A screen row is ``symbol`` plus
+    ``gap%`` and/or ``rank``.
+    """
+    if not isinstance(row, dict):
+        return False
+    keys = set(row)
+    if keys & _FAT_SCAN_KEYS:
+        return False
+    if not keys <= (THIN_RANKED_KEYS | {"on_book"}):
+        return False
+    if "gap%" in keys or "rank" in keys:
+        return True
+    return keys == {"symbol"}
+
+
+def thin_ranked_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Emit ``symbol`` · ``gap%`` · optional ``rank`` (≤3 fields)."""
+    if not isinstance(row, dict):
+        return None
+    sym = str(row.get("symbol") or "").upper().strip()
+    if not sym:
+        return None
+    out: dict[str, Any] = {"symbol": sym}
+    gap = row_gap_pct(row)
+    if gap is not None:
+        out["gap%"] = gap
+    rank = row.get("rank")
+    if rank not in (None, ""):
+        try:
+            out["rank"] = int(rank)
+        except (TypeError, ValueError):
+            out["rank"] = rank
+    return out
+
+
+def thin_ranked_hits(rows: list[Any] | None) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        item = thin_ranked_row(row) if isinstance(row, dict) else None
+        if item:
+            out.append(item)
+    return out
+
+
 def scan_quote_cap() -> int:
     """How many top hits get an IBKR last attached. 0 disables the sweep."""
     raw = (os.environ.get("ABCXAUTO_SCAN_QUOTE_CAP") or "").strip()
@@ -356,9 +487,15 @@ async def criteria_scan(
         turn_symbols=turn_symbols,
         scanner_rows=scanner_rows,
     )
-    quoted = await attach_live_quotes(rows, connector=connector)
+    screen = bool(has_arena or has_code)
+    if screen:
+        # Arena / scan_code: thin at the tool. No quote sweep. #186 clip-rescue is dead.
+        quoted = 0
+        rows = thin_ranked_hits(rows)
+    else:
+        quoted = await attach_live_quotes(rows, connector=connector)
     ranked = bool(scanner_rows) and source == "ibkr"
-    return {
+    out: dict[str, Any] = {
         "ok": True,
         "source": source,
         "arena": arena_id,
@@ -368,13 +505,21 @@ async def criteria_scan(
         "applied": applied,
         "persisted": False,
         "ranked": ranked,
-        "rank_meaning": (
-            "IBKR scanCode sort order; distance/benchmark are that code's metric"
-            if ranked
-            else "not ranked"
-        ),
         "quoted": quoted,
+        "thin": screen,
+        "criteria": (
+            {"arena": arena_id, "scan_code": code_out}
+            if screen
+            else {"symbols": [r["symbol"] for r in rows]}
+        ),
+        "sort": code_out if screen else None,
     }
+    if screen:
+        out["rank_meaning"] = THIN_RANK_MEANING if ranked else "not ranked"
+    else:
+        out["rank_meaning"] = "not ranked"
+        out["note"] = "fat drill-down; ranked arena/scan_code screens stay thin"
+    return out
 
 
 def _closes(candles: list[dict]) -> list[float]:
