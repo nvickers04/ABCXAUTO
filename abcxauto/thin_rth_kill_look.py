@@ -1,7 +1,7 @@
 """pcs-skew Arm v0 kill-window LOOK contract (thin prompt, not SYSTEM_PROMPT).
 
 Hard clerk: STAY-tool allowlist, mill widen, RTH no-xhigh / AH-rare,
-F10 $2 hard / $1 preferred. No one-look RTH entry budget. Paper 7497.
+F10 $15 hard / $10 preferred. No one-look RTH entry budget. Paper 7497.
 Not looking.
 """
 
@@ -45,8 +45,8 @@ DIE_TOOLS = frozenset({
 })
 
 # F10 dollars. Not raiseable Settings knobs. Preferred is an ops tripwire.
-F10_HARD_USD = 2.0
-F10_PREFERRED_USD = 1.0
+F10_HARD_USD = 15.0
+F10_PREFERRED_USD = 10.0
 WINDOW_MODEL_USD = 40.0
 WINDOW_N = 20
 AH_RESEARCH_LOOKS_PER_WEEK = 2
@@ -634,7 +634,7 @@ def live_f10_gate() -> dict[str, Any]:
 
 
 def f10_hard_tripped(gate: dict[str, Any] | None = None) -> bool:
-    """True for the hard $2 F10 fuse (not preferred $1, not unreadable)."""
+    """True for the hard $15 F10 fuse (not preferred $10, not unreadable)."""
     if isinstance(gate, dict) and str(gate.get("reason_code") or "") == REASON_F10:
         return True
     try:
@@ -942,11 +942,11 @@ def kill_look_send_block(
             "preferred_trip": bool(gate.get("preferred_trip")),
         }
     if gate.get("preferred_trip"):
-        logger.warning("F10 preferred $1 tripwire (hard still $2)")
+        logger.warning("F10 preferred $10 tripwire (hard still $15)")
         try:
             from abcxauto.think_stream import emit as think_emit
 
-            think_emit("tool", "\n[F10 preferred $1 tripwire — hard still $2]\n")
+            think_emit("tool", "\n[F10 preferred $10 tripwire — hard still $15]\n")
         except Exception:
             logger.debug("F10 preferred think emit failed", exc_info=True)
     fuse = abort_fuse

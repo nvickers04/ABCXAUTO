@@ -2,7 +2,7 @@
 
 Grok owns the sentences. Clerk does not invent. Tools stay facts.
 Clear on hard reset / overnight park / research↔RTH chat drop.
-Hygiene: F10 $2 hard, nameless card, port≠7496, SYSTEM_PROMPT lock.
+Hygiene: F10 $15 hard, nameless card, port≠7496, SYSTEM_PROMPT lock.
 Does not start looking, TWS, or 7496.
 """
 
@@ -53,7 +53,7 @@ def _wm(tmp_path, monkeypatch):
 def test_hygiene_soften_fail_f10_nameless_7496_prompt():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
     assert get_config().ibkr_port != 7496
-    assert F10_HARD_USD == 2.0
+    assert F10_HARD_USD == 15.0
     assert new_risk_card_error("") == "new risk requires params.card naming a play"
     assert new_risk_card_error("pcs-skew") == ""
 

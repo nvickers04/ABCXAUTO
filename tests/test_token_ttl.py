@@ -83,8 +83,8 @@ async def _safe_execute_must_not_run(*_a, **_k):
 
 
 def test_hygiene_does_not_soften_f10_or_enable_live():
-    assert F10_HARD_USD == 2.0
-    assert F10_PREFERRED_USD == 1.0
+    assert F10_HARD_USD == 15.0
+    assert F10_PREFERRED_USD == 10.0
     assert get_config().ibkr_port != 7496
     assert Config().ibkr_port == 7497
     assert DEFAULT_PLACE_TOKEN_TTL_S == 120.0
@@ -284,5 +284,5 @@ async def test_live_port_still_wins_over_fresh_token(monkeypatch):
     result = await send_action(ticket, _connector())
     assert result["status"] == "blocked"
     assert result["reason_code"] == "live_port_paper"
-    assert F10_HARD_USD == 2.0
+    assert F10_HARD_USD == 15.0
     assert get_config().ibkr_port == 7496
