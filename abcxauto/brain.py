@@ -509,6 +509,9 @@ def _clip_candles(data: dict[str, Any], max_chars: int = CANDLES_CLIP_CHARS) -> 
 
 
 # Fat scan / sessions / news / playbook essay — never the live book.
+TOP_SCAN_KEEP = 10
+_SCAN_SLIM_KEYS = frozenset({"hits", "rows", "scan_hits", "scan_tape"})
+_GAP_FIELDS = ("open_gap_pct", "gap_pct", "gap%")
 _FAT_CLIP_KEYS = (
     "hits",
     "news",
@@ -549,11 +552,103 @@ _LIVE_BOOK_KEEP = (
 )
 
 
+def _scan_row_symbol(row: Any) -> str:
+    if isinstance(row, str):
+        return row.upper().strip()
+    if isinstance(row, dict):
+        return str(row.get("symbol") or "").upper().strip()
+    return ""
+
+
+def _scan_row_gap(row: Any) -> float | None:
+    if not isinstance(row, dict):
+        return None
+    for key in _GAP_FIELDS:
+        raw = row.get(key)
+        if raw is None:
+            continue
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            continue
+    for nest_key in ("ibkr", "quote"):
+        nest = row.get(nest_key)
+        if not isinstance(nest, dict):
+            continue
+        for key in ("open_gap_pct", "gap_pct"):
+            raw = nest.get(key)
+            if raw is None:
+                continue
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _scan_list_rows(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in ("rows", "hits"):
+            rows = value.get(key)
+            if isinstance(rows, list):
+                return rows
+    return []
+
+
+def _is_slim_scan_list(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) > TOP_SCAN_KEEP:
+        return False
+    allowed = {"symbol", "gap%"}
+    return bool(value) and all(
+        isinstance(row, dict)
+        and set(row) <= allowed
+        and str(row.get("symbol") or "").strip()
+        for row in value
+    )
+
+
+def _symbols_is_ranked_scan(value: Any) -> bool:
+    return any(_scan_row_gap(row) is not None for row in _scan_list_rows(value))
+
+
+def _slim_scan_list(value: Any, n: int = TOP_SCAN_KEEP) -> list[dict[str, Any]]:
+    """Top-N {symbol, gap%} by |gap|, missing gap last. Ties keep input order."""
+    extracted: list[dict[str, Any]] = []
+    for row in _scan_list_rows(value):
+        sym = _scan_row_symbol(row)
+        if not sym:
+            continue
+        item: dict[str, Any] = {"symbol": sym}
+        gap = _scan_row_gap(row)
+        if gap is not None:
+            item["gap%"] = gap
+        extracted.append(item)
+    extracted.sort(
+        key=lambda item: abs(item["gap%"]) if "gap%" in item else -1.0,
+        reverse=True,
+    )
+    return extracted[:n]
+
+
 def _pop_fat_key(container: dict[str, Any]) -> str | None:
-    """Drop the next fat key. Clip marker stays on this container."""
+    """Slim a ranked scan list, or drop the next fat key. Clip marker stays."""
     for key in _FAT_CLIP_KEYS:
         if key not in container:
             continue
+        val = container[key]
+        can_slim = key in _SCAN_SLIM_KEYS or (
+            key == "symbols" and _symbols_is_ranked_scan(val)
+        )
+        if can_slim and _is_slim_scan_list(val):
+            continue
+        if can_slim:
+            slimmed = _slim_scan_list(val)
+            if slimmed:
+                container[key] = slimmed
+                container["_clipped"] = key
+                return key
         container.pop(key)
         container["_clipped"] = key
         return key
@@ -561,7 +656,7 @@ def _pop_fat_key(container: dict[str, Any]) -> str | None:
 
 
 def _clip_fat_once(data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """Pop one fat key: top-level scan first, then last_look / world / playbook."""
+    """Clip one fat key: top-level scan first, then last_look / world / playbook."""
     slim = dict(data)
     if _pop_fat_key(slim):
         return slim, True

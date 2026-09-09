@@ -10,6 +10,7 @@ import pytest
 from abcxauto.brain import (
     AGENT_TOOLS,
     BrainTurn,
+    TOP_SCAN_KEEP,
     _apply_candle_session,
     _candle_res_from_tape,
     _clip,
@@ -1037,10 +1038,150 @@ def test_clip_keeps_live_book_when_last_look_scan_overflows():
     assert data["world"]["working_orders"][0]["order_id"] == 77
     assert data["world"]["fills"][0]["symbol"] == "HPQ"
     look = data.get("last_look") or {}
-    assert "scan_hits" not in look
     assert look.get("_clipped") in {"scan_hits", "session_range", "rows"}
     assert data.get("_clipped") not in {"payload", "world", "day"}
+    hits = look.get("scan_hits")
+    if hits is not None:
+        assert isinstance(hits, list)
+        assert len(hits) <= TOP_SCAN_KEEP
+        assert all(set(row) <= {"symbol", "gap%"} for row in hits)
 
+
+
+def _fat_ranked_hits(n: int = 40, pad: int = 900) -> list[dict]:
+    """Many padded scan rows. Gaps: S00=-20 … midpoint=0 … last positive."""
+    hits = []
+    for i in range(n):
+        hits.append(
+            {
+                "symbol": f"S{i:02d}",
+                "open_gap_pct": float(i - 20),
+                "last": 100.0 + i,
+                "pad": "n" * pad,
+                "mda": {"news": ["x" * 80]},
+            }
+        )
+    return hits
+
+
+def test_clip_keeps_top_scan_gaps_when_hits_overflow():
+    hits = _fat_ranked_hits()
+    payload = {
+        "ok": True,
+        "hits": hits,
+        **_live_book_core(),
+    }
+    assert len(json.dumps(payload)) > 24_000
+    raw = _clip(payload)
+    assert len(raw) <= 24_000
+    data = json.loads(raw)
+    assert data.get("_clipped") == "hits"
+    assert data["day"]["open_lots"][0].startswith("HPQ")
+    assert data["world"]["working_orders"][0]["order_id"] == 77
+    kept = data.get("hits")
+    assert isinstance(kept, list)
+    assert len(kept) == TOP_SCAN_KEEP
+    assert all(set(row) <= {"symbol", "gap%"} for row in kept)
+    by_sym = {row["symbol"]: row["gap%"] for row in kept}
+    assert by_sym["S00"] == -20.0
+    assert "S01" in by_sym
+    mags = [abs(row["gap%"]) for row in kept]
+    assert mags == sorted(mags, reverse=True)
+    assert "pad" not in json.dumps(kept)
+
+
+def test_clip_keeps_top_scan_hits_blob_and_stable_ties():
+    rows = [
+        {"symbol": "EARLY", "open_gap_pct": 5.0, "pad": "n" * 2000},
+        {"symbol": "LATE", "gap_pct": 5.0, "pad": "n" * 2000},
+        {"symbol": "SNDK", "open_gap_pct": -6.5, "pad": "n" * 2000},
+        {"symbol": "NEST", "ibkr": {"open_gap_pct": -9.1}, "pad": "n" * 2000},
+        {"symbol": "TINY", "open_gap_pct": 0.2, "pad": "n" * 2000},
+    ]
+    for i in range(20):
+        rows.append(
+            {"symbol": f"Z{i:02d}", "open_gap_pct": 0.1 + i * 0.01, "pad": "n" * 2000}
+        )
+    payload = {
+        "scan_hits": {"arena": "most_active", "ranked": True, "rows": rows},
+        **_live_book_core(),
+    }
+    assert len(json.dumps(payload)) > 24_000
+    raw = _clip(payload)
+    assert len(raw) <= 24_000
+    data = json.loads(raw)
+    assert data["day"]["open_lots"][2].startswith("SPY")
+    kept = data.get("scan_hits")
+    assert isinstance(kept, list)
+    assert len(kept) <= TOP_SCAN_KEEP
+    assert kept[0]["symbol"] == "NEST"
+    assert kept[0]["gap%"] == pytest.approx(-9.1)
+    assert kept[1]["symbol"] == "SNDK"
+    assert kept[1]["gap%"] == pytest.approx(-6.5)
+    tied = [row["symbol"] for row in kept if row.get("gap%") == 5.0]
+    assert tied == ["EARLY", "LATE"]
+
+
+def test_clip_slims_ranked_symbols_pops_plain_symbol_strings():
+    ranked = {
+        "ok": True,
+        "symbols": [
+            {"symbol": f"G{i:02d}", "open_gap_pct": float(15 - i), "pad": "n" * 1600}
+            for i in range(20)
+        ],
+    }
+    raw = _clip(ranked)
+    data = json.loads(raw)
+    assert len(raw) <= 24_000
+    assert data.get("_clipped") == "symbols"
+    kept = data.get("symbols")
+    assert isinstance(kept, list)
+    assert kept[0] == {"symbol": "G00", "gap%": 15.0}
+    assert len(kept) == TOP_SCAN_KEEP
+
+    plain = {
+        "ok": True,
+        "symbols": [f"SYM{i}" + ("x" * 800) for i in range(40)],
+    }
+    assert len(json.dumps(plain)) > 24_000
+    dropped = json.loads(_clip(plain))
+    assert dropped.get("_clipped") == "symbols"
+    assert "symbols" not in dropped
+
+
+def test_clip_last_look_and_tape_keep_top_gaps():
+    payload = {
+        **_live_book_core(),
+        "last_look": {
+            "fresh": True,
+            "send_calls": 0,
+            "tools": ["scan"],
+            "scan_hits": {"arena": "hot_by_volume", "rows": _fat_ranked_hits()},
+        },
+        "scan_tape": [
+            {
+                "symbol": f"T{i:02d}",
+                "open_gap_pct": float(12 - i),
+                "source": "mda",
+                "pad": "n" * 1600,
+            }
+            for i in range(25)
+        ],
+    }
+    assert len(json.dumps(payload)) > 24_000
+    raw = _clip(payload)
+    assert len(raw) <= 24_000
+    data = json.loads(raw)
+    assert data["world"]["fills"][0]["symbol"] == "HPQ"
+    look = data["last_look"]
+    hits = look.get("scan_hits")
+    assert isinstance(hits, list)
+    assert hits[0]["symbol"] == "S00"
+    assert hits[0]["gap%"] == -20.0
+    tape = data.get("scan_tape")
+    assert isinstance(tape, list)
+    assert tape[0] == {"symbol": "T00", "gap%": 12.0}
+    assert len(tape) == TOP_SCAN_KEEP
 
 
 def test_clip_status_keeps_lots_when_news_overflows():
@@ -1118,7 +1259,11 @@ async def test_book_tool_clip_keeps_lots(monkeypatch):
     look = data.get("last_look") or {}
     if look:
         assert look.get("_clipped") in {"scan_hits", "session_range", "rows"}
-        assert "scan_hits" not in look or look.get("_clipped") == "scan_hits"
+        hits = look.get("scan_hits")
+        if hits is not None:
+            assert isinstance(hits, list)
+            assert len(hits) <= TOP_SCAN_KEEP
+            assert all(set(row) <= {"symbol", "gap%"} for row in hits)
 
 
 @pytest.mark.asyncio
