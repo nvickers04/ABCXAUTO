@@ -2458,7 +2458,7 @@ _RTH_LOTS_SNAP = {
 
 
 def test_rth_flat_keep_looking_open_wake_does_not_append_unchanged_wom(monkeypatch):
-    """Unchanged WOM set still sits. Flat snap must not bypass the manage lead."""
+    """Unchanged WOM still sits. Flat snap does not bypass fill/order_change wait."""
     from abcxauto.brain import _open_wake
     from abcxauto.llm import SYSTEM_PROMPT
     from abcxauto.park_clock import clear_interrupt
@@ -3864,7 +3864,7 @@ async def test_rth_duplicate_lead_still_ends_without_poke():
 
 @pytest.mark.asyncio
 async def test_rth_flat_snap_does_not_bypass_unchanged_wom_ended(monkeypatch):
-    """Unchanged WOM still _ended. A flat snap is not a keep-looking bypass."""
+    """Unchanged WOM still _ended. Wait fill/order_change; do not mill the lead."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt, peek_interrupt
 

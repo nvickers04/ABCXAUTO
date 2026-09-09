@@ -232,24 +232,15 @@ def _snap_is_known_flat_no_manage(snap: dict | None) -> bool:
         return False
 
 
-_MANAGE_LEAD_KINDS = frozenset({
-    "working_order_missing",
-    "closest_stop",
-    "unprotected",
-})
-
-
-def _desk_fact_needs_manage(desk_fact: Any = "") -> bool:
-    """True when the lead is WOM / closest_stop / unprotected — sit for a poke."""
+def _desk_fact_is_wom(desk_fact: Any = "") -> bool:
+    """Unchanged working_order_missing still waits fill / order_change."""
     try:
         from abcxauto.world_state import parse_desk_fact
 
         parsed = parse_desk_fact(desk_fact)
     except Exception:
         return False
-    if not parsed:
-        return False
-    return str(parsed.get("kind") or "") in _MANAGE_LEAD_KINDS
+    return bool(parsed) and str(parsed.get("kind") or "") == "working_order_missing"
 
 
 def rth_flat_keep_looking(
@@ -259,12 +250,11 @@ def rth_flat_keep_looking(
 ) -> bool:
     """True when a finished paper RTH look has nothing to manage — re-enter.
 
-    Flat + no working orders: fill / order_change / unprotected never arrive.
+    Paper RTH + known-flat snap + no open lots + no working orders.
     Condition-wait ("next look if SPY breaks 761") with no wake is a hang.
-    Open lots, working orders, or an unchanged WOM / closest_stop /
-    unprotected lead still wait for a real book poke. Blank labels fail
-    closed. Live ports do not stay-up this way. Not a sit-wake clock and
-    not a SYSTEM_PROMPT sermon.
+    An unchanged WOM lead still sits for fill / order_change — even when
+    the snap looks empty. Blank labels fail closed. Live ports do not
+    stay-up this way. Not a sit-wake clock and not a SYSTEM_PROMPT sermon.
     """
     raw = str(session or "").strip().lower()
     if raw in ("", "unknown"):
@@ -279,7 +269,7 @@ def rth_flat_keep_looking(
             return False
     except Exception:
         return False
-    if _desk_fact_needs_manage(desk_fact):
+    if _desk_fact_is_wom(desk_fact):
         return False
     return _snap_is_known_flat_no_manage(snap)
 
