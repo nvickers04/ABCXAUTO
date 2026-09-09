@@ -164,7 +164,9 @@ def research_keep_looking(session: str = "") -> bool:
     Research has no sends, so fill / order_change never arrive. A looking
     premarket session keeps looking (news / scan / web, overwrite the brief)
     until RTH roll, operator stop, or an overnight park that still applies.
-    RTH spoken-no-tool still waits for a real poke. Closed / postmarket stay
+    RTH with open lots or working orders still waits for a real poke.
+    Flat paper RTH with nothing to manage re-enters via
+    ``rth_flat_keep_looking`` — not this path. Closed / postmarket stay
     parked. Blank labels do not clock-fill into a mill — the host passes the
     resolved snap label.
     """
@@ -197,6 +199,79 @@ def research_keep_looking(session: str = "") -> bool:
     except Exception:
         pass
     return True
+
+
+def _snap_is_known_flat_no_manage(snap: dict | None) -> bool:
+    """True only when the snap evidentially has no lots and no working orders.
+
+    Missing book keys fail closed — unknown is not flat. ``book_is_flat``
+    keeps fill-lag from counting as a clean book.
+    """
+    if not isinstance(snap, dict):
+        return False
+    if "positions" not in snap or "open_orders" not in snap:
+        return False
+    lots = snap.get("open_lots")
+    if lots is None:
+        world = snap.get("world") if isinstance(snap.get("world"), dict) else {}
+        day = snap.get("day") if isinstance(snap.get("day"), dict) else {}
+        lots = world.get("open_lots") or day.get("open_lots") or []
+    if any(str(x).strip() for x in (lots or [])):
+        return False
+    try:
+        from abcxauto.world_state import book_is_flat
+
+        return bool(
+            book_is_flat(
+                list(snap.get("positions") or []),
+                list(snap.get("open_orders") or []),
+                list(snap.get("fills") or []),
+            )
+        )
+    except Exception:
+        return False
+
+
+def _desk_fact_is_wom(desk_fact: Any = "") -> bool:
+    """Unchanged working_order_missing still waits fill / order_change."""
+    try:
+        from abcxauto.world_state import parse_desk_fact
+
+        parsed = parse_desk_fact(desk_fact)
+    except Exception:
+        return False
+    return bool(parsed) and str(parsed.get("kind") or "") == "working_order_missing"
+
+
+def rth_flat_keep_looking(
+    session: str = "",
+    snap: dict | None = None,
+    desk_fact: str = "",
+) -> bool:
+    """True when a finished paper RTH look has nothing to manage — re-enter.
+
+    Paper RTH + known-flat snap + no open lots + no working orders.
+    Condition-wait ("next look if SPY breaks 761") with no wake is a hang.
+    An unchanged WOM lead still sits for fill / order_change — even when
+    the snap looks empty. Blank labels fail closed. Live ports do not
+    stay-up this way. Not a sit-wake clock and not a SYSTEM_PROMPT sermon.
+    """
+    raw = str(session or "").strip().lower()
+    if raw in ("", "unknown"):
+        return False
+    sess = desk_session(raw)
+    if sess != RTH_SESSION:
+        return False
+    try:
+        from abcxauto.park_clock import paper_stay_up
+
+        if not paper_stay_up(sess):
+            return False
+    except Exception:
+        return False
+    if _desk_fact_is_wom(desk_fact):
+        return False
+    return _snap_is_known_flat_no_manage(snap)
 
 
 # Spoken CLOSE/EXIT on an open lot is not a finished RTH look when send never

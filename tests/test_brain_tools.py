@@ -2445,6 +2445,70 @@ def test_research_keep_looking_open_wake_still_appends_same_fact():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
+_RTH_FLAT_WOM = (
+    "fact: working_order_missing QQQ 260918C500 long 1.\n"
+    "session=regular flat=True unprotected=none ibkr=up."
+)
+_RTH_FLAT_SNAP = {"positions": [], "open_orders": [], "fills": []}
+_RTH_LOTS_SNAP = {
+    "positions": [{"symbol": "IBIT", "quantity": 10}],
+    "open_orders": [],
+    "fills": [],
+}
+
+
+def test_rth_flat_keep_looking_open_wake_does_not_append_unchanged_wom(monkeypatch):
+    """Unchanged WOM still sits. Flat snap does not bypass fill/order_change wait."""
+    from abcxauto.brain import _open_wake
+    from abcxauto.llm import SYSTEM_PROMPT
+    from abcxauto.park_clock import clear_interrupt
+    from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+
+    monkeypatch.setattr(
+        "abcxauto.config.Config.is_paper",
+        property(lambda self: True),
+    )
+    clear_interrupt()
+    got: list[object] = []
+
+    class Chat:
+        def append(self, msg, **_k):
+            got.append(msg)
+
+    class _ChatNS:
+        @staticmethod
+        def create(**_k):
+            return Chat()
+
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+    )
+    _open_wake(g, _RTH_FLAT_WOM, session="regular", snap=_RTH_FLAT_SNAP)
+    assert len(got) == 1
+    _open_wake(
+        g,
+        _RTH_FLAT_WOM,
+        session="regular",
+        resume=True,
+        snap=_RTH_FLAT_SNAP,
+    )
+    assert len(got) == 1
+    _open_wake(g, _RTH_FLAT_WOM, session="regular", resume=True, snap={})
+    assert len(got) == 1
+    _open_wake(
+        g,
+        _RTH_FLAT_WOM,
+        session="regular",
+        resume=True,
+        snap=_RTH_LOTS_SNAP,
+    )
+    assert len(got) == 1
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
 @pytest.mark.asyncio
 async def test_stream_round_breaks_when_stalled(monkeypatch):
     import asyncio
@@ -3796,6 +3860,51 @@ async def test_rth_duplicate_lead_still_ends_without_poke():
     assert second.ended is True
     assert "should not run" not in (second.text or "")
     assert int(getattr(created[0], "rounds", 0) or 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_rth_flat_snap_does_not_bypass_unchanged_wom_ended(monkeypatch):
+    """Unchanged WOM still _ended. Wait fill/order_change; do not mill the lead."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt, peek_interrupt
+
+    monkeypatch.setattr(
+        "abcxauto.config.Config.is_paper",
+        property(lambda self: True),
+    )
+    clear_interrupt()
+    wake = (
+        "fact: working_order_missing QQQ 260918C500 long 1.\n"
+        "session=regular flat=True unprotected=none ibkr=up."
+    )
+    snap = {"positions": [], "open_orders": [], "fills": []}
+    g, created = _scripted_chat_client(
+        rounds=["Standing down. Next look if SPY breaks 761.", "still looking SPY"]
+    )
+    first = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap=snap,
+        wake=wake,
+    )
+    assert first.ended is False
+    assert "Standing down" in (first.text or "")
+    assert peek_interrupt() is None
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(),
+        snap=snap,
+        wake=wake,
+        resume=True,
+    )
+    assert second.ended is True
+    assert "still looking SPY" not in (second.text or "")
+    assert g.chat is created[0]
+    assert len(created) == 1
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
+    assert peek_interrupt() is None
 
 
 @pytest.mark.asyncio
