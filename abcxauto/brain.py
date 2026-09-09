@@ -1021,6 +1021,7 @@ def _open_wake(
     reset: bool = False,
     session: str = "",
     resume: bool = False,
+    snap: dict[str, Any] | None = None,
 ) -> Any:
     """Start this look, or continue the live stay-up chat.
 
@@ -1051,17 +1052,23 @@ def _open_wake(
             from abcxauto.world_state import desk_fact_is_duplicate
 
             prev = _chat_last_desk_fact(g, live)
-            keep_research = False
+            keep_looking = False
             try:
-                from abcxauto.desk_mode import research_keep_looking
+                from abcxauto.desk_mode import (
+                    research_keep_looking,
+                    rth_flat_keep_looking,
+                )
 
-                keep_research = research_keep_looking(session)
+                keep_looking = research_keep_looking(session) or rth_flat_keep_looking(
+                    session, snap
+                )
             except Exception:
-                keep_research = False
-            if desk_fact_is_duplicate(prev, wake) and not keep_research:
+                keep_looking = False
+            if desk_fact_is_duplicate(prev, wake) and not keep_looking:
                 # Same lead-fact identity (set / list / tick). A look may
                 # end — do not append a fresh go-do-desk developer turn.
-                # Research keep-looking still appends: no broker poke will come.
+                # Research / flat-RTH keep-looking still append: no broker
+                # poke will come.
                 g._wake_n = int(getattr(g, "_wake_n", 0) or 0) + 1
                 return live
             live.append(developer(wake))
@@ -1912,7 +1919,7 @@ async def _grok_turn_impl(
         g._wake_appended = False
     else:
         try:
-            chat = _open_wake(g, wake, session=session, resume=resume)
+            chat = _open_wake(g, wake, session=session, resume=resume, snap=snap)
         except Exception as exc:
             logger.exception("chat start failed")
             turn.last_act = {}

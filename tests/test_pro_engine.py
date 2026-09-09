@@ -2948,20 +2948,33 @@ async def test_research_keep_looking_after_brief_without_poke(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_rth_spoken_no_tool_still_waits_for_real_poke(monkeypatch, tmp_path):
-    """RTH spoken-no-tool stay-up is not a mill. Pulse timeout is not a look."""
+async def test_rth_flat_no_send_reenters_without_poke(monkeypatch, tmp_path):
+    """Flat + no-send RTH must not nap on a book poke that never comes.
+
+    2026-09-09: decide-without-send / condition-wait hang. Soften=FAIL.
+    """
+    from abcxauto.park_clock import peek_interrupt
+
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+
+    async def no_lead(_self, _g):
+        return False
+
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.ProEngine._stay_up_lead_changed", no_lead
+    )
     calls: list[bool] = []
 
     async def think(self, n, g, s, *, resume=False):
+        assert peek_interrupt() is None
         calls.append(resume)
         return {
             "cycle": n,
             "pnl": 0,
             "equity": 100000,
             "_failed": False,
-            "rationale": "Standing down. Watching IWM. No ticket.",
+            "rationale": "Standing down. Next look if SPY breaks 761.",
             "sends": 0,
         }
 
@@ -2974,22 +2987,18 @@ async def test_rth_spoken_no_tool_still_waits_for_real_poke(monkeypatch, tmp_pat
     eng = ProEngine()
     assert eng.start() is None
     deadline = time.time() + 4
-    while time.time() < deadline and len(calls) < 1:
-        eng.drain_apply()
-        await asyncio.sleep(0.05)
-    idle_until = time.time() + 0.4
-    while time.time() < idle_until:
+    while time.time() < deadline and len(calls) < 2:
         eng.drain_apply()
         await asyncio.sleep(0.05)
     eng.stop_engine()
     eng.drain_apply()
-    assert len(calls) == 1
-    assert eng._resume_think is False
-    assert eng._cold_next is False
-    from abcxauto.park_clock import load_alarm, peek_interrupt
+    assert len(calls) >= 2
+    assert calls[0] is True
+    from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None
     assert peek_interrupt() is None
+    assert not (tmp_path / "wake.json").exists()
 
 
 @pytest.mark.asyncio
@@ -3017,6 +3026,60 @@ async def test_rth_spoken_no_tool_with_open_lots_still_waits(monkeypatch, tmp_pa
     async def fake_snap(_c):
         snap = _stay_up_snap("regular")
         snap["positions"] = pos
+        return snap
+
+    monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+
+    async def no_lead(_self, _g):
+        return False
+
+    monkeypatch.setattr("abcxauto.pro_engine.ProEngine._stay_up_lead_changed", no_lead)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.4
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(calls) == 1
+    assert eng._resume_think is False
+    assert eng._cold_next is False
+    from abcxauto.park_clock import load_alarm, peek_interrupt
+
+    assert load_alarm().wake_at is None
+    assert peek_interrupt() is None
+
+
+@pytest.mark.asyncio
+async def test_rth_spoken_no_tool_with_working_order_still_waits(monkeypatch, tmp_path):
+    """Working order + spoken-no-tool still waits for fill / order_change."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+    orders = [{"symbol": "SPY", "order_id": 77, "type": "LMT", "status": "Submitted"}]
+    calls: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        calls.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "Limit is working. No new ticket.",
+            "sends": 0,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+
+    async def fake_snap(_c):
+        snap = _stay_up_snap("regular")
+        snap["open_orders"] = orders
         return snap
 
     monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)

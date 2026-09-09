@@ -27,6 +27,7 @@ from abcxauto.desk_mode import (
     research_brief_stale,
     research_keep_looking,
     research_send_block,
+    rth_flat_keep_looking,
     rth_research_color,
     session_model,
     write_research_brief,
@@ -74,6 +75,62 @@ def test_research_keep_looking_is_premarket_not_rth_or_park():
     assert research_keep_looking("postmarket") is False
     assert research_keep_looking("") is False
     assert research_keep_looking("unknown") is False
+
+
+def _flat_rth_snap():
+    return {"positions": [], "open_orders": [], "fills": []}
+
+
+def test_rth_flat_keep_looking_is_paper_rth_flat_only(monkeypatch):
+    """Condition-wait forever on a flat book is the hang. Soften=FAIL nameless/7496."""
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+    monkeypatch.setattr(
+        "abcxauto.config.Config.is_paper",
+        property(lambda self: True),
+    )
+    flat = _flat_rth_snap()
+    assert rth_flat_keep_looking("regular", flat) is True
+    assert rth_flat_keep_looking("regular", None) is False
+    assert rth_flat_keep_looking("regular", {}) is False
+    assert rth_flat_keep_looking("regular", {"positions": []}) is False
+    assert rth_flat_keep_looking("", flat) is False
+    assert rth_flat_keep_looking("unknown", flat) is False
+    assert rth_flat_keep_looking("premarket", flat) is False
+    assert rth_flat_keep_looking("closed", flat) is False
+    assert rth_flat_keep_looking(
+        "regular",
+        {"positions": [{"symbol": "IBIT", "quantity": 10}], "open_orders": []},
+    ) is False
+    assert rth_flat_keep_looking(
+        "regular",
+        {"positions": [], "open_orders": [], "open_lots": ["IBIT STK long 10"]},
+    ) is False
+    assert rth_flat_keep_looking(
+        "regular",
+        {
+            "positions": [],
+            "open_orders": [{"symbol": "SPY", "order_id": 7, "type": "LMT"}],
+        },
+    ) is False
+    assert rth_flat_keep_looking(
+        "regular",
+        {
+            "positions": [],
+            "open_orders": [],
+            "fills": [
+                {
+                    "side": "BOT",
+                    "conId": "1",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+        },
+    ) is False
+    monkeypatch.setattr(
+        "abcxauto.config.Config.is_paper",
+        property(lambda self: False),
+    )
+    assert rth_flat_keep_looking("regular", flat) is False
 
 
 def _ibit_xlf_positions():

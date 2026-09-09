@@ -1133,18 +1133,20 @@ class ProEngine:
         """Stay-up keeps the process. Rearm itself does not self-schedule.
 
         Paper RTH / premarket stay on this process. A good look writes no
-        grok_wake.json. Duplicate lead-fact looks end with no send.
-        Words with no tool_calls already stopped the model. RTH stay-up
-        waits for fill / order_change / unprotected / operator poke or a
-        changed lead fact — except a spoken CLOSE/EXIT on an open lot, or
-        a named ORDER EXAMPLES ticket (flat or with lots), with zero sends,
-        or a synthesize/decide mill with zero tools and zero send. Unpaid
+        grok_wake.json. Duplicate lead-fact looks end with no send when
+        there is something to manage. Words with no tool_calls already
+        stopped the model. RTH with open lots or working orders waits for
+        fill / order_change / unprotected / operator poke or a changed
+        lead fact — except a spoken CLOSE/EXIT on an open lot, or a named
+        ORDER EXAMPLES ticket (flat or with lots), with zero sends, or a
+        synthesize/decide mill with zero tools and zero send. Unpaid
         tickets re-enter the same chat with lots / SEND-THE-TICKET. A mill
         re-enters with TOOL-OR-SEND; after SYNTHESIZE_MILL_TRIES consecutive
         mill turns, drop the chat and continue cold. Research keep-looking
-        is the stay-up pulse timeout (desk_mode.research_keep_looking), not a
-        fake poke. Chat is kept. Overnight park is park_clock after a closed
-        skip.
+        and flat-RTH no-manage keep-looking are the stay-up pulse timeout
+        (desk_mode.research_keep_looking / rth_flat_keep_looking), not a
+        fake poke and not a sit-wake clock. Chat is kept. Overnight park
+        is park_clock after a closed skip.
         """
         session = self._resolve_session(session)
         self._last_session = session
@@ -1162,7 +1164,9 @@ class ProEngine:
         except (TypeError, ValueError):
             sends = 0
         # A spoken say or a send/fill is a finished look. Do not wipe chat.
-        # Duplicate lead fact (_ended) waits for a poke, not a fresh desk.
+        # Duplicate lead fact (_ended) waits for a poke when lots or
+        # working orders still need manage. Flat no-manage re-enters
+        # on the stay-up pulse, not a fresh desk.
         # CLOSE/EXIT on an open lot, or a named ticket, with no send is not
         # finished — including when the book is flat. A synthesize/decide
         # mill with zero tools and zero send is not finished either.
@@ -1893,12 +1897,13 @@ class ProEngine:
                             # Chat drop is _apply_desk_mode_brain on start.
                             if await self._resume_if_research_rolled_to_rth(sess):
                                 continue
-                            # Stay-up pulse. RTH waits for a poke or a
-                            # lead fact that actually changed. Research
-                            # keep-looking re-enters on timeout — no fake
-                            # fill / order_change / unprotected poke.
-                            # session_change into regular is the same
-                            # physics as the roll check above.
+                            # Stay-up pulse. Research keep-looking and
+                            # flat-RTH no-manage re-enter on timeout —
+                            # no fake fill / order_change / unprotected
+                            # poke. Open lots / working orders still
+                            # wait for a real poke or a changed lead
+                            # fact. session_change into regular is the
+                            # same physics as the roll check above.
                             wait = float(PULSE_S)
                             self.state.status = "On"
                             ev = self._wake_event
@@ -1917,17 +1922,30 @@ class ProEngine:
                                 continue
                             if timed_out:
                                 keep_research = False
+                                keep_flat = False
                                 try:
-                                    from abcxauto.desk_mode import research_keep_looking
+                                    from abcxauto.desk_mode import (
+                                        research_keep_looking,
+                                        rth_flat_keep_looking,
+                                    )
 
                                     keep_research = research_keep_looking(sess)
+                                    s_pulse = None
+                                    if self.conn is not None:
+                                        try:
+                                            s_pulse = await snap(self.conn)
+                                        except Exception:
+                                            s_pulse = None
+                                    keep_flat = rth_flat_keep_looking(sess, s_pulse)
                                 except Exception:
                                     keep_research = False
+                                    keep_flat = False
                                 rolled = await self._resume_if_research_rolled_to_rth(
                                     sess
                                 )
                                 if (
                                     keep_research
+                                    or keep_flat
                                     or rolled
                                     or await self._stay_up_lead_changed(g)
                                 ):
