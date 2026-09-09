@@ -2150,13 +2150,7 @@ async def _run_tool(
         if token not in (None, ""):
             act["preview_token"] = str(token).strip()
         try:
-            from abcxauto.thin_rth_kill_look import (
-                REASON_TOOLS,
-                force_skip_or_manage,
-                kill_look_rth,
-                one_open_send_block,
-                turns_or_tools_breached,
-            )
+            from abcxauto.thin_rth_kill_look import kill_look_rth, one_open_send_block
 
             if kill_look_rth(sess):
                 mode = str(getattr(turn, "kill_mode", "") or "")
@@ -2178,38 +2172,8 @@ async def _run_tool(
                         }
                     )
                     return _hub()._clip(one)
-                breached = turns_or_tools_breached(
-                    mode,
-                    model_turns=int(getattr(turn, "steps", 0) or 0),
-                    tool_count=len(getattr(turn, "tool_trace", None) or []),
-                )
-                if not breached and getattr(turn, "kill_look_capped", False):
-                    breached = REASON_TOOLS
-                capped = force_skip_or_manage(
-                    mode,
-                    strategy=str(act.get("strategy") or ""),
-                    params=dict(params),
-                    breached=breached,
-                )
-                if capped is not None:
-                    turn.last_act = {
-                        "action": str(capped.get("strategy") or "blocked"),
-                        "strategy": str(capped.get("strategy") or "blocked"),
-                        "params": {},
-                        "rationale": str(capped.get("note") or ""),
-                    }
-                    turn.last_result = capped
-                    turn.last_strat = str(capped.get("strategy") or "blocked")
-                    turn.sends.append(
-                        {
-                            "act": dict(turn.last_act),
-                            "result": capped,
-                            "strat": turn.last_strat,
-                        }
-                    )
-                    return _hub()._clip(capped)
         except Exception:
-            logger.debug("kill-look turn/tool cap failed", exc_info=True)
+            logger.debug("kill-look one-send gate failed", exc_info=True)
         result = await execute_ticket(act, connector, world, snap)
         strat = str(act.get("strategy") or result.get("strategy") or "")
         if not isinstance(result, dict):
