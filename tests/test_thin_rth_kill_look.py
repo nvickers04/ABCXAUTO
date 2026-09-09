@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from abcxauto.brain import EMPTY_GROK_TRIES, agent_tools
+from abcxauto.brain import EMPTY_GROK_TRIES, MAX_TOOL_STEPS, agent_tools
 from abcxauto.config import Config, get_config
 from abcxauto.desk_mode import (
     SYNTHESIZE_MILL_TRIES,
@@ -40,7 +40,6 @@ from abcxauto.thin_rth_kill_look import (
     MODE_ABORT,
     MODE_MANAGE,
     MODE_OPEN,
-    MODEL_TURNS_MAX,
     PCS_CARD,
     REASON_ALLOWLIST,
     REASON_NAMELESS,
@@ -52,12 +51,8 @@ from abcxauto.thin_rth_kill_look import (
     REASON_PORT,
     REASON_RESEARCH_PROMPT,
     REASON_RESEARCH_WEEK,
-    REASON_TOOLS,
-    REASON_TURNS,
     RESEARCH_PROMPT_TOKENS_MAX,
     STAY_TOOLS,
-    TOOLS_ENTRY_MAX,
-    TOOLS_MANAGE_MAX,
     WINDOW_MODEL_USD,
     WINDOW_N,
     die_tool_block,
@@ -67,7 +62,6 @@ from abcxauto.thin_rth_kill_look import (
     is_f10_look_halt,
     mark_f10_hard_trip,
     record_f10_loop_halt,
-    force_skip_or_manage,
     has_open_pcs_skew_lot,
     one_open_send_block,
     kill_look_enabled,
@@ -77,17 +71,14 @@ from abcxauto.thin_rth_kill_look import (
     kill_mode,
     look_gather_spin_mill,
     look_kill_mill,
-    max_model_turns,
-    max_tools,
     pcs_send_ok,
     research_prompt_ok,
     rth_model_no_xhigh,
     skip_look_reason,
     spoken_gather_spin,
     tool_allowed,
-    turns_or_tools_breached,
 )
-from tests.test_brain_tools import _world
+from tests.test_brain_tools import _scripted_chat_client, _world
 from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
 
 PCS_OPEN = {
@@ -410,32 +401,33 @@ def test_mill_gather_spin_and_kill_mill(monkeypatch):
     assert SYNTHESIZE_MILL_TRIES == 2
 
 
-def test_turns_and_tool_caps_force_skip_or_manage():
-    assert max_model_turns(MODE_OPEN) == MODEL_TURNS_MAX == 4
-    assert max_tools(MODE_OPEN) == TOOLS_ENTRY_MAX == 6
-    assert max_tools(MODE_MANAGE) == TOOLS_MANAGE_MAX == 4
-    assert turns_or_tools_breached(MODE_OPEN, model_turns=4, tool_count=6) == ""
-    assert turns_or_tools_breached(MODE_OPEN, model_turns=5, tool_count=1) == REASON_TURNS
-    assert turns_or_tools_breached(MODE_OPEN, model_turns=1, tool_count=7) == REASON_TOOLS
-    assert turns_or_tools_breached(MODE_MANAGE, model_turns=1, tool_count=5) == REASON_TOOLS
-    skip = force_skip_or_manage(
-        MODE_OPEN, strategy="vertical_spread", params=dict(PCS_OPEN), breached=REASON_TOOLS
-    )
-    assert skip is not None
-    assert skip["strategy"] == "skipped"
-    assert skip["reason_code"] == REASON_TOOLS
-    close = force_skip_or_manage(
-        MODE_MANAGE,
-        strategy="vertical_spread",
-        params={**PCS_OPEN, "closing_position": True},
-        breached=REASON_TOOLS,
-    )
-    assert close is None
-    hold_new = force_skip_or_manage(
-        MODE_MANAGE, strategy="vertical_spread", params=dict(PCS_OPEN), breached=REASON_TURNS
-    )
-    assert hold_new is not None
-    assert "MANAGE-only" in str(hold_new.get("note") or "")
+def test_kill_look_tool_turn_caps_are_deleted():
+    """Mid-thesis 6-tool / 4-turn / 4-manage guillotines are gone. Soften=FAIL."""
+    from abcxauto import brain, brain_tools
+    from abcxauto import thin_rth_kill_look as kl
+    from abcxauto.risk_gates import new_risk_card_error
+
+    kl_src = inspect.getsource(kl)
+    brain_src = inspect.getsource(brain)
+    tools_src = inspect.getsource(brain_tools)
+    joined = "\n".join((kl_src, brain_src, tools_src))
+    assert "TOOLS_ENTRY_MAX" not in kl_src
+    assert "TOOLS_MANAGE_MAX" not in kl_src
+    assert "MODEL_TURNS_MAX" not in kl_src
+    assert "turns_or_tools_breached" not in joined
+    assert "force_skip_or_manage" not in joined
+    assert "kill_look_capped" not in joined
+    assert "kill-look tool cap" not in joined
+    assert "kill_look_turns" not in joined
+    assert "kill_look_tools" not in joined
+    assert "auto_resume" not in joined
+    assert "auto-resume" not in joined
+    assert MAX_TOOL_STEPS >= 48
+    assert F10_HARD_USD == 2.0
+    assert get_config().ibkr_port != 7496
+    assert kill_look_port_ok() is True
+    assert new_risk_card_error("") == "new risk requires params.card naming a play"
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
 def test_kill_look_send_allows_legal_pcs_and_blocks_live_port(monkeypatch):
@@ -454,15 +446,33 @@ def test_kill_look_send_allows_legal_pcs_and_blocks_live_port(monkeypatch):
     assert blocked["reason_code"] == REASON_PORT
 
 
+async def _stub_send_exec(monkeypatch):
+    async def fake_exec(act, *_a, **_k):
+        return {"status": "submitted", "strategy": act.get("strategy"), "note": "test"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.execute_ticket", fake_exec)
+
+
 @pytest.mark.asyncio
-async def test_run_tool_send_force_skip_on_tool_cap(monkeypatch):
+async def test_run_tool_send_not_force_skipped_after_entry_tool_budget(monkeypatch):
+    """OPEN send after 7 tools is not a kill-look tool-cap skip."""
     _kill_on(monkeypatch)
+    await _stub_send_exec(monkeypatch)
     from abcxauto.brain import BrainTurn, _run_tool
 
     world = _world(session_status="regular", flat=True)
     turn = BrainTurn()
     turn.kill_mode = MODE_OPEN
-    turn.tool_trace = ["book", "status", "quote", "option_chain", "option_quote", "fills", "send"]
+    turn.steps = 5
+    turn.tool_trace = [
+        "book",
+        "status",
+        "quote",
+        "option_chain",
+        "option_quote",
+        "fills",
+        "quote",
+    ]
     raw = await _run_tool(
         "send",
         {"strategy": "vertical_spread", "params": dict(PCS_OPEN), "card": PCS_CARD},
@@ -472,8 +482,103 @@ async def test_run_tool_send_force_skip_on_tool_cap(monkeypatch):
         turn=turn,
     )
     data = json.loads(raw)
-    assert data.get("reason_code") == REASON_TOOLS
-    assert data.get("strategy") == "skipped"
+    assert data.get("reason_code") not in {
+        "kill_look_tools",
+        "kill_look_turns",
+        "kill_look_capped",
+    }
+    assert "force SKIP" not in str(data.get("note") or "")
+    assert data.get("strategy") != "skipped"
+    assert data.get("status") == "submitted"
+
+
+@pytest.mark.asyncio
+async def test_run_tool_send_not_force_skipped_after_manage_tool_budget(monkeypatch):
+    """MANAGE send after 5 tools is not a mid-thesis manage-cap skip."""
+    _kill_on(monkeypatch)
+    await _stub_send_exec(monkeypatch)
+    from abcxauto.brain import BrainTurn, _run_tool
+
+    world = _world(session_status="regular", flat=False)
+    turn = BrainTurn()
+    turn.kill_mode = MODE_MANAGE
+    turn.steps = 5
+    turn.tool_trace = ["book", "status", "quote", "fills", "option_quote"]
+    raw = await _run_tool(
+        "send",
+        {
+            "strategy": "vertical_spread",
+            "params": {**PCS_OPEN, "closing_position": True},
+            "card": PCS_CARD,
+        },
+        connector=None,
+        world=world,
+        snap={"positions": [_pcs_lot()]},
+        turn=turn,
+    )
+    data = json.loads(raw)
+    assert "MANAGE-only" not in str(data.get("note") or "")
+    assert data.get("reason_code") not in {"kill_look_tools", "kill_look_turns"}
+    assert data.get("status") == "submitted"
+
+
+@pytest.mark.asyncio
+async def test_grok_turn_does_not_hard_stop_mid_thesis_on_entry_tool_budget(
+    monkeypatch,
+):
+    """OPEN RTH look keeps thinking past the old 6-tool / 4-turn caps."""
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+    from abcxauto.think_stream import reset_speaker, subscribe, unsubscribe
+
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    clear_interrupt()
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.live_f10_gate", lambda: _allow_f10()
+    )
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name, "last": 248.1})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="book", arguments="{}")
+
+    painted: list[str] = []
+
+    def cap(_kind: str, text: str, piece: str = "") -> None:
+        painted.append(piece or text)
+
+    reset_speaker()
+    subscribe(cap)
+    g, created = _scripted_chat_client(
+        rounds=[("", [TC()])] * 7 + ["pcs-skew after the quotes. No more tools."]
+    )
+    try:
+        turn = await grok_turn(
+            g,
+            connector=None,
+            world=_world(session_status="regular", flat=True),
+            snap={"positions": [], "protection": {}},
+            wake="session=regular send.",
+        )
+    finally:
+        unsubscribe(cap)
+        reset_speaker()
+    assert not any("kill-look tool cap" in p for p in painted)
+    assert not any("step ceiling" in p for p in painted)
+    assert turn.tool_budget_hit is False
+    assert getattr(turn, "kill_look_capped", False) is False
+    assert turn.loop_halted is False
+    assert turn.failed is False
+    assert turn.steps > 4
+    assert turn.tool_trace.count("book") == 7
+    assert "pcs-skew after the quotes" in (turn.text or "")
+    assert int(getattr(created[0], "rounds", 0) or 0) == 8
 
 
 @pytest.mark.asyncio

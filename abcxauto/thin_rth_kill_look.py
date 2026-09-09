@@ -51,9 +51,6 @@ WINDOW_N = 20
 RTH_ENTRY_LOOKS_MAX = 1
 AH_RESEARCH_LOOKS_PER_WEEK = 2
 RESEARCH_PROMPT_TOKENS_MAX = 200_000
-MODEL_TURNS_MAX = 4
-TOOLS_ENTRY_MAX = 6
-TOOLS_MANAGE_MAX = 4
 # Conservative thin STAY look. Used as est_this_look in the F10 sum.
 EST_THIS_LOOK_USD = 0.35
 
@@ -69,8 +66,6 @@ REASON_RESEARCH_PROMPT = "kill_look_research_prompt"
 REASON_BRIEF_LOOP = "brief_loop_halted"
 REASON_BRIEF_COST = "brief_model_cost_missing"
 REASON_DIE_TOOL = "kill_look_die_tool"
-REASON_TURNS = "kill_look_turns"
-REASON_TOOLS = "kill_look_tools"
 REASON_PORT = "kill_look_live_port"
 REASON_ONE_SEND = "kill_look_one_send"
 
@@ -797,37 +792,6 @@ def kill_mode(
     return MODE_OPEN
 
 
-def max_model_turns(mode: str) -> int:
-    if mode in (MODE_OPEN, MODE_MANAGE):
-        return MODEL_TURNS_MAX
-    return 0
-
-
-def max_tools(mode: str) -> int:
-    if mode == MODE_OPEN:
-        return TOOLS_ENTRY_MAX
-    if mode == MODE_MANAGE:
-        return TOOLS_MANAGE_MAX
-    return 0
-
-
-def turns_or_tools_breached(
-    mode: str,
-    *,
-    model_turns: int = 0,
-    tool_count: int = 0,
-) -> str:
-    """Force SKIP (OPEN) or MANAGE-only (MANAGE). Empty = under cap."""
-    if mode not in (MODE_OPEN, MODE_MANAGE):
-        return ""
-    if int(model_turns or 0) > MODEL_TURNS_MAX:
-        return REASON_TURNS
-    cap = max_tools(mode)
-    if cap and int(tool_count or 0) > cap:
-        return REASON_TOOLS
-    return ""
-
-
 def research_prompt_ok(prompt_tokens: int) -> bool:
     try:
         n = int(prompt_tokens or 0)
@@ -1050,37 +1014,3 @@ def one_open_send_block(mode: str, turn: Any = None) -> dict[str, Any] | None:
         "reason_code": REASON_ONE_SEND,
         "strategy": "skipped",
     }
-
-
-def force_skip_or_manage(
-    mode: str,
-    *,
-    strategy: str = "",
-    params: dict[str, Any] | None = None,
-    breached: str = "",
-) -> dict[str, Any] | None:
-    """On turn/tool cap: OPEN → SKIP (no new send). MANAGE → closing only."""
-    if not breached:
-        return None
-    dumped = dict(params or {})
-    if mode == MODE_OPEN:
-        return {
-            "status": "blocked",
-            "note": f"force SKIP ({breached})",
-            "reason_code": breached,
-            "strategy": "skipped",
-        }
-    if mode == MODE_MANAGE:
-        if _is_closing(dumped):
-            return None
-        from abcxauto.agent_loop import is_new_risk
-
-        if not is_new_risk(str(strategy or "").strip().lower(), dumped):
-            return None
-        return {
-            "status": "blocked",
-            "note": f"MANAGE-only ({breached})",
-            "reason_code": breached,
-            "strategy": "blocked",
-        }
-    return None
