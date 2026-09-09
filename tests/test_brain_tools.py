@@ -2445,12 +2445,20 @@ def test_research_keep_looking_open_wake_still_appends_same_fact():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
-_RTH_FLAT_WAKE = "session=regular flat=True unprotected=none ibkr=up."
+_RTH_FLAT_WOM = (
+    "fact: working_order_missing QQQ 260918C500 long 1.\n"
+    "session=regular flat=True unprotected=none ibkr=up."
+)
 _RTH_FLAT_SNAP = {"positions": [], "open_orders": [], "fills": []}
+_RTH_LOTS_SNAP = {
+    "positions": [{"symbol": "IBIT", "quantity": 10}],
+    "open_orders": [],
+    "fills": [],
+}
 
 
 def test_rth_flat_keep_looking_open_wake_still_appends_same_fact(monkeypatch):
-    """Flat RTH has no broker poke. Same lead fact still re-enters looking."""
+    """Flat RTH has no broker poke. Same collapsible fact still re-enters looking."""
     from abcxauto.brain import _open_wake
     from abcxauto.llm import SYSTEM_PROMPT
     from abcxauto.park_clock import clear_interrupt
@@ -2478,17 +2486,25 @@ def test_rth_flat_keep_looking_open_wake_still_appends_same_fact(monkeypatch):
         temperature=0.3,
         max_tokens=256,
     )
-    _open_wake(g, _RTH_FLAT_WAKE, session="regular", snap=_RTH_FLAT_SNAP)
+    _open_wake(g, _RTH_FLAT_WOM, session="regular", snap=_RTH_FLAT_SNAP)
     assert len(got) == 1
     _open_wake(
         g,
-        _RTH_FLAT_WAKE,
+        _RTH_FLAT_WOM,
         session="regular",
         resume=True,
         snap=_RTH_FLAT_SNAP,
     )
     assert len(got) == 2
-    _open_wake(g, _RTH_FLAT_WAKE, session="regular", resume=True, snap={})
+    _open_wake(g, _RTH_FLAT_WOM, session="regular", resume=True, snap={})
+    assert len(got) == 2
+    _open_wake(
+        g,
+        _RTH_FLAT_WOM,
+        session="regular",
+        resume=True,
+        snap=_RTH_LOTS_SNAP,
+    )
     assert len(got) == 2
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
@@ -3857,7 +3873,10 @@ async def test_rth_flat_keep_looking_resume_calls_model_without_poke(monkeypatch
         property(lambda self: True),
     )
     clear_interrupt()
-    wake = "session=regular flat=True unprotected=none ibkr=up."
+    wake = (
+        "fact: working_order_missing QQQ 260918C500 long 1.\n"
+        "session=regular flat=True unprotected=none ibkr=up."
+    )
     snap = {"positions": [], "open_orders": [], "fills": []}
     g, created = _scripted_chat_client(
         rounds=["Standing down. Next look if SPY breaks 761.", "still looking SPY"]
