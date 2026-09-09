@@ -98,13 +98,13 @@ def _f10_hard() -> dict:
         "preferred_trip": True,
         "reason_code": REASON_F10,
         "note": "hard",
-        "projected": 2.1,
+        "projected": 15.15,
     }
 
 
 def test_hygiene_does_not_soften_f10_or_enable_live():
-    assert F10_HARD_USD == 2.0
-    assert F10_PREFERRED_USD == 1.0
+    assert F10_HARD_USD == 15.0
+    assert F10_PREFERRED_USD == 10.0
     assert get_config().ibkr_port != 7496
     assert kill_look_port_ok() is True
     assert ACTION_FUSES == frozenset({"F10", "DD30", "QTY0_STREAK"})

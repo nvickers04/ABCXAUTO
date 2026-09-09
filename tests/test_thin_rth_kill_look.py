@@ -130,8 +130,8 @@ def test_hygiene_prompt_port_empty_grok_mill_tries():
     assert EMPTY_GROK_TRIES == 2
     assert SYNTHESIZE_MILL_TRIES == 2
     assert Config().pcs_kill_look is True
-    assert F10_HARD_USD == 2.0
-    assert F10_PREFERRED_USD == 1.0
+    assert F10_HARD_USD == 15.0
+    assert F10_PREFERRED_USD == 10.0
     assert WINDOW_MODEL_USD == 40.0
     assert WINDOW_N == 20
 
@@ -190,7 +190,7 @@ def test_entry_budget_deleted_allows_n_plus_one_looks(monkeypatch):
 def test_start_does_not_soften_f10(monkeypatch):
     _kill_on(monkeypatch)
     reset_session_caps()
-    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    hard = f10_gate(14.80, est_this_look=0.35, window_cost=0.0)
     assert skip_look_reason("regular", positions=[], f10=hard) == REASON_F10
 
 
@@ -220,7 +220,7 @@ def test_open_send_ok_after_multiple_looks_f10_still_hard(monkeypatch):
     for _ in range(3):
         assert kill_mode("regular", positions=[], f10=f10) == MODE_OPEN
         assert kill_look_send_block(act, session="regular", f10=f10) is None
-    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    hard = f10_gate(14.80, est_this_look=0.35, window_cost=0.0)
     assert skip_look_reason("regular", positions=[], same_look=True, f10=hard) == (
         REASON_F10
     )
@@ -400,7 +400,7 @@ def test_kill_look_tool_turn_caps_are_deleted():
     assert "auto_resume" not in joined
     assert "auto-resume" not in joined
     assert MAX_TOOL_STEPS >= 48
-    assert F10_HARD_USD == 2.0
+    assert F10_HARD_USD == 15.0
     assert get_config().ibkr_port != 7496
     assert kill_look_port_ok() is True
     assert new_risk_card_error("") == "new risk requires params.card naming a play"
@@ -624,10 +624,10 @@ def test_f10_hard_preferred_unreadable_window_exits(monkeypatch):
     gate = f10_gate(0.0, est_this_look=EST_THIS_LOOK_USD, window_cost=0.0)
     assert gate["allow_new_risk"] is True
     assert gate["preferred_trip"] is False
-    pref = f10_gate(0.80, est_this_look=0.35, window_cost=0.0)
+    pref = f10_gate(9.80, est_this_look=0.35, window_cost=0.0)
     assert pref["allow_new_risk"] is True
     assert pref["preferred_trip"] is True
-    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    hard = f10_gate(14.80, est_this_look=0.35, window_cost=0.0)
     assert hard["allow_new_risk"] is False
     assert hard["reason_code"] == REASON_F10
     unread = f10_gate(None, est_this_look=0.35, window_cost=0.0)
@@ -728,7 +728,7 @@ def test_pro_engine_skip_reason_no_entry_budget(monkeypatch):
 
     eng = ProEngine()
     assert eng._kill_look_skip_reason("regular", {"positions": [], "protection": {}}) == ""
-    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    hard = f10_gate(14.80, est_this_look=0.35, window_cost=0.0)
     monkeypatch.setattr(
         "abcxauto.thin_rth_kill_look.live_f10_gate",
         lambda: hard,
@@ -745,7 +745,7 @@ def test_f10_trip_halts_open_look_exits_still_ok(monkeypatch):
 
     _kill_on(monkeypatch)
     reset_session_caps()
-    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    hard = f10_gate(14.80, est_this_look=0.35, window_cost=0.0)
     assert hard["allow_new_risk"] is False
     assert hard["reason_code"] == REASON_F10
     assert f10_hard_tripped(hard) is True
@@ -812,7 +812,7 @@ def test_f10_trip_halts_open_look_exits_still_ok(monkeypatch):
 def test_f10_preferred_does_not_halt_loop(monkeypatch):
     _kill_on(monkeypatch)
     reset_session_caps()
-    pref = f10_gate(0.80, est_this_look=0.35, window_cost=0.0)
+    pref = f10_gate(9.80, est_this_look=0.35, window_cost=0.0)
     assert pref["allow_new_risk"] is True
     assert pref["preferred_trip"] is True
     assert f10_hard_tripped(pref) is False
@@ -871,10 +871,10 @@ def test_record_f10_loop_halt_last_turn_and_scorecard(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_projected_hard_cross_skips_grok_turn_billing(monkeypatch):
-    """SPEC A: next billed look that would cross $2 must not call the model."""
+    """SPEC A: next billed look that would cross $15 must not call the model."""
     _kill_on(monkeypatch)
     reset_session_caps()
-    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    hard = f10_gate(14.80, est_this_look=0.35, window_cost=0.0)
     assert hard["projected"] > F10_HARD_USD
     monkeypatch.setattr("abcxauto.thin_rth_kill_look.live_f10_gate", lambda: hard)
     from abcxauto.brain import grok_turn
@@ -883,7 +883,7 @@ async def test_projected_hard_cross_skips_grok_turn_billing(monkeypatch):
 
     async def boom(*_a, **_k):
         calls["n"] += 1
-        raise AssertionError("stream_round must not run when next look would cross $2")
+        raise AssertionError("stream_round must not run when next look would cross $15")
 
     monkeypatch.setattr("abcxauto.brain.stream_round", boom)
     g = SimpleNamespace(chat=None, model="grok-4.6")
@@ -936,7 +936,7 @@ async def test_execute_ticket_f10_blocks_new_risk_allows_close(monkeypatch):
     reset_session_caps()
     from abcxauto.agent_loop import execute_ticket
 
-    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    hard = f10_gate(14.80, est_this_look=0.35, window_cost=0.0)
     monkeypatch.setattr(
         "abcxauto.thin_rth_kill_look.live_f10_gate",
         lambda: hard,
@@ -1172,7 +1172,7 @@ def test_named_card_allowlist_and_no_credit_floor(monkeypatch):
     assert missing_strikes is not None
     assert missing_strikes["reason_code"] == REASON_ALLOWLIST
 
-    assert F10_HARD_USD == 2.0
+    assert F10_HARD_USD == 15.0
     assert get_config().ibkr_port != 7496
     assert Config().ibkr_port != 7496
 
@@ -1182,7 +1182,7 @@ def test_named_card_allowlist_and_no_credit_floor(monkeypatch):
     )
     assert ok is True
     assert why == "closing"
-    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    hard = f10_gate(14.80, est_this_look=0.35, window_cost=0.0)
     assert (
         kill_look_send_block(
             {

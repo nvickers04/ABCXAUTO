@@ -169,7 +169,7 @@ def _no_usd_refuse(blob: dict | None) -> None:
 
 
 def test_hygiene_f10_port_prompt_lock():
-    assert F10_HARD_USD == 2.0
+    assert F10_HARD_USD == 15.0
     assert get_config().ibkr_port != 7496
     assert Config().ibkr_port == 7497
     assert get_config().trading_mode == "paper"

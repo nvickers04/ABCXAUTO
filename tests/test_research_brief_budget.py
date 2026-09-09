@@ -2,7 +2,7 @@
 
 Fake card → stub turns → ledger increments; trip → no further turns;
 promote missing / ≠PASS ⇒ refuse. No BA / options chain.
-Hygiene: F10 $2 hard, port≠7496, SYSTEM_PROMPT lock.
+Hygiene: F10 $15 hard, port≠7496, SYSTEM_PROMPT lock.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ WINDOW = "prove-w1"
 def test_hygiene_f10_port_prompt_and_v0_constants():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
     assert get_config().ibkr_port != 7496
-    assert F10_HARD_USD == 2.0
+    assert F10_HARD_USD == 15.0
     assert BRIEF_CARD_MODEL_HARD_USD == 1.50
     assert BRIEF_CARD_TURNS_MAX == 8
     assert BRIEF_CARD_TOOLS_MAX == 40
@@ -89,7 +89,7 @@ def test_self_tune_cannot_raise_brief_card_constants():
     assert BRIEF_CARD_TURNS_MAX == before[1] == 8
     assert BRIEF_CARD_TOOLS_MAX == before[2] == 40
     assert EST_BRIEF_TURN_USD == before[3] == 0.20
-    assert F10_HARD_USD == 2.0
+    assert F10_HARD_USD == 15.0
 
 
 def test_fake_card_stub_turns_increment_ledger():
