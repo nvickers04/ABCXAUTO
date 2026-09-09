@@ -44,7 +44,6 @@ from abcxauto.thin_rth_kill_look import (
     REASON_DIE_TOOL,
     REASON_F10,
     REASON_MODEL_COST,
-    REASON_ONE_SEND,
     REASON_PORT,
     REASON_RESEARCH_PROMPT,
     REASON_RESEARCH_WEEK,
@@ -60,7 +59,6 @@ from abcxauto.thin_rth_kill_look import (
     mark_f10_hard_trip,
     record_f10_loop_halt,
     has_open_pcs_skew_lot,
-    one_open_send_block,
     kill_look_enabled,
     kill_look_port_ok,
     kill_look_rth,
@@ -559,21 +557,42 @@ async def test_grok_turn_does_not_hard_stop_mid_thesis_on_entry_tool_budget(
 
 
 @pytest.mark.asyncio
-async def test_open_one_send_then_stop(monkeypatch):
+async def test_open_second_named_send_not_blocked_as_one_send(monkeypatch):
+    """After a non-blocked preview/send in OPEN, a second legal named send is not kill_look_one_send."""
     _kill_on(monkeypatch)
     from abcxauto.brain import BrainTurn, _run_tool
 
+    async def fake_exec(act, *_a, **_k):
+        return {
+            "status": "ok",
+            "note": "IBKR combo (BAG)",
+            "strategy": act.get("strategy"),
+            "preview": bool(act.get("preview")),
+        }
+
+    monkeypatch.setattr("abcxauto.agent_loop.execute_ticket", fake_exec)
     world = _world(session_status="regular", flat=True)
     turn = BrainTurn()
     turn.kill_mode = MODE_OPEN
-    turn.sends = [
+    preview = await _run_tool(
+        "send",
         {
-            "act": {"strategy": "vertical_spread"},
-            "result": {"status": "submitted"},
-            "strat": "vertical_spread",
-        }
-    ]
-    raw = await _run_tool(
+            "strategy": "vertical_spread",
+            "params": dict(PCS_OPEN),
+            "card": PCS_CARD,
+            "preview": True,
+        },
+        connector=None,
+        world=world,
+        snap={"positions": [], "kill_entry_in_flight": True},
+        turn=turn,
+    )
+    preview_data = json.loads(preview)
+    assert preview_data.get("reason_code") != "kill_look_one_send"
+    assert preview_data.get("status") != "blocked"
+    assert len(turn.sends) == 1
+
+    place = await _run_tool(
         "send",
         {"strategy": "vertical_spread", "params": dict(PCS_OPEN), "card": PCS_CARD},
         connector=None,
@@ -581,11 +600,11 @@ async def test_open_one_send_then_stop(monkeypatch):
         snap={"positions": [], "kill_entry_in_flight": True},
         turn=turn,
     )
-    data = json.loads(raw)
-    assert data.get("reason_code") == REASON_ONE_SEND
-    assert data.get("strategy") == "skipped"
-    assert one_open_send_block(MODE_OPEN, turn) is not None
-    assert one_open_send_block(MODE_MANAGE, turn) is None
+    place_data = json.loads(place)
+    assert place_data.get("reason_code") != "kill_look_one_send"
+    assert place_data.get("status") != "blocked"
+    assert "one pcs-skew BAG then stop" not in str(place_data.get("note") or "")
+    assert len(turn.sends) == 2
 
 
 def test_dual_mode_rth_strips_xhigh_ah_one_shot_and_week_cap(monkeypatch):

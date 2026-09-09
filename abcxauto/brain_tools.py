@@ -2149,31 +2149,6 @@ async def _run_tool(
         token = args.get("preview_token") or args.get("place_token")
         if token not in (None, ""):
             act["preview_token"] = str(token).strip()
-        try:
-            from abcxauto.thin_rth_kill_look import kill_look_rth, one_open_send_block
-
-            if kill_look_rth(sess):
-                mode = str(getattr(turn, "kill_mode", "") or "")
-                one = one_open_send_block(mode, turn)
-                if one is not None:
-                    turn.last_act = {
-                        "action": str(one.get("strategy") or "blocked"),
-                        "strategy": str(one.get("strategy") or "blocked"),
-                        "params": {},
-                        "rationale": str(one.get("note") or ""),
-                    }
-                    turn.last_result = one
-                    turn.last_strat = str(one.get("strategy") or "blocked")
-                    turn.sends.append(
-                        {
-                            "act": dict(turn.last_act),
-                            "result": one,
-                            "strat": turn.last_strat,
-                        }
-                    )
-                    return _hub()._clip(one)
-        except Exception:
-            logger.debug("kill-look one-send gate failed", exc_info=True)
         result = await execute_ticket(act, connector, world, snap)
         strat = str(act.get("strategy") or result.get("strategy") or "")
         if not isinstance(result, dict):
