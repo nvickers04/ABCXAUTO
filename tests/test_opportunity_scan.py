@@ -375,7 +375,7 @@ def test_thin_ranked_row_is_symbol_gap_and_optional_rank():
 
 @pytest.mark.asyncio
 async def test_criteria_scan_arena_emits_thin_gap_rows(monkeypatch):
-    async def fake_pull(**_k):
+    async def fake_pull(_connector=None, **_k):
         return {
             "ok": True,
             "arena_id": "top_gainers",

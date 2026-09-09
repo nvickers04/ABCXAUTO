@@ -257,13 +257,22 @@ def row_gap_pct(row: dict[str, Any] | None) -> float | None:
 
 
 def is_thin_ranked_row(row: Any) -> bool:
-    """True when the row is the ranked-screen contract (no quote-heavy fat)."""
+    """True when the row is the ranked-screen contract (no quote-heavy fat).
+
+    ``symbols[]`` drill-down always carries ``on_book`` from overlay and is
+    not thin even when quotes missed. A screen row is ``symbol`` plus
+    ``gap%`` and/or ``rank``.
+    """
     if not isinstance(row, dict):
         return False
     keys = set(row)
     if keys & _FAT_SCAN_KEYS:
         return False
-    return bool(keys) and keys <= (THIN_RANKED_KEYS | {"on_book"})
+    if not keys <= (THIN_RANKED_KEYS | {"on_book"}):
+        return False
+    if "gap%" in keys or "rank" in keys:
+        return True
+    return keys == {"symbol"}
 
 
 def thin_ranked_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
