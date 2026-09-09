@@ -50,6 +50,28 @@ def _tape():
 
 
 
+def test_scan_gate_facts_reads_gap_pct_field():
+    gate = _scan_gate_facts(
+        [
+            {"symbol": "TQQQ", "gap%": 12.0},
+            {"symbol": "SNDK", "gap%": -6.5},
+            {"symbol": "PSQL", "gap%": 73.4, "last": 4.2},
+        ]
+    )
+    assert gate["deepest_symbol"] == "SNDK"
+    assert gate["deepest_open_gap_pct"] == pytest.approx(-6.5)
+
+
+def test_scan_paint_does_not_fatten_thin_ranked_rows():
+    from abcxauto.brain import _scan_paint_rows
+
+    painted = _scan_paint_rows(
+        {"rows": [{"symbol": "NVDA", "gap%": 12.4, "rank": 0}]},
+        quotes={"NVDA": {"last": 181.5, "open_gap_pct": -5.0}},
+    )
+    assert painted == [{"symbol": "NVDA", "gap%": 12.4, "rank": 0}]
+
+
 def test_scan_skip_class_is_levered_or_micro_not_a_send_gate():
     assert scan_skip_class({"symbol": "PSQL", "last": 4.2}) == "micro"
     assert scan_skip_class({"symbol": "TQQQ", "last": 88.0}) == "levered"
@@ -484,6 +506,8 @@ async def test_bare_scan_runs_the_flush_trio(monkeypatch):
     assert data["deepest_symbol"] == "MRVL"
     assert data["deepest_open_gap_pct"] == pytest.approx(-6.8)
     assert "screens_this_look" not in data
+    note = str(data.get("note") or "").lower()
+    assert "arena" in note and "scan_code" in note
     arenas = data.get("arenas") or []
     assert "most_active" in arenas
     assert "top_losers" in arenas
@@ -584,8 +608,16 @@ async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
     assert "PSQL" in names or any(
         (r.get("symbol") == "PSQL") for r in (bag.get("hits") or [])
     )
-    assert bag["deepest_symbol"] != "PSQL"
+    # Thin ranked default has no last, so micro-by-price does not pin PSQL.
+    # Levered TQQQ still skips by name. gap% maps the on-row open_gap/distance.
     assert bag["deepest_symbol"] != "TQQQ"
+    for hit in bag.get("hits") or []:
+        if not isinstance(hit, dict):
+            continue
+        assert set(hit) <= {"symbol", "gap%", "rank", "on_book"}
+        assert len(hit) <= 3
+        if hit.get("symbol") == "PSQL":
+            assert hit.get("gap%") == pytest.approx(73.4)
     hits_lines = [t for k, t in painted if k == "tool" and "hits=" in t]
     assert len(hits_lines) == 1
     assert "screens=" not in hits_lines[0]

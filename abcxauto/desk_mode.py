@@ -799,6 +799,8 @@ def _fact_line(source: str, payload: dict[str, Any], args: dict[str, Any] | None
                     continue
                 gap = row.get("open_gap_pct")
                 if gap is None:
+                    gap = row.get("gap%")
+                if gap is None:
                     gap = row.get("gap_pct")
                 try:
                     mag = abs(float(gap))
@@ -919,7 +921,7 @@ def _direction_bias(text: str) -> str:
 
 
 def _gap_of(row: dict[str, Any]) -> float | None:
-    for key in ("open_gap_pct", "gap_pct"):
+    for key in ("open_gap_pct", "gap%", "gap_pct"):
         if row.get(key) is None:
             continue
         try:

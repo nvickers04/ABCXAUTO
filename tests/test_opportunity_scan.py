@@ -329,6 +329,8 @@ async def test_criteria_scan_symbols_still_returns_asked_names():
     assert out["ok"] is True
     assert out["symbols"] == ["NVDA", "XLE"]
     assert out["source"] == "symbols"
+    assert out.get("thin") is False
+    assert "on_book" in out["hits"][0]
 
 
 @pytest.mark.asyncio
@@ -340,6 +342,97 @@ async def test_criteria_scan_catalog_seed_does_not_quote(monkeypatch):
     out = await criteria_scan(arena="index_etfs", connector=object())
     assert out.get("ok") is False
     assert "SPY" not in (out.get("symbols") or [])
+
+
+def test_row_gap_pct_maps_distance_change_open_gap():
+    from abcxauto.opportunity_scan import row_gap_pct
+
+    assert row_gap_pct({"distance": "8.2%"}) == pytest.approx(8.2)
+    assert row_gap_pct({"change_pct": -3.5}) == pytest.approx(-3.5)
+    assert row_gap_pct({"open_gap_pct": -6.5}) == pytest.approx(-6.5)
+    assert row_gap_pct({"gap%": 1.0, "distance": "9"}) == pytest.approx(1.0)
+    assert row_gap_pct({"change": 4.25}) == pytest.approx(4.25)
+    assert row_gap_pct({"distance": "n/a"}) is None
+
+
+def test_thin_ranked_row_is_symbol_gap_and_optional_rank():
+    from abcxauto.opportunity_scan import thin_ranked_row
+
+    row = thin_ranked_row(
+        {
+            "symbol": "nvda",
+            "rank": 0,
+            "distance": "12.4",
+            "on_book": False,
+            "last": 181.5,
+            "bid": 181.4,
+            "open_gap_pct": -5.0,
+        }
+    )
+    assert row == {"symbol": "NVDA", "gap%": -5.0, "rank": 0}
+    assert len(row) <= 3
+
+
+@pytest.mark.asyncio
+async def test_criteria_scan_arena_emits_thin_gap_rows(monkeypatch):
+    async def fake_pull(**_k):
+        return {
+            "ok": True,
+            "arena_id": "top_gainers",
+            "scan_code": "TOP_PERC_GAIN",
+            "source": "ibkr",
+            "symbols": ["NVDA", "AMD"],
+            "rows": [
+                {"symbol": "NVDA", "rank": 0, "distance": "12.4"},
+                {"symbol": "AMD", "rank": 1, "distance": "-3.1"},
+            ],
+            "applied": {},
+        }
+
+    async def boom(*_a, **_k):
+        raise AssertionError("ranked screen must not quote")
+
+    monkeypatch.setattr("abcxauto.universe.pull_one_screen", fake_pull)
+    monkeypatch.setattr("abcxauto.opportunity_scan.attach_live_quotes", boom)
+    out = await criteria_scan(scan_code="TOP_PERC_GAIN", connector=object())
+    assert out["ok"] is True
+    assert out["thin"] is True
+    assert out["sort"] == "TOP_PERC_GAIN"
+    assert out["criteria"]["scan_code"] == "TOP_PERC_GAIN"
+    assert out["quoted"] == 0
+    assert out["ranked"] is True
+    assert "gap%" in str(out.get("rank_meaning") or "")
+    for row in out["hits"]:
+        assert set(row) <= {"symbol", "gap%", "rank"}
+        assert len(row) <= 3
+        assert "last" not in row
+        assert "distance" not in row
+        assert "open_gap_pct" not in row
+    assert out["hits"][0]["symbol"] == "NVDA"
+    assert out["hits"][0]["gap%"] == pytest.approx(12.4)
+    assert out["hits"][0]["rank"] == 0
+
+
+@pytest.mark.asyncio
+async def test_criteria_scan_symbols_stays_quote_fat(monkeypatch):
+    async def quotes(rows, **_k):
+        for row in rows:
+            if row.get("symbol") == "NVDA":
+                row["last"] = 181.5
+                row["open_gap_pct"] = -5.0
+                row["bid"] = 181.4
+                row["ask"] = 181.6
+        return 1
+
+    monkeypatch.setattr("abcxauto.opportunity_scan.attach_live_quotes", quotes)
+    out = await criteria_scan(symbols=["NVDA"], connector=object())
+    assert out["ok"] is True
+    assert out["thin"] is False
+    assert out["hits"][0]["last"] == 181.5
+    assert out["hits"][0]["open_gap_pct"] == -5.0
+    assert out["hits"][0]["bid"] == 181.4
+    assert "on_book" in out["hits"][0]
+    assert "fat" in str(out.get("note") or "").lower()
 
 
 def test_session_range_from_live_open_at_the_bell():

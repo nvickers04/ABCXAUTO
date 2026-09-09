@@ -2454,7 +2454,11 @@ class ProTerminal:
         for i, row in enumerate(rows[:12], start=1):
             rank = row.get("rank") if ranked else None
             last = row.get("last")
-            metric = row.get("distance") or row.get("benchmark") or row.get("projection") or ""
+            metric = (
+                row.get("gap%")
+                if row.get("gap%") is not None
+                else row.get("distance") or row.get("benchmark") or row.get("projection") or ""
+            )
             tags = []
             if row.get("on_book"):
                 tags.append("on book")

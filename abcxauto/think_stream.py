@@ -553,6 +553,7 @@ def _compact_scan_hits(raw: Any) -> dict[str, Any]:
             "close",
             "change_pct",
             "open_gap_pct",
+            "gap%",
             "distance",
             "bid",
             "ask",
@@ -621,31 +622,46 @@ def _compact_live_quotes(raw: Any) -> dict[str, float]:
     return out
 
 
+def _signed_open_gap(row: dict[str, Any] | None) -> float:
+    """Signed gap% / open_gap_pct. Missing metric is 0."""
+    try:
+        from abcxauto.opportunity_scan import row_gap_pct
+    except Exception:
+        row_gap_pct = None  # type: ignore[assignment]
+    if row_gap_pct is not None:
+        gap = row_gap_pct(row)
+        return float(gap) if gap is not None else 0.0
+    if not isinstance(row, dict):
+        return 0.0
+    raw = row.get("gap%")
+    if raw is None:
+        raw = row.get("open_gap_pct")
+    if raw is None:
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _open_gap_mag(row: dict[str, Any] | None) -> float:
+    """|gap%| (or open_gap_pct). Missing gap sorts last."""
+    try:
+        from abcxauto.opportunity_scan import row_gap_pct
+    except Exception:
+        row_gap_pct = None  # type: ignore[assignment]
+    if row_gap_pct is not None:
+        gap = row_gap_pct(row)
+        return abs(float(gap)) if gap is not None else -1.0
     if not isinstance(row, dict):
         return -1.0
-    gap = row.get("open_gap_pct")
-    try:
-        return abs(float(gap)) if gap is not None else -1.0
-    except (TypeError, ValueError):
-        return -1.0
-
-
-def _signed_open_gap(row: dict[str, Any] | None) -> float:
-    if not isinstance(row, dict) or row.get("open_gap_pct") is None:
-        return 0.0
-    try:
-        return float(row.get("open_gap_pct"))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _open_gap_mag(row: dict[str, Any] | None) -> float:
-    """|open_gap_pct|. Missing gap sorts last. Playbook direction is not a floor."""
-    if not isinstance(row, dict) or row.get("open_gap_pct") is None:
+    raw = row.get("gap%")
+    if raw is None:
+        raw = row.get("open_gap_pct")
+    if raw is None:
         return -1.0
     try:
-        return abs(float(row.get("open_gap_pct")))
+        return abs(float(raw))
     except (TypeError, ValueError):
         return -1.0
 

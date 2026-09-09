@@ -252,13 +252,18 @@ def _scan_gate_facts(
         from abcxauto.universe import scan_skip_class as skip_of
     except Exception:
         skip_of = None
+    try:
+        from abcxauto.opportunity_scan import row_gap_pct
+    except Exception:
+        row_gap_pct = None  # type: ignore[assignment]
     deepest = None
     deepest_sym = ""
     deepest_signed = None
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        if row.get("open_gap_pct") is None:
+        gap = row_gap_pct(row) if row_gap_pct is not None else row.get("open_gap_pct")
+        if gap is None and row.get("gap%") is None and row.get("open_gap_pct") is None:
             continue
         if skip_of and skip_of(row):
             continue
@@ -356,6 +361,17 @@ def _scan_out_from_snap(
     if len(arenas) == 1:
         out["arena"] = merged.get("arena") or seed.get("arena")
         out["scan_code"] = merged.get("scan_code") or seed.get("scan_code")
+    if seed.get("thin") is not None:
+        out["thin"] = bool(seed.get("thin"))
+    else:
+        from abcxauto.opportunity_scan import is_thin_ranked_row
+
+        if rows and all(is_thin_ranked_row(r) for r in rows):
+            out["thin"] = True
+    if seed.get("criteria") is not None:
+        out["criteria"] = seed.get("criteria")
+    if seed.get("sort") is not None:
+        out["sort"] = seed.get("sort")
     out.update(_scan_gate_facts(rows))
     return out
 
@@ -462,7 +478,14 @@ def _scan_paint_rows(
         rows = [r for r in (fallback or []) if isinstance(r, dict)][:24]
     painted: list[dict[str, Any]] = []
     qmap = quotes if isinstance(quotes, dict) else {}
+    from abcxauto.opportunity_scan import is_thin_ranked_row, thin_ranked_row
+
     for row in sort_scan_rows(rows):
+        if is_thin_ranked_row(row):
+            slim = thin_ranked_row(row)
+            if slim:
+                painted.append(slim)
+            continue
         item = dict(row)
         sym = str(item.get("symbol") or "").upper().strip()
         px = _quote_last(qmap.get(sym))
@@ -508,11 +531,16 @@ def _scan_gap_pct(snap: dict[str, Any] | None, symbol: str) -> Any:
     for row in hits.get("rows") or []:
         if not isinstance(row, dict) or str(row.get("symbol") or "").upper() != want:
             continue
+        if row.get("gap%") is not None:
+            return row.get("gap%")
         if row.get("open_gap_pct") is not None:
             return row.get("open_gap_pct")
         ibkr = row.get("ibkr")
-        if isinstance(ibkr, dict) and ibkr.get("open_gap_pct") is not None:
-            return ibkr.get("open_gap_pct")
+        if isinstance(ibkr, dict):
+            if ibkr.get("gap%") is not None:
+                return ibkr.get("gap%")
+            if ibkr.get("open_gap_pct") is not None:
+                return ibkr.get("open_gap_pct")
     qmap = snap.get("ibkr_live_quotes")
     if isinstance(qmap, dict):
         quote = qmap.get(want)
@@ -527,7 +555,9 @@ def _candle_res_from_tape(snap: dict[str, Any] | None) -> str:
     if not isinstance(hits, dict):
         return "D"
     for row in hits.get("rows") or []:
-        if isinstance(row, dict) and row.get("open_gap_pct") is not None:
+        if isinstance(row, dict) and (
+            row.get("open_gap_pct") is not None or row.get("gap%") is not None
+        ):
             return "5"
     return "D"
 
@@ -929,19 +959,26 @@ AGENT_TOOLS = [
     tool(
         name="scan",
         description=(
-            "IBKR scanner. arena+scan_code, or symbols[]. Hits are the union "
-            "with IBKR live last on the top names — triage from these, do not "
-            "re-quote."
+            "IBKR scanner. State criteria (arena and/or scan_code) and the "
+            "scanCode order. Ranked arena/code hits are thin: symbol, gap% "
+            "(on-row distance / change_pct / open_gap_pct), optional rank. "
+            "Fat quote rows only on symbols[] drill-down. Bare scan() notes "
+            "the flush defaults — not a fat dump."
         ),
         parameters=_schema(
             {
                 "arena": {
                     "type": "string",
-                    "description": "arenas=" + ",".join(_scan_arena_keys()),
+                    "description": (
+                        "criteria screen; arenas=" + ",".join(_scan_arena_keys())
+                    ),
                 },
                 "scan_code": {
                     "type": "string",
-                    "description": "|".join(_scan_code_keys()),
+                    "description": (
+                        "criteria + order (IBKR scanCode): "
+                        + "|".join(_scan_code_keys())
+                    ),
                 },
                 "symbols": _SYMBOLS_SCHEMA,
                 "market_cap_above": {
@@ -1570,7 +1607,16 @@ async def _run_tool(
             out["news"] = await _hub()._mda_news(news_syms)
             out["news_freshness"] = "delayed_15m"
             out["news_use"] = "color_not_trigger"
-            attach_mda_news(out.get("hits") or out.get("rows") or [], out["news"])
+            from abcxauto.opportunity_scan import is_thin_ranked_row
+
+            attach_mda_news(
+                [
+                    r
+                    for r in (out.get("hits") or out.get("rows") or [])
+                    if isinstance(r, dict) and not is_thin_ranked_row(r)
+                ],
+                out["news"],
+            )
             if out["news"]:
                 snap["scan_news_attached"] = True
                 if not world.news_items:
@@ -1581,12 +1627,23 @@ async def _run_tool(
             last_ok: dict[str, Any] | None,
             *,
             emit_line: bool,
+            silent: bool = False,
         ) -> str:
+            from abcxauto.opportunity_scan import (
+                SILENT_SCAN_NOTE,
+                is_thin_ranked_row,
+            )
+
             out = _scan_out_from_snap(snap, qmap, last_ok=last_ok)
-            if want_metrics and out.get("hits"):
+            fat_hits = [
+                r
+                for r in (out.get("hits") or [])
+                if isinstance(r, dict) and not is_thin_ranked_row(r)
+            ]
+            if want_metrics and fat_hits:
                 from abcxauto.opportunity_scan import attach_mda_metrics
 
-                await attach_mda_metrics(out["hits"])
+                await attach_mda_metrics(fat_hits)
             await _attach_optional_news(out)
             painted = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
             snap["scan_hits"] = _union_scan_hits(
@@ -1595,7 +1652,7 @@ async def _run_tool(
             if _snap_is_rth(snap):
                 sessions: dict[str, Any] = {}
                 for row in out.get("rows") or []:
-                    if not isinstance(row, dict):
+                    if not isinstance(row, dict) or is_thin_ranked_row(row):
                         continue
                     name = str(row.get("symbol") or "").upper()
                     if not name:
@@ -1605,7 +1662,7 @@ async def _run_tool(
                         name,
                         last=row.get("last"),
                         open_px=row.get("open"),
-                        open_gap_pct=row.get("open_gap_pct"),
+                        open_gap_pct=row.get("open_gap_pct") or row.get("gap%"),
                     )
                     if not live:
                         continue
@@ -1615,6 +1672,8 @@ async def _run_tool(
                     sessions[name] = row["session"]
                 if sessions:
                     out["sessions"] = sessions
+            if silent:
+                out["note"] = SILENT_SCAN_NOTE
             _note_scan_news(turn, out)
             _attach_scan_run(out, turn=turn, world=world)
             if emit_line:
@@ -1724,7 +1783,9 @@ async def _run_tool(
                     _attach_scan_run(err, turn=turn, world=world)
                 return _hub()._clip(err)
             snap["scan_at"] = datetime.now(timezone.utc).isoformat()
-            return await _finish_look_bag(last_ok, emit_line=True)
+            return await _finish_look_bag(
+                last_ok, emit_line=True, silent=not has_screen
+            )
     if name == "candles":
         from abcxauto.broker.bars import ibkr_bar_freshness
 
