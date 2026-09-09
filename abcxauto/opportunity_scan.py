@@ -292,8 +292,6 @@ def thin_ranked_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
             out["rank"] = int(rank)
         except (TypeError, ValueError):
             out["rank"] = rank
-    elif row.get("on_book") is True:
-        out["on_book"] = True
     return out
 
 
