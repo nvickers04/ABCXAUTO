@@ -1113,6 +1113,22 @@ AGENT_TOOLS = [
             [],
         ),
     ),
+    tool(
+        name="note",
+        description=(
+            "This-flight one-sentence conclusion. Grok-owned. "
+            "Empty reads the list. Not a fact. Not the playbook."
+        ),
+        parameters=_schema(
+            {
+                "line": {
+                    "type": "string",
+                    "description": "One sentence. Omitted reads the list.",
+                },
+            },
+            [],
+        ),
+    ),
 ]
 
 
@@ -2258,6 +2274,25 @@ async def _run_tool(
         if isinstance(snap, dict):
             snap["research_web"] = dict(page)
         return _hub()._clip(page)
+    if name == "note":
+        from abcxauto.working_memory import MAX_LINES, remember, working_memory_lines
+
+        line = str(args.get("line") or args.get("text") or "")
+        if not line.strip():
+            lines = working_memory_lines()
+            return _hub()._clip({
+                "working_memory": lines,
+                "n": len(lines),
+                "max": MAX_LINES,
+                "reason": "read",
+            })
+        return _hub()._clip(
+            remember(
+                line,
+                tool_trace=getattr(turn, "tool_trace", None),
+                text=str(getattr(turn, "text", "") or ""),
+            )
+        )
     return json.dumps({"error": f"unknown tool {name}"})
 
 

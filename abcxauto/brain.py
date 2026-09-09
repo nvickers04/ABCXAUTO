@@ -546,6 +546,7 @@ _LIVE_BOOK_KEEP = (
     "levers",
     "mode",
     "ibkr",
+    "working_memory",
 )
 
 
@@ -913,6 +914,12 @@ def _reset_chat(g: GrokClient) -> None:
     g._wake_appended = False
     g._last_desk_fact = ""
     g._chat_had_work = False
+    try:
+        from abcxauto.working_memory import clear_working_memory
+
+        clear_working_memory(reason="chat_reset")
+    except Exception:
+        logger.debug("working_memory clear on chat reset failed", exc_info=True)
 
 
 def drop_live_chat(g: Any | None) -> None:
@@ -1024,6 +1031,13 @@ def _open_wake(
     A pending live poke owns the next developer turn.
     """
     _ = resume
+    if reset:
+        try:
+            from abcxauto.working_memory import clear_working_memory
+
+            clear_working_memory(reason="hard_reset")
+        except Exception:
+            logger.debug("working_memory clear on hard reset failed", exc_info=True)
     g._wake_appended = False
     live = None if reset else getattr(g, "chat", None)
     if live is not None:
@@ -1284,6 +1298,14 @@ def _book_payload(
     }
     if last_look:
         out["last_look"] = last_look
+    try:
+        from abcxauto.working_memory import working_memory_lines
+
+        lines = working_memory_lines()
+    except Exception:
+        lines = []
+    if lines:
+        out["working_memory"] = lines
     return out
 
 

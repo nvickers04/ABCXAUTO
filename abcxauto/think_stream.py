@@ -1356,6 +1356,14 @@ def write_last_turn(out: dict[str, Any]) -> None:
                 or ""
             ).strip(),
         }
+        try:
+            from abcxauto.working_memory import working_memory_lines
+
+            wm = working_memory_lines()
+        except Exception:
+            wm = []
+        if wm:
+            payload["working_memory"] = wm
         if str(payload.get("strat") or "") == "in_progress":
             brief = load_desk_brief()
             if brief.get("strat"):
