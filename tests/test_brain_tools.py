@@ -86,6 +86,7 @@ def test_agent_tools_cover_ibkr_and_mda():
     assert "journal" not in names
     assert "universe" not in names
     assert "strategies" not in names
+    assert "note" in names
 
 
 def test_quote_from_ticker_skips_nan():
@@ -1829,6 +1830,7 @@ def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
     assert "legal_n" not in blob["world"]
     assert "legal_sample" not in blob["world"]
     assert "working_thesis" not in blob["world"]
+    assert "working_memory" not in blob["world"]
     assert "floor" not in blob
     assert "operator_card" not in blob
     assert "scorecard" not in blob
@@ -2199,11 +2201,13 @@ def test_agent_tools_omit_set_wake_in_every_session():
             assert "web" in names, sess
             assert "news" in names, sess
             assert "scan" in names, sess
+            assert "note" in names, sess
         else:
             assert "send" not in names, sess
             assert "web" in names, sess
             assert "news" in names, sess
             assert "scan" in names, sess
+            assert "note" in names, sess
 
 
 @pytest.mark.asyncio

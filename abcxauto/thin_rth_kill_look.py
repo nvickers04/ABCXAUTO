@@ -40,6 +40,7 @@ DIE_TOOLS = frozenset({
     "web",
     "option_facts",
     "write_research_brief",
+    "note",
 })
 
 # F10 dollars. Not raiseable Settings knobs. Preferred is an ops tripwire.
