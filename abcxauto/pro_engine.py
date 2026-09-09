@@ -1936,7 +1936,24 @@ class ProEngine:
                                             s_pulse = await snap(self.conn)
                                         except Exception:
                                             s_pulse = None
-                                    keep_flat = rth_flat_keep_looking(sess, s_pulse)
+                                    prev_fact = ""
+                                    if g is not None:
+                                        chat = getattr(g, "chat", None)
+                                        if chat is not None:
+                                            prev_fact = str(
+                                                getattr(
+                                                    chat, "_abcx_last_desk_fact", ""
+                                                )
+                                                or ""
+                                            )
+                                        if not prev_fact:
+                                            prev_fact = str(
+                                                getattr(g, "_last_desk_fact", "")
+                                                or ""
+                                            )
+                                    keep_flat = rth_flat_keep_looking(
+                                        sess, s_pulse, desk_fact=prev_fact
+                                    )
                                 except Exception:
                                     keep_research = False
                                     keep_flat = False

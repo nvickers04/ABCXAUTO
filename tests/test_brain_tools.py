@@ -2457,8 +2457,8 @@ _RTH_LOTS_SNAP = {
 }
 
 
-def test_rth_flat_keep_looking_open_wake_still_appends_same_fact(monkeypatch):
-    """Flat RTH has no broker poke. Same collapsible fact still re-enters looking."""
+def test_rth_flat_keep_looking_open_wake_does_not_append_unchanged_wom(monkeypatch):
+    """Unchanged WOM set still sits. Flat snap must not bypass the manage lead."""
     from abcxauto.brain import _open_wake
     from abcxauto.llm import SYSTEM_PROMPT
     from abcxauto.park_clock import clear_interrupt
@@ -2495,9 +2495,9 @@ def test_rth_flat_keep_looking_open_wake_still_appends_same_fact(monkeypatch):
         resume=True,
         snap=_RTH_FLAT_SNAP,
     )
-    assert len(got) == 2
+    assert len(got) == 1
     _open_wake(g, _RTH_FLAT_WOM, session="regular", resume=True, snap={})
-    assert len(got) == 2
+    assert len(got) == 1
     _open_wake(
         g,
         _RTH_FLAT_WOM,
@@ -2505,7 +2505,7 @@ def test_rth_flat_keep_looking_open_wake_still_appends_same_fact(monkeypatch):
         resume=True,
         snap=_RTH_LOTS_SNAP,
     )
-    assert len(got) == 2
+    assert len(got) == 1
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
@@ -3863,8 +3863,8 @@ async def test_rth_duplicate_lead_still_ends_without_poke():
 
 
 @pytest.mark.asyncio
-async def test_rth_flat_keep_looking_resume_calls_model_without_poke(monkeypatch):
-    """Host re-entry after flat no-send must look again. Same wake is not _ended."""
+async def test_rth_flat_snap_does_not_bypass_unchanged_wom_ended(monkeypatch):
+    """Unchanged WOM still _ended. A flat snap is not a keep-looking bypass."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt, peek_interrupt
 
@@ -3899,11 +3899,11 @@ async def test_rth_flat_keep_looking_resume_calls_model_without_poke(monkeypatch
         wake=wake,
         resume=True,
     )
-    assert second.ended is False
-    assert "still looking SPY" in (second.text or "")
+    assert second.ended is True
+    assert "still looking SPY" not in (second.text or "")
     assert g.chat is created[0]
     assert len(created) == 1
-    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
     assert peek_interrupt() is None
 
 

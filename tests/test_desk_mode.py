@@ -126,6 +126,14 @@ def test_rth_flat_keep_looking_is_paper_rth_flat_only(monkeypatch):
             ],
         },
     ) is False
+    assert (
+        rth_flat_keep_looking(
+            "regular",
+            flat,
+            desk_fact="fact: working_order_missing QQQ 260918C500 long 1.",
+        )
+        is False
+    )
     monkeypatch.setattr(
         "abcxauto.config.Config.is_paper",
         property(lambda self: False),

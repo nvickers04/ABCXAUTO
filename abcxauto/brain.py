@@ -1060,7 +1060,7 @@ def _open_wake(
                 )
 
                 keep_looking = research_keep_looking(session) or rth_flat_keep_looking(
-                    session, snap
+                    session, snap, desk_fact=wake
                 )
             except Exception:
                 keep_looking = False

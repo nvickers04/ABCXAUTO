@@ -232,14 +232,39 @@ def _snap_is_known_flat_no_manage(snap: dict | None) -> bool:
         return False
 
 
-def rth_flat_keep_looking(session: str = "", snap: dict | None = None) -> bool:
+_MANAGE_LEAD_KINDS = frozenset({
+    "working_order_missing",
+    "closest_stop",
+    "unprotected",
+})
+
+
+def _desk_fact_needs_manage(desk_fact: Any = "") -> bool:
+    """True when the lead is WOM / closest_stop / unprotected — sit for a poke."""
+    try:
+        from abcxauto.world_state import parse_desk_fact
+
+        parsed = parse_desk_fact(desk_fact)
+    except Exception:
+        return False
+    if not parsed:
+        return False
+    return str(parsed.get("kind") or "") in _MANAGE_LEAD_KINDS
+
+
+def rth_flat_keep_looking(
+    session: str = "",
+    snap: dict | None = None,
+    desk_fact: str = "",
+) -> bool:
     """True when a finished paper RTH look has nothing to manage — re-enter.
 
     Flat + no working orders: fill / order_change / unprotected never arrive.
     Condition-wait ("next look if SPY breaks 761") with no wake is a hang.
-    Open lots or working orders still wait for a real book poke. Blank
-    labels fail closed. Live ports do not stay-up this way. Not a sit-wake
-    clock and not a SYSTEM_PROMPT sermon.
+    Open lots, working orders, or an unchanged WOM / closest_stop /
+    unprotected lead still wait for a real book poke. Blank labels fail
+    closed. Live ports do not stay-up this way. Not a sit-wake clock and
+    not a SYSTEM_PROMPT sermon.
     """
     raw = str(session or "").strip().lower()
     if raw in ("", "unknown"):
@@ -253,6 +278,8 @@ def rth_flat_keep_looking(session: str = "", snap: dict | None = None) -> bool:
         if not paper_stay_up(sess):
             return False
     except Exception:
+        return False
+    if _desk_fact_needs_manage(desk_fact):
         return False
     return _snap_is_known_flat_no_manage(snap)
 
