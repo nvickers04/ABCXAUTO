@@ -22,7 +22,6 @@ from abcxauto.thin_rth_kill_look import (
     PCS_CARD,
     REASON_ALLOWLIST,
     REASON_DD,
-    REASON_ENTRY_BUDGET,
     REASON_F10,
     REASON_QTY0,
     kill_look_port_ok,

@@ -1127,7 +1127,6 @@ class ProEngine:
             prompt_tokens=prompt_n,
             in_flight=bool(getattr(self, "_kill_entry_in_flight", False)),
             snap=blob,
-            bypass_entry_budget=bool(getattr(self, "_force_first_look", False)),
         )
 
     def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
@@ -2037,7 +2036,6 @@ class ProEngine:
                         except Exception:
                             logger.debug("f10 skip fail-closed failed", exc_info=True)
                 # Start/bounce one-shot is spent after the first look gate.
-                # Do not reset kill_entry_looks / RTH_ENTRY_LOOKS_MAX.
                 self._force_first_look = False
                 if skip:
                     self._note("SKIP", skip)
@@ -2077,7 +2075,7 @@ class ProEngine:
 
                 n += 1
                 from abcxauto.session_caps import billed_tokens_now, note_look
-                from abcxauto.session_caps import consume_open_entry_look, note_research_look
+                from abcxauto.session_caps import note_research_look
 
                 before_tok = billed_tokens_now()
                 try:
@@ -2092,14 +2090,10 @@ class ProEngine:
                             positions=list(s.get("positions") or []),
                             open_lots=list(s.get("open_lots") or []),
                         )
-                        if not self._kill_look_same_look():
-                            if mode == "open":
-                                consume_open_entry_look(session)
-                                self._kill_entry_in_flight = True
-                            elif mode == "research":
-                                note_research_look()
+                        if not self._kill_look_same_look() and mode == "research":
+                            note_research_look()
                     except Exception:
-                        logger.debug("kill-look consume failed", exc_info=True)
+                        logger.debug("kill-look research note failed", exc_info=True)
                     try:
                         s["kill_entry_in_flight"] = bool(
                             getattr(self, "_kill_entry_in_flight", False)

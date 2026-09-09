@@ -23,9 +23,7 @@ from abcxauto.desk_mode import (
 )
 from abcxauto.llm import SYSTEM_PROMPT
 from abcxauto.session_caps import (
-    consume_open_entry_look,
     f10_loop_halted,
-    kill_entry_looks,
     mark_f10_loop_halt,
     note_research_look,
     research_week_looks,
@@ -44,7 +42,6 @@ from abcxauto.thin_rth_kill_look import (
     REASON_ALLOWLIST,
     REASON_NAMELESS,
     REASON_DIE_TOOL,
-    REASON_ENTRY_BUDGET,
     REASON_F10,
     REASON_MODEL_COST,
     REASON_ONE_SEND,
@@ -149,112 +146,92 @@ def test_kill_look_env_gate(monkeypatch):
     assert kill_look_rth("premarket") is False
 
 
-def test_look_budget_open_one_then_abort(monkeypatch):
+def test_entry_budget_deleted_allows_n_plus_one_looks(monkeypatch):
+    """No one-look RTH entry budget: N>1 looks still OPEN; send not force-blocked."""
+    import abcxauto.session_caps as caps
+    import abcxauto.thin_rth_kill_look as kill
+
     _kill_on(monkeypatch)
     reset_session_caps()
+    assert not hasattr(kill, "RTH_ENTRY_LOOKS_MAX")
+    assert not hasattr(caps, "KILL_ENTRY_LOOKS_MAX")
+    assert not hasattr(caps, "consume_open_entry_look")
     f10 = _allow_f10()
-    assert (
-        kill_mode("regular", positions=[], open_lots=[], entry_looks=0, f10=f10)
-        == MODE_OPEN
+    assert kill_mode("regular", positions=[], open_lots=[], f10=f10) == MODE_OPEN
+    assert skip_look_reason("regular", positions=[], f10=f10) == ""
+    act = {
+        "strategy": "vertical_spread",
+        "params": dict(PCS_OPEN),
+        "card": PCS_CARD,
+    }
+    assert kill_look_send_block(act, session="regular", f10=f10) is None
+    # Unknown abort fuse must not lie as NO_SEND:f10.
+    ok, why = pcs_send_ok(
+        "vertical_spread",
+        dict(PCS_OPEN),
+        PCS_CARD,
+        mode=MODE_ABORT,
+        abort_fuse="none",
     )
-    assert skip_look_reason("regular", positions=[], f10=_allow_f10()) == ""
-    consume_open_entry_look("regular")
-    assert kill_entry_looks("regular") == 1
-    assert (
-        kill_mode("regular", positions=[], open_lots=[], f10=f10) == MODE_ABORT
+    assert ok is False
+    assert why == REASON_PORT
+    assert why != REASON_F10
+    ok_f10, why_f10 = pcs_send_ok(
+        "vertical_spread",
+        dict(PCS_OPEN),
+        PCS_CARD,
+        mode=MODE_ABORT,
+        abort_fuse="F10",
     )
-    assert skip_look_reason("regular", positions=[], same_look=False) == REASON_ENTRY_BUDGET
-    # Mill re-enter of look #1 still runs.
-    assert skip_look_reason("regular", positions=[], same_look=True) == ""
-    consume_open_entry_look("regular")
-    assert kill_entry_looks("regular") == 1
+    assert ok_f10 is False
+    assert why_f10 == REASON_F10
 
 
-def test_start_bypass_spent_entry_budget_once(monkeypatch):
-    """Operator Start one-shot bypasses spent entry; later pulses do not reset it."""
+def test_start_does_not_soften_f10(monkeypatch):
     _kill_on(monkeypatch)
     reset_session_caps()
-    consume_open_entry_look("regular")
-    assert kill_entry_looks("regular") == 1
-    assert (
-        skip_look_reason(
-            "regular",
-            positions=[],
-            f10=_allow_f10(),
-            bypass_entry_budget=True,
-        )
-        == ""
-    )
-    assert kill_entry_looks("regular") == 1
-    assert skip_look_reason(
-        "regular", positions=[], f10=_allow_f10(), bypass_entry_budget=False
-    ) == REASON_ENTRY_BUDGET
-
-
-def test_start_bypass_does_not_soften_f10(monkeypatch):
-    _kill_on(monkeypatch)
-    reset_session_caps()
-    consume_open_entry_look("regular")
     hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
-    assert (
-        skip_look_reason(
-            "regular",
-            positions=[],
-            f10=hard,
-            bypass_entry_budget=True,
-        )
-        == REASON_F10
-    )
+    assert skip_look_reason("regular", positions=[], f10=hard) == REASON_F10
 
 
-def test_start_bypass_does_not_soften_7496(monkeypatch):
+def test_start_does_not_soften_7496(monkeypatch):
     _kill_on(monkeypatch)
     reset_session_caps()
-    consume_open_entry_look("regular")
     monkeypatch.setattr(
         "abcxauto.config.get_config",
         lambda: SimpleNamespace(ibkr_port=7496, pcs_kill_look=True),
     )
     assert kill_look_port_ok() is False
     assert (
-        skip_look_reason(
-            "regular",
-            positions=[],
-            f10=_allow_f10(),
-            bypass_entry_budget=True,
-        )
-        == REASON_ENTRY_BUDGET
+        skip_look_reason("regular", positions=[], f10=_allow_f10()) == REASON_PORT
     )
 
 
-def test_in_flight_open_can_still_send_after_consume(monkeypatch):
-    """Consume-before-think must not abort the legal look-#1 SEND."""
+def test_open_send_ok_after_multiple_looks_f10_still_hard(monkeypatch):
+    """After repeated OPEN looks, legal send still goes; real F10 still blocks."""
     _kill_on(monkeypatch)
     reset_session_caps()
-    consume_open_entry_look("regular")
     f10 = _allow_f10()
     act = {
         "strategy": "vertical_spread",
         "params": dict(PCS_OPEN),
         "card": PCS_CARD,
     }
-    assert kill_mode("regular", positions=[], f10=f10) == MODE_ABORT
-    assert (
-        kill_mode("regular", positions=[], f10=f10, in_flight=True) == MODE_OPEN
-    )
-    blocked = kill_look_send_block(act, session="regular", f10=f10)
-    assert blocked is not None
-    assert kill_look_send_block(act, session="regular", f10=f10, in_flight=True) is None
+    for _ in range(3):
+        assert kill_mode("regular", positions=[], f10=f10) == MODE_OPEN
+        assert kill_look_send_block(act, session="regular", f10=f10) is None
     hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
     assert skip_look_reason("regular", positions=[], same_look=True, f10=hard) == (
         REASON_F10
     )
+    blocked = kill_look_send_block(act, session="regular", f10=hard)
+    assert blocked is not None
+    assert blocked["reason_code"] == REASON_F10
 
 
-def test_look_budget_manage_replaces_second_entry(monkeypatch):
+def test_manage_replaces_second_entry(monkeypatch):
     _kill_on(monkeypatch)
     reset_session_caps()
-    consume_open_entry_look("regular")
     lot = _pcs_lot()
     assert has_open_pcs_skew_lot([lot], ["pcs-skew SPY vert"]) is True
     assert (
@@ -713,11 +690,10 @@ async def test_execute_ticket_kill_look_blocks_non_pcs(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_execute_ticket_in_flight_does_not_abort_legal_pcs(monkeypatch):
-    """Look #1 consume must not F10-abort the legal BAG. Later clerk gates may still block."""
+async def test_execute_ticket_no_entry_budget_f10_lie(monkeypatch):
+    """Without entry budget, legal BAG is not abort-stamped NO_SEND:f10."""
     _kill_on(monkeypatch)
     reset_session_caps()
-    consume_open_entry_look("regular")
     from abcxauto.agent_loop import execute_ticket
 
     monkeypatch.setattr(
@@ -730,16 +706,8 @@ async def test_execute_ticket_in_flight_does_not_abort_legal_pcs(monkeypatch):
         "params": dict(PCS_OPEN),
         "card": PCS_CARD,
     }
-    aborted = await execute_ticket(ticket, object(), world, {"positions": []})
-    assert aborted.get("status") == "blocked"
-    assert aborted.get("reason_code") == REASON_F10
-    inflight = await execute_ticket(
-        ticket,
-        object(),
-        world,
-        {"positions": [], "kill_entry_in_flight": True},
-    )
-    assert inflight.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST, REASON_ENTRY_BUDGET}
+    out = await execute_ticket(ticket, object(), world, {"positions": []})
+    assert out.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST, REASON_PORT}
     close = await execute_ticket(
         {
             "strategy": "vertical_spread",
@@ -753,30 +721,22 @@ async def test_execute_ticket_in_flight_does_not_abort_legal_pcs(monkeypatch):
     assert close.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST}
 
 
-def test_pro_engine_skip_reason_entry_budget(monkeypatch):
+def test_pro_engine_skip_reason_no_entry_budget(monkeypatch):
     _kill_on(monkeypatch)
     reset_session_caps()
-    consume_open_entry_look("regular")
     from abcxauto.pro_engine import ProEngine
 
     eng = ProEngine()
-    why = eng._kill_look_skip_reason("regular", {"positions": [], "protection": {}})
-    assert why == REASON_ENTRY_BUDGET
-    eng._mill_wake = True
-    assert eng._kill_look_skip_reason("regular", {"positions": []}) == ""
-    eng2 = ProEngine()
-    eng2._kill_entry_in_flight = True
-    assert eng2._kill_look_skip_reason("regular", {"positions": []}) == ""
-    start_eng = ProEngine()
-    start_eng._force_first_look = True
-    assert start_eng._kill_look_skip_reason(
-        "regular", {"positions": [], "protection": {}}
-    ) == ""
-    start_eng._force_first_look = False
-    assert start_eng._kill_look_skip_reason(
-        "regular", {"positions": [], "protection": {}}
-    ) == REASON_ENTRY_BUDGET
-    assert kill_entry_looks("regular") == 1
+    assert eng._kill_look_skip_reason("regular", {"positions": [], "protection": {}}) == ""
+    hard = f10_gate(1.80, est_this_look=0.35, window_cost=0.0)
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.live_f10_gate",
+        lambda: hard,
+    )
+    assert (
+        eng._kill_look_skip_reason("regular", {"positions": [], "protection": {}})
+        == REASON_F10
+    )
 
 
 def test_f10_trip_halts_open_look_exits_still_ok(monkeypatch):
@@ -1060,7 +1020,7 @@ def test_f10_nonfinite_fail_closes_loop(monkeypatch):
 def test_is_f10_look_halt_covers_hard_and_unreadable():
     assert is_f10_look_halt(REASON_F10) is True
     assert is_f10_look_halt(REASON_MODEL_COST) is True
-    assert is_f10_look_halt(REASON_ENTRY_BUDGET) is False
+    assert is_f10_look_halt(REASON_PORT) is False
     assert is_f10_look_halt("") is False
 
 

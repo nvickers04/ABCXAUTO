@@ -2099,23 +2099,19 @@ async def test_start_on_sitting_worker_enters_a_look(monkeypatch, tmp_path):
 
 @pytest.mark.pcs_kill_look
 @pytest.mark.asyncio
-async def test_mid_rth_start_spent_entry_enters_look_once(monkeypatch, tmp_path):
-    """Start mid-RTH with spent kill_entry must host GROK once; later pulses skip."""
+async def test_mid_rth_start_no_entry_budget_block(monkeypatch, tmp_path):
+    """Entry budget deleted: mid-RTH start is not alone skipped for prior looks."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
-    from abcxauto.session_caps import consume_open_entry_look, kill_entry_looks
     from abcxauto.think_stream import begin_run, emit
-    from abcxauto.thin_rth_kill_look import REASON_ENTRY_BUDGET
 
-    consume_open_entry_look("regular")
-    assert kill_entry_looks("regular") >= 1
     begin_run()
     calls = {"n": 0}
 
     async def think(self, n, g, s, *, resume=False):
         calls["n"] += 1
         emit("stage", "GROK")
-        emit("say", "\n[say]\nfirst look after start\n")
+        emit("say", "\n[say]\nlook without entry budget\n")
         return {
             "cycle": n,
             "pnl": 0,
@@ -2132,7 +2128,6 @@ async def test_mid_rth_start_spent_entry_enters_look_once(monkeypatch, tmp_path)
     )
     eng = ProEngine()
     assert eng.start() is None
-    assert eng._force_first_look is True
     deadline = time.time() + 4
     while time.time() < deadline and calls["n"] < 1:
         eng.drain_apply()
@@ -2140,34 +2135,11 @@ async def test_mid_rth_start_spent_entry_enters_look_once(monkeypatch, tmp_path)
     assert calls["n"] == 1
     live = str(eng.state.think_live or "")
     assert "--- GROK ---" in live
-    assert "first look after start" in live
-    assert kill_entry_looks("regular") == 1
-    sit_deadline = time.time() + 3
-    while time.time() < sit_deadline:
-        eng.drain_apply()
-        ev = getattr(eng, "_wake_event", None)
-        if calls["n"] == 1 and ev is not None and ev._waiters:
-            break
-        await asyncio.sleep(0.05)
-    else:
-        raise AssertionError("worker never sat on _wake_event")
-    assert eng._force_first_look is False
+    assert "look without entry budget" in live
     assert (
         eng._kill_look_skip_reason("regular", {"positions": [], "protection": {}})
-        == REASON_ENTRY_BUDGET
+        == ""
     )
-    # Stay-up resume without Operator Start must not get another look.
-    eng._resume_think = True
-    ev = eng._wake_event
-    loop = eng._worker_loop
-    if loop is not None and ev is not None:
-        loop.call_soon_threadsafe(ev.set)
-    idle_until = time.time() + 0.8
-    while time.time() < idle_until:
-        eng.drain_apply()
-        await asyncio.sleep(0.05)
-    assert calls["n"] == 1
-    assert kill_entry_looks("regular") == 1
     eng.stop_engine()
     eng.drain_apply()
 
@@ -2178,10 +2150,9 @@ async def test_mid_rth_start_f10_halt_still_skips(monkeypatch, tmp_path):
     """F10 halt still hard-skips the Start first look. Soften=FAIL."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
-    from abcxauto.session_caps import consume_open_entry_look, mark_f10_loop_halt
+    from abcxauto.session_caps import mark_f10_loop_halt
     from abcxauto.thin_rth_kill_look import REASON_F10
 
-    consume_open_entry_look("regular")
     mark_f10_loop_halt()
     calls = {"n": 0}
 
