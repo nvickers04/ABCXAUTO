@@ -66,7 +66,6 @@ REASON_BRIEF_LOOP = "brief_loop_halted"
 REASON_BRIEF_COST = "brief_model_cost_missing"
 REASON_DIE_TOOL = "kill_look_die_tool"
 REASON_PORT = "kill_look_live_port"
-REASON_ONE_SEND = "kill_look_one_send"
 
 LIVE_PORTS = frozenset({7496, 4001})
 
@@ -976,30 +975,3 @@ def kill_look_send_block(
         }
     return None
 
-
-def open_send_used(turn: Any = None) -> bool:
-    """True when OPEN already placed a non-blocked ticket this look."""
-    for item in getattr(turn, "sends", None) or []:
-        if not isinstance(item, dict):
-            continue
-        result = item.get("result") if isinstance(item.get("result"), dict) else {}
-        status = str(result.get("status") or "").lower()
-        strat = str(item.get("strat") or result.get("strategy") or "").lower()
-        if status in ("blocked", "rejected", "validated_block"):
-            continue
-        if strat in ("blocked", "skipped"):
-            continue
-        return True
-    return False
-
-
-def one_open_send_block(mode: str, turn: Any = None) -> dict[str, Any] | None:
-    """OPEN: one pcs-skew BAG then stop."""
-    if mode != MODE_OPEN or not open_send_used(turn):
-        return None
-    return {
-        "status": "blocked",
-        "note": "OPEN: one pcs-skew BAG then stop",
-        "reason_code": REASON_ONE_SEND,
-        "strategy": "skipped",
-    }
