@@ -1,7 +1,8 @@
 """pcs-skew Arm v0 kill-window LOOK contract (thin prompt, not SYSTEM_PROMPT).
 
-Hard clerk: ≤1 RTH entry look/scored session, STAY-tool allowlist, mill widen,
-RTH no-xhigh / AH-rare, F10 $2 hard / $1 preferred. Paper 7497. Not looking.
+Hard clerk: STAY-tool allowlist, mill widen, RTH no-xhigh / AH-rare,
+F10 $2 hard / $1 preferred. No one-look RTH entry budget. Paper 7497.
+Not looking.
 """
 
 from __future__ import annotations
@@ -48,7 +49,6 @@ F10_HARD_USD = 2.0
 F10_PREFERRED_USD = 1.0
 WINDOW_MODEL_USD = 40.0
 WINDOW_N = 20
-RTH_ENTRY_LOOKS_MAX = 1
 AH_RESEARCH_LOOKS_PER_WEEK = 2
 RESEARCH_PROMPT_TOKENS_MAX = 200_000
 # Conservative thin STAY look. Used as est_this_look in the F10 sum.
@@ -60,7 +60,6 @@ REASON_QTY0 = "NO_SEND:qty0_streak"
 REASON_MODEL_COST = "NO_SEND:model_cost_cap"
 REASON_ALLOWLIST = "kill_look_allowlist"
 REASON_NAMELESS = "kill_look_nameless"
-REASON_ENTRY_BUDGET = "kill_look_entry_budget"
 REASON_RESEARCH_WEEK = "kill_look_research_week"
 REASON_RESEARCH_PROMPT = "kill_look_research_prompt"
 REASON_BRIEF_LOOP = "brief_loop_halted"
@@ -313,12 +312,16 @@ def _is_closing(params: dict[str, Any]) -> bool:
 
 
 def _abort_send_reason(abort_fuse: str = "") -> str:
+    """Named scorecard fuses only. Unknown/"none" must not steal F10."""
     token = str(abort_fuse or "").strip()
+    if token == "F10":
+        return REASON_F10
     if token == "DD30":
         return REASON_DD
     if token == "QTY0_STREAK":
         return REASON_QTY0
-    return REASON_F10
+    # Residual non-fuse abort (port / latch). Real F10 hard-trip alone owns f10.
+    return REASON_PORT
 
 
 def normalize_kill_look_card(card: Any = None) -> str:
@@ -730,7 +733,6 @@ def kill_mode(
     *,
     positions: list[Any] | None = None,
     open_lots: list[Any] | None = None,
-    entry_looks: int | None = None,
     f10: dict[str, Any] | None = None,
     now=None,
     in_flight: bool = False,
@@ -738,11 +740,9 @@ def kill_mode(
 ) -> str:
     """OPEN / MANAGE / ABORT / research / empty (contract off).
 
-    ``in_flight`` is look #1 after consume (mill/unpaid/recover included).
-    Entry budget still refuses a *new* look; it must not refuse the SEND on
-    the look that already spent the budget.
-    Named scorecard abort fuses stop new-risk looks even in-flight. Open
-    lots stay MANAGE so exits are not blocked.
+    No one-look RTH entry budget. Named scorecard abort fuses stop new-risk
+    looks even in-flight. Open lots stay MANAGE so exits are not blocked.
+    ``in_flight`` retained for callers; unused for entry-budget gates.
     """
     if not kill_look_enabled():
         return ""
@@ -769,12 +769,6 @@ def kill_mode(
             return MODE_ABORT
     except Exception:
         logger.debug("f10 latch read failed", exc_info=True)
-    if entry_looks is None:
-        from abcxauto.session_caps import kill_entry_looks
-
-        entry_looks = kill_entry_looks(session, now=now)
-    if int(entry_looks or 0) >= RTH_ENTRY_LOOKS_MAX and not in_flight:
-        return MODE_ABORT
     if abort_fuse is None:
         try:
             from abcxauto.abort_fuse import scorecard_abort_fuse
@@ -813,13 +807,10 @@ def skip_look_reason(
     in_flight: bool = False,
     abort_fuse: str | None = None,
     snap: dict[str, Any] | None = None,
-    bypass_entry_budget: bool = False,
 ) -> str:
     """Non-empty = do not call the model. Unprotected last-stop still looks.
 
-    ``bypass_entry_budget`` is the Operator Start / mid-RTH bounce one-shot:
-    spent ``kill_entry_looks`` must not abort that first look. F10, 7496,
-    nameless send, and later pulses stay hard.
+    No entry-budget skip. Soften=FAIL: F10 hard, nameless send, and 7496 stay.
     """
     if unprotected:
         return ""
@@ -871,18 +862,16 @@ def skip_look_reason(
     if mode == MODE_OPEN:
         return ""
     if mode == MODE_ABORT:
-        # Named scorecard fuses. Live F10 / port / spent look stay entry-budget
-        # so look-#1 mill tests keep their existing skip code.
+        # Named scorecard fuses alone own fuse codes. Port ≠ F10.
         if fuse == "DD30":
             return REASON_DD
         if fuse == "QTY0_STREAK":
             return REASON_QTY0
         if fuse == "F10":
             return REASON_F10
-        # Start/bounce one-shot: spent entry only. Port 7496 stays abort.
-        if bypass_entry_budget and kill_look_port_ok():
-            return ""
-        return REASON_ENTRY_BUDGET
+        if not kill_look_port_ok():
+            return REASON_PORT
+        return ""
     if mode == MODE_RESEARCH:
         from abcxauto.session_caps import research_week_looks
 
