@@ -11,7 +11,12 @@ Paper (TWS **7497**) is the book. Live (TWS **7496**, confirm phrase, a differen
 client id) is the same constitution on the live socket. It never copies paper fills.
 
 Size, daily-loss, and the scorecard are **% of NetLiq**. Book return % must beat
-the cost of the model. Same rules at $1k, $100k, or $1M.
+the cost of the model. A freeze window via `python -m abcxauto.freeze open`
+hashes the constitution and scores the next N RTH sessions against cash zero
+plus model cost. `self_tune` is write-locked while armed. PASS requires
+vs_cash greater than 0, no hash drift, N sessions, and at least one
+unseen-name fill when unseen is required. Inception and rolling windows
+remain display facts, not the promote test. Same rules at $1k, $100k, or $1M.
 
 ## Split of labor
 

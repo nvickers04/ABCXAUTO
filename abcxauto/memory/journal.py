@@ -2339,6 +2339,80 @@ class TradeJournal:
             logger.exception("journal.listed_fills failed")
         return out
 
+    def symbols_filled_before(self, before_iso: str) -> set:
+        """Uppercased distinct fills.symbol with ts before the iso stamp."""
+        out: set = set()
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT symbol FROM fills
+                    WHERE symbol IS NOT NULL AND TRIM(symbol) != ''
+                      AND ts < ?
+                    """,
+                    (_ts_bound(before_iso),),
+                ).fetchall()
+            for row in rows:
+                try:
+                    sym = str(row["symbol"] or "").strip().upper()
+                except Exception:
+                    continue
+                if sym:
+                    out.add(sym)
+        except Exception:
+            return set()
+        return out
+
+    def symbols_filled_since(self, since_iso: str) -> set:
+        """Uppercased distinct fills.symbol with ts at or after the iso stamp."""
+        out: set = set()
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT symbol FROM fills
+                    WHERE symbol IS NOT NULL AND TRIM(symbol) != ''
+                      AND ts >= ?
+                    """,
+                    (_ts_bound(since_iso),),
+                ).fetchall()
+            for row in rows:
+                try:
+                    sym = str(row["symbol"] or "").strip().upper()
+                except Exception:
+                    continue
+                if sym:
+                    out.add(sym)
+        except Exception:
+            return set()
+        return out
+
+    def session_dates_since(self, since_iso: str) -> list:
+        """Distinct ET calendar dates of session_markers ts at or after stamp."""
+        out: set = set()
+        try:
+            self._ensure_schema()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT ts FROM session_markers
+                    WHERE ts IS NOT NULL AND ts >= ?
+                    """,
+                    (_ts_bound(since_iso),),
+                ).fetchall()
+            for row in rows:
+                try:
+                    day = _et_calendar_date(row["ts"])
+                except Exception:
+                    continue
+                if day:
+                    out.add(str(day))
+        except Exception:
+            return []
+        return sorted(out)
+
     def realized_by_order_id(self, limit: int = 2000) -> dict:
         """order_id -> summed realized P&L net of commissions.
 

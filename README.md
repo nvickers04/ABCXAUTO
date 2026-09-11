@@ -90,7 +90,7 @@ Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limit
 - **Pro** — Flet cockpit + Grok think stream
 - **Book / positions** — lots, working orders, fills
 - **Risk** — floor display + Halt / Resume / Panic. Knob fields are tighten-only (the writers clamp to the floor); gate switches may re-arm a floor, never disarm one
-- **Scorecard** — book return % of starting NetLiq vs model cost
+- **Scorecard** — book return % of starting NetLiq vs model cost. Promote is the freeze verdict (`python -m abcxauto.freeze`), not inception.
 
 Kill switch: Stop agent, Risk Halt, Panic, `Ctrl+C` on headless, or `python -m abcxauto --cleanup`. Positions stay at IBKR. Open risk is a multi-plan book reconciled from the broker (`active_trade_plans.json`).
 
@@ -162,6 +162,7 @@ abcxauto/
   universe.py           Watchlist for scan seed; not a send sandbox
   self_tune.py          Floor-clamped knobs
   scorecard.py          Book return vs model cost
+  freeze.py             Freeze-then-score window; promote is this verdict, not inception
   prediction_odds.py    Polymarket implied probs
   path_math.py          Expectancy / Kelly facts (Grok still sizes)
   world_state.py        Wake facts

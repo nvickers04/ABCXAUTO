@@ -225,6 +225,7 @@ def _pcs_kill_look_off_unless_marked(monkeypatch, request):
 @pytest.fixture(autouse=True)
 def _isolate_desk_state(tmp_path, monkeypatch):
     """Pytest must not clobber the live last_turn / wake files."""
+    monkeypatch.setenv("ABCXAUTO_FREEZE_PATH", str(tmp_path / "freeze.json"))
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "grok_wake.json"))
     monkeypatch.setenv("ABCXAUTO_SESSION_CAPS_PATH", str(tmp_path / "session_caps.json"))
     from abcxauto.session_caps import reset_session_caps

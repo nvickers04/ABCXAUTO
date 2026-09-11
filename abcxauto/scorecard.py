@@ -714,6 +714,14 @@ def compute_scorecard(
     except Exception:
         book = "paper TWS"
 
+    freeze_facts = None
+    try:
+        from abcxauto.freeze import score as freeze_score
+
+        freeze_facts = freeze_score(journal=journal, equity=current)
+    except Exception:
+        freeze_facts = None
+
     return {
         "book": book,
         "startup_cash": start_base,
@@ -743,6 +751,7 @@ def compute_scorecard(
             "startup_cash": start_base,
         },
         "session": session,
+        "freeze": freeze_facts,
     }
 
 
@@ -870,4 +879,12 @@ def format_scorecard_block(
         bits.append(f"{label}:{wr_s}/{we_s}/{mark}/spy={spy_s}")
     if bits:
         lines.append("- windows " + " ".join(bits))
+    try:
+        from abcxauto.freeze import format_freeze_line
+
+        freeze_line = format_freeze_line(sc.get("freeze") if isinstance(sc, dict) else None)
+    except Exception:
+        freeze_line = None
+    if freeze_line:
+        lines.append(freeze_line)
     return "\n".join(lines) + "\n"

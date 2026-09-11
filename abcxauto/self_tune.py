@@ -280,6 +280,30 @@ def apply_self_tune(
             "strategy": "self_tune",
         }
 
+    from abcxauto.freeze import freeze_armed
+
+    if freeze_armed():
+        rejected = {key: "freeze" for key in flat}
+        try:
+            from abcxauto.memory import get_journal
+
+            get_journal().record_self_tune(
+                applied={},
+                clamped={},
+                rejected=rejected,
+                rationale="freeze",
+            )
+        except Exception:
+            logger.debug("journal self_tune freeze record failed", exc_info=True)
+        return {
+            "status": "blocked",
+            "note": "freeze armed — constitution locked",
+            "strategy": "self_tune",
+            "applied": {},
+            "clamped": {},
+            "rejected": rejected,
+        }
+
     applied: dict[str, Any] = {}
     clamped: dict[str, Any] = {}
     rejected: dict[str, str] = {}
