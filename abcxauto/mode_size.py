@@ -14,11 +14,15 @@ underlying last × 100. That stock-equivalent notional is incomparable to
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
-# Single-digit % of NL. Not 1. Not 25. Not a working size — a ceiling
-# Grok may tighten. Do not copy this number into SYSTEM_PROMPT.
+logger = logging.getLogger(__name__)
+
+# Default only — the live width is ``explore_ceiling()`` /
+# ``mode_size_ceiling_pct``. Not a working size: a ceiling Grok may tighten.
+# Do not copy this number into SYSTEM_PROMPT.
 MODE_SIZE_CEILING_EXPLORE = 8.0
 MODE_SIZE_FLOOR = 0.25
 SIZE_PCT_NL_KEY = "size_pct_nl"
@@ -32,6 +36,22 @@ def _pos_float(value: Any) -> float | None:
     if not math.isfinite(out) or out <= 0:
         return None
     return out
+
+
+def explore_ceiling() -> float:
+    """Operator envelope for Grok's own ``size_pct_nl``. Falls back to the constant.
+
+    A $1k book cannot reach one option contract inside a single-digit band,
+    so the width is an operator knob, not a baked number. Grok still picks
+    the size inside it and may still tighten via ``self_tune``.
+    """
+    try:
+        from abcxauto.config import get_config
+
+        value = _pos_float(getattr(get_config(), "mode_size_ceiling_pct", None))
+    except Exception:
+        return MODE_SIZE_CEILING_EXPLORE
+    return MODE_SIZE_CEILING_EXPLORE if value is None else value
 
 
 def playbook_mode() -> str:
@@ -100,7 +120,7 @@ def mode_size_ceiling(
     bit = str(mode or playbook_mode() or "explore").strip().lower()
     if bit not in ("explore", "exploit"):
         bit = "explore"
-    explore_hi = MODE_SIZE_CEILING_EXPLORE
+    explore_hi = explore_ceiling()
     if card_is_learning(card, type=type):
         return explore_hi
     if bit != "exploit":
@@ -154,7 +174,7 @@ def working_size_ceiling(
 ) -> float:
     """Ceiling that actually sizes a send. Not 25% unless Grok widened it."""
     hi = mode_size_ceiling(card=card, type=type, mode=mode)
-    default = MODE_SIZE_CEILING_EXPLORE
+    default = explore_ceiling()
     tuned = tuned_size_pct_nl()
     cap = default if tuned is None else tuned
     return max(MODE_SIZE_FLOOR, min(hi, cap))
@@ -247,6 +267,8 @@ def mode_size_ticket_error(
     try:
         from abcxauto.send import option_size_mark
     except Exception:
+        logger.debug("option_size_mark import failed; using price fallback", exc_info=True)
+
         def option_size_mark(_s, _p, fallback=None):
             return _pos_float(fallback), 1.0
 

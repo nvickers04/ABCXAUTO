@@ -10,8 +10,11 @@ PCS Arm v0 N=20 kill scorecard logging lives in ``pcs_kill_scorecard``
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Re-export kill-scorecard hooks for QA callers that already import scorecard.
 from abcxauto.pcs_kill_scorecard import (  # noqa: F401
@@ -152,6 +155,10 @@ def usage_from_response(
         "cached_tokens",
         "cached_prompt_tokens",
         "prompt_tokens_details.cached_tokens",
+        # gRPC SamplingUsage spells it this way. Missing it reported every
+        # cache hit as a miss and billed the discount at the full rate.
+        "cached_prompt_text_tokens",
+        "input_tokens_details.cached_tokens",
     )
     out = _usage_int(blob, "completion_tokens", "output_tokens")
     reason = _usage_int(
@@ -168,9 +175,17 @@ def usage_from_response(
             "output_tokens": out + reason,
             "reasoning_tokens": reason,
         }
-    billed_out = out if out else reason
+    # xAI bills reasoning at the output rate and reports it *beside*
+    # completion, not inside it (probe: "OK" -> output 1, reasoning 226).
+    # Taking `out` alone drops the whole think at reasoning_effort=high and
+    # tells the scorecard the model was free.
+    billed_out = out + reason
+    # prompt_tokens already contains the cached prefix, and estimate_cost_usd
+    # prices input and cached separately. Report only the uncached remainder
+    # or the discounted tokens get billed twice.
+    uncached = max(0, inn - cached) if cached else inn
     return {
-        "input_tokens": inn,
+        "input_tokens": uncached,
         "cached_tokens": cached,
         "output_tokens": billed_out,
         "reasoning_tokens": reason,
@@ -231,6 +246,7 @@ def _et_date(value: Any) -> str | None:
 
         return dt.astimezone(ZoneInfo("America/New_York")).date().isoformat()
     except Exception:
+        # ZoneInfo/tzdata missing — UTC date is a display fallback, not a gate.
         return dt.astimezone(timezone.utc).date().isoformat()
 
 
@@ -288,12 +304,14 @@ def spy_prints(spy: Any = None, *, load_last_turn: bool = True) -> dict[str, flo
 
         raw = LAST_TURN_PATH.read_text(encoding="utf-8")
     except Exception:
+        logger.debug("scorecard last_turn spy prints unreadable", exc_info=True)
         return out
     try:
         import json
 
         data = json.loads(raw) if raw else {}
     except Exception:
+        logger.debug("scorecard last_turn spy prints JSON failed", exc_info=True)
         return out
     if not isinstance(data, dict):
         return out
@@ -458,6 +476,7 @@ def compute_scorecard(
 
             journal = get_journal()
         except Exception:
+            logger.debug("scorecard journal unavailable", exc_info=True)
             journal = None
 
     startup = None
@@ -473,6 +492,7 @@ def compute_scorecard(
             if hasattr(journal, "startup_cash"):
                 startup = journal.startup_cash()
         except Exception:
+            logger.debug("scorecard startup_cash failed", exc_info=True)
             startup = None
         try:
             if current is None and hasattr(journal, "account_performance"):
@@ -481,12 +501,12 @@ def compute_scorecard(
                 if nl is not None:
                     current = float(nl)
         except Exception:
-            pass
+            logger.debug("scorecard account_performance failed", exc_info=True)
         try:
             if hasattr(journal, "model_usage_totals"):
                 usage = dict(journal.model_usage_totals() or usage)
         except Exception:
-            pass
+            logger.debug("scorecard model_usage_totals failed", exc_info=True)
 
     book_pnl = None
     book_return_pct = None
@@ -519,6 +539,7 @@ def compute_scorecard(
                     if hasattr(journal, "first_snapshot"):
                         _nl, start_ts = journal.first_snapshot()
                 except Exception:
+                    logger.debug("scorecard first_snapshot failed", exc_info=True)
                     start_ts = None
                 windows[label] = _window_row(
                     label=label,
@@ -539,18 +560,20 @@ def compute_scorecard(
                 if hasattr(journal, "nav_at_or_before"):
                     start_nl, start_ts = journal.nav_at_or_before(cutoff_iso)
             except Exception:
+                logger.debug("scorecard nav_at_or_before failed label=%s", label, exc_info=True)
                 start_nl, start_ts = None, None
             win_usage = dict(usage)
             try:
                 if hasattr(journal, "model_usage_since"):
                     win_usage = dict(journal.model_usage_since(cutoff_iso) or win_usage)
             except Exception:
-                pass
+                logger.debug("scorecard model_usage_since failed label=%s", label, exc_info=True)
             snaps = 0
             try:
                 if hasattr(journal, "snapshot_count_since"):
                     snaps = int(journal.snapshot_count_since(cutoff_iso) or 0)
             except Exception:
+                logger.debug("scorecard snapshot_count_since failed label=%s", label, exc_info=True)
                 snaps = 0
             windows[label] = _window_row(
                 label=label,
@@ -572,6 +595,7 @@ def compute_scorecard(
 
             model_name = str(getattr(get_config(), "model", "") or "")
         except Exception:
+            logger.debug("scorecard model name unavailable", exc_info=True)
             model_name = ""
         bell_utc, session_date = rth_session_start(clock)
         start_ts = _iso(bell_utc)
@@ -590,12 +614,14 @@ def compute_scorecard(
                         start_nl = cand
                         start_obs = str(marker.get("ts") or "") or None
         except Exception:
+            logger.debug("scorecard session_start_marker failed", exc_info=True)
             start_nl, start_obs = None, None
         if start_nl is None:
             try:
                 if hasattr(journal, "nav_at_or_after"):
                     start_nl, start_obs = journal.nav_at_or_after(start_ts)
             except Exception:
+                logger.debug("scorecard nav_at_or_after failed", exc_info=True)
                 start_nl, start_obs = None, None
         if start_nl is None:
             try:
@@ -604,7 +630,7 @@ def compute_scorecard(
                     if pre_nl is not None and _et_date(pre_ts) == session_date:
                         start_nl, start_obs = pre_nl, pre_ts
             except Exception:
-                pass
+                logger.debug("scorecard session nav_at_or_before failed", exc_info=True)
         sess_usage = {
             "calls": 0,
             "cost_usd": 0.0,
@@ -615,18 +641,19 @@ def compute_scorecard(
             if hasattr(journal, "model_usage_since"):
                 sess_usage = dict(journal.model_usage_since(start_ts) or sess_usage)
         except Exception:
-            pass
+            logger.debug("scorecard session model_usage_since failed", exc_info=True)
         fills = {"n": 0, "wins": 0, "sum": 0.0}
         try:
             if hasattr(journal, "closed_fill_stats_since"):
                 fills = dict(journal.closed_fill_stats_since(start_ts) or fills)
         except Exception:
-            pass
+            logger.debug("scorecard closed_fill_stats_since failed", exc_info=True)
         commissions = None
         try:
             if hasattr(journal, "commissions_since"):
                 commissions = float(journal.commissions_since(start_ts) or 0.0)
         except Exception:
+            logger.debug("scorecard commissions_since failed", exc_info=True)
             commissions = None
         path_pts: list[float] = []
         try:
@@ -637,6 +664,7 @@ def compute_scorecard(
                     except (TypeError, ValueError):
                         continue
         except Exception:
+            logger.debug("scorecard nav_path_since failed", exc_info=True)
             path_pts = []
         if start_nl is not None:
             try:
@@ -712,11 +740,40 @@ def compute_scorecard(
 
         book = "paper TWS" if bool(getattr(get_config(), "is_paper", True)) else "live TWS"
     except Exception:
+        logger.debug("scorecard trading-mode label unavailable", exc_info=True)
         book = "paper TWS"
+
+    # Same report card, one more axis. Aggregate book-vs-model answers
+    # "is this worth running"; it never answered "which shape works".
+    by_structure: dict[str, Any] = {}
+    if journal is not None:
+        try:
+            from abcxauto.path_math import path_by_structure
+
+            fn = getattr(journal, "closing_fills", None)
+            rows = list(fn() or []) if callable(fn) else []
+            risk_pct = None
+            try:
+                from abcxauto.config import get_config
+
+                risk_pct = (
+                    float(getattr(get_config(), "max_risk_per_trade_pct", 0) or 0)
+                    or None
+                )
+            except Exception:
+                logger.debug("scorecard risk_pct unavailable", exc_info=True)
+                risk_pct = None
+            by_structure = path_by_structure(
+                rows, equity=current, risk_pct=risk_pct
+            )
+        except Exception:
+            logger.debug("scorecard path_by_structure failed", exc_info=True)
+            by_structure = {}
 
     return {
         "book": book,
         "startup_cash": start_base,
+        "by_structure": by_structure,
         "net_liquidation": current,
         "book_pnl": book_pnl,
         "book_return_pct": book_return_pct,
@@ -780,6 +837,7 @@ def format_scorecard_block(
         cfg = get_config()
         paper = bool(getattr(cfg, "is_paper", True))
     except Exception:
+        logger.debug("scorecard format paper/live label unavailable", exc_info=True)
         paper = True
     book = "paper TWS" if paper else "live TWS"
     if paper:
@@ -870,4 +928,27 @@ def format_scorecard_block(
         bits.append(f"{label}:{wr_s}/{we_s}/{mark}/spy={spy_s}")
     if bits:
         lines.append("- windows " + " ".join(bits))
+    # Which ticket shape actually pays. Aggregate book-vs-model cannot say.
+    # Thin pools say thin; they do not get a number that implies a sample.
+    by = sc.get("by_structure")
+    if isinstance(by, dict) and by:
+        for label, f in by.items():
+            if not isinstance(f, dict):
+                continue
+            n = int(f.get("n") or 0)
+            if f.get("note"):
+                lines.append(f"- {label} n={n} {f['note']}")
+                continue
+            p = f.get("p")
+            win_s = f"{p * 100:.0f}%" if isinstance(p, (int, float)) else "n/a"
+            e = f.get("E")
+            e_s = f"{e:+.2f}$" if isinstance(e, (int, float)) else "n/a"
+            odds = f.get("b")
+            odds_s = f"{odds:.2f}" if isinstance(odds, (int, float)) else "n/a"
+            kel = f.get("kelly")
+            kel_s = f"{kel:+.3f}" if isinstance(kel, (int, float)) else "n/a"
+            lines.append(
+                f"- {label} n={n} win={win_s} payoff={odds_s} "
+                f"E={e_s} kelly={kel_s}"
+            )
     return "\n".join(lines) + "\n"

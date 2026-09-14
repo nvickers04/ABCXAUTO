@@ -27,6 +27,47 @@ from abcxauto.world_state import (
 )
 
 
+def test_day_facts_carries_structure_edge_track_record():
+    """Grok must wake knowing which shape pays, not just the aggregate book.
+
+    ``structures`` is the open book; ``structure_edge`` is the track record.
+    """
+    class W:
+        net_liquidation = 10_000.0
+        positions = []
+        open_orders = []
+        fills = []
+        daily_pnl = 0.0
+
+    sc = {
+        "by_structure": {
+            "spread_2leg": {"n": 8, "p": 0.125, "b": 0.24, "E": -118.9,
+                            "kelly": -3.54},
+            "spread_3leg": {"n": 1, "note": "thin closed-fill sample"},
+        }
+    }
+    d = day_facts(W(), sc)
+    edge = d["structure_edge"]
+    assert edge["spread_2leg"]["n"] == 8
+    assert edge["spread_2leg"]["payoff"] == 0.24
+    assert edge["spread_2leg"]["win_pct"] == 12.5
+    # thin pools carry a flag, never numbers that imply a sample
+    assert edge["spread_3leg"] == {"n": 1, "thin": True}
+    # the open-book key must survive alongside it
+    assert "structures" in d
+
+
+def test_day_facts_structure_edge_empty_without_a_scorecard():
+    class W:
+        net_liquidation = 10_000.0
+        positions = []
+        open_orders = []
+        fills = []
+        daily_pnl = 0.0
+
+    assert day_facts(W(), None)["structure_edge"] == {}
+
+
 def test_lot_ident_matches_lot_labels_without_mtm():
     pos = {
         "symbol": "IWM",

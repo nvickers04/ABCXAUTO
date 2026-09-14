@@ -12,6 +12,48 @@ from abcxauto.scorecard import (
 )
 
 
+def test_by_structure_rides_the_existing_scorecard_block():
+    """One report card gains an axis. Not a sixth surface to read."""
+    journal = get_journal()
+    journal.record_fills([
+        # a 2-leg spread that netted a loss
+        {"exec_id": "a1", "order_id": 900, "symbol": "QQQ", "sec_type": "OPT",
+         "side": "BOT", "quantity": 1, "price": 1.0, "realized_pnl": 90.0},
+        {"exec_id": "a2", "order_id": 900, "symbol": "QQQ", "sec_type": "OPT",
+         "side": "SLD", "quantity": 1, "price": 2.0, "realized_pnl": -150.0},
+        # a single option winner
+        {"exec_id": "b1", "order_id": 901, "symbol": "SPY", "sec_type": "OPT",
+         "side": "SLD", "quantity": 1, "price": 3.0, "realized_pnl": 25.0},
+    ])
+    sc = compute_scorecard(equity=10_000.0, journal=journal)
+    by = sc.get("by_structure")
+    assert isinstance(by, dict)
+    # the spread's two legs net to ONE sample, not a win plus a loss
+    assert by["spread_2leg"]["n"] == 1
+    assert by["single_option"]["n"] == 1
+
+
+def test_by_structure_is_empty_without_a_journal():
+    sc = compute_scorecard(equity=10_000.0, journal=None)
+    assert sc["by_structure"] == {}
+
+
+def test_scorecard_block_renders_by_structure():
+    """Computing it is not enough - the block is what Grok actually reads."""
+    journal = get_journal()
+    journal.record_fills([
+        {"exec_id": "c1", "order_id": 910, "symbol": "QQQ", "sec_type": "OPT",
+         "side": "SLD", "quantity": 1, "price": 2.0, "realized_pnl": -60.0},
+        {"exec_id": "c2", "order_id": 911, "symbol": "SPY", "sec_type": "STK",
+         "side": "SLD", "quantity": 10, "price": 5.0, "realized_pnl": 25.0},
+    ])
+    block = format_scorecard_block(equity=10_000.0, journal=journal)
+    assert "single_option" in block
+    assert "stock" in block
+    # thin pools must say so rather than imply a sample
+    assert "thin closed-fill sample" in block
+
+
 def test_estimate_tokens_and_cost():
     n = estimate_tokens("abcd" * 25)
     assert n >= 1
@@ -21,6 +63,24 @@ def test_estimate_tokens_and_cost():
     assert abs(short - 0.008) < 1e-9
     long = estimate_cost_usd(1_000_000, 1_000_000)
     assert abs(long - 16.0) < 1e-9
+
+
+def test_usage_reads_grpc_cached_prompt_text_tokens():
+    """gRPC SamplingUsage spells cached tokens differently; missing it billed
+    every cache hit at the full input rate."""
+    class Usage:
+        prompt_tokens = 4234
+        completion_tokens = 5
+        reasoning_tokens = 38
+        cached_prompt_text_tokens = 4096
+
+    class Resp:
+        usage = Usage()
+
+    used = usage_from_response(Resp())
+    assert used["cached_tokens"] == 4096
+    assert used["input_tokens"] == 138
+    assert used["output_tokens"] == 43
 
 
 def test_usage_from_response_reads_sdk_and_falls_back():
@@ -34,9 +94,14 @@ def test_usage_from_response_reads_sdk_and_falls_back():
         usage = Usage()
 
     used = usage_from_response(Resp())
-    assert used["input_tokens"] == 1200
+    # prompt_tokens (1200) already contains the cached prefix (100), and cost
+    # prices the two separately. Reporting 1200 billed the discount twice.
+    assert used["input_tokens"] == 1100
     assert used["cached_tokens"] == 100
-    assert used["output_tokens"] == 80
+    # Reasoning is billed at the output rate and reported beside completion,
+    # so the billed figure is both. Dropping it makes a high-effort think
+    # look free to the scorecard.
+    assert used["output_tokens"] == 480
     assert used["reasoning_tokens"] == 400
     fallback = usage_from_response(None, think_text="abcd" * 20, say_text="efgh" * 10)
     assert fallback["input_tokens"] == 0
