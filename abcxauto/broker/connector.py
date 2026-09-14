@@ -1200,7 +1200,13 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                         from abcxauto.risk_gates import get_risk_gate
 
                         gate = get_risk_gate()
-                        if gate.is_halted:
+                        cleared = gate.resume_disconnect()
+                        if cleared:
+                            logger.info(
+                                f"IBKR reconnected successfully (reason={reason}, "
+                                f"client_id={self.client_id}); disconnect halt cleared."
+                            )
+                        elif gate.is_halted:
                             logger.warning(
                                 f"IBKR reconnected successfully (reason={reason}, "
                                 f"client_id={self.client_id}), but risk-gate halt "
@@ -1215,8 +1221,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                     except Exception:
                         logger.info(
                             f"IBKR reconnected successfully (reason={reason}, "
-                            f"client_id={self.client_id}). "
-                            "Any risk-gate halt remains until human/monitor resume."
+                            f"client_id={self.client_id})."
                         )
                     await self._after_connect_restore()
                     return
@@ -1235,15 +1240,20 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
     async def _after_connect_restore(self) -> None:
         """Resubscribe market data after TWS/Gateway reconnect.
 
-        Does not clear a risk-gate halt — human/monitor must resume.
+        A disconnect-kind halt clears here. Daily-loss / operator halts stay.
         """
         self._disconnect_cause = DisconnectCause.UNKNOWN.value
         self._reconnect_requested = False
         self._heartbeat_failures = 0
         self._reconnect_attempt = 0
         self._disconnect_since = None
-        # Leave _disconnect_halt_fired as-is so we do not re-halt on a later blip
-        # in the same outage window; a fresh disconnect resets it in _on_disconnect.
+        self._disconnect_halt_fired = False
+        try:
+            from abcxauto.risk_gates import get_risk_gate
+
+            get_risk_gate().resume_disconnect()
+        except Exception:
+            logger.debug("disconnect halt clear on restore failed", exc_info=True)
         self._last_heartbeat_ok = time.time()
 
         # Streaming subscribe API removed; nothing to restore.

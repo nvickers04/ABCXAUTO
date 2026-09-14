@@ -456,6 +456,31 @@ def test_mode_size_does_not_veto_defined_risk_option_when_max_risk_off():
     assert params["quantity"] == _PROD_QTY
 
 
+def test_mode_size_envelope_binds_when_max_risk_is_off():
+    """Explore ceiling still vetoes a lottery ticket when the % floors are off."""
+    from abcxauto.config import update_risk_config
+
+    update_risk_config(max_risk_per_trade_pct=0, persist=True, _skip_clamp=True)
+    apply_self_tune({"size_pct_nl": _SHADOW}, persist=True)
+    assert max_risk_per_trade_off() is True
+    note = mode_size_ticket_error(
+        {"card": "learn", "size_pct_nl": 12.0, "quantity": 240},
+        net_liq=100_000.0,
+        price=50.0,
+        strategy="market_bracket",
+    )
+    assert note
+    assert "mode_size" in note
+    # Shadow 0.5 is not the clerk cap while the knob is 0 — a 3.7% vertical stands.
+    named = mode_size_ticket_error(
+        _named_vertical(),
+        net_liq=_PROD_NL,
+        price=_PROD_UNDERLYING,
+        strategy="vertical_spread",
+    )
+    assert named == ""
+
+
 def test_mode_size_still_rejects_lottery_stk_when_max_risk_is_on():
     from abcxauto.config import update_risk_config
 

@@ -630,6 +630,34 @@ def format_working_exits(
     return " / ".join(bits)
 
 
+def format_working_entries(
+    orders: list[dict] | None,
+    positions: list[dict] | None = None,
+    *,
+    limit: int = 6,
+) -> str:
+    """Compact unfilled entries (BAG included) for the wake line."""
+    bits: list[str] = []
+    for row in compact_working_orders(orders, positions=positions, limit=12):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("role") or "") != "entry":
+            continue
+        oid = row.get("order_id")
+        sym = row.get("symbol") or "?"
+        typ = str(row.get("type") or "?").upper()
+        sec = str(row.get("sec") or "")
+        lmt = row.get("lmt")
+        bit = f"{sym} {sec} {typ}".strip()
+        if lmt not in (None, ""):
+            bit += f" {lmt}"
+        bit += f" oid {oid}"
+        bits.append(bit)
+        if len(bits) >= limit:
+            break
+    return " / ".join(bits)
+
+
 def format_lot_lasts(world: Any, *, limit: int = 6) -> str:
     qmap = getattr(world, "ibkr_live_quotes", None) or {}
     if not isinstance(qmap, dict):
@@ -1313,10 +1341,11 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     except Exception:
         halt = {}
     lot_lasts = format_lot_lasts(world)
-    working_exits = format_working_exits(
-        getattr(world, "open_orders", None),
-        getattr(world, "positions", None),
-    )
+    open_orders = getattr(world, "open_orders", None)
+    positions = getattr(world, "positions", None)
+    working_exits = format_working_exits(open_orders, positions)
+    working_entries = format_working_entries(open_orders, positions)
+    working_orders = compact_working_orders(open_orders, positions=positions)
     sq = getattr(world, "stop_qty_fact", None)
     if isinstance(sq, dict) and sq and working_exits:
         match = sq.get("match")
@@ -1424,6 +1453,8 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "playbook": {},
         "lot_lasts": lot_lasts,
         "working_exits": working_exits,
+        "working_entries": working_entries,
+        "working_orders": working_orders,
         "halt_trips_at_usd": halt_at,
         "halt_trips_at_pct_of_nl": pct_of_nl(halt_at, nl),
         "ibkr_day_vs_halt": day_vs,
@@ -2087,6 +2118,8 @@ def format_wake(
             parts.append(f"{day.get('lot_lasts')}.")
         if day.get("working_exits"):
             parts.append(f"exits={day.get('working_exits')}.")
+        if day.get("working_entries"):
+            parts.append(f"working={day.get('working_entries')}.")
         src = str(day.get("candle_source") or "").strip()
         if src and src not in ("none",):
             parts.append(f"candles={src}.")

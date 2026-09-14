@@ -2,10 +2,11 @@
 
 Grok still chooses ``size_pct_nl``. This module is the floor/ceiling that
 choice is clamped to — on send (``apply_size_pct_nl``) and via ``self_tune``.
-It runs even when paper risk gates are off, except when
-``max_risk_per_trade_pct`` is 0 (off): then Grok sizes and this module
-does not veto. 25% is the live walk-away ceiling for the risk knobs,
-not the working size.
+It runs even when paper risk gates are off and even when
+``max_risk_per_trade_pct`` is 0 (off). Off means the % risk floors
+do not bind; the explore envelope still does. The self_tune
+``size_pct_nl`` shadow is not a second clerk cap while that knob is 0.
+25% is the live walk-away ceiling for the risk knobs, not the working size.
 
 Option implied % of NL is premium × 100 (the contract multiplier), never
 underlying last × 100. That stock-equivalent notional is incomparable to
@@ -166,6 +167,22 @@ def max_risk_per_trade_off(cfg: Any = None) -> bool:
     return math.isfinite(v) and v <= 0
 
 
+def ticket_size_ceiling(
+    *,
+    card: Any = None,
+    type: str = "",
+    mode: str | None = None,
+) -> float:
+    """Send envelope that always binds.
+
+    ``max_risk_per_trade_pct`` 0 turns off the % floors, not this band.
+    The self_tune shadow only tightens while max-risk is on.
+    """
+    if max_risk_per_trade_off():
+        return mode_size_ceiling(card=card, type=type, mode=mode)
+    return working_size_ceiling(card=card, type=type, mode=mode)
+
+
 def working_size_ceiling(
     *,
     card: Any = None,
@@ -252,15 +269,13 @@ def mode_size_ticket_error(
 ) -> str:
     """Reject if the ticket is still over the mode ceiling after clamp.
 
-    One writer. When max_risk is off this returns empty — Grok's qty stands.
+    One writer. The explore envelope binds even when max_risk is 0.
     Option implied uses premium × 100, not the underlying last agent_loop
     quoted for geometry.
     """
-    if max_risk_per_trade_off():
-        return ""
     p = params if isinstance(params, dict) else {}
     card = p.get("card")
-    ceiling = working_size_ceiling(card=card, type=strategy)
+    ceiling = ticket_size_ceiling(card=card, type=strategy)
     pct = _pos_float(p.get(SIZE_PCT_NL_KEY))
     if pct is not None and pct > ceiling + 1e-6:
         return f"mode_size {pct} > {ceiling}"

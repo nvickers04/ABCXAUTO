@@ -149,9 +149,9 @@ _STREAM_ABORT_MARKERS = (
 # Not a sit clock, not _cold_next, not a new messages list.
 # A poke / desk-fact inject on a kept chat is the same class — #153
 # keyed recover on this-round tool_trace, so a post-poke empty sat.
-EMPTY_GROK_TRIES = 2
+EMPTY_GROK_TRIES = 1
 EMPTY_GROK_DEAD_S = 2.0
-EMPTY_GROK_RECOVER_TRIES = 2
+EMPTY_GROK_RECOVER_TRIES = 1
 # Wall-clock for a GROK tip with no [say]. Not stream stop==empty.
 # Matches STREAM_CHUNK_S * STREAM_IDLE_LIMIT so a silent banner aborts
 # even when think tokens keep resetting the per-chunk idle counter.
@@ -320,7 +320,9 @@ async def _write_last_turn_after_send(
 
         world.flat = book_is_flat(positions, orders)
     except Exception:
-        world.flat = not bool(positions)
+        world.flat = not bool(positions) and not any(
+            isinstance(o, dict) for o in orders
+        )
     from abcxauto.think_stream import write_last_turn_after_send
 
     write_last_turn_after_send(

@@ -572,6 +572,24 @@ class RiskGate:
             logger.warning("RISK GATE RESUMED")
         _journal_halt("manual resume", "resume")
 
+    def resume_disconnect(self) -> bool:
+        """Clear a disconnect-latched halt after the socket is back.
+
+        Daily-loss / operator / other kinds stay latched. Returns True
+        only when a disconnect halt was actually cleared.
+        """
+        with self._lock:
+            if not self._halted or self._halt_kind != "disconnect":
+                return False
+            reason = self._halt_reason
+            self._halted = False
+            self._halt_reason = ""
+            self._halt_kind = ""
+            self._halt_date = None
+            logger.warning("RISK GATE RESUMED (disconnect, socket back): %s", reason)
+        _journal_halt("reconnect resume", "resume")
+        return True
+
     @property
     def is_halted(self) -> bool:
         with self._lock:

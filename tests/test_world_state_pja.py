@@ -558,6 +558,36 @@ def test_format_working_exits_and_wake_lasts():
     assert "haltAt=$-704.0" in text
 
 
+def test_format_wake_paints_working_bag_entry():
+    from abcxauto.world_state import format_working_entries
+
+    orders = [
+        {
+            "order_id": 20121,
+            "symbol": "SPY",
+            "secType": "BAG",
+            "orderType": "LMT",
+            "action": "SELL",
+            "lmtPrice": 0.98,
+            "totalQuantity": 1,
+            "comboLegs": [{}, {}],
+        }
+    ]
+    entries = format_working_entries(orders, [])
+    assert "SPY" in entries
+    assert "20121" in entries
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={"working_entries": entries, "names": 0, "lots": 0},
+    )
+    assert "working=" in text
+    assert "20121" in text
+
+
 def test_format_wake_omits_candles_none():
     """candles=none invited a re-fetch every look after a fresh snap."""
     text = format_wake(

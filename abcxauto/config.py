@@ -948,6 +948,10 @@ def set_trading_mode(mode: str, *, live_confirm: str = "") -> Config:
         confirm = LIVE_CONFIRM_PHRASE
 
     validate_trading_mode_port(normalized, port, confirm)
+    if normalized == "live":
+        from abcxauto.broker.connection import assert_live_playbook
+
+        assert_live_playbook()
     _runtime_overrides.update(
         {
             "trading_mode": normalized,

@@ -191,9 +191,45 @@ async def test_connect_refuses_live_without_confirm(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_connect_live_with_confirm_passes_guard(monkeypatch):
-    """Live + confirm + correct port reaches IB.connectAsync (mocked)."""
+async def test_connect_live_without_playbook_refuses(monkeypatch, tmp_path):
+    """Phrase + port in config is not enough — need a promoted playbook on disk."""
     from abcxauto.broker.connector import IBKRConnector
+
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "no_playbook.json"))
+    base = get_config()
+    cfg = Config(
+        **{
+            **base.__dict__,
+            "trading_mode": "live",
+            "ibkr_port": 7496,
+            "live_confirm": LIVE_CONFIRM_PHRASE,
+        }
+    )
+    monkeypatch.setattr("abcxauto.broker.connection.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.broker.connector.get_config", lambda: cfg)
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+    connect_calls = []
+
+    async def _fake_connect_async(*a, **k):
+        connect_calls.append(1)
+        raise AssertionError("must not connect")
+
+    conn.ib.connectAsync = _fake_connect_async
+    with pytest.raises(TradingModePortError, match="promoted playbook"):
+        await conn.connect(max_retries=1)
+    assert connect_calls == []
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_connect_live_with_confirm_passes_guard(monkeypatch, tmp_path):
+    """Live + confirm + port + promoted playbook reaches IB.connectAsync (mocked)."""
+    from abcxauto.broker.connector import IBKRConnector
+
+    promo = tmp_path / "playbook_live.json"
+    promo.write_text('{"promoted": true}', encoding="utf-8")
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(promo))
 
     base = get_config()
     cfg = Config(
@@ -388,6 +424,35 @@ async def test_disconnect_halts_after_threshold(monkeypatch):
         except (asyncio.CancelledError, Exception):
             pass
 
+    IBKRConnector._instance = None
+    reset_risk_gate()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_halt_clears_on_reconnect_daily_loss_stays(monkeypatch):
+    from abcxauto.broker.connector import IBKRConnector
+
+    reset_risk_gate()
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+    conn._connected = False
+    conn._loop = asyncio.get_running_loop()
+
+    async def _ok(max_retries=None):
+        conn._connected = True
+        return True
+
+    monkeypatch.setattr(conn, "connect", _ok)
+    monkeypatch.setattr("abcxauto.broker.connector._safe_sleep", AsyncMock())
+    get_risk_gate().halt("broker disconnected >1s", kind="disconnect")
+    await conn._reconnect_after_disconnect("tws_restart")
+    assert get_risk_gate().is_halted is False
+
+    conn._connected = False
+    get_risk_gate().halt("daily loss", kind="daily_loss")
+    await conn._reconnect_after_disconnect("tws_restart")
+    assert get_risk_gate().is_halted is True
+    assert get_risk_gate().halt_kind == "daily_loss"
     IBKRConnector._instance = None
     reset_risk_gate()
 

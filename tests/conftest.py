@@ -253,6 +253,7 @@ def _isolate_desk_state(tmp_path, monkeypatch):
     reset_session_caps()
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
     monkeypatch.setenv("ABCXAUTO_STANCE_PATH", str(tmp_path / "stance.json"))
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "playbook_live.json"))
     monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
     monkeypatch.setenv(
         "ABCXAUTO_RESEARCH_BUDGET_PATH", str(tmp_path / "research_budget.json")
