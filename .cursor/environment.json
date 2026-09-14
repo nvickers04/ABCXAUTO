@@ -1,0 +1,4 @@
+{
+  "name": "ABCXAUTO",
+  "install": "bash .cursor/install.sh"
+}
