@@ -483,31 +483,35 @@ class IBKRQueriesMixin:
                             realized_pnl = None
 
                 sec = getattr(contract, "secType", None) or "STK"
+                raw_con = getattr(contract, "conId", None)
+                try:
+                    con_id = int(raw_con) if raw_con not in (None, "", 0, "0") else None
+                except (TypeError, ValueError):
+                    con_id = None
+                local = getattr(contract, "localSymbol", None) or None
+                expiry = getattr(contract, "lastTradeDateOrContractMonth", None) or None
+                right = getattr(contract, "right", None) or None
+                strike = getattr(contract, "strike", None)
                 row = {
                     "ts": ts,
                     "exec_id": getattr(execution, "execId", None),
                     "order_id": getattr(execution, "orderId", None),
                     "symbol": getattr(contract, "symbol", None),
                     "sec_type": sec,
-                    "conId": getattr(contract, "conId", None),
-                    "con_id": getattr(contract, "conId", None),
+                    "conId": con_id,
+                    "con_id": con_id,
+                    "local_symbol": local,
+                    "localSymbol": local,
+                    "strike": strike,
+                    "right": right,
+                    "expiry": expiry,
+                    "expiration": expiry,
                     "side": getattr(execution, "side", None),
                     "quantity": getattr(execution, "shares", None),
                     "price": getattr(execution, "price", None),
                     "commission": commission,
                     "realized_pnl": realized_pnl,
                 }
-                # BAG legs land as OPT fills — keep strike/right/exp for desk attach.
-                if str(sec).upper() in ("OPT", "FOP"):
-                    row["strike"] = getattr(contract, "strike", None)
-                    row["expiration"] = getattr(
-                        contract, "lastTradeDateOrContractMonth", None
-                    )
-                    row["right"] = getattr(contract, "right", None)
-                    local = getattr(contract, "localSymbol", None)
-                    if local:
-                        row["local_symbol"] = local
-                        row["localSymbol"] = local
                 out.append(row)
             try:
                 from abcxauto.send_marks import attach_fill_quotes
