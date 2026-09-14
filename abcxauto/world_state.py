@@ -1329,6 +1329,12 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     open_upnl = open_upnl_of(getattr(world, "positions", None))
     edge_usd = sc.get("edge_usd")
     model_cost = sc.get("model_cost_usd")
+    try:
+        from abcxauto.path_math import structure_edge_summary
+
+        structure_edge = structure_edge_summary(sc.get("by_structure"))
+    except Exception:
+        structure_edge = {}
     # Current NL is the denominator for clerk pct_of_nl siblings (keep $ fields).
     daily_pct = pct_of_nl(daily, nl)
     # Prefer book.daily_pnl_pct when world already computed it.
@@ -1361,7 +1367,13 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     sess_block = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
     vol_rows = _day_vol(world)
     alarms = _wake_lot_alarms(world)
-    return {
+    try:
+        from abcxauto.stance import stance_fact
+
+        stance = stance_fact()
+    except Exception:
+        stance = {}
+    out = {
         "nl": nl,
         "ibkr_daily_pnl": daily,
         "daily_pnl": daily,
@@ -1384,6 +1396,9 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "book_return_pct": sc.get("book_return_pct"),
         "model_cost_usd": model_cost,
         "model_cost_pct_of_nl": pct_of_nl(model_cost, nl),
+        # Realized edge per ticket shape. `structures` below is the open book;
+        # this is the track record, the thing aggregate book-vs-model hides.
+        "structure_edge": structure_edge,
         "names": conc["names"],
         "lots": conc["lots"],
         "structures": conc["structures"],
@@ -1432,6 +1447,10 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "countdown_human": sess_block.get("countdown_human"),
         "tradable_now": pulse.get("tradable_now"),
     }
+    if stance:
+        # Grok's own durable conclusion with its age. Only present when set.
+        out["stance"] = stance
+    return out
 
 
 def _session_cap_day(world: Any) -> dict[str, Any]:
@@ -2047,6 +2066,14 @@ def format_wake(
             parts.append(f"{port_bits}.")
         if lot_s:
             parts.append(f"open_lots={lot_s}.")
+        try:
+            from abcxauto.stance import format_stance_bit
+
+            stance_bit = format_stance_bit(day.get("stance"))
+        except Exception:
+            stance_bit = ""
+        if stance_bit:
+            parts.append(stance_bit if stance_bit.endswith(".") else f"{stance_bit}.")
         if (
             str(session or "").lower() == "regular"
             and day.get("countdown_to") == "close"

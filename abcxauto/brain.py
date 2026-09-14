@@ -87,6 +87,9 @@ class BrainTurn:
     # Read results already fetched this think, keyed by tool + args. A repeat
     # ask is answered from here so the think moves forward instead of spinning.
     tool_cache: dict[str, str] = field(default_factory=dict)
+    # Superseded tool results stubbed in place this look (context_prune).
+    pruned_results: int = 0
+    pruned_chars: int = 0
     # One merged scan tape this look. Survives a stay-up poke so a later
     # scan() folds into the same bag instead of paging IBKR again.
     scan_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -1579,9 +1582,54 @@ def _tool_key(name: str, args: dict[str, Any]) -> str:
         return f"{name}:?"
 
 
+def _prune_after_read(
+    chat: Any, turn: BrainTurn, name: str, args: dict[str, Any], tc: Any, result: str
+) -> None:
+    """Stub the earlier copy of a read this result supersedes. Shell-side only."""
+    try:
+        from abcxauto.context_prune import prune_superseded
+
+        n, saved = prune_superseded(
+            chat,
+            name=name,
+            args=args,
+            tool_call_id=getattr(tc, "id", None),
+            is_fact=_is_fact_result(result),
+        )
+    except Exception:
+        logger.debug("context prune failed", exc_info=True)
+        return
+    if n:
+        turn.pruned_results += n
+        turn.pruned_chars += saved
+
+
+def _log_context_prune(chat: Any, turn: BrainTurn) -> None:
+    if not turn.pruned_results:
+        return
+    try:
+        from abcxauto.context_prune import payload_chars
+        from abcxauto.scorecard import estimate_tokens
+
+        now_chars = payload_chars(chat)
+        after = estimate_tokens("x" * now_chars) if now_chars else 0
+        before = estimate_tokens("x" * (now_chars + turn.pruned_chars))
+        logger.info(
+            "context prune: %d superseded tool results stubbed; chat payload ~%d "
+            "tokens (~%d unpruned, saved ~%d)",
+            turn.pruned_results,
+            after,
+            before,
+            before - after,
+        )
+    except Exception:
+        logger.debug("context prune log failed", exc_info=True)
+
+
 def _cached_read(turn: BrainTurn, name: str, args: dict[str, Any]) -> str | None:
     """Same read, same args, same think — hand back what we already fetched."""
-    if name in _MUTATING_TOOLS:
+    if name in _MUTATING_TOOLS or name == "stance":
+        # stance writes a file; a cached copy would answer a read after a clear.
         return None
     hit = turn.tool_cache.get(_tool_key(name, args))
     if hit is None:
@@ -1727,6 +1775,7 @@ async def _dispatch_tool_calls(
                     )
                 else:
                     _append_tool_result(chat, row[0], row[1])
+                    _prune_after_read(chat, turn, item[0], item[1], row[0], row[1])
 
     for item in writes:
         try:
@@ -2153,6 +2202,7 @@ async def _grok_turn_impl(
     if ran_out:
         turn.tool_budget_hit = True
         think_emit("tool", "\n[think stopped: step ceiling]\n")
+    _log_context_prune(chat, turn)
     if (
         not turn.ended
         and not turn.parked

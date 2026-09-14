@@ -41,7 +41,9 @@ def _et(y, m, d, h=10, mi=0):
     return datetime(y, m, d, h, mi, tzinfo=ZoneInfo("America/New_York"))
 
 
-def test_defaults_are_the_rth_ceiling():
+def test_defaults_are_the_rth_ceiling(code_defaults):
+    # The operator's .env may pin these; a defaults test reads the code.
+    code_defaults("ABCXAUTO_SESSION_LOOK_CAP", "ABCXAUTO_SESSION_TOKEN_CAP")
     cfg = get_config()
     assert cfg.session_look_cap == DEFAULT_LOOK_CAP == 160
     assert cfg.session_token_cap == DEFAULT_TOKEN_CAP == 2_500_000

@@ -1129,6 +1129,24 @@ AGENT_TOOLS = [
             [],
         ),
     ),
+    tool(
+        name="stance",
+        description=(
+            "Durable conclusion that outlives this chat and the overnight park. "
+            "Grok-owned; shown on the wake with its age. Omitted text reads it. "
+            "clear=true drops it. Not a fact. Not the playbook."
+        ),
+        parameters=_schema(
+            {
+                "text": {
+                    "type": "string",
+                    "description": "Replaces the current stance (max 600 chars).",
+                },
+                "clear": {"type": "boolean"},
+            },
+            [],
+        ),
+    ),
 ]
 
 
@@ -2231,6 +2249,17 @@ async def _run_tool(
                 tool_trace=getattr(turn, "tool_trace", None),
                 text=str(getattr(turn, "text", "") or ""),
             )
+        )
+    if name == "stance":
+        from abcxauto.stance import clear_stance, set_stance, stance_view
+
+        if args.get("clear") is True:
+            return _hub()._clip(clear_stance())
+        text = str(args.get("text") or args.get("line") or "")
+        if not text.strip():
+            return _hub()._clip(stance_view(reason="read"))
+        return _hub()._clip(
+            set_stance(text, session=str(getattr(world, "session_status", "") or ""))
         )
     return json.dumps({"error": f"unknown tool {name}"})
 

@@ -120,6 +120,27 @@ def _clear_risk_overrides(tmp_path, monkeypatch):
     get_config.cache_clear()
 
 
+@pytest.fixture
+def code_defaults(monkeypatch):
+    """Read Config defaults from the code, not the operator's ``.env``.
+
+    ``_load_env_config`` calls ``load_dotenv()`` on every cache miss, so a bare
+    ``delenv`` is undone the moment the cache clears. Silence the reload for
+    this test, drop the named vars, then clear the cache.
+    """
+    from abcxauto.config import get_config
+
+    monkeypatch.setattr("abcxauto.config.load_dotenv", lambda *_a, **_k: False)
+
+    def _clear(*names: str) -> None:
+        for name in names:
+            monkeypatch.delenv(name, raising=False)
+        get_config.cache_clear()
+
+    yield _clear
+    get_config.cache_clear()
+
+
 def fake_grok_turn(act: dict, *, wakes: list | None = None):
     """Pretend Grok sent ``act`` through the send clerk."""
     from abcxauto.agent_loop import BLOCKED_STRAT, execute_ticket
@@ -231,6 +252,7 @@ def _isolate_desk_state(tmp_path, monkeypatch):
 
     reset_session_caps()
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
+    monkeypatch.setenv("ABCXAUTO_STANCE_PATH", str(tmp_path / "stance.json"))
     monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
     monkeypatch.setenv(
         "ABCXAUTO_RESEARCH_BUDGET_PATH", str(tmp_path / "research_budget.json")
