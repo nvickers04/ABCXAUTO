@@ -6,11 +6,14 @@ Adapter only — all IBKR and MDA logic lives in ``abcxauto.broker`` and
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List
 
 from abcxauto.broker.connector import get_ibkr_connector
 from abcxauto.config import get_config
 from abcxauto.marketdata.client import get_marketdata_client
+
+logger = logging.getLogger(__name__)
 
 
 async def snapshot_positions(connector: Any = None) -> List[Dict[str, Any]]:
@@ -35,6 +38,7 @@ def connection_status(connector: Any = None) -> Dict[str, Any]:
         try:
             mda_ok = bool(mda_fn())
         except Exception:
+            logger.debug("MDA is_configured check failed", exc_info=True)
             mda_ok = False
     else:
         mda_ok = bool(mda_fn)

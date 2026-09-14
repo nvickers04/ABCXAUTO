@@ -759,6 +759,7 @@ def size_if_stop(
 
             cfg = get_config()
         except Exception:
+            logger.debug("protect size helper: get_config unavailable", exc_info=True)
             return {}
     qty = _size_from_risk(quote=last_f, stop=stop_f, equity=eq, cfg=cfg)
     if qty < 1:

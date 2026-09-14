@@ -401,7 +401,8 @@ def _new_risk_halted(world: WorldState) -> bool:
 
         return bool(get_risk_gate().is_halted)
     except Exception:
-        return False
+        logger.warning("risk-gate halt check failed closed", exc_info=True)
+        return True
 
 
 def _wake_grok_for_session(
@@ -512,7 +513,15 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
                     "note": "book flat unconfirmed — wait before new risk",
                 }
         except Exception:
-            pass
+            logger.warning(
+                "flat-streak gate failed closed symbol=%s",
+                str(((act.get("params") or {}).get("symbol") or "")).upper(),
+                exc_info=True,
+            )
+            return BLOCKED_STRAT, {
+                "status": "blocked",
+                "note": "book flat unconfirmed — wait before new risk",
+            }
         if not capacity_allows_new_risk(world):
             return BLOCKED_STRAT, {
                 "status": "blocked",
@@ -572,7 +581,7 @@ def _record_clerk_block(act: dict, strat: str, reason: str, *, stage: str) -> No
         )
         journal.record_gate_decision(pid, False, note)
     except Exception:
-        logger.debug("clerk block journal failed", exc_info=True)
+        logger.warning("clerk block journal failed", exc_info=True)
 
 
 async def execute_ticket(
@@ -683,7 +692,7 @@ async def execute_ticket(
                     }
                 )
             except Exception:
-                pass
+                logger.debug("overlay structure event failed", exc_info=True)
             act["strategy"] = act["action"] = BLOCKED_STRAT
             act["_structure_grade"] = sh_code
             _record_clerk_block(act, strat, sh_msg, stage="overlay_shares")
@@ -708,12 +717,18 @@ async def execute_ticket(
 
     try:
         ok, vmsg = validate_action_against_inventory(act, positions)
-        if not ok and strat not in (BLOCKED_STRAT, "skipped", "set_risk", "self_tune", "hold"):
-            act["strategy"] = act["action"] = BLOCKED_STRAT
-            _record_clerk_block(act, strat, vmsg, stage="inventory_validation")
-            return {"status": "validated_block", "reason": vmsg}
     except Exception:
-        pass
+        logger.warning(
+            "inventory validation failed closed strat=%s symbol=%s",
+            strat,
+            str((act.get("params") or {}).get("symbol") or ""),
+            exc_info=True,
+        )
+        ok, vmsg = False, "inventory_validation_failed: unverifiable live ledger"
+    if not ok and strat not in (BLOCKED_STRAT, "skipped", "set_risk", "self_tune", "hold"):
+        act["strategy"] = act["action"] = BLOCKED_STRAT
+        _record_clerk_block(act, strat, vmsg, stage="inventory_validation")
+        return {"status": "validated_block", "reason": vmsg}
 
     impact = simulate_close_impact(act, positions)
     act["_live_positions"], act["_impact"] = positions, impact
@@ -739,6 +754,7 @@ async def execute_ticket(
     try:
         cfg = get_config()
     except Exception:
+        logger.debug("get_config unavailable for protection fill", exc_info=True)
         cfg = None
     session = None
     store = snap.get("session_range") if isinstance(snap, dict) else None
@@ -1259,13 +1275,13 @@ async def _post_act_structure_and_plan(
                     if isinstance(live_pos, list):
                         positions = live_pos
                 except Exception:
-                    pass
+                    logger.debug("post-act live positions refresh failed", exc_info=True)
                 try:
                     live_ord = await connector.get_open_orders()
                     if isinstance(live_ord, list):
                         orders = live_ord
                 except Exception:
-                    pass
+                    logger.debug("post-act live open orders refresh failed", exc_info=True)
             if plan and strat in ("market_order", "limit_order", "stop_order"):
                 held = abs(stk_qty_for_symbol(positions, plan.symbol))
                 try:
@@ -1307,7 +1323,12 @@ async def _post_act_structure_and_plan(
                             allow_flat_close=False,
                         )
                     except Exception:
-                        pass
+                        logger.warning(
+                            "sync_open_risk failed after %s symbol=%s",
+                            strat,
+                            getattr(plan, "symbol", ""),
+                            exc_info=True,
+                        )
 
         # Secondary scrape detection from fills (BOT+SLD within seconds)
         if symbol and ok_dispatch and strat in ("bracket", "market_bracket"):
@@ -1320,7 +1341,7 @@ async def _post_act_structure_and_plan(
                     if isinstance(live_pos, list):
                         positions = live_pos
                 except Exception:
-                    pass
+                    logger.debug("scrape-check live positions refresh failed", exc_info=True)
             fills: list = []
             try:
                 if connector is not None:

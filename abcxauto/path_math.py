@@ -8,8 +8,11 @@ A last / mid / mark is not a fill. Qty-blind premium is not cash.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _FILL_PX_KEYS = (
     "avg_fill_price",
@@ -642,6 +645,7 @@ def path_from_journal(
             try:
                 rows = list(fn() or [])
             except Exception:
+                logger.debug("path_math journal %s failed", name, exc_info=True)
                 rows = []
             if rows:
                 pnls = rows

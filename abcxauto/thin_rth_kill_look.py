@@ -92,6 +92,7 @@ def kill_look_enabled(cfg: Any = None) -> bool:
 
             cfg = get_config()
         except Exception:
+            logger.debug("kill_look_enabled: get_config failed; default on", exc_info=True)
             return True
     if hasattr(cfg, "pcs_kill_look"):
         return bool(getattr(cfg, "pcs_kill_look"))
@@ -162,6 +163,7 @@ def kill_look_rth(session: str = "", *, enabled: bool | None = None) -> bool:
 
         return bool(is_rth_session(session))
     except Exception:
+        logger.debug("kill_look_rth: desk_mode unreadable; using session label", exc_info=True)
         return str(session or "").strip().lower() == "regular"
 
 
@@ -775,6 +777,7 @@ def kill_mode(
 
             abort_fuse = scorecard_abort_fuse()
         except Exception:
+            logger.debug("scorecard abort_fuse unreadable", exc_info=True)
             abort_fuse = "none"
     if str(abort_fuse or "") in {"F10", "DD30", "QTY0_STREAK"}:
         return MODE_ABORT
@@ -834,6 +837,7 @@ def skip_look_reason(
 
             fuse = scorecard_abort_fuse()
         except Exception:
+            logger.debug("scorecard abort_fuse unreadable", exc_info=True)
             fuse = "none"
     mode = kill_mode(
         session,
@@ -957,6 +961,7 @@ def kill_look_send_block(
 
             fuse = scorecard_abort_fuse()
         except Exception:
+            logger.debug("scorecard abort_fuse unreadable", exc_info=True)
             fuse = "none"
     mode = kill_mode(
         session,

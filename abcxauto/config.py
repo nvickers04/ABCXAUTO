@@ -32,6 +32,7 @@ RISK_CONFIG_KEYS = frozenset({
     "max_risk_per_trade_pct",
     "max_symbol_concentration_pct",
     "max_arena_concentration_pct",
+    "mode_size_ceiling_pct",
 })
 # Risk % knobs clamped to the walk-away floor on the operator write path.
 # Grok self_tune cannot persist OPERATOR_DISK_KEYS over the file.
@@ -148,8 +149,10 @@ _DEFAULT_FILE_LOG_PATH = _REPO_ROOT / "logs" / "app.log"
 
 @dataclass(frozen=True)
 class Config:
+    # Secrets carry repr=False: a pytest traceback or a logged Config must
+    # never print the key. asdict()/replace() still see them.
     # xAI / Grok
-    xai_api_key: str = ""
+    xai_api_key: str = field(default="", repr=False)
     model: str = DEFAULT_MODEL  # ABCXAUTO_MODEL is the env form; see get_config()
     # Session brains. Empty = use ``model`` (single-model desks keep working).
     model_rth: str = ""
@@ -170,7 +173,7 @@ class Config:
     pcs_kill_look: bool = True
 
     # MarketData.app
-    marketdata_token: str = ""
+    marketdata_token: str = field(default="", repr=False)
 
     # IBKR
     ibkr_host: str = "127.0.0.1"
@@ -178,7 +181,7 @@ class Config:
     ibkr_client_id: int = 42
     trading_mode: str = "paper"  # must match port family (paper↔7497/4002, live↔7496/4001)
     # Exact phrase required before any live-mode connect (empty = refuse live)
-    live_confirm: str = ""
+    live_confirm: str = field(default="", repr=False)
     # After broker disconnect, halt new entries if still down after N seconds (0 = disable)
     disconnect_halt_s: float = 120.0
 
@@ -216,6 +219,10 @@ class Config:
     # One sector/theme/cap arena (catalog we already scan), all names in it.
     # Per-name cap cannot see NVDA+SMCI+ARM+AVGO as one bet.
     max_arena_concentration_pct: float = 25.0
+    # Widest % of NetLiq Grok's own size_pct_nl may reach. The operator sets the
+    # envelope; Grok still picks the size inside it and may tighten via
+    # self_tune. A $1k book cannot buy one option contract at single digits.
+    mode_size_ceiling_pct: float = 8.0
     # 0 = off (no count refuse). A positive N is a Grok/operator ceiling.
     max_open_positions: int = 0
 
@@ -363,6 +370,9 @@ def _load_env_config() -> Config:
         ),
         max_arena_concentration_pct=float(
             _env("ABCXAUTO_MAX_ARENA_CONCENTRATION_PCT", "25")
+        ),
+        mode_size_ceiling_pct=float(
+            _env("ABCXAUTO_MODE_SIZE_CEILING_PCT", "8")
         ),
     )
 
@@ -671,6 +681,7 @@ def get_config() -> Config:
         }
         agent_extra = {k: v for k, v in raw.items() if k in allowed}
     except Exception:
+        logger.debug("agent_state extras unavailable", exc_info=True)
         agent_extra = {}
     merged = {**_file_overrides, **agent_extra, **_runtime_overrides}
     valid = {f.name for f in fields(Config)}
@@ -683,7 +694,7 @@ def get_config() -> Config:
         if fixes:
             cfg = replace(cfg, **{k: v for k, v in fixes.items() if k in valid})
     except Exception:
-        pass
+        logger.warning("floor clamp of config fields failed", exc_info=True)
     return cfg
 
 

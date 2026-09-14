@@ -717,6 +717,7 @@ def journal_pcs_pre_send(
             try:
                 lifecycle_id = finder(geo)
             except Exception:
+                logger.debug("pcs open lifecycle_id lookup failed", exc_info=True)
                 lifecycle_id = None
     if not lifecycle_id:
         lifecycle_id = f"pcs:{geo or 'na'}:{_lifecycle_token(proposal_id, dumped)}"
@@ -952,6 +953,7 @@ def _last_quote_snap(journal: Any, lifecycle_id: str, side: str) -> dict[str, An
     try:
         rows = journal.pcs_events(lifecycle_id=lifecycle_id, event=EVENT_QUOTE_SNAP)
     except Exception:
+        logger.debug("pcs quote snap read failed", exc_info=True)
         rows = []
     for row in rows:
         if str(row.get("side") or "") == side:
@@ -1045,6 +1047,7 @@ def _send_mark_missed(journal: Any, order_id: Any) -> bool:
     try:
         by = fn() or {}
     except Exception:
+        logger.debug("pcs send_marks_by_order_id failed", exc_info=True)
         return False
     row = by.get(oid)
     if not isinstance(row, Mapping):
@@ -1113,6 +1116,7 @@ def ingest_pcs_from_look(journal: Any, snap: Mapping[str, Any] | None) -> None:
                 journal.pcs_events(lifecycle_id=lid, event=EVENT_FILL)
             )
         except Exception:
+            logger.debug("pcs fill-event read failed", exc_info=True)
             has_fill = False
         working = False
         if oid is not None:
@@ -1152,6 +1156,7 @@ def _last_open_credit(journal: Any, lifecycle_id: str) -> float | None:
     try:
         marks = journal.pcs_events(lifecycle_id=lifecycle_id, event=EVENT_SCORE_MARK)
     except Exception:
+        logger.debug("pcs score-mark read failed", exc_info=True)
         marks = []
     for row in marks:
         if str(row.get("side") or "") == "open":
@@ -1159,6 +1164,7 @@ def _last_open_credit(journal: Any, lifecycle_id: str) -> float | None:
     try:
         fills = journal.pcs_events(lifecycle_id=lifecycle_id, event=EVENT_FILL)
     except Exception:
+        logger.debug("pcs fill-event read failed", exc_info=True)
         fills = []
     for row in fills:
         if str(row.get("side") or "") == "open":
@@ -1172,6 +1178,7 @@ def _last_manage_fingerprint(journal: Any, lifecycle_id: str) -> str | None:
             lifecycle_id=lifecycle_id, event=EVENT_MANAGE_CHECK, limit=1
         )
     except Exception:
+        logger.debug("pcs manage-check read failed", exc_info=True)
         return None
     if not rows:
         return None
@@ -1260,6 +1267,7 @@ async def follow_pcs_after_act(
 
             journal = get_journal()
         except Exception:
+            logger.debug("pcs post_act journal unavailable", exc_info=True)
             return
     ingest_pcs_from_look(journal, snap)
     await refresh_pcs_manage(journal, snap, connector)

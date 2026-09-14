@@ -202,7 +202,7 @@ def close_trade_plan(
                 json.dumps(closed.to_dict(), indent=2) + "\n", encoding="utf-8"
             )
         except Exception:
-            pass
+            logger.warning("archive last_closed_trade_plan failed symbol=%s", sym, exc_info=True)
     if kept:
         save_trade_plans(kept)
     else:
@@ -626,7 +626,11 @@ def reconcile_open_risk_all(
                     json.dumps(plan.to_dict(), indent=2) + "\n", encoding="utf-8"
                 )
             except Exception:
-                pass
+                logger.warning(
+                    "archive last_closed_trade_plan failed symbol=%s",
+                    sym,
+                    exc_info=True,
+                )
 
     # Stable order: largest |qty| first (matches _stk_rows)
     order = {r["symbol"]: i for i, r in enumerate(rows)}
@@ -661,7 +665,8 @@ def _flat_streak_state() -> dict[str, Any]:
             "empty_count": max(0, int(raw.get("empty_count") or 0)),
             "ever_held": bool(raw.get("ever_held")),
         }
-    except Exception:
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError):
+        logger.warning("flat streak state unreadable path=%s", p, exc_info=True)
         return {"empty_count": 0, "ever_held": False}
 
 
@@ -724,7 +729,10 @@ def maybe_close_on_confirmed_flat(
                     json.dumps(last.to_dict(), indent=2) + "\n", encoding="utf-8"
                 )
             except Exception:
-                pass
+                logger.warning(
+                    "archive last_closed_trade_plan failed reason=stk_flat_options_remain",
+                    exc_info=True,
+                )
             _save_flat_streak_state(0, False)
             return True
         return False
@@ -749,7 +757,10 @@ def maybe_close_on_confirmed_flat(
                 json.dumps(last.to_dict(), indent=2) + "\n", encoding="utf-8"
             )
         except Exception:
-            pass
+            logger.warning(
+                "archive last_closed_trade_plan failed reason=confirmed_flat",
+                exc_info=True,
+            )
         _save_flat_streak_state(0, False)
         return True
     _save_flat_streak_state(0, False)

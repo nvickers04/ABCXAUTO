@@ -80,11 +80,11 @@ def tee_child_output(stream: Any) -> None:
             sys.stdout.write(line + "\n")
             sys.stdout.flush()
         except Exception:
-            pass
+            pass  # stdout may be closed when the supervisor is detaching.
         try:
             log.info(line)
         except Exception:
-            pass
+            pass  # Logging handler failure must not kill the supervisor loop.
 
 
 def _stop_path() -> Path:
@@ -166,7 +166,7 @@ def _pid_alive(pid: int) -> bool:
 
         return bool(psutil.pid_exists(pid))
     except Exception:
-        pass
+        pass  # Fall through to the Windows/ctypes pid probe.
     if os.name == "nt":
         try:
             import ctypes
@@ -274,7 +274,7 @@ def live_pro_pids(*, exclude: set[int] | None = None) -> list[int]:
         if parent > 0:
             skip.add(parent)
     except Exception:
-        pass
+        pass  # getppid can fail in some hosts; skip-set still has our pid.
     if exclude:
         skip.update(int(pid) for pid in exclude if int(pid) > 0)
     found: list[int] = []
@@ -332,13 +332,13 @@ def ancestor_pids() -> set[int]:
             found.add(pid)
             proc = parent
     except Exception:
-        pass
+        pass  # psutil parent walk is best-effort; fall through to getppid.
     try:
         ppid = int(os.getppid() or 0)
         if ppid > 0:
             found.add(ppid)
     except Exception:
-        pass
+        pass  # getppid unavailable; protected set may just be the walk result.
     return found
 
 
@@ -589,7 +589,7 @@ def note(msg: str, *, warn: bool = False) -> None:
     try:
         _desk_out_logger().info(msg)
     except Exception:
-        pass
+        pass  # desk_out handler is optional; the primary logger already wrote.
 
 
 def orphan_flet_pids(

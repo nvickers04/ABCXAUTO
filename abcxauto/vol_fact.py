@@ -453,7 +453,7 @@ def publish_vol_facts(world: Any = None, snap: dict[str, Any] | None = None) -> 
         try:
             world.vol_facts = rows
         except Exception:
-            pass
+            pass  # World may be a stub without vol_facts; snap already holds the rows.
     return rows
 
 

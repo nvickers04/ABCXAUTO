@@ -678,7 +678,7 @@ class IBKRQueriesMixin:
                 try:
                     self.ib.cancelMktData(contract)
                 except Exception:
-                    pass
+                    pass  # Quote sub already cancelled or contract never subscribed.
 
 
 # Import mixins after defining base classes to avoid circular imports
@@ -949,19 +949,19 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         try:
             target.disconnectedEvent -= self._disconnect_handler
         except Exception:
-            pass
+            pass  # Handler was never registered or IB already dropped it.
         try:
             target.execDetailsEvent -= self._execution_handler
         except Exception:
-            pass
+            pass  # Handler was never registered or IB already dropped it.
         try:
             target.orderStatusEvent -= self._order_status_handler
         except Exception:
-            pass
+            pass  # Handler was never registered or IB already dropped it.
         try:
             target.errorEvent -= self._error_handler
         except Exception:
-            pass
+            pass  # Handler was never registered or IB already dropped it.
         self._handlers_on_ib = None
 
     # ── Noisy IBKR error codes to suppress (log at DEBUG instead of WARNING) ──
@@ -1053,7 +1053,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             try:
                 drop_rt()
             except Exception:
-                pass
+                pass  # Realtime bars already abandoned on this disconnect path.
         self._clear_book_subs(cancel=False)
         self._connected = False
         cause = self._disconnect_cause
@@ -1089,7 +1089,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 if not captured.is_closed() and captured.is_running():
                     return captured
             except Exception:
-                pass
+                pass  # Captured loop already closed; fall through to get_running_loop.
         try:
             return asyncio.get_running_loop()
         except RuntimeError:
@@ -1342,7 +1342,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         try:
             self._stop_heartbeat()
         except Exception:
-            pass
+            pass  # Destructor must not raise if the heartbeat thread is already gone.
 
     # ========== CONNECTION ==========
 
@@ -1568,7 +1568,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 try:
                     self.ib.cancelMktData(ticker.contract)
                 except Exception:
-                    pass
+                    pass  # Quote sub already cancelled or contract never subscribed.
             self._tickers.clear()
             self._cancel_account_pnl()
             drop_rt = getattr(self, "abandon_realtime_bars", None)
@@ -1576,7 +1576,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 try:
                     drop_rt()
                 except Exception:
-                    pass
+                    pass  # Realtime bars already abandoned during disconnect.
             self._clear_book_subs(cancel=True)
 
             self.ib.disconnect()
@@ -1873,7 +1873,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                     if contract is not None:
                         self.ib.cancelMktData(contract)
                 except Exception:
-                    pass
+                    pass  # Book tick sub already cancelled or never live.
         self._book_subs.clear()
         live.clear()
 
@@ -1904,7 +1904,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                     if contract is not None:
                         self.ib.cancelMktData(contract)
                 except Exception:
-                    pass
+                    pass  # Book tick sub already cancelled or never live.
                 live.discard(cid)
         for cid, p in want.items():
             c = self._book_subs.get(cid)

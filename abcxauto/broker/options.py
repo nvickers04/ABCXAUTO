@@ -509,7 +509,7 @@ class IBKROptionsMixin:
             try:
                 self.ib.cancelMktData(contract)
             except Exception:
-                pass
+                pass  # Quote sub already cancelled or contract never subscribed.
 
     async def get_live_vertical_bag_quote(
         self,
@@ -570,7 +570,7 @@ class IBKROptionsMixin:
                 try:
                     self.ib.cancelMktData(combo)
                 except Exception:
-                    pass
+                    pass  # Combo quote sub already cancelled or never subscribed.
 
     # ========== VERTICAL SPREADS ==========
 

@@ -487,6 +487,7 @@ async def check_arena_concentration(
     try:
         account = await connector.get_account_summary()
     except Exception as e:
+        logger.warning("arena concentration fail-closed: cannot read account", exc_info=True)
         return False, f"Risk gate fail-closed: cannot read account summary ({e})"
     if not isinstance(account, dict) or account.get("error"):
         err = account.get("error") if isinstance(account, dict) else "invalid account"
@@ -499,6 +500,7 @@ async def check_arena_concentration(
     try:
         positions = await connector.get_positions()
     except Exception as e:
+        logger.warning("arena concentration fail-closed: cannot read positions", exc_info=True)
         return False, f"Risk gate fail-closed: cannot read positions ({e})"
     if isinstance(positions, dict) and positions.get("error"):
         return False, (
@@ -703,6 +705,7 @@ class RiskGate:
         try:
             account = await connector.get_account_summary()
         except Exception as e:
+            logger.warning("pre-trade fail-closed: cannot read account summary", exc_info=True)
             return False, f"Risk gate fail-closed: cannot read account summary ({e})"
 
         if not isinstance(account, dict) or account.get("error"):
@@ -839,6 +842,7 @@ class RiskGate:
             try:
                 positions = await connector.get_positions()
             except Exception as e:
+                logger.warning("pre-trade fail-closed: cannot read positions", exc_info=True)
                 return False, f"Risk gate fail-closed: cannot read positions ({e})"
             if isinstance(positions, dict) and positions.get("error"):
                 return False, (

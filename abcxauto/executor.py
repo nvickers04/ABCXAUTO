@@ -102,6 +102,11 @@ async def _verify_closes_position(proposal: OrderProposal, connector: Any) -> Op
     try:
         positions = await connector.get_positions()
     except Exception as e:
+        logger.warning(
+            "exit verify fail-closed: cannot read positions symbol=%s",
+            symbol,
+            exc_info=True,
+        )
         return {"error": f"Could not verify position for exit order: {e}"}
 
     held = 0
@@ -315,6 +320,11 @@ async def _verify_cancel_not_last_stop(
     try:
         orders = await connector.get_open_orders()
     except Exception as e:
+        logger.warning(
+            "cancel last-stop fail-closed: cannot read open orders order_id=%s",
+            order_id,
+            exc_info=True,
+        )
         return {
             "error": (
                 f"cancel_order rejected (fail-closed): cannot read open orders ({e}). "
@@ -324,6 +334,11 @@ async def _verify_cancel_not_last_stop(
     try:
         positions = await connector.get_positions()
     except Exception as e:
+        logger.warning(
+            "cancel last-stop fail-closed: cannot read positions order_id=%s",
+            order_id,
+            exc_info=True,
+        )
         return {
             "error": (
                 f"cancel_order rejected (fail-closed): cannot read positions ({e}). "
@@ -608,6 +623,7 @@ async def _verify_riskless_combo_cap(
     try:
         orders = await get()
     except Exception as e:
+        logger.warning("riskless combo fail-closed: cannot read open orders", exc_info=True)
         return riskless_combo_reject(
             f"{REASON_CODE}: cannot read open orders ({e})"
         )
@@ -724,6 +740,11 @@ async def execute_proposal(
         try:
             live = await connector.get_positions()
         except Exception as e:
+            logger.warning(
+                "exit verify fail-closed: cannot read positions proposal=%s",
+                journal_id,
+                exc_info=True,
+            )
             rejection = {"error": f"defined_risk_only: cannot read positions ({e})"}
             journal.record_dispatch(journal_id, False, rejection)
             return rejection
@@ -771,7 +792,12 @@ async def execute_proposal(
 
         quote = await capture_send_quote(connector, proposal) or {}
     except Exception:
-        logger.debug("send_marks quote failed", exc_info=True)
+        logger.warning(
+            "send_marks quote failed proposal=%s strategy=%s",
+            getattr(proposal, "id", None),
+            getattr(proposal, "strategy", ""),
+            exc_info=True,
+        )
         quote = {}
     pcs_lifecycle = None
     try:
@@ -781,7 +807,11 @@ async def execute_proposal(
             journal, connector, proposal, quote, proposal_id=journal_id
         )
     except Exception:
-        logger.debug("pcs fill-λ pre-send failed", exc_info=True)
+        logger.warning(
+            "pcs fill-λ pre-send journal failed proposal=%s",
+            journal_id,
+            exc_info=True,
+        )
     result = await method(**kwargs)
     logger.info(f"Proposal #{proposal.id} result: {result}")
     ok = _dispatch_succeeded(result)
@@ -801,7 +831,12 @@ async def execute_proposal(
         payload = dict(journal_result)
         payload["send_marks"] = public_marks(marks)
     except Exception:
-        logger.debug("send_marks build failed", exc_info=True)
+        logger.warning(
+            "send_marks build failed proposal=%s strategy=%s",
+            journal_id,
+            getattr(proposal, "strategy", ""),
+            exc_info=True,
+        )
         marks = None
     dispatch_id = journal.record_dispatch(journal_id, ok, payload)
     if marks is not None:
@@ -824,7 +859,11 @@ async def execute_proposal(
             lifecycle_id=pcs_lifecycle,
         )
     except Exception:
-        logger.debug("pcs fill-λ post-send failed", exc_info=True)
+        logger.warning(
+            "pcs fill-λ post-send journal failed proposal=%s",
+            journal_id,
+            exc_info=True,
+        )
 
     if (
         cfg.risk_gates_enabled
@@ -1082,7 +1121,7 @@ async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
                 }
             )
         except Exception:
-            pass
+            logger.debug("geometry-reject structure event failed", exc_info=True)
         return {
             "status": "rejected",
             "error": err,

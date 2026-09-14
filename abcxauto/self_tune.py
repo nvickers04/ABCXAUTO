@@ -725,5 +725,5 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
 
         out["size_pct_nl"] = mode_size_band()
     except Exception:
-        pass
+        logger.debug("self_tune size_pct_nl band unavailable", exc_info=True)
     return out

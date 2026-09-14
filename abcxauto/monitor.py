@@ -640,6 +640,7 @@ class PortfolioMonitor:
         try:
             session = get_session_info().get("session")
         except Exception:
+            logger.debug("monitor session probe failed; treating market as active", exc_info=True)
             return True  # fail open — better to review than to skip
         if session == "regular":
             return True
