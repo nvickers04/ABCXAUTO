@@ -170,6 +170,7 @@ class ViewState:
     positions: list[dict] = field(default_factory=list)
     open_orders: list[dict] = field(default_factory=list)
     recent_fills: list[dict] = field(default_factory=list)
+    broker_rejects: list[dict] = field(default_factory=list)
     inventory: str = ""
     records: list[dict] = field(default_factory=list)
     connected: bool = False
@@ -276,6 +277,7 @@ class ProEngine:
         self._flat_start_orphan_gate = False
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
+        self._order_status_wake_registered = False
         from abcxauto.think_stream import bind_engine
 
         bind_engine(self)
@@ -319,6 +321,12 @@ class ProEngine:
         # resumes an existing IBKR worker (Connect then START).
         self._universe_refresh_on_start = already
         if already:
+            try:
+                from abcxauto.park_clock import clear_look_abort
+
+                clear_look_abort()
+            except Exception:
+                logger.debug("look abort clear on start failed", exc_info=True)
             self.pause.clear()
             self.state.autonomous = True
             self.state.paused = False
@@ -342,6 +350,12 @@ class ProEngine:
             return None
         self._gen += 1
         gen = self._gen
+        try:
+            from abcxauto.park_clock import clear_look_abort
+
+            clear_look_abort()
+        except Exception:
+            logger.debug("look abort clear on start failed", exc_info=True)
         self.stop.clear()
         self.pause.clear()
         self.state.autonomous = True
@@ -442,6 +456,12 @@ class ProEngine:
         """Pause think without tearing down IBKR / monitor."""
         if not self.worker or not self.worker.is_alive():
             return
+        try:
+            from abcxauto.park_clock import request_look_abort
+
+            request_look_abort()
+        except Exception:
+            logger.debug("look abort on pause failed", exc_info=True)
         self.pause.set()
         self.state.autonomous = False
         self.state.paused = True
@@ -455,6 +475,12 @@ class ProEngine:
         was_linked = bool(self.state.connected) or (
             self.worker is not None and self.worker.is_alive()
         )
+        try:
+            from abcxauto.park_clock import request_look_abort
+
+            request_look_abort()
+        except Exception:
+            logger.debug("look abort on stop failed", exc_info=True)
         self.stop.set()
         self.pause.clear()
         self._gen += 1
@@ -504,6 +530,15 @@ class ProEngine:
         return None
 
     def _stop_monitor(self) -> None:
+        conn = self.conn
+        if conn is not None and self._order_status_wake_registered:
+            unreg = getattr(conn, "unregister_order_status_listener", None)
+            if unreg is not None:
+                try:
+                    unreg(self._on_ibkr_order_status)
+                except Exception:
+                    pass
+            self._order_status_wake_registered = False
         mon = self.monitor
         if mon is not None:
             try:
@@ -573,6 +608,14 @@ class ProEngine:
         if mode_rolled and cur_mode == "rth":
             self._research_color_injected = False
         return g
+
+    def _on_ibkr_order_status(self, event: dict) -> None:
+        """Event-driven fill wake — do not wait for the monitor poll."""
+        status = str((event or {}).get("status") or "").strip().lower()
+        if status == "filled":
+            self.request_wake("fill")
+        elif status in {"cancelled", "apicancelled", "inactive"}:
+            self.request_wake("order_change")
 
     def request_wake(self, reason: str) -> None:
         """Interrupt pulse sleep for a whitelisted pace wake (monitor → engine)."""
@@ -690,6 +733,11 @@ class ProEngine:
             )
             self._gate_flat_start_orphan_sweep(self.monitor)
             self.monitor.start()
+            conn = self.conn
+            reg = getattr(conn, "register_order_status_listener", None) if conn else None
+            if reg is not None and not self._order_status_wake_registered:
+                reg(self._on_ibkr_order_status)
+                self._order_status_wake_registered = True
             # PortfolioMonitor snapshots the config, so remember what it was
             # built with — a Settings change has to rebuild it.
             self._monitor_key = self._monitor_fingerprint()
@@ -821,6 +869,8 @@ class ProEngine:
                 s.open_orders = snap.get("open_orders") or []
             if snap.get("fills") is not None:
                 s.recent_fills = list(snap.get("fills") or [])[-20:]
+            if snap.get("broker_rejects") is not None:
+                s.broker_rejects = list(snap.get("broker_rejects") or [])[-20:]
             had_plan = bool(s.trade_plan)
             # Never confirmed-flat-close while paused / not autonomous — monitor
             # empty snaps must not wipe durable open risk.
@@ -938,6 +988,8 @@ class ProEngine:
         s.pace = dict(d.get("pace") or {})
         s.positions = d.get("positions") or []
         s.open_orders = d.get("open_orders") or []
+        if d.get("broker_rejects") is not None:
+            s.broker_rejects = list(d.get("broker_rejects") or [])[:20]
         s.inventory = d.get("inventory") or format_position_inventory(s.positions)
         # Book strip / mandate health
         unprotected = _unprotected_list(d)
@@ -1632,6 +1684,10 @@ class ProEngine:
             "rationale": act.get("rationale") or (turn.text or "")[:1200],
             "positions": s.get("positions") or [],
             "open_orders": s.get("open_orders") or [],
+            "fills": list(s.get("fills") or [])[-20:],
+            "broker_rejects": list(
+                getattr(world, "broker_rejects", None) or s.get("broker_rejects") or []
+            )[:20],
             "inventory": format_position_inventory(s.get("positions") or []),
             "reality_pulse": s.get("reality_pulse") or {},
             "world_state": world.to_dict() if hasattr(world, "to_dict") else {},

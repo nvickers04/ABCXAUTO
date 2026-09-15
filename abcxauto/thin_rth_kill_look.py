@@ -22,6 +22,10 @@ MODE_RESEARCH = "research"
 
 PCS_CARD = "pcs-skew"
 PCS_STRATEGY = "vertical_spread"
+# Working-order tickets. Not new risk; kill_look_send_block already lets them
+# through. The RTH send enum must list them or the model cannot cancel or
+# retighten a resting BAG exit (it only sees vertical_spread).
+KILL_LOOK_BOOK_EDIT = frozenset({"cancel_order", "modify_stop", "modify_target"})
 
 STAY_TOOLS = frozenset({
     "book",
@@ -292,15 +296,14 @@ def filter_agent_tool_names(
 
 
 def send_strategy_names(*, session: str = "") -> list[str] | None:
-    """None = default enum. Kill RTH send stays vertical_spread (close via param).
+    """None = default enum. Kill RTH new-risk stays vertical_spread.
 
-    Named-card allowlist accepts other clerk-legal defined-risk ORDER EXAMPLES
-    schemas if they reach send. The tool enum expands only when a named-card
-    schema already in ORDER EXAMPLES needs a key other than vertical_spread.
+    Close a live vertical with the same key + closing_position. Cancel and
+    modify stay on the enum — they are book edits, not named-card new risk.
     """
     if not kill_look_rth(session):
         return None
-    return [PCS_STRATEGY]
+    return sorted({PCS_STRATEGY, *KILL_LOOK_BOOK_EDIT})
 
 
 def _params_of(act: dict[str, Any] | None) -> dict[str, Any]:

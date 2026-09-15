@@ -8,6 +8,7 @@ import pytest
 
 from abcxauto.config import Config, get_config
 from abcxauto.proposals import validate_proposal
+from abcxauto.look_snapshot import begin_look, record_look_tool
 from abcxauto.risk_gates import (
     arena_concentration_error,
     arena_exposure_usd,
@@ -18,6 +19,7 @@ from abcxauto.risk_gates import (
     is_exit_or_management,
     reset_risk_gate,
     risk_base_usd,
+    size_unknown_notional_reason,
     sizing_floors_active,
     symbol_exposure_usd,
 )
@@ -1783,3 +1785,149 @@ def test_estimate_notional_csp_and_option_limit():
         RATIONALE,
     )
     assert estimate_notional(vert) == pytest.approx(1.25 * 100 * 1)
+
+
+def _vertical_look_snap(
+    *,
+    long_bid=8.0,
+    long_ask=8.1,
+    short_bid=3.0,
+    short_ask=3.1,
+) -> dict:
+    snap: dict = {}
+    begin_look(snap)
+    record_look_tool(
+        snap,
+        "option_quote",
+        {
+            "quotes": [
+                {
+                    "symbol": "SPY",
+                    "expiration": "20260925",
+                    "strike": 755.0,
+                    "right": "C",
+                    "ibkr": {
+                        "bid": long_bid,
+                        "ask": long_ask,
+                        "mid": (long_bid + long_ask) / 2,
+                    },
+                },
+                {
+                    "symbol": "SPY",
+                    "expiration": "20260925",
+                    "strike": 765.0,
+                    "right": "C",
+                    "ibkr": {
+                        "bid": short_bid,
+                        "ask": short_ask,
+                        "mid": (short_bid + short_ask) / 2,
+                    },
+                },
+            ]
+        },
+    )
+    return snap
+
+
+def _first_send_vertical(*, limit=None, qty=6):
+    payload = {
+        "symbol": "SPY",
+        "expiration": "20260925",
+        "long_strike": 755.0,
+        "short_strike": 765.0,
+        "right": "C",
+        "quantity": qty,
+    }
+    if limit is not None:
+        payload["limit_price"] = limit
+    return validate_proposal("vertical_spread", payload, RATIONALE)
+
+
+def test_estimate_notional_vertical_from_look_without_limit():
+    snap = _vertical_look_snap()
+    vert = _first_send_vertical(limit=None)
+    # debit combo mid = (8.05 ask leg - 3.0 short bid) natural: bid=4.9 ask=5.1 mid=5.0
+    assert estimate_notional(vert, snap) == pytest.approx(5.0 * 100 * 6)
+
+
+def test_size_unknown_notional_refusal_names_missing_tool():
+    vert = _first_send_vertical(limit=None)
+    reason = size_unknown_notional_reason(vert, snap=None)
+    assert reason.startswith("size_unknown_notional:")
+    assert "option_quote both legs" in reason
+    assert "SPY" in reason
+
+    snap = _vertical_look_snap()
+    reason_with_quotes = size_unknown_notional_reason(vert, snap=snap)
+    assert "limit_price missing" in reason_with_quotes
+
+
+@pytest.mark.asyncio
+async def test_arena_concentration_resolves_notional_from_look_snap(monkeypatch):
+    from abcxauto.executor import execute_proposal
+
+    cfg = _cfg(
+        risk_gates_enabled=False,
+        sizing_floors=False,
+        max_arena_concentration_pct=25.0,
+        max_symbol_concentration_pct=0,
+        defined_risk_only=False,
+    )
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    monkeypatch.setattr(
+        "abcxauto.universe.membership_rows",
+        lambda **_k: [{"symbol": "SPY", "arena": "index_etfs", "source": "static"}],
+    )
+
+    class Bare(FakeConnector):
+        async def place_vertical_spread(self, **kwargs):
+            return {"success": True, "order_id": 9001}
+
+    conn = Bare(
+        account={"netliquidation": 100_000.0, "dailypnl": 0.0},
+        positions=[],
+    )
+    snap = _vertical_look_snap()
+    vert = _first_send_vertical(limit=None)
+    result = await execute_proposal(vert, conn, look_snap=snap)
+    assert result.get("success") is True, result
+    assert "size_unknown_notional" not in str(result.get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_pre_trade_option_notional_from_look_snap(monkeypatch):
+    cfg = _cfg(
+        risk_gates_enabled=True,
+        sizing_floors=False,
+        max_arena_concentration_pct=0,
+        defined_risk_only=False,
+    )
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    gate = reset_risk_gate()
+    snap = _vertical_look_snap()
+    vert = _first_send_vertical(limit=None)
+    ok, reason = await gate.pre_trade_check(
+        vert, FakeConnector(), snap=snap
+    )
+    assert ok is True, reason
+    assert "size_unknown_notional" not in reason
+
+
+@pytest.mark.asyncio
+async def test_pre_trade_refuses_option_without_look_quotes(monkeypatch):
+    cfg = _cfg(
+        risk_gates_enabled=True,
+        sizing_floors=False,
+        defined_risk_only=False,
+    )
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    gate = reset_risk_gate()
+    vert = _first_send_vertical(limit=None)
+    ok, reason = await gate.pre_trade_check(vert, FakeConnector(), snap=None)
+    assert ok is False
+    assert reason.startswith("size_unknown_notional:")
+    assert "option_quote both legs" in reason

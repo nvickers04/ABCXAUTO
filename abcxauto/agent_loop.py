@@ -255,6 +255,13 @@ async def snap(c: Any) -> dict:
         except Exception:
             logger.debug("snap fills failed", exc_info=True)
     base["fills"] = fills
+    get_rejects = getattr(c, "get_broker_rejects", None)
+    if callable(get_rejects):
+        try:
+            base["broker_rejects"] = list(get_rejects() or [])[:20]
+        except Exception:
+            logger.debug("snap broker_rejects failed", exc_info=True)
+            base["broker_rejects"] = []
     if any(
         str(p.get("secType") or p.get("sec_type") or "").upper() in ("OPT", "FOP")
         for p in pl
@@ -870,6 +877,7 @@ async def execute_ticket(
     if strat in ALLOWED_ACTIONS:
         if isinstance(act, dict):
             act["_desk_session"] = sess
+            act["_look_snap"] = snap
         if needs_place_token(act) and not extract_place_token(act):
             bind_place_token(act, source="execute_ticket")
         result = await send_action(act, connector)
@@ -1093,11 +1101,45 @@ def _extract_last(q: dict | None) -> float | None:
     return None
 
 
+def _stk_market_price_from_snap(snap: dict | None, symbol: str) -> float | None:
+    """IBKR portfolio mark for an open STK lot — manage/protect geometry only."""
+    want = str(symbol or "").upper()
+    if not want:
+        return None
+    for row in (snap or {}).get("positions") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("symbol") or "").upper() != want:
+            continue
+        sec = str(
+            row.get("sec_type") or row.get("secType") or row.get("sec") or "STK"
+        ).upper()
+        if sec not in ("", "STK", "ETF"):
+            continue
+        try:
+            held = float(row.get("quantity") or row.get("position") or 0)
+        except (TypeError, ValueError):
+            held = 0.0
+        if abs(held) < 1e-9:
+            continue
+        for key in ("market_price", "marketPrice"):
+            raw = row.get(key)
+            if raw is None:
+                continue
+            try:
+                px = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if px > 0:
+                return px
+    return None
+
+
 async def _quote_for_action(act: dict, snap: dict, connector: Any = None) -> float | None:
     """IBKR live last for geometry — never use MDA SCAN TAPE last as live.
 
-    Order: connector quote → snap ibkr_live_* → snap spy (if SPY) →
-    Grok price_hint / entry only when no IBKR live (manage / protect paths).
+    Order: connector quote → snap ibkr_live_* → scan hit → open STK
+    market_price (manage/protect only) → Grok price_hint / entry.
     New-entry brackets fail closed without IBKR live (returns None → geometry block).
     """
     params = act.get("params") or {}
@@ -1143,6 +1185,10 @@ async def _quote_for_action(act: dict, snap: dict, connector: Any = None) -> flo
     # New-entry brackets: do not fall back to MDA tape / hints as "live"
     if needs_live_geometry:
         return None
+    if sym:
+        pos_px = _stk_market_price_from_snap(snap, sym)
+        if pos_px is not None:
+            return pos_px
     try:
         hint = float(params["price_hint"]) if params.get("price_hint") is not None else None
         if hint and hint > 0:

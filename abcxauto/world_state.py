@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
@@ -503,6 +505,100 @@ def _contract_fp(row: dict[str, Any] | None, *, use_id: bool = True) -> tuple[An
     return ("stk", sym, sec)
 
 
+_UNSET_FLOAT = sys.float_info.max
+_COVER_QTY_SLACK = 0.51
+
+
+def _clean_num(v: Any) -> float | None:
+    """Drop IBKR unset doubles and other non-finite junk."""
+    if v is None:
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(x):
+        return None
+    if abs(x) >= _UNSET_FLOAT:
+        return None
+    return x
+
+
+def _combo_legs_from_order(order: dict[str, Any] | None) -> list[dict[str, Any]]:
+    o = order if isinstance(order, dict) else {}
+    legs = o.get("combo_legs") or o.get("comboLegs") or []
+    return [leg for leg in legs if isinstance(leg, dict)]
+
+
+def _leg_ratio(leg: dict[str, Any] | None) -> float:
+    raw = (leg or {}).get("ratio")
+    try:
+        ratio = float(raw if raw is not None else 1)
+    except (TypeError, ValueError):
+        ratio = 1.0
+    return ratio if ratio > 0 else 1.0
+
+
+def _order_abs_qty(order: dict[str, Any] | None) -> float:
+    o = order if isinstance(order, dict) else {}
+    raw = o.get("quantity") if o.get("quantity") is not None else o.get("totalQuantity")
+    try:
+        return abs(float(raw or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _covers_held_qty(held: float, order: dict[str, Any], *, ratio: float = 1.0) -> bool:
+    try:
+        r = float(ratio)
+    except (TypeError, ValueError):
+        r = 1.0
+    if r <= 0:
+        r = 1.0
+    cover = _order_abs_qty(order) * r
+    return cover + 1e-9 >= abs(held) - _COVER_QTY_SLACK
+
+
+def _bag_order_lot(
+    order: dict[str, Any],
+    by_id: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any] | None, bool | None]:
+    """Held lot via BAG leg conIds. (lot, closing) or (None, None)."""
+    legs = _combo_legs_from_order(order)
+    if not legs:
+        return None, None
+    parent = str(order.get("action") or order.get("side") or "").upper()
+    matched: dict[str, Any] | None = None
+    closing: bool | None = None
+    for leg in legs:
+        cid = _row_con_id(leg)
+        if not cid:
+            continue
+        lot = by_id.get(cid)
+        if not lot:
+            continue
+        lot_qty = float(lot.get("qty") or 0)
+        if abs(lot_qty) < 1e-9:
+            continue
+        want = "SELL" if lot_qty > 0 else "BUY"
+        leg_act = str(leg.get("action") or "").upper()
+        leg_closes = leg_act == want or (not leg_act and parent == want)
+        if matched is None:
+            matched = lot
+        if not leg_closes:
+            if closing is None:
+                closing = False
+            continue
+        if _covers_held_qty(lot_qty, order, ratio=_leg_ratio(leg)):
+            return lot, True
+        if closing is not True:
+            closing = True
+            matched = lot
+    if matched is None:
+        return None, None
+    return matched, closing
+
+
 def compact_working_orders(
     orders: list[dict] | None,
     *,
@@ -555,19 +651,25 @@ def compact_working_orders(
             local = o.get("local_symbol") or o.get("localSymbol")
             if local:
                 row["local"] = local
-        stop = (
+        stop = _clean_num(
             o.get("aux_price")
             or o.get("auxPrice")
             or o.get("stop_price")
             or o.get("stopPrice")
         )
-        if stop not in (None, 0, 0.0, "0"):
+        if stop not in (None, 0, 0.0):
             row["stop"] = stop
-        lmt = o.get("lmt_price") or o.get("lmtPrice") or o.get("limit_price")
-        if lmt not in (None, 0, 0.0, "0"):
+        lmt = _clean_num(o.get("lmt_price") or o.get("lmtPrice") or o.get("limit_price"))
+        if lmt not in (None, 0, 0.0):
             row["lmt"] = lmt
-        trail = o.get("trail_percent") or o.get("trailingPercent") or o.get("trail_amount")
-        if trail not in (None, 0, 0.0, "0"):
+        trail = _clean_num(
+            o.get("trail_percent")
+            or o.get("trailingPercent")
+            or o.get("trail_amount")
+            or o.get("trailAmount")
+            or o.get("trail")
+        )
+        if trail not in (None, 0, 0.0):
             row["trail"] = trail
         if sec == "BAG":
             legs = o.get("combo_legs") or o.get("comboLegs")
@@ -576,17 +678,23 @@ def compact_working_orders(
             reserved = o.get("reserved_slots")
             if reserved not in (None, 0, 0.0, "0"):
                 row["reserved_slots"] = reserved
-        lot = by_id.get(cid) if cid else None
-        if lot is None:
-            lot = by_fp.get(_contract_fp(o, use_id=False))
+        lot: dict[str, Any] | None = None
+        closing: bool | None = None
+        if sec == "BAG":
+            lot, closing = _bag_order_lot(o, by_id)
+        else:
+            lot = by_id.get(cid) if cid else None
+            if lot is None:
+                lot = by_fp.get(_contract_fp(o, use_id=False))
+            if lot:
+                lot_qty = float(lot.get("qty") or 0)
+                closing = (action in {"SELL", "SLD"} and lot_qty > 0) or (
+                    action in {"BUY", "BOT"} and lot_qty < 0
+                )
         if lot:
             row["covers"] = lot["ident"]
-            lot_qty = float(lot.get("qty") or 0)
-            closing = (action in {"SELL", "SLD"} and lot_qty > 0) or (
-                action in {"BUY", "BOT"} and lot_qty < 0
-            )
             otype_u = str(otype or "").upper()
-            if not closing and not action and (
+            if closing is None and not action and (
                 "STP" in otype_u or otype_u.startswith("TRAIL")
             ):
                 closing = True
@@ -597,6 +705,134 @@ def compact_working_orders(
         if len(rows) >= limit:
             break
     return rows
+
+
+def _working_order_ids(
+    open_orders: list[dict] | None,
+    *,
+    working_orders: list[dict] | None = None,
+) -> set[int] | None:
+    """Live working order ids, or None when the list is unavailable."""
+    ids: set[int] = set()
+    if working_orders is not None:
+        if not isinstance(working_orders, list):
+            return None
+        src = working_orders
+    elif open_orders is not None:
+        if not isinstance(open_orders, list):
+            return None
+        src = open_orders
+    else:
+        return None
+    for row in src:
+        if not isinstance(row, dict):
+            continue
+        oid = row.get("order_id")
+        if oid is None:
+            oid = row.get("orderId")
+        try:
+            if oid is not None:
+                ids.add(int(oid))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _broker_reject_working_facts(
+    oid: Any,
+    *,
+    raw: dict[str, Any],
+    working_ids: set[int] | None,
+) -> dict[str, Any]:
+    if raw.get("gone") is True or raw.get("working") is False:
+        return {"working": False, "gone": True}
+    if raw.get("working") is True:
+        return {"working": True}
+    if working_ids is None:
+        return {}
+    try:
+        working = int(oid) in working_ids
+    except (TypeError, ValueError):
+        working = False
+    if working:
+        return {"working": True}
+    return {"working": False, "gone": True}
+
+
+def enrich_broker_rejects(
+    rejects: list[dict] | None,
+    open_orders: list[dict] | None,
+) -> list[dict[str, Any]]:
+    """Attach working/gone facts to raw broker reject rows."""
+    working_ids = _working_order_ids(open_orders)
+    out: list[dict[str, Any]] = []
+    for r in rejects or []:
+        if not isinstance(r, dict):
+            continue
+        oid = r.get("order_id")
+        if oid is None:
+            oid = r.get("orderId")
+        row = dict(r)
+        row.update(
+            _broker_reject_working_facts(oid, raw=r, working_ids=working_ids)
+        )
+        out.append(row)
+    return out
+
+
+def compact_broker_rejects(
+    rejects: list[dict] | None,
+    *,
+    open_orders: list[dict] | None = None,
+    working_orders: list[dict] | None = None,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Recent IBKR broker cancels/rejects tied to order_id."""
+    working_ids = _working_order_ids(open_orders, working_orders=working_orders)
+    rows: list[dict[str, Any]] = []
+    for r in reversed(rejects or []):
+        if not isinstance(r, dict):
+            continue
+        oid = r.get("order_id")
+        if oid is None:
+            oid = r.get("orderId")
+        if oid is None:
+            continue
+        row: dict[str, Any] = {
+            "order_id": oid,
+            "symbol": r.get("symbol"),
+            "kind": r.get("kind") or "broker_cancel",
+            "reason": str(r.get("reason") or "")[:240],
+        }
+        otype = r.get("order_type") or r.get("type")
+        if otype not in (None, ""):
+            row["type"] = otype
+        action = r.get("action")
+        if action not in (None, ""):
+            row["action"] = action
+        row.update(_broker_reject_working_facts(oid, raw=r, working_ids=working_ids))
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    rows.reverse()
+    return rows
+
+
+def format_broker_rejects(
+    rejects: list[dict] | None,
+    *,
+    limit: int = 3,
+) -> str:
+    bits: list[str] = []
+    for row in compact_broker_rejects(rejects, limit=limit):
+        sym = row.get("symbol") or "?"
+        oid = row.get("order_id")
+        kind = row.get("kind") or "broker_cancel"
+        reason = str(row.get("reason") or "")[:160]
+        bits.append(f"oid {oid} {sym} {kind}: {reason}")
+        if len(bits) >= limit:
+            break
+    return " / ".join(bits)
 
 
 def format_working_exits(
@@ -1346,6 +1582,10 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     working_exits = format_working_exits(open_orders, positions)
     working_entries = format_working_entries(open_orders, positions)
     working_orders = compact_working_orders(open_orders, positions=positions)
+    broker_rejects = compact_broker_rejects(
+        getattr(world, "broker_rejects", None),
+        open_orders=open_orders,
+    )
     sq = getattr(world, "stop_qty_fact", None)
     if isinstance(sq, dict) and sq and working_exits:
         match = sq.get("match")
@@ -1455,6 +1695,8 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "working_exits": working_exits,
         "working_entries": working_entries,
         "working_orders": working_orders,
+        "broker_rejects": broker_rejects,
+        "broker_reject_bit": format_broker_rejects(broker_rejects),
         "halt_trips_at_usd": halt_at,
         "halt_trips_at_pct_of_nl": pct_of_nl(halt_at, nl),
         "ibkr_day_vs_halt": day_vs,
@@ -1540,6 +1782,19 @@ def _lot_last_px(pos: dict[str, Any], quotes: dict[str, Any]) -> float | None:
     return px if px is not None and px > 0 else None
 
 
+def _defined_risk_vertical_lot(
+    position: dict[str, Any],
+    positions: list[dict] | None,
+) -> bool:
+    """True when an OPT lot is one leg of a live defined-risk vertical."""
+    sec = str(
+        position.get("secType") or position.get("sec_type") or position.get("sec") or "STK"
+    ).upper()
+    if not (sec.startswith("OPT") or sec == "FOP"):
+        return False
+    return vertical_partner(position, positions) is not None
+
+
 def _wake_lot_alarms(world: Any) -> dict[str, Any]:
     """Distance to written stop + lots with no covering working order."""
     positions = list(getattr(world, "positions", None) or [])
@@ -1567,7 +1822,7 @@ def _wake_lot_alarms(world: Any) -> dict[str, Any]:
             for o in exits
             if is_stop_order(str(o.get("order_type") or o.get("orderType") or ""))
         ]
-        if not exits:
+        if not exits and not _defined_risk_vertical_lot(p, positions):
             missing.append(ident)
         last = _lot_last_px(p, quotes)
         stop_px = None
@@ -2120,6 +2375,8 @@ def format_wake(
             parts.append(f"exits={day.get('working_exits')}.")
         if day.get("working_entries"):
             parts.append(f"working={day.get('working_entries')}.")
+        if day.get("broker_reject_bit"):
+            parts.append(f"broker_cancel={day.get('broker_reject_bit')}.")
         src = str(day.get("candle_source") or "").strip()
         if src and src not in ("none",):
             parts.append(f"candles={src}.")
@@ -2233,6 +2490,74 @@ def _regime_from_opps(opportunities: list[dict], pulse: dict) -> dict[str, Any]:
     }
 
 
+def _portfolio_arenas_fact(
+    positions: list[dict],
+    net_liq: float,
+) -> dict[str, Any] | None:
+    try:
+        from abcxauto.risk_gates import arena_exposure_usd, risk_base_usd
+        from abcxauto.universe import arenas_for_symbol, is_bucket_arena, membership_rows
+
+        cfg = get_config()
+        cap = float(getattr(cfg, "max_arena_concentration_pct", 0) or 0)
+        if not math.isfinite(cap) or cap <= 0:
+            return None
+        if not net_liq or net_liq <= 0:
+            return None
+        membership = membership_rows()
+        if membership is None:
+            return None
+    except Exception:
+        return None
+
+    held: dict[str, set[str]] = {}
+    for p in positions or []:
+        if not isinstance(p, dict):
+            continue
+        sym = str(p.get("symbol") or "").upper()
+        if not sym:
+            continue
+        try:
+            qty = float(p.get("quantity") or p.get("position") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(qty) < 1e-9:
+            continue
+        for arena in arenas_for_symbol(sym, membership=membership):
+            if is_bucket_arena(arena):
+                held.setdefault(arena, set()).add(sym)
+
+    book = risk_base_usd(net_liq)
+    if book <= 0:
+        return None
+
+    items: list[dict[str, Any]] = []
+    for arena_id in sorted(held):
+        exp = arena_exposure_usd(positions, arena_id, membership=membership)
+        if exp is None:
+            return None
+        pct = round(100.0 * float(exp) / float(book), 2)
+        cap_usd = (cap / 100.0) * book
+        headroom_usd = max(0.0, cap_usd - float(exp))
+        headroom_pct = max(0.0, round(cap - pct, 2))
+        items.append(
+            {
+                "arena": arena_id,
+                "symbols": sorted(held[arena_id]),
+                "exposure_usd": round(float(exp), 2),
+                "pct_nl": pct,
+                "cap_pct_nl": cap,
+                "headroom_usd": round(headroom_usd, 2),
+                "headroom_pct_nl": headroom_pct,
+            }
+        )
+
+    return {
+        "items": items,
+        "note": "Fact — bucket arena exposure vs cap; not a narrative hold gate",
+    }
+
+
 def _portfolio_risk(
     positions: list[dict],
     net_liq: float,
@@ -2296,13 +2621,17 @@ def _portfolio_risk(
         "deployed_long_pct_nl": deployed_pct,
         "note": "Fact — liquidity vs NL; not a hold/sell gate",
     }
-    return {
+    out: dict[str, Any] = {
         "n_positions": n,
         "top_symbol": top_sym,
         "top_concentration_pct": top_pct,
         "exposure": exposure,
         "capital_liquidity": capital_liquidity,
     }
+    arenas = _portfolio_arenas_fact(positions, net_liq)
+    if arenas is not None:
+        out["arenas"] = arenas
+    return out
 
 
 @dataclass
@@ -2342,6 +2671,7 @@ class WorldState:
     option_facts: list[dict] = field(default_factory=list)
     vol_facts: list[dict] = field(default_factory=list)
     fills: list[dict] = field(default_factory=list)
+    broker_rejects: list[dict] = field(default_factory=list)
     stop_qty_fact: dict[str, Any] | None = None
     book_reconciled: bool = False
 
@@ -2534,6 +2864,10 @@ def build_world_state(
         option_facts=option_facts,
         vol_facts=list(snap.get("vol_facts") or []),
         fills=list(snap.get("fills") or [])[:12],
+        broker_rejects=enrich_broker_rejects(
+            list(snap.get("broker_rejects") or [])[:20],
+            orders,
+        ),
         stop_qty_fact=stop_fact,
         book_reconciled=book_reconciled,
         ibkr_live_quotes=dict(snap.get("ibkr_live_quotes") or {}),

@@ -59,3 +59,37 @@ async def test_modify_target_rejects_when_ibkr_keeps_old_lmt(monkeypatch):
     assert "error" in out
     assert out["live_lmt"] == 0.52
     assert out["requested"] == 0.48
+
+
+@pytest.mark.asyncio
+async def test_modify_target_sticks_on_bag_combo(monkeypatch):
+    contract = SimpleNamespace(secType="BAG", symbol="NOK")
+    order = SimpleNamespace(orderId=1503, permId=99, lmtPrice=0.33)
+    trade = SimpleNamespace(contract=contract, order=order)
+
+    def placeOrder(c, o):
+        assert c.secType == "BAG"
+        o.lmtPrice = 0.22
+
+    async def _noop(*_a, **_k):
+        return None
+
+    ib = SimpleNamespace(
+        openTrades=lambda: [trade],
+        placeOrder=placeOrder,
+        reqAllOpenOrdersAsync=_noop,
+    )
+    mixin = IBKROrdersMixin()
+    mixin.ib = ib
+
+    async def _ok():
+        return True
+
+    mixin._ensure_connected = _ok
+    monkeypatch.setattr("abcxauto.broker.orders._safe_sleep", _noop)
+
+    out = await mixin.modify_target_price(1503, 0.22)
+    assert out.get("success") is True
+    assert out["new_limit_price"] == 0.22
+    assert out["live_lmt"] == 0.22
+    assert order.lmtPrice == 0.22

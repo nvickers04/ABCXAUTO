@@ -125,21 +125,25 @@ def operator_stopped() -> bool:
 
 
 def useful_hours(*, now: datetime | None = None) -> bool:
-    """RTH plus last hour of premarket (ET). Closed / weekend stay down."""
+    """RTH plus desk premarket (8:45 ET / 7:45 CDT). Closed / weekend stay down."""
     try:
         from zoneinfo import ZoneInfo
+
+        from abcxauto.park_clock import PREMARKET_START_ET
 
         clock = now or datetime.now(ZoneInfo("America/New_York"))
         if clock.tzinfo is None:
             clock = clock.replace(tzinfo=ZoneInfo("America/New_York"))
         else:
             clock = clock.astimezone(ZoneInfo("America/New_York"))
+        start = PREMARKET_START_ET.hour * 60 + PREMARKET_START_ET.minute
     except Exception:
         clock = now or datetime.now()
+        start = 8 * 60 + 45
     if clock.weekday() >= 5:
         return False
     minutes = clock.hour * 60 + clock.minute
-    return (8 * 60 + 30) <= minutes < (16 * 60)
+    return start <= minutes < (16 * 60)
 
 
 def tws_listening(host: str = "127.0.0.1", port: int = 7497, timeout: float = 2.0) -> bool:
@@ -573,8 +577,29 @@ def prepare_desk_start(*, exclude: set[int] | None = None) -> list[int]:
 def stop_desk(*, exclude: set[int] | None = None) -> list[int]:
     """One tree on Stop: latch stop, kill Pro python + flet, drop the lock."""
     mark_operator_stop()
-    killed = reap_leftover_desk(exclude=exclude)
-    killed.extend(kill_descendant_flet())
+    skip = protected_pids(extra=exclude)
+    killed: list[int] = []
+    seen: set[int] = set()
+    owner = desk_owner_pid()
+    if owner and owner not in skip:
+        # Close-the-window can leave the lock owner hung in IBKR cancel.
+        # Leftover reap skips a live owner; Stop must still kill that tree.
+        for dead in kill_descendant_flet(root=owner):
+            if dead not in seen:
+                seen.add(dead)
+                killed.append(dead)
+        for dead in kill_pid_tree(owner, exclude=exclude):
+            if dead not in seen:
+                seen.add(dead)
+                killed.append(dead)
+    for dead in reap_leftover_desk(exclude=exclude):
+        if dead not in seen:
+            seen.add(dead)
+            killed.append(dead)
+    for dead in kill_descendant_flet():
+        if dead not in seen:
+            seen.add(dead)
+            killed.append(dead)
     release_desk_lock(force=True)
     return killed
 

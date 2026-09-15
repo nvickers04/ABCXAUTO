@@ -150,10 +150,15 @@ def test_pause_engine_keeps_plan_file(tmp_path, monkeypatch):
     eng.state.open_orders = []
     eng.state.connected = True
     eng.worker = type("W", (), {"is_alive": lambda self: True})()
+    from abcxauto.park_clock import clear_look_abort, look_aborted
+
+    clear_look_abort()
     eng.pause_engine()
+    assert look_aborted() is True
     assert load_trade_plan() is not None
     assert eng.state.trade_plan is not None
     assert eng.state.trade_plan.get("symbol") == "IWM"
+    clear_look_abort()
 
 
 def _judgment_world(**kwargs):

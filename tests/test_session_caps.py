@@ -291,6 +291,16 @@ def test_request_wake_non_whitelist_does_not_set_event():
     assert eng._wake_reason == ""
 
 
+def test_ibkr_order_status_filled_wakes_immediately():
+    from abcxauto.park_clock import peek_interrupt
+
+    eng = _armed_wake_engine()
+    eng._on_ibkr_order_status({"status": "Filled", "order_id": 19875})
+    assert eng._wake_event.is_set()
+    assert eng._wake_reason == "fill"
+    assert peek_interrupt() is not None
+
+
 @pytest.mark.parametrize("reason", ["halt", "flat_confirmed"])
 def test_request_wake_non_poke_sets_event_without_live_poke(reason):
     from abcxauto.park_clock import peek_interrupt

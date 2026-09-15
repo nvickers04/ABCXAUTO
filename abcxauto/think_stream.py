@@ -1133,6 +1133,9 @@ def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
         "working_orders": [
             item for item in (row.get("working_orders") or []) if isinstance(item, dict)
         ][:12],
+        "broker_rejects": [
+            item for item in (row.get("broker_rejects") or []) if isinstance(item, dict)
+        ][:8],
     }
     if loaded:
         last = _read_json(LAST_TURN_PATH)
@@ -1147,9 +1150,12 @@ def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
             "session_range": {},
             "ibkr_live_quotes": {},
             "working_orders": [],
+            "broker_rejects": [],
         }
     # Leftover say is not the next job. Facts only.
-    return out if (tools or hits or n or out.get("working_orders")) else {}
+    return out if (
+        tools or hits or n or out.get("working_orders") or out.get("broker_rejects")
+    ) else {}
 
 
 def last_turn_look_failed(out: dict[str, Any] | None) -> bool:
@@ -1199,6 +1205,11 @@ def write_desk_brief(payload: dict[str, Any]) -> None:
             for row in (payload.get("working_orders") or [])
             if isinstance(row, dict)
         ][:12],
+        "broker_rejects": [
+            row
+            for row in (payload.get("broker_rejects") or [])
+            if isinstance(row, dict)
+        ][:8],
         "net_liquidation": payload.get("net_liquidation"),
         "mix": payload.get("mix") if isinstance(payload.get("mix"), dict) else {},
         "rationale": (payload.get("rationale") or "")[:800],
@@ -1238,6 +1249,36 @@ def _orders_of(out: dict[str, Any], world: dict[str, Any]) -> list[Any]:
         if isinstance(src, list) and src:
             return [row for row in src if isinstance(row, dict)]
     return []
+
+
+def _fills_of(out: dict[str, Any], world: dict[str, Any]) -> list[dict[str, Any]]:
+    for src in (out.get("fills"), world.get("fills")):
+        if isinstance(src, list) and src:
+            return [row for row in src if isinstance(row, dict)]
+    return []
+
+
+def _broker_rejects_of(
+    out: dict[str, Any],
+    world: dict[str, Any],
+    *,
+    prior: dict[str, Any] | None = None,
+    open_orders: list[Any] | None = None,
+    working_orders: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    from abcxauto.world_state import compact_broker_rejects
+
+    raw: list[dict[str, Any]] = []
+    for src in (out.get("broker_rejects"), world.get("broker_rejects")):
+        if isinstance(src, list) and src:
+            raw.extend(row for row in src if isinstance(row, dict))
+    if not raw and isinstance(prior, dict):
+        raw.extend(
+            row for row in (prior.get("broker_rejects") or []) if isinstance(row, dict)
+        )
+    return compact_broker_rejects(
+        raw, open_orders=open_orders, working_orders=working_orders
+    )
 
 
 def _working_orders_of(
@@ -1359,10 +1400,32 @@ def write_last_turn(out: dict[str, Any]) -> None:
             unreliable=unreliable or ibkr_down,
         )
         orders = _orders_of(out, world if isinstance(world, dict) else {})
+        broker_rejects = _broker_rejects_of(
+            out,
+            world if isinstance(world, dict) else {},
+            prior=prior,
+            open_orders=orders,
+            working_orders=working_orders,
+        )
+        fills = _fills_of(out, world if isinstance(world, dict) else {})
         if working_orders:
             persist_flat = False
         else:
-            persist_flat = book_is_flat(positions, orders)
+            persist_flat = book_is_flat(positions, orders, fills)
+        try:
+            sends_n = int(out.get("sends") or out.get("send_calls") or 0)
+        except (TypeError, ValueError):
+            sends_n = 0
+        if persist_flat and not bool(prior.get("flat", True)):
+            if sends_n > 0 or prior.get("working_orders"):
+                persist_flat = False
+        if persist_flat and sends_n > 0 and fills:
+            if not book_is_flat(positions, orders, []):
+                persist_flat = False
+        if not persist_flat and not open_lots:
+            open_lots = lot_labels(positions, fills=fills)
+        if not persist_flat and not open_lots and prior.get("open_lots"):
+            open_lots = list(prior.get("open_lots") or [])
         nl = world.get("net_liquidation") or out.get("equity")
         try:
             nl_f = float(nl) if nl is not None else 0.0
@@ -1395,6 +1458,7 @@ def write_last_turn(out: dict[str, Any]) -> None:
             "ibkr_connected": ibkr,
             "open_lots": open_lots,
             "working_orders": working_orders,
+            "broker_rejects": broker_rejects,
             "book_unreliable": bool(
                 out.get("book_unreliable") or gates.get("book_unreliable")
             ),

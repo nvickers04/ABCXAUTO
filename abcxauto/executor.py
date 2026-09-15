@@ -641,7 +641,10 @@ async def _verify_riskless_combo_cap(
 
 
 async def _verify_arena_concentration(
-    proposal: OrderProposal, connector: Any
+    proposal: OrderProposal,
+    connector: Any,
+    *,
+    look_snap: dict[str, Any] | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Bucket cap on send, even when paper risk_gates_enabled is off.
 
@@ -658,7 +661,9 @@ async def _verify_arena_concentration(
         cap = 25.0
     if cap <= 0:
         return None
-    ok, reason = await check_arena_concentration(proposal, connector)
+    ok, reason = await check_arena_concentration(
+        proposal, connector, snap=look_snap
+    )
     if ok:
         return None
     return {"error": reason, "status": "rejected"}
@@ -680,7 +685,11 @@ def _verify_defined_risk_only(proposal: OrderProposal) -> Optional[Dict[str, Any
 
 
 async def execute_proposal(
-    proposal: OrderProposal, connector: Any, *, source: str = "agent"
+    proposal: OrderProposal,
+    connector: Any,
+    *,
+    source: str = "agent",
+    look_snap: dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Dispatch a validated proposal to the matching gateway method.
 
@@ -706,7 +715,9 @@ async def execute_proposal(
         journal.record_dispatch(journal_id, False, rejection)
         return rejection
 
-    rejection = await _verify_arena_concentration(proposal, connector)
+    rejection = await _verify_arena_concentration(
+        proposal, connector, look_snap=look_snap
+    )
     if rejection:
         logger.warning(f"Proposal #{proposal.id} blocked: {rejection['error']}")
         journal.record_dispatch(journal_id, False, rejection)
@@ -721,7 +732,9 @@ async def execute_proposal(
     cfg = get_config()
     if cfg.risk_gates_enabled and not is_exit_or_management(proposal):
         gate = get_risk_gate()
-        ok, reason = await gate.pre_trade_check(proposal, connector)
+        ok, reason = await gate.pre_trade_check(
+            proposal, connector, snap=look_snap
+        )
         journal.record_gate_decision(journal_id, ok, reason)
         if not ok:
             logger.warning(f"Proposal #{proposal.id} blocked by risk gate: {reason}")
@@ -1128,4 +1141,9 @@ async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
             "learn": err,
             "reason_code": err.split(":", 1)[0].strip() if ":" in err else "rejected",
         }
-    return await execute_proposal(proposal, connector, source="cycle")
+    look_snap = action.get("_look_snap") if isinstance(action, dict) else None
+    if not isinstance(look_snap, dict):
+        look_snap = None
+    return await execute_proposal(
+        proposal, connector, source="cycle", look_snap=look_snap
+    )

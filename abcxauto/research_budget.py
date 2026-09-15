@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,7 @@ REASON_LAB_PROMOTE = "lab_promote_refused"
 
 # Clerk name for the existing AH brief pipeline. Not a new strategy card.
 DEFAULT_RESEARCH_CARD_ID = "research-brief"
+_ISO_WEEK_RE = re.compile(r"^\d{4}-W\d{2}$")
 
 _REPO = Path(__file__).resolve().parents[1]
 _DEFAULT_PATH = _REPO / "data" / "state" / "research_budget.json"
@@ -274,6 +276,29 @@ def ensure_research_card(
     return open_research_card(research_card_id, prove_window_id)
 
 
+def _coerce_prove_window(
+    window: str,
+    *,
+    now: datetime | None = None,
+    explicit: bool = False,
+) -> str:
+    """Keep an explicit window. Roll a leftover ISO week to the current ET week.
+
+    Disk / snap still carry last week's ``YYYY-Www`` after the week flips.
+    That window's brief halt must not skip this week's premarket looks.
+    Named lab windows (``prove-w1``) are not ISO weeks and stay as written.
+    """
+    current = default_prove_window_id(now=now)
+    raw = str(window or "").strip()
+    if not raw:
+        return current
+    if explicit:
+        return raw
+    if _ISO_WEEK_RE.fullmatch(raw) and raw != current:
+        return current
+    return raw
+
+
 def resolve_research_card(
     *,
     research_card_id: str = "",
@@ -299,13 +324,14 @@ def resolve_research_card(
         or str(disk.get("research_card_id") or "").strip()
         or DEFAULT_RESEARCH_CARD_ID
     )
+    explicit = bool(str(prove_window_id or "").strip())
     window = (
         str(prove_window_id or "").strip()
         or str(bag.get("prove_window_id") or "").strip()
         or str(disk.get("prove_window_id") or "").strip()
         or default_prove_window_id(now=now)
     )
-    return card, window
+    return card, _coerce_prove_window(window, now=now, explicit=explicit)
 
 
 def brief_budget_gate(

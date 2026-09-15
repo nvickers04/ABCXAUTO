@@ -115,3 +115,42 @@ def test_brain_fallback_flat_sees_orders():
 
     assert book_is_flat([], [_bag_order()]) is False
     assert book_is_flat([], []) is True
+
+
+def test_write_last_turn_fill_lag_does_not_fake_flat(tmp_path, monkeypatch):
+    """Filled ticket + empty positions must not overwrite a working last_turn."""
+    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
+    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
+    ts._run = {"run_id": "r1", "pid": 1}
+    ts.write_last_turn_after_send(
+        strat="vertical_spread",
+        sends=1,
+        positions=[],
+        orders=[_bag_order(19875)],
+        rationale="placed",
+        tool_trace=["send"],
+        net_liquidation=34047.64,
+    )
+    fill = {
+        "side": "BOT",
+        "symbol": "SPY",
+        "conId": 28812380,
+        "order_id": 19875,
+        "ts": "2099-01-01T00:00:00+00:00",
+        "quantity": 6.0,
+        "price": 5.08,
+    }
+    ts.write_last_turn({
+        "strat": "vertical_spread",
+        "rationale": "filled",
+        "sends": 6,
+        "send_calls": 6,
+        "tool_trace": ["send", "book"],
+        "positions": [],
+        "open_orders": [],
+        "fills": [fill],
+        "world_state": {"flat": True, "net_liquidation": 34047.64},
+    })
+    last = json.loads((tmp_path / "last_turn.json").read_text(encoding="utf-8"))
+    assert last["flat"] is False
+    assert last["working_orders"] == []

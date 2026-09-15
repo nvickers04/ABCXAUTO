@@ -13,6 +13,7 @@ from abcxauto.world_state import (
     book_is_flat,
     build_world_state,
     combo_partner,
+    compact_broker_rejects,
     concentration,
     day_facts,
     format_wake,
@@ -24,6 +25,7 @@ from abcxauto.world_state import (
     single_leg_vertical_block,
     structure_mix,
     vertical_partner,
+    _portfolio_risk,
 )
 
 
@@ -1417,6 +1419,194 @@ def test_compact_working_orders_tags_exit_of_long_call():
     assert rows[0]["conId"] == 899950329
 
 
+def test_compact_working_orders_scrubs_ibkr_unset_trail():
+    import sys
+
+    from abcxauto.world_state import compact_working_orders
+
+    bag = {
+        "order_id": 20034,
+        "symbol": "SPY",
+        "secType": "BAG",
+        "orderType": "LMT",
+        "action": "SELL",
+        "lmtPrice": 5.24,
+        "totalQuantity": 6,
+        "comboLegs": [{}, {}],
+        "trail_percent": sys.float_info.max,
+    }
+    rows = compact_working_orders([bag])
+    assert rows[0]["lmt"] == 5.24
+    assert "trail" not in rows[0]
+
+    real = dict(bag, trail_amount=1.25)
+    del real["trail_percent"]
+    rows = compact_working_orders([real])
+    assert rows[0]["trail"] == 1.25
+
+    stop_sentinel = {
+        "order_id": 1,
+        "symbol": "SPY",
+        "secType": "STK",
+        "orderType": "STP",
+        "action": "SELL",
+        "totalQuantity": 1,
+        "auxPrice": float("inf"),
+    }
+    rows = compact_working_orders([stop_sentinel])
+    assert "stop" not in rows[0]
+
+
+def _spy_long_vertical_positions(qty: float = 6.0):
+    return [
+        {
+            "symbol": "SPY",
+            "sec_type": "OPT",
+            "quantity": qty,
+            "conId": 755001,
+            "strike": 755.0,
+            "right": "C",
+            "expiration": "20260918",
+        },
+        {
+            "symbol": "SPY",
+            "sec_type": "OPT",
+            "quantity": -qty,
+            "conId": 765001,
+            "strike": 765.0,
+            "right": "C",
+            "expiration": "20260918",
+        },
+    ]
+
+
+def _spy_close_bag(*, qty: float = 6.0, action: str = "SELL", oid: int = 20034):
+    return {
+        "order_id": oid,
+        "symbol": "SPY",
+        "secType": "BAG",
+        "orderType": "LMT",
+        "action": action,
+        "lmtPrice": 5.24,
+        "totalQuantity": qty,
+        "comboLegs": [
+            {"conId": 755001, "action": "SELL", "ratio": 1},
+            {"conId": 765001, "action": "BUY", "ratio": 1},
+        ],
+    }
+
+
+def test_compact_working_orders_bag_close_long_vertical():
+    from abcxauto.world_state import compact_working_orders
+
+    positions = _spy_long_vertical_positions()
+    rows = compact_working_orders([_spy_close_bag()], positions=positions)
+    assert rows[0]["role"] == "exit"
+    assert rows[0]["legs"] == 2
+    assert "SPY" in str(rows[0]["covers"])
+    assert "755" in str(rows[0]["covers"])
+    assert "long" in str(rows[0]["covers"])
+
+
+def test_compact_working_orders_bag_without_held_legs_is_entry():
+    from abcxauto.world_state import compact_working_orders
+
+    rows = compact_working_orders([_spy_close_bag(qty=1.0)], positions=[])
+    assert rows[0]["role"] == "entry"
+    assert "covers" not in rows[0]
+
+
+def test_compact_working_orders_bag_close_short_vertical():
+    from abcxauto.world_state import compact_working_orders
+
+    positions = [
+        {"symbol": "SPY", "sec_type": "OPT", "quantity": -6, "conId": 755001,
+         "strike": 755.0, "right": "C", "expiration": "20260918"},
+        {"symbol": "SPY", "sec_type": "OPT", "quantity": 6, "conId": 765001,
+         "strike": 765.0, "right": "C", "expiration": "20260918"},
+    ]
+    bag = _spy_close_bag(action="BUY", qty=6.0)
+    bag["comboLegs"] = [
+        {"conId": 755001, "action": "BUY", "ratio": 1},
+        {"conId": 765001, "action": "SELL", "ratio": 1},
+    ]
+    rows = compact_working_orders([bag], positions=positions)
+    assert rows[0]["role"] == "exit"
+    assert "short" in str(rows[0]["covers"])
+
+
+def test_wake_lot_alarms_bag_close_suppresses_missing():
+    from abcxauto.world_state import _wake_lot_alarms
+
+    positions = _spy_long_vertical_positions()
+    orders = [_spy_close_bag()]
+    world = type("W", (), {"positions": positions, "open_orders": orders, "ibkr_live_quotes": {}})()
+    alarms = _wake_lot_alarms(world)
+    assert alarms["working_order_missing"] == []
+
+
+def test_wake_lot_alarms_stk_without_stop_still_missing():
+    from abcxauto.world_state import _wake_lot_alarms
+
+    positions = [{"symbol": "AAPL", "sec_type": "STK", "quantity": 10, "conId": 111}]
+    world = type("W", (), {"positions": positions, "open_orders": [], "ibkr_live_quotes": {}})()
+    alarms = _wake_lot_alarms(world)
+    assert alarms["working_order_missing"] == ["AAPL STK long 10"]
+
+
+def test_wake_lot_alarms_defined_risk_vertical_without_close_not_flagged():
+    from abcxauto.world_state import _wake_lot_alarms
+    from abcxauto.monitor import build_protection_report
+
+    positions = _spy_long_vertical_positions(qty=1.0)
+    report = build_protection_report(positions, [])
+    assert report["unprotected_symbols"] == []
+    world = type("W", (), {"positions": positions, "open_orders": [], "ibkr_live_quotes": {}})()
+    alarms = _wake_lot_alarms(world)
+    assert alarms["working_order_missing"] == []
+
+
+def test_wake_lot_alarms_naked_opt_still_flags():
+    from abcxauto.world_state import _wake_lot_alarms
+
+    positions = [{
+        "symbol": "QQQ",
+        "sec_type": "OPT",
+        "quantity": 1,
+        "conId": 740683086,
+        "strike": 500.0,
+        "right": "C",
+        "expiration": "20260918",
+    }]
+    world = type("W", (), {"positions": positions, "open_orders": [], "ibkr_live_quotes": {}})()
+    alarms = _wake_lot_alarms(world)
+    assert len(alarms["working_order_missing"]) == 1
+    assert "QQQ" in alarms["working_order_missing"][0]
+    assert "260918C500" in alarms["working_order_missing"][0]
+    assert "long 1" in alarms["working_order_missing"][0]
+
+
+def test_wake_lot_alarms_orphan_short_leg_still_flags():
+    from abcxauto.world_state import _wake_lot_alarms, vertical_partner
+
+    positions = [{
+        "symbol": "SPY",
+        "sec_type": "OPT",
+        "quantity": -1,
+        "conId": 765001,
+        "strike": 765.0,
+        "right": "C",
+        "expiration": "20260918",
+    }]
+    assert vertical_partner(positions[0], positions) is None
+    world = type("W", (), {"positions": positions, "open_orders": [], "ibkr_live_quotes": {}})()
+    alarms = _wake_lot_alarms(world)
+    assert len(alarms["working_order_missing"]) == 1
+    assert "SPY" in alarms["working_order_missing"][0]
+    assert "260918C765" in alarms["working_order_missing"][0]
+    assert "short 1" in alarms["working_order_missing"][0]
+
+
 def test_trade_plan_round_trip(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
     clear_trade_plan()
@@ -1447,3 +1637,182 @@ def test_trade_plan_round_trip(tmp_path, monkeypatch):
     from_bracket = plan_from_bracket_action(act, "fade thesis")
     assert from_bracket is not None
     assert from_bracket.direction == "SHORT"
+
+
+def _arena_cfg(monkeypatch, **overrides):
+    from abcxauto.config import Config, get_config
+
+    base = get_config()
+    data = {**base.__dict__, "max_arena_concentration_pct": 20.0, **overrides}
+    cfg = Config(**data)
+    monkeypatch.setattr("abcxauto.world_state.get_config", lambda: cfg)
+    return cfg
+
+
+def test_portfolio_risk_arenas_summed_exposure(monkeypatch):
+    _arena_cfg(monkeypatch)
+    positions = [
+        {"symbol": "SPY", "quantity": 10, "marketValue": 4000},
+        {"symbol": "QQQ", "quantity": 5, "marketValue": 3000},
+    ]
+    net = 50_000.0
+    port = _portfolio_risk(positions, net)
+    arenas = port["arenas"]
+    assert "note" in arenas
+    idx = [a for a in arenas["items"] if a["arena"] == "index_etfs"]
+    assert len(idx) == 1
+    row = idx[0]
+    assert set(row["symbols"]) == {"SPY", "QQQ"}
+    assert row["exposure_usd"] == 7000.0
+    assert row["pct_nl"] == round(100.0 * 7000 / net, 2)
+    assert row["cap_pct_nl"] == 20.0
+    assert row["headroom_usd"] == round(net * 0.20 - 7000, 2)
+    assert row["headroom_pct_nl"] == round(20.0 - row["pct_nl"], 2)
+
+
+def test_portfolio_risk_arenas_spy_live_headroom_zero(monkeypatch):
+    """2026-09-15 index_etfs block: ~20.5% held vs 20% cap → ~0 headroom."""
+    _arena_cfg(monkeypatch)
+    net = 33_700.0
+    exposure = 6920.0
+    port = _portfolio_risk(
+        [{"symbol": "SPY", "quantity": 20, "marketValue": exposure}],
+        net,
+    )
+    row = port["arenas"]["items"][0]
+    assert row["arena"] == "index_etfs"
+    assert row["symbols"] == ["SPY"]
+    assert row["exposure_usd"] == exposure
+    assert row["pct_nl"] == round(100.0 * exposure / net, 2)
+    assert row["cap_pct_nl"] == 20.0
+    assert row["headroom_usd"] == 0.0
+    assert row["headroom_pct_nl"] == 0.0
+
+
+def test_portfolio_risk_arenas_over_cap_headroom_floored(monkeypatch):
+    _arena_cfg(monkeypatch)
+    net = 30_000.0
+    exposure = 7000.0
+    port = _portfolio_risk(
+        [{"symbol": "SPY", "quantity": 10, "marketValue": exposure}],
+        net,
+    )
+    row = port["arenas"]["items"][0]
+    assert row["pct_nl"] > 20.0
+    assert row["headroom_usd"] == 0.0
+    assert row["headroom_pct_nl"] == 0.0
+
+
+def test_portfolio_risk_arenas_fail_soft_no_crash(monkeypatch):
+    from abcxauto.config import Config, get_config
+
+    base = get_config()
+    cfg = Config(**{**base.__dict__, "max_arena_concentration_pct": 0.0})
+    monkeypatch.setattr("abcxauto.world_state.get_config", lambda: cfg)
+    port = _portfolio_risk(
+        [{"symbol": "SPY", "quantity": 1, "marketValue": 5000}],
+        50_000.0,
+    )
+    assert "arenas" not in port
+
+    monkeypatch.setattr(
+        "abcxauto.universe.membership_rows",
+        lambda **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    _arena_cfg(monkeypatch)
+    port = _portfolio_risk(
+        [{"symbol": "SPY", "quantity": 1, "marketValue": 5000}],
+        50_000.0,
+    )
+    assert "arenas" not in port
+
+
+def test_compact_broker_rejects_gone_when_not_working():
+    raw = [
+        {
+            "order_id": 21107,
+            "symbol": "SPY",
+            "kind": "broker_cancel",
+            "reason": "Order Canceled - reason:202",
+        }
+    ]
+    rows = compact_broker_rejects(raw, open_orders=[])
+    assert rows[0]["working"] is False
+    assert rows[0]["gone"] is True
+
+
+def test_compact_broker_rejects_still_working_not_gone():
+    raw = [
+        {
+            "order_id": 21250,
+            "symbol": "QQQ",
+            "kind": "broker_cancel",
+            "reason": "pending review",
+        }
+    ]
+    rows = compact_broker_rejects(
+        raw,
+        open_orders=[{"order_id": 21250, "symbol": "QQQ", "quantity": 1}],
+    )
+    assert rows[0]["working"] is True
+    assert "gone" not in rows[0]
+
+
+def test_compact_broker_rejects_omit_working_when_unavailable():
+    raw = [{"order_id": 99, "symbol": "AAPL", "kind": "broker_cancel", "reason": "x"}]
+    rows = compact_broker_rejects(raw)
+    assert "working" not in rows[0]
+    assert "gone" not in rows[0]
+
+
+def test_broker_rejects_gone_reaches_book_payload(monkeypatch, tmp_path):
+    monkeypatch.setenv("ABCXAUTO_TRADE_PLAN_PATH", str(tmp_path / "plan.json"))
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "j.db"))
+    from abcxauto.brain import _book_payload
+    from abcxauto.memory import reset_journal
+
+    reset_journal(path=str(tmp_path / "j.db"), enabled=True)
+    snap = {
+        "taken_at": "2026-09-15T16:36:00Z",
+        "account": {"netliquidation": 50_000.0, "dailypnl": 0},
+        "positions": [],
+        "open_orders": [],
+        "fills": [],
+        "broker_rejects": [
+            {
+                "order_id": 21107,
+                "symbol": "SPY",
+                "kind": "broker_cancel",
+                "reason": "Order Canceled - reason:202",
+            }
+        ],
+        "protection": {"unprotected_symbols": []},
+        "reality_pulse": {"session": {"status": "regular"}},
+        "portfolio_state": {},
+    }
+    ws = build_world_state(cycle=1, snap=snap, opportunities=[], news_items=[])
+    book = _book_payload(ws)
+    reject = book["world"]["broker_rejects"][0]
+    assert reject["order_id"] == 21107
+    assert reject["working"] is False
+    assert reject["gone"] is True
+    day_reject = book["day"]["broker_rejects"][0]
+    assert day_reject["gone"] is True
+
+
+def test_portfolio_risk_arenas_reach_book_tool(monkeypatch):
+    from abcxauto import book
+
+    _arena_cfg(monkeypatch)
+    state = book.build_book(
+        account={"netliquidation": 33_700.0, "dailypnl": 0, "totalcashvalue": 26_780.0},
+        positions=[
+            {"symbol": "SPY", "quantity": 20, "marketValue": 6920.0, "secType": "STK"},
+        ],
+        open_orders=[],
+        protection={"unprotected_symbols": []},
+        include_narrative=False,
+    )
+    arenas = state["portfolio_risk"]["arenas"]
+    assert arenas["items"][0]["arena"] == "index_etfs"
+    assert arenas["items"][0]["headroom_pct_nl"] == 0.0

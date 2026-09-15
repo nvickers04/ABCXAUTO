@@ -38,8 +38,6 @@ class SendMarksMixin:
         token_used: bool = False,
         source: str = "",
         portfolio_max_loss_usd: Any = None,
-        portfolio_cap_usd: Any = None,
-        portfolio_usd_refused: Any = None,
         ts: Optional[str] = None,
     ) -> Optional[int]:
         """KEEP-3 preview row. Never raises."""
@@ -51,9 +49,6 @@ class SendMarksMixin:
             if not pid:
                 return None
             refuse_json = _json_dumps(would_refuse) if would_refuse is not None else None
-            usd_refused = None
-            if portfolio_usd_refused is not None:
-                usd_refused = 1 if portfolio_usd_refused else 0
             with self._connect() as conn:
                 cur = conn.execute(
                     """
@@ -62,7 +57,7 @@ class SendMarksMixin:
                         max_loss, would_refuse_json, verdict, token_used,
                         source, portfolio_max_loss_usd, portfolio_cap_usd,
                         portfolio_usd_refused
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
                     """,
                     (
                         _row_ts(ts),
@@ -76,8 +71,6 @@ class SendMarksMixin:
                         1 if token_used else 0,
                         source or None,
                         portfolio_max_loss_usd,
-                        portfolio_cap_usd,
-                        usd_refused,
                     ),
                 )
                 conn.commit()
@@ -147,8 +140,8 @@ class SendMarksMixin:
             else:
                 item["would_refuse"] = []
             item["token_used"] = bool(item.get("token_used"))
-            if item.get("portfolio_usd_refused") is not None:
-                item["portfolio_usd_refused"] = bool(item.get("portfolio_usd_refused"))
+            item.pop("portfolio_cap_usd", None)
+            item.pop("portfolio_usd_refused", None)
             return item
         except Exception:
             logger.exception("journal.get_send_preview failed")

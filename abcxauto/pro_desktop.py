@@ -144,7 +144,6 @@ RISK_FIELDS = (
     ("max_peak_drawdown_pct", "Peak drawdown", "% of NetLiq, 2 – 25"),
     ("max_option_premium_pct", "Max option premium", "% of NetLiq, 0 = off, else 1 – 25"),
     ("max_open_positions", "Max open lots", "0 = off — Grok may set N for this book"),
-    ("portfolio_cap_usd", "Portfolio max-loss $", "Display only. Not a place refuse. Default 800 is not a gate"),
 )
 # ProEngine._note kinds. Anything not listed still paints its message in MUTED,
 # so a new note kind is visible the day it is added.
@@ -2534,6 +2533,7 @@ class ProTerminal:
             self.col_activity.controls = [self.lbl_activity]
             return
         controls: list[ft.Control] = []
+        rejects = self._broker_rejects_for_display()
         for r in reversed(records):
             kind = str(r.get("type") or "cycle").lower()
             ts = str(r.get("ts") or "")
@@ -2546,10 +2546,12 @@ class ProTerminal:
                 what = str(
                     r.get("strat") or (r.get("action_obj") or {}).get("strategy") or "—"
                 )
-                result = self._format_result_status(r.get("result") or {})
+                result = self._format_result_status(r.get("result") or {}, rejects)
                 color = (
                     RED
-                    if result.lower().startswith(("blocked", "rejected", "fail", "error"))
+                    if result.lower().startswith(
+                        ("blocked", "rejected", "fail", "error", "broker-cancel")
+                    )
                     else TEXT
                 )
             controls.append(
@@ -3920,9 +3922,12 @@ class ProTerminal:
         self._refresh_service_status()
         self._sync_think_stream()
         result = s.last_result or {}
-        status = self._format_result_status(result)
+        rejects = self._broker_rejects_for_display()
+        status = self._format_result_status(result, rejects)
         self.lbl_result.value = f"Result: {status}"
-        blocked = status.lower().startswith(("blocked", "rejected", "fail", "error"))
+        blocked = status.lower().startswith(
+            ("blocked", "rejected", "fail", "error", "broker-cancel")
+        )
         self.lbl_result.color = RED if blocked else TEXT
         rationale = str(s.brain_rationale or "").strip()
         if not s.equity:
@@ -4011,11 +4016,59 @@ class ProTerminal:
             pass
         self._paint_think_news_if_flat()
 
+    def _broker_rejects_for_display(self) -> list[dict]:
+        from abcxauto.world_state import compact_broker_rejects
+
+        s = self.engine.state
+        rejects = list(getattr(s, "broker_rejects", None) or [])
+        conn = getattr(self.engine, "conn", None)
+        if conn is not None:
+            fn = getattr(conn, "get_broker_rejects", None)
+            if callable(fn):
+                try:
+                    live = fn() or []
+                    if live:
+                        rejects = live
+                except Exception:
+                    pass
+        return compact_broker_rejects(rejects)
+
     @staticmethod
-    def _format_result_status(res: object) -> str:
+    def _format_result_status(
+        res: object,
+        broker_rejects: list[dict] | None = None,
+    ) -> str:
         if not isinstance(res, dict) or not res:
             return "—"
         if res.get("success") is True:
+            oid = res.get("order_id")
+            if oid is not None and broker_rejects:
+                try:
+                    oid_i = int(oid)
+                except (TypeError, ValueError):
+                    oid_i = None
+                if oid_i is not None:
+                    for row in reversed(broker_rejects):
+                        if not isinstance(row, dict):
+                            continue
+                        try:
+                            if int(row.get("order_id") or 0) != oid_i:
+                                continue
+                        except (TypeError, ValueError):
+                            continue
+                        kind = str(row.get("kind") or "broker_cancel")
+                        reason = str(row.get("reason") or "").strip()
+                        for prefix in (
+                            "Order Canceled - reason:",
+                            "Order rejected - reason:",
+                            "Order Rejected - reason:",
+                        ):
+                            if reason.startswith(prefix):
+                                reason = reason[len(prefix) :].strip()
+                                break
+                        label = "broker-cancelled" if kind == "broker_cancel" else "rejected"
+                        bit = f"{label}: {reason}" if reason else label
+                        return bit if len(bit) <= 120 else bit[:117] + "…"
             if res.get("filled") is True:
                 ep = res.get("entry_price")
                 return f"filled @{ep}" if ep not in (None, "") else "filled"
@@ -4084,7 +4137,10 @@ class ProTerminal:
                 lines.append(f"{ts}  {kind.upper()}  {r.get('msg') or '—'}")
                 continue
             strat = r.get("strat") or (r.get("action_obj") or {}).get("strategy") or "—"
-            status = self._format_result_status(r.get("result") or {})
+            status = self._format_result_status(
+                r.get("result") or {},
+                self._broker_rejects_for_display(),
+            )
             lines.append(f"{ts}  {strat}  {status}")
         return "\n".join(lines) or "Connect IBKR."
 

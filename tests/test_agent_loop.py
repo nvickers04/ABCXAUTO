@@ -597,3 +597,130 @@ def test_result_dict_keeps_hunt_tape():
     )
     assert out["scan_hits"]["rows"][0]["symbol"] == "SNDK"
     assert out["session_range"]["SNDK"]["low"] == 88.0
+
+
+@pytest.mark.asyncio
+async def test_oca_quote_uses_open_stk_market_price():
+    from abcxauto.agent_loop import _quote_for_action
+
+    act = {
+        "strategy": "oca",
+        "params": {
+            "symbol": "SOFI",
+            "direction": "LONG",
+            "stop_price": 24.0,
+            "target_price": 28.0,
+            "quantity": 10,
+        },
+    }
+    snap = {
+        "ibkr_live_quotes": {},
+        "positions": [
+            {"symbol": "SOFI", "quantity": 10, "sec_type": "STK", "market_price": 25.5},
+        ],
+    }
+    got = await _quote_for_action(act, snap, connector=None)
+    assert got == pytest.approx(25.5)
+
+
+@pytest.mark.asyncio
+async def test_new_entry_bracket_ignores_stk_market_price_fallback():
+    from abcxauto.agent_loop import _quote_for_action
+
+    act = {
+        "strategy": "market_bracket",
+        "params": {"symbol": "SOFI", "price_hint": 25.0},
+    }
+    snap = {
+        "ibkr_live_quotes": {},
+        "positions": [
+            {"symbol": "SOFI", "quantity": 10, "sec_type": "STK", "market_price": 25.5},
+        ],
+    }
+    got = await _quote_for_action(act, snap, connector=None)
+    assert got is None
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_oca_passes_geometry_from_position_mark(monkeypatch, tmp_path):
+    from abcxauto.agent_loop import execute_ticket
+    from abcxauto.monitor import build_protection_report
+    from abcxauto.world_state import WorldState
+
+    monkeypatch.setenv("ABCXAUTO_STRUCTURE_EVENTS_PATH", str(tmp_path / "ev.jsonl"))
+    sent: list[dict] = []
+
+    async def _no_live_quote(_c, name, _a=None):
+        if name == "quote":
+            return {"symbol": "INTC", "error": "no live last"}
+        return {}
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok", "success": True}
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", _no_live_quote)
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
+    monkeypatch.setattr(
+        "abcxauto.agent_loop.get_config",
+        lambda: SimpleNamespace(
+            is_paper=True,
+            trading_mode="paper",
+            max_risk_per_trade_pct=1.0,
+            max_position_pct=20.0,
+            risk_gates_enabled=False,
+            defined_risk_only=False,
+        ),
+    )
+    positions = [
+        {"symbol": "INTC", "quantity": 15, "sec_type": "STK", "market_price": 23.4},
+    ]
+    orders: list[dict] = []
+    protection = build_protection_report(positions, orders)
+    assert protection["unprotected_symbols"] == ["INTC"]
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=False,
+        needs_protection=True,
+        unprotected=["INTC"],
+        net_liquidation=100_000.0,
+        daily_pnl=0.0,
+        positions=positions,
+        open_orders=orders,
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    act = {
+        "action": "oca",
+        "strategy": "oca",
+        "rationale": "Protect INTC last-stop",
+        "params": {
+            "symbol": "INTC",
+            "quantity": 15,
+            "direction": "LONG",
+            "stop_price": 22.0,
+            "target_price": 26.0,
+        },
+    }
+    snap = {
+        "account": {"netliquidation": 100_000.0},
+        "positions": positions,
+        "open_orders": orders,
+        "protection": protection,
+        "ibkr_live_quotes": {},
+    }
+    result = await execute_ticket(act, object(), world, snap)
+    assert result.get("reason_code") != "geometry_quote_required"
+    assert sent
+    assert sent[0].get("strategy") == "oca"

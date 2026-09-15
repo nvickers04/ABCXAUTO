@@ -723,8 +723,6 @@ def preview_ticket(
             token_used=False,
             source=source,
             portfolio_max_loss_usd=usd.get("portfolio_max_loss_usd"),
-            portfolio_cap_usd=usd.get("portfolio_cap_usd"),
-            portfolio_usd_refused=False,
         )
     except Exception:
         logger.debug("preview journal failed", exc_info=True)
@@ -748,9 +746,9 @@ def preview_ticket(
     }
     if usd:
         try:
-            from abcxauto.portfolio_loss import stamp_portfolio_usd
+            from abcxauto.portfolio_loss import stamp_portfolio_max_loss
 
-            stamp_portfolio_usd(out, usd)
+            stamp_portfolio_max_loss(out, usd)
         except Exception:
             logger.debug("preview portfolio stamp failed", exc_info=True)
     if not passed:

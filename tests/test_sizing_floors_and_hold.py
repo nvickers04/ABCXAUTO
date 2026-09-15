@@ -176,7 +176,8 @@ async def test_floors_off_skips_pct_but_blocks_unknown_option_and_short(monkeypa
     )
     ok, reason = await gate.pre_trade_check(buy, conn)
     assert ok is False
-    assert reason == "size_unknown_notional"
+    assert reason.startswith("size_unknown_notional:")
+    assert "option_quote" in reason
 
 
 @pytest.mark.asyncio

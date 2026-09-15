@@ -1151,7 +1151,7 @@ AGENT_TOOLS = [
 
 
 def _send_strategy_names_for_look(*, session: str = "") -> list[str]:
-    """send enum this look. Hold is never a ticket. Kill RTH is vertical_spread only."""
+    """send enum this look. Hold is never a ticket. Kill RTH is vertical_spread + book edits."""
     try:
         from abcxauto.thin_rth_kill_look import send_strategy_names
 
@@ -1463,16 +1463,32 @@ async def _run_tool(
             st["desk_mode"] = ""
             st["send_allowed"] = True
         try:
-            from abcxauto.world_state import compact_working_orders, lot_labels
+            from abcxauto.world_state import (
+                compact_broker_rejects,
+                compact_working_orders,
+                lot_labels,
+            )
 
             st["open_lots"] = lot_labels(getattr(world, "positions", None))
             st["working_orders"] = compact_working_orders(
                 getattr(world, "open_orders", None),
                 positions=getattr(world, "positions", None),
             )
+            rejects = getattr(world, "broker_rejects", None)
+            if not rejects and connector is not None:
+                fn = getattr(connector, "get_broker_rejects", None)
+                if callable(fn):
+                    try:
+                        rejects = fn()
+                    except Exception:
+                        rejects = []
+            st["broker_rejects"] = compact_broker_rejects(
+                rejects, open_orders=getattr(world, "open_orders", None)
+            )
         except Exception:
             st["open_lots"] = []
             st["working_orders"] = []
+            st["broker_rejects"] = []
         pulse = snap.get("reality_pulse") if isinstance(snap.get("reality_pulse"), dict) else {}
         if not pulse:
             pulse = getattr(world, "pulse", None) or {}

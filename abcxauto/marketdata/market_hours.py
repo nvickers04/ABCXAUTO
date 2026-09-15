@@ -31,7 +31,8 @@ class MarketSession(Enum):
 class MarketHoursProvider:
     """
     Provides market hours information using exchange calendars and IBKR contract details.
-    Supports premarket (4:00 AM - 9:30 AM ET) and postmarket (4:00 PM - 8:00 PM ET) detection.
+    Supports desk premarket (8:45 AM - 9:30 AM ET / 7:45 AM CDT) and
+    postmarket (4:00 PM - 8:00 PM ET) detection.
     """
 
     def __init__(self, exchange: str = 'NYSE'):
@@ -62,7 +63,9 @@ class MarketHoursProvider:
                     logger.warning(f"Invalid time format for {key}: {val}, using default")
             return default
 
-        self.premarket_start = _parse_time('premarket_start', time(4, 0))
+        from abcxauto.park_clock import PREMARKET_START_ET
+
+        self.premarket_start = _parse_time('premarket_start', PREMARKET_START_ET)
         self.regular_open = _parse_time('regular_open', time(9, 30))
         self.regular_close = _parse_time('regular_close', time(16, 0))
         self.postmarket_end = _parse_time('postmarket_end', time(20, 0))

@@ -265,14 +265,55 @@ def _pct_of_nl(dollars: float, book: float) -> float:
     return round(100.0 * float(dollars) / float(book), 4)
 
 
-def estimate_notional(proposal: OrderProposal) -> Optional[float]:
+_OPTION_PREMIUM_KEYS = (
+    "limit_price",
+    "credit",
+    "net_credit",
+    "premium",
+    "net_premium",
+)
+
+
+def _proposal_params_dict(proposal: OrderProposal) -> dict[str, Any]:
+    params = proposal.params
+    dump = getattr(params, "model_dump", None)
+    if callable(dump):
+        try:
+            blob = dump(exclude_none=False)
+        except TypeError:
+            blob = dump()
+        if isinstance(blob, dict):
+            return blob
+    return {}
+
+
+def size_unknown_notional_reason(
+    proposal: OrderProposal,
+    snap: dict[str, Any] | None = None,
+) -> str:
+    """Actionable refuse when notional cannot be verified."""
+    try:
+        from abcxauto.look_snapshot import size_notional_refusal_hint
+    except Exception:
+        return "size_unknown_notional"
+    hint = size_notional_refusal_hint(
+        proposal.strategy,
+        _proposal_params_dict(proposal),
+        snap,
+    )
+    return f"size_unknown_notional: {hint}"
+
+
+def estimate_notional(
+    proposal: OrderProposal,
+    snap: dict[str, Any] | None = None,
+) -> Optional[float]:
     """Estimate order notional for position-sizing. None if not estimable."""
     params = proposal.params
     qty = int(getattr(params, "quantity", 0) or 0)
     strategy = proposal.strategy
 
     entry = getattr(params, "entry_price", None)
-    limit = getattr(params, "limit_price", None)
     price_hint = getattr(params, "price_hint", None)
 
     if strategy == "bracket" and entry is not None and qty > 0:
@@ -299,13 +340,33 @@ def estimate_notional(proposal: OrderProposal) -> Optional[float]:
             return strike * 100.0 * contracts
         return None
 
-    # Option premium notional when limit_price present (multiplier 100)
-    if strategy in OPTION_STRATEGIES and limit is not None and qty > 0:
-        try:
-            return abs(float(limit)) * 100.0 * qty
-        except (TypeError, ValueError):
-            return None
+    if strategy in OPTION_STRATEGIES and qty > 0:
+        for key in _OPTION_PREMIUM_KEYS:
+            raw = getattr(params, key, None)
+            if raw is None:
+                continue
+            try:
+                px = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(px) and px != 0:
+                return abs(px) * 100.0 * qty
+        if snap is not None:
+            try:
+                from abcxauto.look_snapshot import notional_premium_from_look
 
+                look_px = notional_premium_from_look(
+                    strategy,
+                    _proposal_params_dict(proposal),
+                    snap,
+                )
+            except Exception:
+                look_px = None
+            if look_px is not None:
+                return abs(float(look_px)) * 100.0 * qty
+        return None
+
+    limit = getattr(params, "limit_price", None)
     if limit is not None and qty > 0:
         return float(limit) * qty
     if entry is not None and qty > 0:
@@ -430,6 +491,7 @@ def arena_concentration_error(
     *,
     membership: list | None = None,
     cap_pct: float | None = None,
+    snap: dict[str, Any] | None = None,
 ) -> str:
     """Refuse when this ticket would push any of its arenas over the bucket %."""
     if is_exit_or_management(proposal):
@@ -452,9 +514,9 @@ def arena_concentration_error(
     ]
     if not arenas:
         return ""
-    notional = estimate_notional(proposal)
+    notional = estimate_notional(proposal, snap)
     if notional is None:
-        return "size_unknown_notional"
+        return size_unknown_notional_reason(proposal, snap)
     book = risk_base_usd(net_liq)
     for arena in arenas:
         held = arena_exposure_usd(
@@ -472,7 +534,10 @@ def arena_concentration_error(
 
 
 async def check_arena_concentration(
-    proposal: OrderProposal, connector: Any
+    proposal: OrderProposal,
+    connector: Any,
+    *,
+    snap: dict[str, Any] | None = None,
 ) -> Tuple[bool, str]:
     """Always-on send check. Exits pass. Cap 0 is off."""
     if is_exit_or_management(proposal):
@@ -509,7 +574,9 @@ async def check_arena_concentration(
         )
     if not isinstance(positions, list):
         return False, "Risk gate fail-closed: cannot read positions"
-    note = arena_concentration_error(proposal, positions, float(net_liq))
+    note = arena_concentration_error(
+        proposal, positions, float(net_liq), snap=snap
+    )
     if note:
         return False, note
     return True, "ok"
@@ -702,7 +769,11 @@ class RiskGate:
     # ------------------------------------------------------------------
 
     async def pre_trade_check(
-        self, proposal: OrderProposal, connector: Any
+        self,
+        proposal: OrderProposal,
+        connector: Any,
+        *,
+        snap: dict[str, Any] | None = None,
     ) -> Tuple[bool, str]:
         """Return (ok, reason). Exits/management always pass."""
         if is_exit_or_management(proposal):
@@ -752,9 +823,9 @@ class RiskGate:
 
         # Fail-closed: option tickets must carry a price (no sizing on a lie).
         if proposal.strategy in OPTION_STRATEGIES:
-            opt_notional = estimate_notional(proposal)
+            opt_notional = estimate_notional(proposal, snap)
             if opt_notional is None:
-                return False, "size_unknown_notional"
+                return False, size_unknown_notional_reason(proposal, snap)
 
         if breaker_on:
             limit = -(cfg.daily_loss_limit_pct / 100.0) * book
@@ -800,9 +871,9 @@ class RiskGate:
                         "Risk gate fail-closed: cash-only mode requires TotalCashValue "
                         "(or AvailableFunds) in account summary"
                     )
-                notional = estimate_notional(proposal)
+                notional = estimate_notional(proposal, snap)
                 if notional is None:
-                    return False, "size_unknown_notional"
+                    return False, size_unknown_notional_reason(proposal, snap)
                 if notional > cash:
                     return False, (
                         f"size_cash {_pct_of_nl(notional, book)} > "
@@ -810,9 +881,9 @@ class RiskGate:
                     )
 
         if floors_on and cfg.max_position_pct > 0:
-            notional = estimate_notional(proposal)
+            notional = estimate_notional(proposal, snap)
             if notional is None:
-                return False, "size_unknown_notional"
+                return False, size_unknown_notional_reason(proposal, snap)
             notional_pct = _pct_of_nl(notional, book)
             if notional_pct > cfg.max_position_pct:
                 return False, (
@@ -823,7 +894,7 @@ class RiskGate:
             if proposal.strategy in ("bracket", "market_bracket"):
                 risked = estimate_bracket_risk_dollars(proposal)
                 if risked is None:
-                    return False, "size_unknown_notional"
+                    return False, size_unknown_notional_reason(proposal, snap)
                 risked_pct = _pct_of_nl(risked, book)
                 if risked_pct > cfg.max_risk_per_trade_pct:
                     return False, (
@@ -831,9 +902,9 @@ class RiskGate:
                         f"{cfg.max_risk_per_trade_pct}"
                     )
             elif proposal.strategy in OPTION_STRATEGIES:
-                notional = estimate_notional(proposal)
+                notional = estimate_notional(proposal, snap)
                 if notional is None:
-                    return False, "size_unknown_notional"
+                    return False, size_unknown_notional_reason(proposal, snap)
                 notional_pct = _pct_of_nl(notional, book)
                 if notional_pct > cfg.max_risk_per_trade_pct:
                     return False, (
@@ -842,9 +913,9 @@ class RiskGate:
                     )
 
         if floors_on and cfg.max_option_premium_pct > 0 and proposal.strategy in OPTION_STRATEGIES:
-            notional = estimate_notional(proposal)
+            notional = estimate_notional(proposal, snap)
             if notional is None:
-                return False, "size_unknown_notional"
+                return False, size_unknown_notional_reason(proposal, snap)
             notional_pct = _pct_of_nl(notional, book)
             if notional_pct > cfg.max_option_premium_pct:
                 return False, (
@@ -871,9 +942,9 @@ class RiskGate:
                 return False, "Risk gate fail-closed: cannot read positions"
 
         if concentration_pct > 0:
-            notional = estimate_notional(proposal)
+            notional = estimate_notional(proposal, snap)
             if notional is None:
-                return False, "size_unknown_notional"
+                return False, size_unknown_notional_reason(proposal, snap)
             held = symbol_exposure_usd(
                 positions, getattr(proposal.params, "symbol", "")
             )

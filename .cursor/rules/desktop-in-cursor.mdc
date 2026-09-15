@@ -11,6 +11,6 @@ When the operator wants the trader on, launch the Pro desktop so the Grok think 
 python -m abcxauto
 ```
 
-Probe TWS paper **7497** first. If the port refuses, do not launch. Do not launch before the last hour to the RTH open. Kill leftovers before a second launch.
+Probe TWS paper **7497** first. If the port refuses, do not launch. Do not launch before desk premarket (8:45 ET / 7:45 CDT). Kill leftovers before a second launch.
 
 Do not use `--headless` unless the operator explicitly asks for console-only (`ABCXAUTO_FORCE_HEADLESS=1`). Headless is paper-only. One IBKR client id per process (paper 77 on 7497; live needs a different id on 7496). Do not enable live from Cursor unless the operator typed the confirm phrase and a promoted playbook exists.
