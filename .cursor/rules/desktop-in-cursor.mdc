@@ -1,16 +1,8 @@
 ---
-description: Launch ABCXAUTO Pro desktop + think stream whenever this repo runs in Cursor
-alwaysApply: true
+description: Retired. Do not load.
+alwaysApply: false
 ---
 
-# Run ABCXAUTO in Cursor
+# Retired
 
-When the operator wants the trader on, launch the Pro desktop so the Grok think stream is visible:
-
-```powershell
-python -m abcxauto
-```
-
-Probe TWS paper **7497** first. If the port refuses, do not launch. Do not launch before the last hour to the RTH open. Kill leftovers before a second launch.
-
-Do not use `--headless` unless the operator explicitly asks for console-only (`ABCXAUTO_FORCE_HEADLESS=1`). Headless is paper-only. One IBKR client id per process (paper 77 on 7497; live needs a different id on 7496). Do not enable live from Cursor unless the operator typed the confirm phrase and a promoted playbook exists.
+This rule is retired. Do not auto-launch Pro from Cursor. Paper client id is 42 on TWS 7497, not 77.
