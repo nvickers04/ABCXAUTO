@@ -276,6 +276,10 @@ def _stub_overlay_send(monkeypatch) -> list[dict]:
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
     monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.kill_look_send_block",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
             is_paper=True,
@@ -317,10 +321,13 @@ def _world(**kw):
 
 
 def _pp_ticket() -> dict:
+    # Opening overlay is new risk: gate_ticket requires a named card
+    # before overlay_shares can run. These execute_ticket tests are
+    # overlay_shares integration, not a nameless-card probe.
     return {
         "action": "protective_put",
         "strategy": "protective_put",
-        "params": _pp_params(),
+        "params": {**_pp_params(), "card": "pypl overlay"},
         "rationale": "overlay sample",
     }
 
@@ -357,12 +364,15 @@ async def test_execute_ticket_accepts_protective_put_on_unprotected_pypl(monkeyp
     result = await execute_ticket(
         _pp_ticket(),
         object(),
+        # needs_protection stays false so this remains an overlay_shares
+        # accept. An opening protective_put is new risk; the protect-first
+        # new-risk block is a different gate (see test_overlay_opens_are_new_risk).
         _world(
             positions=pos,
             open_orders=[],
             flat=False,
-            needs_protection=True,
-            unprotected=["PYPL"],
+            needs_protection=False,
+            unprotected=[],
         ),
         {
             "account": {"netliquidation": 100_000.0},
