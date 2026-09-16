@@ -245,7 +245,8 @@ def test_symbol_fallback_when_conids_absent():
 
 
 @pytest.mark.asyncio
-async def test_take_snapshot_records_fills(tmp_path, monkeypatch):
+async def test_take_snapshot_includes_fills_without_journal_ingest(tmp_path, monkeypatch):
+    """Poll still carries fills on the snap. Journal ingest is the look's job."""
     db = tmp_path / "monitor_fills.db"
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(db))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_ENABLED", "true")
@@ -288,24 +289,26 @@ async def test_take_snapshot_records_fills(tmp_path, monkeypatch):
     mon = PortfolioMonitor(Session(), Connector())
     snap = await mon.take_snapshot()
     assert snap["connected"] is True
+    assert snap["fills"][0]["exec_id"] == "mon-exec-1"
 
     conn = sqlite3.connect(str(db))
     try:
         rows = conn.execute(
             "SELECT exec_id, order_id, symbol FROM fills"
         ).fetchall()
+        snaps = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     finally:
         conn.close()
-    assert rows == [("mon-exec-1", 42, "AAPL")]
+    assert rows == []
+    assert snaps == 0
 
-    # Second poll is idempotent on exec_id.
     await mon.take_snapshot()
     conn = sqlite3.connect(str(db))
     try:
         n = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     finally:
         conn.close()
-    assert n == 1
+    assert n == 0
 
 
 @pytest.mark.asyncio

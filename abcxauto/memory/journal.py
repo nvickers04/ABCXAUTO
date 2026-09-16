@@ -12,12 +12,20 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _sqlite_locked(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DB_PATH = str(_REPO_ROOT / "journal.db")
@@ -607,6 +615,7 @@ class TradeJournal:
         self.enabled = bool(enabled)
         self._timeout = float(timeout)
         self._init_lock = threading.Lock()
+        self._io_lock = threading.RLock()
         self._initialized = False
         # (model, ts) waiting for a real NetLiq. Never persist NL=None.
         self._pending_session: Optional[tuple[str, Optional[str]]] = None
@@ -770,14 +779,39 @@ class TradeJournal:
                 conn.commit()
             self._initialized = True
 
+    def _open(self) -> sqlite3.Connection:
+        """One connection: WAL + busy timeout. Retry open if the file is locked."""
+        delay = 0.05
+        last: Optional[BaseException] = None
+        timeout_ms = max(0, int(self._timeout * 1000))
+        for _ in range(8):
+            try:
+                conn = sqlite3.connect(self.path, timeout=self._timeout)
+                conn.row_factory = sqlite3.Row
+                conn.execute(f"PRAGMA busy_timeout={timeout_ms}")
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.OperationalError:
+                    pass
+                return conn
+            except sqlite3.OperationalError as e:
+                if not _sqlite_locked(e):
+                    raise
+                last = e
+                time.sleep(delay)
+                delay = min(delay * 2, 1.0)
+        if last is not None:
+            raise last
+        raise sqlite3.OperationalError("database is locked")
+
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=self._timeout)
-        try:
-            conn.row_factory = sqlite3.Row
-            yield conn
-        finally:
-            conn.close()
+        with self._io_lock:
+            conn = self._open()
+            try:
+                yield conn
+            finally:
+                conn.close()
 
     # ------------------------------------------------------------------
     # Writers (never raise into the caller)

@@ -555,6 +555,38 @@ async def test_closed_overnight_still_parks_when_caps_exist(monkeypatch, tmp_pat
     assert load_alarm().wake_at is not None
 
 
+@pytest.mark.asyncio
+async def test_failed_think_does_not_bill_the_look_cap(monkeypatch):
+    """A thrown _host_think is not a finished look — do not increment the cap."""
+    hits = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        hits["n"] += 1
+        raise RuntimeError("llm down")
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    saw_err = False
+    while time.time() < deadline:
+        eng.drain_apply()
+        if any(r.get("type") == "error" for r in eng.state.records):
+            saw_err = True
+            break
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.3
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert saw_err
+    assert hits["n"] >= 1
+    assert usage("regular")["looks"] == 0
+    assert is_capped("regular") is False
+
+
 def test_health_strip_cap_idle_does_not_say_next_look(monkeypatch):
     from abcxauto.pro_desktop import ProTerminal
 
