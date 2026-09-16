@@ -26,6 +26,12 @@ from abcxauto.broker.ticks import round_to_min_tick
 logger = logging.getLogger(__name__)
 
 
+
+def _is_bag_contract(contract: Any) -> bool:
+    sec = getattr(contract, "secType", None) or getattr(contract, "sec_type", None) or ""
+    return str(sec).upper() == "BAG"
+
+
 def _oid_matches(order: Any, order_id: int) -> bool:
     try:
         want = int(order_id)
@@ -129,22 +135,73 @@ class IBKROrdersMixin:
                 return float(cached)
             except (TypeError, ValueError):
                 pass
-        tick = 0.01
-        req = getattr(getattr(self, "ib", None), "reqContractDetailsAsync", None)
-        if callable(req):
-            try:
-                details = await req(contract)
-                row = details[0] if details else None
-                raw = getattr(row, "minTick", None) if row is not None else None
-                if raw is not None and float(raw) > 0:
-                    tick = float(raw)
-            except Exception:
-                logger.debug("minTick lookup failed", exc_info=True)
+        if _is_bag_contract(contract):
+            tick = await self._bag_leg_min_tick(contract)
+        else:
+            tick = await self._req_min_tick(contract)
+            if tick is None:
+                tick = 0.01
         try:
             setattr(contract, "_abcx_min_tick", tick)
         except Exception:
             pass
         return tick
+
+    async def _req_min_tick(self, contract: Any) -> Optional[float]:
+        """Contract-details minTick. Never call this with a BAG (IBKR 321)."""
+        if _is_bag_contract(contract):
+            return None
+        req = getattr(getattr(self, "ib", None), "reqContractDetailsAsync", None)
+        if not callable(req):
+            return None
+        try:
+            details = await req(contract)
+            row = details[0] if details else None
+            raw = getattr(row, "minTick", None) if row is not None else None
+            if raw is not None and float(raw) > 0:
+                return float(raw)
+        except Exception:
+            logger.debug("minTick lookup failed", exc_info=True)
+        return None
+
+    async def _bag_leg_min_tick(self, contract: Any) -> float:
+        """BAG has no contract details. Use the coarsest successful leg tick."""
+        legs = list(
+            getattr(contract, "comboLegs", None)
+            or getattr(contract, "combo_legs", None)
+            or []
+        )
+        ticks = []
+        for leg in legs:
+            raw = getattr(leg, "minTick", None)
+            if raw is not None:
+                try:
+                    if float(raw) > 0:
+                        ticks.append(float(raw))
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            con_id = getattr(leg, "conId", None)
+            if con_id is None:
+                con_id = getattr(leg, "con_id", None)
+            try:
+                cid = int(con_id)
+            except (TypeError, ValueError):
+                continue
+            if cid <= 0:
+                continue
+            got = await self._req_min_tick(Contract(conId=cid))
+            if got is not None:
+                ticks.append(got)
+        if ticks:
+            return max(ticks)
+        logger.warning(
+            "BAG minTick unavailable from %s comboLegs; using conservative "
+            "option tick 0.05 (standard US equity-option increment). "
+            "BAG has no contract details.",
+            len(legs),
+        )
+        return 0.05
 
     async def _wait_until_working(self, trade: Any, *, timeout: float = 2.0) -> bool:
         deadline = time.monotonic() + timeout
@@ -350,7 +407,7 @@ class IBKROrdersMixin:
             return {'error': 'Not connected'}
         tick = await self._contract_min_tick(contract)
         if limit_price is not None:
-            limit_price = round_to_min_tick(limit_price, tick)
+            limit_price = round_to_min_tick(limit_price, tick, action=action)
         if aux_price is not None:
             aux_price = round_to_min_tick(aux_price, tick)
 
@@ -433,7 +490,7 @@ class IBKROrdersMixin:
             return {'error': 'Not connected'}
         tick = await self._contract_min_tick(contract)
         if limit_price is not None:
-            limit_price = round_to_min_tick(limit_price, tick)
+            limit_price = round_to_min_tick(limit_price, tick, action=action)
 
         try:
             order = Order()
@@ -529,9 +586,9 @@ class IBKROrdersMixin:
             # Risk/concentration/PDT sanity lives in proposal validation +
             # human confirmation — the broker layer just executes.
             tick = await self._contract_min_tick(contract)
-            limit_price = round_to_min_tick(entry_price, tick)
+            limit_price = round_to_min_tick(entry_price, tick, action=entry_action)
             planned_stop = round_to_min_tick(stop_price, tick)
-            planned_target = round_to_min_tick(target_price, tick)
+            planned_target = round_to_min_tick(target_price, tick, action=exit_action)
             await self._update_account_values()
 
             # PDT visibility only (informational — the human decides)
@@ -635,12 +692,12 @@ class IBKROrdersMixin:
                 stop_pct = (entry_price - stop_price) / entry_price  # e.g., 2.2% risk
                 target_pct = (target_price - entry_price) / entry_price  # e.g., 6.6% reward
                 adjusted_stop = round_to_min_tick(actual_fill_price * (1 - stop_pct), tick)
-                adjusted_target = round_to_min_tick(actual_fill_price * (1 + target_pct), tick)
+                adjusted_target = round_to_min_tick(actual_fill_price * (1 + target_pct), tick, action=exit_action)
             else:  # SHORT
                 stop_pct = (stop_price - entry_price) / entry_price
                 target_pct = (entry_price - target_price) / entry_price
                 adjusted_stop = round_to_min_tick(actual_fill_price * (1 + stop_pct), tick)
-                adjusted_target = round_to_min_tick(actual_fill_price * (1 - target_pct), tick)
+                adjusted_target = round_to_min_tick(actual_fill_price * (1 - target_pct), tick, action=exit_action)
 
             logger.info(f"Entry FILLED: {direction} {filled_qty} {symbol} @ ${actual_fill_price:.2f}")
             if abs(float(adjusted_stop) - float(planned_stop)) > 1e-9 and stop_id:
@@ -766,7 +823,7 @@ class IBKROrdersMixin:
         exit_action = 'SELL' if direction == 'LONG' else 'BUY'
         tick = await self._contract_min_tick(contract)
         stop_price = round_to_min_tick(stop_price, tick)
-        target_price = round_to_min_tick(target_price, tick)
+        target_price = round_to_min_tick(target_price, tick, action=exit_action)
         oca_group = f"OCA_{symbol}_{int(datetime.now().timestamp())}"
 
         try:
@@ -902,12 +959,12 @@ class IBKROrdersMixin:
         if contract is None:
             return {'error': 'Not connected'}
         tick = await self._contract_min_tick(contract)
+        exit_action = 'SELL' if direction == 'LONG' else 'BUY'
         stop_price = round_to_min_tick(stop_price, tick)
-        target_price = round_to_min_tick(target_price, tick)
+        target_price = round_to_min_tick(target_price, tick, action=exit_action)
 
         try:
             oca_group = f"OCA_{symbol}_{int(datetime.now().timestamp())}"
-            exit_action = 'SELL' if direction == 'LONG' else 'BUY'
 
             # Stop order
             stop_order = Order()
@@ -1017,7 +1074,7 @@ class IBKROrdersMixin:
             return {'error': 'Not connected'}
         tick = await self._contract_min_tick(contract)
         stop_price = round_to_min_tick(stop_price, tick)
-        limit_price = round_to_min_tick(limit_price, tick)
+        limit_price = round_to_min_tick(limit_price, tick, action=action)
 
         try:
             order = Order()
@@ -1336,7 +1393,9 @@ class IBKROrdersMixin:
             if trade is None:
                 return {'error': f'Order {order_id} not found'}
             tick = await self._contract_min_tick(trade.contract)
-            new_limit_price = round_to_min_tick(new_limit_price, tick)
+            new_limit_price = round_to_min_tick(
+                new_limit_price, tick, action=getattr(trade.order, "action", None)
+            )
             trade.order.lmtPrice = new_limit_price
             self.ib.placeOrder(trade.contract, trade.order)
             live = await self._reread_order_px(order_id, field="lmtPrice")
