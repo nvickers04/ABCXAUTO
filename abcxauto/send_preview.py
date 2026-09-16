@@ -371,6 +371,7 @@ def collect_would_refuse(
             )
     except Exception:
         logger.debug("preview kill-look check failed", exc_info=True)
+        reasons.append("kill-look gate failed closed")
 
     if world is not None:
         try:

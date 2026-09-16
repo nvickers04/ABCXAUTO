@@ -361,6 +361,19 @@ def test_collect_would_refuse_reports_kill_look_without_softening():
     assert isinstance(reasons, list)
 
 
+def test_collect_would_refuse_kill_look_exception_fail_closes(monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("kill-look exploded")
+
+    monkeypatch.setattr("abcxauto.thin_rth_kill_look.kill_look_send_block", boom)
+    reasons = collect_would_refuse(
+        _exit_ticket(),
+        world=_world(session_status="regular"),
+        snap={"account": {"netliquidation": 100000}, "positions": [], "open_lots": []},
+    )
+    assert any("kill-look gate failed closed" in str(r) for r in reasons)
+
+
 @pytest.mark.asyncio
 async def test_h_ttl_expired_same_hash_cannot_place(monkeypatch):
     """H-TTL: issue → past TTL → same-hash place is blocked expired."""

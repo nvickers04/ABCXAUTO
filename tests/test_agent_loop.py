@@ -245,6 +245,26 @@ async def test_new_entry_quote_uses_this_look_scan_print():
 
 
 @pytest.mark.asyncio
+async def test_new_entry_quote_ignores_scan_row_mda_last():
+    from abcxauto.agent_loop import _quote_for_action
+
+    act = {
+        "strategy": "market_bracket",
+        "params": {"symbol": "SNDK", "price_hint": 100.0, "entry_price": 91.5},
+    }
+    snap_d = {
+        "ibkr_live_quotes": {},
+        "scan_hits": {
+            "quoted": 1,
+            "rows": [{"symbol": "SNDK", "last": 91.5}],
+        },
+        "spy_quote": {"last": 500},
+    }
+    got = await _quote_for_action(act, snap_d, connector=None)
+    assert got is None
+
+
+@pytest.mark.asyncio
 async def test_new_entry_quote_does_not_use_prior_close_as_last(monkeypatch):
     from abcxauto.agent_loop import _quote_for_action
 
