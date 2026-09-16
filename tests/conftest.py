@@ -2,7 +2,9 @@
 
 import json
 import logging
+import os
 import re
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -97,9 +99,72 @@ def _isolated_journal(tmp_path):
     reset_journal(path=str(tmp_path / "journal.db"))
 
 
+def pytest_configure(config):
+    """Redirect settings before test modules import abcxauto.config.
+
+    ``load_risk_settings()`` runs at import and would otherwise read the
+    worktree / repo-root ``risk_settings.json``.
+    """
+    os.environ["ABCXAUTO_RISK_SETTINGS_PATH"] = str(
+        Path(tempfile.gettempdir()) / f"abcxauto-pytest-{os.getpid()}-no-settings.json"
+    )
+
+
+# Env knobs that overlay the same Config fields as risk_settings.json / .env.
+# Without this list, `_load_env_config()` / `load_dotenv()` can make
+# default tests see the operator live knobs after the settings file is
+# redirected.
+_OPERATOR_CONFIG_ENV = (
+    "ABCXAUTO_SESSION_TOKEN_CAP",
+    "ABCXAUTO_SESSION_LOOK_CAP",
+    "ABCXAUTO_MODEL",
+    "ABCXAUTO_MODEL_RTH",
+    "ABCXAUTO_MODEL_RESEARCH",
+    "ABCXAUTO_MODEL_PARAMS",
+    "ABCXAUTO_MODEL_PARAMS_RTH",
+    "ABCXAUTO_MODEL_PARAMS_RESEARCH",
+    "ABCXAUTO_TEMPERATURE",
+    "ABCXAUTO_MAX_TOKENS",
+    "ABCXAUTO_RISK_POSTURE",
+    "ABCXAUTO_RISK_GATES_ENABLED",
+    "ABCXAUTO_SIZING_FLOORS",
+    "ABCXAUTO_DAILY_LOSS_LIMIT_PCT",
+    "ABCXAUTO_MAX_POSITION_PCT",
+    "ABCXAUTO_MAX_OPEN_POSITIONS",
+    "ABCXAUTO_AUTO_PANIC_ON_BREACH",
+    "ABCXAUTO_DEFINED_RISK_ONLY",
+    "ABCXAUTO_CASH_ONLY",
+    "ABCXAUTO_PORTFOLIO_CAP_USD",
+    "ABCXAUTO_MAX_PEAK_DRAWDOWN_PCT",
+    "ABCXAUTO_MAX_OPTION_PREMIUM_PCT",
+    "ABCXAUTO_MAX_RISK_PER_TRADE_PCT",
+    "ABCXAUTO_MAX_SYMBOL_CONCENTRATION_PCT",
+    "ABCXAUTO_MAX_ARENA_CONCENTRATION_PCT",
+    "ABCXAUTO_SCAN_FETCH_CAP",
+    "ABCXAUTO_TRADING_BUDGET_USD",
+    "ABCXAUTO_TARGET_CAPITAL",
+    "ABCXAUTO_MONITOR_ENABLED",
+    "ABCXAUTO_MONITOR_POLL_S",
+    "ABCXAUTO_MONITOR_REVIEW_S",
+    "ABCXAUTO_MONITOR_EXTENDED_HOURS",
+    "ABCXAUTO_DISCONNECT_HALT_S",
+    "ABCXAUTO_LIVE_CONFIRM",
+    "TRADING_MODE",
+    "IBKR_HOST",
+    "IBKR_PORT",
+    "IBKR_CLIENT_ID",
+)
+
+
 @pytest.fixture(autouse=True)
 def _clear_risk_overrides(tmp_path, monkeypatch):
-    """Risk overrides must not leak; use a temp settings file per test."""
+    """Risk overrides must not leak; use a temp settings file per test.
+
+    Also drop operator ``.env`` / shell knobs so ``_load_env_config`` sees
+    code defaults. ``load_dotenv()`` is a no-op here: it would otherwise
+    re-inject ``ABCXAUTO_SESSION_TOKEN_CAP`` from the live desk ``.env``
+    when pytest is launched from the repo root.
+    """
     from abcxauto.config import (
         clear_risk_settings,
         clear_runtime_overrides,
@@ -110,6 +175,9 @@ def _clear_risk_overrides(tmp_path, monkeypatch):
     path = tmp_path / "risk_settings.json"
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent_state.json"))
+    monkeypatch.setattr("abcxauto.config.load_dotenv", lambda *a, **k: False)
+    for key in _OPERATOR_CONFIG_ENV:
+        monkeypatch.delenv(key, raising=False)
     clear_risk_settings(path=path)
     load_risk_settings(path)
     clear_runtime_overrides()
