@@ -55,6 +55,7 @@ _LONG_PREMIUM_STRATEGIES = frozenset({
 
 # Always rejected when operator sets defined_risk_only (unlimited / naked risk).
 _DEFINED_RISK_FORBIDDEN = frozenset({"ratio_spread", "jade_lizard"})
+_DEFINED_RISK_STOCK = frozenset({"bracket", "market_bracket", "oca"})
 # Short premium naked — rejected when defined_risk_only unless action=BUY.
 _DEFINED_RISK_SHORT_OK_IF_LONG = frozenset({"straddle", "strangle"})
 
@@ -289,12 +290,22 @@ def ibkr_data_stale_reason(
     return ""
 
 
+def _stock_entry_has_stop(proposal: OrderProposal) -> bool:
+    """True when a stock ticket carries a stop that must rest at IBKR."""
+    raw = getattr(proposal.params, "stop_price", None)
+    try:
+        return raw is not None and float(raw) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def check_defined_risk_only(
     proposal: OrderProposal, cfg: Any = None
 ) -> Tuple[bool, str]:
     """Gate: when defined_risk_only, reject unlimited-risk option shapes
-    and new undefined STK risk (naked stock entries, including market_bracket).
+    and new undefined STK risk (naked stock entries with no stop).
 
+    A bracket / market_bracket / oca that carries a stop is defined risk.
     Last-stop / protective stop / cover on an existing lot is not new STK
     risk — exits, oca, trailing, and named option overlays still pass.
     Named defined-risk option plays (vertical, calendar, butterfly, iron)
@@ -321,6 +332,13 @@ def check_defined_risk_only(
                 f"defined_risk_only: short {strat} rejected "
                 "(use action=BUY or disable defined_risk_only)"
             )
+    if strat in _DEFINED_RISK_STOCK:
+        if _stock_entry_has_stop(proposal):
+            return True, "ok"
+        return False, (
+            f"defined_risk_only: {strat} is undefined STK risk "
+            "(operator gate)"
+        )
     if strat not in OPTION_STRATEGIES:
         return False, (
             f"defined_risk_only: {strat} is undefined STK risk "
