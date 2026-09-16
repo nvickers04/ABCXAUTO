@@ -110,7 +110,9 @@ def fill_ts_iso(
 ) -> str:
     """Canonical ``...Z`` UTC stamp for one broker execution.
 
-    Bare digits from TWS are UTC, so they are labelled rather than converted.
+    Bare digits from TWS are in the TWS clock (``ABCXAUTO_TWS_TIMEZONE``,
+    default UTC on this desk). Naive values are labelled with that zone rather
+    than silently assumed UTC when the operator named a different clock.
     An execution cannot have happened after now, so a stamp in the future is
     proof the digits were already read in some other zone; reading that zone's
     wall clock back as UTC undoes exactly that shift. ``local_tz`` defaults to
@@ -120,7 +122,16 @@ def fill_ts_iso(
     dt = _as_datetime(exec_time)
     if dt is None:
         return _iso_z(now_utc)
-    dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    if dt.tzinfo is None:
+        zone_name = tws_timezone()
+        try:
+            from zoneinfo import ZoneInfo
+
+            dt = dt.replace(tzinfo=ZoneInfo(zone_name)).astimezone(timezone.utc)
+        except Exception:
+            dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
     if (dt - now_utc).total_seconds() > _FILL_FUTURE_TOLERANCE_S:
         reread = dt.astimezone(local_tz).replace(tzinfo=timezone.utc)
         fixed = reread if reread <= now_utc else now_utc
@@ -327,12 +338,18 @@ class IBKRQueriesMixin:
     async def get_account_summary(self) -> Dict[str, Any]:
         """Get account summary."""
         if not await self._ensure_connected():
-            return {'error': 'Not connected'}
+            return {
+                'error': 'Not connected',
+                'ibkr_data_stale': bool(getattr(self, '_ibkr_data_stale', False)),
+            }
 
         try:
             async with self.async_lock:
                 account_values = self.ib.accountValues()
-                result = {'account_id': self.account_id}
+                result = {
+                    'account_id': self.account_id,
+                    'ibkr_data_stale': bool(getattr(self, '_ibkr_data_stale', False)),
+                }
                 target_tags = {
                     'NetLiquidation',
                     'TotalCashValue',
@@ -348,7 +365,10 @@ class IBKRQueriesMixin:
                 return result
         except Exception as e:
             logger.error(f"Failed to get account summary: {e}")
-            return {'error': str(e)}
+            return {
+                'error': str(e),
+                'ibkr_data_stale': bool(getattr(self, '_ibkr_data_stale', False)),
+            }
 
     async def cancel_order(self, order_id: int) -> Dict[str, Any]:
         """Cancel an open order."""
@@ -566,6 +586,12 @@ class IBKRQueriesMixin:
 
     _QUOTE_CACHE_S = 2.5
 
+    def _invalidate_live_caches(self) -> None:
+        """Drop quote cache so a reconnect cannot reuse a pre-disconnect last."""
+        bag = getattr(self, "_quote_cache", None)
+        if isinstance(bag, dict):
+            bag.clear()
+
     def _live_quote_cached(self, symbol: str) -> Optional[Dict[str, Any]]:
         bag = getattr(self, "_quote_cache", None)
         if not isinstance(bag, dict):
@@ -620,6 +646,13 @@ class IBKRQueriesMixin:
         sym = str(symbol or "").strip().upper()
         if not sym:
             return {"error": "symbol required", "source": "ibkr"}
+        if bool(getattr(self, "_ibkr_data_stale", False)):
+            return {
+                "error": "ibkr_data_stale",
+                "source": "ibkr",
+                "symbol": sym,
+                "ibkr_data_stale": True,
+            }
         if not fresh:
             cached = self._live_quote_cached(sym)
             if cached is not None:
@@ -840,6 +873,8 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         self._disconnect_halt_fired: bool = False
         self._reconnect_attempt: int = 0
         self._ibkr_data_stale: bool = False
+        self._quote_cache: Dict[str, Any] = {}
+        self._book_refresh_task: Optional[Any] = None
         self._book_subs: Dict[int, Any] = {}
         self._book_sub_live: set[int] = set()
 
@@ -884,6 +919,16 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
     def is_connected(self) -> bool:
         """Check if connected to IBKR TWS/Gateway."""
         return self._connected and self.ib.isConnected()
+
+    @property
+    def ibkr_data_stale(self) -> bool:
+        """True after error 1100 / disconnect until a successful book refresh."""
+        return bool(getattr(self, "_ibkr_data_stale", False))
+
+    def _mark_ibkr_data_stale(self, *, reason: str) -> None:
+        self._ibkr_data_stale = True
+        self._invalidate_live_caches()
+        logger.warning("IBKR data marked stale (%s) — new risk blocked until refresh", reason)
 
     def _record_local_cancel_request(self, order_id: int, source: str = "unknown") -> None:
         """Track a local cancel request so later Error 202 can be attributed."""
@@ -974,18 +1019,22 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         """Handle IBKR error/warning events. Suppress noisy codes to DEBUG."""
         lifecycle = classify_error_code(errorCode)
         if lifecycle == "tws_lost":
-            self._ibkr_data_stale = True
+            self._mark_ibkr_data_stale(reason=f"error {errorCode}")
             logger.warning(
                 f"IBKR↔TWS link lost [{errorCode}]: {errorString} — "
                 "keep API socket; no new IB()"
             )
             return
         if lifecycle == "tws_restored":
-            self._ibkr_data_stale = False
+            # Stay stale until positions/orders/account refresh. 1101/1102
+            # only mean the socket is back — ib_insync caches may still be empty.
+            self._mark_ibkr_data_stale(reason=f"restore {errorCode}")
             logger.info(
                 f"IBKR connectivity restored [{errorCode}]: {errorString}"
                 + (" (data lost)" if errorCode == 1101 else "")
+                + " — refresh book before clearing stale"
             )
+            self._schedule_book_refresh_after_restore()
             return
         if lifecycle == "farm_ok":
             logger.debug(f"IBKR data farm OK [{errorCode}]: {errorString}")
@@ -1038,8 +1087,65 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         else:
             logger.info(f"IBKR [{errorCode}] reqId={reqId}: {errorString}")
 
+    def _schedule_book_refresh_after_restore(self) -> None:
+        """Refresh positions/orders/account after 1101/1102; stay stale on failure."""
+        loop = self._resolve_loop()
+        if loop is None:
+            logger.error("IBKR restore: no event loop to refresh book — stay stale")
+            return
+        prev = getattr(self, "_book_refresh_task", None)
+        if prev is not None and not getattr(prev, "done", lambda: True)():
+            try:
+                prev.cancel()
+            except Exception:
+                pass
+
+        async def _run() -> None:
+            try:
+                ok = await self._refresh_book_after_data_loss()
+                if ok:
+                    self._ibkr_data_stale = False
+                    logger.info("IBKR book refreshed after data restore")
+                else:
+                    logger.error("IBKR book refresh failed — stay stale")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("IBKR book refresh crashed — stay stale")
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            self._book_refresh_task = loop.create_task(_run())
+            return
+        try:
+            self._book_refresh_task = asyncio.run_coroutine_threadsafe(_run(), loop)
+        except Exception:
+            logger.exception("IBKR restore: could not schedule book refresh — stay stale")
+
+    async def _refresh_book_after_data_loss(self) -> bool:
+        """Mandatory positions + open orders + account pull after data loss."""
+        if not (self._connected or self._api_socket_live()):
+            return False
+        try:
+            async with self.async_lock:
+                req_pos = getattr(self.ib, "reqPositionsAsync", None)
+                if callable(req_pos):
+                    await req_pos()
+                req_ord = getattr(self.ib, "reqAllOpenOrdersAsync", None)
+                if callable(req_ord):
+                    await req_ord()
+            await self._update_account_values()
+            return True
+        except Exception:
+            logger.exception("IBKR book refresh after data restore failed")
+            return False
+
     def _on_disconnect(self) -> None:
         """Handle disconnection from TWS/Gateway (API socket closed)."""
+        self._mark_ibkr_data_stale(reason="api_disconnect")
         symbols = list(self._tickers.keys())
         if symbols:
             self._pending_resubscribe.update(s.upper() for s in symbols)
@@ -1079,7 +1185,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         schedules reconnect off the lock's loop and raises
         ``Lock bound to a different event loop``.
         """
-        captured = self._loop
+        captured = getattr(self, "_loop", None)
         if captured is not None:
             try:
                 if not captured.is_closed() and captured.is_running():
@@ -1241,12 +1347,18 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         # Leave _disconnect_halt_fired as-is so we do not re-halt on a later blip
         # in the same outage window; a fresh disconnect resets it in _on_disconnect.
         self._last_heartbeat_ok = time.time()
+        self._invalidate_live_caches()
 
         # Streaming subscribe API removed; nothing to restore.
         n = len(self._pending_resubscribe)
         self._pending_resubscribe.clear()
         if n:
             logger.info(f"Cleared {n} pending market-data resubscribe symbol(s)")
+        try:
+            if await self._refresh_book_after_data_loss():
+                self._ibkr_data_stale = False
+        except Exception:
+            logger.exception("post-reconnect book refresh failed — stay stale")
 
     def _on_execution(self, trade: Trade, fill: Fill) -> None:
         """
@@ -1266,7 +1378,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 'shares': int(execution.shares),
                 'price': float(execution.price),
                 'avg_price': float(execution.avgPrice),
-                'time': execution.time.isoformat() if execution.time else datetime.now(timezone.utc).isoformat(),
+                'time': fill_ts_iso(getattr(execution, "time", None)),
                 'order_id': execution.orderId,
                 'exec_id': execution.execId,
                 'commission': commission,
@@ -1345,10 +1457,9 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
     async def connect(self, max_retries: Optional[int] = None) -> bool:
         """Connect to IBKR TWS/Gateway.
 
-        Tries ``IBKR_CLIENT_ID + attempt`` for ``attempt`` in ``0 .. max_retries-1`` so a
-        stale or competing session on the base id does not block connect. Default span is
-        controlled by ``IBKR_CONNECT_MAX_ATTEMPTS`` (1–50, default 12). After success,
-        ``self.client_id`` is set to the working id for this process.
+        Retries on the configured ``IBKR_CLIENT_ID`` only — never ``id + attempt``.
+        Walking ids orphans the prior session's orders and breaks the one-id-per-process
+        contract. Default attempts: ``IBKR_CONNECT_MAX_ATTEMPTS`` (1–50, default 12).
 
         Refuses to attempt a socket connect when TRADING_MODE / port / live-confirm
         are inconsistent (:class:`TradingModePortError`).
@@ -1387,15 +1498,18 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
             for attempt in range(max_retries):
                 try:
-                    # Use the fixed client_id. On retry, try client_id+attempt to handle
-                    # stale connection on the same ID (e.g., TWS still thinks old session is active)
-                    current_client_id = self.client_id + attempt
+                    current_client_id = int(self.client_id)
                     logger.info(f"Connecting to IBKR ({self.host}:{self.port}, client_id={current_client_id}, attempt {attempt + 1})")
 
                     # Clean up old IB instance handlers before creating new one
                     self._unregister_handlers()
+                    try:
+                        if self.ib is not None and self.ib.isConnected():
+                            self.ib.disconnect()
+                    except Exception:
+                        logger.debug("prior IB disconnect before retry failed", exc_info=True)
 
-                    # Create fresh IB instance on each attempt
+                    # Create fresh IB instance on each attempt — same client id.
                     self.ib = new_ib()
 
                     # Re-register all event handlers on new IB instance
@@ -1413,7 +1527,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
                     if self.ib.isConnected():
                         self._connected = True
-                        self.client_id = current_client_id  # Store the working client ID
+                        self._invalidate_live_caches()
                         self._disconnect_since = None
                         if self._disconnect_cause != DisconnectCause.USER_DISCONNECT.value:
                             self._disconnect_cause = DisconnectCause.UNKNOWN.value

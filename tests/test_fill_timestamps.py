@@ -17,6 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from threading import Lock
+
 from abcxauto.broker.connector import IBKRConnector, fill_ts_iso, new_ib, tws_timezone
 from abcxauto.memory.journal import TradeJournal
 
@@ -67,6 +69,13 @@ def test_the_skew_tracks_the_local_offset_not_a_constant():
 
 def test_bare_tws_digits_are_labelled_utc_not_shifted():
     assert fill_ts_iso(datetime(2026, 8, 20, 15, 42, 6), now=LATER) == "2026-08-20T15:42:06.000Z"
+
+
+def test_naive_digits_honor_the_named_tws_zone(monkeypatch):
+    """Ingest labels bare TWS digits with ABCXAUTO_TWS_TIMEZONE, not a silent UTC."""
+    monkeypatch.setenv("ABCXAUTO_TWS_TIMEZONE", "America/New_York")
+    ts = fill_ts_iso(datetime(2026, 8, 20, 11, 42, 6), now=LATER)
+    assert ts == "2026-08-20T15:42:06.000Z"
 
 
 def test_an_offset_bearing_stamp_is_converted():
@@ -124,6 +133,30 @@ def test_the_tws_zone_is_operator_overridable(monkeypatch):
     monkeypatch.setenv("ABCXAUTO_TWS_TIMEZONE", "US/Eastern")
     assert tws_timezone() == "US/Eastern"
     assert new_ib().TimezoneTWS == "US/Eastern"
+
+
+def test_on_execution_uses_fill_ts_iso():
+    conn = IBKRConnector.__new__(IBKRConnector)
+    conn._executions = {}
+    conn._execution_lock = Lock()
+    trade = SimpleNamespace(
+        contract=SimpleNamespace(symbol="WMT"),
+        order=SimpleNamespace(orderType="MKT", ocaGroup=None),
+    )
+    fill = SimpleNamespace(
+        execution=SimpleNamespace(
+            time=datetime(2026, 8, 20, 15, 42, 6),
+            shares=70,
+            price=103.07,
+            avgPrice=103.07,
+            side="BOT",
+            orderId=4443,
+            execId="e1",
+        ),
+        commissionReport=None,
+    )
+    conn._on_execution(trade, fill)
+    assert conn._executions["WMT"][0]["time"] == "2026-08-20T15:42:06.000Z"
 
 
 # ---------------------------------------------------------------- the reads
