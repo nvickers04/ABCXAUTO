@@ -284,9 +284,9 @@ def spy_prints(spy: Any = None, *, load_last_turn: bool = True) -> dict[str, flo
     if not load_last_turn:
         return out
     try:
-        from abcxauto.think_stream import LAST_TURN_PATH
+        from abcxauto.think_stream import last_turn_path
 
-        raw = LAST_TURN_PATH.read_text(encoding="utf-8")
+        raw = last_turn_path().read_text(encoding="utf-8")
     except Exception:
         return out
     try:
