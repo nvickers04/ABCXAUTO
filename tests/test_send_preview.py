@@ -361,6 +361,111 @@ def test_collect_would_refuse_reports_kill_look_without_softening():
     assert isinstance(reasons, list)
 
 
+def test_preview_mirrors_always_armed_refusals_when_gates_off(monkeypatch):
+    """Paper risk_gates_enabled=False still previews the #200 always-armed refuses."""
+    from dataclasses import replace
+
+    cfg = replace(
+        get_config(),
+        risk_gates_enabled=False,
+        sizing_floors=False,
+        defined_risk_only=True,
+        cash_only=True,
+        daily_loss_limit_pct=25.0,
+        trading_mode="paper",
+        ibkr_port=7497,
+    )
+    monkeypatch.setattr("abcxauto.config.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.kill_look_send_block",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "abcxauto.look_snapshot.check_ticket_numbers",
+        lambda *_a, **_k: (True, "", ""),
+    )
+
+    class _Gate:
+        is_halted = False
+        halt_reason = ""
+
+        def halt(self, *_a, **_k):
+            raise AssertionError("preview must not trip the halt latch")
+
+    gate = _Gate()
+    monkeypatch.setattr("abcxauto.risk_gates.get_risk_gate", lambda: gate)
+
+    healthy = {
+        "account": {
+            "netliquidation": 100_000.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 100_000.0,
+            "AvailableFunds": 100_000.0,
+        },
+        "positions": [],
+        "open_lots": [],
+    }
+    world = _world(session_status="regular")
+
+    defined = collect_would_refuse(_bracket(), world=world, snap=healthy)
+    assert any("defined_risk_only" in str(r) for r in defined)
+
+    gate.is_halted = True
+    gate.halt_reason = "daily loss breach"
+    halted = collect_would_refuse(_vertical(), world=world, snap=healthy)
+    assert any("halted" in str(r).lower() for r in halted)
+    gate.is_halted = False
+
+    loss_snap = {
+        "account": {
+            "netliquidation": 100_000.0,
+            "dailypnl": -25_000.0,
+            "TotalCashValue": 100_000.0,
+        },
+        "positions": [],
+        "open_lots": [],
+    }
+    daily = collect_would_refuse(_vertical(), world=world, snap=loss_snap)
+    assert any("daily_loss" in str(r).lower() for r in daily)
+
+    cash_snap = {
+        "account": {
+            "netliquidation": 100_000.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 50.0,
+        },
+        "positions": [],
+        "open_lots": [],
+    }
+    cash = collect_would_refuse(_vertical(), world=world, snap=cash_snap)
+    assert any("cash" in str(r).lower() for r in cash)
+
+    short = collect_would_refuse(
+        _bracket(direction="SHORT"), world=world, snap=healthy
+    )
+    assert any("short" in str(r).lower() or "cash-only" in str(r).lower() for r in short)
+
+    exits = collect_would_refuse(_exit_ticket(), world=world, snap=loss_snap)
+    assert not any("daily_loss" in str(r).lower() for r in exits)
+    assert not any("defined_risk" in str(r).lower() for r in exits)
+    assert not any("cash" in str(r).lower() for r in exits)
+    assert not any("halted" in str(r).lower() for r in exits)
+
+
+def test_collect_would_refuse_kill_look_exception_fail_closes(monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("kill-look exploded")
+
+    monkeypatch.setattr("abcxauto.thin_rth_kill_look.kill_look_send_block", boom)
+    reasons = collect_would_refuse(
+        _exit_ticket(),
+        world=_world(session_status="regular"),
+        snap={"account": {"netliquidation": 100000}, "positions": [], "open_lots": []},
+    )
+    assert any("kill-look gate failed closed" in str(r) for r in reasons)
+
+
 @pytest.mark.asyncio
 async def test_h_ttl_expired_same_hash_cannot_place(monkeypatch):
     """H-TTL: issue → past TTL → same-hash place is blocked expired."""
