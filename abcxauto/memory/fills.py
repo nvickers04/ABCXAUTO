@@ -15,6 +15,7 @@ from abcxauto.memory.journal_support import (
     _account_float,
     _align_fill_ts_to_dispatch,
     _coerce_order_id,
+    _fill_multiplier,
     _json_dumps,
     _open_order_id_set,
     _order_ids_from_result_json,
@@ -149,6 +150,12 @@ class JournalFills:
                             else None
                         )
                         fill_marks = self._fill_mark_values(stamp_mark, fill)
+                        if fill_marks.get("sent_price") is None and fill.get("sent_price") is not None:
+                            fill_marks["sent_price"] = fill.get("sent_price")
+                        if fill_marks.get("signed_slippage") is None and fill.get("signed_slippage") is not None:
+                            fill_marks["signed_slippage"] = fill.get("signed_slippage")
+                        if fill_marks.get("ibkr_last") is None:
+                            fill_marks["ibkr_last"] = fill.get("ibkr_last") or fill.get("last")
                         cur = conn.execute(
                             """
                             INSERT OR IGNORE INTO fills (
@@ -156,8 +163,8 @@ class JournalFills:
                                 quantity, price, commission, realized_pnl,
                                 ibkr_last, bid, ask, sent_price,
                                 signed_slippage, spread_paid, fill_label,
-                                quote_reason
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                quote_reason, multiplier
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (
                                 fill_ts,
@@ -178,6 +185,7 @@ class JournalFills:
                                 fill_marks.get("spread_paid"),
                                 fill_marks.get("fill_label"),
                                 fill_marks.get("quote_reason"),
+                                _fill_multiplier(fill),
                             ),
                         )
                         inserted += int(cur.rowcount or 0)

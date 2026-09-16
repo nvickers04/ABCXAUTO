@@ -362,3 +362,37 @@ def _patch_dispatch_send_marks(
         "UPDATE dispatches SET result_json = ? WHERE id = ?",
         (_json_dumps(blob), int(dispatch_id)),
     )
+
+
+def _split_gate_stage(reason: Any) -> tuple[str, str]:
+    """Parse clerk ``stage: note`` reasons. Bare gate notes have no stage."""
+    text = str(reason or "").strip()
+    if not text:
+        return "", ""
+    if ": " not in text:
+        return "", text
+    left, right = text.split(": ", 1)
+    token = left.strip()
+    if not token or " " in token:
+        return "", text
+    if not token.replace("_", "").isalnum():
+        return "", text
+    return token, right.strip()
+
+
+def _fill_multiplier(fill: Any) -> float:
+    """Contract multiplier. OPT/FOP/BAG default 100; stock is 1."""
+    row = fill if isinstance(fill, dict) else {}
+    raw = row.get("multiplier")
+    try:
+        mult = float(raw)
+        if mult == mult and mult > 0:
+            return mult
+    except (TypeError, ValueError):
+        pass
+    sec = str(row.get("sec_type") or row.get("secType") or row.get("sec") or "").upper()
+    if sec in ("OPT", "FOP", "BAG"):
+        return 100.0
+    if row.get("strike") is not None or row.get("right"):
+        return 100.0
+    return 1.0
