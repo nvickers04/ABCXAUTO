@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 _OPTION_ENTRY_ACTIONS = (
     "vertical_spread|iron_condor|iron_butterfly|butterfly|straddle|strangle|"
     "calendar_spread|diagonal_spread|buy_option|cash_secured_put|"
+    "covered_call|collar|protective_put|"
     "ratio_spread|jade_lizard"
 )
 ALLOWED_ACTIONS = frozenset(SENDABLE_TYPES)
