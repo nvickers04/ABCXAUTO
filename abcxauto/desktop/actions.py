@@ -160,38 +160,70 @@ class ActionsMixin:
 
 
     @staticmethod
+    def _flatten_failed_row(failed: object) -> dict | None:
+        """Unprotected leftover first — that is the line Noah needs."""
+        rows = [row for row in (failed or []) if isinstance(row, dict)]
+        if not rows:
+            return None
+        rank = {"none": 0, "still_working": 1, "last_stop": 2}
+        return min(
+            rows,
+            key=lambda row: rank.get(str(row.get("protection") or ""), 3),
+        )
+
+    @staticmethod
+    def _flatten_leftover_bit(row: dict) -> str:
+        symbol = str(row.get("symbol") or "").strip() or "lot"
+        reason = str(row.get("reason") or "").strip()
+        prot = str(row.get("protection") or "").strip()
+        if prot == "none":
+            bit = f"{symbol} unprotected"
+            if reason:
+                bit = f"{bit} · {reason}"
+            return bit[:96]
+        if prot == "still_working":
+            return f"{symbol} last-stop still working"
+        if prot == "last_stop":
+            bit = f"{symbol} last-stop restored"
+            if reason:
+                bit = f"{bit} · {reason}"
+            return bit[:96]
+        if reason:
+            return f"{symbol} {reason}"[:96]
+        return symbol
+
+    @staticmethod
     def _flatten_outcome(result: object) -> tuple[str, str]:
-        """Honest line. flatten_all sets success=True even when lots remain."""
+        """Format flatten_all success / remaining / failed. Green only when flat."""
         if not isinstance(result, dict) or not result:
             return "Flatten failed", RED
+        if result.get("success") is True:
+            return "Flattened — book is flat", GREEN
         err = str(result.get("error") or "").strip()
-        try:
-            closed = int(result.get("positions_closed") or 0)
-            total = int(result.get("positions_total") or 0)
-            cancelled = int(result.get("orders_cancelled") or 0)
-            orders = int(result.get("orders_total") or 0)
-        except (TypeError, ValueError):
-            closed = total = cancelled = orders = 0
-        errors = [str(item) for item in (result.get("errors") or []) if item]
-        if err and total == 0 and orders == 0 and not errors:
-            return f"Flatten failed: {err}", RED
-        still = max(total - closed, 0)
+        status = str(result.get("status") or "").strip()
+        if status == "disconnected" or err == "Not connected":
+            return f"Flatten failed: {err or 'Not connected'}", RED
+        failed = result.get("failed") if isinstance(result.get("failed"), list) else []
+        remaining = (
+            result.get("remaining") if isinstance(result.get("remaining"), list) else []
+        )
+        n_left = len(failed) if failed else len(remaining)
+        prefix = "Partial flatten" if status == "partial" or n_left else "Flatten failed"
         bits: list[str] = []
-        if total:
-            bits.append(f"{closed}/{total} lots closed")
-        else:
-            bits.append("no lots to close")
-        if orders:
-            bits.append(f"{cancelled}/{orders} orders cancelled")
-        leftover_orders = max(orders - cancelled, 0)
-        partial = bool(errors) or still > 0 or leftover_orders > 0
-        if still:
-            bits.append(f"{still} still open")
-        if errors:
-            bits.append(str(errors[0])[:96])
-        if partial:
-            return "Partial flatten — " + " · ".join(bits), AMBER
-        return "Flattened — " + " · ".join(bits), GREEN
+        if n_left == 1:
+            bits.append("1 still open")
+        elif n_left > 1:
+            bits.append(f"{n_left} still open")
+        row = ActionsMixin._flatten_failed_row(failed)
+        if row is None and remaining and isinstance(remaining[0], dict):
+            row = remaining[0]
+        leftover = ActionsMixin._flatten_leftover_bit(row) if row else ""
+        if leftover:
+            bits.append(leftover)
+        if not bits and err:
+            return f"Flatten failed: {err}", RED
+        color = AMBER if n_left or status == "partial" else RED
+        return prefix + (" — " + " · ".join(bits) if bits else ""), color
 
 
     def _maybe_finish_flatten_report(self) -> None:
