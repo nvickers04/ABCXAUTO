@@ -1,9 +1,9 @@
 """Model id + model_params are operator knobs, not a grok-4.6-only code path.
 
 Flipping to grok-4.7 (when xAI publishes the id) is Settings / env /
-risk_settings.json. Unknown future chat.create kwargs pass through; an
-old SDK TypeError drops them instead of crashing the look. self_tune
-cannot overwrite the brain.
+risk_settings.json. ``effort`` maps to ``reasoning_effort``. Unknown
+keys and values are refused at Settings. self_tune cannot overwrite
+the brain.
 """
 
 from __future__ import annotations
@@ -28,7 +28,13 @@ from abcxauto.config import (
     update_agent_config,
 )
 from abcxauto.desk_mode import session_model, session_model_params
-from abcxauto.llm import GrokClient, chat_create_kwargs, create_chat, normalize_chat_extras
+from abcxauto.llm import (
+    GrokClient,
+    chat_create_kwargs,
+    create_chat,
+    log_chat_create_kwargs,
+    normalize_chat_extras,
+)
 from abcxauto.self_tune import OPERATOR_DISK_KEYS, apply_self_tune
 from abcxauto.thin_rth_kill_look import rth_model_no_xhigh, rth_params_no_xhigh
 
@@ -106,7 +112,7 @@ def test_env_model_and_params_load(monkeypatch):
     cfg = get_config()
     assert cfg.model == "grok-4.7"
     assert cfg.model_params["reasoning_effort"] == "high"
-    assert cfg.model_params["thinking"] is True
+    assert "thinking" not in cfg.model_params
 
 
 def test_invalid_env_params_are_ignored(monkeypatch):
@@ -118,13 +124,13 @@ def test_invalid_env_params_are_ignored(monkeypatch):
 def test_model_params_persist_in_risk_settings():
     cfg = update_agent_config(
         model="grok-4.7",
-        model_params={"reasoning_effort": "high", "effort": "xhigh"},
+        model_params={"reasoning_effort": "high"},
     )
     assert cfg.model_params["reasoning_effort"] == "high"
-    assert cfg.model_params["effort"] == "xhigh"
+    assert "effort" not in cfg.model_params
     raw = json.loads(risk_settings_path().read_text(encoding="utf-8"))
     assert raw["model"] == "grok-4.7"
-    assert raw["model_params"]["effort"] == "xhigh"
+    assert raw["model_params"]["reasoning_effort"] == "high"
 
     from abcxauto import config as cfg_mod
 
@@ -133,16 +139,16 @@ def test_model_params_persist_in_risk_settings():
     load_risk_settings(risk_settings_path())
     reread = get_config()
     assert reread.model == "grok-4.7"
-    assert reread.model_params == {"reasoning_effort": "high", "effort": "xhigh"}
+    assert reread.model_params == {"reasoning_effort": "high"}
 
 
 def test_settings_form_accepts_json_string():
     res = set_agent_knobs(
-        {"model_params": '{"reasoning_effort":"low","future_knob":2}'},
+        {"model_params": '{"reasoning_effort":"low","seed":7}'},
         persist=True,
     )
     assert res["rejected"] == {}
-    assert res["applied"]["model_params"]["future_knob"] == 2
+    assert res["applied"]["model_params"]["seed"] == 7
     assert agent_config_snapshot()["model_params"]["reasoning_effort"] == "low"
 
 
@@ -174,6 +180,19 @@ def test_bad_model_params_are_rejected():
         update_agent_config(model_params="[1,2]")
     with pytest.raises(ValueError):
         update_agent_config(model_params={"bad key": 1})
+    with pytest.raises(ValueError, match="unknown chat.create kwarg"):
+        update_agent_config(model_params={"future_knob": 2})
+    with pytest.raises(ValueError, match="not a chat.create kwarg"):
+        update_agent_config(model_params={"thinking": True})
+    with pytest.raises(ValueError, match="not a reasoning_effort"):
+        update_agent_config(model_params={"effort": "banana"})
+    with pytest.raises(ValueError, match="disagrees"):
+        update_agent_config(
+            model_params={"effort": "xhigh", "reasoning_effort": "high"}
+        )
+    res = set_agent_knobs({"model_params": '{"thinking": true}'})
+    assert "model_params" in res["rejected"]
+    assert "thinking" in res["rejected"]["model_params"]
     res = set_agent_knobs({"model_params": "not-json"})
     assert "model_params" in res["rejected"]
     assert get_config().model_params == {}
@@ -274,8 +293,8 @@ def test_self_tune_cannot_overwrite_brain_or_params():
         model_rth="rth-brain",
         model_research="research-brain",
         model_params={"reasoning_effort": "high"},
-        model_params_rth={"effort": "low"},
-        model_params_research={"effort": "xhigh"},
+        model_params_rth={"reasoning_effort": "low"},
+        model_params_research={"reasoning_effort": "xhigh"},
         persist=True,
     )
     out = apply_self_tune(
@@ -284,8 +303,8 @@ def test_self_tune_cannot_overwrite_brain_or_params():
             "model_rth": "hijack-rth",
             "model_research": "hijack-research",
             "model_params": {"reasoning_effort": "low"},
-            "model_params_rth": {"effort": "xhigh"},
-            "model_params_research": {"effort": "low"},
+            "model_params_rth": {"reasoning_effort": "xhigh"},
+            "model_params_research": {"reasoning_effort": "low"},
             "defined_risk_only": False,
         },
         persist=True,
@@ -307,8 +326,8 @@ def test_self_tune_cannot_overwrite_brain_or_params():
     assert cfg.model_rth == "rth-brain"
     assert cfg.model_research == "research-brain"
     assert cfg.model_params == {"reasoning_effort": "high"}
-    assert cfg.model_params_rth == {"effort": "low"}
-    assert cfg.model_params_research == {"effort": "xhigh"}
+    assert cfg.model_params_rth == {"reasoning_effort": "low"}
+    assert cfg.model_params_research == {"reasoning_effort": "xhigh"}
     assert cfg.defined_risk_only is True
     assert before.defined_risk_only is True
 
@@ -339,9 +358,9 @@ def test_launch_helpers_read_disk_not_hardcoded_default(monkeypatch):
         model="grok-4.7",
         model_rth="grok-4.7",
         model_research="grok-4.7-xhigh",
-        model_params={"effort": "xhigh", "thinking": True},
+        model_params={"effort": "xhigh"},
         model_params_rth={"effort": "low"},
-        model_params_research={"effort": "xhigh", "thinking": True},
+        model_params_research={"effort": "xhigh"},
         persist=True,
     )
     from abcxauto import config as cfg_mod
@@ -354,25 +373,25 @@ def test_launch_helpers_read_disk_not_hardcoded_default(monkeypatch):
     assert knobs["model"] == "grok-4.7"
     assert knobs["model_rth"] == "grok-4.7"
     assert knobs["model_research"] == "grok-4.7-xhigh"
-    assert knobs["model_params"] == {"effort": "xhigh", "thinking": True}
-    assert knobs["model_params_rth"] == {"effort": "low"}
-    assert knobs["model_params_research"]["effort"] == "xhigh"
+    assert knobs["model_params"] == {"reasoning_effort": "xhigh"}
+    assert knobs["model_params_rth"] == {"reasoning_effort": "low"}
+    assert knobs["model_params_research"]["reasoning_effort"] == "xhigh"
     assert knobs["model"] != DEFAULT_MODEL
 
     client = SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: SimpleNamespace()))
     g = GrokClient(client=client, session="premarket")
     assert g.model == "grok-4.7-xhigh"
-    assert g.model_params["effort"] == "xhigh"
+    assert g.model_params["reasoning_effort"] == "xhigh"
 
     ts._run = {}
     run = ts.begin_run()
     assert run["model"] == "grok-4.7"
     assert run["model_rth"] == "grok-4.7"
     assert run["model_research"] == "grok-4.7-xhigh"
-    assert run["model_params"]["thinking"] is True
+    assert run["model_params"]["reasoning_effort"] == "xhigh"
     disk = json.loads(ts.RUN_PATH.read_text(encoding="utf-8"))
     assert disk["model"] == "grok-4.7"
-    assert disk["model_params"]["effort"] == "xhigh"
+    assert disk["model_params"]["reasoning_effort"] == "xhigh"
 
     from abcxauto.cursor_env import START_PRO_SOURCE
     from abcxauto.pro_desktop import run_app
@@ -392,7 +411,7 @@ def test_launch_helpers_read_disk_not_hardcoded_default(monkeypatch):
     prepare_desk_start()
     assert get_config().model == "grok-4.7"
     assert get_config().model_research == "grok-4.7-xhigh"
-    assert get_config().model_params["effort"] == "xhigh"
+    assert get_config().model_params["reasoning_effort"] == "xhigh"
 
     probe = ts.RUN_PATH.parent / "launch-probe.txt"
     monkeypatch.setenv("ABCXAUTO_LAUNCH_PROBE", str(probe))
@@ -401,45 +420,45 @@ def test_launch_helpers_read_disk_not_hardcoded_default(monkeypatch):
     cfg_mod._file_overrides = {}
     run_app()
     assert get_config().model == "grok-4.7"
-    assert get_config().model_params["thinking"] is True
-    assert get_config().model_params_rth == {"effort": "low"}
-    assert get_config().model_params_research["effort"] == "xhigh"
+    assert get_config().model_params["reasoning_effort"] == "xhigh"
+    assert get_config().model_params_rth == {"reasoning_effort": "low"}
+    assert get_config().model_params_research["reasoning_effort"] == "xhigh"
 
 
 def test_session_params_fall_back_to_shared():
     cfg = update_agent_config(
-        model_params={"effort": "high", "thinking": True},
+        model_params={"effort": "high"},
         model_params_rth={},
         model_params_research={},
         persist=False,
     )
     assert session_model_params("premarket", cfg) == {
-        "effort": "high",
-        "thinking": True,
+        "reasoning_effort": "high",
     }
     cfg = update_agent_config(
         model_params={"effort": "high"},
         model_params_rth={"effort": "low"},
-        model_params_research={"effort": "xhigh", "future_knob": 1},
+        model_params_research={"effort": "xhigh", "seed": 1},
         persist=False,
     )
     assert session_model_params("premarket", cfg) == {
-        "effort": "xhigh",
-        "future_knob": 1,
+        "reasoning_effort": "xhigh",
+        "seed": 1,
     }
     client = SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: SimpleNamespace()))
     g = GrokClient(client=client, session="premarket")
-    assert g.model_params["effort"] == "xhigh"
-    assert g.model_params["future_knob"] == 1
+    assert g.model_params["reasoning_effort"] == "xhigh"
+    assert g.model_params["seed"] == 1
 
 
 def test_rth_params_cannot_defeat_xhigh_strip_or_f10(monkeypatch):
     raw = {"effort": "xhigh", "reasoning_effort": "xhigh", "thinking": True}
-    assert rth_params_no_xhigh(raw, enabled=True) == {"thinking": True}
+    assert rth_params_no_xhigh(raw, enabled=True) == {}
     assert rth_params_no_xhigh("not-json", enabled=True) == {}
     assert rth_params_no_xhigh(None, enabled=True) == {}
     kept = rth_params_no_xhigh(raw, enabled=False)
-    assert kept["effort"] == "xhigh"
+    assert kept["reasoning_effort"] == "xhigh"
+    assert "thinking" not in kept
     monkeypatch.setattr(
         "abcxauto.thin_rth_kill_look.kill_look_enabled", lambda: True
     )
@@ -449,14 +468,21 @@ def test_rth_params_cannot_defeat_xhigh_strip_or_f10(monkeypatch):
         model_params_research={"effort": "xhigh"},
     )
     rth = session_model_params("regular", cfg)
-    assert rth == {"thinking": True}
-    assert rth.get("effort") != "xhigh"
-    assert session_model_params("premarket", cfg) == {"effort": "xhigh"}
+    assert rth == {}
+    assert rth.get("reasoning_effort") != "xhigh"
+    assert session_model_params("premarket", cfg) == {"reasoning_effort": "xhigh"}
+    client = SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: SimpleNamespace()))
+    update_agent_config(
+        model_params_rth={"effort": "xhigh", "seed": 3},
+        persist=False,
+    )
+    g = GrokClient(client=client, session="regular")
+    assert g.model_params.get("reasoning_effort") != "xhigh"
+    assert g.model_params.get("seed") == 3
 
 
 def test_new_chat_applies_rth_params_when_client_had_no_session(monkeypatch):
     from abcxauto.brain import _new_chat
-    from abcxauto.llm import GrokClient
 
     created: dict = {}
 
@@ -471,19 +497,12 @@ def test_new_chat_applies_rth_params_when_client_had_no_session(monkeypatch):
     )
     monkeypatch.setattr("abcxauto.thin_rth_kill_look.kill_look_enabled", lambda: True)
     g = GrokClient(client=SimpleNamespace(chat=_ChatAPI()))
-    assert g.model_params.get("effort") == "xhigh"
+    assert g.model_params.get("reasoning_effort") == "xhigh"
+    assert "thinking" not in g.model_params
     _new_chat(g, session="regular")
-    assert g.model_params.get("effort") != "xhigh"
+    assert g.model_params.get("reasoning_effort") != "xhigh"
     assert created.get("reasoning_effort") != "xhigh"
     assert "thinking" not in created
-    client = SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: SimpleNamespace()))
-    update_agent_config(
-        model_params_rth={"effort": "xhigh", "thinking": True},
-        persist=False,
-    )
-    g = GrokClient(client=client, session="regular")
-    assert g.model_params.get("effort") != "xhigh"
-    assert g.model_params.get("thinking") is True
 
 
 def test_env_session_params_load(monkeypatch):
@@ -497,5 +516,119 @@ def test_env_session_params_load(monkeypatch):
     )
     get_config.cache_clear()
     cfg = get_config()
-    assert cfg.model_params_rth == {"effort": "low"}
-    assert cfg.model_params_research == {"effort": "xhigh"}
+    assert cfg.model_params_rth == {"reasoning_effort": "low"}
+    assert cfg.model_params_research == {"reasoning_effort": "xhigh"}
+
+
+def test_sdk_reasoning_effort_name_and_values():
+    """Installed xai_sdk 1.19: reasoning_effort, including xhigh. effort is not a kwarg."""
+    import inspect
+
+    from xai_sdk.chat import BaseClient, _reasoning_effort_to_proto
+    from xai_sdk.types.chat import ReasoningEffort
+
+    assert set(ReasoningEffort.__args__) == {"none", "low", "medium", "high", "xhigh"}
+    sig = inspect.signature(BaseClient.create)
+    assert "reasoning_effort" in sig.parameters
+    assert "effort" not in sig.parameters
+    assert "thinking" not in sig.parameters
+    assert _reasoning_effort_to_proto("xhigh") is not None
+    assert _reasoning_effort_to_proto("high") is not None
+    with pytest.raises(ValueError, match="Invalid reasoning effort"):
+        _reasoning_effort_to_proto("banana")
+
+
+def test_effort_alias_becomes_reasoning_effort():
+    got = coerce_model_params({"effort": "xhigh"})
+    assert got == {"reasoning_effort": "xhigh"}
+    g = SimpleNamespace(
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=8192,
+        model_params={"effort": "medium"},
+    )
+    kw = chat_create_kwargs(g, messages=["hi"])
+    assert kw["reasoning_effort"] == "medium"
+    assert "effort" not in kw
+
+
+def test_default_desk_create_kwargs_have_no_reasoning_effort():
+    g = SimpleNamespace(
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=8192,
+        model_params={},
+    )
+    kw = chat_create_kwargs(g, messages=["hi"])
+    assert kw["model"] == "grok-4.6"
+    assert kw["temperature"] == 0.3
+    assert kw["max_tokens"] == 8192
+    assert kw["include"] == ["verbose_streaming"]
+    assert "reasoning_effort" not in kw
+
+
+def test_first_create_logs_exact_kwargs(caplog, monkeypatch):
+    import abcxauto.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "_LOGGED_CREATE_FP", None)
+    caplog.set_level("INFO", logger="abcxauto.llm")
+    g = SimpleNamespace(
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=8192,
+        model_params={"effort": "high"},
+    )
+    kw = chat_create_kwargs(g, messages=["secret prompt"], tools=["book"])
+    line = log_chat_create_kwargs(kw)
+    assert "model='grok-4.6'" in line
+    assert "reasoning_effort='high'" in line
+    assert "secret" not in line
+    assert "book" not in line
+    assert "chat.create" in caplog.text
+    n = caplog.text.count("chat.create")
+    log_chat_create_kwargs(kw)
+    assert caplog.text.count("chat.create") == n
+
+
+def test_model_id_xhigh_suffix_is_logged_as_not_effort(caplog, monkeypatch):
+    import abcxauto.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "_LOGGED_CREATE_FP", None)
+    caplog.set_level("ERROR", logger="abcxauto.llm")
+    log_chat_create_kwargs(
+        {
+            "model": "grok-4.6-xhigh",
+            "temperature": 0.3,
+            "max_tokens": 8192,
+            "include": ["verbose_streaming"],
+        }
+    )
+    assert "not reasoning_effort" in caplog.text
+
+
+@pytest.mark.pcs_kill_look
+def test_new_chat_applies_rth_xhigh_strip(monkeypatch):
+    from abcxauto.brain import _new_chat
+
+    monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
+    update_agent_config(
+        model="grok-4.6",
+        model_params={"effort": "xhigh"},
+        persist=False,
+    )
+    created: dict = {}
+
+    class _Chat:
+        @staticmethod
+        def create(**k):
+            created.update(k)
+            return SimpleNamespace()
+
+    g = GrokClient(
+        client=SimpleNamespace(chat=_Chat()),
+        model="grok-4.6",
+    )
+    assert g.model_params.get("reasoning_effort") == "xhigh"
+    _new_chat(g, session="regular")
+    assert created.get("reasoning_effort") != "xhigh"
+    assert g.model_params.get("reasoning_effort") != "xhigh"

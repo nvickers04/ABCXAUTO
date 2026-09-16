@@ -141,7 +141,7 @@ def rth_params_no_xhigh(params: Any, *, enabled: bool | None = None) -> dict[str
     try:
         from abcxauto.config import coerce_model_params
 
-        cleaned = coerce_model_params(params) if params else {}
+        cleaned = coerce_model_params(params, strict=False) if params else {}
     except (TypeError, ValueError):
         cleaned = {}
     if enabled is False:

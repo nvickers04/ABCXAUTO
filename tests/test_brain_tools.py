@@ -2909,6 +2909,45 @@ def test_send_tool_says_one_ticket_per_call():
     card = props.get("card") or {}
     assert "required on new risk" in str(card.get("description") or "").lower()
     assert "not a catalog" in str(card.get("description") or "").lower()
+    assert "long_strike" in props
+    assert "closing_position" in props
+    assert "size_pct_nl" in props
+    assert "conId" in props
+
+
+@pytest.mark.asyncio
+async def test_send_names_missing_strategy():
+    raw = await _run_tool(
+        "send",
+        {"action": "SELL", "symbol": "AAPL", "quantity": 5, "closing_position": True},
+        connector=object(),
+        world=_world(session_status="regular"),
+        snap={},
+        turn=BrainTurn(),
+    )
+    data = json.loads(raw)
+    assert data.get("status") == "rejected"
+    err = str(data.get("error") or "")
+    assert "side, not a strategy" in err
+    assert "market_bracket" in err or "ORDER EXAMPLES" in err
+
+
+@pytest.mark.asyncio
+async def test_option_quote_error_names_missing_fields():
+    class Conn:
+        pass
+
+    raw = await _run_tool(
+        "option_quote",
+        {"ticker": "SPY"},
+        connector=Conn(),
+        world=_world(),
+        snap={},
+        turn=BrainTurn(),
+    )
+    data = json.loads(raw)
+    assert "expiration" in str(data.get("error") or "")
+    assert data.get("need") == ["expiration", "strike", "right"]
 
 
 def test_self_tune_tool_is_flat():

@@ -27,6 +27,7 @@ from abcxauto.tool_args import (
     bind_send_card,
     fallback_quote_symbols,
     normalize_tool_call,
+    option_quote_missing,
     option_quote_specs,
 )
 from abcxauto.world_state import WorldState
@@ -829,66 +830,162 @@ def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required}
 
 
+def _send_example_properties() -> dict[str, Any]:
+    """ORDER EXAMPLES keys that were missing from the send schema.
+
+    Top-level long_strike / closing_position / size_pct_nl used to die
+    in params and come back as a missing-field retry.
+    """
+    from abcxauto.order_examples import send_ticket_field_names
+
+    already = {
+        "strategy",
+        "symbol",
+        "quantity",
+        "direction",
+        "stop_price",
+        "target_price",
+        "entry_price",
+        "limit_price",
+        "order_id",
+        "expiration",
+        "strike",
+        "right",
+        "params",
+        "target_conId",
+        "card",
+        "rationale",
+        "preview",
+        "preview_token",
+    }
+    bools = {"closing_position"}
+    ints = {
+        "quantity",
+        "qty",
+        "shares",
+        "contracts",
+        "order_id",
+        "ratio",
+        "display_size",
+        "total_quantity",
+        "new_dte",
+    }
+    numbers = {
+        "stop_price",
+        "target_price",
+        "entry_price",
+        "limit_price",
+        "strike",
+        "long_strike",
+        "short_strike",
+        "put_long_strike",
+        "put_short_strike",
+        "call_short_strike",
+        "call_long_strike",
+        "put_strike",
+        "call_strike",
+        "near_strike",
+        "far_strike",
+        "center_strike",
+        "wing_width",
+        "lower_strike",
+        "middle_strike",
+        "upper_strike",
+        "trail_percent",
+        "limit_offset",
+        "offset",
+        "max_pct_volume",
+        "size_pct_nl",
+        "new_stop_price",
+        "new_limit_price",
+    }
+    out: dict[str, Any] = {}
+    for key in send_ticket_field_names():
+        if key in already:
+            continue
+        if key in bools:
+            out[key] = {"type": "boolean"}
+        elif key in ints:
+            out[key] = {"type": "integer"}
+        elif key in numbers:
+            out[key] = {"type": "number"}
+        else:
+            out[key] = {"type": "string"}
+    out.setdefault(
+        "size_pct_nl",
+        {
+            "type": "number",
+            "description": "Size as % of current NetLiq. Clerk fills quantity when omitted.",
+        },
+    )
+    out.setdefault(
+        "closing_position",
+        {"type": "boolean", "description": "True on exits and combo BAG closes."},
+    )
+    out.setdefault("conId", {"type": "string", "description": "IBKR conId. close_option prefers this."})
+    out.setdefault("action", {"type": "string", "description": "BUY or SELL on exits. Not a strategy name."})
+    return out
+
+
 def _send_tool(strategy_names: list[str] | None = None) -> Any:
     """Build the send tool. Hold is never a ticket."""
     names = list(strategy_names) if strategy_names is not None else ticket_strategy_names()
+    properties: dict[str, Any] = {
+        "strategy": {
+            "type": "string",
+            "enum": names,
+            "description": "Ticket name from ORDER EXAMPLES. Not BUY/SELL.",
+        },
+        "symbol": _QUOTE_SCHEMA,
+        "quantity": {"type": "number"},
+        "direction": {"type": "string", "description": "LONG or SHORT"},
+        "stop_price": {"type": "number"},
+        "target_price": {"type": "number"},
+        "entry_price": {"type": "number"},
+        "limit_price": {"type": "number"},
+        "order_id": {"type": "integer"},
+        "expiration": {"type": "string", "description": "YYYYMMDD"},
+        "strike": {"type": "number"},
+        "right": {"type": "string", "description": "C or P"},
+        "params": {
+            "type": "object",
+            "description": "Same ORDER EXAMPLES fields if not sent top-level.",
+        },
+        "target_conId": {"type": "string"},
+        "card": {
+            "type": "string",
+            "description": (
+                "Play name for this ticket. Required on new risk; "
+                "optional on exits, protection, modifies and cancels. "
+                "Scorecard label, not a catalog."
+            ),
+        },
+        "rationale": {"type": "string"},
+        "preview": {
+            "type": "boolean",
+            "description": (
+                "Readonly dry-run: pass/refuse, max_loss, would_refuse, "
+                "preview_token. Never places."
+            ),
+        },
+        "preview_token": {
+            "type": "string",
+            "description": (
+                "Single-use token from preview. Required to place new "
+                "risk. Bound to ticket hash (legs, qty, side, card, limit)."
+            ),
+        },
+    }
+    properties.update(_send_example_properties())
     return tool(
         name="send",
         description=(
             "One IBKR ticket per call. Call send again this turn for another ticket. "
-            "strategy name + fields match ORDER EXAMPLES. "
+            "strategy name + fields match ORDER EXAMPLES (top-level or params). "
             "Size (% of NL) and book width (self_tune max_open_positions) are together, not pick-one. "
             "Knobs are self_tune, not a ticket. Hard risk is code."
         ),
-        parameters=_schema(
-            {
-                "strategy": {
-                    "type": "string",
-                    "enum": names,
-                    "description": "Ticket name from ORDER EXAMPLES.",
-                },
-                "symbol": _QUOTE_SCHEMA,
-                "quantity": {"type": "number"},
-                "direction": {"type": "string", "description": "LONG or SHORT"},
-                "stop_price": {"type": "number"},
-                "target_price": {"type": "number"},
-                "entry_price": {"type": "number"},
-                "limit_price": {"type": "number"},
-                "order_id": {"type": "integer"},
-                "expiration": {"type": "string", "description": "YYYYMMDD"},
-                "strike": {"type": "number"},
-                "right": {"type": "string", "description": "C or P"},
-                "params": {
-                    "type": "object",
-                    "description": "Extra ticket fields from ORDER EXAMPLES if not top-level.",
-                },
-                "target_conId": {"type": "string"},
-                "card": {
-                    "type": "string",
-                    "description": (
-                        "Play name for this ticket. Required on new risk; "
-                        "optional on exits, protection, modifies and cancels. "
-                        "Scorecard label, not a catalog."
-                    ),
-                },
-                "rationale": {"type": "string"},
-                "preview": {
-                    "type": "boolean",
-                    "description": (
-                        "Readonly dry-run: pass/refuse, max_loss, would_refuse, "
-                        "preview_token. Never places."
-                    ),
-                },
-                "preview_token": {
-                    "type": "string",
-                    "description": (
-                        "Single-use token from preview. Required to place new "
-                        "risk. Bound to ticket hash (legs, qty, side, card, limit)."
-                    ),
-                },
-            },
-            ["strategy"],
-        ),
+        parameters=_schema(properties, ["strategy"]),
     )
 
 
@@ -948,7 +1045,10 @@ AGENT_TOOLS = [
             "Anything time-sensitive at +15 minutes is already in the price. "
             "Bare news() uses this look's scan tape when present, not SPY."
         ),
-        parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, []),
+        parameters=_schema(
+            {"symbol": _QUOTE_SCHEMA, "symbols": _SYMBOLS_SCHEMA},
+            [],
+        ),
     ),
     tool(
         name="odds",
@@ -1816,7 +1916,7 @@ async def _run_tool(
             args.get("symbols") or args.get("symbol"), cap=CANDLE_CAP
         )
         if not syms:
-            return json.dumps({"error": "symbol required", "source": "ibkr"})
+            return json.dumps({"error": "symbol or symbols[] required", "source": "ibkr"})
         try:
             countback = int(args.get("countback") or 60)
         except (TypeError, ValueError):
@@ -2048,7 +2148,7 @@ async def _run_tool(
             args.get("symbols") or args.get("symbol"), cap=CHAIN_CAP
         )
         if not syms:
-            return json.dumps({"error": "symbol required", "source": "ibkr"})
+            return json.dumps({"error": "symbol or symbols[] required", "source": "ibkr"})
         try:
             min_dte = int(args.get("min_dte") or 7)
             max_dte = int(args.get("max_dte") or 45)
@@ -2078,7 +2178,15 @@ async def _run_tool(
     if name == "option_quote":
         specs = option_quote_specs(args)
         if not specs:
-            return json.dumps({"error": "symbol, expiration, strike, right required", "source": "ibkr"})
+            missing = option_quote_missing(args)
+            need = missing or ["symbol", "expiration", "strike", "right"]
+            return json.dumps(
+                {
+                    "error": "option_quote needs " + ", ".join(need),
+                    "need": need,
+                    "source": "ibkr",
+                }
+            )
         rows = await asyncio.gather(
             *[_one_option_quote(connector, spec) for spec in specs[:OPTION_QUOTE_CAP]]
         )
@@ -2142,9 +2250,42 @@ async def _run_tool(
             )
             return _hub()._clip(blocked)
         params = args.get("params") if isinstance(args.get("params"), dict) else {}
+        names = _send_strategy_names_for_look(
+            session=str(getattr(world, "session_status", "") or "")
+        )
+        raw_strategy = str(args.get("strategy") or "").strip()
+        raw_action = str(args.get("action") or "").strip()
+        side_words = {"BUY", "SELL", "LONG", "SHORT"}
+        if not raw_strategy and raw_action and raw_action in names:
+            raw_strategy = raw_action
+        if not raw_strategy and raw_action.upper() in side_words:
+            raw_strategy = raw_action
+        if not raw_strategy:
+            return _hub()._clip(
+                {
+                    "status": "rejected",
+                    "error": (
+                        "strategy required — one of: " + ", ".join(names)
+                    ),
+                    "need": ["strategy"],
+                }
+            )
+        if raw_strategy.upper() in side_words and raw_strategy not in names:
+            return _hub()._clip(
+                {
+                    "status": "rejected",
+                    "error": (
+                        f"{raw_strategy!r} is a side, not a strategy. "
+                        "Send strategy= from ORDER EXAMPLES "
+                        "(e.g. market_bracket) and direction=LONG|SHORT "
+                        "or action=BUY|SELL."
+                    ),
+                    "need": ["strategy"],
+                }
+            )
         act = {
-            "action": str(args.get("strategy") or args.get("action") or "").strip(),
-            "strategy": str(args.get("strategy") or args.get("action") or "").strip(),
+            "action": raw_strategy,
+            "strategy": raw_strategy,
             "params": dict(params),
             "rationale": str(args.get("rationale") or ""),
         }
@@ -2239,7 +2380,15 @@ async def _run_tool(
                 text=str(getattr(turn, "text", "") or ""),
             )
         )
-    return json.dumps({"error": f"unknown tool {name}"})
+    known = []
+    for t in AGENT_TOOLS:
+        fn = getattr(t, "function", None)
+        got = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
+        if got and got not in known:
+            known.append(got)
+    if "web" not in known:
+        known.append("web")
+    return json.dumps({"error": f"unknown tool {name}", "tools": known})
 
 
 

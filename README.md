@@ -130,7 +130,7 @@ Precedence: Settings / `risk_settings.json` > env > default. `scan_fetch_cap` is
 | `ABCXAUTO_MODEL` | `grok-4.6` | Brain id — Pro Settings `model` wins over this. Set `grok-4.7` when available |
 | `ABCXAUTO_MODEL_RTH` | (empty) | RTH id; empty = `model`. Settings `model_rth` |
 | `ABCXAUTO_MODEL_RESEARCH` | (empty) | Premarket/AH id; empty = `model`. Settings `model_research` |
-| `ABCXAUTO_MODEL_PARAMS` | `{}` | Shared extra `chat.create` kwargs as JSON (`effort` + future keys). Settings `model_params` |
+| `ABCXAUTO_MODEL_PARAMS` | `{}` | Shared extra `chat.create` kwargs as JSON (`reasoning_effort` / `effort` alias: low\|medium\|high\|xhigh). Settings `model_params`. Unknown keys are refused. |
 | `ABCXAUTO_MODEL_PARAMS_RTH` | `{}` | RTH extras; empty = shared. Settings `model_params_rth`. xhigh stripped when RTH thin is on |
 | `ABCXAUTO_MODEL_PARAMS_RESEARCH` | `{}` | Research extras; empty = shared. Settings `model_params_research` |
 | `IBKR_PORT` | `7497` | Paper TWS |
