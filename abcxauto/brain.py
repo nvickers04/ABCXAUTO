@@ -997,6 +997,9 @@ def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
 
 
 def _new_chat(g: GrokClient, *, session: str = "") -> Any:
+    apply = getattr(g, "apply_session", None)
+    if callable(apply):
+        apply(session)
     create_kw = chat_create_kwargs(
         g,
         messages=[system(brain_system_prompt())],

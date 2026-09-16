@@ -10,6 +10,7 @@ from abcxauto.order_examples import (
     assert_examples_cover_strategies,
     combo_close_example,
     format_order_examples,
+    send_ticket_field_names,
 )
 from abcxauto.proposals import STRATEGIES, validate_proposal
 
@@ -40,6 +41,14 @@ def test_hold_absent_from_catalog():
 def test_set_risk_present():
     assert "set_risk" in ORDER_EXAMPLES
     assert "size_pct_nl" in ORDER_EXAMPLES["set_risk"]
+
+
+def test_send_ticket_field_names_cover_examples():
+    names = send_ticket_field_names()
+    assert "long_strike" in names
+    assert "closing_position" in names
+    assert "symbol" in names
+    assert "enabled_arenas" not in names
 
 
 def test_self_tune_present():

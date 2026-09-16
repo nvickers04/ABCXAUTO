@@ -694,7 +694,12 @@ def session_model(session: str = "", cfg: Any = None) -> str:
 def _params_map(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict) or not raw:
         return {}
-    return dict(raw)
+    try:
+        from abcxauto.config import coerce_model_params
+
+        return coerce_model_params(raw, strict=False)
+    except (TypeError, ValueError):
+        return {}
 
 
 def session_model_params(session: str = "", cfg: Any = None) -> dict[str, Any]:

@@ -93,7 +93,7 @@ BRAIN_FIELDS = (
     (
         "model_params",
         "Model params",
-        "JSON object — shared effort/thinking. Empty = none. Next look rebuilds",
+        "JSON object — reasoning_effort: low|medium|high|xhigh (effort alias). Empty = SDK default high. Next look rebuilds",
     ),
     (
         "model_params_rth",

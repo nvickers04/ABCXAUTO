@@ -71,6 +71,34 @@ RESERVED_CHAT_KEYS = frozenset({
     "temperature",
     "max_tokens",
 })
+# Settings still accept ``effort``; xAI SDK 1.19 ``chat.create`` wants
+# ``reasoning_effort``. Values from xai_sdk.types.chat.ReasoningEffort.
+# ``thinking`` is not a create kwarg (stream already surfaces reasoning_content).
+REASONING_EFFORT_VALUES = frozenset({"none", "low", "medium", "high", "xhigh"})
+_CHAT_EXTRA_ALIASES = {"effort": "reasoning_effort"}
+_REFUSED_CHAT_EXTRAS = {
+    "thinking": (
+        "not a chat.create kwarg — stream already surfaces reasoning_content; "
+        "use reasoning_effort=low|medium|high|xhigh"
+    ),
+}
+# Simple extras on xai_sdk.chat.BaseClient.create (1.19). Complex objects
+# (tools, search_parameters, response_format) stay clerk-owned or unused.
+ALLOWED_MODEL_PARAM_KEYS = frozenset({
+    "reasoning_effort",
+    "effort",
+    "seed",
+    "top_p",
+    "logprobs",
+    "top_logprobs",
+    "parallel_tool_calls",
+    "store_messages",
+    "use_encrypted_content",
+    "max_turns",
+    "service_tier",
+    "user",
+    "conversation_id",
+})
 # Brain / pacing / link knobs the operator sets from Pro Settings.
 # scan_fetch_cap is deliberately absent: self_tune is its only writer.
 AGENT_CONFIG_KEYS = frozenset({
@@ -154,7 +182,8 @@ class Config:
     # Session brains. Empty = use ``model`` (single-model desks keep working).
     model_rth: str = ""
     model_research: str = ""
-    # Extra chat.create kwargs (effort + future keys). JSON object.
+    # Extra chat.create kwargs. JSON object. ``effort`` is an alias for
+    # ``reasoning_effort`` (low|medium|high|xhigh). Unknown keys are refused.
     # Session maps fall back to ``model_params`` when empty.
     model_params: dict[str, Any] = field(default_factory=dict)
     model_params_rth: dict[str, Any] = field(default_factory=dict)
@@ -453,11 +482,83 @@ def _json_safe_param(value: Any, *, depth: int = 0) -> bool:
     return False
 
 
-def coerce_model_params(value: Any) -> dict[str, Any]:
-    """JSON object of extra chat.create kwargs. Unknown keys stay.
+def normalize_model_params(extras: Any) -> tuple[dict[str, Any], list[str]]:
+    """Map Settings aliases onto SDK names. Return ``(cleaned, problems)``.
+
+    Does not raise. Reserved clerk keys are dropped. ``effort`` becomes
+    ``reasoning_effort``. Unknown keys and bad values are listed in
+    ``problems`` and omitted from ``cleaned``.
+    """
+    if not isinstance(extras, dict):
+        return {}, ["model_params must be a JSON object"]
+    out: dict[str, Any] = {}
+    aliases: dict[str, Any] = {}
+    problems: list[str] = []
+    allowed_show = ", ".join(sorted(ALLOWED_MODEL_PARAM_KEYS - {"effort"} | {"effort (alias)"}))
+    for raw_key, raw_val in extras.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        if not _MODEL_PARAM_KEY_RE.match(key):
+            problems.append(f"{raw_key!r} must be a Python identifier")
+            continue
+        if key in RESERVED_CHAT_KEYS:
+            continue
+        if not _json_safe_param(raw_val):
+            problems.append(f"{key} is not JSON-safe")
+            continue
+        if key in _REFUSED_CHAT_EXTRAS:
+            problems.append(f"{key}: {_REFUSED_CHAT_EXTRAS[key]}")
+            continue
+        mapped = _CHAT_EXTRA_ALIASES.get(key)
+        dest = mapped or key
+        if dest not in ALLOWED_MODEL_PARAM_KEYS and dest not in _CHAT_EXTRA_ALIASES.values():
+            problems.append(
+                f"{key}: unknown chat.create kwarg (allowed: {allowed_show})"
+            )
+            continue
+        if dest == "reasoning_effort":
+            token = str(raw_val or "").strip().lower()
+            if token not in REASONING_EFFORT_VALUES:
+                problems.append(
+                    f"{key}={raw_val!r} is not a reasoning_effort value "
+                    f"({ '|'.join(sorted(REASONING_EFFORT_VALUES)) })"
+                )
+                continue
+            if mapped:
+                aliases[dest] = token
+            else:
+                out[dest] = token
+            continue
+        if mapped:
+            aliases[dest] = raw_val
+            continue
+        out[dest] = raw_val
+    if "reasoning_effort" in aliases:
+        aliased = aliases["reasoning_effort"]
+        explicit = out.get("reasoning_effort")
+        if explicit is not None and explicit != aliased:
+            problems.append(
+                f"effort={aliased!r} disagrees with reasoning_effort={explicit!r}"
+            )
+        elif explicit is None:
+            out["reasoning_effort"] = aliased
+    for key, value in aliases.items():
+        if key == "reasoning_effort":
+            continue
+        if key not in out:
+            out[key] = value
+    return out, problems
+
+
+def coerce_model_params(value: Any, *, strict: bool = True) -> dict[str, Any]:
+    """JSON object of extra chat.create kwargs.
 
     Empty / missing → {}. Reserved clerk keys (model, messages, tools,
     include, temperature, max_tokens) are dropped so dedicated knobs win.
+    ``effort`` is stored as ``reasoning_effort``. Unknown keys / values
+    raise when ``strict`` (Settings). Env / file load use ``strict=False``
+    and log the dropped keys instead of wiping a valid map.
     """
     if value is None or value == "":
         return {}
@@ -473,21 +574,15 @@ def coerce_model_params(value: Any) -> dict[str, Any]:
         raise ValueError("model_params must be a JSON object")
     if len(value) > _MODEL_PARAMS_MAX_KEYS:
         raise ValueError(f"model_params has too many keys (max {_MODEL_PARAMS_MAX_KEYS})")
-    out: dict[str, Any] = {}
-    for raw_key, raw_val in value.items():
-        key = str(raw_key).strip()
-        if not key or not _MODEL_PARAM_KEY_RE.match(key):
-            raise ValueError(
-                f"model_params key {raw_key!r} must be a Python identifier"
-            )
-        if key in RESERVED_CHAT_KEYS:
-            continue
-        if not _json_safe_param(raw_val):
-            raise ValueError(f"model_params.{key} is not JSON-safe")
-        out[key] = raw_val
+    out, problems = normalize_model_params(value)
     blob = json.dumps(out, sort_keys=True, default=str)
     if len(blob) > _MODEL_PARAMS_MAX_CHARS:
         raise ValueError("model_params JSON is too large")
+    if problems:
+        msg = "model_params: " + "; ".join(problems)
+        if strict:
+            raise ValueError(msg)
+        logger.error("%s — dropped", msg)
     return out
 
 
@@ -496,9 +591,9 @@ def _env_model_params(name: str = "ABCXAUTO_MODEL_PARAMS") -> dict[str, Any]:
     if not raw:
         return {}
     try:
-        return coerce_model_params(raw)
+        return coerce_model_params(raw, strict=False)
     except (TypeError, ValueError) as exc:
-        logger.warning("Ignoring invalid %s: %s", name, exc)
+        logger.error("Ignoring invalid %s: %s", name, exc)
         return {}
 
 
@@ -581,9 +676,12 @@ def _read_risk_file(settings_path: Path) -> dict[str, Any]:
         if key not in PERSISTED_SETTINGS_KEYS:
             continue
         try:
-            cleaned[key] = _coerce_persisted_value(key, value)
+            if key in _AGENT_JSON_OBJECT_KEYS:
+                cleaned[key] = coerce_model_params(value, strict=False)
+            else:
+                cleaned[key] = _coerce_persisted_value(key, value)
         except (TypeError, ValueError):
-            logger.warning("Ignoring invalid risk setting %s=%r", key, value)
+            logger.error("Ignoring invalid risk setting %s=%r", key, value)
     return cleaned
 
 
@@ -657,7 +755,8 @@ def get_config() -> Config:
     session brain when set; empty falls back to ``model``. ``model_params``
     / ``model_params_rth`` / ``model_params_research`` are extra
     ``chat.create`` kwargs (JSON object; session maps fall back to shared).
-    Unknown future keys pass through. ``scan_fetch_cap`` from ``self_tune``
+    Unknown ``model_params`` keys are refused at Settings; env / disk
+    drop them with an error log. ``scan_fetch_cap`` from ``self_tune``
     beats both.
     """
     base = _load_env_config()
