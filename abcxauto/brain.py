@@ -997,6 +997,12 @@ def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
 
 
 def _new_chat(g: GrokClient, *, session: str = "") -> Any:
+    apply = getattr(g, "apply_session", None)
+    if callable(apply) and str(session or "").strip():
+        try:
+            apply(session)
+        except Exception:
+            logger.debug("session knobs apply failed", exc_info=True)
     create_kw = chat_create_kwargs(
         g,
         messages=[system(brain_system_prompt())],
@@ -1203,7 +1209,6 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         "unprotected": list(world.unprotected or []),
         "net_liquidation": world.net_liquidation,
         "daily_pnl": world.daily_pnl,
-        "ibkr_daily_pnl": world.daily_pnl,
         "open_upnl": open_upnl_of(world.positions),
         "posture": world.effective_posture or world.risk_posture,
         "gates": world.gates,
@@ -1290,18 +1295,41 @@ def _book_payload(
     except Exception:
         last_look = {}
     _ = (tool_trace, snap)
+    day = day_facts(world, sc)
+    if isinstance(day, dict):
+        day = dict(day)
+        for alias in (
+            "daily_pnl_pct_of_nl",
+            "ibkr_daily_pnl_pct_of_nl",
+            "risk_per_trade_pct",
+        ):
+            day.pop(alias, None)
+        if not day.get("playbook"):
+            day.pop("playbook", None)
+    windows = (sc or {}).get("windows") or {}
+    useful_windows = {
+        name: row
+        for name, row in dict(windows).items()
+        if isinstance(row, dict) and row.get("snaps")
+    }
+    score_windows: dict[str, Any] = {}
+    fastest = (sc or {}).get("fastest_beating")
+    best = (sc or {}).get("best_pace")
+    if fastest is not None:
+        score_windows["fastest_beating"] = fastest
+    if best is not None:
+        score_windows["best_pace"] = best
+    if useful_windows:
+        score_windows["windows"] = useful_windows
     out: dict[str, Any] = {
-        "day": day_facts(world, sc),
+        "day": day,
         "world": facts,
         "ibkr_live_quotes": dict(world.ibkr_live_quotes or {}),
-        "score_windows": {
-            "fastest_beating": (sc or {}).get("fastest_beating"),
-            "best_pace": (sc or {}).get("best_pace"),
-            "windows": (sc or {}).get("windows") or {},
-        },
         "levers": levers_snapshot(cfg),
         "path": _path_block(world, cfg),
     }
+    if score_windows:
+        out["score_windows"] = score_windows
     if last_look:
         out["last_look"] = last_look
     try:
@@ -1330,6 +1358,19 @@ def _path_block(world: WorldState, cfg: Any) -> dict[str, Any]:
         return {"n": 0, "note": "path unavailable"}
 
 
+def _should_bill_research_round(turn: BrainTurn, *, tool_calls: int = 0) -> bool:
+    """False for a failed / empty / junk round — those are not a look."""
+    if turn.failed or turn.ended or turn.parked:
+        return False
+    try:
+        n = int(tool_calls or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n > 0:
+        return True
+    return not _look_is_empty_or_question(turn)
+
+
 def _bill_research_brief_round(
     turn: BrainTurn,
     *,
@@ -1338,6 +1379,8 @@ def _bill_research_brief_round(
     tool_calls: int = 0,
 ) -> bool:
     """Count one billed research model turn. True when the card is now halted."""
+    if not _should_bill_research_round(turn, tool_calls=tool_calls):
+        return False
     try:
         from abcxauto.desk_mode import is_research_session, is_rth_session
         from abcxauto.research_budget import note_brief_turn, resolve_research_card
@@ -2098,9 +2141,6 @@ async def _grok_turn_impl(
                     empty_tries,
                     EMPTY_GROK_TRIES,
                 )
-                if _bill_research_brief_round(turn, session=session, snap=snap):
-                    ran_out = False
-                    break
                 await asyncio.sleep(empty_grok_dead_s())
                 continue
             if empty_after_work:
@@ -2112,7 +2152,9 @@ async def _grok_turn_impl(
             # Words (or empty) and no tools: stop calling the model. Chat
             # stays. Next call is fill / order_change / unprotected / poke
             # with this chat plus a fresh snap. Do not call again because it spoke.
-            if _bill_research_brief_round(turn, session=session, snap=snap):
+            if not empty_after_work and _bill_research_brief_round(
+                turn, session=session, snap=snap
+            ):
                 ran_out = False
                 break
             ran_out = False

@@ -660,24 +660,38 @@ class PortfolioMonitor:
             }
             return {}
 
-        positions = await self.connector.get_positions()
-        orders = await self.connector.get_open_orders()
-        account = await self.connector.get_account_summary()
+        async def _one(fn: Any, label: str, default: Any) -> Any:
+            if not callable(fn):
+                return default
+            try:
+                out = fn()
+                if asyncio.iscoroutine(out) or asyncio.isfuture(out):
+                    out = await out
+                return default if out is None and default is not None else out
+            except Exception as exc:
+                logger.warning("Monitor %s failed: %s", label, exc)
+                return default
+
+        positions, orders, account, fills = await asyncio.gather(
+            _one(self.connector.get_positions, "positions", []),
+            _one(self.connector.get_open_orders, "open_orders", []),
+            _one(self.connector.get_account_summary, "account", {}),
+            _one(getattr(self.connector, "get_fills", None), "fills", []),
+        )
+        if not isinstance(positions, list):
+            positions = []
+        if not isinstance(orders, list):
+            orders = []
+        if not isinstance(account, dict):
+            account = {}
+        if not isinstance(fills, list):
+            fills = []
         protection = build_protection_report(positions, orders)
 
         # Feed peak-equity tracker for the self-clearing drawdown gate.
         net_liq = _account_float(account or {}, "netliquidation", "NetLiquidation")
         if net_liq is not None and net_liq > 0:
             get_risk_gate().update_equity(net_liq)
-
-        fills: list = []
-        # Cheap idempotent fill ingest (hasattr so fakes without get_fills stay green).
-        if hasattr(self.connector, "get_fills"):
-            try:
-                fills = await self.connector.get_fills() or []
-            except Exception as e:
-                logger.warning(f"Monitor fill ingest failed: {e}")
-                fills = []
 
         snapshot = {
             "connected": True,
