@@ -116,6 +116,12 @@ _JOURNAL_METHODS = frozenset(
         "startup_cash",
         "strategy_diversity",
         "strategy_performance",
+        "write_note",
+        "get_notes",
+        "list_notes",
+        "invalidate_note",
+        "record_code_note",
+        "notes_pointer",
     }
 )
 

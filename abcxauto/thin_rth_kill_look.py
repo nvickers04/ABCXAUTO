@@ -31,6 +31,8 @@ STAY_TOOLS = frozenset({
     "option_quote",
     "fills",
     "send",
+    "recall",
+    "research_brief",
 })
 DIE_TOOLS = frozenset({
     "scan",

@@ -1171,6 +1171,35 @@ AGENT_TOOLS = [
             [],
         ),
     ),
+    tool(
+        name="recall",
+        description="Durable notes. Fetch only.",
+        parameters=_schema(
+            {
+                "op": {
+                    "type": "string",
+                    "enum": ["list", "get", "write", "invalidate"],
+                },
+                "ids": {"type": "array", "items": {"type": "string"}},
+                "id": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "kind": {
+                    "type": "string",
+                    "enum": ["fact", "event", "invalidate"],
+                },
+                "symbol": {"type": "string"},
+                "body": {"type": "string"},
+                "evidence": {"type": "string"},
+                "invalidate": {"type": "string"},
+            },
+            [],
+        ),
+    ),
+    tool(
+        name="research_brief",
+        description="Prior-session brief. Color only.",
+        parameters=_schema({}, []),
+    ),
 ]
 
 
@@ -2346,6 +2375,25 @@ async def _run_tool(
                 tool_trace=getattr(turn, "tool_trace", None),
                 text=str(getattr(turn, "text", "") or ""),
             )
+        )
+    if name == "recall":
+        from abcxauto.memory.notes import recall_tool
+
+        return _hub()._clip(recall_tool(args if isinstance(args, dict) else {}))
+    if name == "research_brief":
+        from abcxauto.desk_mode import load_research_brief, research_brief_stale
+
+        brief = load_research_brief()
+        missing = not bool(brief)
+        stale = True if missing else research_brief_stale(brief)
+        return _hub()._clip(
+            {
+                "brief": brief or {},
+                "missing": missing,
+                "stale": stale,
+                "use": "color, never a live trigger",
+                "send_geometry": False,
+            }
         )
     return json.dumps({"error": f"unknown tool {name}"})
 

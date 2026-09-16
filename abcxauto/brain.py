@@ -7,7 +7,7 @@ Chat kept. Do not call the model again because it spoke. Next call is
 fill / order_change / unprotected / operator poke, with the full chat
 plus a fresh snap. A poke does not start a new messages list. Overnight
 / after-close / park drop the chat. Session cap idles; chat is kept.
-Durable notes across days are gone. Tickets go through
+Durable notes live in journal.db; wake carries a pointer; recall fetches. Tickets go through
 ``execute_ticket`` → ``send_action``. IBKR tools are live. scan() is one
 tape this look (merged hits + on_book); candles are IBKR hist or the
 live 5s stream (error if both miss); news is ~15 min delayed.

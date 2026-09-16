@@ -1597,10 +1597,7 @@ class ProEngine:
             from abcxauto.desk_mode import is_rth_session
 
             if is_rth_session(str(getattr(world, "session_status", "") or "")):
-                full = not bool(getattr(self, "_research_color_injected", False))
-                day["research_brief_full"] = full
-                if full:
-                    self._research_color_injected = True
+                day["research_brief_full"] = False
         except Exception:
             logger.debug("research color flag failed", exc_info=True)
         wake = format_wake(

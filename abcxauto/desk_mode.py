@@ -1409,9 +1409,17 @@ def rth_research_color(
         n = len(brief.get("expectancy") or [])
         reg = _normalize_regime(brief.get("regime"))
         theme = f" regime={reg['theme']}" if reg and reg.get("theme") else ""
+        age_bit = ""
+        ts = _parse_iso(str(brief.get("as_of") or brief.get("ts") or ""))
+        clock = now or _utc_now()
+        if ts is not None:
+            if clock.tzinfo is None:
+                clock = clock.replace(tzinfo=timezone.utc)
+            age = max(0, int((clock - ts).total_seconds() // 86400))
+            age_bit = f" age={age}d"
         return (
             "prior_session_research=on_disk "
-            f"expectancy={n}{theme} (color, never a live trigger)."
+            f"expectancy={n}{theme}{age_bit} (color, never a live trigger)."
         )
     bits = [
         "prior_session_research(color, not a live trigger):",

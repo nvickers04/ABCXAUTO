@@ -239,6 +239,22 @@ CREATE TABLE IF NOT EXISTS send_previews (
     used_ts TEXT,
     source TEXT
 );
+
+CREATE TABLE IF NOT EXISTS notes (
+    id TEXT PRIMARY KEY,
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    symbol TEXT,
+    tags_json TEXT,
+    body TEXT NOT NULL,
+    evidence TEXT,
+    invalidate TEXT,
+    expires_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    rev INTEGER NOT NULL DEFAULT 1,
+    invalidated_at TEXT,
+    reason_code TEXT
+);
 """
 
 _FILL_MARK_COLS = (
@@ -433,6 +449,28 @@ class JournalSchema:
                 )
                 _ensure_columns(conn, "gate_decisions", (("stage", "TEXT"),))
                 _ensure_columns(conn, "fills", (("multiplier", "REAL"),))
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS notes (
+                        id TEXT PRIMARY KEY,
+                        ts TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        symbol TEXT,
+                        tags_json TEXT,
+                        body TEXT NOT NULL,
+                        evidence TEXT,
+                        invalidate TEXT,
+                        expires_at TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        rev INTEGER NOT NULL DEFAULT 1,
+                        invalidated_at TEXT,
+                        reason_code TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_notes_expires_at ON notes(expires_at);
+                    CREATE INDEX IF NOT EXISTS idx_notes_source_reason_ts
+                        ON notes(source, reason_code, ts);
+                    """
+                )
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.commit()
             self._initialized = True

@@ -81,9 +81,11 @@ IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 
 MDA delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
 
-Other: `odds` (Polymarket), `send`, `self_tune` (flat knobs; `send self_tune` still works).
+Other: `odds` (Polymarket), `send`, `self_tune` (flat knobs; `send self_tune` still works),
+`note` (this-flight scratch), `recall` (durable `journal.db` notes, fetch only),
+`research_brief` (prior-session COLOR; never a live trigger).
 
-Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limited to it. Code still writes `journal.db`; there is no `journal` tool.
+Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limited to it. Code still writes `journal.db`; there is no `journal` tool. Durable notes (14d or `invalidate`) sit in that DB. Wake pointer only; `recall` fetches. Never auto-injected; never send geometry.
 
 ## 3. Operator surfaces
 
