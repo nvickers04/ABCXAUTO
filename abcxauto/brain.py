@@ -95,6 +95,10 @@ class BrainTurn:
     scan_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Last stream_round had no [say] after tools/send. Not a sit.
     trailing_empty_grok: bool = False
+    # Paid reasoning, no [say]. Completed look, not a void.
+    trailing_think_only: bool = False
+    # Empty/silent ended with the same prompt still on the wire.
+    skip_identical_retry: bool = False
     # Fill / order_change / unprotected / desk-fact inject landed on this chat.
     poked: bool = False
     kill_mode: str = ""
@@ -149,10 +153,15 @@ _STREAM_ABORT_MARKERS = (
 EMPTY_GROK_TRIES = 2
 EMPTY_GROK_DEAD_S = 2.0
 EMPTY_GROK_RECOVER_TRIES = 2
-# Wall-clock for a GROK tip with no [say]. Not stream stop==empty.
-# Matches STREAM_CHUNK_S * STREAM_IDLE_LIMIT so a silent banner aborts
-# even when think tokens keep resetting the per-chunk idle counter.
+# Idle wall-clock with no think and no say. Think chunks reset this.
+# Matches STREAM_CHUNK_S * STREAM_IDLE_LIMIT. A live reasoning stream
+# is not silent; THINK_ONLY_CEILING_S bounds a think-forever round.
 SILENT_GROK_TIP_S = float(STREAM_CHUNK_S * STREAM_IDLE_LIMIT)
+# 240s = 4 min. Observed ~2500 reasoning tok in 48s (~52 tok/s);
+# 8192 max_tokens at half that rate is ~315s. 240s covers a full dump
+# at today's rate (~157s) with margin and still ends a stuck think-only
+# stream. Dead streams still die at SILENT_GROK_TIP_S.
+THINK_ONLY_CEILING_S = 240.0
 
 
 def provider_overloaded(err: Any) -> bool:
@@ -200,6 +209,17 @@ def silent_grok_tip_s() -> float:
     return float(SILENT_GROK_TIP_S)
 
 
+def think_only_ceiling_s() -> float:
+    """Overall bound for a think-only stream. Env override for tests."""
+    raw = (os.environ.get("ABCXAUTO_THINK_ONLY_CEILING_S") or "").strip()
+    if raw:
+        try:
+            return max(0.0, min(600.0, float(raw)))
+        except ValueError:
+            pass
+    return float(THINK_ONLY_CEILING_S)
+
+
 def _empty_grok_round_after_work(
     turn: "BrainTurn",
     text: str,
@@ -233,6 +253,8 @@ def _empty_grok_round_after_work(
     ):
         return False
     if stop in ("interrupt", "loop"):
+        return False
+    if stop == "think_only":
         return False
     if stop in ("empty", "silent"):
         return True
@@ -756,6 +778,7 @@ async def stream_round(
     idle = 0
     reason = "ok"
     tip_t0 = time.monotonic()
+    last_activity = tip_t0
     while True:
         try:
             from abcxauto.park_clock import peek_interrupt
@@ -765,17 +788,29 @@ async def stream_round(
                 break
         except Exception:
             pass
+        now = time.monotonic()
+        ceiling_s = think_only_ceiling_s()
+        if (
+            ceiling_s > 0
+            and saw_think
+            and not saw_say
+            and not o
+            and (now - tip_t0) >= ceiling_s
+        ):
+            think_emit("tool", "\n[think-only ceiling]\n")
+            reason = "think_only"
+            break
         silent_s = silent_grok_tip_s()
         if (
             silent_s > 0
             and not saw_say
             and not o
-            and (time.monotonic() - tip_t0) >= silent_s
+            and (now - last_activity) >= silent_s
         ):
-            # Wall-clock hung tip — think dribble resets STREAM_IDLE but
-            # never [say]. stop==empty is not required.
+            # Idle since last think/say. A live reasoning stream resets
+            # last_activity. No think and no say is still hung.
             think_emit("tool", "\n[stream silent]\n")
-            reason = "empty"
+            reason = "think_only" if saw_think else "empty"
             break
         try:
             resp, ch = await asyncio.wait_for(anext(agen), timeout=STREAM_CHUNK_S)
@@ -785,7 +820,10 @@ async def stream_round(
             idle += 1
             if idle >= STREAM_IDLE_LIMIT:
                 think_emit("tool", "\n[stream stalled]\n")
-                reason = "empty" if not saw_say and not o else "stalled"
+                if not saw_say and not o:
+                    reason = "think_only" if saw_think else "empty"
+                else:
+                    reason = "stalled"
                 break
             continue
         idle = 0
@@ -794,6 +832,7 @@ async def stream_round(
         rc = _piece(ch, "reasoning_content", "reasoning")
         think_acc, think_piece = _delta(think_acc, rc)
         if think_piece:
+            last_activity = time.monotonic()
             if not saw_think:
                 think_emit("say", "\n[think]\n")
                 saw_think = True
@@ -802,6 +841,7 @@ async def stream_round(
         if content:
             say_acc, say_piece = _delta(say_acc, content)
             if say_piece:
+                last_activity = time.monotonic()
                 if not saw_say:
                     think_emit("say", "\n[say]\n")
                     saw_say = True
@@ -811,8 +851,8 @@ async def stream_round(
             think_emit("tool", "\n[stream loop]\n")
             reason = "loop"
             break
+    fr = ""
     try:
-        fr = ""
         if last_ch is not None:
             choices = list(getattr(last_ch, "choices", None) or [])
             raw_fr = getattr(choices[0], "finish_reason", None) if choices else None
@@ -833,14 +873,36 @@ async def stream_round(
     # Hung GROK tip: no [say]. Think-only / stall / banner-then-silence
     # are the same class. Do not require stop==empty from the SDK.
     if reason in ("ok", "stalled") and not saw_say and not o:
-        reason = "empty"
+        reason = "think_only" if saw_think else "empty"
+    if reason in ("empty", "think_only"):
+        for obj in (last_resp, last_ch):
+            if obj is not None and list(getattr(obj, "tool_calls", None) or []):
+                reason = "ok"
+                break
+    used: dict[str, int] = {}
     try:
-        from abcxauto.memory import get_journal
-        from abcxauto.scorecard import estimate_cost_usd, usage_from_response
+        from abcxauto.scorecard import usage_from_response
 
         used = usage_from_response(
             last_resp, last_ch, think_text=think_acc, say_text=o
         )
+    except Exception:
+        logger.debug("usage probe failed", exc_info=True)
+    try:
+        logger.info(
+            "grok call input=%s output=%s reasoning=%s finish_reason=%s stop=%s",
+            int(used.get("input_tokens") or 0),
+            int(used.get("output_tokens") or 0),
+            int(used.get("reasoning_tokens") or 0),
+            fr or "-",
+            reason,
+        )
+    except Exception:
+        logger.debug("grok call log failed", exc_info=True)
+    try:
+        from abcxauto.memory import get_journal
+        from abcxauto.scorecard import estimate_cost_usd
+
         from abcxauto.config import get_config
 
         get_journal().record_model_usage(
@@ -2251,6 +2313,13 @@ async def _grok_turn_impl(
             # Gate on THIS round: no say, no tool. [think] is not a
             # checkpoint. A [say] this round sits. stop==empty is not
             # required — wall-clock silent / stall / junk tip count.
+            if stop == "think_only":
+                turn.trailing_think_only = True
+                turn.trailing_empty_grok = False
+                turn.skip_identical_retry = True
+                logger.info("think-only GROK — completed, no recover")
+                ran_out = False
+                break
             empty_after_work = _empty_grok_round_after_work(
                 turn,
                 text,
@@ -2260,20 +2329,10 @@ async def _grok_turn_impl(
                 poked=bool(getattr(turn, "poked", False)),
             )
             turn.trailing_empty_grok = empty_after_work
-            if empty_after_work and empty_tries < EMPTY_GROK_TRIES:
-                empty_tries += 1
-                logger.warning(
-                    "empty GROK after tools/send/poke — recover %s/%s same chat",
-                    empty_tries,
-                    EMPTY_GROK_TRIES,
-                )
-                await asyncio.sleep(empty_grok_dead_s())
-                continue
             if empty_after_work:
-                logger.error(
-                    "empty GROK after tools/send/poke — cannot continue "
-                    "same chat after %s recovers",
-                    empty_tries,
+                turn.skip_identical_retry = True
+                logger.warning(
+                    "empty GROK after tools/send/poke — skip identical retry"
                 )
             # Words (or empty) and no tools: stop calling the model. Chat
             # stays. Next call is fill / order_change / unprotected / poke
@@ -2286,6 +2345,7 @@ async def _grok_turn_impl(
             ran_out = False
             break
         turn.trailing_empty_grok = False
+        turn.trailing_think_only = False
         tools_before = len(turn.tool_trace)
         interrupted = await _dispatch_tool_calls(
             calls,

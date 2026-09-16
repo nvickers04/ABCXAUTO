@@ -1321,6 +1321,17 @@ class ProEngine:
         payload = out if isinstance(out, dict) else {}
         if payload.get("_ended") or payload.get("_parked"):
             return False
+        if payload.get("_think_only"):
+            return False
+        if payload.get("_skip_identical_retry"):
+            if payload.get("_empty_grok") and not bool(
+                getattr(self, "_recover_gave_up", False)
+            ):
+                self._recover_gave_up = True
+                logger.warning(
+                    "empty/junk GROK — skip identical same-chat recover"
+                )
+            return False
         from abcxauto.brain import (
             EMPTY_GROK_RECOVER_TRIES,
             _look_text_is_junk,
@@ -1680,6 +1691,8 @@ class ProEngine:
             "_ended": bool(getattr(turn, "ended", False)),
             "_stream_error": str(getattr(turn, "stream_error", "") or ""),
             "_empty_grok": bool(getattr(turn, "trailing_empty_grok", False)),
+            "_think_only": bool(getattr(turn, "trailing_think_only", False)),
+            "_skip_identical_retry": bool(getattr(turn, "skip_identical_retry", False)),
             "_poked": bool(getattr(turn, "poked", False)),
             "_recover": recover,
             "f10_tripped": bool(getattr(turn, "f10_tripped", False)),
