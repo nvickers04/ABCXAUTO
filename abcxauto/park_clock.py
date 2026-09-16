@@ -151,6 +151,7 @@ class GrokAlarm:
     wake_at: str | None = None
     wake_if: list[str] = field(default_factory=list)
     set_at: str = ""
+    session: str = ""
 
     def due(self, now: datetime | None = None) -> bool:
         at = _parse_iso(self.wake_at or "")
@@ -195,6 +196,7 @@ def load_alarm() -> GrokAlarm:
         wake_at=str(raw.get("wake_at") or "") or None,
         wake_if=[str(x).strip().lower() for x in ifs if str(x).strip()],
         set_at=str(raw.get("set_at") or ""),
+        session=str(raw.get("session") or "").strip().lower(),
     )
 
 
@@ -206,6 +208,7 @@ def save_alarm(alarm: GrokAlarm) -> GrokAlarm:
             "wake_at": alarm.wake_at,
             "wake_if": list(alarm.wake_if),
             "set_at": alarm.set_at or _utc_now().isoformat(),
+            "session": str(alarm.session or "").strip().lower(),
         }
         p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError:
@@ -404,15 +407,18 @@ def start_looks_now(
     """Operator Start thinks now unless an overnight / after-close park is standing.
 
     Premarket stay-up and RTH have no sit clock — leftover grok_wake.json does
-    not block Start. Overnight closed parks stand until due.
+    not block Start. Overnight closed parks stand until due. A labeled park
+    session on the alarm is fail-closed: session=closed after the RTH bell
+    still parks rather than starting looks.
     """
     al = alarm or load_alarm()
     if not al.wake_at or al.due(now=now):
         return True
+    sess = str(session or al.session or "").strip().lower()
     mins = minutes_to_open
     if mins is None:
         mins = et_minutes_to_rth_open(now=now)
-    return not _is_park_session(session, mins)
+    return not _is_park_session(sess, mins)
 
 
 def minutes_to_open_from_snap(snap: dict[str, Any] | None) -> float | None:
@@ -560,6 +566,7 @@ def set_wake(
             wake_at=at,
             wake_if=clean,
             set_at=_utc_now().isoformat(),
+            session=sess,
         )
     )
 

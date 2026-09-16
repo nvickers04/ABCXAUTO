@@ -356,7 +356,7 @@ class ProEngine:
             from abcxauto.park_clock import load_alarm, start_looks_now
 
             alarm = load_alarm()
-            if alarm.wake_at and not alarm.due() and not start_looks_now(alarm):
+            if alarm.wake_at and not alarm.due() and not start_looks_now(alarm, session=alarm.session):
                 # Fresh launch: honor Grok's leftover park, except a
                 # remaining-to-bell / session-card clock — that is a send
                 # gate, not a think shutdown. Operator Start on a live

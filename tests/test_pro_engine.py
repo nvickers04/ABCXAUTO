@@ -2279,6 +2279,41 @@ async def test_launch_honors_an_overnight_park(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_launch_honors_closed_park_after_rth_bell(monkeypatch, tmp_path):
+    """session=closed leftover park sits Start after 09:30. Fail closed."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    from abcxauto.park_clock import set_wake
+
+    set_wake(wake_in_s=30, session="closed", flat=True)
+    calls = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        return {"cycle": n, "pnl": 0, "equity": 100000, "_failed": False}
+
+    _wire_stay_up_engine(monkeypatch, session="closed", think=think)
+    # After the bell the ET clock is not overnight. Honor alarm.session anyway.
+    monkeypatch.setattr(
+        "abcxauto.park_clock.et_minutes_to_rth_open",
+        lambda **_k: None,
+    )
+    monkeypatch.setattr(
+        "abcxauto.park_clock.infer_session_before_open",
+        lambda **_k: ("", None),
+    )
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 1.2
+    while time.time() < deadline:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert calls["n"] == 0
+    assert eng._force_first_look is False
+
+
+@pytest.mark.asyncio
 async def test_launch_ignores_a_leftover_rth_clock(monkeypatch, tmp_path):
     """A leftover grok_wake.json from the old RTH launcher must not sit Start."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
