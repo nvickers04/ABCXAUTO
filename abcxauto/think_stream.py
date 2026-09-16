@@ -30,12 +30,94 @@ _listeners: list[Listener] = []
 _engine: Any = None
 _speaker = ""  # last banner in the live stream ("grok" or "")
 _STATE_DIR = Path(__file__).resolve().parents[1] / "data" / "state"
-THINK_TAIL_PATH = _STATE_DIR / "think_tail.txt"
-THINK_PREV_PATH = _STATE_DIR / "think_prev.txt"
-THINK_SESSION_DIR = _STATE_DIR / "think_session"
-LAST_TURN_PATH = _STATE_DIR / "last_turn.json"
-DESK_BRIEF_PATH = _STATE_DIR / "desk_brief.json"
-RUN_PATH = _STATE_DIR / "run.json"
+_THINK_TAIL_DEFAULT = _STATE_DIR / "think_tail.txt"
+_THINK_PREV_DEFAULT = _STATE_DIR / "think_prev.txt"
+_THINK_SESSION_DEFAULT = _STATE_DIR / "think_session"
+_LAST_TURN_DEFAULT = _STATE_DIR / "last_turn.json"
+_DESK_BRIEF_DEFAULT = _STATE_DIR / "desk_brief.json"
+_RUN_DEFAULT = _STATE_DIR / "run.json"
+
+
+class _EnvPath(os.PathLike):
+    """Path that re-reads an optional ABCXAUTO_* env var on every use.
+
+    ``from think_stream import LAST_TURN_PATH`` binds this object, not a
+    frozen Path, so a later setenv still wins. Empty env is today's
+    data/state file.
+    """
+
+    __slots__ = ("_env_name", "_default")
+
+    def __init__(self, env_name: str, default: Path) -> None:
+        object.__setattr__(self, "_env_name", env_name)
+        object.__setattr__(self, "_default", Path(default))
+
+    def _resolve(self) -> Path:
+        raw = (os.environ.get(self._env_name) or "").strip()
+        return Path(raw) if raw else self._default
+
+    def __fspath__(self) -> str:
+        return os.fspath(self._resolve())
+
+    def __str__(self) -> str:
+        return str(self._resolve())
+
+    def __repr__(self) -> str:
+        return repr(self._resolve())
+
+    def __eq__(self, other: object) -> bool:
+        resolved = self._resolve()
+        if isinstance(other, _EnvPath):
+            return resolved == other._resolve()
+        return resolved == other
+
+    def __hash__(self) -> int:
+        return hash(self._resolve())
+
+    def __truediv__(self, other: object):
+        return self._resolve() / other
+
+    def __rtruediv__(self, other: object):
+        return other / self._resolve()
+
+    def __getattr__(self, name: str):
+        return getattr(self._resolve(), name)
+
+
+THINK_TAIL_PATH = _EnvPath("ABCXAUTO_THINK_TAIL_PATH", _THINK_TAIL_DEFAULT)
+THINK_PREV_PATH = _EnvPath("ABCXAUTO_THINK_PREV_PATH", _THINK_PREV_DEFAULT)
+THINK_SESSION_DIR = _EnvPath("ABCXAUTO_THINK_SESSION_DIR", _THINK_SESSION_DEFAULT)
+LAST_TURN_PATH = _EnvPath("ABCXAUTO_LAST_TURN_PATH", _LAST_TURN_DEFAULT)
+DESK_BRIEF_PATH = _EnvPath("ABCXAUTO_DESK_BRIEF_PATH", _DESK_BRIEF_DEFAULT)
+RUN_PATH = _EnvPath("ABCXAUTO_RUN_PATH", _RUN_DEFAULT)
+
+
+def _state_path(env_name: str, default: Path) -> Path:
+    """Optional ABCXAUTO_* redirect. Empty env keeps today's data/state path."""
+    raw = (os.environ.get(env_name) or "").strip()
+    return Path(raw) if raw else default
+
+
+def think_tail_path() -> Path:
+    return _state_path("ABCXAUTO_THINK_TAIL_PATH", _THINK_TAIL_DEFAULT)
+
+
+def think_prev_path() -> Path:
+    return _state_path("ABCXAUTO_THINK_PREV_PATH", _THINK_PREV_DEFAULT)
+
+
+def think_session_dir() -> Path:
+    return _state_path("ABCXAUTO_THINK_SESSION_DIR", _THINK_SESSION_DEFAULT)
+
+
+def last_turn_path() -> Path:
+    return _state_path("ABCXAUTO_LAST_TURN_PATH", _LAST_TURN_DEFAULT)
+
+
+def run_path() -> Path:
+    return _state_path("ABCXAUTO_RUN_PATH", _RUN_DEFAULT)
+
+
 _TAIL_MIN_INTERVAL = 2.0
 _last_tail_write = 0.0
 _run: dict[str, Any] = {}
@@ -363,7 +445,7 @@ def _keep_run_banner() -> None:
 
 
 def _think_session_path() -> Path:
-    return THINK_SESSION_DIR / f"{_et_session_day()}.txt"
+    return think_session_dir() / f"{_et_session_day()}.txt"
 
 
 _session_read_cache: dict[str, Any] = {
@@ -401,8 +483,8 @@ def _read_think_session_file() -> str:
 
 def _read_think_tail_file() -> str:
     try:
-        if THINK_TAIL_PATH.is_file():
-            return THINK_TAIL_PATH.read_text(encoding="utf-8")
+        if think_tail_path().is_file():
+            return think_tail_path().read_text(encoding="utf-8")
     except OSError:
         logger.debug("think_tail read failed", exc_info=True)
     return ""
@@ -450,7 +532,7 @@ def _append_think_session(piece: str) -> None:
     if not piece:
         return
     try:
-        THINK_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        think_session_dir().mkdir(parents=True, exist_ok=True)
         with _think_session_path().open("a", encoding="utf-8") as fh:
             fh.write(piece)
     except OSError:
@@ -464,8 +546,8 @@ def _write_think_tail(buf: str, *, force: bool = False) -> None:
         return
     _last_tail_write = now
     try:
-        THINK_TAIL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        THINK_TAIL_PATH.write_text(buf[-8000:], encoding="utf-8")
+        think_tail_path().parent.mkdir(parents=True, exist_ok=True)
+        think_tail_path().write_text(buf[-8000:], encoding="utf-8")
     except OSError:
         logger.debug("think_tail write failed", exc_info=True)
 
@@ -479,20 +561,20 @@ def flush_think_tail() -> None:
             buf = str(getattr(getattr(eng, "state", None), "think_live", "") or "")
         except Exception:
             buf = ""
-    if not buf and THINK_TAIL_PATH.is_file():
+    if not buf and think_tail_path().is_file():
         return
-    _write_think_tail(buf or (THINK_TAIL_PATH.read_text(encoding="utf-8") if THINK_TAIL_PATH.is_file() else ""), force=True)
+    _write_think_tail(buf or (think_tail_path().read_text(encoding="utf-8") if think_tail_path().is_file() else ""), force=True)
 
 
 def _archive_think_tail() -> None:
     try:
-        if not THINK_TAIL_PATH.is_file():
+        if not think_tail_path().is_file():
             return
-        text = THINK_TAIL_PATH.read_text(encoding="utf-8")
+        text = think_tail_path().read_text(encoding="utf-8")
         if not text.strip():
             return
-        THINK_PREV_PATH.parent.mkdir(parents=True, exist_ok=True)
-        THINK_PREV_PATH.write_text(text, encoding="utf-8")
+        think_prev_path().parent.mkdir(parents=True, exist_ok=True)
+        think_prev_path().write_text(text, encoding="utf-8")
     except OSError:
         logger.debug("think_prev archive failed", exc_info=True)
 
@@ -725,13 +807,13 @@ def merge_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
 def current_run() -> dict[str, Any]:
     if _run:
         return dict(_run)
-    return _read_json(RUN_PATH)
+    return _read_json(run_path())
 
 
 def mark_review_stale(*, archive_tail: bool = False) -> None:
     """Mark last_turn dead. Keep the think tail so a mid-turn kill is readable."""
     flush_think_tail()
-    prev = _read_json(LAST_TURN_PATH)
+    prev = _read_json(last_turn_path())
     run = current_run()
     payload = {
         "stale": True,
@@ -752,15 +834,15 @@ def mark_review_stale(*, archive_tail: bool = False) -> None:
         "candle_source": prev.get("candle_source") or "none",
     }
     try:
-        LAST_TURN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        LAST_TURN_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        last_turn_path().parent.mkdir(parents=True, exist_ok=True)
+        last_turn_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError:
         logger.debug("last_turn stale mark failed", exc_info=True)
     if archive_tail:
         _archive_think_tail()
         try:
-            if THINK_TAIL_PATH.is_file():
-                THINK_TAIL_PATH.write_text("", encoding="utf-8")
+            if think_tail_path().is_file():
+                think_tail_path().write_text("", encoding="utf-8")
         except OSError:
             logger.debug("think_tail clear failed", exc_info=True)
 
@@ -785,12 +867,12 @@ def begin_run() -> dict[str, Any]:
     this must not truncate or replace that file.
     """
     global _run
-    prev = _read_json(LAST_TURN_PATH)
+    prev = _read_json(last_turn_path())
     if _last_turn_is_this_hunt(prev):
         _archive_think_tail()
         try:
-            if THINK_TAIL_PATH.is_file():
-                THINK_TAIL_PATH.write_text("", encoding="utf-8")
+            if think_tail_path().is_file():
+                think_tail_path().write_text("", encoding="utf-8")
         except OSError:
             logger.debug("think_tail clear failed", exc_info=True)
     else:
@@ -815,8 +897,8 @@ def begin_run() -> dict[str, Any]:
     except Exception:
         logger.debug("launch model knobs on begin_run failed", exc_info=True)
     try:
-        RUN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        RUN_PATH.write_text(json.dumps(_run, indent=2), encoding="utf-8")
+        run_path().parent.mkdir(parents=True, exist_ok=True)
+        run_path().write_text(json.dumps(_run, indent=2), encoding="utf-8")
     except OSError:
         logger.debug("run.json write failed", exc_info=True)
     _keep_run_banner()
@@ -934,7 +1016,7 @@ def seed_snap_from_last_turn(snap: dict[str, Any] | None) -> None:
     """
     if not isinstance(snap, dict):
         return
-    data = _read_json(LAST_TURN_PATH)
+    data = _read_json(last_turn_path())
     if not data:
         return
     existing = str(snap.get("candle_source") or "").strip()
@@ -961,7 +1043,7 @@ def seed_snap_from_last_turn(snap: dict[str, Any] | None) -> None:
 
 def last_turn_is_live(payload: dict[str, Any] | None = None) -> bool:
     """True only if last_turn belongs to this live process."""
-    data = payload if isinstance(payload, dict) else _read_json(LAST_TURN_PATH)
+    data = payload if isinstance(payload, dict) else _read_json(last_turn_path())
     if not data or data.get("stale"):
         return False
     run = current_run()
@@ -978,14 +1060,14 @@ def last_turn_is_live(payload: dict[str, Any] | None = None) -> bool:
 
 def _desk_brief_path() -> Path:
     raw = (os.environ.get("ABCXAUTO_DESK_BRIEF_PATH") or "").strip()
-    return Path(raw) if raw else DESK_BRIEF_PATH
+    return Path(raw) if raw else _DESK_BRIEF_DEFAULT
 
 
 def load_desk_brief() -> dict[str, Any]:
     """Last completed look. in_progress last_turn is not memory."""
     p = _desk_brief_path()
     if not p.is_file():
-        data = _read_json(LAST_TURN_PATH)
+        data = _read_json(last_turn_path())
         if data.get("stale") or str(data.get("strat") or "") == "in_progress":
             return {}
         return data
@@ -1117,7 +1199,7 @@ def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
         "fresh": last_look_is_fresh(row),
     }
     if loaded:
-        last = _read_json(LAST_TURN_PATH)
+        last = _read_json(last_turn_path())
         if last.get("stale"):
             out["fresh"] = False
     if out["fresh"] is False:
@@ -1258,7 +1340,7 @@ def write_last_turn(out: dict[str, Any]) -> None:
     if last_turn_look_failed(out):
         return
     try:
-        LAST_TURN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        last_turn_path().parent.mkdir(parents=True, exist_ok=True)
         pulse = out.get("reality_pulse") or {}
         world = out.get("world_state") or {}
         run = current_run()
@@ -1276,7 +1358,7 @@ def write_last_turn(out: dict[str, Any]) -> None:
             out.get("book_unreliable") or gates.get("book_unreliable")
         )
         ibkr_down = ibkr is False or "ibkr_down" in str(out.get("validation") or "")
-        prior = _read_json(LAST_TURN_PATH)
+        prior = _read_json(last_turn_path())
         if (unreliable or ibkr_down) and not open_lots:
             open_lots = list(prior.get("open_lots") or [])
         nl = world.get("net_liquidation") or out.get("equity")
@@ -1369,7 +1451,7 @@ def write_last_turn(out: dict[str, Any]) -> None:
             if brief.get("strat"):
                 payload["previous_strat"] = brief.get("strat")
                 payload["previous_sends"] = brief.get("sends") or 0
-        LAST_TURN_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        last_turn_path().write_text(json.dumps(payload, indent=2), encoding="utf-8")
         write_desk_brief(payload)
     except OSError:
         logger.debug("last_turn write failed", exc_info=True)

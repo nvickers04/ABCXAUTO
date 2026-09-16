@@ -856,9 +856,9 @@ def test_record_f10_loop_halt_last_turn_and_scorecard(monkeypatch):
     assert out["loop_halted"] is True
     assert out["skip_reason"] == REASON_F10
     assert f10_loop_halted() is True
-    from abcxauto.think_stream import LAST_TURN_PATH
+    from abcxauto.think_stream import last_turn_path
 
-    last = json.loads(LAST_TURN_PATH.read_text(encoding="utf-8"))
+    last = json.loads(last_turn_path().read_text(encoding="utf-8"))
     assert last["f10_tripped"] is True
     assert last["loop_halted"] is True
     assert last["skip_reason"] == REASON_F10
