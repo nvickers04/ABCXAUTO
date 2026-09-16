@@ -133,6 +133,7 @@ Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** 
 | `ABCXAUTO_MODEL_PARAMS_RESEARCH` | `{}` | Research extras; empty = shared. Settings `model_params_research` |
 | `IBKR_PORT` | `7497` | Paper TWS |
 | `IBKR_CLIENT_ID` | `42` | One id per process |
+| `ABCXAUTO_TWS_TIMEZONE` | `America/Chicago` | IANA zone TWS stamps `execDetails` in (CDT/CST). Must match TWS Display. Not a fixed offset. |
 | `ABCXAUTO_MAX_OPEN_POSITIONS` | `0` | Slot cap (0 = off; Grok may set a positive ceiling) |
 | `ABCXAUTO_DAILY_LOSS_LIMIT_PCT` | `25` | Daily-loss halt vs NetLiq |
 | `ABCXAUTO_MAX_POSITION_PCT` | `25` | Max position vs NetLiq |

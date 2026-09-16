@@ -64,6 +64,11 @@ def port_is_closed(exc: BaseException) -> bool:
 _FILL_FUTURE_TOLERANCE_S = 300.0
 
 
+# IANA name so CDT/CST follow DST. A fixed offset would stay wrong after the
+# fall-back. Noah's TWS display is Chicago (Configure → Display).
+_DEFAULT_TWS_TIMEZONE = "America/Chicago"
+
+
 def tws_timezone() -> str:
     """Which zone TWS stamps execution times in.
 
@@ -71,9 +76,11 @@ def tws_timezone() -> str:
     ``IB.TimezoneTWS`` is unset, ib_insync's decoder falls through to
     ``astimezone()`` on that naive value, which reads it as *this machine's*
     local time and shifts every fill by the local UTC offset. Naming the zone
-    keeps the digits meaning what TWS meant by them.
+    keeps the digits meaning what TWS meant by them. Default is the IANA
+    Chicago zone, not a UTC-5/UTC-6 constant.
     """
-    return (os.environ.get("ABCXAUTO_TWS_TIMEZONE") or "UTC").strip() or "UTC"
+    named = (os.environ.get("ABCXAUTO_TWS_TIMEZONE") or _DEFAULT_TWS_TIMEZONE).strip()
+    return named or _DEFAULT_TWS_TIMEZONE
 
 
 def _iso_z(dt: datetime) -> str:
@@ -111,8 +118,8 @@ def fill_ts_iso(
     """Canonical ``...Z`` UTC stamp for one broker execution.
 
     Bare digits from TWS are in the TWS clock (``ABCXAUTO_TWS_TIMEZONE``,
-    default UTC on this desk). Naive values are labelled with that zone rather
-    than silently assumed UTC when the operator named a different clock.
+    default ``America/Chicago`` on this desk). Naive values are labelled with
+    that zone rather than silently assumed UTC.
     An execution cannot have happened after now, so a stamp in the future is
     proof the digits were already read in some other zone; reading that zone's
     wall clock back as UTC undoes exactly that shift. ``local_tz`` defaults to

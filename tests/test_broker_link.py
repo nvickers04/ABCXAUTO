@@ -283,7 +283,8 @@ async def test_bracket_stop_rests_before_entry_can_fill(monkeypatch):
     assert placed[1].parentId == placed[0].orderId
 
 
-def test_on_execution_stamps_via_fill_ts_iso():
+def test_on_execution_stamps_via_fill_ts_iso(monkeypatch):
+    monkeypatch.delenv("ABCXAUTO_TWS_TIMEZONE", raising=False)
     conn = IBKRConnector.__new__(IBKRConnector)
     conn._executions = {}
     conn._execution_lock = Lock()
@@ -304,7 +305,7 @@ def test_on_execution_stamps_via_fill_ts_iso():
         commissionReport=None,
     )
     conn._on_execution(trade, fill)
-    assert conn._executions["WMT"][0]["time"] == "2026-08-20T15:42:06.000Z"
+    assert conn._executions["WMT"][0]["time"] == "2026-08-20T20:42:06.000Z"
 
 
 def test_claim_desk_lock_write_failure_blocks_start(tmp_path, monkeypatch):
