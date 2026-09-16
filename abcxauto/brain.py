@@ -1271,6 +1271,52 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
     }
 
 
+def _mark_incomplete_book(
+    out: dict[str, Any],
+    world: WorldState,
+    snap: dict[str, Any] | None,
+) -> None:
+    """Honest markers when the backing snap was incomplete or NL is unknown."""
+    lost: list[str] = []
+    src = None
+    incomplete = False
+    if isinstance(snap, dict):
+        lost = [str(x) for x in (snap.get("snap_lost") or []) if str(x)]
+        src = snap.get("nl_source")
+        incomplete = bool(lost) or bool(snap.get("snap_incomplete")) or bool(
+            snap.get("book_unreliable")
+        )
+    if incomplete:
+        out["snap_incomplete"] = True
+        if lost:
+            out["snap_lost"] = lost
+    if src:
+        out["nl_source"] = src
+    world_facts = out.get("world") if isinstance(out.get("world"), dict) else None
+    day = out.get("day") if isinstance(out.get("day"), dict) else None
+    if src and world_facts is not None:
+        world_facts["nl_source"] = src
+    if src and day is not None:
+        day["nl_source"] = src
+    nl = getattr(world, "net_liquidation", None)
+    if nl is None:
+        if world_facts is not None:
+            world_facts["net_liquidation"] = None
+            world_facts["nl_unavailable"] = True
+        if day is not None:
+            day["nl"] = None
+            day["nl_unavailable"] = True
+        acct_live = src == "account_summary"
+        if not acct_live:
+            if world_facts is not None:
+                world_facts["cash_unavailable"] = True
+            if day is not None:
+                day["cash_unavailable"] = True
+                cl = day.get("capital_liquidity")
+                if isinstance(cl, dict) and cl.get("total_cash") in (0, 0.0, None):
+                    day["capital_liquidity"] = dict(cl, total_cash=None)
+
+
 def _book_payload(
     world: WorldState,
     tool_trace: list[str] | None = None,
@@ -1295,7 +1341,6 @@ def _book_payload(
         last_look = last_look_facts()
     except Exception:
         last_look = {}
-    _ = (tool_trace, snap)
     day = day_facts(world, sc)
     if isinstance(day, dict):
         day = dict(day)
@@ -1341,6 +1386,8 @@ def _book_payload(
         lines = []
     if lines:
         out["working_memory"] = lines
+    _mark_incomplete_book(out, world, snap)
+    _ = tool_trace
     return out
 
 
