@@ -492,7 +492,7 @@ def test_new_chat_applies_rth_params_when_client_had_no_session(monkeypatch):
             return SimpleNamespace()
 
     update_agent_config(
-        model_params={"effort": "xhigh", "thinking": True},
+        model_params={"effort": "xhigh"},
         persist=False,
     )
     monkeypatch.setattr("abcxauto.thin_rth_kill_look.kill_look_enabled", lambda: True)
