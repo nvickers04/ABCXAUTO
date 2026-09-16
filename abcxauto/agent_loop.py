@@ -985,6 +985,15 @@ async def _reconcile_protection_after_snap(c: Any, s: dict) -> None:
 
     if _book_unreliable(snap=s):
         return
+    try:
+        from abcxauto.risk_gates import get_risk_gate
+
+        get_risk_gate().maybe_resume_disconnect(
+            broker_connected=bool(getattr(c, "connected", False)),
+            book_complete=True,
+        )
+    except Exception:
+        logger.debug("disconnect-halt auto-resume after snap failed", exc_info=True)
     begin_look_protection_budget(reset=True)
     try:
         from abcxauto.executor import (

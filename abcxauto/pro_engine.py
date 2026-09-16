@@ -401,6 +401,14 @@ class ProEngine:
                 await self.conn.disconnect()
             self.conn = get_ibkr_connector()
             await self.conn.connect()
+            restore = getattr(self.conn, "_after_connect_restore", None)
+            if callable(restore):
+                try:
+                    await restore()
+                except Exception:
+                    logger.debug(
+                        "mode-switch post-connect restore failed", exc_info=True
+                    )
             self.ui.put(("conn", True))
             self._publish_ibkr_account()
             self.ui.put(("log", "IBKR reconnected after mode switch"))
@@ -1737,6 +1745,15 @@ class ProEngine:
                     self.state.last_error = msg
                     self._note("ERR", msg)
                 if ok and getattr(self.conn, "connected", False):
+                    restore = getattr(self.conn, "_after_connect_restore", None)
+                    if callable(restore):
+                        try:
+                            await restore()
+                        except Exception:
+                            logger.debug(
+                                "post-connect halt reconcile failed",
+                                exc_info=True,
+                            )
                     break
                 self.ui.put(("conn", False))
                 self.state.connected = False
