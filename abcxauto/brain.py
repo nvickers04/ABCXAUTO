@@ -625,6 +625,7 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
                 return text
         if _is_live_book(slim):
             return json.dumps(_keep_live_book(slim), default=str)
+        kept: dict[str, Any] = {}
         if slim.get("run") is not None:
             kept["run"] = slim["run"]
         if kept:

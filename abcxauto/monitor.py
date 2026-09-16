@@ -688,10 +688,8 @@ class PortfolioMonitor:
             "fills": list(fills)[-20:],
             "protection": protection,
         }
-        try:
-            get_journal().ingest_look(snapshot)
-        except Exception as e:
-            logger.warning(f"Monitor look journal ingest failed: {e}")
+        # Journal ingest is look-boundary only (pro_engine._host_think).
+        # Poll snapshots stay in-memory for UI / pokes — no second writer.
         try:
             from abcxauto.pcs_fill_lambda import refresh_pcs_manage
 

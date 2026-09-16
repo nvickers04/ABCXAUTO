@@ -208,3 +208,61 @@ def test_run_cycle_is_not_the_journal_writer():
 
     assert not hasattr(agent_loop, "run_cycle")
     assert hasattr(get_journal(), "ingest_look")
+
+
+@pytest.mark.asyncio
+async def test_single_ingest_per_look(monkeypatch):
+    """Monitor poll must not write a second ingest_look next to the think."""
+    from abcxauto.memory.journal import TradeJournal
+    from abcxauto.monitor import PortfolioMonitor
+
+    calls: list[str] = []
+    real = TradeJournal.ingest_look
+
+    def spy(self, snap=None):
+        calls.append("ingest")
+        return real(self, snap)
+
+    monkeypatch.setattr(TradeJournal, "ingest_look", spy)
+
+    async def grok(*_a, **_k):
+        return BrainTurn(text="watching the book")
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok)
+    snap = {
+        "account": {"netliquidation": 50000.0, "dailypnl": 0.0},
+        "positions": [],
+        "open_orders": [],
+        "fills": [],
+        "protection": {},
+        "reality_pulse": {"session": {"status": "regular"}},
+        "taken_at": "2026-08-31T14:00:00Z",
+    }
+
+    class Session:
+        def emit(self, *_a, **_k):
+            pass
+
+    class Connector:
+        connected = True
+
+        async def get_positions(self):
+            return []
+
+        async def get_open_orders(self):
+            return []
+
+        async def get_account_summary(self):
+            return {"netliquidation": 50000.0}
+
+        async def get_fills(self):
+            return []
+
+    mon = PortfolioMonitor(Session(), Connector())
+    await mon.take_snapshot()
+    assert calls == []
+
+    eng = ProEngine()
+    eng.conn = _conn()
+    await eng._host_think(1, None, snap)
+    assert calls == ["ingest"]

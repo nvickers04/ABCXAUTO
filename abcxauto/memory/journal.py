@@ -12,6 +12,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +21,13 @@ from typing import Any, Iterator, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _is_sqlite_busy(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
 _DEFAULT_DB_PATH = str(_REPO_ROOT / "journal.db")
 
 _SCHEMA_SQL = """
@@ -607,6 +615,7 @@ class TradeJournal:
         self.enabled = bool(enabled)
         self._timeout = float(timeout)
         self._init_lock = threading.Lock()
+        self._io_lock = threading.RLock()
         self._initialized = False
         # (model, ts) waiting for a real NetLiq. Never persist NL=None.
         self._pending_session: Optional[tuple[str, Optional[str]]] = None
@@ -772,12 +781,40 @@ class TradeJournal:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=self._timeout)
-        try:
-            conn.row_factory = sqlite3.Row
-            yield conn
-        finally:
-            conn.close()
+        """One connection per call. WAL + busy timeout on every handle.
+
+        In-process writers (look + leftover poll) share ``_io_lock`` so a
+        second ``ingest_look`` waits instead of raising ``database is locked``.
+        Cross-handle contention still uses SQLite busy timeout / retry.
+        """
+        deadline = time.monotonic() + max(0.05, self._timeout)
+        delay = 0.02
+        conn: Optional[sqlite3.Connection] = None
+        with self._io_lock:
+            while True:
+                try:
+                    conn = sqlite3.connect(self.path, timeout=self._timeout)
+                    conn.row_factory = sqlite3.Row
+                    busy_ms = max(0, int(self._timeout * 1000))
+                    conn.execute(f"PRAGMA busy_timeout={busy_ms}")
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as e:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        conn = None
+                    if not _is_sqlite_busy(e) or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(delay)
+                    delay = min(delay * 2, 0.5)
+            assert conn is not None
+            try:
+                yield conn
+            finally:
+                conn.close()
 
     # ------------------------------------------------------------------
     # Writers (never raise into the caller)
@@ -1520,7 +1557,7 @@ class TradeJournal:
             return 0
 
     def ingest_look(self, snap: Optional[dict] = None) -> dict:
-        """Persist this look's book on the existing journal. Same writer as monitor.
+        """Persist this look's book. Look-boundary writer (not the monitor poll).
 
         Snapshot + fills + missed-send resolve. Not a second ledger.
         """
@@ -1533,26 +1570,35 @@ class TradeJournal:
         fills = bag.get("fills") if isinstance(bag.get("fills"), list) else []
         taken = bag.get("taken_at")
         ts = taken if isinstance(taken, str) and taken.strip() else None
-        self.record_snapshot(account, positions, open_orders, ts=ts)
-        nl = _account_float(account, "netliquidation", "NetLiquidation")
-        if nl is not None:
+        try:
+            self.record_snapshot(account, positions, open_orders, ts=ts)
+            nl = _account_float(account, "netliquidation", "NetLiquidation")
+            if nl is not None:
+                try:
+                    self.ensure_session_start_nl(nl, ts=ts)
+                except Exception:
+                    logger.exception("journal.ingest_look session-start NL failed")
+            inserted = self.record_fills(fills)
+            resolved = 0
             try:
-                self.ensure_session_start_nl(nl, ts=ts)
+                resolved = self.resolve_unfilled_sends(open_orders, ts=ts)
             except Exception:
-                logger.exception("journal.ingest_look session-start NL failed")
-        inserted = self.record_fills(fills)
-        resolved = 0
-        try:
-            resolved = self.resolve_unfilled_sends(open_orders, ts=ts)
-        except Exception:
-            logger.exception("journal.ingest_look resolve failed")
-        try:
-            from abcxauto.pcs_fill_lambda import ingest_pcs_from_look
+                logger.exception("journal.ingest_look resolve failed")
+            try:
+                from abcxauto.pcs_fill_lambda import ingest_pcs_from_look
 
-            ingest_pcs_from_look(self, bag)
-        except Exception:
-            logger.debug("journal.ingest_look pcs fill-λ failed", exc_info=True)
-        return {"fills_inserted": int(inserted or 0), "sends_resolved": int(resolved or 0)}
+                ingest_pcs_from_look(self, bag)
+            except Exception:
+                logger.debug("journal.ingest_look pcs fill-λ failed", exc_info=True)
+            return {
+                "fills_inserted": int(inserted or 0),
+                "sends_resolved": int(resolved or 0),
+            }
+        except sqlite3.OperationalError as e:
+            if _is_sqlite_busy(e):
+                logger.exception("journal.ingest_look busy path=%s", self.path)
+                return {"fills_inserted": 0, "sends_resolved": 0}
+            raise
 
     def recent_send_marks(self, limit: int = 50) -> List[dict]:
         try:

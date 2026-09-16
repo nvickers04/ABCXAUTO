@@ -32,3 +32,19 @@ def bind_thread_loop(loop: asyncio.AbstractEventLoop | None) -> None:
         asyncio.set_event_loop(loop)
     except Exception:
         pass
+
+
+def run_on_loop(coro, loop: asyncio.AbstractEventLoop | None):
+    """Marshal ``coro`` onto a running IBKR worker loop.
+
+    Same seam as ProEngine snapshot / mode-switch. Returns the concurrent
+    future, or ``None`` when the loop is down — never ``asyncio.run``.
+    """
+    if loop is None:
+        return None
+    try:
+        if loop.is_closed() or not loop.is_running():
+            return None
+    except Exception:
+        return None
+    return asyncio.run_coroutine_threadsafe(coro, loop)

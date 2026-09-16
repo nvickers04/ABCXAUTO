@@ -288,24 +288,27 @@ async def test_take_snapshot_records_fills(tmp_path, monkeypatch):
     mon = PortfolioMonitor(Session(), Connector())
     snap = await mon.take_snapshot()
     assert snap["connected"] is True
+    assert snap["fills"][0]["exec_id"] == "mon-exec-1"
 
     conn = sqlite3.connect(str(db))
     try:
-        rows = conn.execute(
-            "SELECT exec_id, order_id, symbol FROM fills"
-        ).fetchall()
+        fills = conn.execute("SELECT exec_id FROM fills").fetchall()
+        snaps = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     finally:
         conn.close()
-    assert rows == [("mon-exec-1", 42, "AAPL")]
+    # Poll keeps fills on the snap for UI / pokes. Journal ingest is the look.
+    assert fills == []
+    assert snaps == 0
 
-    # Second poll is idempotent on exec_id.
     await mon.take_snapshot()
     conn = sqlite3.connect(str(db))
     try:
         n = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+        snaps = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     finally:
         conn.close()
-    assert n == 1
+    assert n == 0
+    assert snaps == 0
 
 
 @pytest.mark.asyncio
