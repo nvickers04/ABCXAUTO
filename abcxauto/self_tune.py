@@ -23,6 +23,8 @@ import logging
 import math
 from typing import Any
 
+from abcxauto.risk_gates import live_desk
+
 logger = logging.getLogger(__name__)
 
 # Risk knobs: agent may set within [min, max]. max is the immutable ceiling.
@@ -55,22 +57,6 @@ LOCKED_TRUE: frozenset[str] = frozenset({
     "defined_risk_only",
     "cash_only",
 })
-# TWS 7496 / Gateway 4001 — live socket family. Paper is 7497 / 4002.
-_LIVE_IBKR_PORTS = frozenset({7496, 4001})
-
-
-def _live_desk(cfg: Any) -> bool:
-    """True when this desk is live (mode, port family, or not-paper)."""
-    mode = str(getattr(cfg, "trading_mode", "paper") or "paper").strip().lower()
-    if mode == "live":
-        return True
-    if getattr(cfg, "is_paper", None) is False:
-        return True
-    try:
-        port = int(getattr(cfg, "ibkr_port", 0) or 0)
-    except (TypeError, ValueError):
-        port = 0
-    return port in _LIVE_IBKR_PORTS
 
 
 def slot_cap_armed(cfg: Any = None) -> bool:
@@ -557,7 +543,7 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
         "max_option_premium_pct": 5.0,
         "max_position_pct": 20.0,
     }
-    live = _live_desk(cfg)
+    live = live_desk(cfg)
     for key, (lo, hi) in RISK_FLOOR.items():
         cur = _f(getattr(cfg, key, None))
         # 0 = off for risk/position/premium. Do not replace with 25.
@@ -581,7 +567,7 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
         # Do not cap a chosen N at 25. Paper and live are the same.
         fixes["max_open_positions"] = int(UNSUPERVISED_DEFAULTS["max_open_positions"])
     for key in LOCKED_TRUE:
-        if key == "risk_gates_enabled" and not _live_desk(cfg):
+        if key == "risk_gates_enabled" and not live_desk(cfg):
             # Paper: operator-off survives start. Live still forces gates on.
             continue
         if not bool(getattr(cfg, key, False)):
@@ -647,7 +633,7 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
         cfg_now = get_config()
         update_risk_config(
             risk_gates_enabled=(
-                True if _live_desk(cfg_now)
+                True if live_desk(cfg_now)
                 else bool(getattr(cfg_now, "risk_gates_enabled"))
             ),
             auto_panic_on_breach=True,

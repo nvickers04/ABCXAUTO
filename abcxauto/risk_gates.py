@@ -42,6 +42,7 @@ from abcxauto.config import get_config
 from abcxauto.proposals import MANAGEMENT_STRATEGIES, OrderProposal
 from abcxauto.strategy_params import EXIT_ONLY_EXTRA, OPTION_STRATEGIES
 from abcxauto.universe import arenas_for_symbol, is_bucket_arena
+from abcxauto.world_state import pct_of_nl
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,28 @@ def is_exit_or_management(proposal: OrderProposal) -> bool:
     return False
 
 
+def ibkr_data_stale_reason(
+    account: Any = None,
+    connector: Any = None,
+) -> str:
+    """Refuse new risk only on an explicit ``ibkr_data_stale is True``.
+
+    Missing field / missing property is no signal — never a block. That
+    keeps the desk from wedging when #201's fact is absent. Exits never
+    call this (``is_exit_or_management`` returns first).
+    """
+    if isinstance(account, dict) and "ibkr_data_stale" in account:
+        if account.get("ibkr_data_stale") is True:
+            return "ibkr_data_stale"
+    if connector is not None:
+        # Public fact from the broker lane (#201). Do not read the private
+        # ``_ibkr_data_stale`` bit — older connectors have that flag without
+        # publishing it on account.
+        if getattr(connector, "ibkr_data_stale", None) is True:
+            return "ibkr_data_stale"
+    return ""
+
+
 def check_defined_risk_only(
     proposal: OrderProposal, cfg: Any = None
 ) -> Tuple[bool, str]:
@@ -365,7 +388,23 @@ def risk_base_usd(net_liq: float, cfg: Any = None) -> float:
 
 
 # TWS 7496 / Gateway 4001 — live socket family. Paper is 7497 / 4002.
-_LIVE_IBKR_PORTS = frozenset({7496, 4001})
+# Single definition for risk_gates / self_tune / send. Do not copy.
+LIVE_IBKR_PORTS = frozenset({7496, 4001})
+
+
+def live_desk(cfg: Any = None) -> bool:
+    """True when this desk is live (mode, port family, or not-paper)."""
+    c = cfg if cfg is not None else get_config()
+    mode = str(getattr(c, "trading_mode", "paper") or "paper").strip().lower()
+    if mode == "live":
+        return True
+    if getattr(c, "is_paper", None) is False:
+        return True
+    try:
+        port = int(getattr(c, "ibkr_port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    return port in LIVE_IBKR_PORTS
 
 
 def sizing_floors_active(cfg: Any = None) -> bool:
@@ -377,24 +416,9 @@ def sizing_floors_active(cfg: Any = None) -> bool:
     not enable live send — only the size/loss breaker.
     """
     c = cfg if cfg is not None else get_config()
-    mode = str(getattr(c, "trading_mode", "paper") or "paper").strip().lower()
-    if mode == "live":
-        return True
-    if getattr(c, "is_paper", None) is False:
-        return True
-    try:
-        port = int(getattr(c, "ibkr_port", 0) or 0)
-    except (TypeError, ValueError):
-        port = 0
-    if port in _LIVE_IBKR_PORTS:
+    if live_desk(c):
         return True
     return bool(getattr(c, "sizing_floors", False))
-
-
-def _pct_of_nl(dollars: float, book: float) -> float:
-    if book <= 0:
-        return 0.0
-    return round(100.0 * float(dollars) / float(book), 4)
 
 
 def estimate_notional(proposal: OrderProposal) -> Optional[float]:
@@ -630,8 +654,10 @@ def arena_concentration_error(
         if held is None:
             return "size_arena_concentration unknown"
         after = held + float(notional)
-        after_pct = _pct_of_nl(after, book)
-        if not math.isfinite(after_pct) or after_pct > cap:
+        after_pct = pct_of_nl(after, book)
+        if after_pct is None or not math.isfinite(after_pct):
+            return "size_arena_concentration unknown"
+        if after_pct > cap:
             return (
                 f"size_arena_concentration {after_pct} > {cap} ({arena})"
             )
@@ -939,6 +965,11 @@ class RiskGate:
         if not ok_dr:
             return False, why_dr
 
+        # Always-armed: explicit 1100 stale fact. Missing is not stale.
+        stale = ibkr_data_stale_reason(connector=connector)
+        if stale:
+            return False, stale
+
         if self.is_halted:
             return False, f"Trading halted: {self.halt_reason}"
 
@@ -957,6 +988,13 @@ class RiskGate:
                 account = await connector.get_account_summary()
             except Exception as e:
                 return False, f"Risk gate fail-closed: cannot read account summary ({e})"
+
+            stale = ibkr_data_stale_reason(
+                account=account if isinstance(account, dict) else None,
+                connector=connector,
+            )
+            if stale:
+                return False, stale
 
             if not isinstance(account, dict) or account.get("error"):
                 err = account.get("error") if isinstance(account, dict) else "invalid account"
@@ -984,7 +1022,7 @@ class RiskGate:
         if breaker_on:
             limit = -(cfg.daily_loss_limit_pct / 100.0) * book
             if daily_pnl <= limit:
-                day_pct = _pct_of_nl(daily_pnl, book)
+                day_pct = pct_of_nl(daily_pnl, book)
                 reason = (
                     f"daily_loss {day_pct} <= -{cfg.daily_loss_limit_pct}"
                 )
@@ -1020,8 +1058,8 @@ class RiskGate:
                 return False, "size_unknown_notional"
             if notional > cash:
                 return False, (
-                    f"size_cash {_pct_of_nl(notional, book)} > "
-                    f"{_pct_of_nl(cash, book)}"
+                    f"size_cash {pct_of_nl(notional, book)} > "
+                    f"{pct_of_nl(cash, book)}"
                 )
 
         if not gates_on:
@@ -1047,8 +1085,12 @@ class RiskGate:
             notional = estimate_notional(proposal)
             if notional is None:
                 return False, "size_unknown_notional"
-            notional_pct = _pct_of_nl(notional, book)
-            if notional_pct > cfg.max_position_pct:
+            notional_pct = pct_of_nl(notional, book)
+            if (
+                notional_pct is None
+                or not math.isfinite(notional_pct)
+                or notional_pct > cfg.max_position_pct
+            ):
                 return False, (
                     f"size_max_position {notional_pct} > {cfg.max_position_pct}"
                 )
@@ -1058,8 +1100,12 @@ class RiskGate:
                 risked = estimate_bracket_risk_dollars(proposal)
                 if risked is None:
                     return False, "size_unknown_notional"
-                risked_pct = _pct_of_nl(risked, book)
-                if risked_pct > cfg.max_risk_per_trade_pct:
+                risked_pct = pct_of_nl(risked, book)
+                if (
+                    risked_pct is None
+                    or not math.isfinite(risked_pct)
+                    or risked_pct > cfg.max_risk_per_trade_pct
+                ):
                     return False, (
                         f"size_risk_per_trade {risked_pct} > "
                         f"{cfg.max_risk_per_trade_pct}"
@@ -1068,8 +1114,12 @@ class RiskGate:
                 risked = estimate_option_risk_dollars(proposal)
                 if risked is None:
                     return False, "size_unknown_notional"
-                risked_pct = _pct_of_nl(risked, book)
-                if risked_pct > cfg.max_risk_per_trade_pct:
+                risked_pct = pct_of_nl(risked, book)
+                if (
+                    risked_pct is None
+                    or not math.isfinite(risked_pct)
+                    or risked_pct > cfg.max_risk_per_trade_pct
+                ):
                     return False, (
                         f"size_risk_per_trade {risked_pct} > "
                         f"{cfg.max_risk_per_trade_pct}"
@@ -1079,8 +1129,12 @@ class RiskGate:
             notional = estimate_notional(proposal)
             if notional is None:
                 return False, "size_unknown_notional"
-            notional_pct = _pct_of_nl(notional, book)
-            if notional_pct > cfg.max_option_premium_pct:
+            notional_pct = pct_of_nl(notional, book)
+            if (
+                notional_pct is None
+                or not math.isfinite(notional_pct)
+                or notional_pct > cfg.max_option_premium_pct
+            ):
                 return False, (
                     f"size_option_premium {notional_pct} > "
                     f"{cfg.max_option_premium_pct}"
@@ -1113,8 +1167,8 @@ class RiskGate:
             if held is None:
                 return False, "size_symbol_concentration unknown"
             after = held + float(notional)
-            after_pct = _pct_of_nl(after, book)
-            if not math.isfinite(after_pct) or after_pct > concentration_pct:
+            after_pct = pct_of_nl(after, book)
+            if after_pct is None or not math.isfinite(after_pct) or after_pct > concentration_pct:
                 return False, (
                     f"size_symbol_concentration {after_pct} > {concentration_pct}"
                 )

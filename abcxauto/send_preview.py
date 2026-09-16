@@ -401,10 +401,10 @@ def _always_armed_refuses(
             from abcxauto.risk_gates import (
                 _account_float,
                 _account_number_state,
-                _pct_of_nl,
                 estimate_notional,
                 risk_base_usd,
             )
+            from abcxauto.world_state import pct_of_nl
 
             nl_state, net_liq = _account_number_state(
                 account, "netliquidation", "NetLiquidation"
@@ -426,7 +426,7 @@ def _always_armed_refuses(
                     book = risk_base_usd(net_liq, cfg)
                     limit = -(float(cfg.daily_loss_limit_pct) / 100.0) * book
                     if daily_pnl <= limit:
-                        day_pct = _pct_of_nl(daily_pnl, book)
+                        day_pct = pct_of_nl(daily_pnl, book)
                         reasons.append(
                             f"daily_loss {day_pct} <= -{cfg.daily_loss_limit_pct}"
                         )
@@ -464,8 +464,8 @@ def _always_armed_refuses(
                         reasons.append("size_unknown_notional")
                     elif notional > cash:
                         reasons.append(
-                            f"size_cash {_pct_of_nl(notional, book)} > "
-                            f"{_pct_of_nl(cash, book)}"
+                            f"size_cash {pct_of_nl(notional, book)} > "
+                            f"{pct_of_nl(cash, book)}"
                         )
     except Exception:
         logger.debug("preview daily-loss/cash-only check failed", exc_info=True)
