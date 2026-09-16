@@ -699,8 +699,23 @@ class ProEngine:
             self.ui.put(("log", f"Monitor start skipped: {e}"))
 
     def panic(self) -> None:
-        self.stop_engine()
-        threading.Thread(target=lambda: asyncio.run(self._do_panic()), daemon=True).start()
+        """Flatten on the IB worker loop, then stop. Never ``asyncio.run`` against it."""
+        loop = self._worker_loop
+        threading.Thread(
+            target=self._panic_on_ib_loop, args=(loop,), daemon=True
+        ).start()
+
+    def _panic_on_ib_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
+        from abcxauto.aio import run_on_loop
+
+        try:
+            run_on_loop(self._do_panic(), loop, timeout=120)
+        except Exception as e:
+            self.ui.put(("error", f"PANIC ERROR: {e}"))
+        try:
+            self.stop_engine()
+        except Exception:
+            logger.warning("panic stop failed", exc_info=True)
 
 
     def _publish_ibkr_account(self) -> None:
@@ -1665,6 +1680,12 @@ class ProEngine:
         }
 
     async def _do_panic(self) -> None:
+        from abcxauto.aio import bind_thread_loop
+
+        try:
+            bind_thread_loop(asyncio.get_running_loop())
+        except Exception:
+            pass
         try:
             conn = self.conn or get_ibkr_connector()
             if not getattr(conn, "connected", False):
@@ -2210,10 +2231,6 @@ class ProEngine:
                                 self._note("WAKE", "next look seed failed")
                     self._rearm_after_think(out, session=session)
                 except Exception as e:
-                    note_look(
-                        session=session,
-                        tokens=max(0, billed_tokens_now() - before_tok),
-                    )
                     self.ui.put(("error", str(e)))
                     payload = {"_failed": True, "_stream_error": str(e)}
                     self._rearm_after_think(payload, session=session)

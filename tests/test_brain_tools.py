@@ -989,6 +989,23 @@ def test_clip_does_not_decorate_top_n_scan_rescue():
         assert data.get("_clipped")
 
 
+def test_clip_fat_non_book_payload_keeps_run_without_nameerror():
+    """Oversized non-live-book dict with run used to NameError on undefined kept."""
+    payload = {
+        "ok": True,
+        "run": {"next": "send", "card": "flush bounce"},
+        "essay": "x" * 30_000,
+    }
+    assert len(json.dumps(payload)) > 24_000
+    raw = _clip(payload)
+    data = json.loads(raw)
+    assert data["run"]["next"] == "send"
+    assert data["run"]["card"] == "flush bounce"
+    assert data.get("ok") is True
+    assert data.get("_clipped") == "payload"
+    assert "essay" not in data
+
+
 def test_clip_keeps_run_when_hits_overflow():
     raw = _clip(
         {

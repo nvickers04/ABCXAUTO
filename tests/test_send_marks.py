@@ -36,6 +36,14 @@ SYSTEM_PROMPT_LOCK = (
 )
 
 
+def _snapshot_count(journal) -> int:
+    conn = sqlite3.connect(journal.path)
+    try:
+        return int(conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0])
+    finally:
+        conn.close()
+
+
 def test_system_prompt_is_unchanged():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
@@ -323,6 +331,7 @@ async def test_execute_proposal_journals_nbbo_vs_paper_mid_fill(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_take_snapshot_resolves_a_missed_working_order():
+    """Poll resolves a missed send without writing a snapshot row."""
     from abcxauto.monitor import PortfolioMonitor
 
     journal = get_journal()
@@ -362,6 +371,7 @@ async def test_take_snapshot_resolves_a_missed_working_order():
             return []
 
     mon = PortfolioMonitor(Session(), Connector())
+    before_snaps = _snapshot_count(journal)
     await mon.take_snapshot()
     row = journal.recent_send_marks()[0]
     assert row["fill_label"] == FILL_LABEL_MISSED
@@ -369,3 +379,4 @@ async def test_take_snapshot_resolves_a_missed_working_order():
     assert row["bid"] == 10.00
     assert row["ask"] == 10.20
     assert row["sent_price"] == 10.10
+    assert _snapshot_count(journal) == before_snaps

@@ -710,10 +710,12 @@ class PortfolioMonitor:
             "fills": list(fills)[-20:],
             "protection": protection,
         }
+        # Snapshot rows are look-only. Fills and missed sends persist here
+        # so P&L truth does not wait on an idle look.
         try:
-            get_journal().ingest_look(snapshot)
+            get_journal().ingest_poll(snapshot)
         except Exception as e:
-            logger.warning(f"Monitor look journal ingest failed: {e}")
+            logger.warning(f"Monitor poll journal ingest failed: {e}")
         try:
             from abcxauto.pcs_fill_lambda import refresh_pcs_manage
 
