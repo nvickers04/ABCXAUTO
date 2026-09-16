@@ -320,7 +320,8 @@ async def test_execute_proposal_journals_nbbo_vs_paper_mid_fill(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_take_snapshot_resolves_a_missed_working_order():
+async def test_look_ingest_resolves_a_missed_working_order():
+    """Monitor poll is not a journal writer. Look ingest marks the miss."""
     from abcxauto.monitor import PortfolioMonitor
 
     journal = get_journal()
@@ -361,6 +362,17 @@ async def test_take_snapshot_resolves_a_missed_working_order():
 
     mon = PortfolioMonitor(Session(), Connector())
     await mon.take_snapshot()
+    row = journal.recent_send_marks()[0]
+    assert row["fill_label"] == FILL_LABEL_WORKING
+
+    journal.ingest_look(
+        {
+            "account": {"netliquidation": 100_000.0, "dailypnl": 0.0},
+            "positions": [],
+            "open_orders": [],
+            "fills": [],
+        }
+    )
     row = journal.recent_send_marks()[0]
     assert row["fill_label"] == FILL_LABEL_MISSED
     assert row["fill_price"] is None
