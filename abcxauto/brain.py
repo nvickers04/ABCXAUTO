@@ -914,6 +914,7 @@ def _reset_chat(g: GrokClient) -> None:
     g._wake_appended = False
     g._last_desk_fact = ""
     g._chat_had_work = False
+    _clear_look_tool_stash(g)
     try:
         from abcxauto.working_memory import clear_working_memory
 
@@ -1088,6 +1089,77 @@ def _open_wake(
     return chat
 
 
+
+_LOOK_SNAP_KEY = "_look_tool_snapshot"
+_LOOK_STASH_ATTR = "_abcx_look_tool_snapshot"
+
+
+def _look_tool_bag(snap: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(snap, dict):
+        return None
+    bag = snap.get(_LOOK_SNAP_KEY)
+    return bag if isinstance(bag, dict) else None
+
+
+def _look_bag_has_rows(bag: dict[str, Any] | None) -> bool:
+    if not isinstance(bag, dict):
+        return False
+    quotes = bag.get("quote")
+    oq = bag.get("option_quote")
+    if isinstance(quotes, list) and quotes:
+        return True
+    if isinstance(oq, list) and oq:
+        return True
+    return bag.get("book") is not None
+
+
+def _stash_look_tool_bag(holder: Any, snap: dict[str, Any] | None) -> None:
+    if holder is None:
+        return
+    bag = _look_tool_bag(snap)
+    keep = bag if _look_bag_has_rows(bag) else None
+    try:
+        setattr(holder, _LOOK_STASH_ATTR, keep)
+    except Exception:
+        logger.debug("look cache stash failed", exc_info=True)
+
+
+def _restore_look_tool_bag(snap: dict[str, Any] | None, bag: dict[str, Any] | None) -> None:
+    if not isinstance(snap, dict) or not isinstance(bag, dict):
+        return
+    snap[_LOOK_SNAP_KEY] = bag
+
+
+def _clear_look_tool_stash(holder: Any) -> None:
+    if holder is None:
+        return
+    try:
+        setattr(holder, _LOOK_STASH_ATTR, None)
+    except Exception:
+        pass
+
+
+def _begin_look_for_turn(
+    snap: dict[str, Any] | None, *, same_look: bool, holder: Any = None
+) -> None:
+    """Wipe this-look quote cache only at a true look start.
+
+    A stream-loop abort re-enters _grok_turn_impl on the same chat.
+    Those IBKR prints were already paid for; begin_look would throw
+    them away and the model would not re-fetch.
+    """
+    from abcxauto.look_snapshot import begin_look
+
+    if same_look:
+        if not _look_bag_has_rows(_look_tool_bag(snap)):
+            stashed = getattr(holder, _LOOK_STASH_ATTR, None) if holder is not None else None
+            if isinstance(stashed, dict):
+                _restore_look_tool_bag(snap, stashed)
+        return
+    begin_look(snap)
+    _clear_look_tool_stash(holder)
+
+
 async def _inject_live_poke(
     chat: Any,
     *,
@@ -1128,15 +1200,12 @@ async def _inject_live_poke(
     # This look's IBKR screens did not change. Quotes/book refetch only when
     # the poke actually moved the book (fill / order_change / unprotected).
     scan_snap = _scan_snap_bag(snap)
+    look_bag = _look_tool_bag(snap)
     if live_poke_clears_tool_cache(ev):
         # Fill / real order fill-cancel / unprotected: the book moved under us.
         turn.tool_cache.clear()
-        try:
-            from abcxauto.look_snapshot import begin_look
-
-            begin_look(snap)
-        except Exception:
-            logger.debug("look snapshot reset on poke failed", exc_info=True)
+        # Do not begin_look. A book poke means positions/orders moved. It
+        # does not make a two-second-old IBKR option print invented.
     think_emit("tool", f"\n[{ev.kind}]\n")
     # Refresh book facts when we can — thin poke, not a second wake dump.
     day: dict[str, Any] | None = None
@@ -1149,6 +1218,7 @@ async def _inject_live_poke(
                 snap.clear()
                 snap.update(fresh)
                 _restore_scan_snap(snap, scan_snap)
+                _restore_look_tool_bag(snap, look_bag)
                 world.net_liquidation = (
                     fresh.get("net_liquidation")
                     or (fresh.get("account") or {}).get("netliquidation")
@@ -1834,6 +1904,13 @@ async def _dispatch_tool_calls(
         _append_tool_result(chat, tc, result)
         # The book just moved. Every cached read is now a pre-trade fact.
         turn.tool_cache.clear()
+        try:
+            from abcxauto.look_snapshot import begin_look
+
+            begin_look(snap)
+        except Exception:
+            logger.debug("look snapshot reset on send failed", exc_info=True)
+        _clear_look_tool_stash(chat)
     return peek_interrupt() is not None
 
 
@@ -1851,10 +1928,11 @@ async def _grok_turn_impl(
     turn = turn or BrainTurn()
     # Rejected clerk tickets must not ride to the next look.
     drop_refused_send_targets(turn)
+    live_chat = getattr(g, "chat", None) if g is not None else None
     try:
-        from abcxauto.look_snapshot import begin_look
-
-        begin_look(snap)
+        _begin_look_for_turn(
+            snap, same_look=live_chat is not None, holder=live_chat or g
+        )
     except Exception:
         logger.debug("look snapshot begin failed", exc_info=True)
     if g is None:
@@ -2261,6 +2339,8 @@ async def _grok_turn_impl(
             )
     except Exception:
         logger.debug("research brief write failed", exc_info=True)
+    _stash_look_tool_bag(getattr(g, "chat", None), snap)
+    _stash_look_tool_bag(g, snap)
     _finish_look_chat(g, turn, session=session)
     if not turn.sends:
         if str(turn.last_strat or "").lower() == "hold":
