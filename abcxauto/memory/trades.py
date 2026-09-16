@@ -15,6 +15,7 @@ from abcxauto.memory.journal_support import (
     _order_ids_from_result_json,
     _patch_dispatch_send_marks,
     _row_ts,
+    _split_gate_stage,
 )
 
 logger = logging.getLogger("abcxauto.memory.journal")
@@ -79,22 +80,27 @@ class JournalTrades:
         reason: str = "",
         *,
         ts: Optional[str] = None,
+        stage: Optional[str] = None,
     ) -> None:
         if not self.enabled:
             return
         try:
             self._ensure_schema()
+            stage_val = str(stage or "").strip()
+            if not stage_val:
+                stage_val, _note = _split_gate_stage(reason)
             with self._connect() as conn:
                 conn.execute(
                     """
-                    INSERT INTO gate_decisions (ts, proposal_id, allowed, reason)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO gate_decisions (ts, proposal_id, allowed, reason, stage)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
                     (
                         _row_ts(ts),
                         proposal_id,
                         1 if allowed else 0,
                         reason or None,
+                        stage_val or None,
                     ),
                 )
                 conn.commit()

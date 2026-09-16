@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS gate_decisions (
     ts TEXT NOT NULL,
     proposal_id INTEGER REFERENCES proposals(id),
     allowed INTEGER,
-    reason TEXT
+    reason TEXT,
+    stage TEXT
 );
 
 CREATE TABLE IF NOT EXISTS dispatches (
@@ -89,7 +90,8 @@ CREATE TABLE IF NOT EXISTS fills (
     signed_slippage REAL,
     spread_paid REAL,
     fill_label TEXT,
-    quote_reason TEXT
+    quote_reason TEXT,
+    multiplier REAL
 );
 
 CREATE TABLE IF NOT EXISTS decisions (
@@ -429,6 +431,8 @@ class JournalSchema:
                         ("portfolio_usd_refused", "INTEGER"),
                     ),
                 )
+                _ensure_columns(conn, "gate_decisions", (("stage", "TEXT"),))
+                _ensure_columns(conn, "fills", (("multiplier", "REAL"),))
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.commit()
             self._initialized = True
