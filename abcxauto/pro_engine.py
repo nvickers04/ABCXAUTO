@@ -9,6 +9,7 @@ import queue
 import sys
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -25,6 +26,50 @@ from abcxauto.agent_loop import (
 )
 
 logger = logging.getLogger(__name__)
+
+_LIVE_ENGINES: weakref.WeakSet = weakref.WeakSet()
+
+
+def reset_pro_engines_for_tests(*, join_s: float = 3.0) -> None:
+    """Join leftover stay-up workers. Tests only.
+
+    ``stop_engine`` drops ``worker`` without joining, and stay-up tests patch
+    ``ProEngine._host_think`` on the class. A thread that is still in the
+    loop would otherwise call the next test's think.
+
+    Do not call ``stop_engine`` here: it flushes think_stream files into
+    the next test's tmp_path.
+    """
+    for eng in list(_LIVE_ENGINES):
+        worker = getattr(eng, "worker", None) or getattr(eng, "_join_thread", None)
+        try:
+            eng.stop.set()
+            eng._gen += 1
+            sig = getattr(eng, "_signal_worker_wake", None)
+            if callable(sig):
+                sig()
+        except Exception:
+            logger.debug("reset_pro_engines_for_tests stop failed", exc_info=True)
+        if isinstance(worker, threading.Thread) and worker.is_alive():
+            worker.join(timeout=join_s)
+        try:
+            eng.worker = None
+            eng._join_thread = None
+        except Exception:
+            pass
+    try:
+        from abcxauto.park_clock import clear_interrupt, note_wake
+
+        clear_interrupt()
+        note_wake(None)
+    except Exception:
+        logger.debug("reset_pro_engines_for_tests park clear failed", exc_info=True)
+    try:
+        from abcxauto.think_stream import bind_engine
+
+        bind_engine(None)
+    except Exception:
+        logger.debug("reset_pro_engines_for_tests unbind failed", exc_info=True)
 
 
 class _MonitorStubSession:
@@ -276,6 +321,8 @@ class ProEngine:
         self._flat_start_orphan_gate = False
         self._brain_key: tuple = ()
         self._monitor_key: tuple = ()
+        self._join_thread: threading.Thread | None = None
+        _LIVE_ENGINES.add(self)
         from abcxauto.think_stream import bind_engine
 
         bind_engine(self)
@@ -331,13 +378,7 @@ class ProEngine:
             # Stay-up sits on `_wake_event.wait`. Book pokes set it;
             # operator Start must too or the desk paints "Grok on"
             # while the worker stays mid-wait with no look.
-            ev = self._wake_event
-            if ev is not None:
-                loop = self._worker_loop
-                if loop is not None and loop.is_running():
-                    loop.call_soon_threadsafe(ev.set)
-                else:
-                    ev.set()
+            self._signal_worker_wake()
             self._note("START", "Grok running")
             return None
         self._gen += 1
@@ -459,13 +500,33 @@ class ProEngine:
         self._note("PAUSE", "Agent paused — IBKR still connected; open risk kept")
         self._apply_open_risk(note=True, allow_flat_close=False)
 
+    def _signal_worker_wake(self) -> None:
+        """Unblock stay-up pulse wait. Start pokes; Stop must too."""
+        ev = self._wake_event
+        if ev is None:
+            return
+        loop = self._worker_loop
+        if loop is not None and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(ev.set)
+            except RuntimeError:
+                pass
+        else:
+            try:
+                ev.set()
+            except Exception:
+                pass
+
     def stop_engine(self) -> None:
         was_linked = bool(self.state.connected) or (
             self.worker is not None and self.worker.is_alive()
         )
+        worker = self.worker
         self.stop.set()
         self.pause.clear()
         self._gen += 1
+        self._signal_worker_wake()
+        self._join_thread = worker
         self.state.running = False
         self.state.paused = False
         self.state.autonomous = False
@@ -2183,6 +2244,8 @@ class ProEngine:
                         )
                     except Exception:
                         logger.debug("kill-look in_flight stamp failed", exc_info=True)
+                    if gen != self._gen or self.stop.is_set():
+                        continue
                     out = await self._host_think(n, g, s, resume=resume)
                     if not out.get("_recover"):
                         self._recover_same_chat = False

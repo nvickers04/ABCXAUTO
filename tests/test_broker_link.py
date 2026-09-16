@@ -357,6 +357,7 @@ def test_crash_relaunch_probes_configured_port(monkeypatch):
     monkeypatch.setattr(sup, "useful_hours", lambda **_kw: True)
     monkeypatch.setattr(sup, "tws_listening", _listen)
     monkeypatch.setattr(sup, "operator_stopped", lambda: False)
+    monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: [])
     monkeypatch.setattr(sup.time, "sleep", lambda _s: None)
     assert sup.supervise() == 0
     assert len(launches) == 2

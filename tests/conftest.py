@@ -290,6 +290,16 @@ def _reset_abort_fuse():
 
 
 @pytest.fixture(autouse=True)
+def _reset_pro_engines():
+    """Stay-up worker threads are process-life; join them between tests."""
+    from abcxauto.pro_engine import reset_pro_engines_for_tests
+
+    reset_pro_engines_for_tests()
+    yield
+    reset_pro_engines_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _pcs_kill_look_off_unless_marked(monkeypatch, request):
     """Kill-look contract is production-on; unit tests opt in via env or mark."""
     marked = request.node.get_closest_marker("pcs_kill_look") is not None
