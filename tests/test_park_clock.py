@@ -470,9 +470,9 @@ def test_start_looks_now_honors_closed_alarm_after_rth_bell(tmp_path, monkeypatc
     from abcxauto.park_clock import GrokAlarm, save_alarm, start_looks_now
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
-    later = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
-    save_alarm(GrokAlarm(wake_at=later, set_at=later, session="closed"))
     now = datetime(2026, 9, 16, 10, 16, tzinfo=ZoneInfo("America/New_York"))
+    later = (now + timedelta(minutes=5)).astimezone(timezone.utc).isoformat()
+    save_alarm(GrokAlarm(wake_at=later, set_at=later, session="closed"))
     assert start_looks_now(now=now) is False
     save_alarm(GrokAlarm(wake_at=later, set_at=later))
     assert start_looks_now(now=now) is True
