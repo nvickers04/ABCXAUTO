@@ -110,19 +110,70 @@ def _parse_halt_date(raw: Any) -> Optional[date]:
         return None
 
 
+def _parse_halt_ts(raw: Any) -> Optional[datetime]:
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, datetime):
+        if raw.tzinfo is None:
+            return raw.replace(tzinfo=timezone.utc)
+        return raw.astimezone(timezone.utc)
+    text = str(raw).strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _halt_age_label(
+    halt_at: Optional[datetime],
+    halt_date: Optional[date] = None,
+) -> str:
+    """Human age for operator logs. Fail closed to unknown-age."""
+    when = halt_at
+    if when is None and halt_date is not None:
+        when = datetime(
+            halt_date.year, halt_date.month, halt_date.day, tzinfo=timezone.utc
+        )
+    if when is None:
+        return "unknown-age"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    secs = max(0, int((datetime.now(timezone.utc) - when).total_seconds()))
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days > 0:
+        return f"{days}-day"
+    if hours > 0:
+        return f"{hours}-hour"
+    if minutes > 0:
+        return f"{minutes}-minute"
+    return f"{secs}-second"
+
+
 def _write_halt_state(
     *,
     halted: bool,
     reason: str,
     kind: str,
     halt_date: Optional[date],
+    halt_at: Optional[datetime] = None,
 ) -> None:
     path = halt_state_path()
+    ts = None
+    if halt_at is not None:
+        if halt_at.tzinfo is None:
+            halt_at = halt_at.replace(tzinfo=timezone.utc)
+        ts = halt_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     blob = {
         "halted": bool(halted),
         "reason": reason or "",
         "kind": kind or "",
         "date": halt_date.isoformat() if halt_date is not None else None,
+        "ts": ts,
     }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,6 +224,7 @@ def _latest_journal_halt() -> Optional[dict[str, Any]]:
                 "reason": "",
                 "kind": "",
                 "date": None,
+                "ts": None,
             }
         halt_day = _parse_halt_date(ts) or session_date()
         return {
@@ -180,6 +232,7 @@ def _latest_journal_halt() -> Optional[dict[str, Any]]:
             "reason": str(reason or "halted"),
             "kind": kind_s,
             "date": halt_day,
+            "ts": _parse_halt_ts(ts),
         }
     except Exception:
         logger.exception("journal halt restore failed")
@@ -191,8 +244,9 @@ _EXIT_ONLY_STRATEGIES = frozenset({
     "limit_order", "market_order", "stop_order", "stop_limit",
 }) | EXIT_ONLY_EXTRA
 
-# Only daily-loss circuit-breaker halts auto-clear at midnight. Disconnect,
-# auto_panic, and manual/default "halt" kinds persist until resume().
+# Only daily-loss circuit-breaker halts auto-clear at midnight. Disconnect
+# auto-resumes only after reconnect + a complete book. auto_panic and
+# manual/default "halt" kinds persist until resume().
 _AUTO_RESET_HALT_KINDS = frozenset({"daily_loss"})
 
 
@@ -738,6 +792,7 @@ class RiskGate:
         self._halt_reason = ""
         self._halt_kind: str = ""
         self._halt_date: Optional[date] = None
+        self._halt_at: Optional[datetime] = None
         self.auto_reset_on_new_day = auto_reset_on_new_day
         self._trade_date: Optional[str] = None
         self._daily_trades = 0
@@ -756,6 +811,7 @@ class RiskGate:
             reason=self._halt_reason,
             kind=self._halt_kind,
             halt_date=self._halt_date,
+            halt_at=self._halt_at,
         )
 
     def _apply_halt_blob_unlocked(self, blob: dict[str, Any]) -> None:
@@ -764,11 +820,15 @@ class RiskGate:
             self._halt_reason = ""
             self._halt_kind = ""
             self._halt_date = None
+            self._halt_at = None
             return
         self._halted = True
         self._halt_reason = str(blob.get("reason") or "halted")
         self._halt_kind = str(blob.get("kind") or "halt")
         self._halt_date = _parse_halt_date(blob.get("date")) or session_date()
+        self._halt_at = _parse_halt_ts(blob.get("ts"))
+        if self._halt_at is None:
+            self._halt_at = _parse_halt_ts(blob.get("date"))
 
     def _restore_halt_latch(self) -> None:
         blob, unreadable = _read_halt_state()
@@ -781,6 +841,7 @@ class RiskGate:
                 self._halt_reason = "halt restore failed"
                 self._halt_kind = "halt"
                 self._halt_date = session_date()
+                self._halt_at = datetime.now(timezone.utc)
                 logger.critical("RISK GATE FAIL-CLOSED: halt state unreadable")
                 return
         if blob is None:
@@ -795,6 +856,7 @@ class RiskGate:
                 self._halt_reason,
                 self._halt_kind,
                 self._halt_date,
+                self._halt_at,
             )
         if cleared:
             _write_halt_state(
@@ -802,8 +864,12 @@ class RiskGate:
             )
             _journal_halt("auto-reset new ET day", "resume")
         elif snapshot[0]:
+            age = _halt_age_label(snapshot[4], snapshot[3])
             logger.critical(
-                "RISK GATE RESTORED (%s): %s", snapshot[2], snapshot[1]
+                "RISK GATE RESTORED (%s): %s (age=%s-old)",
+                snapshot[2],
+                snapshot[1],
+                age,
             )
 
     def halt(self, reason: str, *, kind: str = "halt") -> None:
@@ -812,6 +878,7 @@ class RiskGate:
             self._halt_reason = reason or "halted"
             self._halt_kind = kind or "halt"
             self._halt_date = session_date()
+            self._halt_at = datetime.now(timezone.utc)
             logger.critical(
                 f"RISK GATE HALTED ({self._halt_kind}): {self._halt_reason}"
             )
@@ -824,9 +891,48 @@ class RiskGate:
             self._halt_reason = ""
             self._halt_kind = ""
             self._halt_date = None
+            self._halt_at = None
             logger.warning("RISK GATE RESUMED")
             self._persist_halt_unlocked()
         _journal_halt("manual resume", "resume")
+
+    def maybe_resume_disconnect(
+        self,
+        *,
+        broker_connected: bool,
+        book_complete: bool,
+    ) -> bool:
+        """Clear a disconnect halt only after reconnect and a complete book.
+
+        Fail closed on any missing evidence. Other kinds never clear here.
+        """
+        if not broker_connected or not book_complete:
+            return False
+        with self._lock:
+            if not self._halted or self._halt_kind != "disconnect":
+                return False
+            kind = self._halt_kind
+            reason = self._halt_reason
+            age = _halt_age_label(self._halt_at, self._halt_date)
+            self._halted = False
+            self._halt_reason = ""
+            self._halt_kind = ""
+            self._halt_date = None
+            self._halt_at = None
+            self._persist_halt_unlocked()
+        logger.critical(
+            "RISK GATE AUTO-RESUMED (%s): cleared a %s-old %s halt: %s",
+            kind,
+            age,
+            kind,
+            reason,
+        )
+        _journal_halt(
+            f"auto-resume {kind} after reconnect + complete book "
+            f"(age={age}-old): {reason}",
+            "resume",
+        )
+        return True
 
     def _read_halt_field(self, name: str) -> Any:
         with self._lock:
@@ -867,6 +973,7 @@ class RiskGate:
         self._halt_reason = ""
         self._halt_kind = ""
         self._halt_date = None
+        self._halt_at = None
         return True
 
     # ------------------------------------------------------------------

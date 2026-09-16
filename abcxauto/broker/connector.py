@@ -1195,6 +1195,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 if ok:
                     self._ibkr_data_stale = False
                     logger.info("IBKR book refreshed after data restore")
+                    self._maybe_resume_disconnect_halt(book_complete=True)
                 else:
                     logger.error("IBKR book refresh failed — stay stale")
             except asyncio.CancelledError:
@@ -1387,6 +1388,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                     logger.error(f"Reconnect error (reason={reason}): {e}")
 
                 if ok:
+                    await self._after_connect_restore()
                     try:
                         from abcxauto.risk_gates import get_risk_gate
 
@@ -1406,10 +1408,8 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                     except Exception:
                         logger.info(
                             f"IBKR reconnected successfully (reason={reason}, "
-                            f"client_id={self.client_id}). "
-                            "Any risk-gate halt remains until human/monitor resume."
+                            f"client_id={self.client_id})."
                         )
-                    await self._after_connect_restore()
                     return
 
                 self._reconnect_attempt += 1
@@ -1423,10 +1423,27 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         finally:
             self._reconnect_task = None
 
-    async def _after_connect_restore(self) -> None:
-        """Resubscribe market data after TWS/Gateway reconnect.
+    def _maybe_resume_disconnect_halt(self, *, book_complete: bool) -> None:
+        """Disconnect-kind only. Fail closed if the broker or book is unknown."""
+        try:
+            connected = bool(self.connected)
+        except Exception:
+            connected = False
+        try:
+            from abcxauto.risk_gates import get_risk_gate
 
-        Does not clear a risk-gate halt — human/monitor must resume.
+            get_risk_gate().maybe_resume_disconnect(
+                broker_connected=connected,
+                book_complete=bool(book_complete),
+            )
+        except Exception:
+            logger.exception("disconnect-halt auto-resume check failed")
+
+    async def _after_connect_restore(self) -> None:
+        """Refresh the book after TWS/Gateway connect or reconnect.
+
+        A disconnect-kind halt may auto-resume after a complete book.
+        Other halt kinds still require operator resume().
         """
         self._disconnect_cause = DisconnectCause.UNKNOWN.value
         self._reconnect_requested = False
@@ -1443,11 +1460,15 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         self._pending_resubscribe.clear()
         if n:
             logger.info(f"Cleared {n} pending market-data resubscribe symbol(s)")
+        book_ok = False
         try:
             if await self._refresh_book_after_data_loss():
                 self._ibkr_data_stale = False
+                book_ok = True
         except Exception:
-            logger.exception("post-reconnect book refresh failed — stay stale")
+            logger.exception("post-reconnect book refresh failed - stay stale")
+            book_ok = False
+        self._maybe_resume_disconnect_halt(book_complete=book_ok)
 
     def _on_execution(self, trade: Trade, fill: Fill) -> None:
         """
