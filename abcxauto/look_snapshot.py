@@ -18,11 +18,13 @@ and are not themselves prints):
   or geometry facts (book aux, session_range tape: low / high / open /
   last / retrace_*). Session tape is this-look fact, not MDA scan last.
 * Last-relative derivation — a verified same-instrument IBKR last L
-  exists, the ticket names LONG or SHORT, and the level is on the legal
-  side of L. Stops must also sit within 25% of L (walk-away risk/trade
-  ceiling). A farther pin must be an exact this-look fact (gap under the
-  open). Targets have no distance cap. ``last ± any invented offset``
-  beyond that is not derived.
+  exists and the level is last-relative: stops must sit within 25% of L
+  (walk-away risk/trade ceiling). A farther pin must be an exact
+  this-look fact (gap under the open). Targets have no distance cap.
+  Legal side (stop below last on a LONG) is ``structure_grade``, not
+  this gate — so an inverted but last-relative stop still reaches the
+  geometry referee. ``last ± any invented offset`` beyond the ceiling
+  is not derived.
 
 Code does not invent a stop from last. An option ticket cannot derive
 geometry from a stock last.
@@ -565,25 +567,16 @@ def _derived_protection(
     field: str,
     direction: str,
 ) -> bool:
-    side = str(direction or "").upper()
-    if side not in {"LONG", "SHORT"}:
-        return False
+    """True when level is last-relative. Side is structure_grade's job."""
+    _ = direction
     for last in lasts:
         if last <= 0:
             continue
         frac = abs(level - last) / last
         if field == "stop_price" and frac > DERIVE_STOP_FRAC + 1e-12:
             continue
-        if field == "stop_price":
-            if side == "LONG" and level < last:
-                return True
-            if side == "SHORT" and level > last:
-                return True
-        elif field == "target_price":
-            if side == "LONG" and level > last:
-                return True
-            if side == "SHORT" and level < last:
-                return True
+        if field in {"stop_price", "target_price"}:
+            return True
     return False
 
 

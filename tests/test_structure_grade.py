@@ -682,6 +682,9 @@ async def test_agent_loop_blocks_inverted_before_send(monkeypatch, tmp_path):
     eng = ProEngine()
     eng.conn = Conn()
     s = await snap(eng.conn)
+    quotes = dict(s.get("ibkr_live_quotes") or {})
+    quotes["QQQ"] = 709.83
+    s["ibkr_live_quotes"] = quotes
     out = await eng._host_think(1, None, s)
     assert out["strat"] == "blocked"
     assert send_calls == []
