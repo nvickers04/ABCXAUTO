@@ -131,19 +131,18 @@ def compact_position(
                 nl = None
         if nl is not None and nl > 0:
             if upnl is not None:
-                row["uPnL_pct_nl"] = round(100.0 * float(upnl) / float(nl), 4)
+                row["uPnL_pct_nl"] = pct_of_nl(upnl, nl)
             avg_usd = row.get("avg_usd")
             if avg_usd is not None:
-                try:
-                    row["avg_usd_pct_nl"] = round(100.0 * float(avg_usd) / float(nl), 4)
-                except (TypeError, ValueError):
-                    pass
+                pct = pct_of_nl(avg_usd, nl)
+                if pct is not None:
+                    row["avg_usd_pct_nl"] = pct
             try:
                 mv = abs(float(p.get("marketValue") or p.get("market_value") or 0))
             except (TypeError, ValueError):
                 mv = 0.0
             if mv > 0:
-                row["mv_pct_nl"] = round(100.0 * mv / float(nl), 4)
+                row["mv_pct_nl"] = pct_of_nl(mv, nl)
             stop_px = stop
             if stop_px is None:
                 raw_stop = p.get("stop") or p.get("stop_price") or p.get("aux_price")
@@ -161,20 +160,26 @@ def compact_position(
                     sec = str(row.get("sec") or "STK").upper()
                     mult = 100.0 if sec.startswith("OPT") else 1.0
                     risk_usd = abs(float(mkt_f) - float(stop_px)) * abs(qty) * mult
-                    row["risk_pct_nl"] = round(100.0 * risk_usd / float(nl), 4)
+                    row["risk_pct_nl"] = pct_of_nl(risk_usd, nl)
     return row
 
 
-def pct_of_nl(usd: Any, net_liq: Any) -> float | None:
-    """Percent of NetLiq for a dollar amount. None when either side is unknown."""
+def pct_of_nl(usd: Any, net_liq: Any, *, digits: int = 4) -> float | None:
+    """Percent of NetLiq for a dollar amount.
+
+    Canonical % of NL helper. None when either side cannot be coerced or
+    NetLiq is zero (unknown book — not 0%). Zero dollars on a live book is
+    ``0.0``. ``risk_gates._pct_of_nl`` still returns ``0.0`` on book<=0;
+    migrate those call sites to this helper.
+    """
     try:
         dollars = float(usd)
         nl = float(net_liq)
     except (TypeError, ValueError):
         return None
-    if nl == 0:
+    if nl == 0 or nl != nl or dollars != dollars:
         return None
-    return round(100.0 * dollars / nl, 4)
+    return round(100.0 * dollars / nl, digits)
 
 
 def _fill_order_id(fill: dict[str, Any]) -> str:
@@ -1329,7 +1334,7 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
     open_upnl = open_upnl_of(getattr(world, "positions", None))
     edge_usd = sc.get("edge_usd")
     model_cost = sc.get("model_cost_usd")
-    # Current NL is the denominator for clerk pct_of_nl siblings (keep $ fields).
+    # Current NL is the denominator for pct_of_nl siblings (keep $ fields).
     daily_pct = pct_of_nl(daily, nl)
     # Prefer book.daily_pnl_pct when world already computed it.
     book = getattr(world, "book", None) if isinstance(getattr(world, "book", None), dict) else {}
@@ -2203,7 +2208,7 @@ def _portfolio_risk(
             if mv > best:
                 best = mv
                 top_sym = str(p.get("symbol") or "")
-        top_pct = round(100.0 * best / float(net_liq), 2)
+        top_pct = pct_of_nl(best, net_liq, digits=2) or 0.0
     # Soft exposure Fact (not a hold gate): top names + share of NL.
     exposure = {
         "top_symbol": top_sym,
@@ -2212,9 +2217,7 @@ def _portfolio_risk(
             (
                 {
                     "symbol": s,
-                    "pct_nl": round(100.0 * mv / float(net_liq), 2)
-                    if net_liq and net_liq > 0
-                    else 0.0,
+                    "pct_nl": pct_of_nl(mv, net_liq, digits=2) or 0.0,
                 }
                 for s, mv in by_sym.items()
             ),
@@ -2226,10 +2229,8 @@ def _portfolio_risk(
         cash = float(total_cash) if total_cash is not None else 0.0
     except (TypeError, ValueError):
         cash = 0.0
-    cash_pct = round(100.0 * cash / float(net_liq), 2) if net_liq and net_liq > 0 else 0.0
-    deployed_pct = (
-        round(100.0 * long_mv / float(net_liq), 2) if net_liq and net_liq > 0 else 0.0
-    )
+    cash_pct = pct_of_nl(cash, net_liq, digits=2) or 0.0
+    deployed_pct = pct_of_nl(long_mv, net_liq, digits=2) or 0.0
     capital_liquidity = {
         "total_cash": round(cash, 2),
         "cash_pct_nl": cash_pct,

@@ -369,7 +369,10 @@ def validate_proposal(
             f"{'.'.join(str(p) for p in err['loc'])}: {err['msg']}" if err["loc"] else err["msg"]
             for err in e.errors()
         )
-        raise ProposalValidationError(f"Invalid {strategy} params — {problems}") from e
+        raise ProposalValidationError(
+            f"Invalid {strategy} params — {problems}. "
+            f"Send the ORDER EXAMPLES {strategy} fields (top-level or params)."
+        ) from e
     if hasattr(parsed, "symbol"):
         parsed.symbol = parsed.symbol.upper()
 

@@ -449,7 +449,7 @@ async def test_news_is_labeled_delayed_but_candles_never_serves_mda(monkeypatch)
     assert news["source"] == "mda"
     assert "delayed" in news["freshness"]
     assert news["use"] == "color_not_trigger"
-    assert "already in the price" in str(news.get("note") or "")
+    assert "note" not in news
     candles = json.loads(
         await _run_tool(
             "candles",
@@ -987,6 +987,23 @@ def test_clip_does_not_decorate_top_n_scan_rescue():
         assert slim is False
     else:
         assert data.get("_clipped")
+
+
+def test_clip_fat_non_book_payload_keeps_run_without_nameerror():
+    """Oversized non-live-book dict with run used to NameError on undefined kept."""
+    payload = {
+        "ok": True,
+        "run": {"next": "send", "card": "flush bounce"},
+        "essay": "x" * 30_000,
+    }
+    assert len(json.dumps(payload)) > 24_000
+    raw = _clip(payload)
+    data = json.loads(raw)
+    assert data["run"]["next"] == "send"
+    assert data["run"]["card"] == "flush bounce"
+    assert data.get("ok") is True
+    assert data.get("_clipped") == "payload"
+    assert "essay" not in data
 
 
 def test_clip_keeps_run_when_hits_overflow():
@@ -1861,6 +1878,37 @@ def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
     pb = blob.get("day", {}).get("playbook") or {}
     assert "do_more" not in pb
     assert "stop_doing" not in pb
+
+
+def test_book_payload_drops_day_aliases_and_empty_score_windows(monkeypatch):
+    from abcxauto.brain import _book_payload
+
+    monkeypatch.setattr("abcxauto.universe.legal_symbols", lambda **_k: ["SPY"])
+    blob = _book_payload(_world())
+    day = blob["day"]
+    assert "ibkr_daily_pnl" in day
+    assert "daily_pnl_pct_of_nl" not in day
+    assert "ibkr_daily_pnl_pct_of_nl" not in day
+    assert "risk_per_trade_pct" not in day
+    assert "playbook" not in day
+    assert "ibkr_daily_pnl" not in blob["world"]
+    assert "score_windows" not in blob
+
+
+def test_scan_public_payload_drops_duplicate_rows():
+    from abcxauto.brain_tools import _scan_public_payload
+
+    hits = [{"symbol": "SPY", "open_gap_pct": -1.2}]
+    slim = _scan_public_payload(
+        {"ok": True, "hits": hits, "rows": hits, "source": "ibkr"}
+    )
+    assert slim["hits"] == hits
+    assert "rows" not in slim
+    other = [{"symbol": "QQQ"}]
+    kept = _scan_public_payload(
+        {"ok": True, "hits": hits, "rows": other, "source": "ibkr"}
+    )
+    assert kept["rows"] == other
 
 
 def test_book_lists_full_capacity(monkeypatch):
@@ -2861,6 +2909,45 @@ def test_send_tool_says_one_ticket_per_call():
     card = props.get("card") or {}
     assert "required on new risk" in str(card.get("description") or "").lower()
     assert "not a catalog" in str(card.get("description") or "").lower()
+    assert "long_strike" in props
+    assert "closing_position" in props
+    assert "size_pct_nl" in props
+    assert "conId" in props
+
+
+@pytest.mark.asyncio
+async def test_send_names_missing_strategy():
+    raw = await _run_tool(
+        "send",
+        {"action": "SELL", "symbol": "AAPL", "quantity": 5, "closing_position": True},
+        connector=object(),
+        world=_world(session_status="regular"),
+        snap={},
+        turn=BrainTurn(),
+    )
+    data = json.loads(raw)
+    assert data.get("status") == "rejected"
+    err = str(data.get("error") or "")
+    assert "side, not a strategy" in err
+    assert "market_bracket" in err or "ORDER EXAMPLES" in err
+
+
+@pytest.mark.asyncio
+async def test_option_quote_error_names_missing_fields():
+    class Conn:
+        pass
+
+    raw = await _run_tool(
+        "option_quote",
+        {"ticker": "SPY"},
+        connector=Conn(),
+        world=_world(),
+        snap={},
+        turn=BrainTurn(),
+    )
+    data = json.loads(raw)
+    assert "expiration" in str(data.get("error") or "")
+    assert data.get("need") == ["expiration", "strike", "right"]
 
 
 def test_self_tune_tool_is_flat():

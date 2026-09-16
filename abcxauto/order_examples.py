@@ -353,6 +353,28 @@ def ticket_strategy_names() -> list[str]:
     return sorted(k for k in ORDER_EXAMPLES if k not in NOT_TICKETS)
 
 
+def send_ticket_field_names() -> list[str]:
+    """Every key ORDER EXAMPLES teaches on a sendable ticket, plus close siblings.
+
+    send hoist / schema use this so a top-level ``long_strike`` reaches
+    params instead of dying as a missing-field retry.
+    """
+    keys: list[str] = []
+    seen: set[str] = set()
+    for name, params in ORDER_EXAMPLES.items():
+        if name in NOT_TICKETS or not isinstance(params, dict):
+            continue
+        blobs = [params]
+        if name in COMBO_BAG_CLOSE:
+            blobs.append(combo_close_example(name))
+        for blob in blobs:
+            for key in blob:
+                if key not in seen:
+                    seen.add(key)
+                    keys.append(key)
+    return keys
+
+
 def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -> str:
     """Compact prompt section: how to send each Act-allowlisted order type.
 

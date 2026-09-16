@@ -1411,7 +1411,7 @@ async def test_execute_ticket_does_not_apply_hunt_hold_to_manage(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_execute_ticket_uses_scan_hit_last_when_quote_map_misses(monkeypatch):
+async def test_execute_ticket_refuses_mda_scan_last_for_geometry(monkeypatch):
     from abcxauto.agent_loop import execute_ticket
     from abcxauto.world_state import WorldState
 
@@ -1498,10 +1498,9 @@ async def test_execute_ticket_uses_scan_hit_last_when_quote_map_misses(monkeypat
             },
         },
     )
-    assert result.get("status") == "ok"
-    assert sent
-    assert sent[0]["params"]["symbol"] == "SNDK"
-    assert sent[0]["_quote_last"] == 91.5
+    assert result.get("status") == "blocked"
+    assert "IBKR live last" in str(result.get("note") or "")
+    assert sent == []
 
 
 @pytest.mark.asyncio
@@ -1693,7 +1692,7 @@ async def test_execute_ticket_blocks_when_one_share_blows_card_risk(monkeypatch)
                 "card": "flush bounce",
                 "symbol": "BKNG",
                 "direction": "LONG",
-                "stop_price": 100.0,
+                "stop_price": 490.0,
                 "target_price": 520.0,
             },
             "rationale": "card=flush bounce BKNG",

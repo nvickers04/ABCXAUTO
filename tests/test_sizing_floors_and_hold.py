@@ -145,7 +145,7 @@ async def test_floors_off_skips_pct_but_blocks_unknown_option_and_short(monkeypa
         account={
             "netliquidation": 10_000.0,
             "dailypnl": 0.0,  # daily-loss is always-on; keep PnL above the floor
-            "TotalCashValue": 100.0,
+            "TotalCashValue": 100_000.0,
         }
     )
     # Huge bracket would fail % floors — passes when OFF
@@ -447,7 +447,7 @@ def test_size_pct_nl_hoisted_not_converted():
 
 
 def test_size_pct_nl_is_clerk_send_annotation():
-    """size_pct_nl lives on send/tool_args — not brain AGENT_TOOLS schema."""
+    """size_pct_nl is Grok's size — hoist + send schema, clerk fills qty."""
     from abcxauto.send import SEND_SIZE_PCT_NL
     from abcxauto.tool_args import SEND_SIZE_PCT_NL as TA_KEY
     from abcxauto import tool_args as ta
@@ -466,4 +466,4 @@ def test_size_pct_nl_is_clerk_send_annotation():
             send = t
             break
     assert send is not None
-    assert "size_pct_nl" not in str(send)
+    assert "size_pct_nl" in str(send)

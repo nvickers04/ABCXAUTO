@@ -22,6 +22,7 @@ from abcxauto.token_ttl import (
     issue_place_token,
     peek_place_token,
     place_token_block,
+    prune_place_tokens,
     reset_place_tokens_for_tests,
     stamp_token,
     ticket_is_exit,
@@ -286,3 +287,20 @@ async def test_live_port_still_wins_over_fresh_token(monkeypatch):
     assert result["reason_code"] == "live_port_paper"
     assert F10_HARD_USD == 15.0
     assert get_config().ibkr_port == 7496
+
+
+def test_expired_store_rows_are_pruned():
+    now = 1_700_000_400.0
+    live = issue_place_token(kind="place", ttl_s=60, now=now)
+    dead = issue_place_token(kind="place", ttl_s=5, now=now)
+    assert peek_place_token(dead["id"]) is not None
+    verdict = evaluate_place_token(dead["id"], now=now + 10)
+    assert verdict["ok"] is False
+    assert verdict["reason"] == REASON_TOKEN_EXPIRED
+    assert peek_place_token(dead["id"]) is not None
+    assert peek_place_token(live["id"]) is not None
+    later = issue_place_token(kind="place", ttl_s=60, now=now + 200)
+    assert peek_place_token(dead["id"]) is None
+    assert peek_place_token(live["id"]) is None
+    assert peek_place_token(later["id"]) is not None
+    assert prune_place_tokens(now=now + 201) == 0

@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 WakeCallback = Callable[[str], None]
 
 
+def fill_exec_key(fill: Any) -> str:
+    """Stable fill identity. Missing exec_id is unknown — not a colliding fallback."""
+    if not isinstance(fill, dict):
+        return ""
+    return str(
+        fill.get("execId")
+        or fill.get("exec_id")
+        or fill.get("execution_id")
+        or ""
+    ).strip()
+
+
 def _account_float(account: Dict[str, Any], *keys: str) -> Optional[float]:
     for key in keys:
         if key in account and account[key] is not None:
@@ -382,6 +394,7 @@ class PortfolioMonitor:
         self._orders_seeded: bool = False
         self._prev_halted: bool = False
         self._prev_had_plan: bool | None = None
+        self._auto_panic_flatten_done: bool = False
         self.reconciler: Any = None
 
     # ------------------------------------------------------------------
@@ -465,21 +478,9 @@ class PortfolioMonitor:
 
         fill_keys: set[str] = set()
         for f in snapshot.get("fills") or []:
-            if not isinstance(f, dict):
-                continue
-            key = str(
-                f.get("execId")
-                or f.get("exec_id")
-                or f.get("execution_id")
-                or f.get("orderId")
-                or f.get("order_id")
-                or ""
-            )
-            if not key:
-                key = (
-                    f"{f.get('symbol')}|{f.get('side')}|{f.get('shares')}|{f.get('time')}"
-                )
-            fill_keys.add(key)
+            key = fill_exec_key(f)
+            if key:
+                fill_keys.add(key)
         if self._prev_fill_keys and (fill_keys - self._prev_fill_keys):
             self._emit_wake("fill")
         if fill_keys:
@@ -590,16 +591,17 @@ class PortfolioMonitor:
         return True
 
     async def _maybe_auto_panic(self, snapshot: Dict[str, Any]) -> None:
-        """On daily-loss breach: halt once, flatten_all, inject a clear message.
+        """On daily-loss breach: halt if needed, flatten_all once, inject.
 
-        The risk-gate halt latch guards against repeated flatten on every poll.
+        A send-path daily_loss halt does not skip flatten. The once-flag
+        stops a flatten storm on later polls; new entries stay blocked.
         """
         cfg = self.cfg
         if not cfg.auto_panic_on_breach or cfg.daily_loss_limit_pct <= 0:
             return
-
-        gate = get_risk_gate()
-        if gate.is_halted:
+        # A send-path daily_loss halt must not suppress flatten. Flatten
+        # once per monitor instance; the latch still blocks new entries.
+        if self._auto_panic_flatten_done:
             return
 
         account = snapshot.get("account") or {}
@@ -617,8 +619,11 @@ class PortfolioMonitor:
             f"{cfg.daily_loss_limit_pct}% of NL ({limit:.2f} on {net_liq:.2f})"
         )
         logger.critical(reason)
-        gate.halt(reason, kind="auto_panic")
+        gate = get_risk_gate()
+        if not gate.is_halted:
+            gate.halt(reason, kind="auto_panic")
 
+        self._auto_panic_flatten_done = True
         flatten_result: Any = {"skipped": True}
         try:
             if hasattr(self.connector, "flatten_all"):
@@ -640,7 +645,10 @@ class PortfolioMonitor:
         try:
             session = get_session_info().get("session")
         except Exception:
-            return True  # fail open — better to review than to skip
+            if not getattr(self, "_calendar_warned", False):
+                logger.warning("monitor calendar failed — treating market inactive")
+                self._calendar_warned = True
+            return False
         if session == "regular":
             return True
         if self.cfg.monitor_extended_hours and session in ("premarket", "postmarket"):
@@ -660,24 +668,38 @@ class PortfolioMonitor:
             }
             return {}
 
-        positions = await self.connector.get_positions()
-        orders = await self.connector.get_open_orders()
-        account = await self.connector.get_account_summary()
+        async def _one(fn: Any, label: str, default: Any) -> Any:
+            if not callable(fn):
+                return default
+            try:
+                out = fn()
+                if asyncio.iscoroutine(out) or asyncio.isfuture(out):
+                    out = await out
+                return default if out is None and default is not None else out
+            except Exception as exc:
+                logger.warning("Monitor %s failed: %s", label, exc)
+                return default
+
+        positions, orders, account, fills = await asyncio.gather(
+            _one(self.connector.get_positions, "positions", []),
+            _one(self.connector.get_open_orders, "open_orders", []),
+            _one(self.connector.get_account_summary, "account", {}),
+            _one(getattr(self.connector, "get_fills", None), "fills", []),
+        )
+        if not isinstance(positions, list):
+            positions = []
+        if not isinstance(orders, list):
+            orders = []
+        if not isinstance(account, dict):
+            account = {}
+        if not isinstance(fills, list):
+            fills = []
         protection = build_protection_report(positions, orders)
 
         # Feed peak-equity tracker for the self-clearing drawdown gate.
         net_liq = _account_float(account or {}, "netliquidation", "NetLiquidation")
         if net_liq is not None and net_liq > 0:
             get_risk_gate().update_equity(net_liq)
-
-        fills: list = []
-        # Cheap idempotent fill ingest (hasattr so fakes without get_fills stay green).
-        if hasattr(self.connector, "get_fills"):
-            try:
-                fills = await self.connector.get_fills() or []
-            except Exception as e:
-                logger.warning(f"Monitor fill ingest failed: {e}")
-                fills = []
 
         snapshot = {
             "connected": True,
@@ -688,10 +710,12 @@ class PortfolioMonitor:
             "fills": list(fills)[-20:],
             "protection": protection,
         }
+        # Snapshot rows are look-only. Fills and missed sends persist here
+        # so P&L truth does not wait on an idle look.
         try:
-            get_journal().ingest_look(snapshot)
+            get_journal().ingest_poll(snapshot)
         except Exception as e:
-            logger.warning(f"Monitor look journal ingest failed: {e}")
+            logger.warning(f"Monitor poll journal ingest failed: {e}")
         try:
             from abcxauto.pcs_fill_lambda import refresh_pcs_manage
 

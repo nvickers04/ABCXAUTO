@@ -12,6 +12,7 @@ from abcxauto.tool_args import (
     fallback_quote_symbols,
     hoist_send_params,
     normalize_tool_call,
+    option_quote_missing,
     option_quote_specs,
     strip_ambiguous_last,
 )
@@ -108,6 +109,53 @@ def test_send_hoists_flat_fields():
     assert out["params"]["symbol"] == "SPY"
     assert out["params"]["direction"] == "LONG"
     assert out["params"]["quantity"] == 4
+
+
+def test_send_hoists_order_example_strikes():
+    name, args = normalize_tool_call(
+        "send",
+        {
+            "strategy": "vertical_spread",
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "longStrike": 500,
+            "short_strike": 505,
+            "right": "C",
+            "quantity": 1,
+        },
+    )
+    assert name == "send"
+    assert args["params"]["long_strike"] == 500
+    assert args["params"]["short_strike"] == 505
+    assert args["params"]["expiration"] == "20260718"
+    assert args.get("strategy") == "vertical_spread"
+
+
+def test_send_does_not_treat_buy_sell_as_strategy():
+    name, args = normalize_tool_call(
+        "send",
+        {"action": "SELL", "symbol": "AAPL", "quantity": 5, "closing_position": True},
+    )
+    assert name == "send"
+    assert args.get("strategy") in (None, "")
+    assert args["params"]["action"] == "SELL"
+    assert args["params"]["closing_position"] is True
+
+
+def test_option_quote_missing_names_fields():
+    assert option_quote_missing({}) == ["symbol", "expiration", "strike", "right"]
+    assert option_quote_missing({"ticker": "SPY", "expiry": "20260821"}) == [
+        "strike",
+        "right",
+    ]
+    assert option_quote_missing(
+        {
+            "symbol": "SPY",
+            "expiration": "20260821",
+            "strike": 500,
+            "right": "C",
+        }
+    ) == []
 
 
 def test_candles_keeps_symbols_batch():

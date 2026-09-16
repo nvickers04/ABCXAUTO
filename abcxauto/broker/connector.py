@@ -64,6 +64,11 @@ def port_is_closed(exc: BaseException) -> bool:
 _FILL_FUTURE_TOLERANCE_S = 300.0
 
 
+# IANA name so CDT/CST follow DST. A fixed offset would stay wrong after the
+# fall-back. Noah's TWS display is Chicago (Configure → Display).
+_DEFAULT_TWS_TIMEZONE = "America/Chicago"
+
+
 def tws_timezone() -> str:
     """Which zone TWS stamps execution times in.
 
@@ -71,9 +76,11 @@ def tws_timezone() -> str:
     ``IB.TimezoneTWS`` is unset, ib_insync's decoder falls through to
     ``astimezone()`` on that naive value, which reads it as *this machine's*
     local time and shifts every fill by the local UTC offset. Naming the zone
-    keeps the digits meaning what TWS meant by them.
+    keeps the digits meaning what TWS meant by them. Default is the IANA
+    Chicago zone, not a UTC-5/UTC-6 constant.
     """
-    return (os.environ.get("ABCXAUTO_TWS_TIMEZONE") or "UTC").strip() or "UTC"
+    named = (os.environ.get("ABCXAUTO_TWS_TIMEZONE") or _DEFAULT_TWS_TIMEZONE).strip()
+    return named or _DEFAULT_TWS_TIMEZONE
 
 
 def _iso_z(dt: datetime) -> str:
@@ -110,7 +117,9 @@ def fill_ts_iso(
 ) -> str:
     """Canonical ``...Z`` UTC stamp for one broker execution.
 
-    Bare digits from TWS are UTC, so they are labelled rather than converted.
+    Bare digits from TWS are in the TWS clock (``ABCXAUTO_TWS_TIMEZONE``,
+    default ``America/Chicago`` on this desk). Naive values are labelled with
+    that zone rather than silently assumed UTC.
     An execution cannot have happened after now, so a stamp in the future is
     proof the digits were already read in some other zone; reading that zone's
     wall clock back as UTC undoes exactly that shift. ``local_tz`` defaults to
@@ -120,7 +129,16 @@ def fill_ts_iso(
     dt = _as_datetime(exec_time)
     if dt is None:
         return _iso_z(now_utc)
-    dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    if dt.tzinfo is None:
+        zone_name = tws_timezone()
+        try:
+            from zoneinfo import ZoneInfo
+
+            dt = dt.replace(tzinfo=ZoneInfo(zone_name)).astimezone(timezone.utc)
+        except Exception:
+            dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
     if (dt - now_utc).total_seconds() > _FILL_FUTURE_TOLERANCE_S:
         reread = dt.astimezone(local_tz).replace(tzinfo=timezone.utc)
         fixed = reread if reread <= now_utc else now_utc
@@ -327,12 +345,18 @@ class IBKRQueriesMixin:
     async def get_account_summary(self) -> Dict[str, Any]:
         """Get account summary."""
         if not await self._ensure_connected():
-            return {'error': 'Not connected'}
+            return {
+                'error': 'Not connected',
+                'ibkr_data_stale': bool(getattr(self, '_ibkr_data_stale', False)),
+            }
 
         try:
             async with self.async_lock:
                 account_values = self.ib.accountValues()
-                result = {'account_id': self.account_id}
+                result = {
+                    'account_id': self.account_id,
+                    'ibkr_data_stale': bool(getattr(self, '_ibkr_data_stale', False)),
+                }
                 target_tags = {
                     'NetLiquidation',
                     'TotalCashValue',
@@ -348,7 +372,10 @@ class IBKRQueriesMixin:
                 return result
         except Exception as e:
             logger.error(f"Failed to get account summary: {e}")
-            return {'error': str(e)}
+            return {
+                'error': str(e),
+                'ibkr_data_stale': bool(getattr(self, '_ibkr_data_stale', False)),
+            }
 
     async def cancel_order(self, order_id: int) -> Dict[str, Any]:
         """Cancel an open order."""
@@ -566,6 +593,12 @@ class IBKRQueriesMixin:
 
     _QUOTE_CACHE_S = 2.5
 
+    def _invalidate_live_caches(self) -> None:
+        """Drop quote cache so a reconnect cannot reuse a pre-disconnect last."""
+        bag = getattr(self, "_quote_cache", None)
+        if isinstance(bag, dict):
+            bag.clear()
+
     def _live_quote_cached(self, symbol: str) -> Optional[Dict[str, Any]]:
         bag = getattr(self, "_quote_cache", None)
         if not isinstance(bag, dict):
@@ -620,6 +653,13 @@ class IBKRQueriesMixin:
         sym = str(symbol or "").strip().upper()
         if not sym:
             return {"error": "symbol required", "source": "ibkr"}
+        if bool(getattr(self, "_ibkr_data_stale", False)):
+            return {
+                "error": "ibkr_data_stale",
+                "source": "ibkr",
+                "symbol": sym,
+                "ibkr_data_stale": True,
+            }
         if not fresh:
             cached = self._live_quote_cached(sym)
             if cached is not None:
@@ -681,6 +721,88 @@ class IBKRQueriesMixin:
 from abcxauto.broker.bars import IBKRBarsMixin
 from abcxauto.broker.orders import IBKROrdersMixin
 from abcxauto.broker.options import IBKROptionsMixin
+
+
+_STOP_ORDER_TYPES = {"STP", "STP LMT", "TRAIL", "TRAIL LIMIT", "TRAIL STOP"}
+
+
+def _flatten_qty(pos: dict) -> float:
+    try:
+        return float(pos.get("quantity") if pos.get("quantity") is not None else pos.get("qty") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _flatten_lot_key(pos: dict) -> str:
+    cid = pos.get("conId") or pos.get("con_id")
+    try:
+        cid_i = int(cid)
+    except (TypeError, ValueError):
+        cid_i = 0
+    if cid_i > 0:
+        return f"con:{cid_i}"
+    symbol = str(pos.get("symbol") or "").upper()
+    sec = str(pos.get("sec_type") or pos.get("secType") or "STK").upper()
+    if sec.startswith("OPT"):
+        return "opt:{}:{}:{}:{}".format(
+            symbol,
+            pos.get("expiration") or pos.get("lastTradeDateOrContractMonth") or "",
+            pos.get("strike") or "",
+            pos.get("right") or "",
+        )
+    return f"stk:{symbol}"
+
+
+def _is_stop_order_row(order: dict) -> bool:
+    raw = str((order or {}).get("order_type") or "").upper().replace("_", " ").replace("-", " ")
+    compact = " ".join(raw.split())
+    return compact in _STOP_ORDER_TYPES or compact.startswith("TRAIL")
+
+
+def _cancel_cleared(out: Any) -> bool:
+    if not isinstance(out, dict):
+        return False
+    if out.get("success") or out.get("already_gone") or out.get("order_gone"):
+        return True
+    return False
+
+
+def _index_stk_stops(orders: List[Dict[str, Any]]) -> Dict[str, dict]:
+    saved: Dict[str, dict] = {}
+    for order in orders or []:
+        if not _is_stop_order_row(order):
+            continue
+        sec = str(order.get("sec_type") or order.get("secType") or "STK").upper()
+        if sec.startswith("OPT"):
+            continue
+        px = order.get("aux_price")
+        if px is None:
+            px = order.get("stop_price")
+        saved[_flatten_lot_key(order)] = {
+            "action": order.get("action"),
+            "quantity": order.get("quantity"),
+            "stop_price": px,
+            "order_id": order.get("order_id"),
+        }
+    return saved
+
+
+def _covering_stop_order(lot: dict, orders: List[Dict[str, Any]]) -> Optional[dict]:
+    key = _flatten_lot_key(lot)
+    symbol = str(lot.get("symbol") or "").upper()
+    want = "SELL" if _flatten_qty(lot) > 0 else "BUY"
+    for order in orders or []:
+        if not _is_stop_order_row(order):
+            continue
+        if str(order.get("action") or "").upper() != want:
+            continue
+        if _flatten_lot_key(order) == key:
+            return order
+        if symbol and str(order.get("symbol") or "").upper() == symbol:
+            sec = str(order.get("sec_type") or order.get("secType") or "STK").upper()
+            if sec.startswith("STK"):
+                return order
+    return None
 
 
 class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBarsMixin):
@@ -840,6 +962,8 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         self._disconnect_halt_fired: bool = False
         self._reconnect_attempt: int = 0
         self._ibkr_data_stale: bool = False
+        self._quote_cache: Dict[str, Any] = {}
+        self._book_refresh_task: Optional[Any] = None
         self._book_subs: Dict[int, Any] = {}
         self._book_sub_live: set[int] = set()
 
@@ -884,6 +1008,16 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
     def is_connected(self) -> bool:
         """Check if connected to IBKR TWS/Gateway."""
         return self._connected and self.ib.isConnected()
+
+    @property
+    def ibkr_data_stale(self) -> bool:
+        """True after error 1100 / disconnect until a successful book refresh."""
+        return bool(getattr(self, "_ibkr_data_stale", False))
+
+    def _mark_ibkr_data_stale(self, *, reason: str) -> None:
+        self._ibkr_data_stale = True
+        self._invalidate_live_caches()
+        logger.warning("IBKR data marked stale (%s) — new risk blocked until refresh", reason)
 
     def _record_local_cancel_request(self, order_id: int, source: str = "unknown") -> None:
         """Track a local cancel request so later Error 202 can be attributed."""
@@ -974,18 +1108,22 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         """Handle IBKR error/warning events. Suppress noisy codes to DEBUG."""
         lifecycle = classify_error_code(errorCode)
         if lifecycle == "tws_lost":
-            self._ibkr_data_stale = True
+            self._mark_ibkr_data_stale(reason=f"error {errorCode}")
             logger.warning(
                 f"IBKR↔TWS link lost [{errorCode}]: {errorString} — "
                 "keep API socket; no new IB()"
             )
             return
         if lifecycle == "tws_restored":
-            self._ibkr_data_stale = False
+            # Stay stale until positions/orders/account refresh. 1101/1102
+            # only mean the socket is back — ib_insync caches may still be empty.
+            self._mark_ibkr_data_stale(reason=f"restore {errorCode}")
             logger.info(
                 f"IBKR connectivity restored [{errorCode}]: {errorString}"
                 + (" (data lost)" if errorCode == 1101 else "")
+                + " — refresh book before clearing stale"
             )
+            self._schedule_book_refresh_after_restore()
             return
         if lifecycle == "farm_ok":
             logger.debug(f"IBKR data farm OK [{errorCode}]: {errorString}")
@@ -1038,8 +1176,65 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         else:
             logger.info(f"IBKR [{errorCode}] reqId={reqId}: {errorString}")
 
+    def _schedule_book_refresh_after_restore(self) -> None:
+        """Refresh positions/orders/account after 1101/1102; stay stale on failure."""
+        loop = self._resolve_loop()
+        if loop is None:
+            logger.error("IBKR restore: no event loop to refresh book — stay stale")
+            return
+        prev = getattr(self, "_book_refresh_task", None)
+        if prev is not None and not getattr(prev, "done", lambda: True)():
+            try:
+                prev.cancel()
+            except Exception:
+                pass
+
+        async def _run() -> None:
+            try:
+                ok = await self._refresh_book_after_data_loss()
+                if ok:
+                    self._ibkr_data_stale = False
+                    logger.info("IBKR book refreshed after data restore")
+                else:
+                    logger.error("IBKR book refresh failed — stay stale")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("IBKR book refresh crashed — stay stale")
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            self._book_refresh_task = loop.create_task(_run())
+            return
+        try:
+            self._book_refresh_task = asyncio.run_coroutine_threadsafe(_run(), loop)
+        except Exception:
+            logger.exception("IBKR restore: could not schedule book refresh — stay stale")
+
+    async def _refresh_book_after_data_loss(self) -> bool:
+        """Mandatory positions + open orders + account pull after data loss."""
+        if not (self._connected or self._api_socket_live()):
+            return False
+        try:
+            async with self.async_lock:
+                req_pos = getattr(self.ib, "reqPositionsAsync", None)
+                if callable(req_pos):
+                    await req_pos()
+                req_ord = getattr(self.ib, "reqAllOpenOrdersAsync", None)
+                if callable(req_ord):
+                    await req_ord()
+            await self._update_account_values()
+            return True
+        except Exception:
+            logger.exception("IBKR book refresh after data restore failed")
+            return False
+
     def _on_disconnect(self) -> None:
         """Handle disconnection from TWS/Gateway (API socket closed)."""
+        self._mark_ibkr_data_stale(reason="api_disconnect")
         symbols = list(self._tickers.keys())
         if symbols:
             self._pending_resubscribe.update(s.upper() for s in symbols)
@@ -1079,7 +1274,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         schedules reconnect off the lock's loop and raises
         ``Lock bound to a different event loop``.
         """
-        captured = self._loop
+        captured = getattr(self, "_loop", None)
         if captured is not None:
             try:
                 if not captured.is_closed() and captured.is_running():
@@ -1241,12 +1436,18 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         # Leave _disconnect_halt_fired as-is so we do not re-halt on a later blip
         # in the same outage window; a fresh disconnect resets it in _on_disconnect.
         self._last_heartbeat_ok = time.time()
+        self._invalidate_live_caches()
 
         # Streaming subscribe API removed; nothing to restore.
         n = len(self._pending_resubscribe)
         self._pending_resubscribe.clear()
         if n:
             logger.info(f"Cleared {n} pending market-data resubscribe symbol(s)")
+        try:
+            if await self._refresh_book_after_data_loss():
+                self._ibkr_data_stale = False
+        except Exception:
+            logger.exception("post-reconnect book refresh failed — stay stale")
 
     def _on_execution(self, trade: Trade, fill: Fill) -> None:
         """
@@ -1266,7 +1467,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 'shares': int(execution.shares),
                 'price': float(execution.price),
                 'avg_price': float(execution.avgPrice),
-                'time': execution.time.isoformat() if execution.time else datetime.now(timezone.utc).isoformat(),
+                'time': fill_ts_iso(getattr(execution, "time", None)),
                 'order_id': execution.orderId,
                 'exec_id': execution.execId,
                 'commission': commission,
@@ -1345,10 +1546,9 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
     async def connect(self, max_retries: Optional[int] = None) -> bool:
         """Connect to IBKR TWS/Gateway.
 
-        Tries ``IBKR_CLIENT_ID + attempt`` for ``attempt`` in ``0 .. max_retries-1`` so a
-        stale or competing session on the base id does not block connect. Default span is
-        controlled by ``IBKR_CONNECT_MAX_ATTEMPTS`` (1–50, default 12). After success,
-        ``self.client_id`` is set to the working id for this process.
+        Retries on the configured ``IBKR_CLIENT_ID`` only — never ``id + attempt``.
+        Walking ids orphans the prior session's orders and breaks the one-id-per-process
+        contract. Default attempts: ``IBKR_CONNECT_MAX_ATTEMPTS`` (1–50, default 12).
 
         Refuses to attempt a socket connect when TRADING_MODE / port / live-confirm
         are inconsistent (:class:`TradingModePortError`).
@@ -1387,15 +1587,18 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
             for attempt in range(max_retries):
                 try:
-                    # Use the fixed client_id. On retry, try client_id+attempt to handle
-                    # stale connection on the same ID (e.g., TWS still thinks old session is active)
-                    current_client_id = self.client_id + attempt
+                    current_client_id = int(self.client_id)
                     logger.info(f"Connecting to IBKR ({self.host}:{self.port}, client_id={current_client_id}, attempt {attempt + 1})")
 
                     # Clean up old IB instance handlers before creating new one
                     self._unregister_handlers()
+                    try:
+                        if self.ib is not None and self.ib.isConnected():
+                            self.ib.disconnect()
+                    except Exception:
+                        logger.debug("prior IB disconnect before retry failed", exc_info=True)
 
-                    # Create fresh IB instance on each attempt
+                    # Create fresh IB instance on each attempt — same client id.
                     self.ib = new_ib()
 
                     # Re-register all event handlers on new IB instance
@@ -1413,7 +1616,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
                     if self.ib.isConnected():
                         self._connected = True
-                        self.client_id = current_client_id  # Store the working client ID
+                        self._invalidate_live_caches()
                         self._disconnect_since = None
                         if self._disconnect_cause != DisconnectCause.USER_DISCONNECT.value:
                             self._disconnect_cause = DisconnectCause.UNKNOWN.value
@@ -1702,6 +1905,59 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
     # ========== EMERGENCY OPERATIONS ==========
 
+    async def _last_stop_for_leftover_stk(
+        self,
+        lot: dict,
+        *,
+        saved_stops: Dict[str, dict],
+        live_orders: List[Dict[str, Any]],
+    ) -> dict:
+        """Leave a last-stop on leftover stock, or say why we could not."""
+        covering = _covering_stop_order(lot, live_orders)
+        if covering is not None:
+            return {
+                "protection": "still_working",
+                "protection_order_id": covering.get("order_id"),
+            }
+        key = _flatten_lot_key(lot)
+        saved = saved_stops.get(key) or {}
+        px = saved.get("stop_price")
+        if px is None:
+            px = lot.get("market_price") or lot.get("avg_cost")
+        try:
+            stop_price = float(px)
+        except (TypeError, ValueError):
+            stop_price = 0.0
+        qty = abs(int(_flatten_qty(lot)))
+        symbol = str(lot.get("symbol") or "")
+        action = "SELL" if _flatten_qty(lot) > 0 else "BUY"
+        if stop_price <= 0 or qty <= 0 or not symbol:
+            return {
+                "protection": "none",
+                "reason": "no last-stop price for leftover stock",
+            }
+        place = getattr(self, "place_stop_order", None)
+        if not callable(place):
+            return {"protection": "none", "reason": "place_stop_order missing"}
+        try:
+            placed = await place(symbol, action, qty, stop_price)
+        except Exception as e:
+            logger.critical(
+                "FLATTEN ALL leftover STK %s last-stop raised: %s", symbol, e
+            )
+            return {"protection": "none", "reason": str(e)}
+        if placed.get("success") or placed.get("order_id"):
+            return {
+                "protection": "last_stop",
+                "protection_order_id": placed.get("order_id"),
+                "stop_price": stop_price,
+            }
+        return {
+            "protection": "none",
+            "reason": placed.get("error") or "last-stop rejected",
+            "order_result": placed,
+        }
+
     async def _flatten_one_position(self, pos: dict) -> dict:
         """Close one position leg independently. STK→MKT, OPT→close_option_position."""
         symbol = pos.get("symbol", "")
@@ -1760,7 +2016,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 action=action,
                 quantity=close_qty,
                 order_type="MKT",
-                tif="IOC",
+                tif="GTC",
                 order_name="EMERGENCY_FLATTEN_STK",
             )
             return {
@@ -1786,71 +2042,209 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             }
 
     async def flatten_all(self) -> dict:
-        """Cancel all open orders and close all positions per-leg (STK vs OPT).
+        """Cancel working orders and close every lot. success only if the book is flat.
 
-        Returns a summary dict with cancelled/closed counts and position_results.
-        This is the broker-level nuclear option — caller decides when to invoke.
+        Per-lot outcomes plus leftover lots (and why) go back to the caller.
+        A leftover STK lot gets a last-stop or a loud unprotected failure.
+        Close attempts are not skipped when a cancel is rejected.
         """
         if not await self._ensure_connected():
-            return {"success": False, "error": "Not connected"}
+            return {
+                "success": False,
+                "status": "disconnected",
+                "error": "Not connected",
+                "failed": [],
+                "remaining": [],
+                "position_results": [],
+                "positions_closed": 0,
+                "positions_total": 0,
+                "orders_cancelled": 0,
+                "orders_total": 0,
+                "orders_failed": [],
+                "errors": ["Not connected"],
+            }
 
-        result = {
+        result: Dict[str, Any] = {
             "orders_cancelled": 0,
             "orders_total": 0,
+            "orders_failed": [],
             "positions_closed": 0,
             "positions_total": 0,
             "position_results": [],
+            "remaining": [],
+            "failed": [],
             "errors": [],
         }
 
-        # Step 1: Cancel ALL open orders
+        open_orders: List[Dict[str, Any]] = []
         try:
-            open_orders = await self.get_open_orders()
-            result["orders_total"] = len(open_orders)
-            for order in open_orders:
-                try:
-                    oid = order.get("order_id")
-                    if oid:
-                        await self.cancel_order(oid)
-                        result["orders_cancelled"] += 1
-                except Exception as e:
-                    err_msg = f'cancel order {order.get("order_id")}: {e}'
-                    logger.error(err_msg)
-                    result["errors"].append(err_msg)
+            open_orders = list(await self.get_open_orders() or [])
         except Exception as e:
             err_msg = f"get_open_orders: {e}"
             logger.error(err_msg)
             result["errors"].append(err_msg)
+        result["orders_total"] = len(open_orders)
+        saved_stops = _index_stk_stops(open_orders)
 
-        await _safe_sleep(1)  # Let cancellations process
+        for order in open_orders:
+            oid = order.get("order_id")
+            if not oid:
+                continue
+            try:
+                cancelled = await self.cancel_order(oid)
+            except Exception as e:
+                cancelled = {"error": str(e)}
+            if _cancel_cleared(cancelled):
+                result["orders_cancelled"] += 1
+                continue
+            why = ""
+            if isinstance(cancelled, dict):
+                why = str(cancelled.get("error") or "")
+            why = why or "cancel rejected"
+            row = {
+                "order_id": oid,
+                "symbol": order.get("symbol"),
+                "reason": why,
+            }
+            result["orders_failed"].append(row)
+            err_msg = f"cancel order {oid}: {why}"
+            logger.error(err_msg)
+            result["errors"].append(err_msg)
 
-        # Step 2: Close each position leg independently (STK vs OPT routing)
+        await _safe_sleep(1)
+
+        positions: List[Dict[str, Any]] = []
         try:
-            positions = await self.get_positions()
-            result["positions_total"] = len(positions)
-            for pos in positions:
-                try:
-                    pr = await self._flatten_one_position(pos)
-                    result["position_results"].append(pr)
-                    if pr.get("success") and pr.get("method") != "noop":
-                        result["positions_closed"] += 1
-                    elif not pr.get("success"):
-                        err_msg = f'flatten {pos.get("symbol", "?")}: {pr}'
-                        logger.error(err_msg)
-                        result["errors"].append(err_msg)
-                except Exception as e:
-                    err_msg = f'flatten {pos.get("symbol", "?")}: {e}'
-                    logger.error(err_msg)
-                    result["errors"].append(err_msg)
+            positions = [
+                p for p in (await self.get_positions() or []) if _flatten_qty(p)
+            ]
         except Exception as e:
             err_msg = f"get_positions: {e}"
             logger.error(err_msg)
             result["errors"].append(err_msg)
+        result["positions_total"] = len(positions)
 
-        result["success"] = True
+        for pos in positions:
+            symbol = pos.get("symbol", "?")
+            try:
+                pr = await self._flatten_one_position(pos)
+            except Exception as e:
+                pr = {
+                    "success": False,
+                    "symbol": symbol,
+                    "conId": pos.get("conId") or pos.get("con_id"),
+                    "error": str(e),
+                    "reasoning": f"flatten {symbol} raised: {e}",
+                }
+            pr["lot_key"] = _flatten_lot_key(pos)
+            if pr.get("conId") in (None, "none"):
+                pr["conId"] = pos.get("conId") or pos.get("con_id")
+            result["position_results"].append(pr)
+            if not pr.get("success"):
+                err_msg = f"flatten {symbol}: {pr.get('error') or pr}"
+                logger.error(err_msg)
+                result["errors"].append(err_msg)
+
+        await _safe_sleep(1)
+
+        remaining: Optional[List[Dict[str, Any]]] = None
+        try:
+            remaining = [
+                p for p in (await self.get_positions() or []) if _flatten_qty(p)
+            ]
+        except Exception as e:
+            err_msg = f"reread positions: {e}"
+            logger.error(err_msg)
+            result["errors"].append(err_msg)
+
+        if remaining is None:
+            result["book_unknown"] = True
+            remaining = list(positions)
+
+        remain_keys = {_flatten_lot_key(p) for p in remaining}
+        before_keys = {_flatten_lot_key(p) for p in positions}
+        result["positions_closed"] = len(before_keys - remain_keys)
+        result["remaining"] = remaining
+
+        pr_by_key = {
+            str(pr.get("lot_key") or _flatten_lot_key(pr)): pr
+            for pr in result["position_results"]
+        }
+        for pr in result["position_results"]:
+            key = str(pr.get("lot_key") or "")
+            if pr.get("method") == "noop":
+                pr["status"] = "noop"
+            elif key and key in remain_keys:
+                pr["status"] = "failed"
+                pr["success"] = False
+                if not pr.get("error"):
+                    pr["error"] = "lot still open after flatten"
+            else:
+                pr["status"] = "closed"
+
+        live_orders: List[Dict[str, Any]] = []
+        try:
+            live_orders = list(await self.get_open_orders() or [])
+        except Exception:
+            live_orders = []
+
+        failed: List[Dict[str, Any]] = []
+        for lot in remaining:
+            key = _flatten_lot_key(lot)
+            pr = pr_by_key.get(key) or {}
+            why = str(pr.get("error") or "lot still open after flatten")
+            rec: Dict[str, Any] = {
+                "symbol": lot.get("symbol"),
+                "conId": lot.get("conId") or lot.get("con_id"),
+                "sec_type": str(lot.get("sec_type") or lot.get("secType") or "STK"),
+                "quantity": _flatten_qty(lot),
+                "reason": why,
+            }
+            sec = str(rec["sec_type"]).upper()
+            if sec.startswith("STK"):
+                prot = await self._last_stop_for_leftover_stk(
+                    lot, saved_stops=saved_stops, live_orders=live_orders
+                )
+                rec.update(prot)
+                if prot.get("protection") in ("last_stop", "still_working"):
+                    logger.critical(
+                        "FLATTEN ALL leftover STK %s qty=%s protection=%s",
+                        rec.get("symbol"),
+                        rec.get("quantity"),
+                        prot.get("protection"),
+                    )
+                else:
+                    logger.critical(
+                        "FLATTEN ALL leftover STK %s qty=%s UNPROTECTED: %s",
+                        rec.get("symbol"),
+                        rec.get("quantity"),
+                        prot.get("reason") or why,
+                    )
+            failed.append(rec)
+        result["failed"] = failed
+
+        book_flat = not remaining and not result.get("book_unknown")
+        result["success"] = bool(book_flat)
+        if result.get("book_unknown"):
+            result["status"] = "failed"
+        elif book_flat:
+            result["status"] = "flat"
+        elif result["positions_closed"]:
+            result["status"] = "partial"
+        else:
+            result["status"] = "failed"
+
         logger.critical(
-            f"FLATTEN ALL: cancelled {result['orders_cancelled']}/{result['orders_total']} orders, "
-            f"closed {result['positions_closed']}/{result['positions_total']} (per-leg)"
+            "FLATTEN ALL: success=%s status=%s cancelled %s/%s orders, "
+            "closed %s/%s lots, remaining=%s failed=%s",
+            result["success"],
+            result["status"],
+            result["orders_cancelled"],
+            result["orders_total"],
+            result["positions_closed"],
+            result["positions_total"],
+            len(remaining),
+            len(failed),
         )
         return result
 

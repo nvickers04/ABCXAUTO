@@ -301,6 +301,178 @@ def _dedupe(reasons: list[str]) -> list[str]:
     return out
 
 
+def _ticket_proposal(act: dict[str, Any]) -> Any:
+    """Lightweight proposal for always-armed preview checks. Not a place path."""
+    from types import SimpleNamespace
+
+    params = _params_of(act)
+    direction = params.get("direction")
+    if direction in (None, ""):
+        side = _side_of(act, params)
+        if side in ("LONG", "SHORT"):
+            direction = side
+    return SimpleNamespace(
+        strategy=_strategy_of(act),
+        params=SimpleNamespace(
+            action=params.get("action") or act.get("action"),
+            closing_position=params.get("closing_position", False),
+            contracts=params.get("contracts"),
+            direction=direction,
+            entry_price=params.get("entry_price"),
+            limit_price=params.get("limit_price"),
+            price_hint=params.get("price_hint"),
+            quantity=params.get("quantity") or params.get("qty") or params.get("shares"),
+            stop_price=params.get("stop_price"),
+            strike=params.get("strike"),
+            symbol=params.get("symbol"),
+            target_price=params.get("target_price"),
+        ),
+    )
+
+
+def _preview_account(world: Any, snap_d: dict[str, Any]) -> dict[str, Any]:
+    """Account tags from this look. Do not invent cash."""
+    acct = snap_d.get("account")
+    if isinstance(acct, dict) and acct:
+        return acct
+    if world is None:
+        return {}
+    out: dict[str, Any] = {}
+    nl = getattr(world, "net_liquidation", None)
+    if nl not in (None, ""):
+        out["netliquidation"] = nl
+    pnl = getattr(world, "daily_pnl", None)
+    if pnl not in (None, ""):
+        out["dailypnl"] = pnl
+    return out
+
+
+def _always_armed_refuses(
+    work: dict[str, Any],
+    world: Any,
+    snap_d: dict[str, Any],
+) -> list[str]:
+    """Mirror #200 send refusals that stay armed when paper gates are off.
+
+    Daily-loss, defined-risk, cash-only, and the halt latch. Preview is
+    sync and must not call ``halt()`` or async ``pre_trade_check``.
+    """
+    from abcxauto.agent_loop import is_new_risk
+
+    if not is_new_risk(_strategy_of(work), _params_of(work)):
+        return []
+
+    from abcxauto.config import get_config
+
+    cfg = get_config()
+    reasons: list[str] = []
+    proposal = _ticket_proposal(work)
+
+    try:
+        from abcxauto.risk_gates import check_defined_risk_only
+
+        try:
+            ok_dr, why_dr = check_defined_risk_only(proposal, cfg)
+        except TypeError:
+            ok_dr, why_dr = check_defined_risk_only(proposal)
+        if not ok_dr:
+            reasons.append(str(why_dr))
+    except Exception:
+        logger.debug("preview defined-risk check failed", exc_info=True)
+
+    try:
+        from abcxauto.risk_gates import get_risk_gate
+
+        gate = get_risk_gate()
+        if gate.is_halted:
+            reasons.append(f"Trading halted: {gate.halt_reason}")
+    except Exception:
+        logger.debug("preview halt-latch check failed", exc_info=True)
+
+    try:
+        breaker_on = float(getattr(cfg, "daily_loss_limit_pct", 0) or 0) > 0
+    except (TypeError, ValueError):
+        breaker_on = False
+    cash_on = bool(getattr(cfg, "cash_only", False))
+    account = _preview_account(world, snap_d)
+
+    try:
+        if breaker_on or cash_on:
+            from abcxauto.risk_gates import (
+                _account_float,
+                _account_number_state,
+                estimate_notional,
+                risk_base_usd,
+            )
+            from abcxauto.world_state import pct_of_nl
+
+            nl_state, net_liq = _account_number_state(
+                account, "netliquidation", "NetLiquidation"
+            )
+            book = 0.0
+            if breaker_on:
+                pnl_state, daily_pnl_raw = _account_number_state(
+                    account, "dailypnl", "DailyPnL"
+                )
+                if nl_state != "ok" or net_liq is None or net_liq <= 0:
+                    reasons.append(
+                        "Risk gate fail-closed: NetLiquidation unavailable "
+                        "or non-positive"
+                    )
+                elif pnl_state == "unreadable":
+                    reasons.append("Risk gate fail-closed: DailyPnL unreadable")
+                else:
+                    daily_pnl = 0.0 if daily_pnl_raw is None else daily_pnl_raw
+                    book = risk_base_usd(net_liq, cfg)
+                    limit = -(float(cfg.daily_loss_limit_pct) / 100.0) * book
+                    if daily_pnl <= limit:
+                        day_pct = pct_of_nl(daily_pnl, book)
+                        reasons.append(
+                            f"daily_loss {day_pct} <= -{cfg.daily_loss_limit_pct}"
+                        )
+            elif nl_state == "ok" and net_liq is not None:
+                book = risk_base_usd(net_liq, cfg)
+
+            if cash_on:
+                direction = getattr(proposal.params, "direction", None)
+                if (
+                    proposal.strategy in ("bracket", "market_bracket")
+                    and str(direction or "").upper() == "SHORT"
+                ):
+                    reasons.append(
+                        "Cash-only mode: SHORT stock brackets are rejected "
+                        "(no short selling). Set ABCXAUTO_CASH_ONLY=false to allow."
+                    )
+                cash = _account_float(
+                    account,
+                    "TotalCashValue",
+                    "totalcashvalue",
+                    "AvailableFunds",
+                    "availablefunds",
+                )
+                if cash is None:
+                    reasons.append(
+                        "Risk gate fail-closed: cash-only mode requires "
+                        "TotalCashValue (or AvailableFunds) in account summary"
+                    )
+                else:
+                    try:
+                        notional = estimate_notional(proposal)
+                    except Exception:
+                        notional = None
+                    if notional is None:
+                        reasons.append("size_unknown_notional")
+                    elif notional > cash:
+                        reasons.append(
+                            f"size_cash {pct_of_nl(notional, book)} > "
+                            f"{pct_of_nl(cash, book)}"
+                        )
+    except Exception:
+        logger.debug("preview daily-loss/cash-only check failed", exc_info=True)
+
+    return reasons
+
+
 def collect_would_refuse(
     act: Any,
     world: Any = None,
@@ -371,6 +543,13 @@ def collect_would_refuse(
             )
     except Exception:
         logger.debug("preview kill-look check failed", exc_info=True)
+        reasons.append("kill-look gate failed closed")
+
+    try:
+        reasons.extend(_always_armed_refuses(work, world, snap_d))
+    except Exception:
+        logger.debug("preview always-armed check failed", exc_info=True)
+        reasons.append("always-armed gates failed closed")
 
     if world is not None:
         try:

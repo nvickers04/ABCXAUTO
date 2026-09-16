@@ -2,6 +2,32 @@
 
 Grok's ticket last / IV / credit / width must appear in those tool results
 from THIS look. Unverifiable is a kill, not a pass. Not a verifier agent.
+
+Prints are scoped to the instrument they came from (STK vs OPT, and for
+options expiration / right / strike). A stock last cannot verify an option
+limit, and the reverse.
+
+Protection geometry (stop_price / target_price) is claimed on new-risk
+bracket / market_bracket / oca only. Exits, closing_position, and manage
+tickets do not fire those claims.
+
+Rule chosen (SPEC lists last / IV / credit / width; stops are Grok-owned
+and are not themselves prints):
+
+* Fact match — the level appears in this look's instrument-scoped prints
+  or geometry facts (book aux, session_range tape: low / high / open /
+  last / retrace_*). Session tape is this-look fact, not MDA scan last.
+* Last-relative derivation — a verified same-instrument IBKR last L
+  exists and the level is last-relative: stops must sit within 25% of L
+  (walk-away risk/trade ceiling). A farther pin must be an exact
+  this-look fact (gap under the open). Targets have no distance cap.
+  Legal side (stop below last on a LONG) is ``structure_grade``, not
+  this gate — so an inverted but last-relative stop still reaches the
+  geometry referee. ``last ± any invented offset`` beyond the ceiling
+  is not derived.
+
+Code does not invent a stop from last. An option ticket cannot derive
+geometry from a stock last.
 """
 
 from __future__ import annotations
@@ -12,6 +38,11 @@ from typing import Any
 REASON_CODE = "stale_or_invented_number"
 LOOK_TOOLS = ("quote", "option_quote", "book")
 _SNAP_KEY = "_look_tool_snapshot"
+
+# Walk-away risk/trade ceiling. A last-relative stop farther than this
+# is not derived from that last — it needs an exact this-look fact.
+DERIVE_STOP_FRAC = 0.25
+_PROTECT_STRATS = frozenset({"bracket", "market_bracket", "oca"})
 
 _PRINT_KEYS = frozenset(
     {
@@ -25,6 +56,18 @@ _PRINT_KEYS = frozenset(
         "market_price",
         "marketprice",
         "lastprice",
+    }
+)
+_LAST_KEYS = frozenset(
+    {
+        "last",
+        "price",
+        "mkt",
+        "market_price",
+        "marketprice",
+        "lastprice",
+        "mid",
+        "mark",
     }
 )
 _IV_KEYS = frozenset(
@@ -51,10 +94,42 @@ _STRIKE_KEYS = frozenset(
         "call_strike",
     }
 )
+_GEOM_KEYS = frozenset(
+    {
+        "aux_price",
+        "auxprice",
+        "stop_price",
+        "target_price",
+        "new_stop_price",
+        "low",
+        "high",
+        "session_low",
+        "session_high",
+        "retrace_30",
+        "retrace30",
+        "retrace",
+        "vwap",
+    }
+)
+_SESSION_GEOM_KEYS = (
+    "low",
+    "high",
+    "open",
+    "last",
+    "retrace_30",
+    "retrace30",
+    "retrace",
+    "vwap",
+    "open_px",
+    "session_low",
+    "session_high",
+)
 _TICKET_LAST = ("last", "price_hint", "entry_price")
 _TICKET_IV = ("iv", "implied_vol", "impliedVolatility", "implied_volatility")
 _TICKET_CREDIT = ("credit", "net_credit", "premium", "net_premium")
 _TICKET_WIDTH = ("width", "wing_width")
+_TICKET_STOP = ("stop_price", "target_price")
+_EXP_KEYS = ("expiration", "expiry", "near_expiration", "far_expiration")
 _SKIP_WALK = frozenset(
     {
         "mda",
@@ -65,6 +140,7 @@ _SKIP_WALK = frozenset(
         "scan_hits",
         "news_items",
         "option_facts",
+        "ticket",
     }
 )
 
@@ -148,14 +224,56 @@ def _sym_of(row: dict[str, Any]) -> str:
     return str(row.get("symbol") or row.get("underlying") or "").upper().strip()
 
 
+def _norm_exp(raw: Any) -> str:
+    return str(raw or "").replace("-", "").strip()[:8]
+
+
+def _norm_right(raw: Any) -> str:
+    s = str(raw or "").upper().strip()
+    if s in {"C", "CALL"}:
+        return "C"
+    if s in {"P", "PUT"}:
+        return "P"
+    return s[:1] if s else ""
+
+
+def _row_is_opt(row: dict[str, Any]) -> bool:
+    sec = str(
+        row.get("sec") or row.get("secType") or row.get("sec_type") or ""
+    ).upper()
+    if sec in {"OPT", "FOP"} or sec.startswith("OPT"):
+        return True
+    if row.get("strike") not in (None, "") and (
+        row.get("right") or row.get("expiration") or row.get("expiry")
+    ):
+        return True
+    return False
+
+
+def _inst_key(kind: str, row: dict[str, Any], default_sym: str = "") -> tuple:
+    sym = _sym_of(row) or str(default_sym or "").upper().strip()
+    if kind == "option_quote" or (kind != "quote" and _row_is_opt(row)):
+        strike = _finite(row.get("strike"))
+        return (
+            "OPT",
+            sym,
+            _norm_exp(row.get("expiration") or row.get("expiry")),
+            _norm_right(row.get("right")),
+            _canon(strike) if strike is not None else None,
+        )
+    return ("STK", sym)
+
+
 class _Bags:
-    __slots__ = ("prints", "ivs", "widths", "strikes")
+    __slots__ = ("prints", "ivs", "widths", "strikes", "geom", "lasts")
 
     def __init__(self) -> None:
         self.prints: set[int] = set()
         self.ivs: set[int] = set()
         self.widths: set[int] = set()
         self.strikes: list[float] = []
+        self.geom: set[int] = set()
+        self.lasts: list[float] = []
 
     def add_iv(self, raw: Any) -> None:
         v = _finite(raw)
@@ -176,12 +294,11 @@ class _Bags:
                     self.widths.add(_canon(d))
 
 
-def _bag_for(by_sym: dict[str, _Bags], sym: str) -> _Bags:
-    key = str(sym or "").upper().strip() or "*"
-    bag = by_sym.get(key)
+def _bag_for(by_inst: dict[tuple, _Bags], key: tuple) -> _Bags:
+    bag = by_inst.get(key)
     if bag is None:
         bag = _Bags()
-        by_sym[key] = bag
+        by_inst[key] = bag
     return bag
 
 
@@ -198,6 +315,10 @@ def _walk_row(row: Any, bags: _Bags, *, skip_mda: bool = True) -> None:
             continue
         if kl in _PRINT_KEYS:
             _add_num(bags.prints, val)
+            if kl in _LAST_KEYS:
+                fv = _finite(val)
+                if fv is not None and fv > 0:
+                    bags.lasts.append(fv)
             continue
         if kl in _IV_KEYS:
             bags.add_iv(val)
@@ -213,32 +334,38 @@ def _walk_row(row: Any, bags: _Bags, *, skip_mda: bool = True) -> None:
             if sv is not None:
                 bags.strikes.append(sv)
             continue
+        if kl in _GEOM_KEYS:
+            _add_num(bags.geom, val)
+            continue
         if isinstance(val, (dict, list)):
             _walk_row(val, bags, skip_mda=skip_mda)
 
 
-def _harvest_quote_map(qmap: Any, by_sym: dict[str, _Bags]) -> None:
+def _harvest_quote_map(qmap: Any, by_inst: dict[tuple, _Bags]) -> None:
     if not isinstance(qmap, dict):
         return
     for sym, raw in qmap.items():
-        bag = _bag_for(by_sym, str(sym))
+        bag = _bag_for(by_inst, ("STK", str(sym or "").upper().strip() or "*"))
         if isinstance(raw, dict):
             _walk_row(raw, bag)
         else:
             _add_num(bag.prints, raw)
+            fv = _finite(raw)
+            if fv is not None and fv > 0:
+                bag.lasts.append(fv)
 
 
-def _harvest_payload(kind: str, payload: Any, by_sym: dict[str, _Bags]) -> None:
+def _harvest_payload(kind: str, payload: Any, by_inst: dict[tuple, _Bags]) -> None:
     if not isinstance(payload, dict):
         return
     if kind == "book":
-        _harvest_quote_map(payload.get("ibkr_live_quotes"), by_sym)
+        _harvest_quote_map(payload.get("ibkr_live_quotes"), by_inst)
         world = payload.get("world") if isinstance(payload.get("world"), dict) else {}
-        _harvest_quote_map(world.get("ibkr_live_quotes"), by_sym)
+        _harvest_quote_map(world.get("ibkr_live_quotes"), by_inst)
         for p in list(world.get("positions") or []) + list(payload.get("positions") or []):
             if not isinstance(p, dict):
                 continue
-            bag = _bag_for(by_sym, _sym_of(p))
+            bag = _bag_for(by_inst, _inst_key("book", p))
             _walk_row(p, bag)
         return
     rows = []
@@ -246,10 +373,11 @@ def _harvest_payload(kind: str, payload: Any, by_sym: dict[str, _Bags]) -> None:
         rows.extend(payload["quotes"])
     else:
         rows.append(payload)
+    default_sym = _sym_of(payload)
     for row in rows:
         if not isinstance(row, dict):
             continue
-        bag = _bag_for(by_sym, _sym_of(row))
+        bag = _bag_for(by_inst, _inst_key(kind, row, default_sym))
         ibkr = row.get("ibkr") if isinstance(row.get("ibkr"), dict) else None
         if ibkr is not None:
             _walk_row(ibkr, bag)
@@ -258,19 +386,40 @@ def _harvest_payload(kind: str, payload: Any, by_sym: dict[str, _Bags]) -> None:
             _walk_row(row, bag)
 
 
-def snapshot_bags(snap: dict[str, Any] | None) -> dict[str, _Bags]:
+def _harvest_session_range(raw: Any, by_inst: dict[tuple, _Bags]) -> None:
+    """Session tape is geometry fact, not a last/credit print."""
+    if not isinstance(raw, dict):
+        return
+    skip = {k.lower() for k in _SESSION_GEOM_KEYS}
+    for sym, row in raw.items():
+        if not isinstance(row, dict):
+            continue
+        if str(sym or "").lower() in skip:
+            continue
+        key = str(sym or "").upper().strip()
+        if not key:
+            continue
+        bag = _bag_for(by_inst, ("STK", key))
+        for field in _SESSION_GEOM_KEYS:
+            _add_num(bag.geom, row.get(field))
+
+
+def snapshot_bags(snap: dict[str, Any] | None) -> dict[tuple, _Bags]:
     store = _store(snap) if isinstance(snap, dict) and _SNAP_KEY in snap else {}
-    by_sym: dict[str, _Bags] = {}
+    by_inst: dict[tuple, _Bags] = {}
     for row in store.get("quote") or []:
-        _harvest_payload("quote", row, by_sym)
+        _harvest_payload("quote", row, by_inst)
     for row in store.get("option_quote") or []:
-        _harvest_payload("option_quote", row, by_sym)
+        _harvest_payload("option_quote", row, by_inst)
     book = store.get("book")
     if isinstance(book, dict):
-        _harvest_payload("book", book, by_sym)
-    for bag in by_sym.values():
+        _harvest_payload("book", book, by_inst)
+    if isinstance(snap, dict):
+        _harvest_quote_map(snap.get("ibkr_live_quotes"), by_inst)
+        _harvest_session_range(snap.get("session_range"), by_inst)
+    for bag in by_inst.values():
         bag.seal_widths()
-    return by_sym
+    return by_inst
 
 
 def _claimed(params: dict[str, Any], keys: tuple[str, ...]) -> list[tuple[str, float]]:
@@ -283,6 +432,12 @@ def _claimed(params: dict[str, Any], keys: tuple[str, ...]) -> list[tuple[str, f
             continue
         out.append((key, v))
     return out
+
+
+def _protection_claims_apply(strategy: str, params: dict[str, Any]) -> bool:
+    if str(strategy or "").strip().lower() not in _PROTECT_STRATS:
+        return False
+    return params.get("closing_position") is not True
 
 
 def ticket_claims(strategy: str, params: dict[str, Any] | None) -> list[tuple[str, str, float]]:
@@ -301,6 +456,9 @@ def ticket_claims(strategy: str, params: dict[str, Any] | None) -> list[tuple[st
             claims.append(("credit", field, val))
     for field, val in _claimed(p, _TICKET_WIDTH):
         claims.append(("width", field, val))
+    if _protection_claims_apply(strat, p):
+        for field, val in _claimed(p, _TICKET_STOP):
+            claims.append(("stop", field, val))
     return claims
 
 
@@ -312,30 +470,143 @@ def _in_pool(pool: set[int], value: float) -> bool:
     return (c - 5) in pool or (c + 5) in pool or (c - 1) in pool or (c + 1) in pool
 
 
+def _ticket_is_option(strategy: str, params: dict[str, Any]) -> bool:
+    if str(strategy or "").strip().lower() in OPTION_STRATEGIES:
+        return True
+    if params.get("expiration") or params.get("expiry") or params.get("right"):
+        return True
+    return params.get("strike") not in (None, "")
+
+
+def _opt_filters(
+    params: dict[str, Any],
+) -> tuple[str, set[str], set[str], set[int]]:
+    sym = str(params.get("symbol") or "").upper().strip()
+    exps: set[str] = set()
+    for key in _EXP_KEYS:
+        exp = _norm_exp(params.get(key))
+        if exp:
+            exps.add(exp)
+    rights: set[str] = set()
+    right = _norm_right(params.get("right"))
+    if right:
+        rights.add(right)
+    for key in params:
+        kl = str(key).lower()
+        if "strike" not in kl:
+            continue
+        if "put" in kl:
+            rights.add("P")
+        if "call" in kl:
+            rights.add("C")
+    strikes: set[int] = set()
+    for key in _STRIKE_KEYS:
+        v = _finite(params.get(key))
+        if v is not None:
+            strikes.add(_canon(v))
+    return sym, exps, rights, strikes
+
+
+def _opt_key_matches(
+    key: tuple,
+    sym: str,
+    exps: set[str],
+    rights: set[str],
+    strikes: set[int],
+) -> bool:
+    if len(key) < 5 or key[0] != "OPT" or key[1] != sym:
+        return False
+    exp, right, strike = key[2], key[3], key[4]
+    if exps and exp and exp not in exps:
+        return False
+    if rights and right and right not in rights:
+        return False
+    if strikes and strike is not None and strike not in strikes:
+        return False
+    return True
+
+
+def _merge_bags(bags: list[_Bags]) -> _Bags:
+    out = _Bags()
+    for bag in bags:
+        out.prints |= bag.prints
+        out.ivs |= bag.ivs
+        out.widths |= bag.widths
+        out.strikes.extend(bag.strikes)
+        out.geom |= bag.geom
+        out.lasts.extend(bag.lasts)
+    out.seal_widths()
+    return out
+
+
+def _bags_for_ticket(
+    by_inst: dict[tuple, _Bags],
+    strategy: str,
+    params: dict[str, Any] | None,
+) -> _Bags:
+    p = params if isinstance(params, dict) else {}
+    sym = str(p.get("symbol") or "").upper().strip()
+    if not sym:
+        return _Bags()
+    if _ticket_is_option(strategy, p):
+        _sym, exps, rights, strikes = _opt_filters(p)
+        chosen = [
+            bag
+            for key, bag in by_inst.items()
+            if _opt_key_matches(key, _sym or sym, exps, rights, strikes)
+        ]
+        return _merge_bags(chosen)
+    return _merge_bags(
+        [bag for key, bag in by_inst.items() if key[:2] == ("STK", sym)]
+    )
+
+
+def _derived_protection(
+    level: float,
+    lasts: list[float],
+    field: str,
+    direction: str,
+) -> bool:
+    """True when level is last-relative. Side is structure_grade's job."""
+    _ = direction
+    for last in lasts:
+        if last <= 0:
+            continue
+        frac = abs(level - last) / last
+        if field == "stop_price" and frac > DERIVE_STOP_FRAC + 1e-12:
+            continue
+        if field in {"stop_price", "target_price"}:
+            return True
+    return False
+
+
 def check_ticket_numbers(
     strategy: str,
     params: dict[str, Any] | None,
     snap: dict[str, Any] | None,
 ) -> tuple[bool, str, str]:
-    """Reject when a claimed last / IV / credit / width is not in this look's cache."""
+    """Reject when a claimed last / IV / credit / width / stop is not in this look."""
     claims = ticket_claims(strategy, params)
     if not claims:
         return True, "ok", ""
-    by_sym = snapshot_bags(snap)
-    sym = str((params or {}).get("symbol") or "").upper().strip()
-    bag = by_sym.get(sym) if sym else None
+    by_inst = snapshot_bags(snap)
+    bag = _bags_for_ticket(by_inst, strategy, params)
+    direction = str((params or {}).get("direction") or "").upper()
     missing: list[str] = []
     for kind, field, val in claims:
-        if bag is None:
-            pool: set[int] = set()
-        elif kind == "iv":
+        if kind == "iv":
             pool = bag.ivs
         elif kind == "width":
             pool = bag.widths
+        elif kind == "stop":
+            pool = bag.prints | bag.geom
         else:
             pool = bag.prints
-        if not pool or not _in_pool(pool, val):
-            missing.append(f"{field}={val}")
+        if pool and _in_pool(pool, val):
+            continue
+        if kind == "stop" and _derived_protection(val, bag.lasts, field, direction):
+            continue
+        missing.append(f"{field}={val}")
     if not missing:
         return True, "ok", ""
     note = (

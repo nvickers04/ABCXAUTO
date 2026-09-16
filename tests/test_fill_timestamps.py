@@ -2,11 +2,11 @@
 
 2026-08-20: a WMT bracket entry dispatched at 15:42:07Z had its fill written as
 20:42:06Z — five hours after the order that caused it. TWS sends execution time
-as bare ``YYYYmmdd  HH:MM:SS`` digits in UTC; ib_insync's decoder calls
-``astimezone()`` on that naive value, which reads the digits as *this machine's*
-local time, so every fill moved by the local UTC offset. Dispatch and
-model_usage rows were right because they stamp ``datetime.now(timezone.utc)``
-and never touch local time.
+as bare ``YYYYmmdd  HH:MM:SS`` digits in the TWS display zone (this desk:
+America/Chicago). ib_insync's decoder calls ``astimezone()`` on that naive
+value, which reads the digits as *this machine's* local time, so every fill
+moved by the local UTC offset. Dispatch and model_usage rows were right
+because they stamp ``datetime.now(timezone.utc)`` and never touch local time.
 """
 
 from __future__ import annotations
@@ -17,8 +17,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from threading import Lock
+
 from abcxauto.broker.connector import IBKRConnector, fill_ts_iso, new_ib, tws_timezone
-from abcxauto.memory.journal import TradeJournal
+from abcxauto.memory.journal import TradeJournal, _et_calendar_date
 
 # What this desk's clock reads in summer (US Central, DST).
 CDT = timezone(timedelta(hours=-5))
@@ -65,8 +67,18 @@ def test_the_skew_tracks_the_local_offset_not_a_constant():
         )
 
 
-def test_bare_tws_digits_are_labelled_utc_not_shifted():
-    assert fill_ts_iso(datetime(2026, 8, 20, 15, 42, 6), now=LATER) == "2026-08-20T15:42:06.000Z"
+def test_bare_tws_digits_are_labelled_chicago_not_utc(monkeypatch):
+    """Default IANA Chicago zone: August 15:42 is CDT (UTC-5), not silent UTC."""
+    monkeypatch.delenv("ABCXAUTO_TWS_TIMEZONE", raising=False)
+    now = datetime(2026, 8, 20, 21, 0, 0, tzinfo=timezone.utc)
+    assert fill_ts_iso(datetime(2026, 8, 20, 15, 42, 6), now=now) == "2026-08-20T20:42:06.000Z"
+
+
+def test_naive_digits_honor_the_named_tws_zone(monkeypatch):
+    """Ingest labels bare TWS digits with ABCXAUTO_TWS_TIMEZONE, not a silent UTC."""
+    monkeypatch.setenv("ABCXAUTO_TWS_TIMEZONE", "America/New_York")
+    ts = fill_ts_iso(datetime(2026, 8, 20, 11, 42, 6), now=LATER)
+    assert ts == "2026-08-20T15:42:06.000Z"
 
 
 def test_an_offset_bearing_stamp_is_converted():
@@ -116,14 +128,41 @@ def test_a_string_execution_time_is_normalised():
 def test_the_ib_session_names_the_zone_tws_stamps_in(monkeypatch):
     """Unset TimezoneTWS is what makes ib_insync guess with the local zone."""
     monkeypatch.delenv("ABCXAUTO_TWS_TIMEZONE", raising=False)
-    assert tws_timezone() == "UTC"
-    assert new_ib().TimezoneTWS == "UTC"
+    assert tws_timezone() == "America/Chicago"
+    assert new_ib().TimezoneTWS == "America/Chicago"
+    monkeypatch.setenv("ABCXAUTO_TWS_TIMEZONE", "   ")
+    assert tws_timezone() == "America/Chicago"
 
 
 def test_the_tws_zone_is_operator_overridable(monkeypatch):
     monkeypatch.setenv("ABCXAUTO_TWS_TIMEZONE", "US/Eastern")
     assert tws_timezone() == "US/Eastern"
     assert new_ib().TimezoneTWS == "US/Eastern"
+
+
+def test_on_execution_uses_fill_ts_iso(monkeypatch):
+    monkeypatch.delenv("ABCXAUTO_TWS_TIMEZONE", raising=False)
+    conn = IBKRConnector.__new__(IBKRConnector)
+    conn._executions = {}
+    conn._execution_lock = Lock()
+    trade = SimpleNamespace(
+        contract=SimpleNamespace(symbol="WMT"),
+        order=SimpleNamespace(orderType="MKT", ocaGroup=None),
+    )
+    fill = SimpleNamespace(
+        execution=SimpleNamespace(
+            time=datetime(2026, 8, 20, 15, 42, 6),
+            shares=70,
+            price=103.07,
+            avgPrice=103.07,
+            side="BOT",
+            orderId=4443,
+            execId="e1",
+        ),
+        commissionReport=None,
+    )
+    conn._on_execution(trade, fill)
+    assert conn._executions["WMT"][0]["time"] == "2026-08-20T20:42:06.000Z"
 
 
 # ---------------------------------------------------------------- the reads
@@ -146,11 +185,11 @@ class _OfflineConnector:
         return True
 
 
-def _fake_fill(exec_time, *, symbol="WMT", order_id=4443, sec_type="STK"):
+def _fake_fill(exec_time, *, symbol="WMT", order_id=4443, sec_type="STK", exec_id="00025b47.6a86a86b.01.01"):
     return SimpleNamespace(
         execution=SimpleNamespace(
             time=exec_time,
-            execId="00025b47.6a86a86b.01.01",
+            execId=exec_id,
             orderId=order_id,
             side="BOT",
             shares=70.0,
@@ -228,6 +267,40 @@ async def test_a_fill_is_never_written_after_the_order_that_caused_it(tmp_path):
 
 
 # ---------------------------------------------------------------- the journal
+
+
+@pytest.mark.asyncio
+async def test_naive_tws_cdt_and_cst_fills_land_on_et_journal_day(tmp_path, monkeypatch):
+    """Late Chicago wall times must not land on the previous ET scorecard day.
+
+    A UTC label on the same digits keeps 23:30 on the prior America/New_York
+    date. The IANA zone follows DST: CDT is UTC-5, CST is UTC-6.
+    """
+    monkeypatch.delenv("ABCXAUTO_TWS_TIMEZONE", raising=False)
+    assert tws_timezone() == "America/Chicago"
+
+    cdt_naive = datetime(2026, 8, 19, 23, 30, 0)
+    cst_naive = datetime(2026, 1, 15, 23, 30, 0)
+    assert _et_calendar_date("2026-08-19T23:30:00.000Z") == "2026-08-19"
+    assert _et_calendar_date("2026-01-15T23:30:00.000Z") == "2026-01-15"
+
+    conn = _OfflineConnector(
+        [
+            _fake_fill(cdt_naive, symbol="WMT", order_id=8101, exec_id="cdt"),
+            _fake_fill(cst_naive, symbol="IWM", order_id=8102, exec_id="cst"),
+        ]
+    )
+    rows = await conn.get_fills()
+    by_id = {row["exec_id"]: row["ts"] for row in rows}
+    assert by_id["cdt"] == "2026-08-20T04:30:00.000Z"
+    assert by_id["cst"] == "2026-01-16T05:30:00.000Z"
+
+    journal = TradeJournal(path=str(tmp_path / "j.db"), enabled=True)
+    assert journal.record_fills(rows) == 2
+    with sqlite3.connect(str(tmp_path / "j.db")) as db:
+        stored = dict(db.execute("SELECT exec_id, ts FROM fills").fetchall())
+    assert _et_calendar_date(stored["cdt"]) == "2026-08-20"
+    assert _et_calendar_date(stored["cst"]) == "2026-01-16"
 
 
 def test_journal_canonicalises_an_offset_bearing_fill_stamp(tmp_path):

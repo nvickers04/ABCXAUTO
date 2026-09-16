@@ -370,6 +370,104 @@ def test_thread_safety_smoke(journal):
     assert summary["dispatch_ok"] == 80
 
 
+def test_connect_sets_wal_and_busy_timeout(journal):
+    with journal._connect() as conn:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        busy = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    assert str(mode).lower() == "wal"
+    assert int(busy) >= 30_000
+
+
+def test_concurrent_ingest_look_writes_do_not_lock(journal, tmp_path):
+    """Look + poll used to write together. Concurrent ingest_look must not drop rows."""
+    errors: list = []
+    workers = 6
+    rounds = 20
+
+    def writer(n: int) -> None:
+        try:
+            for i in range(rounds):
+                journal.ingest_look(
+                    {
+                        "account": {"netliquidation": 10_000.0 + n},
+                        "positions": [{"symbol": "SPY", "quantity": n}],
+                        "open_orders": [],
+                        "fills": [
+                            {
+                                "exec_id": f"e-{n}-{i}",
+                                "order_id": n * 1000 + i,
+                                "symbol": "SPY",
+                                "sec_type": "STK",
+                                "side": "BOT",
+                                "quantity": 1,
+                                "price": 500.0,
+                            }
+                        ],
+                    }
+                )
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(writer, range(workers)))
+
+    assert errors == []
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        snaps = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        fills = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    finally:
+        conn.close()
+    assert snaps == workers * rounds
+    assert fills == workers * rounds
+    assert str(mode).lower() == "wal"
+
+
+def test_two_journal_instances_concurrent_writes(tmp_path):
+    """Cross-instance writers (the old look+poll pattern) must not raise locked."""
+    db = tmp_path / "shared.db"
+    a = TradeJournal(path=str(db), enabled=True)
+    b = TradeJournal(path=str(db), enabled=True)
+    errors: list = []
+
+    def writer(j: TradeJournal, tag: str) -> None:
+        try:
+            for i in range(25):
+                j.ingest_look(
+                    {
+                        "account": {"netliquidation": 1.0},
+                        "positions": [],
+                        "open_orders": [],
+                        "fills": [
+                            {
+                                "exec_id": f"{tag}-{i}",
+                                "order_id": i,
+                                "symbol": "QQQ",
+                                "side": "BOT",
+                                "quantity": 1,
+                                "price": 1.0,
+                            }
+                        ],
+                    }
+                )
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda pair: writer(*pair), ((a, "a"), (b, "b"))))
+
+    assert errors == []
+    conn = sqlite3.connect(str(db))
+    try:
+        snaps = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        fills = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+    finally:
+        conn.close()
+    assert snaps == 50
+    assert fills == 50
+
+
 def test_record_methods_swallow_errors(tmp_path):
     # Point at a path that cannot be a SQLite DB (existing directory).
     bad = tmp_path / "not_a_file"

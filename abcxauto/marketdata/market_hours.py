@@ -1,18 +1,30 @@
-"""
-Market Hours Utility
-Provides comprehensive market session detection and trading hours information.
-Integrates with IBKR API to get actual contract trading hours including premarket/postmarket.
+"""NYSE session clock — holidays, early closes, pre/RTH/post edges.
+
+One implementation. ``park_clock`` and ``opportunity_scan`` call these
+helpers. Regular hours come from exchange_calendars; premarket (04:00)
+and postmarket (to 20:00 ET) are the same overlays the desk already uses.
 """
 
-import asyncio
+from __future__ import annotations
+
 import logging
-from datetime import datetime, time, timezone
-from typing import Dict, Any, Optional
+from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
-
-import exchange_calendars as ecals
+from typing import Any
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
+
+ET = ZoneInfo("America/New_York")
+PREMARKET_START = time(4, 0)
+REGULAR_OPEN = time(9, 30)
+REGULAR_CLOSE = time(16, 0)
+POSTMARKET_END = time(20, 0)
+DEFAULT_EARLY_CLOSE = time(13, 0)
+
+_calendar = None
+_calendar_failed = False
+_market_hours_provider: MarketHoursProvider | None = None
 
 
 def _load_market_hours_config() -> dict:
@@ -20,8 +32,142 @@ def _load_market_hours_config() -> dict:
     return {}
 
 
+def as_eastern(dt: datetime | date | None = None) -> datetime:
+    """Wall clock in America/New_York. Naive datetimes are treated as ET."""
+    if isinstance(dt, datetime):
+        clock = dt
+    elif isinstance(dt, date):
+        clock = datetime(dt.year, dt.month, dt.day, tzinfo=ET)
+    else:
+        clock = datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        return clock.replace(tzinfo=ET)
+    return clock.astimezone(ET)
+
+
+def nyse_calendar():
+    """Cached NYSE calendar, or None when exchange_calendars cannot load."""
+    global _calendar, _calendar_failed
+    if _calendar is not None or _calendar_failed:
+        return _calendar
+    try:
+        import exchange_calendars as ecals
+
+        _calendar = ecals.get_calendar("NYSE")
+        logger.info("Initialized market hours calendar NYSE")
+    except Exception:
+        logger.exception("Failed to load NYSE exchange calendar")
+        _calendar_failed = True
+        _calendar = None
+    return _calendar
+
+
+def is_trading_day(dt: datetime | date | None = None) -> bool:
+    """True on a NYSE session day (holidays off). Weekday fallback if calendar misses."""
+    et = as_eastern(dt)
+    day = et.date()
+    cal = nyse_calendar()
+    if cal is None:
+        return day.weekday() < 5
+    try:
+        return bool(cal.is_session(day))
+    except Exception:
+        logger.debug("is_session failed for %s", day, exc_info=True)
+        return day.weekday() < 5
+
+
+def regular_close_time(dt: datetime | date | None = None) -> time:
+    """RTH close in ET, including published early closes (typically 13:00)."""
+    et = as_eastern(dt)
+    if not is_trading_day(et):
+        return REGULAR_CLOSE
+    cal = nyse_calendar()
+    if cal is None:
+        return REGULAR_CLOSE
+    try:
+        close = cal.session_close(et.date())
+        close_et = close.tz_convert("America/New_York")
+        return time(int(close_et.hour), int(close_et.minute))
+    except Exception:
+        logger.debug("session_close failed for %s", et.date(), exc_info=True)
+        return REGULAR_CLOSE
+
+
+def is_early_close(dt: datetime | date | None = None) -> bool:
+    return regular_close_time(dt) < REGULAR_CLOSE
+
+
+def rth_minute_bounds(dt: datetime | date | None = None) -> tuple[int, int]:
+    """Inclusive-start exclusive-end RTH minutes past midnight ET."""
+    close = regular_close_time(dt)
+    start = REGULAR_OPEN.hour * 60 + REGULAR_OPEN.minute
+    end = close.hour * 60 + close.minute
+    return start, end
+
+
+def session_of(dt: datetime | date | None = None) -> str:
+    """``premarket`` / ``regular`` / ``postmarket`` / ``closed``."""
+    et = as_eastern(dt)
+    if not is_trading_day(et):
+        return "closed"
+    now_t = et.time()
+    close = regular_close_time(et)
+    if PREMARKET_START <= now_t < REGULAR_OPEN:
+        return "premarket"
+    if REGULAR_OPEN <= now_t < close:
+        return "regular"
+    if close <= now_t < POSTMARKET_END:
+        return "postmarket"
+    return "closed"
+
+
+def rth_now(*, now: datetime | None = None) -> bool:
+    """True during the NYSE regular session (holidays and early closes)."""
+    return session_of(now) == "regular"
+
+
+def minutes_to_rth_open(*, now: datetime | None = None) -> float | None:
+    """Minutes to today's 09:30 ET. None when already open or not a session day."""
+    et = as_eastern(now)
+    if not is_trading_day(et):
+        return None
+    bell = et.replace(hour=9, minute=30, second=0, microsecond=0)
+    if et >= bell:
+        return None
+    return (bell - et).total_seconds() / 60.0
+
+
+def next_premarket_open(dt: datetime | date | None = None) -> datetime | None:
+    """Next 04:00 ET premarket open (today, if still before 04:00 on a session)."""
+    et = as_eastern(dt)
+    if is_trading_day(et) and et.time() < PREMARKET_START:
+        return datetime.combine(et.date(), PREMARKET_START, tzinfo=ET)
+    cal = nyse_calendar()
+    nxt: date | None = None
+    if cal is not None:
+        try:
+            nxt = cal.date_to_session(et.date() + timedelta(days=1), direction="next")
+            if hasattr(nxt, "date"):
+                nxt = nxt.date()
+        except Exception:
+            logger.debug("date_to_session failed after %s", et.date(), exc_info=True)
+            nxt = None
+    if nxt is None:
+        day = et.date() + timedelta(days=1)
+        for _ in range(10):
+            probe = datetime(day.year, day.month, day.day, tzinfo=ET)
+            if is_trading_day(probe):
+                nxt = day
+                break
+            day += timedelta(days=1)
+    if nxt is None:
+        return None
+    return datetime.combine(nxt, PREMARKET_START, tzinfo=ET)
+
+
 class MarketSession(Enum):
-    """Market trading session types"""
+    """Market trading session types."""
+
     CLOSED = "closed"
     PREMARKET = "premarket"
     REGULAR = "regular"
@@ -29,225 +175,84 @@ class MarketSession(Enum):
 
 
 class MarketHoursProvider:
-    """
-    Provides market hours information using exchange calendars and IBKR contract details.
-    Supports premarket (4:00 AM - 9:30 AM ET) and postmarket (4:00 PM - 8:00 PM ET) detection.
-    """
+    """Session labels + next-transition facts. Clock math lives in the module."""
 
-    def __init__(self, exchange: str = 'NYSE'):
-        """
-        Initialize market hours provider.
-        
-        Args:
-            exchange: Exchange calendar to use (NYSE, NASDAQ, etc.)
-        """
-        # Load config
+    def __init__(self, exchange: str = "NYSE"):
         mh_cfg = _load_market_hours_config()
-        self.exchange = mh_cfg.get('exchange', exchange)
-        try:
-            self.calendar = ecals.get_calendar(self.exchange)
-            logger.info(f"Initialized market hours provider for {self.exchange}")
-        except Exception as e:
-            logger.error(f"Failed to load exchange calendar for {self.exchange}: {e}")
-            self.calendar = None
+        self.exchange = mh_cfg.get("exchange", exchange)
+        self.calendar = nyse_calendar() if self.exchange == "NYSE" else None
+        if self.calendar is None and self.exchange != "NYSE":
+            try:
+                import exchange_calendars as ecals
 
-        # Parse times from config (HH:MM strings) or use defaults
-        def _parse_time(key: str, default: time) -> time:
-            val = mh_cfg.get(key)
-            if val:
-                try:
-                    parts = str(val).split(':')
-                    return time(int(parts[0]), int(parts[1]))
-                except (ValueError, IndexError):
-                    logger.warning(f"Invalid time format for {key}: {val}, using default")
-            return default
-
-        self.premarket_start = _parse_time('premarket_start', time(4, 0))
-        self.regular_open = _parse_time('regular_open', time(9, 30))
-        self.regular_close = _parse_time('regular_close', time(16, 0))
-        self.postmarket_end = _parse_time('postmarket_end', time(20, 0))
-
-        # Early close state (checked once per day via MDA)
-        self._early_close_date: Optional[str] = None   # date string checked
-        self._is_early_close: bool = False
-        self._early_close_time = time(13, 0)  # Standard US early close
-
-        # Try to use zoneinfo for DST-aware ET, fall back to fixed offset
-        from zoneinfo import ZoneInfo
-        self._et_tz = ZoneInfo('America/New_York')
+                self.calendar = ecals.get_calendar(self.exchange)
+            except Exception:
+                logger.exception("Failed to load exchange calendar for %s", self.exchange)
+                self.calendar = None
+        self.premarket_start = PREMARKET_START
+        self.regular_open = REGULAR_OPEN
+        self.regular_close = REGULAR_CLOSE
+        self.postmarket_end = POSTMARKET_END
+        self._early_close_time = DEFAULT_EARLY_CLOSE
+        self._et_tz = ET
 
     def _to_eastern(self, dt: datetime) -> datetime:
-        """Convert datetime to Eastern Time (DST-aware)."""
-        return dt.astimezone(self._et_tz)
-
-    def _check_early_close(self, date_str: str) -> None:
-        """Query MDA market status once per day to detect early closes."""
-        if self._early_close_date == date_str:
-            return  # Already checked today
-        self._early_close_date = date_str
-        self._is_early_close = False
-        try:
-            from concurrent.futures import ThreadPoolExecutor
-
-            from abcxauto.marketdata.client import get_marketdata_client
-            client = get_marketdata_client()
-            # Run on a dedicated thread with its own loop — callers may already
-            # be inside a running event loop.
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                result = pool.submit(
-                    asyncio.run, client.get_market_status(date=date_str)
-                ).result(timeout=15)
-            if result and result.get("statuses"):
-                for entry in result["statuses"]:
-                    if entry.get("date") == date_str:
-                        status = (entry.get("status") or "").lower()
-                        if "early" in status:
-                            self._is_early_close = True
-                            logger.info(f"Early close detected for {date_str}")
-        except Exception as e:
-            logger.debug(f"Early close check failed: {e}")
+        return as_eastern(dt)
 
     def _effective_close(self, et_time: datetime) -> time:
-        """Return the effective regular close time, accounting for early closes."""
-        self._check_early_close(et_time.date().isoformat())
-        return self._early_close_time if self._is_early_close else self.regular_close
+        return regular_close_time(et_time)
 
-    def get_current_session(self, dt: Optional[datetime] = None) -> MarketSession:
-        """
-        Determine current market session.
-        
-        Args:
-            dt: Datetime to check (defaults to now in UTC)
-            
-        Returns:
-            MarketSession enum indicating current session
-        """
+    def get_current_session(self, dt: datetime | None = None) -> MarketSession:
+        return MarketSession(session_of(dt))
+
+    def is_trading_day(self, dt: datetime | None = None) -> bool:
+        return is_trading_day(dt)
+
+    def get_session_info(self, dt: datetime | None = None) -> dict[str, Any]:
         if dt is None:
             dt = datetime.now(timezone.utc)
-
-        # Convert to ET for session detection (DST-aware)
-        et_time = self._to_eastern(dt)
-        current_time = et_time.time()
-
-        # Check if it's a trading day
-        if not self.is_trading_day(et_time):
-            return MarketSession.CLOSED
-
-        # Determine session based on time (accounting for early close)
-        close = self._effective_close(et_time)
-        if current_time >= self.premarket_start and current_time < self.regular_open:
-            return MarketSession.PREMARKET
-        elif current_time >= self.regular_open and current_time < close:
-            return MarketSession.REGULAR
-        elif current_time >= close and current_time < self.postmarket_end:
-            return MarketSession.POSTMARKET
-        else:
-            return MarketSession.CLOSED
-
-    def is_trading_day(self, dt: Optional[datetime] = None) -> bool:
-        """
-        Check if given date is a trading day.
-        
-        Args:
-            dt: Datetime to check (defaults to now)
-            
-        Returns:
-            True if trading day, False otherwise
-        """
-        if self.calendar is None:
-            # Fallback: assume Mon-Fri are trading days
-            if dt is None:
-                dt = datetime.now(timezone.utc)
-            return dt.weekday() < 5
-
-        try:
-            if dt is None:
-                dt = datetime.now(timezone.utc)
-            return self.calendar.is_session(dt.date())
-        except Exception as e:
-            logger.warning(f"Error checking trading day: {e}")
-            return dt.weekday() < 5  # Fallback
-
-    def get_session_info(self, dt: Optional[datetime] = None) -> Dict[str, Any]:
-        """
-        Get comprehensive session information.
-        
-        Args:
-            dt: Datetime to check (defaults to now)
-            
-        Returns:
-            Dict with session details
-        """
-        if dt is None:
-            dt = datetime.now(timezone.utc)
-
         session = self.get_current_session(dt)
-        et_time = self._to_eastern(dt)
-        close = self._effective_close(et_time)
-
-        info = {
-            'session': session.value,
-            'is_trading_day': self.is_trading_day(dt),
-            'current_time_et': et_time.strftime('%H:%M:%S'),
-            'current_date': et_time.date().isoformat(),
-            'exchange': self.exchange,
+        et_time = as_eastern(dt)
+        close = regular_close_time(et_time)
+        info: dict[str, Any] = {
+            "session": session.value,
+            "is_trading_day": is_trading_day(et_time),
+            "current_time_et": et_time.strftime("%H:%M:%S"),
+            "current_date": et_time.date().isoformat(),
+            "exchange": self.exchange,
         }
+        if is_early_close(et_time):
+            info["early_close"] = True
+            info["close_time"] = close.strftime("%H:%M")
 
-        if self._is_early_close:
-            info['early_close'] = True
-            info['close_time'] = self._early_close_time.strftime('%H:%M')
-
-        # Compute minutes to open / close
         now_minutes = et_time.hour * 60 + et_time.minute
-        open_minutes = self.regular_open.hour * 60 + self.regular_open.minute
+        open_minutes = REGULAR_OPEN.hour * 60 + REGULAR_OPEN.minute
         close_minutes = close.hour * 60 + close.minute
         if session == MarketSession.PREMARKET:
-            info['minutes_to_open'] = open_minutes - now_minutes
+            info["minutes_to_open"] = open_minutes - now_minutes
         elif session == MarketSession.REGULAR:
-            info['minutes_to_close'] = close_minutes - now_minutes
+            info["minutes_to_close"] = close_minutes - now_minutes
 
-        # Add session-specific details
         if session == MarketSession.PREMARKET:
-            next_open = datetime.combine(et_time.date(), self.regular_open)
-            info['next_transition'] = 'regular_open'
-            info['next_transition_time'] = next_open.isoformat()
+            next_open = datetime.combine(et_time.date(), REGULAR_OPEN)
+            info["next_transition"] = "regular_open"
+            info["next_transition_time"] = next_open.isoformat()
         elif session == MarketSession.REGULAR:
             next_close = datetime.combine(et_time.date(), close)
-            info['next_transition'] = 'regular_close'
-            info['next_transition_time'] = next_close.isoformat()
+            info["next_transition"] = "regular_close"
+            info["next_transition_time"] = next_close.isoformat()
         elif session == MarketSession.POSTMARKET:
-            next_end = datetime.combine(et_time.date(), self.postmarket_end)
-            info['next_transition'] = 'market_closed'
-            info['next_transition_time'] = next_end.isoformat()
+            next_end = datetime.combine(et_time.date(), POSTMARKET_END)
+            info["next_transition"] = "market_closed"
+            info["next_transition_time"] = next_end.isoformat()
         else:
-            # Market closed - find next open
-            next_open = self._get_next_market_open(et_time)
-            info['next_transition'] = 'premarket_open'
-            info['next_transition_time'] = next_open.isoformat() if next_open else None
-
+            nxt = next_premarket_open(et_time)
+            info["next_transition"] = "premarket_open"
+            info["next_transition_time"] = nxt.isoformat() if nxt else None
         return info
 
-    def _get_next_market_open(self, current_et: datetime) -> Optional[datetime]:
-        """Get the next market opening time."""
-        if self.calendar is None:
-            return None
 
-        try:
-            # Get next trading day
-            next_session = self.calendar.next_session(current_et.date())
-            # Combine with premarket start time
-            next_open = datetime.combine(next_session, self.premarket_start)
-            # Return with ET timezone
-            return next_open.replace(tzinfo=self._et_tz)
-        except Exception as e:
-            logger.warning(f"Error getting next market open: {e}")
-            return None
-
-# Global instance
-_market_hours_provider: Optional[MarketHoursProvider] = None
-
-
-def get_market_hours_provider(exchange: str = 'NYSE') -> MarketHoursProvider:
+def get_market_hours_provider(exchange: str = "NYSE") -> MarketHoursProvider:
     """Get or create global market hours provider instance."""
     global _market_hours_provider
     if _market_hours_provider is None or _market_hours_provider.exchange != exchange:
@@ -255,7 +260,6 @@ def get_market_hours_provider(exchange: str = 'NYSE') -> MarketHoursProvider:
     return _market_hours_provider
 
 
-def get_session_info() -> Dict[str, Any]:
+def get_session_info(dt: datetime | None = None) -> dict[str, Any]:
     """Get comprehensive session information."""
-    provider = get_market_hours_provider()
-    return provider.get_session_info()
+    return get_market_hours_provider().get_session_info(dt)

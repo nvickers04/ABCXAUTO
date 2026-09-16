@@ -82,6 +82,63 @@ async def test_host_think_ingests_look_snap_fills(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_single_ingest_per_look_monitor_poll_does_not(monkeypatch):
+    """Look writes the snapshot row. Monitor poll must not call ingest_look."""
+    from abcxauto.monitor import PortfolioMonitor
+
+    calls: list = []
+    j = get_journal()
+    real = j.ingest_look
+
+    def spy(snap=None):
+        calls.append(snap)
+        return real(snap)
+
+    monkeypatch.setattr(j, "ingest_look", spy)
+
+    async def grok(*_a, **_k):
+        return BrainTurn(text="watching the book")
+
+    monkeypatch.setattr("abcxauto.brain.grok_turn", grok)
+    snap = {
+        "account": {"netliquidation": 50000.0, "dailypnl": 0.0, "totalcashvalue": 40000.0},
+        "positions": [],
+        "open_orders": [],
+        "fills": [],
+        "protection": {},
+        "reality_pulse": {"session": {"status": "regular"}},
+        "taken_at": "2026-08-31T14:00:00Z",
+    }
+    eng = ProEngine()
+    eng.conn = _conn()
+    await eng._host_think(1, None, snap)
+    assert len(calls) == 1
+
+    class Session:
+        def emit(self, *_a, **_k):
+            pass
+
+    class Connector:
+        connected = True
+
+        async def get_positions(self):
+            return []
+
+        async def get_open_orders(self):
+            return []
+
+        async def get_account_summary(self):
+            return {"netliquidation": 50000.0, "dailypnl": 0.0}
+
+        async def get_fills(self):
+            return []
+
+    mon = PortfolioMonitor(Session(), Connector())
+    await mon.take_snapshot()
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_spoken_look_bills_model_cost_when_sdk_usage_empty(monkeypatch):
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt

@@ -12,13 +12,16 @@ This mixin is imported by IBKRConnector in connector.py.
 """
 
 import logging
+import time
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from ib_insync import Order, Contract, TagValue
 from ib_insync.contract import Stock
 
 from abcxauto.broker.connection import safe_sleep as _safe_sleep
+from abcxauto.broker.connection import stale_new_risk_block
+from abcxauto.broker.ticks import round_to_min_tick
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +71,22 @@ def _action_matches(got: Any, want: str) -> bool:
     return False
 
 
+_WORKING_STATUSES = frozenset({
+    "PreSubmitted", "Submitted", "PendingSubmit", "Filled", "PendingCancel",
+})
+_DEAD_STATUSES = frozenset({
+    "ApiCancelled", "Cancelled", "Inactive", "Error", "Rejected",
+})
+
+
+def _order_status_name(trade: Any) -> str:
+    return str(getattr(getattr(trade, "orderStatus", None), "status", "") or "")
+
+
+def _order_is_working(trade: Any) -> bool:
+    return _order_status_name(trade) in _WORKING_STATUSES
+
+
 def _no_fill() -> Dict[str, Any]:
     return {
         "filled": False,
@@ -100,7 +119,179 @@ class IBKROrdersMixin:
             return None
         contract = Stock(symbol, 'SMART', 'USD')
         await self.ib.qualifyContractsAsync(contract)
+        await self._contract_min_tick(contract)
         return contract
+
+    async def _contract_min_tick(self, contract: Any) -> float:
+        cached = getattr(contract, "_abcx_min_tick", None)
+        if cached:
+            try:
+                return float(cached)
+            except (TypeError, ValueError):
+                pass
+        tick = 0.01
+        req = getattr(getattr(self, "ib", None), "reqContractDetailsAsync", None)
+        if callable(req):
+            try:
+                details = await req(contract)
+                row = details[0] if details else None
+                raw = getattr(row, "minTick", None) if row is not None else None
+                if raw is not None and float(raw) > 0:
+                    tick = float(raw)
+            except Exception:
+                logger.debug("minTick lookup failed", exc_info=True)
+        try:
+            setattr(contract, "_abcx_min_tick", tick)
+        except Exception:
+            pass
+        return tick
+
+    async def _wait_until_working(self, trade: Any, *, timeout: float = 2.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            if _order_is_working(trade):
+                return True
+            if _order_status_name(trade) in _DEAD_STATUSES:
+                return False
+            if time.monotonic() >= deadline:
+                return _order_is_working(trade)
+            await _safe_sleep(0.05)
+
+    async def _stk_qty(self, symbol: str) -> Optional[int]:
+        get = getattr(self, "get_positions", None)
+        if not callable(get):
+            return None
+        try:
+            rows = await get()
+        except Exception:
+            return None
+        if not isinstance(rows, list):
+            return None
+        qty = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("symbol") or "").upper() != str(symbol or "").upper():
+                continue
+            sec = str(row.get("sec_type") or row.get("secType") or "STK").upper()
+            if sec not in ("STK", "WAR", ""):
+                continue
+            try:
+                qty += int(row.get("quantity") or 0)
+            except (TypeError, ValueError):
+                return None
+        return qty
+
+    async def _verify_flat_or_protected(
+        self, symbol: str, *, stop_trade: Any = None
+    ) -> str:
+        """'flat', 'protected', or 'unprotected' after an emergency path."""
+        if stop_trade is not None and _order_is_working(stop_trade):
+            return "protected"
+        live = await self._stk_qty(symbol)
+        if live is None:
+            return "unprotected"
+        if live == 0:
+            return "flat"
+        return "unprotected"
+
+    async def _emergency_exit_and_verify(
+        self,
+        contract: Any,
+        symbol: str,
+        exit_action: str,
+        quantity: int,
+        *,
+        stop_trade: Any = None,
+    ) -> Dict[str, Any]:
+        info: Dict[str, Any] = {"attempted": True}
+        try:
+            emergency_order = Order()
+            emergency_order.action = exit_action
+            emergency_order.totalQuantity = int(quantity)
+            emergency_order.orderType = "MKT"
+            emergency_order.tif = "GTC"
+            emergency_order.transmit = True
+            emergency_trade = self.ib.placeOrder(contract, emergency_order)
+            await _safe_sleep(2.0)
+            info.update({
+                "order_id": emergency_trade.order.orderId,
+                "status": emergency_trade.orderStatus.status,
+            })
+            logger.critical(
+                "Emergency market exit placed for %s: order_id=%s status=%s",
+                symbol,
+                emergency_trade.order.orderId,
+                emergency_trade.orderStatus.status,
+            )
+        except Exception as emerg_err:
+            info["error"] = str(emerg_err)
+            logger.critical("EMERGENCY EXIT ALSO FAILED for %s: %s", symbol, emerg_err)
+        book = await self._verify_flat_or_protected(symbol, stop_trade=stop_trade)
+        if book == "unprotected":
+            try:
+                retry = Order()
+                retry.action = exit_action
+                retry.totalQuantity = int(quantity)
+                retry.orderType = "MKT"
+                retry.tif = "GTC"
+                retry.transmit = True
+                retry_trade = self.ib.placeOrder(contract, retry)
+                await _safe_sleep(2.0)
+                info["retry_order_id"] = retry_trade.order.orderId
+                info["retry_status"] = retry_trade.orderStatus.status
+            except Exception as retry_err:
+                info["retry_error"] = str(retry_err)
+            book = await self._verify_flat_or_protected(symbol, stop_trade=stop_trade)
+        info["book"] = book
+        return info
+
+    async def _place_parent_with_stop(
+        self,
+        contract: Any,
+        *,
+        entry_action: str,
+        exit_action: str,
+        quantity: int,
+        entry_type: str,
+        entry_limit: Optional[float],
+        stop_price: float,
+        oca_group: str,
+    ) -> tuple[Any, Any]:
+        """Entry transmit=False + stop parentId/transmit=True so the stop rests first."""
+        parent = Order()
+        parent.action = entry_action
+        parent.totalQuantity = quantity
+        parent.orderType = entry_type
+        if entry_limit is not None:
+            parent.lmtPrice = entry_limit
+        parent.tif = "DAY"
+        parent.transmit = False
+        parent_trade = self.ib.placeOrder(contract, parent)
+        parent_id = parent_trade.order.orderId
+
+        stop = Order()
+        stop.action = exit_action
+        stop.totalQuantity = quantity
+        stop.orderType = "STP"
+        stop.auxPrice = stop_price
+        stop.tif = "GTC"
+        stop.parentId = parent_id
+        stop.ocaGroup = oca_group
+        stop.ocaType = 1
+        stop.transmit = True
+        try:
+            stop_trade = self.ib.placeOrder(contract, stop)
+        except Exception:
+            try:
+                if hasattr(self, "_cancel_order_with_tracking"):
+                    self._cancel_order_with_tracking(parent_trade.order, source="bracket_stop_failed")
+                else:
+                    self.ib.cancelOrder(parent_trade.order)
+            except Exception:
+                logger.debug("cancel parent after stop place failed", exc_info=True)
+            raise
+        return parent_trade, stop_trade
 
     async def _check_order_rejection(self, trade, order_name: str, symbol: str) -> Optional[Dict[str, Any]]:
         """
@@ -157,6 +348,11 @@ class IBKROrdersMixin:
         contract = await self._prepare_contract(symbol)
         if contract is None:
             return {'error': 'Not connected'}
+        tick = await self._contract_min_tick(contract)
+        if limit_price is not None:
+            limit_price = round_to_min_tick(limit_price, tick)
+        if aux_price is not None:
+            aux_price = round_to_min_tick(aux_price, tick)
 
         # === INFO: Check for existing orders (warn but don't block) ===
         try:
@@ -235,6 +431,9 @@ class IBKROrdersMixin:
         contract = await self._prepare_contract(symbol)
         if contract is None:
             return {'error': 'Not connected'}
+        tick = await self._contract_min_tick(contract)
+        if limit_price is not None:
+            limit_price = round_to_min_tick(limit_price, tick)
 
         try:
             order = Order()
@@ -294,15 +493,17 @@ class IBKROrdersMixin:
         time_bucket: str = 'short_swing'
     ) -> Dict[str, Any]:
         """
-        Place entry order + OCA protective orders (stop loss and take profit).
+        Place entry + last-stop so the stop rests at IBKR before the entry can fill.
 
-        Uses OCA (One-Cancels-All) instead of parent-linked brackets because:
-        1. IOC entry orders complete before children can be linked
-        2. OCA orders don't depend on parent order status
-        3. More reliable protection that persists after entry fills
+        Parent ``transmit=False`` + stop ``parentId`` / ``transmit=True`` is the
+        IBKR-supported shrink of the naked window. Target stays a sibling OCA
+        after the fill. Fill-adjusted stop uses modify, not a second place.
         """
+        blocked = stale_new_risk_block(self)
+        if blocked:
+            return blocked
+
         from abcxauto.broker.connector import BracketGroup
-        from abcxauto.broker.order_types import IBKROrderType
 
         contract = await self._prepare_contract(symbol)
         if contract is None:
@@ -312,6 +513,7 @@ class IBKROrdersMixin:
         filled_qty = None
         actual_fill_price = None
         exit_action = None
+        stop_trade = None
 
         try:
 
@@ -326,7 +528,10 @@ class IBKROrdersMixin:
             # entry_price already has tolerance applied by upstream validation.
             # Risk/concentration/PDT sanity lives in proposal validation +
             # human confirmation — the broker layer just executes.
-            limit_price = entry_price
+            tick = await self._contract_min_tick(contract)
+            limit_price = round_to_min_tick(entry_price, tick)
+            planned_stop = round_to_min_tick(stop_price, tick)
+            planned_target = round_to_min_tick(target_price, tick)
             await self._update_account_values()
 
             # PDT visibility only (informational — the human decides)
@@ -336,21 +541,18 @@ class IBKROrdersMixin:
                     f"day trades remaining: {self.day_trades_remaining}"
                 )
 
-            # STEP 1: Place entry order
-            entry_order = Order()
-            entry_order.action = entry_action
-            entry_order.totalQuantity = quantity
-            entry_order.orderType = 'LMT'
-            entry_order.lmtPrice = limit_price
-            entry_order.tif = 'DAY'  # DAY order gives time to fill
-            entry_order.transmit = True
-
-            # Log order details
-            logger.info(f"[ORDER] {entry_action} {quantity} {symbol} @ ${limit_price:.2f}")
-
-            logger.info(f"Placing LIMIT {entry_action} {quantity} {symbol} @ ${limit_price:.2f}")
-
-            entry_trade = self.ib.placeOrder(contract, entry_order)
+            oca_group = f"OCA_{symbol}_{int(datetime.now().timestamp())}"
+            logger.info(f"[ORDER] {entry_action} {quantity} {symbol} @ ${limit_price:.2f} + stop ${planned_stop:.2f}")
+            entry_trade, stop_trade = await self._place_parent_with_stop(
+                contract,
+                entry_action=entry_action,
+                exit_action=exit_action,
+                quantity=quantity,
+                entry_type="LMT",
+                entry_limit=limit_price,
+                stop_price=planned_stop,
+                oca_group=oca_group,
+            )
             entry_id = entry_trade.order.orderId
 
             # Wait for entry fill confirmation
@@ -398,98 +600,57 @@ class IBKROrdersMixin:
                     )
                 return result
 
-            # STEP 2: Entry filled - now place OCA protective orders
             actual_fill_price = fill_result['avg_fill_price']
             filled_qty = fill_result['filled_quantity']
+            stop_id = stop_trade.order.orderId if stop_trade is not None else None
+
+            if not await self._wait_until_working(stop_trade):
+                logger.critical(
+                    "POSITION AT RISK: Entry filled but linked stop is not working for %s. "
+                    "Placing emergency market exit.",
+                    symbol,
+                )
+                emergency = await self._emergency_exit_and_verify(
+                    contract, symbol, exit_action, int(filled_qty), stop_trade=stop_trade
+                )
+                return {
+                    'success': False,
+                    'filled': True,
+                    'entry_price': actual_fill_price,
+                    'quantity': filled_qty,
+                    'error': f"Linked stop not working: {_order_status_name(stop_trade)}",
+                    'symbol': symbol,
+                    'emergency_exit': emergency,
+                    'protection': emergency.get('book'),
+                    'warning': 'Emergency market exit attempted — verify position manually!'
+                }
 
             # Recalculate stop/target based on ACTUAL fill price
             # Preserve the PERCENTAGE distances from the original analysis
             if entry_price <= 0:
                 logger.error(f"Invalid entry_price {entry_price} - using original stop/target")
-                adjusted_stop = stop_price
-                adjusted_target = target_price
+                adjusted_stop = planned_stop
+                adjusted_target = planned_target
             elif direction == 'LONG':
                 stop_pct = (entry_price - stop_price) / entry_price  # e.g., 2.2% risk
                 target_pct = (target_price - entry_price) / entry_price  # e.g., 6.6% reward
-                adjusted_stop = round(actual_fill_price * (1 - stop_pct), 2)
-                adjusted_target = round(actual_fill_price * (1 + target_pct), 2)
+                adjusted_stop = round_to_min_tick(actual_fill_price * (1 - stop_pct), tick)
+                adjusted_target = round_to_min_tick(actual_fill_price * (1 + target_pct), tick)
             else:  # SHORT
                 stop_pct = (stop_price - entry_price) / entry_price
                 target_pct = (entry_price - target_price) / entry_price
-                adjusted_stop = round(actual_fill_price * (1 + stop_pct), 2)
-                adjusted_target = round(actual_fill_price * (1 - target_pct), 2)
+                adjusted_stop = round_to_min_tick(actual_fill_price * (1 + stop_pct), tick)
+                adjusted_target = round_to_min_tick(actual_fill_price * (1 - target_pct), tick)
 
             logger.info(f"Entry FILLED: {direction} {filled_qty} {symbol} @ ${actual_fill_price:.2f}")
-            logger.info(f"Placing OCA protection: stop=${adjusted_stop:.2f}, target=${adjusted_target:.2f}")
-
-            # Create unique OCA group to link stop and target
-            oca_group = f"OCA_{symbol}_{entry_id}_{int(datetime.now().timestamp())}"
-
-            # Stop loss order (GTC, OCA-linked) — retry up to 3x on failure
-            stop_trade = None
-            stop_id = None
-            for _stop_attempt in range(3):
-                stop_order = Order()
-                stop_order.action = exit_action
-                stop_order.totalQuantity = filled_qty
-                stop_order.orderType = IBKROrderType.STOP.value
-                stop_order.auxPrice = adjusted_stop
-                stop_order.tif = 'GTC'
-                stop_order.ocaGroup = oca_group
-                stop_order.ocaType = 1  # Cancel on fill
-                stop_order.transmit = True
-
-                stop_trade = self.ib.placeOrder(contract, stop_order)
-                stop_id = stop_trade.order.orderId
-
-                # Wait for broker to accept/reject
-                await _safe_sleep(0.5)
-                await _safe_sleep(0)  # flush callbacks
-
-                if stop_trade.orderStatus.status not in ('ApiCancelled', 'Cancelled', 'Error'):
-                    break  # Stop accepted
-                logger.warning(
-                    f"Stop order attempt {_stop_attempt + 1}/3 failed for {symbol}: "
-                    f"{stop_trade.orderStatus.status}"
-                )
-                if _stop_attempt < 2:
-                    await _safe_sleep(1.0 * (_stop_attempt + 1))
-
-            # After retries, check if stop is still rejected
-            if stop_trade.orderStatus.status in ('ApiCancelled', 'Cancelled', 'Error'):
-                logger.critical(
-                    f"POSITION AT RISK: Entry filled but stop failed after 3 attempts for {symbol}! "
-                    f"Placing emergency market exit."
-                )
-                # Emergency: close the position with a market order
+            if abs(float(adjusted_stop) - float(planned_stop)) > 1e-9 and stop_id:
                 try:
-                    emergency_order = Order()
-                    emergency_order.action = exit_action
-                    emergency_order.totalQuantity = filled_qty
-                    emergency_order.orderType = 'MKT'
-                    emergency_order.tif = 'GTC'
-                    emergency_order.transmit = True
-                    emergency_trade = self.ib.placeOrder(contract, emergency_order)
-                    await _safe_sleep(2.0)
-                    logger.critical(
-                        f"Emergency market exit placed for {symbol}: "
-                        f"order_id={emergency_trade.order.orderId}, "
-                        f"status={emergency_trade.orderStatus.status}"
-                    )
-                except Exception as emerg_err:
-                    logger.critical(f"EMERGENCY EXIT ALSO FAILED for {symbol}: {emerg_err}")
+                    await self.modify_stop_price(stop_id, adjusted_stop)
+                except Exception:
+                    logger.warning("fill-adjust modify_stop failed; planned stop remains", exc_info=True)
+                    adjusted_stop = planned_stop
 
-                return {
-                    'success': False,
-                    'filled': True,  # Entry DID fill
-                    'entry_price': actual_fill_price,
-                    'quantity': filled_qty,
-                    'error': f"Stop order failed after 3 retries: {stop_trade.orderStatus.status}",
-                    'symbol': symbol,
-                    'warning': 'Emergency market exit attempted — verify position manually!'
-                }
-
-            # Take profit order (GTC, OCA-linked)
+            # Take profit order (GTC, OCA-linked to the already-resting stop)
             target_order = Order()
             target_order.action = exit_action
             target_order.totalQuantity = filled_qty
@@ -503,8 +664,7 @@ class IBKROrdersMixin:
             target_trade = self.ib.placeOrder(contract, target_order)
             target_id = target_trade.order.orderId
 
-            # Brief wait and verify target order was accepted
-            await _safe_sleep(0.1)
+            await self._wait_until_working(target_trade)
 
             if target_trade.orderStatus.status in ('ApiCancelled', 'Cancelled', 'Error'):
                 # Target failed - BUT KEEP THE STOP (position is protected)
@@ -546,6 +706,7 @@ class IBKROrdersMixin:
                 'entry_price': actual_fill_price,
                 'stop_price': adjusted_stop,
                 'target_price': adjusted_target,
+                'protection': 'protected',
                 'timestamp': datetime.now(timezone.utc).isoformat()
             }
 
@@ -558,28 +719,9 @@ class IBKROrdersMixin:
                     f"POSITION AT RISK: Entry filled for {symbol} but bracket failed "
                     f"before protection confirmed ({e}). Placing emergency market exit."
                 )
-                emergency_info: Dict[str, Any] = {"attempted": True}
-                try:
-                    emergency_order = Order()
-                    emergency_order.action = exit_action
-                    emergency_order.totalQuantity = int(filled_qty)
-                    emergency_order.orderType = "MKT"
-                    emergency_order.tif = "GTC"
-                    emergency_order.transmit = True
-                    emergency_trade = self.ib.placeOrder(contract, emergency_order)
-                    await _safe_sleep(2.0)
-                    emergency_info.update({
-                        "order_id": emergency_trade.order.orderId,
-                        "status": emergency_trade.orderStatus.status,
-                    })
-                    logger.critical(
-                        f"Emergency market exit placed for {symbol}: "
-                        f"order_id={emergency_trade.order.orderId}, "
-                        f"status={emergency_trade.orderStatus.status}"
-                    )
-                except Exception as emerg_err:
-                    emergency_info["error"] = str(emerg_err)
-                    logger.critical(f"EMERGENCY EXIT ALSO FAILED for {symbol}: {emerg_err}")
+                emergency_info = await self._emergency_exit_and_verify(
+                    contract, symbol, exit_action, int(filled_qty), stop_trade=stop_trade
+                )
                 return {
                     "success": False,
                     "filled": True,
@@ -588,6 +730,7 @@ class IBKROrdersMixin:
                     "error": str(e),
                     "symbol": symbol,
                     "emergency_exit": emergency_info,
+                    "protection": emergency_info.get("book"),
                     "warning": (
                         "Entry filled but bracket exception before protection — "
                         "emergency market exit attempted. Verify position manually!"
@@ -606,75 +749,120 @@ class IBKROrdersMixin:
         target_price: float
     ) -> Dict[str, Any]:
         """
-        Market entry, then OCA stop loss + take profit sized to the actual fill.
+        Market entry linked to a last-stop, then a sibling target after the fill.
 
-        Guarantees no naked position: if the entry fills but protection cannot
-        be placed, the position is closed with an emergency market order.
+        Guarantees no naked position: if the entry fills but the stop is not
+        working, the position is flattened and the book is reread.
         """
-        entry_action = 'BUY' if direction == 'LONG' else 'SELL'
+        blocked = stale_new_risk_block(self)
+        if blocked:
+            return blocked
 
-        entry = await self.place_market_order(symbol, entry_action, quantity, wait_for_fill=True, timeout=30.0)
-        if entry.get('error') or not entry.get('success'):
-            return entry
-        if not entry.get('filled'):
-            # Last chance: position may already exist even if wait reported miss.
+        contract = await self._prepare_contract(symbol)
+        if contract is None:
+            return {'error': 'Not connected'}
+
+        entry_action = 'BUY' if direction == 'LONG' else 'SELL'
+        exit_action = 'SELL' if direction == 'LONG' else 'BUY'
+        tick = await self._contract_min_tick(contract)
+        stop_price = round_to_min_tick(stop_price, tick)
+        target_price = round_to_min_tick(target_price, tick)
+        oca_group = f"OCA_{symbol}_{int(datetime.now().timestamp())}"
+
+        try:
+            entry_trade, stop_trade = await self._place_parent_with_stop(
+                contract,
+                entry_action=entry_action,
+                exit_action=exit_action,
+                quantity=quantity,
+                entry_type="MKT",
+                entry_limit=None,
+                stop_price=stop_price,
+                oca_group=oca_group,
+            )
+        except Exception as e:
+            return {'error': str(e), 'symbol': symbol}
+
+        fill_result = await self._wait_for_fill(entry_trade, timeout=30.0)
+        if not fill_result.get('filled'):
             reconciled = await self._reconcile_market_fill(
                 symbol=symbol,
                 action=entry_action,
                 quantity=quantity,
-                order_id=entry.get('order_id'),
+                order_id=entry_trade.order.orderId,
             )
             if reconciled.get('filled'):
-                entry.update(reconciled)
+                fill_result.update(reconciled)
                 logger.warning(
                     "market_bracket: fill wait missed but position/fill reconciled for %s",
                     symbol,
                 )
             else:
-                order_id = entry.get('order_id')
-                if order_id:
-                    try:
-                        await self.cancel_order(order_id)
-                    except Exception:
-                        pass
+                try:
+                    if hasattr(self, "_cancel_order_with_tracking"):
+                        self._cancel_order_with_tracking(entry_trade.order, source="market_bracket_no_fill")
+                    else:
+                        self.ib.cancelOrder(entry_trade.order)
+                except Exception:
+                    pass
                 return {
                     'success': False,
                     'filled': False,
-                    'reason': f"Market entry not filled within timeout ({entry.get('fill_status')})",
+                    'reason': f"Market entry not filled within timeout ({fill_result.get('status')})",
                     'symbol': symbol,
                 }
 
         try:
-            filled_qty = int(entry.get('filled_quantity') or 0)
+            filled_qty = int(fill_result.get('filled_quantity') or 0)
         except (TypeError, ValueError):
             filled_qty = 0
         if filled_qty <= 0:
+            try:
+                self.ib.cancelOrder(entry_trade.order)
+            except Exception:
+                pass
             return {
                 'success': False,
                 'filled': False,
                 'reason': 'Market entry fill has no quantity',
                 'symbol': symbol,
             }
-        fill_price = _finite_px(entry.get('avg_fill_price'))
+        fill_price = _finite_px(fill_result.get('avg_fill_price'))
 
-        protection = await self.place_oca(symbol, filled_qty, direction, stop_price, target_price)
-        if protection.get('error') or not protection.get('success'):
+        if not await self._wait_until_working(stop_trade):
             logger.critical(
-                f"POSITION AT RISK: market entry filled for {symbol} but OCA protection failed. "
-                f"Placing emergency market exit."
+                "POSITION AT RISK: market entry filled for %s but linked stop failed. "
+                "Placing emergency market exit.",
+                symbol,
             )
-            exit_action = 'SELL' if direction == 'LONG' else 'BUY'
-            emergency = await self.place_market_order(symbol, exit_action, filled_qty, wait_for_fill=True)
+            emergency = await self._emergency_exit_and_verify(
+                contract, symbol, exit_action, filled_qty, stop_trade=stop_trade
+            )
             return {
                 'success': False,
                 'filled': True,
                 'entry_price': fill_price,
                 'quantity': filled_qty,
-                'error': f"Protection failed: {protection.get('error') or 'OCA rejected'}",
+                'error': f"Linked stop not working: {_order_status_name(stop_trade)}",
                 'emergency_exit': emergency,
+                'protection': emergency.get('book'),
                 'symbol': symbol,
                 'warning': 'Entry filled but protection failed — emergency exit attempted. Verify position manually!'
             }
+
+        target_order = Order()
+        target_order.action = exit_action
+        target_order.totalQuantity = filled_qty
+        target_order.orderType = 'LMT'
+        target_order.lmtPrice = target_price
+        target_order.tif = 'GTC'
+        target_order.ocaGroup = oca_group
+        target_order.ocaType = 1
+        target_order.transmit = True
+        target_trade = self.ib.placeOrder(contract, target_order)
+        await self._wait_until_working(target_trade)
+        if _order_status_name(target_trade) in _DEAD_STATUSES:
+            logger.error("Target order failed for market bracket %s: %s", symbol, _order_status_name(target_trade))
 
         return {
             'success': True,
@@ -685,10 +873,11 @@ class IBKROrdersMixin:
             'entry_price': fill_price,
             'stop_price': stop_price,
             'target_price': target_price,
-            'entry_order_id': entry.get('order_id'),
-            'stop_order_id': protection.get('stop_order_id'),
-            'target_order_id': protection.get('target_order_id'),
-            'oca_group': protection.get('oca_group'),
+            'entry_order_id': entry_trade.order.orderId,
+            'stop_order_id': stop_trade.order.orderId,
+            'target_order_id': target_trade.order.orderId,
+            'oca_group': oca_group,
+            'protection': 'protected',
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
 
@@ -712,6 +901,9 @@ class IBKROrdersMixin:
         contract = await self._prepare_contract(symbol)
         if contract is None:
             return {'error': 'Not connected'}
+        tick = await self._contract_min_tick(contract)
+        stop_price = round_to_min_tick(stop_price, tick)
+        target_price = round_to_min_tick(target_price, tick)
 
         try:
             oca_group = f"OCA_{symbol}_{int(datetime.now().timestamp())}"
@@ -742,11 +934,7 @@ class IBKROrdersMixin:
             stop_trade = self.ib.placeOrder(contract, stop_order)
             stop_id = stop_trade.order.orderId
 
-            # Brief wait to ensure stop order is accepted before placing target
-            await _safe_sleep(0.1)
-
-            # Check if stop order was rejected before placing target
-            if stop_trade.orderStatus.status in ('ApiCancelled', 'Cancelled', 'Error'):
+            if not await self._wait_until_working(stop_trade):
                 logger.error(f"Stop order failed for {symbol}: {stop_trade.orderStatus.status}")
                 return {
                     'success': False,
@@ -827,6 +1015,9 @@ class IBKROrdersMixin:
         contract = await self._prepare_contract(symbol)
         if contract is None:
             return {'error': 'Not connected'}
+        tick = await self._contract_min_tick(contract)
+        stop_price = round_to_min_tick(stop_price, tick)
+        limit_price = round_to_min_tick(limit_price, tick)
 
         try:
             order = Order()
@@ -1099,6 +1290,8 @@ class IBKROrdersMixin:
             trade = self._open_trade_for(order_id)
             if trade is None:
                 return {'error': f'Order {order_id} not found'}
+            tick = await self._contract_min_tick(trade.contract)
+            new_stop_price = round_to_min_tick(new_stop_price, tick)
             trade.order.auxPrice = new_stop_price
             self.ib.placeOrder(trade.contract, trade.order)
             live = await self._reread_order_px(order_id, field="auxPrice")
@@ -1142,6 +1335,8 @@ class IBKROrdersMixin:
             trade = self._open_trade_for(order_id)
             if trade is None:
                 return {'error': f'Order {order_id} not found'}
+            tick = await self._contract_min_tick(trade.contract)
+            new_limit_price = round_to_min_tick(new_limit_price, tick)
             trade.order.lmtPrice = new_limit_price
             self.ib.placeOrder(trade.contract, trade.order)
             live = await self._reread_order_px(order_id, field="lmtPrice")

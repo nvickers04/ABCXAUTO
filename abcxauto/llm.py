@@ -9,7 +9,13 @@ import random
 import time
 from typing import Any, Callable
 
-from abcxauto.config import DEFAULT_MODEL, RESERVED_CHAT_KEYS, get_config
+from abcxauto.config import (
+    DEFAULT_MODEL,
+    RESERVED_CHAT_KEYS,
+    bind_model_and_params,
+    coerce_model_params,
+    get_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +104,11 @@ async def _stream_with_capacity_retry(factory: Callable[[], Any]) -> Any:
     raise last
 
 
+def normalize_chat_extras(extras: Any) -> dict[str, Any]:
+    """Map Settings aliases onto SDK names. Same guard as ``coerce_model_params``."""
+    return coerce_model_params(extras, strict=False)
+
+
 def chat_create_kwargs(
     g: Any,
     *,
@@ -107,11 +118,18 @@ def chat_create_kwargs(
     """Core chat.create kwargs plus operator ``model_params``.
 
     Dedicated knobs (model / temperature / max_tokens / include / tools /
-    messages) win. Extra keys from ``g.model_params`` pass through so a
-    later Grok release can add effort/thinking without a code hunt.
+    messages) win. ``effort`` is sent as ``reasoning_effort``. Unknown
+    extras are dropped here with an error log — Settings already refused
+    them, so this is the last line of defense for a raw map. A leftover
+    effort suffix on the model id is stripped and folded into
+    ``reasoning_effort`` so the wire never sees ``grok-4.6-xhigh``.
     """
+    model, extras = bind_model_and_params(
+        getattr(g, "model", None) or DEFAULT_MODEL,
+        getattr(g, "model_params", None) or {},
+    )
     kw: dict[str, Any] = {
-        "model": g.model,
+        "model": model,
         "messages": messages,
         "temperature": g.temperature,
         "max_tokens": int(g.max_tokens or 8192),
@@ -119,22 +137,69 @@ def chat_create_kwargs(
     }
     if tools is not None:
         kw["tools"] = list(tools)
-    extras = getattr(g, "model_params", None) or {}
-    if isinstance(extras, dict):
-        for key, value in extras.items():
-            if key in RESERVED_CHAT_KEYS or key in kw:
-                continue
-            kw[key] = value
+    for key, value in extras.items():
+        if key in RESERVED_CHAT_KEYS or key in kw:
+            continue
+        kw[key] = value
     return kw
 
 
-def create_chat(client: Any, **kwargs: Any) -> Any:
-    """``chat.create`` that ignores unknown kwargs instead of crashing.
+_LOGGED_CREATE_FP: str | None = None
 
-    Tries the full set (so a newer SDK accepts future params). On
+
+def _short_create_kw(kwargs: dict[str, Any]) -> str:
+    """Operator-readable create line. No messages, tools, or secrets."""
+    skip = {"messages", "tools", "api_key", "authorization"}
+    parts: list[str] = []
+    for key in sorted(kwargs):
+        if key in skip:
+            continue
+        parts.append(f"{key}={kwargs[key]!r}")
+    if "reasoning_effort" not in kwargs:
+        parts.append("reasoning_effort=(unset; SDK default high on grok-4.6)")
+    return " ".join(parts)
+
+
+def log_chat_create_kwargs(kwargs: dict[str, Any]) -> str:
+    """Log exact create kwargs once per distinct payload this process."""
+    global _LOGGED_CREATE_FP
+    line = _short_create_kw(kwargs)
+    if line == _LOGGED_CREATE_FP:
+        return line
+    _LOGGED_CREATE_FP = line
+    logger.info("chat.create %s", line)
+    model = str(kwargs.get("model") or "")
+    if "-xhigh" in model.lower():
+        logger.error(
+            "model id %s is not reasoning_effort; "
+            "set model_params.reasoning_effort=xhigh",
+            model,
+        )
+    return line
+
+
+def create_chat(client: Any, **kwargs: Any) -> Any:
+    """``chat.create`` that refuses to silently strip extras.
+
+    A leftover effort suffix on ``model`` is rewritten to the real id plus
+    ``reasoning_effort`` before the SDK sees it. Tries the full set. On
     ``TypeError``, drop ``include`` first (older clients), then drop
-    extras that are not clerk-owned.
+    unknown extras one key at a time and log each drop so a bad alias
+    cannot hide ``reasoning_effort``.
     """
+    kwargs = dict(kwargs)
+    bound_model, bound_extras = bind_model_and_params(
+        kwargs.get("model") or DEFAULT_MODEL,
+        (
+            {"reasoning_effort": kwargs["reasoning_effort"]}
+            if "reasoning_effort" in kwargs
+            else {}
+        ),
+    )
+    kwargs["model"] = bound_model
+    if "reasoning_effort" in bound_extras:
+        kwargs["reasoning_effort"] = bound_extras["reasoning_effort"]
+    log_chat_create_kwargs(kwargs)
     create = client.chat.create
     try:
         return create(**kwargs)
@@ -142,14 +207,27 @@ def create_chat(client: Any, **kwargs: Any) -> Any:
         if "include" in kwargs:
             no_include = dict(kwargs)
             no_include.pop("include", None)
+            logger.warning("chat.create dropped unknown kwarg include")
             try:
                 return create(**no_include)
             except TypeError:
                 kwargs = no_include
-        extra_keys = [k for k in kwargs if k not in RESERVED_CHAT_KEYS]
-        if extra_keys:
-            slim = {k: v for k, v in kwargs.items() if k in RESERVED_CHAT_KEYS}
-            return create(**slim)
+        reserved = {k: v for k, v in kwargs.items() if k in RESERVED_CHAT_KEYS}
+        extras = {k: v for k, v in kwargs.items() if k not in RESERVED_CHAT_KEYS}
+        prefer = frozenset({"reasoning_effort"})
+        drop_order = [k for k in extras if k not in prefer] + [
+            k for k in extras if k in prefer
+        ]
+        kept = dict(extras)
+        for drop in drop_order:
+            kept.pop(drop, None)
+            logger.error("chat.create refused unknown kwarg %s — not sent", drop)
+            try:
+                return create(**reserved, **kept)
+            except TypeError:
+                continue
+        if extras:
+            return create(**reserved)
         raise
 
 
@@ -221,20 +299,47 @@ class GrokClient:
 
             client = AsyncClient(api_key=cfg.xai_api_key)
         self.client = _wrap_client(client)
-        chosen = str(model or "").strip()
-        params = dict(getattr(cfg, "model_params", None) or {})
-        if str(session or "").strip():
-            from abcxauto.desk_mode import session_model, session_model_params
-
-            if not chosen:
-                chosen = session_model(session, cfg)
-            params = session_model_params(session, cfg)
-        self.model = chosen or cfg.model or DEFAULT_MODEL
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens
-        self.model_params = params
         self.chat = None
         self._wake_n = 0
         self._wake_appended = False
         self._last_desk_fact = ""
-        logger.info(f"Grok client ready (model={self.model})")
+        chosen = str(model or "").strip()
+        sess = str(session or "").strip()
+        if sess:
+            self.apply_session(sess, model=chosen)
+        else:
+            self.model, self.model_params = bind_model_and_params(
+                chosen or cfg.model or DEFAULT_MODEL,
+                getattr(cfg, "model_params", None) or {},
+            )
+        logger.info("Grok client ready (model=%s)", self.model)
+
+    def apply_session(self, session: str = "", *, model: str = "") -> None:
+        """Bind model + params to this session so RTH thin / fallback apply."""
+        from abcxauto.desk_mode import is_rth_session, session_model, session_model_params
+
+        cfg = get_config()
+        sess = str(session or "").strip()
+        chosen = str(model or "").strip()
+        if sess:
+            extras = session_model_params(sess, cfg)
+            if not chosen:
+                chosen = session_model(sess, cfg)
+            self.model, self.model_params = bind_model_and_params(chosen, extras)
+            if is_rth_session(sess):
+                from abcxauto.thin_rth_kill_look import (
+                    rth_model_no_xhigh,
+                    rth_params_no_xhigh,
+                )
+
+                self.model = rth_model_no_xhigh(self.model)
+                self.model_params = rth_params_no_xhigh(self.model_params)
+        else:
+            self.model, self.model_params = bind_model_and_params(
+                chosen or cfg.model or DEFAULT_MODEL,
+                getattr(cfg, "model_params", None) or {},
+            )
+        self.temperature = cfg.temperature
+        self.max_tokens = cfg.max_tokens

@@ -239,7 +239,7 @@ async def test_place_calendar_spread_close_sells_combo():
     mix = IBKROptionsMixin()
     seen: dict = {}
 
-    async def capture(symbol, legs, quantity, combo_action, limit_price, strategy_name):
+    async def capture(symbol, legs, quantity, combo_action, limit_price, strategy_name, **_k):
         seen["combo_action"] = combo_action
         seen["limit_price"] = limit_price
         seen["legs"] = legs

@@ -244,8 +244,36 @@ def test_symbol_fallback_when_conids_absent():
     assert report["unprotected_symbols"] == []
 
 
+def _poll_session():
+    class Session:
+        def emit(self, *_a, **_k):
+            pass
+
+    return Session()
+
+
+def _poll_connector(*, fills=None, orders=None):
+    class Connector:
+        connected = True
+
+        async def get_positions(self):
+            return []
+
+        async def get_open_orders(self):
+            return list(orders or [])
+
+        async def get_account_summary(self):
+            return {"netliquidation": 100_000.0, "dailypnl": 0.0}
+
+        async def get_fills(self):
+            return list(fills or [])
+
+    return Connector()
+
+
 @pytest.mark.asyncio
-async def test_take_snapshot_records_fills(tmp_path, monkeypatch):
+async def test_poll_persists_fill_without_a_look(tmp_path, monkeypatch):
+    """An unpoked fill must land in the journal even when no look runs."""
     db = tmp_path / "monitor_fills.db"
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(db))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_ENABLED", "true")
@@ -266,28 +294,10 @@ async def test_take_snapshot_records_fills(tmp_path, monkeypatch):
         }
     ]
 
-    class Session:
-        def emit(self, *_a, **_k):
-            pass
-
-    class Connector:
-        connected = True
-
-        async def get_positions(self):
-            return []
-
-        async def get_open_orders(self):
-            return []
-
-        async def get_account_summary(self):
-            return {"netliquidation": 100_000.0, "dailypnl": 0.0}
-
-        async def get_fills(self):
-            return fills
-
-    mon = PortfolioMonitor(Session(), Connector())
+    mon = PortfolioMonitor(_poll_session(), _poll_connector(fills=fills))
     snap = await mon.take_snapshot()
     assert snap["connected"] is True
+    assert snap["fills"][0]["exec_id"] == "mon-exec-1"
 
     conn = sqlite3.connect(str(db))
     try:
@@ -298,7 +308,6 @@ async def test_take_snapshot_records_fills(tmp_path, monkeypatch):
         conn.close()
     assert rows == [("mon-exec-1", 42, "AAPL")]
 
-    # Second poll is idempotent on exec_id.
     await mon.take_snapshot()
     conn = sqlite3.connect(str(db))
     try:
@@ -306,6 +315,40 @@ async def test_take_snapshot_records_fills(tmp_path, monkeypatch):
     finally:
         conn.close()
     assert n == 1
+
+
+@pytest.mark.asyncio
+async def test_poll_writes_no_snapshot_row(tmp_path, monkeypatch):
+    """Poll may persist fills. The snapshots table is look-only."""
+    db = tmp_path / "monitor_nosnap.db"
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(db))
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_ENABLED", "true")
+    reset_journal(path=str(db), enabled=True)
+
+    mon = PortfolioMonitor(
+        _poll_session(),
+        _poll_connector(
+            fills=[
+                {
+                    "exec_id": "idle-fill",
+                    "order_id": 7,
+                    "symbol": "SPY",
+                    "side": "BOT",
+                    "quantity": 1,
+                    "price": 500.0,
+                }
+            ]
+        ),
+    )
+    await mon.take_snapshot()
+    conn = sqlite3.connect(str(db))
+    try:
+        snaps = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        fills = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+    finally:
+        conn.close()
+    assert snaps == 0
+    assert fills == 1
 
 
 @pytest.mark.asyncio
@@ -513,5 +556,65 @@ def test_detect_pace_wakes_without_callback_is_silent():
             "open_orders": [{"order_id": 5}],
         }
     )
+
+
+def test_fill_wake_ignores_fills_without_exec_id():
+    from types import SimpleNamespace
+
+    from abcxauto.monitor import PortfolioMonitor, fill_exec_key
+
+    assert fill_exec_key({"symbol": "IWM", "shares": 1, "time": "t"}) == ""
+    assert fill_exec_key({"execId": "E1"}) == "E1"
+    wakes: list[str] = []
+    mon = PortfolioMonitor(
+        SimpleNamespace(emit=lambda *_a, **_k: None),
+        SimpleNamespace(),
+        on_wake=wakes.append,
+    )
+    empty = {
+        "protection": {"unprotected_symbols": []},
+        "fills": [{"exec_id": "e1", "symbol": "IWM"}],
+        "positions": [],
+        "open_orders": [],
+    }
+    mon._detect_pace_wakes(empty)
+    mon._detect_pace_wakes(
+        {
+            **empty,
+            "fills": [
+                {"exec_id": "e1", "symbol": "IWM"},
+                {"symbol": "IWM", "side": "BOT", "shares": 1, "time": "t"},
+                {"order_id": 99, "symbol": "IWM"},
+            ],
+        }
+    )
+    assert "fill" not in wakes
+    mon._detect_pace_wakes(
+        {
+            **empty,
+            "fills": [
+                {"exec_id": "e1", "symbol": "IWM"},
+                {"exec_id": "e2", "symbol": "IWM"},
+            ],
+        }
+    )
+    assert wakes == ["fill"]
+
+
+def test_market_active_fails_closed_on_calendar_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from abcxauto.monitor import PortfolioMonitor
+
+    def boom():
+        raise RuntimeError("no calendar")
+
+    monkeypatch.setattr("abcxauto.monitor.get_session_info", boom)
+    mon = PortfolioMonitor(
+        SimpleNamespace(emit=lambda *_a, **_k: None),
+        SimpleNamespace(),
+    )
+    assert mon._market_active() is False
+    assert mon._market_active() is False
 
 
