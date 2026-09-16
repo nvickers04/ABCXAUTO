@@ -2693,6 +2693,109 @@ async def test_closed_session_skips_grok_and_keeps_a_clock(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
+async def test_closed_session_skips_grok_even_if_prior_worker_still_alive(
+    monkeypatch, tmp_path
+):
+    """Closed skip is per-engine. A leftover stay-up thread must not count."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.05")
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
+
+    async def leftover_think(self, n, g, s, *, resume=False):
+        g.chat = g.chat or object()
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": True,
+            "_stream_error": "stream stalled",
+            "rationale": "?",
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=leftover_think)
+    leftover = ProEngine()
+    assert leftover.start() is None
+    deadline = time.time() + 2
+    while time.time() < deadline and not (
+        leftover.worker and leftover.worker.is_alive()
+    ):
+        leftover.drain_apply()
+        await asyncio.sleep(0.05)
+    assert leftover.worker and leftover.worker.is_alive()
+
+    calls = {"n": 0}
+    mine: dict = {}
+
+    async def think(self, n, g, s, *, resume=False):
+        if self is mine.get("eng"):
+            calls["n"] += 1
+        return {"_parked": True, "cycle": n, "pnl": 0, "equity": 100000}
+
+    _freeze_overnight_closed(monkeypatch)
+    _wire_stay_up_engine(monkeypatch, session="closed", think=think)
+    eng = ProEngine()
+    mine["eng"] = eng
+    assert eng.start() is None
+    deadline = time.time() + 2
+    while time.time() < deadline:
+        eng.drain_apply()
+        leftover.drain_apply()
+        await asyncio.sleep(0.05)
+    assert calls["n"] == 0
+    assert eng._think_parked is False
+    assert eng.state.autonomous is True
+    leftover.stop_engine()
+    eng.stop_engine()
+    leftover.drain_apply()
+    eng.drain_apply()
+
+
+@pytest.mark.asyncio
+async def test_stop_engine_does_not_start_another_host_think(monkeypatch, tmp_path):
+    """Stop must wake the pulse wait and not enter `_host_think` again."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_STAY_UP_RETRY_S", "0.05")
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0.01")
+    started = {"n": 0}
+
+    async def first_think(self, n, g, s, *, resume=False):
+        started["n"] += 1
+        g.chat = g.chat or object()
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": True,
+            "_stream_error": "stream stalled",
+            "rationale": "?",
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=first_think)
+    leftover = ProEngine()
+    assert leftover.start() is None
+    deadline = time.time() + 2
+    while time.time() < deadline and started["n"] < 1:
+        leftover.drain_apply()
+        await asyncio.sleep(0.05)
+    assert started["n"] >= 1
+    leftover.stop_engine()
+    leftover.drain_apply()
+
+    calls = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        return {"_parked": True, "cycle": n, "pnl": 0, "equity": 100000}
+
+    monkeypatch.setattr("abcxauto.pro_engine.ProEngine._host_think", think)
+    deadline = time.time() + 1
+    while time.time() < deadline:
+        leftover.drain_apply()
+        await asyncio.sleep(0.05)
+    assert calls["n"] == 0
+
+
+@pytest.mark.asyncio
 async def test_closed_session_skip_drops_live_chat(monkeypatch, tmp_path):
     """Overnight skip is a park: the next think must not resume yesterday's chat."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
