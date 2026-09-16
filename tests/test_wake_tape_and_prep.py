@@ -440,8 +440,8 @@ async def test_scan_arena_most_active_ibkr_order_overlay_no_persist(
     assert data.get("thin") is True
     hits = {h["symbol"]: h for h in data["hits"]}
     for hit in data["hits"]:
-        assert set(hit) <= {"symbol", "gap%", "rank"}
-        assert len(hit) <= 3
+        assert set(hit) <= {"symbol", "gap%", "rank", "arena"}
+        assert len(hit) <= 4
         assert "on_book" not in hit
     # Kill condition: scan must not start quoting.
     assert "last" not in hits["AAPL"]

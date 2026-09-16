@@ -403,8 +403,8 @@ async def test_criteria_scan_arena_emits_thin_gap_rows(monkeypatch):
     assert out["ranked"] is True
     assert "gap%" in str(out.get("rank_meaning") or "")
     for row in out["hits"]:
-        assert set(row) <= {"symbol", "gap%", "rank"}
-        assert len(row) <= 3
+        assert set(row) <= {"symbol", "gap%", "rank", "arena"}
+        assert len(row) <= 4
         assert "last" not in row
         assert "distance" not in row
         assert "open_gap_pct" not in row

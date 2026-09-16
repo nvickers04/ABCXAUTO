@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -190,6 +191,46 @@ _DEFAULT_ENABLED = ("most_active", "index_etfs", "mega_cap")
 # Sector / theme / cap screens. Scan sorts (most_active, top_losers, …) are not
 # a concentration bucket — every active name would clump.
 _BUCKET_GROUPS = frozenset({"industries", "caps", "etfs", "commodities"})
+
+
+def catalog_arena_ids() -> list[str]:
+    """Watchlist arena ids Grok may set via self_tune.enabled_arenas."""
+    return list(ARENA_CATALOG.keys())
+
+
+# Sort screens rotate intra-day. 2h is one RTH chapter (open / mid / close).
+# Bucket arenas (caps / ETFs / commodities / industries) have no time horizon.
+SORT_MEMBERSHIP_STALE_S = 2 * 3600
+BUCKET_MEMBERSHIP_STALE_S = None
+# Compact wake add: " watch=4h old=top_gainers." ~25 chars / ~7 tokens.
+WAKE_WATCH_MAX_CHARS = 100
+
+
+def validate_enabled_arenas(raw: Any) -> tuple[list[str] | None, str]:
+    """Normalize catalog ids. Unknown names are an error, never dropped."""
+    if not isinstance(raw, list):
+        return None, (
+            "enabled_arenas must be a list; valid="
+            + ",".join(catalog_arena_ids())
+        )
+    out: list[str] = []
+    unknown: list[str] = []
+    for item in raw:
+        name = str(item or "").strip()
+        if not name:
+            continue
+        canon = name.lower()
+        if canon in ARENA_CATALOG:
+            if canon not in out:
+                out.append(canon)
+            continue
+        unknown.append(name)
+    if unknown:
+        return None, (
+            "unknown arena(s): " + ", ".join(unknown) + "; valid="
+            + ",".join(catalog_arena_ids())
+        )
+    return out, ""
 
 
 def _build_known_scan_codes() -> dict[str, dict[str, Any]]:
@@ -626,6 +667,7 @@ def default_allowlist() -> dict[str, Any]:
         "membership": [],  # [{symbol, arena, source}] scan/arena order
         "source": "",
         "refreshed_at": "",
+        "refresh_pending": False,
     }
 
 
@@ -679,8 +721,11 @@ def load_allowlist(path: Path | None = None) -> dict[str, Any]:
             ]
         out["source"] = str(raw.get("source") or "")
         out["refreshed_at"] = str(raw.get("refreshed_at") or "")
-        if not out["enabled_arenas"] and not out["custom_symbols"]:
-            out["enabled_arenas"] = list(_DEFAULT_ENABLED)
+        out["refresh_pending"] = bool(raw.get("refresh_pending"))
+        # Explicit empty list means none. Only a missing file uses defaults.
+        if "enabled_arenas" not in raw and not out["custom_symbols"]:
+            if not out["enabled_arenas"]:
+                out["enabled_arenas"] = list(_DEFAULT_ENABLED)
         return out
     except Exception:
         logger.exception("load universe allowlist failed")
@@ -703,8 +748,8 @@ def save_allowlist(data: dict[str, Any], path: Path | None = None) -> Path:
         cur["source"] = str(data.get("source") or "")
     if "refreshed_at" in data:
         cur["refreshed_at"] = str(data.get("refreshed_at") or "")
-    if not cur["enabled_arenas"] and not cur["custom_symbols"]:
-        cur["enabled_arenas"] = list(_DEFAULT_ENABLED)
+    if "refresh_pending" in data:
+        cur["refresh_pending"] = bool(data.get("refresh_pending"))
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(cur, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return p
@@ -957,9 +1002,14 @@ async def refresh_legal_set(
     dump ARENA_CATALOG names. Never invent SPY/QQQ/IWM.
     """
     al = dict(allowlist if allowlist is not None else load_allowlist())
-    enabled = list(al.get("enabled_arenas") or _DEFAULT_ENABLED)
+    raw_enabled = al.get("enabled_arenas")
+    if isinstance(raw_enabled, list):
+        enabled = [str(a) for a in raw_enabled if str(a) in ARENA_CATALOG]
+    else:
+        enabled = list(_DEFAULT_ENABLED)
     custom = normalize_symbols(al.get("custom_symbols") or [])
-    exclude = set(normalize_symbols(al.get("exclude_symbols") or []))
+    exclude_list = normalize_symbols(al.get("exclude_symbols") or [])
+    exclude = set(exclude_list)
 
     legal: list[str] = []
     membership: list[dict[str, str]] = []
@@ -1002,8 +1052,11 @@ async def refresh_legal_set(
     source = "+".join(sources) if sources else "empty"
     al["legal_symbols"] = legal
     al["membership"] = membership
+    al["custom_symbols"] = custom
+    al["exclude_symbols"] = exclude_list
     al["source"] = source
     al["refreshed_at"] = _utc_now()
+    al["refresh_pending"] = False
     if persist:
         save_allowlist(al)
     _CACHE.update(
@@ -1080,9 +1133,121 @@ def universe_glance_line() -> str:
     return f"Universe: {n} legal · arenas={arenas} · {short_src} · {ts}"
 
 
+def is_sort_arena(arena_id: str) -> bool:
+    meta = ARENA_CATALOG.get(str(arena_id or "").strip()) or {}
+    return meta.get("group") == "scans"
+
+
 def is_bucket_arena(arena_id: str) -> bool:
     meta = ARENA_CATALOG.get(str(arena_id or "").strip()) or {}
     return meta.get("group") in _BUCKET_GROUPS
+
+
+def _parse_refreshed_at(raw: str) -> datetime | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def membership_age_s(
+    allowlist: dict[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+) -> float | None:
+    al = allowlist if isinstance(allowlist, dict) else load_allowlist()
+    ts = _parse_refreshed_at(str(al.get("refreshed_at") or ""))
+    if ts is None:
+        return None
+    clock = now or datetime.now(timezone.utc)
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    return max(0.0, (clock - ts).total_seconds())
+
+
+def _age_token(seconds: float | None) -> str:
+    if seconds is None:
+        return "never"
+    if seconds < 90:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    hours = seconds / 3600.0
+    if abs(hours - round(hours)) < 0.05:
+        return f"{int(round(hours))}h"
+    return f"{hours:.1f}h"
+
+
+def membership_watch_line(
+    allowlist: dict[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Terse membership age + sort/bucket marks. Not send geometry."""
+    al = allowlist if isinstance(allowlist, dict) else load_allowlist()
+    age = membership_age_s(al, now=now)
+    parts = [f"age={_age_token(age)}"]
+    if al.get("refresh_pending"):
+        parts.append("pending")
+    for aid in al.get("enabled_arenas") or []:
+        name = str(aid or "").strip()
+        if not name:
+            continue
+        if is_sort_arena(name):
+            stale = age is not None and age > SORT_MEMBERSHIP_STALE_S
+            parts.append(f"{name}:sort:stale" if stale else f"{name}:sort")
+        elif is_bucket_arena(name):
+            parts.append(f"{name}:bucket")
+        else:
+            parts.append(name)
+    return " ".join(parts)
+
+
+def membership_wake_bit(
+    allowlist: dict[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Wake-sized watch: age plus stale sorts only. Not the long scan line."""
+    al = allowlist if isinstance(allowlist, dict) else load_allowlist()
+    age = membership_age_s(al, now=now)
+    # Wake tokens avoid playbook leak keys age= / stale= (test_world_state_pja).
+    bits = [_age_token(age)]
+    if al.get("refresh_pending"):
+        bits.append("pending")
+    stale = [
+        str(a)
+        for a in (al.get("enabled_arenas") or [])
+        if is_sort_arena(str(a))
+        and age is not None
+        and age > SORT_MEMBERSHIP_STALE_S
+    ]
+    if stale:
+        shown = stale[:3]
+        extra = len(stale) - len(shown)
+        tail = ",".join(shown)
+        if extra > 0:
+            tail += f"+{extra}"
+        bits.append(f"old={tail}")
+    line = " ".join(bits)
+    budget = max(8, WAKE_WATCH_MAX_CHARS - len(" watch=."))
+    if len(line) > budget:
+        line = line[: budget - 1].rstrip(", ") + "+"
+    return line
+
+
+async def maybe_refresh_pending_universe(connector: Any = None) -> dict[str, Any] | None:
+    """One refresh after self_tune changed arenas. No timer. No every-look cost."""
+    al = load_allowlist()
+    if not al.get("refresh_pending"):
+        return None
+    return await refresh_legal_set(connector, persist=True)
 
 
 def arenas_for_symbol(

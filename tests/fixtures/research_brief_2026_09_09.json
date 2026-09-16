@@ -1,0 +1,165 @@
+{
+  "as_of": "2026-09-09T12:56:36.755548+00:00",
+  "session": "premarket",
+  "mode": "research",
+  "symbols": [
+    "CRWV",
+    "CRCL",
+    "INTC",
+    "NVDA",
+    "TSLA",
+    "SPCX",
+    "HOOD",
+    "ORCL",
+    "AVGO",
+    "MSTR",
+    "RKLB",
+    "GOOG",
+    "SLV",
+    "GOOGL",
+    "META",
+    "IBIT"
+  ],
+  "facts": [
+    {
+      "source": "scan",
+      "text": "hits=0 src=ibkr"
+    },
+    {
+      "source": "news",
+      "text": "QQQ: Stock Market Today: Dow Falls Amid Rising Oil Prices; Apple Shares Drop Ahead Of iPhone Event (Live Coverage); QQQ: Should Goldman Sachs MarketBeta Russell 1000 Growth Equity ETF (GGUS) Be on Your Investing Radar?; QQQ: Riverside Resources Intersects Near-Surface Gold and Base Metal Mineralization at Union Norte and Advances Multiple Targets for Phase 2B Drilling; QQQ: Questcorp Defines Near-Surface Gold Discovery Corridor at Union Norte Expanding District-Scale Potential at La Union"
+    },
+    {
+      "source": "candles",
+      "text": "bars n=0 src=ibkr use=ibkr_rth_structure"
+    },
+    {
+      "source": "odds",
+      "text": "implied-prob events n=2 query=Fed September (not send geometry)"
+    },
+    {
+      "source": "news",
+      "text": "AAPL: John Ternus's first Apple product launch as CEO: What to Watch; AAPL: Why Apple investors probably don't need to worry about a $2,000 iPhone price tag; AAPL: Jefferies starts Formula One at Buy with $115 target, cites Apple TV, MotoGP; AAPL: I'm Not Worried About a Bear Market in 2026. Here's Why."
+    }
+  ],
+  "uncertainties": [
+    "scan hits are tape color, not a send trigger",
+    "MDA news delayed ~15m \u2014 time-sensitive prints may already be in the price",
+    "Polymarket implied probs, not IBKR last / not send geometry"
+  ],
+  "expectancy": [
+    {
+      "symbol": "CRWV",
+      "catalyst": "gap_risk",
+      "why": "open_gap=-6.872%",
+      "source": "scan",
+      "direction": "down",
+      "uncertainty": "gap is tape color until RTH trade",
+      "invalidate": "gap fills on the open / no follow-through"
+    },
+    {
+      "symbol": "HOOD",
+      "catalyst": "gap_risk",
+      "why": "open_gap=6.528%",
+      "source": "scan",
+      "direction": "up",
+      "uncertainty": "gap is tape color until RTH trade",
+      "invalidate": "gap fills on the open / no follow-through"
+    },
+    {
+      "symbol": "CRCL",
+      "catalyst": "gap_risk",
+      "why": "open_gap=4.388%",
+      "source": "scan",
+      "direction": "up",
+      "uncertainty": "gap is tape color until RTH trade",
+      "invalidate": "gap fills on the open / no follow-through"
+    },
+    {
+      "symbol": "ORCL",
+      "catalyst": "gap_risk",
+      "why": "open_gap=4.11%",
+      "source": "scan",
+      "direction": "up",
+      "uncertainty": "gap is tape color until RTH trade",
+      "invalidate": "gap fills on the open / no follow-through"
+    },
+    {
+      "symbol": "INTC",
+      "catalyst": "gap_risk",
+      "why": "open_gap=-3.35%",
+      "source": "scan",
+      "direction": "down",
+      "uncertainty": "gap is tape color until RTH trade",
+      "invalidate": "gap fills on the open / no follow-through"
+    },
+    {
+      "symbol": "NVDA",
+      "catalyst": "gap_risk",
+      "why": "open_gap=3.283%",
+      "source": "scan",
+      "direction": "up",
+      "uncertainty": "gap is tape color until RTH trade",
+      "invalidate": "gap fills on the open / no follow-through"
+    },
+    {
+      "symbol": "TSLA",
+      "catalyst": "gap_risk",
+      "why": "open_gap=-2.934%",
+      "source": "scan",
+      "direction": "down",
+      "uncertainty": "gap is tape color until RTH trade",
+      "invalidate": "gap fills on the open / no follow-through"
+    },
+    {
+      "symbol": "SPCX",
+      "catalyst": "gap_risk",
+      "why": "open_gap=-2.874%",
+      "source": "scan",
+      "direction": "down",
+      "uncertainty": "gap is tape color until RTH trade",
+      "invalidate": "gap fills on the open / no follow-through"
+    },
+    {
+      "symbol": "AAPL",
+      "catalyst": "announcement",
+      "why": "John Ternus's first Apple product launch as CEO: What to Watch",
+      "source": "news/https://finance.yahoo.com/video/john-ternuss-first-apple-product-120000517.html",
+      "direction": "",
+      "uncertainty": "MDA delayed ~15m",
+      "invalidate": "open prints inside prior range / headline reversed"
+    },
+    {
+      "symbol": "AAPL",
+      "catalyst": "announcement",
+      "why": "Why Apple investors probably don't need to worry about a $2,000 iPhone price tag",
+      "source": "news/https://finance.yahoo.com/markets/stocks/article/why-apple-investors-probably-dont-need-to-worry-about-a-2000-iphone-price-tag-115353466.html",
+      "direction": "",
+      "uncertainty": "MDA delayed ~15m",
+      "invalidate": "open prints inside prior range / headline reversed"
+    }
+  ],
+  "tickets": [],
+  "tool_trace": [
+    "book",
+    "status",
+    "scan",
+    "scan",
+    "scan",
+    "news",
+    "quote",
+    "news",
+    "scan",
+    "scan",
+    "candles",
+    "quote",
+    "news",
+    "candles",
+    "odds"
+  ],
+  "research_card_id": "research-brief",
+  "prove_window_id": "2026-W37",
+  "gate_verdict": "INCONCLUSIVE",
+  "model_cost_window_USD": 1.4,
+  "brief_loop_halted": false
+}

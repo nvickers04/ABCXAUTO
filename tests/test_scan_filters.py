@@ -322,7 +322,8 @@ async def test_scan_filters_echo_applied_and_reach_ibkr_spec(monkeypatch):
     assert data.get("thin") is True
     assert data.get("sort") == "MOST_ACTIVE"
     assert all("last" not in h and "bid" not in h for h in data["hits"])
-    assert all(len(h) <= 3 for h in data["hits"])
+    assert all(len(h) <= 4 for h in data["hits"])
+    assert all(set(h) <= {"symbol", "gap%", "rank", "arena"} for h in data["hits"])
 
 
 @pytest.mark.asyncio
