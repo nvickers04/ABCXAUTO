@@ -12,7 +12,20 @@ import pytest
 
 from abcxauto.pro_desktop import ProTerminal
 
-PRO_SRC = Path(__file__).resolve().parents[1] / "abcxauto" / "pro_desktop.py"
+_REPO = Path(__file__).resolve().parents[1]
+PRO_SRC = _REPO / "abcxauto" / "pro_desktop.py"
+_DESKTOP = _REPO / "abcxauto" / "desktop"
+
+
+def _cockpit_paths() -> list[Path]:
+    paths = [PRO_SRC]
+    if _DESKTOP.is_dir():
+        paths.extend(sorted(p for p in _DESKTOP.rglob("*.py") if p.is_file()))
+    return paths
+
+
+def _cockpit_text() -> str:
+    return "\n".join(p.read_text(encoding="utf-8") for p in _cockpit_paths())
 
 
 def _nav():
@@ -68,18 +81,20 @@ REQUIRED = (
 
 
 def test_pro_desktop_imports_flet():
-    tree = ast.parse(PRO_SRC.read_text(encoding="utf-8"))
-    imports = {
-        alias.name.split(".")[0]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    }
+    imports: set[str] = set()
+    for path in _cockpit_paths():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imports.update(
+            alias.name.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        )
     assert "flet" in imports
 
 
 def test_pro_gui_contract_labels():
-    text = PRO_SRC.read_text(encoding="utf-8")
+    text = _cockpit_text()
     for label in REQUIRED:
         assert label in text
     assert "Close All Positions" not in text
@@ -90,7 +105,7 @@ def test_pro_gui_contract_labels():
 
 
 def test_no_validate_execute_chrome():
-    text = PRO_SRC.read_text(encoding="utf-8")
+    text = _cockpit_text()
     assert "VALIDATE & EXECUTE" not in text
     assert "_validate_execute" not in text
 
@@ -267,7 +282,7 @@ def test_surfaces_are_reachable_as_tabs(headless_pro):
 
 def test_navigation_is_tabs_only_no_second_rail_nav(headless_pro):
     """Two navigations doing one job is worse than either alone."""
-    text = PRO_SRC.read_text(encoding="utf-8")
+    text = _cockpit_text()
     assert "_nav_btn" not in text
     assert "sidebar_btns" not in text
     rail = headless_pro._left_rail()
@@ -358,7 +373,7 @@ def test_pro_desk_operator_paint_omits_cycle(headless_pro):
     assert headless_pro.lbl_desk_sub.value == "looking"
     assert (headless_pro.page.title or "") == "ABCXAUTO"
     assert "wakes" not in (headless_pro.page.title or "").lower()
-    src = PRO_SRC.read_text(encoding="utf-8")
+    src = _cockpit_text()
     assert "lbl_cycles" not in src
     assert 'ft.Text("wakes"' not in src
     assert "c{s.cycles}" not in src
@@ -985,7 +1000,7 @@ def test_stream_pane_pins_the_tail_without_an_invoke_method(headless_pro):
 
 def test_no_invoke_method_calls_on_page_only_controls():
     """Page swapping can unmount any page control, so these stay out of the file."""
-    text = PRO_SRC.read_text(encoding="utf-8")
+    text = _cockpit_text()
     for call in (".scroll_to(", ".focus(", "invoke_method"):
         offenders = [
             line.strip()
@@ -1000,7 +1015,7 @@ def test_window_close_always_lets_go_of_the_window(headless_pro, tmp_path, monke
     """prevent_close holds the window open, so a missed destroy traps the operator."""
     from abcxauto.supervisor import clear_operator_stop, operator_stopped
 
-    text = PRO_SRC.read_text(encoding="utf-8")
+    text = _cockpit_text()
     assert "prevent_close = True" in text
 
     monkeypatch.setenv("ABCXAUTO_OPERATOR_STOP_PATH", str(tmp_path / "stop.json"))
@@ -1064,7 +1079,7 @@ def test_field_hint_ellipsizes_instead_of_clipping_mid_word(headless_pro):
 
 
 def test_settings_never_offers_a_live_switch_of_its_own():
-    text = PRO_SRC.read_text(encoding="utf-8")
+    text = _cockpit_text()
     # Mode changes go through the confirm-phrase dialog only.
     assert text.count("switch_trading_mode") == 2
     assert "_open_live_confirm_dialog" in text
