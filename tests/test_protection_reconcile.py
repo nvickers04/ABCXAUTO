@@ -39,7 +39,14 @@ def _disable_risk_gates(monkeypatch):
     base = get_config()
     monkeypatch.setattr(
         "abcxauto.executor.get_config",
-        lambda: Config(**{**base.__dict__, "risk_gates_enabled": False, "max_arena_concentration_pct": 0}),
+        lambda: Config(**{
+            **base.__dict__,
+            "risk_gates_enabled": False,
+            "max_arena_concentration_pct": 0,
+            "defined_risk_only": False,
+            "cash_only": False,
+            "daily_loss_limit_pct": 0,
+        }),
     )
     monkeypatch.setattr(
         "abcxauto.proposals.get_config",

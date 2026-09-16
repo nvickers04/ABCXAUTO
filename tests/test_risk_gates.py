@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -15,9 +15,12 @@ from abcxauto.risk_gates import (
     check_defined_risk_only,
     estimate_bracket_risk_dollars,
     estimate_notional,
+    estimate_option_risk_dollars,
+    halt_state_path,
     is_exit_or_management,
     reset_risk_gate,
     risk_base_usd,
+    session_date,
     sizing_floors_active,
     symbol_exposure_usd,
 )
@@ -455,7 +458,12 @@ async def test_arena_cap_zero_on_executor_skips_risk_gates_default(monkeypatch):
     """Isolation patches executor.get_config. Cap 0 must not fail-closed."""
     from abcxauto.executor import execute_proposal
 
-    off = _cfg(risk_gates_enabled=False, max_arena_concentration_pct=0)
+    off = _cfg(
+        risk_gates_enabled=False,
+        max_arena_concentration_pct=0,
+        daily_loss_limit_pct=0,
+        cash_only=False,
+    )
     on = _cfg(risk_gates_enabled=False, max_arena_concentration_pct=25.0)
     monkeypatch.setattr("abcxauto.executor.get_config", lambda: off)
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: on)
@@ -1080,7 +1088,49 @@ async def test_monitor_auto_panic_once(monkeypatch):
     assert conn.flatten_calls == 1
     assert any("AUTO-PANIC" in m for m in injections)
 
-    # Second tick must not flatten again (halt latch guard)
+    # Second tick must not flatten again (once-per-instance flag)
+    await mon._maybe_auto_panic(snap)
+    assert conn.flatten_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_halt_does_not_block_auto_panic_flatten(monkeypatch):
+    """Send-path daily_loss halt must not suppress flatten_all."""
+    from abcxauto.monitor import PortfolioMonitor
+
+    gate = reset_risk_gate()
+    gate.halt("daily_loss -2.5", kind="daily_loss")
+    injections = []
+
+    class Session:
+        def emit(self, *_a, **_k):
+            pass
+
+        async def inject(self, message, source=""):
+            injections.append(message)
+
+    cfg = _cfg(
+        auto_panic_on_breach=True,
+        daily_loss_limit_pct=2.0,
+        monitor_poll_s=30,
+        monitor_review_s=300,
+    )
+    monkeypatch.setattr("abcxauto.monitor.get_config", lambda: cfg)
+
+    conn = FakeConnector(
+        account={"netliquidation": 100_000.0, "dailypnl": -3000.0},
+        positions=[{"symbol": "AAPL", "quantity": 10, "sec_type": "STK"}],
+    )
+    mon = PortfolioMonitor(Session(), conn)
+    mon.cfg = cfg
+    snap = {
+        "account": conn.account,
+        "protection": {"unprotected_symbols": [], "positions": conn.positions},
+    }
+    assert gate.is_halted is True
+    assert gate.halt_kind == "daily_loss"
+    await mon._maybe_auto_panic(snap)
+    assert conn.flatten_calls == 1
     await mon._maybe_auto_panic(snap)
     assert conn.flatten_calls == 1
 
@@ -1142,7 +1192,7 @@ def test_market_bracket_sizing_prefers_price_hint(monkeypatch):
 
 
 def test_kind_aware_auto_reset_daily_loss_only(gate):
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = session_date() - timedelta(days=1)
 
     # daily_loss from a prior day auto-clears
     gate.halt("daily loss breach", kind="daily_loss")
@@ -1172,6 +1222,71 @@ def test_kind_aware_auto_reset_daily_loss_only(gate):
     gate._halt_date = yesterday
     assert gate.is_halted is True
     assert gate.halt_kind == "halt"
+
+
+def test_session_date_follows_et_not_utc_calendar():
+    """UTC midnight can still be the prior US equity session."""
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    utc_after_midnight = datetime(2026, 9, 17, 3, 30, tzinfo=timezone.utc)
+    assert session_date(utc_after_midnight) == date(2026, 9, 16)
+    et_open = datetime(2026, 9, 17, 0, 0, tzinfo=et)
+    assert session_date(et_open) == date(2026, 9, 17)
+
+
+def test_daily_loss_auto_reset_waits_for_et_date(gate, monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.session_date", lambda now=None: date(2026, 9, 16)
+    )
+    gate.halt("daily loss breach", kind="daily_loss")
+    assert gate._halt_date == date(2026, 9, 16)
+    # Host UTC already 17th, ET still 16th — stay latched.
+    assert gate.is_halted is True
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.session_date", lambda now=None: date(2026, 9, 17)
+    )
+    assert gate.is_halted is False
+    assert gate.halt_kind == ""
+
+
+def test_restart_restores_halt_from_durable_state():
+    gate = reset_risk_gate()
+    gate.halt("daily loss breach", kind="daily_loss")
+    assert halt_state_path().is_file()
+    restarted = reset_risk_gate(restore=True)
+    assert restarted is not gate
+    assert restarted.is_halted is True
+    assert restarted.halt_kind == "daily_loss"
+    assert "daily loss" in restarted.halt_reason.lower()
+
+
+def test_restart_restores_halt_from_journal_when_state_missing():
+    gate = reset_risk_gate()
+    gate.halt("daily loss breach", kind="daily_loss")
+    path = halt_state_path()
+    if path.is_file():
+        path.unlink()
+    restarted = reset_risk_gate(restore=True)
+    assert restarted.is_halted is True
+    assert restarted.halt_kind == "daily_loss"
+
+
+@pytest.mark.asyncio
+async def test_restart_restores_halt_exits_unblocked(monkeypatch):
+    cfg = _cfg(defined_risk_only=False, cash_only=False, daily_loss_limit_pct=25.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    reset_risk_gate()
+    reset_risk_gate().halt("daily loss breach", kind="daily_loss")
+    restarted = reset_risk_gate(restore=True)
+    conn = FakeConnector()
+    ok, reason = await restarted.pre_trade_check(_bracket(), conn)
+    assert ok is False
+    assert "halted" in reason.lower() or "daily loss" in reason.lower()
+    ok, reason = await restarted.pre_trade_check(_market_order_exit(), conn)
+    assert ok is True
+    assert "bypass" in reason
 
 
 @pytest.mark.asyncio
@@ -1783,3 +1898,165 @@ def test_estimate_notional_csp_and_option_limit():
         RATIONALE,
     )
     assert estimate_notional(vert) == pytest.approx(1.25 * 100 * 1)
+    # Short 5-wide @ 1.25 credit: defined max-loss is 375, not the 125 premium.
+    assert estimate_option_risk_dollars(vert) == pytest.approx((5.0 - 1.25) * 100.0)
+
+
+@pytest.mark.asyncio
+async def test_gates_off_still_halts_daily_loss(monkeypatch):
+    """Paper risk_gates_enabled=False must not skip the daily-loss breaker."""
+    from abcxauto.executor import execute_proposal
+
+    cfg = _cfg(
+        risk_gates_enabled=False,
+        sizing_floors=False,
+        daily_loss_limit_pct=25.0,
+        cash_only=False,
+        defined_risk_only=False,
+        max_arena_concentration_pct=0,
+        max_open_positions=0,
+    )
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    gate = reset_risk_gate()
+    net = 100_000.0
+    account = {"netliquidation": net, "dailypnl": -25_000.0, "TotalCashValue": net}
+
+    class GW(FakeConnector):
+        async def place_bracket_order(self, **kwargs):
+            raise AssertionError("must not place after daily-loss halt")
+
+    gw = GW(account=account)
+    ok, reason = await gate.pre_trade_check(_bracket(), gw)
+    assert ok is False
+    assert "daily_loss" in reason.lower()
+    assert gate.halt_kind == "daily_loss"
+    result = await execute_proposal(_bracket(), gw)
+    assert result.get("status") == "rejected"
+    assert "daily_loss" in str(result.get("error") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_option_risk_uses_defined_max_loss_not_premium(monkeypatch):
+    """Short vertical: width−credit, not premium×100. Long debit stays premium."""
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_config",
+        lambda: _cfg(
+            sizing_floors=True,
+            max_risk_per_trade_pct=0.3,
+            max_position_pct=0,
+            daily_loss_limit_pct=0,
+            max_open_positions=0,
+            cash_only=False,
+            defined_risk_only=False,
+        ),
+    )
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
+    gate = reset_risk_gate()
+    conn = FakeConnector(
+        account={
+            "netliquidation": 100_000.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 100_000.0,
+        }
+    )
+    # 5-wide @ $1.00: premium $100 (would pass 0.3%), defined $400 (must refuse).
+    vert = _vertical(qty=1, limit=1.0)
+    assert estimate_notional(vert) == pytest.approx(100.0)
+    assert estimate_option_risk_dollars(vert) == pytest.approx(400.0)
+    ok, reason = await gate.pre_trade_check(vert, conn)
+    assert ok is False
+    assert "size_risk_per_trade" in reason
+
+    # Long premium: 1 contract × $2 × 100 = $200 < $300 cap.
+    buy = validate_proposal(
+        "buy_option",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "strike": 500.0,
+            "right": "C",
+            "quantity": 1,
+            "limit_price": 2.0,
+        },
+        RATIONALE,
+    )
+    assert estimate_option_risk_dollars(buy) == pytest.approx(200.0)
+    ok, reason = await gate.pre_trade_check(buy, conn)
+    assert ok is True, reason
+    buy_big = validate_proposal(
+        "buy_option",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "strike": 500.0,
+            "right": "C",
+            "quantity": 2,
+            "limit_price": 2.0,
+        },
+        RATIONALE,
+    )
+    assert estimate_option_risk_dollars(buy_big) == pytest.approx(400.0)
+    ok, reason = await gate.pre_trade_check(buy_big, conn)
+    assert ok is False
+    assert "size_risk_per_trade" in reason
+
+
+@pytest.mark.asyncio
+async def test_cash_only_notional_fires_when_floors_off(monkeypatch):
+    """Cash-only vs AvailableFunds is a constitution floor, not a % sizing gate."""
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_config",
+        lambda: _cfg(
+            cash_only=True,
+            sizing_floors=False,
+            risk_gates_enabled=True,
+            daily_loss_limit_pct=0,
+            max_position_pct=0,
+            max_open_positions=0,
+            defined_risk_only=False,
+        ),
+    )
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
+    gate = reset_risk_gate()
+    conn = FakeConnector(
+        account={
+            "netliquidation": 100_000.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 5_000.0,
+        }
+    )
+    ok, reason = await gate.pre_trade_check(_bracket(qty=200, entry=100.0), conn)
+    assert ok is False
+    assert "cash" in reason.lower()
+    conn.account["TotalCashValue"] = 50_000.0
+    ok, _ = await gate.pre_trade_check(_bracket(qty=200, entry=100.0), conn)
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_cash_only_fires_when_paper_gates_off(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_config",
+        lambda: _cfg(
+            cash_only=True,
+            risk_gates_enabled=False,
+            sizing_floors=False,
+            daily_loss_limit_pct=0,
+            defined_risk_only=False,
+            max_arena_concentration_pct=0,
+        ),
+    )
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
+    gate = reset_risk_gate()
+    conn = FakeConnector(
+        account={
+            "netliquidation": 100_000.0,
+            "dailypnl": 0.0,
+            "AvailableFunds": 1_000.0,
+        }
+    )
+    ok, reason = await gate.pre_trade_check(_bracket(qty=200, entry=100.0), conn)
+    assert ok is False
+    assert "cash" in reason.lower()
