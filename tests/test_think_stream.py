@@ -697,7 +697,7 @@ def test_last_turn_keeps_open_gap_rows_and_the_gate_table(tmp_path, monkeypatch)
     snap: dict = {}
     ts.seed_snap_from_last_turn(snap)
     assert snap["scan_hits"]["rows"][0]["open_gap_pct"] == -6.5
-    assert snap["ibkr_live_quotes"]["SNDK"] == 1485.0
+    assert "SNDK" not in (snap.get("ibkr_live_quotes") or {})
     snap_none = {"candle_source": "none"}
     ts.seed_snap_from_last_turn(snap_none)
     assert snap_none["scan_hits"]["rows"][0]["open_gap_pct"] == -6.5
@@ -835,8 +835,11 @@ def test_seed_snap_carries_fresh_ibkr_quotes(tmp_path, monkeypatch):
             "ts": datetime.now(timezone.utc).isoformat(),
             "ibkr_live_quotes": {"SNDK": 91.5},
             "scan_hits": {
-                "quoted": 1,
-                "rows": [{"symbol": "MU", "last": 910.0}],
+                "quoted": 2,
+                "rows": [
+                    {"symbol": "MU", "last": 910.0, "ibkr": {"last": 910.0}},
+                    {"symbol": "AMD", "last": 472.0},
+                ],
             },
         }),
         encoding="utf-8",
@@ -846,7 +849,33 @@ def test_seed_snap_carries_fresh_ibkr_quotes(tmp_path, monkeypatch):
     assert snap["ibkr_live_quotes"]["SPY"] == 500.0
     assert snap["ibkr_live_quotes"]["SNDK"] == 91.5
     assert snap["ibkr_live_quotes"]["MU"] == 910.0
+    assert "AMD" not in snap["ibkr_live_quotes"]
     assert snap["scan_hits"]["rows"][0]["symbol"] == "MU"
+
+
+def test_quotes_from_scan_hits_never_seeds_mda_last():
+    from datetime import datetime, timezone
+
+    from abcxauto.think_stream import _quotes_from_scan_hits, last_look_facts
+
+    hits = {
+        "rows": [
+            {"symbol": "SNDK", "last": 1485.0},
+            {"symbol": "MU", "last": 911.0, "ibkr": {"last": 91.5}},
+            {"symbol": "AMD", "ibkr": {"last": 0}},
+            {"symbol": "NVDA", "ibkr": {}},
+        ]
+    }
+    got = _quotes_from_scan_hits(hits)
+    assert got == {"MU": 91.5}
+    facts = last_look_facts(
+        {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "tool_trace": ["scan"],
+            "scan_hits": {"rows": [{"symbol": "SNDK", "last": 1485.0}]},
+        }
+    )
+    assert not facts.get("ibkr_live_quotes")
 
 
 def test_overnight_last_turn_does_not_seed_scan_hits(tmp_path, monkeypatch):

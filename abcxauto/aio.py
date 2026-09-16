@@ -1,6 +1,9 @@
 """Small async helpers shared across layers (no package-internal imports)."""
 
+from __future__ import annotations
+
 import asyncio
+from typing import Any
 
 
 async def safe_sleep(seconds: float) -> None:
@@ -32,3 +35,27 @@ def bind_thread_loop(loop: asyncio.AbstractEventLoop | None) -> None:
         asyncio.set_event_loop(loop)
     except Exception:
         pass
+
+
+def run_on_loop(
+    coro: Any,
+    loop: asyncio.AbstractEventLoop | None,
+    *,
+    timeout: float | None = None,
+) -> Any:
+    """Run ``coro`` on a live owning loop. Never ``asyncio.run`` against it.
+
+    ib_insync is a singleton bound to ProEngine's worker loop. A second
+    ``asyncio.run`` on another thread trips ``async_lock`` loop mismatch or
+    corrupts the client. Same seam as ``request_snapshot`` / mode switch
+    (``asyncio.run_coroutine_threadsafe``).
+    """
+    if loop is not None:
+        try:
+            live = bool(loop.is_running())
+        except Exception:
+            live = False
+        if live:
+            fut = asyncio.run_coroutine_threadsafe(coro, loop)
+            return fut.result(timeout=timeout)
+    return asyncio.run(coro)

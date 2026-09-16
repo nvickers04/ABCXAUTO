@@ -22,6 +22,9 @@ from typing import Dict, Any, List, Optional, Tuple
 from ib_insync import Order, Option, ComboLeg, Contract
 from ib_insync.contract import Stock
 
+from abcxauto.broker.connection import stale_new_risk_block
+from abcxauto.broker.ticks import round_to_min_tick
+
 logger = logging.getLogger(__name__)
 
 
@@ -171,7 +174,8 @@ class IBKROptionsMixin:
         quantity: int,
         combo_action: str = 'BUY',
         limit_price: Optional[float] = None,
-        strategy_name: str = 'Combo'
+        strategy_name: str = 'Combo',
+        is_exit: bool = False,
     ) -> Dict[str, Any]:
         """
         Generic combo order placement - all multi-leg strategies use this.
@@ -182,6 +186,10 @@ class IBKROptionsMixin:
         """
         if not await self._ensure_connected():
             return {'error': 'Not connected'}
+        if not is_exit:
+            blocked = stale_new_risk_block(self)
+            if blocked:
+                return blocked
 
         return await self._place_combo_as_bag(
             symbol, expiration, strikes_rights_actions,
@@ -212,6 +220,14 @@ class IBKROptionsMixin:
             order.totalQuantity = quantity
             order.orderType = 'LMT' if limit_price is not None else 'MKT'
             if limit_price is not None:
+                tick = 0.01
+                getter = getattr(self, "_contract_min_tick", None)
+                if callable(getter):
+                    try:
+                        tick = await getter(combo)
+                    except Exception:
+                        tick = 0.01
+                limit_price = round_to_min_tick(limit_price, tick)
                 order.lmtPrice = float(limit_price)
             order.tif = 'DAY'
             order.transmit = True
@@ -243,10 +259,15 @@ class IBKROptionsMixin:
         combo_action: str,
         limit_price: Optional[float],
         strategy_name: str,
+        is_exit: bool = False,
     ) -> Dict[str, Any]:
         """One BAG. Each leg is (expiration, strike, right, action, ratio)."""
         if not await self._ensure_connected():
             return {'error': 'Not connected'}
+        if not is_exit:
+            blocked = stale_new_risk_block(self)
+            if blocked:
+                return blocked
         try:
             built = []
             for exp, strike, right, action, ratio in legs:
@@ -258,6 +279,14 @@ class IBKROptionsMixin:
             order.totalQuantity = quantity
             order.orderType = 'LMT' if limit_price is not None else 'MKT'
             if limit_price is not None:
+                tick = 0.01
+                getter = getattr(self, "_contract_min_tick", None)
+                if callable(getter):
+                    try:
+                        tick = await getter(combo)
+                    except Exception:
+                        tick = 0.01
+                limit_price = round_to_min_tick(limit_price, tick)
                 order.lmtPrice = float(limit_price)
             order.tif = 'DAY'
             order.transmit = True
@@ -357,11 +386,16 @@ class IBKROptionsMixin:
         action: str,
         quantity: int,
         limit_price: Optional[float] = None,
-        strategy_name: str = 'Option'
+        strategy_name: str = 'Option',
+        is_exit: bool = False,
     ) -> Dict[str, Any]:
         """Place a single option order (covered call, CSP, protective put)."""
         if not await self._ensure_connected():
             return {'error': 'Not connected'}
+        if not is_exit:
+            blocked = stale_new_risk_block(self)
+            if blocked:
+                return blocked
 
         try:
             opt = Option(symbol, expiration, strike, right, 'SMART')
@@ -375,6 +409,14 @@ class IBKROptionsMixin:
             order.totalQuantity = quantity
             order.orderType = 'LMT' if limit_price else 'MKT'
             if limit_price:
+                tick = 0.01
+                getter = getattr(self, "_contract_min_tick", None)
+                if callable(getter):
+                    try:
+                        tick = await getter(opt)
+                    except Exception:
+                        tick = 0.01
+                limit_price = round_to_min_tick(limit_price, tick)
                 order.lmtPrice = limit_price
             order.tif = 'DAY'
             order.transmit = True
@@ -618,7 +660,7 @@ class IBKROptionsMixin:
         result = await self._place_combo_order(
             symbol, expiration,
             [(long_strike, right, 'BUY', 1), (short_strike, right, 'SELL', 1)],
-            quantity, combo_action, limit_price, strategy
+            quantity, combo_action, limit_price, strategy, is_exit=closing_position
         )
         if 'success' in result:
             result.update({'long_strike': long_strike, 'short_strike': short_strike, 'right': right})
@@ -688,7 +730,7 @@ class IBKROptionsMixin:
                 (call_short_strike, 'C', 'SELL', 1),
                 (call_long_strike, 'C', 'BUY', 1),
             ],
-            quantity, combo_action, limit_price, 'Iron Condor'
+            quantity, combo_action, limit_price, 'Iron Condor', is_exit=closing_position
         )
         if 'success' in result:
             width = min(put_short_strike - put_long_strike, call_long_strike - call_short_strike)
@@ -726,7 +768,7 @@ class IBKROptionsMixin:
                 (center_strike, 'C', 'SELL', 1),
                 (center_strike + wing_width, 'C', 'BUY', 1),
             ],
-            quantity, combo_action, limit_price, 'Iron Butterfly'
+            quantity, combo_action, limit_price, 'Iron Butterfly', is_exit=closing_position
         )
         if 'success' in result:
             result.update({'center_strike': center_strike, 'wing_width': wing_width})
@@ -748,7 +790,7 @@ class IBKROptionsMixin:
         result = await self._place_combo_order(
             symbol, expiration,
             [(strike, 'C', action, 1), (strike, 'P', action, 1)],
-            quantity, combo_action, limit_price, strategy
+            quantity, combo_action, limit_price, strategy, is_exit=closing_position
         )
         if 'success' in result:
             result['strike'] = strike
@@ -773,7 +815,7 @@ class IBKROptionsMixin:
         result = await self._place_combo_order(
             symbol, expiration,
             [(call_strike, 'C', action, 1), (put_strike, 'P', action, 1)],
-            quantity, combo_action, limit_price, strategy
+            quantity, combo_action, limit_price, strategy, is_exit=closing_position
         )
         if 'success' in result:
             result.update({'put_strike': put_strike, 'call_strike': call_strike})
@@ -805,7 +847,7 @@ class IBKROptionsMixin:
                 (middle_strike, right, 'SELL', 2),
                 (upper_strike, right, 'BUY', 1),
             ],
-            quantity, combo_action, limit_price, strategy
+            quantity, combo_action, limit_price, strategy, is_exit=closing_position
         )
         if 'success' in result:
             result.update({'lower_strike': lower_strike, 'middle_strike': middle_strike, 'upper_strike': upper_strike})
@@ -832,7 +874,7 @@ class IBKROptionsMixin:
                 (near_expiration, strike, right, 'SELL', 1),
                 (far_expiration, strike, right, 'BUY', 1),
             ],
-            quantity, combo_action, limit_price, strategy,
+            quantity, combo_action, limit_price, strategy, is_exit=closing_position,
         )
         if result.get('success'):
             result.update({
@@ -865,7 +907,7 @@ class IBKROptionsMixin:
                 (near_expiration, near_strike, right, 'SELL', 1),
                 (far_expiration, far_strike, right, 'BUY', 1),
             ],
-            quantity, combo_action, limit_price, strategy,
+            quantity, combo_action, limit_price, strategy, is_exit=closing_position,
         )
         if result.get('success'):
             result.update({
@@ -1104,6 +1146,14 @@ class IBKROptionsMixin:
             order.totalQuantity = close_qty
             order.orderType = 'LMT' if limit_price else 'MKT'
             if limit_price:
+                tick = 0.01
+                getter = getattr(self, "_contract_min_tick", None)
+                if callable(getter):
+                    try:
+                        tick = await getter(contract)
+                    except Exception:
+                        tick = 0.01
+                limit_price = round_to_min_tick(limit_price, tick)
                 order.lmtPrice = limit_price
             order.tif = 'DAY'
             order.transmit = True
@@ -1284,6 +1334,7 @@ class IBKROptionsMixin:
                 close_action,
                 quantity,
                 strategy_name=f'Roll {roll_type} close leg',
+                is_exit=True,
             )
             if close_result.get('success'):
                 order_ids.append(close_result['order_id'])

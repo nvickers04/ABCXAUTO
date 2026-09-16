@@ -511,8 +511,12 @@ def test_inline_scan_will_not_pair_a_stale_screen_with_this_look(pro):
 def test_scan_is_no_longer_a_dashboard_section(pro):
     from pathlib import Path
 
-    src = Path(pro.__module__.replace(".", "/") + ".py")
-    text = (Path(__file__).resolve().parents[1] / src).read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parents[1]
+    desk = root / "abcxauto" / "desktop"
+    files = [root / "abcxauto" / "pro_desktop.py"]
+    if desk.is_dir():
+        files.extend(sorted(desk.rglob("*.py")))
+    text = "\n".join(p.read_text(encoding="utf-8") for p in files)
     assert '_section("Scan tape"' not in text
     pro.engine.state.scan_hits = _ranked_hits()
     pro.engine.state.think_live = BUFFER

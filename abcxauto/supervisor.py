@@ -150,6 +150,29 @@ def tws_listening(host: str = "127.0.0.1", port: int = 7497, timeout: float = 2.
         return False
 
 
+def tws_listen_endpoint(env: dict[str, str] | None = None) -> tuple[str, int]:
+    """Host/port the supervisor should probe — configured, not hardcoded 7497."""
+    src = env if env is not None else os.environ
+    host = (src.get("IBKR_HOST") or "").strip()
+    port_raw = (src.get("IBKR_PORT") or "").strip()
+    cfg_host = ""
+    cfg_port = 0
+    try:
+        from abcxauto.config import get_config
+
+        cfg = get_config()
+        cfg_host = str(getattr(cfg, "ibkr_host", "") or "").strip()
+        cfg_port = int(getattr(cfg, "ibkr_port", 0) or 0)
+    except Exception:
+        logger.debug("tws_listen_endpoint config fallback", exc_info=True)
+    host = host or cfg_host or "127.0.0.1"
+    try:
+        port = int(port_raw) if port_raw else (cfg_port or 7497)
+    except ValueError:
+        port = cfg_port or 7497
+    return host, port
+
+
 DESK_LOCK_PATH = _REPO / "data" / "state" / "desk.lock"
 
 
@@ -204,6 +227,15 @@ def claim_desk_lock() -> bool:
     if owner and owner != os.getpid():
         return False
     p = _lock_path()
+    if p.is_file() and owner == 0:
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            pid = int(raw.get("pid") or 0)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            logger.error("desk lock unreadable — refuse start")
+            return False
+        if pid and _pid_alive(pid) and pid != os.getpid():
+            return False
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(
@@ -212,8 +244,8 @@ def claim_desk_lock() -> bool:
         )
         return True
     except OSError:
-        logger.debug("desk lock write failed", exc_info=True)
-        return True
+        logger.error("desk lock write failed — refuse start", exc_info=True)
+        return False
 
 
 def release_desk_lock(*, force: bool = False) -> None:
@@ -724,8 +756,9 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
         if not useful_hours():
             note("supervisor: outside useful hours — stay down")
             return int(code or 0)
-        if not tws_listening():
-            note("supervisor: TWS 7497 down — stay down")
+        host, port = tws_listen_endpoint(env)
+        if not tws_listening(host, port):
+            note(f"supervisor: TWS {port} down — stay down")
             return int(code or 0)
         note(f"supervisor: child exited {code} — relaunch in {backoff:.0f}s", warn=True)
         time.sleep(backoff)

@@ -28,7 +28,7 @@ from abcxauto.config import (
     update_agent_config,
 )
 from abcxauto.desk_mode import session_model, session_model_params
-from abcxauto.llm import GrokClient, chat_create_kwargs, create_chat
+from abcxauto.llm import GrokClient, chat_create_kwargs, create_chat, normalize_chat_extras
 from abcxauto.self_tune import OPERATOR_DISK_KEYS, apply_self_tune
 from abcxauto.thin_rth_kill_look import rth_model_no_xhigh, rth_params_no_xhigh
 
@@ -58,6 +58,25 @@ def test_default_model_is_one_constant():
     assert knobs["model_params"] == {}
     assert knobs["model_params_rth"] == {}
     assert knobs["model_params_research"] == {}
+
+
+def test_default_desk_create_kwargs_omit_effort():
+    """Empty Settings maps send no reasoning_effort; SDK then defaults high."""
+    cfg = get_config()
+    g = SimpleNamespace(
+        model=cfg.model,
+        temperature=cfg.temperature,
+        max_tokens=cfg.max_tokens,
+        model_params=dict(cfg.model_params or {}),
+    )
+    kw = chat_create_kwargs(g, messages=["hi"], tools=["book"])
+    assert kw["model"] == DEFAULT_MODEL
+    assert kw["temperature"] == 0.3
+    assert kw["max_tokens"] == 8192
+    assert kw["include"] == ["verbose_streaming"]
+    assert "reasoning_effort" not in kw
+    assert "effort" not in kw
+    assert "thinking" not in kw
 
 
 def test_settings_can_select_a_later_model_id():
@@ -166,6 +185,8 @@ def test_chat_create_passes_future_params():
     class _Chat:
         @staticmethod
         def create(**k):
+            if "effort" in k or "thinking" in k:
+                raise TypeError("unexpected effort/thinking")
             created.update(k)
             return SimpleNamespace()
 
@@ -178,12 +199,44 @@ def test_chat_create_passes_future_params():
     kw = chat_create_kwargs(g, messages=["hi"], tools=["book"])
     assert kw["model"] == "grok-4.7"
     assert kw["reasoning_effort"] == "high"
-    assert kw["thinking"] is True
-    assert kw["effort"] == "xhigh"
+    assert "thinking" not in kw
+    assert "effort" not in kw
     assert kw["include"] == ["verbose_streaming"]
     create_chat(SimpleNamespace(chat=_Chat()), **kw)
-    assert created["thinking"] is True
+    assert created["reasoning_effort"] == "high"
     assert created["model"] == "grok-4.7"
+
+
+def test_effort_alias_reaches_sdk_and_unknown_key_does_not_strip_it():
+    created: dict = {}
+
+    class _Chat:
+        @staticmethod
+        def create(**k):
+            if "future_unknown" in k:
+                raise TypeError("unexpected future_unknown")
+            created.update(k)
+            return SimpleNamespace(ok=True)
+
+    assert normalize_chat_extras({"effort": "high", "thinking": True}) == {
+        "reasoning_effort": "high"
+    }
+    assert normalize_chat_extras(
+        {"reasoning_effort": "high", "effort": "xhigh"}
+    ) == {"reasoning_effort": "high"}
+    g = SimpleNamespace(
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=8192,
+        model_params={"effort": "high", "future_unknown": 1},
+    )
+    kw = chat_create_kwargs(g, messages=["hi"])
+    assert kw["reasoning_effort"] == "high"
+    assert "effort" not in kw
+    chat = create_chat(SimpleNamespace(chat=_Chat()), **kw)
+    assert chat.ok is True
+    assert created["reasoning_effort"] == "high"
+    assert "future_unknown" not in created
 
 
 def test_chat_create_drops_unknown_kwargs_instead_of_crashing():
@@ -205,10 +258,11 @@ def test_chat_create_drops_unknown_kwargs_instead_of_crashing():
         model="grok-4.7",
         temperature=0.2,
         max_tokens=1024,
-        model_params={"thinking": True, "effort": "xhigh"},
+        model_params={"thinking": True, "effort": "high"},
     )
     kw = chat_create_kwargs(g, messages=["hi"])
-    assert "thinking" in kw
+    assert "thinking" not in kw
+    assert kw["reasoning_effort"] == "high"
     chat = create_chat(SimpleNamespace(chat=_Strict()), **kw)
     assert chat.ok is True
 
@@ -398,6 +452,30 @@ def test_rth_params_cannot_defeat_xhigh_strip_or_f10(monkeypatch):
     assert rth == {"thinking": True}
     assert rth.get("effort") != "xhigh"
     assert session_model_params("premarket", cfg) == {"effort": "xhigh"}
+
+
+def test_new_chat_applies_rth_params_when_client_had_no_session(monkeypatch):
+    from abcxauto.brain import _new_chat
+    from abcxauto.llm import GrokClient
+
+    created: dict = {}
+
+    class _ChatAPI:
+        def create(self, **k):
+            created.update(k)
+            return SimpleNamespace()
+
+    update_agent_config(
+        model_params={"effort": "xhigh", "thinking": True},
+        persist=False,
+    )
+    monkeypatch.setattr("abcxauto.thin_rth_kill_look.kill_look_enabled", lambda: True)
+    g = GrokClient(client=SimpleNamespace(chat=_ChatAPI()))
+    assert g.model_params.get("effort") == "xhigh"
+    _new_chat(g, session="regular")
+    assert g.model_params.get("effort") != "xhigh"
+    assert created.get("reasoning_effort") != "xhigh"
+    assert "thinking" not in created
     client = SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: SimpleNamespace()))
     update_agent_config(
         model_params_rth={"effort": "xhigh", "thinking": True},

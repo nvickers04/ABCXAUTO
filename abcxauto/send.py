@@ -21,6 +21,7 @@ from typing import Any, Dict
 
 from abcxauto.config import get_config
 from abcxauto.executor import safe_execute
+from abcxauto.risk_gates import LIVE_IBKR_PORTS
 from abcxauto.tool_args import SEND_SIZE_PCT_NL
 
 __all__ = [
@@ -218,10 +219,6 @@ def apply_size_pct_nl(
         out["raw_size_pct_nl"] = clamp_note.get("raw")
     return out
 
-# TWS 7496 / Gateway 4001 — live socket family. Paper is 7497 / 4002.
-_LIVE_IBKR_PORTS = frozenset({7496, 4001})
-
-
 def _paper_live_port(cfg: Any) -> int | None:
     """Live-family port when TRADING_MODE is not already live; else None."""
     mode = str(getattr(cfg, "trading_mode", "paper") or "paper").strip().lower()
@@ -231,7 +228,7 @@ def _paper_live_port(cfg: Any) -> int | None:
         port = int(getattr(cfg, "ibkr_port", 0) or 0)
     except (TypeError, ValueError):
         return None
-    if port in _LIVE_IBKR_PORTS:
+    if port in LIVE_IBKR_PORTS:
         return port
     return None
 

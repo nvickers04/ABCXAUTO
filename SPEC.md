@@ -5,7 +5,8 @@ Brain is the `model` knob (default grok-4.6; Settings / `ABCXAUTO_MODEL` can
 point at grok-4.7 when xAI publishes it). Extra `chat.create` kwargs live in
 `model_params` / `model_params_rth` / `model_params_research` (JSON objects;
 session maps fall back to shared). Mainline is `master`. There is no clerk
-process.
+process (`clerk_*` names are in-process gates). Settings /
+`risk_settings.json` beat env, which beats defaults.
 
 Paper (TWS **7497**) is the book. Live (TWS **7496**, confirm phrase, a different
 client id) is the same constitution on the live socket. It never copies paper fills.

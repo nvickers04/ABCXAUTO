@@ -376,6 +376,14 @@ def _scan_out_from_snap(
     return out
 
 
+def _scan_public_payload(out: dict[str, Any]) -> dict[str, Any]:
+    """Drop the duplicate rows=hits copy before clip. Snap still keeps rows."""
+    slim = dict(out) if isinstance(out, dict) else {}
+    if slim.get("rows") == slim.get("hits"):
+        slim.pop("rows", None)
+    return slim
+
+
 def _emit_scan_look_line(snap: dict[str, Any], out: dict[str, Any]) -> None:
     """One trophy line per look. Not per page. No screens=N."""
     if snap.get("scan_streamed"):
@@ -1540,7 +1548,6 @@ async def _run_tool(
             "source": "mda",
             "freshness": "delayed_15m",
             "use": "color_not_trigger",
-            "note": "delayed MDA; time-sensitive at +15m is already in the price",
             "items": items[:24],
         }
         miss = news_hard_miss(items)
@@ -1695,7 +1702,7 @@ async def _run_tool(
             if emit_line:
                 _emit_scan_look_line(snap, out)
             turn.scan_cache[_LOOK_SCAN_CACHE_KEY] = deepcopy(out)
-            return _hub()._clip(out)
+            return _hub()._clip(_scan_public_payload(out))
 
         async def _repeat_look_bag() -> str:
             reused = _scan_out_from_snap(snap, qmap)
@@ -1706,7 +1713,7 @@ async def _run_tool(
             _attach_scan_run(reused, turn=turn, world=world)
             think_emit("tool", "\n[scan = already have it]\n")
             turn.scan_cache[_LOOK_SCAN_CACHE_KEY] = deepcopy(reused)
-            return _hub()._clip(reused)
+            return _hub()._clip(_scan_public_payload(reused))
 
         async with lock:
             if asked_symbols:

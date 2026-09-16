@@ -884,7 +884,7 @@ def _compact_session_range(raw: Any) -> dict[str, Any]:
 
 
 def _quotes_from_scan_hits(hits: Any) -> dict[str, float]:
-    """IBKR lasts already printed on the last screen. Not MDA tape."""
+    """IBKR lasts already printed on the last screen. Never MDA row.last."""
     blob = hits if isinstance(hits, dict) else {}
     out: dict[str, float] = {}
     for row in blob.get("rows") or []:
@@ -892,7 +892,7 @@ def _quotes_from_scan_hits(hits: Any) -> dict[str, float]:
             continue
         sym = str(row.get("symbol") or "").upper().strip()
         ibkr = row.get("ibkr") if isinstance(row.get("ibkr"), dict) else {}
-        raw = ibkr.get("last") if ibkr.get("last") is not None else row.get("last")
+        raw = ibkr.get("last")
         try:
             px = float(raw)
         except (TypeError, ValueError):

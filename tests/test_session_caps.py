@@ -75,6 +75,25 @@ def test_legacy_single_row_caps_file_still_counts(tmp_path, monkeypatch):
     assert usage("premarket", now=_et(2026, 8, 28, 8, 0))["looks"] == 1
 
 
+def test_session_caps_reload_when_file_mtime_changes(tmp_path, monkeypatch):
+    import json
+    import time
+
+    path = tmp_path / "session_caps.json"
+    monkeypatch.setenv("ABCXAUTO_SESSION_CAPS_PATH", str(path))
+    reset_session_caps()
+    now = _et(2026, 8, 28, 10, 0)
+    note_look("regular", tokens=3, now=now)
+    assert usage("regular", now=now)["looks"] == 1
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    key = session_key("regular", now=now)
+    raw["sessions"][key]["looks"] = 9
+    time.sleep(0.02)
+    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    assert usage("regular", now=now)["looks"] == 9
+    assert not path.with_name(path.name + ".tmp").exists()
+
+
 def test_look_cap_stops_further_counts_from_gating():
     update_agent_config(session_look_cap=2, persist=False)
     assert is_capped("regular") is False
@@ -553,6 +572,38 @@ async def test_closed_overnight_still_parks_when_caps_exist(monkeypatch, tmp_pat
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is not None
+
+
+@pytest.mark.asyncio
+async def test_failed_think_does_not_bill_the_look_cap(monkeypatch):
+    """A thrown _host_think is not a finished look — do not increment the cap."""
+    hits = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        hits["n"] += 1
+        raise RuntimeError("llm down")
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    saw_err = False
+    while time.time() < deadline:
+        eng.drain_apply()
+        if any(r.get("type") == "error" for r in eng.state.records):
+            saw_err = True
+            break
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.3
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert saw_err
+    assert hits["n"] >= 1
+    assert usage("regular")["looks"] == 0
+    assert is_capped("regular") is False
 
 
 def test_health_strip_cap_idle_does_not_say_next_look(monkeypatch):

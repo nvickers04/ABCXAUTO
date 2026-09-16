@@ -273,3 +273,51 @@ async def test_grok_turn_does_not_bill_after_brief_halt(monkeypatch):
     assert turn.loop_halted is True
     assert (turn.last_result or {}).get("reason_code") == REASON_BRIEF_LOOP
     assert card_row(CARD, WINDOW)["turns"] == 7
+
+
+def test_budget_reloads_when_operator_edits_file(tmp_path, monkeypatch):
+    import json
+    import time
+
+    path = tmp_path / "research_budget.json"
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BUDGET_PATH", str(path))
+    reset_research_budget()
+    open_research_card(CARD, WINDOW)
+    note_brief_turn(CARD, WINDOW, cost_usd=0.10)
+    assert card_row(CARD, WINDOW)["turns"] == 1
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    key = f"{CARD}::{WINDOW}"
+    raw["cards"][key]["turns"] = 4
+    time.sleep(0.02)
+    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    assert card_row(CARD, WINDOW)["turns"] == 4
+    assert not (tmp_path / "research_budget.json.tmp").exists()
+
+
+def test_empty_or_failed_research_round_is_not_billed():
+    from abcxauto.brain import (
+        BrainTurn,
+        _bill_research_brief_round,
+        _should_bill_research_round,
+    )
+
+    reset_research_budget()
+    open_research_card(CARD, WINDOW)
+    snap = {"research_card_id": CARD, "prove_window_id": WINDOW}
+    empty = BrainTurn(text="")
+    assert _should_bill_research_round(empty) is False
+    assert _bill_research_brief_round(empty, session="premarket", snap=snap) is False
+    question = BrainTurn(text="?")
+    assert _should_bill_research_round(question) is False
+    failed = BrainTurn(text="watching the open", failed=True)
+    assert _should_bill_research_round(failed, tool_calls=3) is False
+    assert _bill_research_brief_round(
+        failed, session="premarket", snap=snap, tool_calls=3
+    ) is False
+    parked = BrainTurn(text="watching the open", parked=True)
+    assert _should_bill_research_round(parked) is False
+    assert card_row(CARD, WINDOW)["turns"] == 0
+    spoken = BrainTurn(text="watching the open")
+    assert _should_bill_research_round(spoken) is True
+    tools_only = BrainTurn(text="")
+    assert _should_bill_research_round(tools_only, tool_calls=2) is True

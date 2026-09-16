@@ -27,18 +27,31 @@ Peak-drawdown and per-name concentration stay floors-gated.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
+import sqlite3
 import threading
-from datetime import date
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from abcxauto.config import get_config
 from abcxauto.proposals import MANAGEMENT_STRATEGIES, OrderProposal
 from abcxauto.strategy_params import EXIT_ONLY_EXTRA, OPTION_STRATEGIES
 from abcxauto.universe import arenas_for_symbol, is_bucket_arena
+from abcxauto.world_state import pct_of_nl
 
 logger = logging.getLogger(__name__)
+
+_ET = ZoneInfo("America/New_York")
+_HALT_STATE_ENV = "ABCXAUTO_HALT_STATE_PATH"
+# Long-premium tickets: defined max-loss is the debit paid (premium × 100).
+_LONG_PREMIUM_STRATEGIES = frozenset({
+    "buy_option", "covered_call", "protective_put",
+})
 
 # Always rejected when operator sets defined_risk_only (unlimited / naked risk).
 _DEFINED_RISK_FORBIDDEN = frozenset({"ratio_spread", "jade_lizard"})
@@ -54,6 +67,123 @@ def _journal_halt(reason: str, kind: str) -> None:
         get_journal().record_halt(reason, kind)
     except Exception:
         logger.exception("journal halt record failed")
+
+
+def session_date(now: datetime | None = None) -> date:
+    """America/New_York calendar date. IBKR DailyPnL resets on this day."""
+    if now is None:
+        clock = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        clock = now.replace(tzinfo=timezone.utc)
+    else:
+        clock = now
+    try:
+        return clock.astimezone(_ET).date()
+    except Exception:
+        return clock.astimezone(timezone.utc).date()
+
+
+def halt_state_path() -> Path:
+    """Durable halt latch. Override with ``ABCXAUTO_HALT_STATE_PATH`` (tests)."""
+    raw = os.environ.get(_HALT_STATE_ENV, "").strip()
+    if raw:
+        return Path(raw)
+    return Path(__file__).resolve().parents[1] / "data" / "state" / "halt_state.json"
+
+
+def _parse_halt_date(raw: Any) -> Optional[date]:
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, datetime):
+        return session_date(raw)
+    if isinstance(raw, date):
+        return raw
+    text = str(raw).strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        try:
+            return date(int(text[0:4]), int(text[5:7]), int(text[8:10]))
+        except ValueError:
+            return None
+    try:
+        return session_date(datetime.fromisoformat(text.replace("Z", "+00:00")))
+    except ValueError:
+        return None
+
+
+def _write_halt_state(
+    *,
+    halted: bool,
+    reason: str,
+    kind: str,
+    halt_date: Optional[date],
+) -> None:
+    path = halt_state_path()
+    blob = {
+        "halted": bool(halted),
+        "reason": reason or "",
+        "kind": kind or "",
+        "date": halt_date.isoformat() if halt_date is not None else None,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(blob, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        logger.exception("halt state persist failed path=%s", path)
+
+
+def _read_halt_state() -> tuple[Optional[dict], bool]:
+    """Return ``(blob, unreadable)``. Missing file is ``(None, False)``."""
+    path = halt_state_path()
+    if not path.is_file():
+        return None, False
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("halt state unreadable path=%s", path)
+        return None, True
+    if not isinstance(raw, dict):
+        return None, True
+    return raw, False
+
+
+def _latest_journal_halt() -> Optional[dict[str, Any]]:
+    """Latest journal halt row. Resume clears. None if journal has no row."""
+    try:
+        from abcxauto.memory import get_journal
+
+        journal = get_journal()
+        if not getattr(journal, "enabled", True):
+            return None
+        path = getattr(journal, "path", None)
+        if not path:
+            return None
+        with sqlite3.connect(str(path)) as conn:
+            row = conn.execute(
+                "SELECT reason, kind, ts FROM halts ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if not row:
+            return None
+        reason, kind, ts = row
+        kind_s = str(kind or "halt")
+        if kind_s == "resume":
+            return {
+                "halted": False,
+                "reason": "",
+                "kind": "",
+                "date": None,
+            }
+        halt_day = _parse_halt_date(ts) or session_date()
+        return {
+            "halted": True,
+            "reason": str(reason or "halted"),
+            "kind": kind_s,
+            "date": halt_day,
+        }
+    except Exception:
+        logger.exception("journal halt restore failed")
+        return None
 
 
 # Bare stock orders are exit-only (schema requires closing_position=true).
@@ -83,7 +213,31 @@ def is_exit_or_management(proposal: OrderProposal) -> bool:
     return False
 
 
-def check_defined_risk_only(proposal: OrderProposal) -> Tuple[bool, str]:
+def ibkr_data_stale_reason(
+    account: Any = None,
+    connector: Any = None,
+) -> str:
+    """Refuse new risk only on an explicit ``ibkr_data_stale is True``.
+
+    Missing field / missing property is no signal — never a block. That
+    keeps the desk from wedging when #201's fact is absent. Exits never
+    call this (``is_exit_or_management`` returns first).
+    """
+    if isinstance(account, dict) and "ibkr_data_stale" in account:
+        if account.get("ibkr_data_stale") is True:
+            return "ibkr_data_stale"
+    if connector is not None:
+        # Public fact from the broker lane (#201). Do not read the private
+        # ``_ibkr_data_stale`` bit — older connectors have that flag without
+        # publishing it on account.
+        if getattr(connector, "ibkr_data_stale", None) is True:
+            return "ibkr_data_stale"
+    return ""
+
+
+def check_defined_risk_only(
+    proposal: OrderProposal, cfg: Any = None
+) -> Tuple[bool, str]:
     """Gate: when defined_risk_only, reject unlimited-risk option shapes
     and new undefined STK risk (naked stock entries, including market_bracket).
 
@@ -92,7 +246,8 @@ def check_defined_risk_only(proposal: OrderProposal) -> Tuple[bool, str]:
     Named defined-risk option plays (vertical, calendar, butterfly, iron)
     still pass. Operator control knob — not strategy taste. Returns (ok, reason).
     """
-    cfg = get_config()
+    if cfg is None:
+        cfg = get_config()
     if not getattr(cfg, "defined_risk_only", False):
         return True, "defined_risk_off"
     if is_exit_or_management(proposal):
@@ -233,7 +388,23 @@ def risk_base_usd(net_liq: float, cfg: Any = None) -> float:
 
 
 # TWS 7496 / Gateway 4001 — live socket family. Paper is 7497 / 4002.
-_LIVE_IBKR_PORTS = frozenset({7496, 4001})
+# Single definition for risk_gates / self_tune / send. Do not copy.
+LIVE_IBKR_PORTS = frozenset({7496, 4001})
+
+
+def live_desk(cfg: Any = None) -> bool:
+    """True when this desk is live (mode, port family, or not-paper)."""
+    c = cfg if cfg is not None else get_config()
+    mode = str(getattr(c, "trading_mode", "paper") or "paper").strip().lower()
+    if mode == "live":
+        return True
+    if getattr(c, "is_paper", None) is False:
+        return True
+    try:
+        port = int(getattr(c, "ibkr_port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+    return port in LIVE_IBKR_PORTS
 
 
 def sizing_floors_active(cfg: Any = None) -> bool:
@@ -245,24 +416,9 @@ def sizing_floors_active(cfg: Any = None) -> bool:
     not enable live send — only the size/loss breaker.
     """
     c = cfg if cfg is not None else get_config()
-    mode = str(getattr(c, "trading_mode", "paper") or "paper").strip().lower()
-    if mode == "live":
-        return True
-    if getattr(c, "is_paper", None) is False:
-        return True
-    try:
-        port = int(getattr(c, "ibkr_port", 0) or 0)
-    except (TypeError, ValueError):
-        port = 0
-    if port in _LIVE_IBKR_PORTS:
+    if live_desk(c):
         return True
     return bool(getattr(c, "sizing_floors", False))
-
-
-def _pct_of_nl(dollars: float, book: float) -> float:
-    if book <= 0:
-        return 0.0
-    return round(100.0 * float(dollars) / float(book), 4)
 
 
 def estimate_notional(proposal: OrderProposal) -> Optional[float]:
@@ -313,6 +469,41 @@ def estimate_notional(proposal: OrderProposal) -> Optional[float]:
     if price_hint is not None and qty > 0:
         return float(price_hint) * qty
     return None
+
+
+def _proposal_loss_row(proposal: OrderProposal) -> dict[str, Any]:
+    params = proposal.params
+    dumped = (
+        params.model_dump(exclude_none=True)
+        if hasattr(params, "model_dump")
+        else {}
+    )
+    return {"strategy": proposal.strategy, "params": dumped}
+
+
+def estimate_option_risk_dollars(proposal: OrderProposal) -> Optional[float]:
+    """Conservative dollars-at-risk for an option ticket.
+
+    Spreads use defined max-loss (width − credit), never premium alone —
+    a short vertical's worst case is the width, not the credit collected.
+    Long-premium tickets stay ``premium × 100``. CSP uses the larger of
+    cash reserved vs premium. None when geometry cannot be read.
+    """
+    if proposal.strategy not in OPTION_STRATEGIES:
+        return None
+    from abcxauto.portfolio_loss import defined_max_loss_usd
+
+    defined = defined_max_loss_usd(_proposal_loss_row(proposal))
+    premium = estimate_notional(proposal)
+    strat = proposal.strategy
+    if strat in _LONG_PREMIUM_STRATEGIES:
+        return defined if defined is not None else premium
+    if strat == "cash_secured_put":
+        parts = [float(x) for x in (defined, premium) if x is not None]
+        return max(parts) if parts else None
+    if defined is not None and premium is not None:
+        return max(float(defined), float(premium))
+    return defined
 
 
 def _lot_names(position: dict) -> set[str]:
@@ -463,8 +654,10 @@ def arena_concentration_error(
         if held is None:
             return "size_arena_concentration unknown"
         after = held + float(notional)
-        after_pct = _pct_of_nl(after, book)
-        if not math.isfinite(after_pct) or after_pct > cap:
+        after_pct = pct_of_nl(after, book)
+        if after_pct is None or not math.isfinite(after_pct):
+            return "size_arena_concentration unknown"
+        if after_pct > cap:
             return (
                 f"size_arena_concentration {after_pct} > {cap} ({arena})"
             )
@@ -534,7 +727,12 @@ def estimate_bracket_risk_dollars(proposal: OrderProposal) -> Optional[float]:
 class RiskGate:
     """Thread-safe pre-trade risk checks + kill-switch latch."""
 
-    def __init__(self, *, auto_reset_on_new_day: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        auto_reset_on_new_day: bool = True,
+        restore: bool = False,
+    ) -> None:
         self._lock = threading.Lock()
         self._halted = False
         self._halt_reason = ""
@@ -545,20 +743,79 @@ class RiskGate:
         self._daily_trades = 0
         self._peak_equity: Optional[float] = None
         self._riskless_combo_202 = False
+        if restore:
+            self._restore_halt_latch()
 
     # ------------------------------------------------------------------
     # Halt latch
     # ------------------------------------------------------------------
+
+    def _persist_halt_unlocked(self) -> None:
+        _write_halt_state(
+            halted=self._halted,
+            reason=self._halt_reason,
+            kind=self._halt_kind,
+            halt_date=self._halt_date,
+        )
+
+    def _apply_halt_blob_unlocked(self, blob: dict[str, Any]) -> None:
+        if not blob.get("halted"):
+            self._halted = False
+            self._halt_reason = ""
+            self._halt_kind = ""
+            self._halt_date = None
+            return
+        self._halted = True
+        self._halt_reason = str(blob.get("reason") or "halted")
+        self._halt_kind = str(blob.get("kind") or "halt")
+        self._halt_date = _parse_halt_date(blob.get("date")) or session_date()
+
+    def _restore_halt_latch(self) -> None:
+        blob, unreadable = _read_halt_state()
+        if blob is None and unreadable:
+            journal_blob = _latest_journal_halt()
+            if journal_blob is not None:
+                blob = journal_blob
+            else:
+                self._halted = True
+                self._halt_reason = "halt restore failed"
+                self._halt_kind = "halt"
+                self._halt_date = session_date()
+                logger.critical("RISK GATE FAIL-CLOSED: halt state unreadable")
+                return
+        if blob is None:
+            blob = _latest_journal_halt()
+        if not blob:
+            return
+        with self._lock:
+            self._apply_halt_blob_unlocked(blob)
+            cleared = self._maybe_auto_reset_unlocked()
+            snapshot = (
+                self._halted,
+                self._halt_reason,
+                self._halt_kind,
+                self._halt_date,
+            )
+        if cleared:
+            _write_halt_state(
+                halted=False, reason="", kind="", halt_date=None
+            )
+            _journal_halt("auto-reset new ET day", "resume")
+        elif snapshot[0]:
+            logger.critical(
+                "RISK GATE RESTORED (%s): %s", snapshot[2], snapshot[1]
+            )
 
     def halt(self, reason: str, *, kind: str = "halt") -> None:
         with self._lock:
             self._halted = True
             self._halt_reason = reason or "halted"
             self._halt_kind = kind or "halt"
-            self._halt_date = date.today()
+            self._halt_date = session_date()
             logger.critical(
                 f"RISK GATE HALTED ({self._halt_kind}): {self._halt_reason}"
             )
+            self._persist_halt_unlocked()
         _journal_halt(self._halt_reason, self._halt_kind)
 
     def resume(self) -> None:
@@ -568,41 +825,49 @@ class RiskGate:
             self._halt_kind = ""
             self._halt_date = None
             logger.warning("RISK GATE RESUMED")
+            self._persist_halt_unlocked()
         _journal_halt("manual resume", "resume")
+
+    def _read_halt_field(self, name: str) -> Any:
+        with self._lock:
+            cleared = self._maybe_auto_reset_unlocked()
+            value = getattr(self, name)
+        if cleared:
+            _write_halt_state(
+                halted=False, reason="", kind="", halt_date=None
+            )
+            _journal_halt("auto-reset new ET day", "resume")
+        return value
 
     @property
     def is_halted(self) -> bool:
-        with self._lock:
-            self._maybe_auto_reset_unlocked()
-            return self._halted
+        return bool(self._read_halt_field("_halted"))
 
     @property
     def halt_reason(self) -> str:
-        with self._lock:
-            self._maybe_auto_reset_unlocked()
-            return self._halt_reason
+        return str(self._read_halt_field("_halt_reason"))
 
     @property
     def halt_kind(self) -> str:
-        with self._lock:
-            self._maybe_auto_reset_unlocked()
-            return self._halt_kind
+        return str(self._read_halt_field("_halt_kind"))
 
-    def _maybe_auto_reset_unlocked(self) -> None:
+    def _maybe_auto_reset_unlocked(self) -> bool:
         if not self._halted or not self.auto_reset_on_new_day:
-            return
-        if self._halt_date is None or self._halt_date >= date.today():
-            return
+            return False
+        today = session_date()
+        if self._halt_date is None or self._halt_date >= today:
+            return False
         if self._halt_kind not in _AUTO_RESET_HALT_KINDS:
-            return
+            return False
         logger.info(
-            f"Risk gate auto-reset on new day (kind={self._halt_kind}, "
+            f"Risk gate auto-reset on new ET day (kind={self._halt_kind}, "
             f"was halted {self._halt_date}: {self._halt_reason})"
         )
         self._halted = False
         self._halt_reason = ""
         self._halt_kind = ""
         self._halt_date = None
+        return True
 
     # ------------------------------------------------------------------
     # Peak equity (drawdown gate — self-clearing, no halt latch)
@@ -635,7 +900,7 @@ class RiskGate:
 
     def record_entry(self) -> None:
         """Increment the daily entry counter after a successful dispatch."""
-        today = date.today().isoformat()
+        today = session_date().isoformat()
         with self._lock:
             if self._trade_date != today:
                 self._trade_date = today
@@ -643,7 +908,7 @@ class RiskGate:
             self._daily_trades += 1
 
     def daily_trade_count(self) -> int:
-        today = date.today().isoformat()
+        today = session_date().isoformat()
         with self._lock:
             if self._trade_date != today:
                 return 0
@@ -651,7 +916,7 @@ class RiskGate:
 
     def reset_daily_trades(self) -> None:
         with self._lock:
-            self._trade_date = date.today().isoformat()
+            self._trade_date = session_date().isoformat()
             self._daily_trades = 0
 
     # ------------------------------------------------------------------
@@ -682,81 +947,91 @@ class RiskGate:
     # ------------------------------------------------------------------
 
     async def pre_trade_check(
-        self, proposal: OrderProposal, connector: Any
+        self, proposal: OrderProposal, connector: Any, cfg: Any = None
     ) -> Tuple[bool, str]:
-        """Return (ok, reason). Exits/management always pass."""
+        """Return (ok, reason). Exits/management always pass.
+
+        ``risk_gates_enabled`` only switches optional capital-sizing
+        (peak-dd, % position / risk / premium, concentration, mop).
+        Daily-loss, defined-risk, cash-only, and the halt latch stay armed.
+        """
         if is_exit_or_management(proposal):
             return True, "exit/management bypass"
 
-        cfg = get_config()
+        if cfg is None:
+            cfg = get_config()
         # defined_risk_only is an operator hard gate, not a paper-gates toggle.
-        ok_dr, why_dr = check_defined_risk_only(proposal)
+        ok_dr, why_dr = check_defined_risk_only(proposal, cfg)
         if not ok_dr:
             return False, why_dr
 
-        if not cfg.risk_gates_enabled:
-            return True, "risk gates disabled"
+        # Always-armed: explicit 1100 stale fact. Missing is not stale.
+        stale = ibkr_data_stale_reason(connector=connector)
+        if stale:
+            return False, stale
 
         if self.is_halted:
             return False, f"Trading halted: {self.halt_reason}"
 
-        try:
-            account = await connector.get_account_summary()
-        except Exception as e:
-            return False, f"Risk gate fail-closed: cannot read account summary ({e})"
-
-        if not isinstance(account, dict) or account.get("error"):
-            err = account.get("error") if isinstance(account, dict) else "invalid account"
-            return False, f"Risk gate fail-closed: cannot read account summary ({err})"
-
-        nl_state, net_liq = _account_number_state(
-            account, "netliquidation", "NetLiquidation"
-        )
-        pnl_state, daily_pnl = _account_number_state(account, "dailypnl", "DailyPnL")
-        if nl_state != "ok" or net_liq is None or net_liq <= 0:
-            return False, "Risk gate fail-closed: NetLiquidation unavailable or non-positive"
-        # Missing DailyPnL is flat (IBKR often omits it early session). A
-        # present but non-finite tag is unknown — fail-closed when the
-        # daily-loss breaker is armed (not gated on sizing_floors), and
-        # never treat NaN as "no loss".
         floors_on = sizing_floors_active(cfg)
         breaker_on = cfg.daily_loss_limit_pct > 0
-        if pnl_state == "unreadable" and breaker_on:
-            return False, "Risk gate fail-closed: DailyPnL unreadable"
-        if daily_pnl is None:
-            daily_pnl = 0.0
+        cash_on = bool(getattr(cfg, "cash_only", False))
+        gates_on = bool(getattr(cfg, "risk_gates_enabled", True))
+        need_account = breaker_on or cash_on or gates_on
+        account: dict[str, Any] = {}
+        net_liq: Optional[float] = None
+        daily_pnl = 0.0
+        book = 0.0
 
-        self.update_equity(net_liq)
-        book = risk_base_usd(net_liq, cfg)
+        if need_account:
+            try:
+                account = await connector.get_account_summary()
+            except Exception as e:
+                return False, f"Risk gate fail-closed: cannot read account summary ({e})"
 
-        # Fail-closed: option tickets must carry a price (no sizing on a lie).
-        if proposal.strategy in OPTION_STRATEGIES:
-            opt_notional = estimate_notional(proposal)
-            if opt_notional is None:
-                return False, "size_unknown_notional"
+            stale = ibkr_data_stale_reason(
+                account=account if isinstance(account, dict) else None,
+                connector=connector,
+            )
+            if stale:
+                return False, stale
+
+            if not isinstance(account, dict) or account.get("error"):
+                err = account.get("error") if isinstance(account, dict) else "invalid account"
+                return False, f"Risk gate fail-closed: cannot read account summary ({err})"
+
+            nl_state, net_liq = _account_number_state(
+                account, "netliquidation", "NetLiquidation"
+            )
+            pnl_state, daily_pnl_raw = _account_number_state(
+                account, "dailypnl", "DailyPnL"
+            )
+            if nl_state != "ok" or net_liq is None or net_liq <= 0:
+                return False, "Risk gate fail-closed: NetLiquidation unavailable or non-positive"
+            # Missing DailyPnL is flat (IBKR often omits it early session). A
+            # present but non-finite tag is unknown — fail-closed when the
+            # daily-loss breaker is armed (not gated on sizing_floors), and
+            # never treat NaN as "no loss".
+            if pnl_state == "unreadable" and breaker_on:
+                return False, "Risk gate fail-closed: DailyPnL unreadable"
+            daily_pnl = 0.0 if daily_pnl_raw is None else daily_pnl_raw
+
+            self.update_equity(net_liq)
+            book = risk_base_usd(net_liq, cfg)
 
         if breaker_on:
             limit = -(cfg.daily_loss_limit_pct / 100.0) * book
             if daily_pnl <= limit:
-                day_pct = _pct_of_nl(daily_pnl, book)
+                day_pct = pct_of_nl(daily_pnl, book)
                 reason = (
                     f"daily_loss {day_pct} <= -{cfg.daily_loss_limit_pct}"
                 )
                 self.halt(reason, kind="daily_loss")
                 return False, reason
 
-        if floors_on and cfg.max_peak_drawdown_pct > 0:
-            peak = self.peak_equity
-            if peak is not None and peak > 0:
-                floor = peak * (1.0 - cfg.max_peak_drawdown_pct / 100.0)
-                if net_liq <= floor:
-                    dd_pct = round(100.0 * (1.0 - float(net_liq) / float(peak)), 4)
-                    return False, (
-                        f"peak_drawdown {dd_pct} > {cfg.max_peak_drawdown_pct}"
-                    )
-
-        # cash_only structural: no short stock (always). % cash check only when floors ON.
-        if cfg.cash_only:
+        # cash_only is a constitution floor: no short stock, and notional
+        # cannot exceed cash — even when paper sizing_floors / gates are off.
+        if cash_on:
             direction = getattr(proposal.params, "direction", None)
             if (
                 proposal.strategy in ("bracket", "market_bracket")
@@ -766,34 +1041,56 @@ class RiskGate:
                     "Cash-only mode: SHORT stock brackets are rejected "
                     "(no short selling). Set ABCXAUTO_CASH_ONLY=false to allow."
                 )
-            if floors_on:
-                cash = _account_float(
-                    account,
-                    "TotalCashValue",
-                    "totalcashvalue",
-                    "AvailableFunds",
-                    "availablefunds",
+            cash = _account_float(
+                account,
+                "TotalCashValue",
+                "totalcashvalue",
+                "AvailableFunds",
+                "availablefunds",
+            )
+            if cash is None:
+                return False, (
+                    "Risk gate fail-closed: cash-only mode requires TotalCashValue "
+                    "(or AvailableFunds) in account summary"
                 )
-                if cash is None:
+            notional = estimate_notional(proposal)
+            if notional is None:
+                return False, "size_unknown_notional"
+            if notional > cash:
+                return False, (
+                    f"size_cash {pct_of_nl(notional, book)} > "
+                    f"{pct_of_nl(cash, book)}"
+                )
+
+        if not gates_on:
+            return True, "risk gates disabled"
+
+        # Fail-closed: option tickets must carry a price (no sizing on a lie).
+        if proposal.strategy in OPTION_STRATEGIES:
+            opt_notional = estimate_notional(proposal)
+            if opt_notional is None:
+                return False, "size_unknown_notional"
+
+        if floors_on and cfg.max_peak_drawdown_pct > 0:
+            peak = self.peak_equity
+            if peak is not None and peak > 0:
+                floor = peak * (1.0 - cfg.max_peak_drawdown_pct / 100.0)
+                if net_liq is not None and net_liq <= floor:
+                    dd_pct = round(100.0 * (1.0 - float(net_liq) / float(peak)), 4)
                     return False, (
-                        "Risk gate fail-closed: cash-only mode requires TotalCashValue "
-                        "(or AvailableFunds) in account summary"
-                    )
-                notional = estimate_notional(proposal)
-                if notional is None:
-                    return False, "size_unknown_notional"
-                if notional > cash:
-                    return False, (
-                        f"size_cash {_pct_of_nl(notional, book)} > "
-                        f"{_pct_of_nl(cash, book)}"
+                        f"peak_drawdown {dd_pct} > {cfg.max_peak_drawdown_pct}"
                     )
 
         if floors_on and cfg.max_position_pct > 0:
             notional = estimate_notional(proposal)
             if notional is None:
                 return False, "size_unknown_notional"
-            notional_pct = _pct_of_nl(notional, book)
-            if notional_pct > cfg.max_position_pct:
+            notional_pct = pct_of_nl(notional, book)
+            if (
+                notional_pct is None
+                or not math.isfinite(notional_pct)
+                or notional_pct > cfg.max_position_pct
+            ):
                 return False, (
                     f"size_max_position {notional_pct} > {cfg.max_position_pct}"
                 )
@@ -803,20 +1100,28 @@ class RiskGate:
                 risked = estimate_bracket_risk_dollars(proposal)
                 if risked is None:
                     return False, "size_unknown_notional"
-                risked_pct = _pct_of_nl(risked, book)
-                if risked_pct > cfg.max_risk_per_trade_pct:
+                risked_pct = pct_of_nl(risked, book)
+                if (
+                    risked_pct is None
+                    or not math.isfinite(risked_pct)
+                    or risked_pct > cfg.max_risk_per_trade_pct
+                ):
                     return False, (
                         f"size_risk_per_trade {risked_pct} > "
                         f"{cfg.max_risk_per_trade_pct}"
                     )
             elif proposal.strategy in OPTION_STRATEGIES:
-                notional = estimate_notional(proposal)
-                if notional is None:
+                risked = estimate_option_risk_dollars(proposal)
+                if risked is None:
                     return False, "size_unknown_notional"
-                notional_pct = _pct_of_nl(notional, book)
-                if notional_pct > cfg.max_risk_per_trade_pct:
+                risked_pct = pct_of_nl(risked, book)
+                if (
+                    risked_pct is None
+                    or not math.isfinite(risked_pct)
+                    or risked_pct > cfg.max_risk_per_trade_pct
+                ):
                     return False, (
-                        f"size_risk_per_trade {notional_pct} > "
+                        f"size_risk_per_trade {risked_pct} > "
                         f"{cfg.max_risk_per_trade_pct}"
                     )
 
@@ -824,8 +1129,12 @@ class RiskGate:
             notional = estimate_notional(proposal)
             if notional is None:
                 return False, "size_unknown_notional"
-            notional_pct = _pct_of_nl(notional, book)
-            if notional_pct > cfg.max_option_premium_pct:
+            notional_pct = pct_of_nl(notional, book)
+            if (
+                notional_pct is None
+                or not math.isfinite(notional_pct)
+                or notional_pct > cfg.max_option_premium_pct
+            ):
                 return False, (
                     f"size_option_premium {notional_pct} > "
                     f"{cfg.max_option_premium_pct}"
@@ -858,8 +1167,8 @@ class RiskGate:
             if held is None:
                 return False, "size_symbol_concentration unknown"
             after = held + float(notional)
-            after_pct = _pct_of_nl(after, book)
-            if not math.isfinite(after_pct) or after_pct > concentration_pct:
+            after_pct = pct_of_nl(after, book)
+            if after_pct is None or not math.isfinite(after_pct) or after_pct > concentration_pct:
                 return False, (
                     f"size_symbol_concentration {after_pct} > {concentration_pct}"
                 )
@@ -893,13 +1202,13 @@ def get_risk_gate() -> RiskGate:
     global _gate
     with _gate_lock:
         if _gate is None:
-            _gate = RiskGate()
+            _gate = RiskGate(restore=True)
         return _gate
 
 
-def reset_risk_gate() -> RiskGate:
-    """Replace the singleton (for tests)."""
+def reset_risk_gate(*, restore: bool = False) -> RiskGate:
+    """Replace the singleton (for tests). ``restore=True`` simulates a restart."""
     global _gate
     with _gate_lock:
-        _gate = RiskGate()
+        _gate = RiskGate(restore=restore)
         return _gate

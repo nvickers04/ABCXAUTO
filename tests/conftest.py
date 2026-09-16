@@ -223,6 +223,17 @@ def _pcs_kill_look_off_unless_marked(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_halt_state(tmp_path, monkeypatch):
+    """Halt latch is durable; do not write the live data/state file."""
+    monkeypatch.setenv("ABCXAUTO_HALT_STATE_PATH", str(tmp_path / "halt_state.json"))
+    from abcxauto.risk_gates import reset_risk_gate
+
+    reset_risk_gate()
+    yield
+    reset_risk_gate()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_desk_state(tmp_path, monkeypatch):
     """Pytest must not clobber the live last_turn / wake files."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "grok_wake.json"))

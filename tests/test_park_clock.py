@@ -54,6 +54,11 @@ def test_resolve_stay_up_session_fills_blank_rth_and_premarket(monkeypatch):
         resolve_stay_up_session("", now=datetime(2026, 8, 27, 17, 0, tzinfo=et))
         == ""
     )
+    # Thanksgiving 2026 is a Thursday holiday — not a weekday-RTH fill.
+    assert (
+        resolve_stay_up_session("", now=datetime(2026, 11, 26, 10, 16, tzinfo=et))
+        == ""
+    )
 
 
 def test_first_boot_wakes_once():
@@ -460,6 +465,22 @@ def test_remaining_to_bell_and_start_looks_now(tmp_path, monkeypatch):
     save_alarm(GrokAlarm(wake_at=bell, set_at=bell))
     assert start_looks_now(minutes_to_open=32) is True
     assert start_looks_now(minutes_to_open=6 * 60) is False
+
+
+def test_start_looks_now_honors_closed_alarm_after_rth_bell(tmp_path, monkeypatch):
+    """session=closed leftover park sits Start after 09:30. Fail closed."""
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    from abcxauto.park_clock import GrokAlarm, save_alarm, start_looks_now
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    now = datetime(2026, 9, 16, 10, 16, tzinfo=ZoneInfo("America/New_York"))
+    later = (now + timedelta(minutes=5)).astimezone(timezone.utc).isoformat()
+    save_alarm(GrokAlarm(wake_at=later, set_at=later, session="closed"))
+    assert start_looks_now(now=now) is False
+    save_alarm(GrokAlarm(wake_at=later, set_at=later))
+    assert start_looks_now(now=now) is True
 
 
 def test_infer_session_before_open_splits_overnight_from_premarket():
