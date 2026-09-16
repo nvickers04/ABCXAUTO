@@ -2180,7 +2180,7 @@ def _regime_from_opps(opportunities: list[dict], pulse: dict) -> dict[str, Any]:
 
 def _portfolio_risk(
     positions: list[dict],
-    net_liq: float,
+    net_liq: float | None,
     *,
     total_cash: float | None = None,
 ) -> dict[str, Any]:
@@ -2253,7 +2253,7 @@ class WorldState:
     flat: bool
     needs_protection: bool
     unprotected: list[str]
-    net_liquidation: float
+    net_liquidation: float | None
     daily_pnl: float
     positions: list[dict]
     open_orders: list[dict]
@@ -2361,23 +2361,20 @@ def build_world_state(
     protection = snap.get("protection") or {}
     unprotected = list(protection.get("unprotected_symbols") or [])
     session = str((pulse.get("session") or {}).get("status") or "").lower()
-    try:
-        net = float(account_float(acct, "netliquidation", "NetLiquidation") or 0)
-    except (TypeError, ValueError):
-        net = 0.0
+    net = account_float(acct, "netliquidation", "NetLiquidation")
+    if net is None:
+        raw = snap.get("net_liquidation")
+        if raw is not None:
+            try:
+                net = float(raw)
+            except (TypeError, ValueError):
+                net = None
     pnl = daily_pnl_of(acct)
     if pnl is None:
         pnl = 0.0
-    try:
-        total_cash = float(
-            acct.get("totalcashvalue")
-            or acct.get("TotalCashValue")
-            or acct.get("total_cash")
-            or acct.get("TotalCash")
-            or 0
-        )
-    except (TypeError, ValueError):
-        total_cash = 0.0
+    total_cash = account_float(
+        acct, "totalcashvalue", "TotalCashValue", "total_cash", "TotalCash"
+    )
 
     cfg = get_config()
     posture = str(getattr(cfg, "risk_posture", "") or "")

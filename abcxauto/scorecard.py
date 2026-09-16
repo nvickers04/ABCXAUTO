@@ -488,9 +488,14 @@ def compute_scorecard(
         except Exception:
             pass
 
+    nl_unknown = current is None
     book_pnl = None
     book_return_pct = None
-    if current is not None and startup is not None and startup > 0:
+    if nl_unknown:
+        current = None
+        book_pnl = None
+        book_return_pct = None
+    elif current is not None and startup is not None and startup > 0:
         try:
             current = float(current)
             book_pnl = current - float(startup)
@@ -718,6 +723,7 @@ def compute_scorecard(
         "book": book,
         "startup_cash": start_base,
         "net_liquidation": current,
+        "nl_unknown": nl_unknown,
         "book_pnl": book_pnl,
         "book_return_pct": book_return_pct,
         "model_calls": int(usage.get("calls") or 0),

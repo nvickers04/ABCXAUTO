@@ -250,7 +250,7 @@ def build_book(
     )
     port = _portfolio_risk(
         positions,
-        float(net_liq) if net_liq is not None else 0.0,
+        net_liq,
         total_cash=total_cash,
     )
     state: Dict[str, Any] = {

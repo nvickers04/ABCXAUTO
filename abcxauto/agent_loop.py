@@ -25,6 +25,7 @@ from abcxauto.trade_plan import (
 )
 from abcxauto.world_state import (
     WorldState,
+    account_float,
     capacity_allows_new_risk,
 )
 
@@ -184,23 +185,49 @@ async def _tool(c: Any, n: str, a: dict | None = None) -> Any:
         return {"error": f"{n}: bad json"}
 
 
-async def snap(c: Any) -> dict:
+_SNAP_FETCHES = (
+    ("account_summary", None, "account_summary"),
+    ("positions", None, "positions"),
+    ("open_orders", None, "open_orders"),
+    ("market_hours", None, "market_hours"),
+    ("quote", {"symbol": "SPY"}, "quote SPY"),
+    ("quote", {"symbol": "VIX"}, "quote VIX"),
+)
+
+
+async def _snap_one(c: Any, name: str, args: dict | None, label: str) -> Any:
     try:
-        acct, pos, orders, hours, spy, vix = await asyncio.wait_for(
-            asyncio.gather(
-                _tool(c, "account_summary"),
-                _tool(c, "positions"),
-                _tool(c, "open_orders"),
-                _tool(c, "market_hours"),
-                _tool(c, "quote", {"symbol": "SPY"}),
-                _tool(c, "quote", {"symbol": "VIX"}),
-                return_exceptions=True,
-            ),
-            timeout=SNAP_S,
-        )
+        return await asyncio.wait_for(_tool(c, name, args), timeout=SNAP_S)
     except asyncio.TimeoutError:
-        logger.warning("snap timed out after %.0fs", SNAP_S)
-        acct = pos = orders = hours = spy = vix = TimeoutError("snap")
+        return TimeoutError(label)
+
+
+async def snap(c: Any) -> dict:
+    raw = await asyncio.gather(
+        *[
+            _snap_one(c, name, args, label)
+            for name, args, label in _SNAP_FETCHES
+        ],
+        return_exceptions=True,
+    )
+    lost: list[str] = []
+    survived: list[str] = []
+    mapped: list[Any] = []
+    for (_name, _args, label), item in zip(_SNAP_FETCHES, raw):
+        if isinstance(item, Exception):
+            lost.append(label)
+            mapped.append(item)
+        else:
+            survived.append(label)
+            mapped.append(item)
+    if lost:
+        logger.warning(
+            "snap lost %s after %.0fs; survived %s",
+            ",".join(lost),
+            SNAP_S,
+            ",".join(survived) or "none",
+        )
+    acct, pos, orders, hours, spy, vix = mapped
     pos_ok = isinstance(pos, list)
     ord_ok = isinstance(orders, list)
     if isinstance(acct, Exception):
@@ -217,14 +244,28 @@ async def snap(c: Any) -> dict:
         vix = {}
     pl = pos if isinstance(pos, list) else []
     ol = orders if isinstance(orders, list) else []
-    acct_d = acct if isinstance(acct, dict) else {}
-    try:
-        acct_nl = float(
-            acct_d.get("netliquidation") or acct_d.get("NetLiquidation") or 0
-        )
-    except (TypeError, ValueError):
-        acct_nl = 0.0
-    acct_ok = acct_nl > 0
+    acct_d = dict(acct) if isinstance(acct, dict) else {}
+    acct_nl = account_float(acct_d, "netliquidation", "NetLiquidation")
+    nl_source = "account_summary" if acct_nl is not None else None
+    if acct_nl is None:
+        try:
+            cached = float(getattr(c, "net_liquidation", 0) or 0)
+        except (TypeError, ValueError):
+            cached = 0.0
+        if cached > 0:
+            acct_nl = cached
+            nl_source = "connector_cache"
+            acct_d["NetLiquidation"] = acct_nl
+            acct_d["netliquidation"] = acct_nl
+            try:
+                cash = float(getattr(c, "cash_value", 0) or 0)
+            except (TypeError, ValueError):
+                cash = 0.0
+            if cash > 0:
+                acct_d.setdefault("TotalCashValue", cash)
+                acct_d.setdefault("totalcashvalue", cash)
+    # Fresh account_summary with a positive NL. Overlay is display-only.
+    acct_ok = nl_source == "account_summary" and acct_nl is not None and acct_nl > 0
     taken = datetime.now(timezone.utc).isoformat()
     protection = build_protection_report(pl, ol)
     # Explicit True only — a missing ibkr_data_stale must not flip the flag.
@@ -240,6 +281,11 @@ async def snap(c: Any) -> dict:
         "book_unreliable": (not (pos_ok and ord_ok and acct_ok)) or stale_book,
         "ibkr_live_quotes": _seed_live_quotes(spy, vix),
         "candle_source": "none",
+        "net_liquidation": acct_nl,
+        "nl_source": nl_source,
+        "snap_lost": lost,
+        "snap_survived": survived,
+        "snap_incomplete": bool(lost),
     }
     base["reality_pulse"] = build_reality_pulse(
         account=base["account"], positions=pl, open_orders=ol,
