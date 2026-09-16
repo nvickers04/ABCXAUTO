@@ -1,6 +1,7 @@
 """Operator click handlers for the Pro cockpit. Same engine seams."""
 from __future__ import annotations
 
+import json
 import logging
 
 import flet as ft
@@ -111,6 +112,109 @@ class ActionsMixin:
         self._sync_widgets()
         self._sync_risk_page(force=True)
         self._safe_update()
+
+
+    def _open_flatten_confirm_dialog(self, _=None) -> None:
+        """Confirm first — Flatten All is the broker nuclear option."""
+
+        def _cancel(_e=None) -> None:
+            dlg.open = False
+            self._safe_update()
+
+        def _confirm(_e=None) -> None:
+            dlg.open = False
+            self._flatten_all()
+            self._safe_update()
+
+        dlg = ft.AlertDialog(
+            modal=True,
+            bgcolor=SURFACE,
+            title=ft.Text("Flatten All?", color=TEXT),
+            content=ft.Text(
+                "Cancels working orders and closes lots at the broker. "
+                "This is not Halt — Halt only blocks new risk.",
+                size=13,
+                color=MUTED,
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=_cancel),
+                ft.TextButton(
+                    "Flatten All",
+                    on_click=_confirm,
+                    style=ft.ButtonStyle(color=RED),
+                ),
+            ],
+            shape=ft.RoundedRectangleBorder(radius=16),
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self._safe_update()
+
+
+    def _flatten_all(self) -> None:
+        """Marshalled engine.panic() once. Never asyncio.run."""
+        self._flatten_waiting = True
+        self.engine.panic()
+        self._toast("Flattening…", color=AMBER)
+        self._sync_widgets()
+
+
+    @staticmethod
+    def _flatten_outcome(result: object) -> tuple[str, str]:
+        """Honest line. flatten_all sets success=True even when lots remain."""
+        if not isinstance(result, dict) or not result:
+            return "Flatten failed", RED
+        err = str(result.get("error") or "").strip()
+        try:
+            closed = int(result.get("positions_closed") or 0)
+            total = int(result.get("positions_total") or 0)
+            cancelled = int(result.get("orders_cancelled") or 0)
+            orders = int(result.get("orders_total") or 0)
+        except (TypeError, ValueError):
+            closed = total = cancelled = orders = 0
+        errors = [str(item) for item in (result.get("errors") or []) if item]
+        if err and total == 0 and orders == 0 and not errors:
+            return f"Flatten failed: {err}", RED
+        still = max(total - closed, 0)
+        bits: list[str] = []
+        if total:
+            bits.append(f"{closed}/{total} lots closed")
+        else:
+            bits.append("no lots to close")
+        if orders:
+            bits.append(f"{cancelled}/{orders} orders cancelled")
+        leftover_orders = max(orders - cancelled, 0)
+        partial = bool(errors) or still > 0 or leftover_orders > 0
+        if still:
+            bits.append(f"{still} still open")
+        if errors:
+            bits.append(str(errors[0])[:96])
+        if partial:
+            return "Partial flatten — " + " · ".join(bits), AMBER
+        return "Flattened — " + " · ".join(bits), GREEN
+
+
+    def _maybe_finish_flatten_report(self) -> None:
+        if not getattr(self, "_flatten_waiting", False):
+            return
+        for rec in reversed(list(self.engine.state.records or [])):
+            kind = str(rec.get("type") or "")
+            msg = rec.get("msg")
+            if kind == "panic":
+                payload = msg
+                if isinstance(msg, str):
+                    try:
+                        payload = json.loads(msg)
+                    except json.JSONDecodeError:
+                        payload = {}
+                line, color = self._flatten_outcome(payload)
+                self._flatten_waiting = False
+                self._toast(line, color=color)
+                return
+            if kind == "error" and "PANIC ERROR" in str(msg or ""):
+                self._flatten_waiting = False
+                self._toast(str(msg), color=RED)
+                return
 
 
     def _copy_stream(self, _=None) -> None:
