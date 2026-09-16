@@ -371,6 +371,13 @@ def collect_would_refuse(
             )
     except Exception:
         logger.debug("preview kill-look check failed", exc_info=True)
+        try:
+            from abcxauto.thin_rth_kill_look import kill_look_rth
+
+            if kill_look_rth(sess):
+                reasons.append("kill-look gate failed closed")
+        except Exception:
+            reasons.append("kill-look gate failed closed")
 
     if world is not None:
         try:

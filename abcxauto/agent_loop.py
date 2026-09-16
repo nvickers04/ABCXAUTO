@@ -628,23 +628,28 @@ async def execute_ticket(
             return blocked
     except Exception:
         logger.debug("kill-look send gate failed", exc_info=True)
+        asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
+        note = "kill-look gate failed closed"
         try:
             from abcxauto.thin_rth_kill_look import REASON_MODEL_COST, kill_look_rth
 
             if kill_look_rth(sess):
-                params = act.get("params") if isinstance(act.get("params"), dict) else {}
-                asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
-                if is_new_risk(asked, params):
-                    note = "kill-look gate failed closed"
-                    _record_clerk_block(act, asked, note, stage="kill_look")
-                    return {
-                        "status": "blocked",
-                        "note": note,
-                        "reason_code": REASON_MODEL_COST,
-                        "strategy": "blocked",
-                    }
+                _record_clerk_block(act, asked, note, stage="kill_look")
+                return {
+                    "status": "blocked",
+                    "note": note,
+                    "reason_code": REASON_MODEL_COST,
+                    "strategy": "blocked",
+                }
         except Exception:
             logger.debug("kill-look fail-closed fallback failed", exc_info=True)
+            _record_clerk_block(act, asked, note, stage="kill_look")
+            return {
+                "status": "blocked",
+                "note": note,
+                "reason_code": "kill_look_failed_closed",
+                "strategy": "blocked",
+            }
     positions = list(snap.get("positions") or world.positions or [])
     orders = list(snap.get("open_orders") or world.open_orders or [])
     asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
@@ -1043,7 +1048,7 @@ async def _reconcile_protection_after_snap(c: Any, s: dict) -> None:
 
 
 def _scan_hit_last(snap: dict | None, symbol: str) -> float | None:
-    """IBKR last from this look's scan row. Not MDA tape as live."""
+    """IBKR last from this look's scan row. Never MDA ``row.last``."""
     want = str(symbol or "").upper()
     if not want or not isinstance(snap, dict):
         return None
@@ -1052,13 +1057,13 @@ def _scan_hit_last(snap: dict | None, symbol: str) -> float | None:
         if not isinstance(row, dict) or str(row.get("symbol") or "").upper() != want:
             continue
         ibkr = row.get("ibkr") if isinstance(row.get("ibkr"), dict) else {}
-        for raw in (ibkr.get("last"), row.get("last")):
-            try:
-                v = float(raw)
-            except (TypeError, ValueError):
-                continue
-            if v > 0:
-                return v
+        raw = ibkr.get("last")
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            return v
     return None
 
 
