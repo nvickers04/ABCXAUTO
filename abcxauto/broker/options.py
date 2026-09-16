@@ -227,7 +227,7 @@ class IBKROptionsMixin:
                         tick = await getter(combo)
                     except Exception:
                         tick = 0.01
-                limit_price = round_to_min_tick(limit_price, tick)
+                limit_price = round_to_min_tick(limit_price, tick, action=combo_action)
                 order.lmtPrice = float(limit_price)
             order.tif = 'DAY'
             order.transmit = True
@@ -286,7 +286,7 @@ class IBKROptionsMixin:
                         tick = await getter(combo)
                     except Exception:
                         tick = 0.01
-                limit_price = round_to_min_tick(limit_price, tick)
+                limit_price = round_to_min_tick(limit_price, tick, action=combo_action)
                 order.lmtPrice = float(limit_price)
             order.tif = 'DAY'
             order.transmit = True
@@ -416,7 +416,7 @@ class IBKROptionsMixin:
                         tick = await getter(opt)
                     except Exception:
                         tick = 0.01
-                limit_price = round_to_min_tick(limit_price, tick)
+                limit_price = round_to_min_tick(limit_price, tick, action=action)
                 order.lmtPrice = limit_price
             order.tif = 'DAY'
             order.transmit = True
@@ -1153,7 +1153,7 @@ class IBKROptionsMixin:
                         tick = await getter(contract)
                     except Exception:
                         tick = 0.01
-                limit_price = round_to_min_tick(limit_price, tick)
+                limit_price = round_to_min_tick(limit_price, tick, action=action)
                 order.lmtPrice = limit_price
             order.tif = 'DAY'
             order.transmit = True
