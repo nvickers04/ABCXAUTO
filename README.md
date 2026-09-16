@@ -89,10 +89,10 @@ Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limit
 
 - **Pro** — Flet cockpit + Grok think stream
 - **Book / positions** — lots, working orders, fills
-- **Risk** — floor display + Halt / Resume / Panic. Knob fields are tighten-only (the writers clamp to the floor); gate switches may re-arm a floor, never disarm one
+- **Risk** — floor display + Halt / Resume / Flatten All. Knob fields are tighten-only (the writers clamp to the floor); gate switches may re-arm a floor, never disarm one
 - **Scorecard** — book return % of starting NetLiq vs model cost
 
-Kill switch: Stop agent, Risk Halt, Panic, `Ctrl+C` on headless, or `python -m abcxauto --cleanup`. Positions stay at IBKR. Open risk is a multi-plan book reconciled from the broker (`active_trade_plans.json`).
+Kill switch: Stop agent, Risk Halt, Flatten All, `Ctrl+C` on headless, or `python -m abcxauto --cleanup`. Positions stay at IBKR. Open risk is a multi-plan book reconciled from the broker (`active_trade_plans.json`).
 
 ## 4. Run
 
