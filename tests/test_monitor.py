@@ -618,3 +618,35 @@ def test_market_active_fails_closed_on_calendar_error(monkeypatch):
     assert mon._market_active() is False
 
 
+def test_detect_pace_wakes_halt_state_change(monkeypatch):
+    """Rising and falling halt both emit. Unchanged halt does not."""
+    from types import SimpleNamespace
+
+    from abcxauto.monitor import PortfolioMonitor
+    from abcxauto.risk_gates import get_risk_gate, reset_risk_gate
+
+    reset_risk_gate()
+    wakes: list[str] = []
+    mon = PortfolioMonitor(
+        SimpleNamespace(emit=lambda *_a, **_k: None),
+        SimpleNamespace(),
+        on_wake=wakes.append,
+    )
+    empty = {
+        "protection": {"unprotected_symbols": []},
+        "fills": [],
+        "positions": [],
+        "open_orders": [],
+    }
+    mon._detect_pace_wakes(empty)
+    assert wakes == []
+    get_risk_gate().halt("test halt", kind="halt")
+    mon._detect_pace_wakes(empty)
+    assert wakes == ["halt"]
+    mon._detect_pace_wakes(empty)
+    assert wakes == ["halt"]
+    get_risk_gate().resume()
+    mon._detect_pace_wakes(empty)
+    assert wakes == ["halt", "halt"]
+    reset_risk_gate()
+

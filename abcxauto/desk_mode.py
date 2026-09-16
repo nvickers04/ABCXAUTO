@@ -165,9 +165,8 @@ def research_keep_looking(session: str = "") -> bool:
     premarket session keeps looking (news / scan / web, overwrite the brief)
     until RTH roll, operator stop, or an overnight park that still applies.
     RTH with open lots or working orders still waits for a real poke.
-    Flat paper RTH with nothing to manage re-enters via
-    ``rth_flat_keep_looking`` — not this path. Closed / postmarket stay
-    parked. Blank labels do not clock-fill into a mill — the host passes the
+    Flat paper RTH with nothing to manage waits for a real event —
+    not this path. Closed / postmarket stay parked. Blank labels do not clock-fill into a mill — the host passes the
     resolved snap label.
     """
     raw = str(session or "").strip().lower()
@@ -248,30 +247,15 @@ def rth_flat_keep_looking(
     snap: dict | None = None,
     desk_fact: str = "",
 ) -> bool:
-    """True when a finished paper RTH look has nothing to manage — re-enter.
+    """Words-only paper RTH waits for a real event. Never a pulse mill.
 
-    Paper RTH + known-flat snap + no open lots + no working orders.
-    Condition-wait ("next look if SPY breaks 761") with no wake is a hang.
-    An unchanged WOM lead still sits for fill / order_change — even when
-    the snap looks empty. Blank labels fail closed. Live ports do not
-    stay-up this way. Not a sit-wake clock and not a SYSTEM_PROMPT sermon.
+    LOOK.md: words only -> stop calling the model. Wait for fill /
+    order_change / unprotected / operator poke / a lead fact that
+    actually changed. An unchanged flat book is not a new fact.
     """
-    raw = str(session or "").strip().lower()
-    if raw in ("", "unknown"):
-        return False
-    sess = desk_session(raw)
-    if sess != RTH_SESSION:
-        return False
-    try:
-        from abcxauto.park_clock import paper_stay_up
+    _ = session, snap, desk_fact
+    return False
 
-        if not paper_stay_up(sess):
-            return False
-    except Exception:
-        return False
-    if _desk_fact_is_wom(desk_fact):
-        return False
-    return _snap_is_known_flat_no_manage(snap)
 
 
 # Spoken CLOSE/EXIT on an open lot is not a finished RTH look when send never

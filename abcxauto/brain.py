@@ -1137,8 +1137,8 @@ def _open_wake(
             if desk_fact_is_duplicate(prev, wake) and not keep_looking:
                 # Same lead-fact identity (set / list / tick). A look may
                 # end — do not append a fresh go-do-desk developer turn.
-                # Research / flat-RTH keep-looking still append: no broker
-                # poke will come.
+                # Research keep-looking still appends: no broker poke will
+                # come. Words-only flat RTH waits for a real event.
                 g._wake_n = int(getattr(g, "_wake_n", 0) or 0) + 1
                 return live
             live.append(developer(wake))

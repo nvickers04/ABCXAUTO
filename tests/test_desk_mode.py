@@ -81,15 +81,15 @@ def _flat_rth_snap():
     return {"positions": [], "open_orders": [], "fills": []}
 
 
-def test_rth_flat_keep_looking_is_paper_rth_flat_only(monkeypatch):
-    """Condition-wait forever on a flat book is the hang. Soften=FAIL nameless/7496."""
+def test_rth_flat_keep_looking_never_mills_a_words_only_flat(monkeypatch):
+    """Words-only flat RTH is not a pulse mill. Soften=FAIL nameless/7496."""
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
     monkeypatch.setattr(
         "abcxauto.config.Config.is_paper",
         property(lambda self: True),
     )
     flat = _flat_rth_snap()
-    assert rth_flat_keep_looking("regular", flat) is True
+    assert rth_flat_keep_looking("regular", flat) is False
     assert rth_flat_keep_looking("regular", None) is False
     assert rth_flat_keep_looking("regular", {}) is False
     assert rth_flat_keep_looking("regular", {"positions": []}) is False
