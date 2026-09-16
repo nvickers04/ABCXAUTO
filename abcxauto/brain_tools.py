@@ -1061,7 +1061,8 @@ AGENT_TOOLS = [
     tool(
         name="option_quote",
         description=(
-            "IBKR live bid/ask/last for one option or contracts[] (max 8). "
+            "IBKR live bid/ask/last for one option, contracts[] (max 8), "
+            "or a vertical BAG net (long_strike + short_strike). "
             "MDA greeks delayed if present — not send geometry."
         ),
         parameters=_schema(
@@ -1070,6 +1071,14 @@ AGENT_TOOLS = [
                 "expiration": {"type": "string", "description": "YYYYMMDD"},
                 "strike": {"type": "number"},
                 "right": {"type": "string", "description": "C or P"},
+                "long_strike": {
+                    "type": "number",
+                    "description": "Vertical long (BUY) strike. With short_strike: live BAG net.",
+                },
+                "short_strike": {
+                    "type": "number",
+                    "description": "Vertical short (SELL) strike. With long_strike: live BAG net.",
+                },
                 "contracts": {
                     "type": "array",
                     "items": {
@@ -1336,6 +1345,70 @@ async def _mda_news(symbols: list[str], *, per_symbol: int = 4) -> list[dict[str
     if not syms:
         return []
     return await fetch_symbols_news(syms, per_symbol=per_symbol)
+
+
+def _combo_quote_spec(args: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Vertical BAG quote args. long_strike + short_strike, not a single strike."""
+    src = args if isinstance(args, dict) else {}
+    syms = normalize_tickers(src.get("symbol"))
+    if not syms:
+        return None
+    exp = src.get("expiration") or src.get("expiry")
+    right = str(src.get("right") or "").upper().strip()
+    if right in {"CALL"}:
+        right = "C"
+    elif right in {"PUT"}:
+        right = "P"
+    else:
+        right = right[:1]
+    long_k = src.get("long_strike")
+    short_k = src.get("short_strike")
+    if long_k in (None, "") or short_k in (None, "") or not exp or right not in {"C", "P"}:
+        return None
+    try:
+        long_f = float(long_k)
+        short_f = float(short_k)
+    except (TypeError, ValueError):
+        return None
+    return {
+        "symbol": syms[0],
+        "expiration": str(exp).replace("-", "").strip(),
+        "long_strike": long_f,
+        "short_strike": short_f,
+        "right": right,
+    }
+
+
+async def _one_combo_quote(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
+    """Live IBKR BAG net via get_live_vertical_bag_quote. Never MDA."""
+    live_fn = getattr(connector, "get_live_vertical_bag_quote", None)
+    if not callable(live_fn):
+        return {
+            "error": "IBKR combo quote unavailable",
+            "source": "ibkr",
+            "sec": "BAG",
+            **spec,
+        }
+    live = await live_fn(
+        spec["symbol"],
+        spec["expiration"],
+        spec["long_strike"],
+        spec["short_strike"],
+        spec["right"],
+    )
+    if not isinstance(live, dict):
+        live = {}
+    out = dict(live)
+    out.update({
+        "symbol": spec["symbol"],
+        "expiration": spec.get("expiration") or live.get("expiration"),
+        "long_strike": spec["long_strike"],
+        "short_strike": spec["short_strike"],
+        "right": spec["right"],
+        "sec": live.get("sec") or "BAG",
+        "use": "ibkr_live_combo_net",
+    })
+    return out
 
 
 async def _one_option_quote(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
@@ -2076,6 +2149,16 @@ async def _run_tool(
             return _hub()._clip(chains[0])
         return _hub()._clip({"source": "ibkr", "chains": chains})
     if name == "option_quote":
+        combo = _combo_quote_spec(args)
+        if combo:
+            row = await _one_combo_quote(connector, combo)
+            try:
+                from abcxauto.look_snapshot import record_look_tool
+
+                record_look_tool(snap, "option_quote", row)
+            except Exception:
+                logger.debug("look snapshot option_quote record failed", exc_info=True)
+            return _hub()._clip(row)
         specs = option_quote_specs(args)
         if not specs:
             return json.dumps({"error": "symbol, expiration, strike, right required", "source": "ibkr"})
@@ -2301,6 +2384,8 @@ __all__ = [
     '_publish_vol',
     '_compact_chain',
     '_mda_news',
+    '_combo_quote_spec',
+    '_one_combo_quote',
     '_one_option_quote',
     '_run_tool',
 ]

@@ -506,7 +506,17 @@ async def test_execute_ticket_named_vertical_not_blocked_by_size_pct_nl_shadow(
         "option_quote",
         {
             "symbol": "SPY",
-            "ibkr": {"last": 5.0, "bid": 4.9, "ask": 5.1, "mid": 5.0},
+            "expiration": "20260718",
+            "long_strike": 500.0,
+            "short_strike": 505.0,
+            "right": "C",
+            "sec": "BAG",
+            "bid": 4.9,
+            "ask": 5.1,
+            "last": 5.0,
+            "mid": 5.0,
+            "source": "ibkr",
+            "freshness": "live",
         },
     )
     result = await execute_ticket(
