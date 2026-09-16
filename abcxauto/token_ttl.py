@@ -175,7 +175,30 @@ def issue_place_token(
         "payload": payload,
     }
     _store[token_id] = rec
+    prune_place_tokens(now=clock)
     return dict(rec)
+
+
+def prune_place_tokens(*, now: Any = None) -> int:
+    """Drop expired / used store rows. Unbounded otherwise on a long desk."""
+    clock = _unix(now)
+    if clock is None:
+        clock = time.time()
+    dead: list[str] = []
+    for key, rec in list(_store.items()):
+        if not isinstance(rec, dict):
+            dead.append(key)
+            continue
+        if token_expired(
+            rec.get("issued_at"),
+            expires_at=rec.get("expires_at"),
+            now=clock,
+            ttl_s=rec.get("ttl_s"),
+        ):
+            dead.append(key)
+    for key in dead:
+        _store.pop(key, None)
+    return len(dead)
 
 
 def peek_place_token(token_id: Any) -> dict[str, Any] | None:
@@ -343,6 +366,7 @@ __all__ = [
     "peek_place_token",
     "place_token_block",
     "reset_place_tokens_for_tests",
+    "prune_place_tokens",
     "stamp_token",
     "ticket_is_exit",
     "token_expired",

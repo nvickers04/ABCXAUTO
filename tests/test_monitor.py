@@ -515,3 +515,63 @@ def test_detect_pace_wakes_without_callback_is_silent():
     )
 
 
+def test_fill_wake_ignores_fills_without_exec_id():
+    from types import SimpleNamespace
+
+    from abcxauto.monitor import PortfolioMonitor, fill_exec_key
+
+    assert fill_exec_key({"symbol": "IWM", "shares": 1, "time": "t"}) == ""
+    assert fill_exec_key({"execId": "E1"}) == "E1"
+    wakes: list[str] = []
+    mon = PortfolioMonitor(
+        SimpleNamespace(emit=lambda *_a, **_k: None),
+        SimpleNamespace(),
+        on_wake=wakes.append,
+    )
+    empty = {
+        "protection": {"unprotected_symbols": []},
+        "fills": [{"exec_id": "e1", "symbol": "IWM"}],
+        "positions": [],
+        "open_orders": [],
+    }
+    mon._detect_pace_wakes(empty)
+    mon._detect_pace_wakes(
+        {
+            **empty,
+            "fills": [
+                {"exec_id": "e1", "symbol": "IWM"},
+                {"symbol": "IWM", "side": "BOT", "shares": 1, "time": "t"},
+                {"order_id": 99, "symbol": "IWM"},
+            ],
+        }
+    )
+    assert "fill" not in wakes
+    mon._detect_pace_wakes(
+        {
+            **empty,
+            "fills": [
+                {"exec_id": "e1", "symbol": "IWM"},
+                {"exec_id": "e2", "symbol": "IWM"},
+            ],
+        }
+    )
+    assert wakes == ["fill"]
+
+
+def test_market_active_fails_closed_on_calendar_error(monkeypatch):
+    from types import SimpleNamespace
+
+    from abcxauto.monitor import PortfolioMonitor
+
+    def boom():
+        raise RuntimeError("no calendar")
+
+    monkeypatch.setattr("abcxauto.monitor.get_session_info", boom)
+    mon = PortfolioMonitor(
+        SimpleNamespace(emit=lambda *_a, **_k: None),
+        SimpleNamespace(),
+    )
+    assert mon._market_active() is False
+    assert mon._market_active() is False
+
+

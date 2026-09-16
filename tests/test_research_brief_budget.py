@@ -273,3 +273,22 @@ async def test_grok_turn_does_not_bill_after_brief_halt(monkeypatch):
     assert turn.loop_halted is True
     assert (turn.last_result or {}).get("reason_code") == REASON_BRIEF_LOOP
     assert card_row(CARD, WINDOW)["turns"] == 7
+
+
+def test_budget_reloads_when_operator_edits_file(tmp_path, monkeypatch):
+    import json
+    import time
+
+    path = tmp_path / "research_budget.json"
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BUDGET_PATH", str(path))
+    reset_research_budget()
+    open_research_card(CARD, WINDOW)
+    note_brief_turn(CARD, WINDOW, cost_usd=0.10)
+    assert card_row(CARD, WINDOW)["turns"] == 1
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    key = f"{CARD}::{WINDOW}"
+    raw["cards"][key]["turns"] = 4
+    time.sleep(0.02)
+    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    assert card_row(CARD, WINDOW)["turns"] == 4
+    assert not (tmp_path / "research_budget.json.tmp").exists()

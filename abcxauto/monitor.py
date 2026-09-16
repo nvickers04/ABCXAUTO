@@ -28,6 +28,18 @@ logger = logging.getLogger(__name__)
 WakeCallback = Callable[[str], None]
 
 
+def fill_exec_key(fill: Any) -> str:
+    """Stable fill identity. Missing exec_id is unknown — not a colliding fallback."""
+    if not isinstance(fill, dict):
+        return ""
+    return str(
+        fill.get("execId")
+        or fill.get("exec_id")
+        or fill.get("execution_id")
+        or ""
+    ).strip()
+
+
 def _account_float(account: Dict[str, Any], *keys: str) -> Optional[float]:
     for key in keys:
         if key in account and account[key] is not None:
@@ -466,21 +478,9 @@ class PortfolioMonitor:
 
         fill_keys: set[str] = set()
         for f in snapshot.get("fills") or []:
-            if not isinstance(f, dict):
-                continue
-            key = str(
-                f.get("execId")
-                or f.get("exec_id")
-                or f.get("execution_id")
-                or f.get("orderId")
-                or f.get("order_id")
-                or ""
-            )
-            if not key:
-                key = (
-                    f"{f.get('symbol')}|{f.get('side')}|{f.get('shares')}|{f.get('time')}"
-                )
-            fill_keys.add(key)
+            key = fill_exec_key(f)
+            if key:
+                fill_keys.add(key)
         if self._prev_fill_keys and (fill_keys - self._prev_fill_keys):
             self._emit_wake("fill")
         if fill_keys:
@@ -645,7 +645,10 @@ class PortfolioMonitor:
         try:
             session = get_session_info().get("session")
         except Exception:
-            return True  # fail open — better to review than to skip
+            if not getattr(self, "_calendar_warned", False):
+                logger.warning("monitor calendar failed — treating market inactive")
+                self._calendar_warned = True
+            return False
         if session == "regular":
             return True
         if self.cfg.monitor_extended_hours and session in ("premarket", "postmarket"):
