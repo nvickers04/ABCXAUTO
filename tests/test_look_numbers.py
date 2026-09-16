@@ -11,6 +11,7 @@ from abcxauto.look_snapshot import (
     begin_look,
     check_ticket_numbers,
     record_look_tool,
+    snapshot_bags,
     ticket_claims,
 )
 from abcxauto.llm import SYSTEM_PROMPT
@@ -900,3 +901,339 @@ async def test_bracket_close_empty_cache_is_not_number_gated(monkeypatch):
     assert "limit_price" not in str(result.get("note") or "")
     # Later geometry may still refuse; this gate must not.
     assert sent == [] or result.get("status") == "ok"
+
+# extra tests appended by combo-net fix — keep helpers local to this block
+
+def _record_ibkr_opt_leg(
+    snap: dict,
+    *,
+    symbol: str,
+    expiration: str,
+    strike: float,
+    right: str,
+    bid: float,
+    ask: float,
+    mid: float | None = None,
+    last: float | None = None,
+) -> None:
+    if mid is None:
+        mid = round((bid + ask) / 2.0, 4)
+    record_look_tool(
+        snap,
+        "option_quote",
+        {
+            "symbol": symbol,
+            "expiration": expiration,
+            "strike": strike,
+            "right": right,
+            "ibkr": {
+                "last": last if last is not None else mid,
+                "bid": bid,
+                "ask": ask,
+                "mid": mid,
+                "source": "ibkr",
+                "freshness": "live",
+            },
+        },
+    )
+
+
+def _spy_750_745_ticket(*, limit_price: float, closing: bool = False) -> dict:
+    return {
+        "symbol": "SPY",
+        "expiration": "20260918",
+        "right": "P",
+        "long_strike": 750.0,
+        "short_strike": 745.0,
+        "quantity": 1,
+        "limit_price": limit_price,
+        "closing_position": closing,
+    }
+
+
+def _record_spy_750_745_legs(snap: dict) -> None:
+    # Live refusal 2026-09-16: 750P 2.27/2.28, 745P 1.47/1.48, sent 0.78.
+    _record_ibkr_opt_leg(
+        snap,
+        symbol="SPY",
+        expiration="20260918",
+        strike=750.0,
+        right="P",
+        bid=2.27,
+        ask=2.28,
+        mid=2.275,
+    )
+    _record_ibkr_opt_leg(
+        snap,
+        symbol="SPY",
+        expiration="20260918",
+        strike=745.0,
+        right="P",
+        bid=1.47,
+        ask=1.48,
+        mid=1.475,
+    )
+
+
+def test_spy_750_745p_net_078_is_allowed_from_leg_prints():
+    """Exact live case: natural credit ~0.80, sent 0.78 as new risk."""
+    snap: dict = {}
+    begin_look(snap)
+    _record_spy_750_745_legs(snap)
+    ok, code, msg = check_ticket_numbers(
+        "vertical_spread",
+        _spy_750_745_ticket(limit_price=0.78),
+        snap,
+    )
+    assert ok is True, msg
+    assert code == "ok"
+    assert msg == ""
+
+
+def test_live_bag_quote_is_found_and_verifies_combo_net():
+    snap: dict = {}
+    begin_look(snap)
+    record_look_tool(
+        snap,
+        "option_quote",
+        {
+            "symbol": "SPY",
+            "expiration": "20260918",
+            "long_strike": 750.0,
+            "short_strike": 745.0,
+            "right": "P",
+            "sec": "BAG",
+            "bid": 0.79,
+            "ask": 0.81,
+            "last": 0.80,
+            "mid": 0.80,
+            "source": "ibkr",
+            "freshness": "live",
+        },
+    )
+    by_inst = snapshot_bags(snap)
+    bag_keys = [k for k in by_inst if k[0] == "BAG"]
+    assert bag_keys, f"BAG row stored but not keyed as BAG: {list(by_inst)}"
+    want_pair = tuple(sorted((int(round(745.0 * 10000.0)), int(round(750.0 * 10000.0)))))
+    assert any(
+        k[1] == "SPY" and k[2] == "20260918" and k[3] == "P" and k[4] == want_pair
+        for k in bag_keys
+    ), bag_keys
+    # Wildcard OPT-without-strike would also verify a *different* combo.
+    other = dict(_spy_750_745_ticket(limit_price=0.80))
+    other["long_strike"] = 740.0
+    other["short_strike"] = 735.0
+    other_ok, other_code, other_msg = check_ticket_numbers(
+        "vertical_spread", other, snap
+    )
+    assert other_ok is False
+    assert other_code == REASON_CODE
+    assert "0.8" in other_msg
+    for px in (0.79, 0.80, 0.81):
+        ok, code, msg = check_ticket_numbers(
+            "vertical_spread",
+            _spy_750_745_ticket(limit_price=px),
+            snap,
+        )
+        assert ok is True, (px, msg)
+        assert code == "ok"
+
+
+def test_nok_014_inside_derived_combo_range_is_allowed():
+    snap: dict = {}
+    begin_look(snap)
+    _record_ibkr_opt_leg(
+        snap, symbol="NOK", expiration="20260925", strike=10.0, right="C",
+        bid=0.31, ask=0.35, mid=0.33,
+    )
+    _record_ibkr_opt_leg(
+        snap, symbol="NOK", expiration="20260925", strike=10.5, right="C",
+        bid=0.16, ask=0.18, mid=0.17,
+    )
+    ticket = {
+        "symbol": "NOK",
+        "expiration": "20260925",
+        "right": "C",
+        "long_strike": 10.0,
+        "short_strike": 10.5,
+        "limit_price": 0.14,
+        "closing_position": False,
+    }
+    ok, code, msg = check_ticket_numbers("vertical_spread", ticket, snap)
+    assert ok is True, msg
+    assert code == "ok"
+    far = dict(ticket)
+    far["limit_price"] = 0.60
+    bad, bcode, bmsg = check_ticket_numbers("vertical_spread", far, snap)
+    assert bad is False
+    assert bcode == REASON_CODE
+    assert "0.6" in bmsg
+    assert "option_quote" in bmsg
+    assert "long_strike" in bmsg
+    assert "short_strike" in bmsg
+    assert "derived_combo" in bmsg
+    assert "0.13" in bmsg
+    assert "0.19" in bmsg
+
+
+def test_mda_price_cannot_verify_combo_net():
+    snap: dict = {}
+    begin_look(snap)
+    record_look_tool(
+        snap,
+        "option_quote",
+        {
+            "symbol": "SPY",
+            "expiration": "20260918",
+            "strike": 750.0,
+            "right": "P",
+            "ibkr": {"error": "no IBKR tick yet", "source": "ibkr"},
+            "mda": {
+                "last": 0.78,
+                "bid": 2.27,
+                "ask": 2.28,
+                "mid": 2.275,
+                "source": "marketdata",
+                "freshness": "delayed",
+            },
+        },
+    )
+    record_look_tool(
+        snap,
+        "option_quote",
+        {
+            "symbol": "SPY",
+            "expiration": "20260918",
+            "strike": 745.0,
+            "right": "P",
+            "ibkr": {"error": "no IBKR tick yet", "source": "ibkr"},
+            "mda": {
+                "last": 0.78,
+                "bid": 1.47,
+                "ask": 1.48,
+                "mid": 1.475,
+                "source": "marketdata",
+                "freshness": "delayed",
+            },
+        },
+    )
+    ok, code, msg = check_ticket_numbers(
+        "vertical_spread",
+        _spy_750_745_ticket(limit_price=0.78),
+        snap,
+    )
+    assert ok is False
+    assert code == REASON_CODE
+    assert "0.78" in msg
+
+
+def test_prior_look_number_cannot_verify_combo_net():
+    snap: dict = {}
+    begin_look(snap)
+    _record_spy_750_745_legs(snap)
+    begin_look(snap)
+    ok, code, msg = check_ticket_numbers(
+        "vertical_spread",
+        _spy_750_745_ticket(limit_price=0.78),
+        snap,
+    )
+    assert ok is False
+    assert code == REASON_CODE
+    assert "0.78" in msg
+    assert "legs missing from this look's cache" in msg
+
+
+def test_single_leg_print_does_not_verify_combo_net():
+    snap: dict = {}
+    begin_look(snap)
+    _record_ibkr_opt_leg(
+        snap,
+        symbol="SPY",
+        expiration="20260918",
+        strike=750.0,
+        right="P",
+        bid=2.27,
+        ask=2.28,
+        mid=2.275,
+    )
+    ok, code, msg = check_ticket_numbers(
+        "vertical_spread",
+        _spy_750_745_ticket(limit_price=2.27),
+        snap,
+    )
+    assert ok is False
+    assert code == REASON_CODE
+    assert "2.27" in msg
+    assert "option_quote" in msg
+    assert "long_strike" in msg
+
+
+def test_combo_refusal_names_tool_and_derived_market():
+    snap: dict = {}
+    begin_look(snap)
+    _record_ibkr_opt_leg(
+        snap, symbol="NOK", expiration="20260925", strike=10.0, right="C",
+        bid=0.31, ask=0.35, mid=0.33,
+    )
+    _record_ibkr_opt_leg(
+        snap, symbol="NOK", expiration="20260925", strike=10.5, right="C",
+        bid=0.16, ask=0.18, mid=0.17,
+    )
+    ok, code, msg = check_ticket_numbers(
+        "vertical_spread",
+        {
+            "symbol": "NOK",
+            "expiration": "20260925",
+            "right": "C",
+            "long_strike": 10.0,
+            "short_strike": 10.5,
+            "limit_price": 0.60,
+            "closing_position": False,
+        },
+        snap,
+    )
+    assert ok is False
+    assert code == REASON_CODE
+    assert "option_quote" in msg
+    assert "long_strike" in msg
+    assert "short_strike" in msg
+    assert "derived_combo bid=0.13" in msg
+    assert "ask=0.19" in msg
+
+
+def test_omitted_limit_price_on_new_risk_combo_is_refused():
+    snap: dict = {}
+    begin_look(snap)
+    _record_spy_750_745_legs(snap)
+    params = _spy_750_745_ticket(limit_price=0.78)
+    del params["limit_price"]
+    ok, code, msg = check_ticket_numbers("vertical_spread", params, snap)
+    assert ok is False
+    assert code == REASON_CODE
+    assert "limit_price" in msg
+    mkt = dict(params)
+    mkt["order_type"] = "MKT"
+    mok, mcode, mmsg = check_ticket_numbers("vertical_spread", mkt, snap)
+    assert mok is False
+    assert mcode == REASON_CODE
+    assert "limit_price" in mmsg
+
+
+@pytest.mark.asyncio
+async def test_closing_vertical_still_not_number_gated(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+
+    legs = _nok_legs()
+    sent = _capture_send(monkeypatch)
+    ticket = _nok_ticket(closing=True)
+    ticket["params"]["limit_price"] = 4.50
+    result = await execute_ticket(
+        ticket,
+        MagicMock(),
+        _world(flat=False, positions=legs),
+        _empty_look_snap(legs),
+    )
+    assert result.get("reason_code") != REASON_CODE
+    assert "stale_or_invented_number" not in str(result.get("note") or "")
+    assert result.get("status") == "ok"
+    assert sent and sent[0]["params"]["limit_price"] == 4.50

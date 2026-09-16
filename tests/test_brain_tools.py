@@ -1769,6 +1769,94 @@ async def test_option_quote_batches_contracts(monkeypatch):
 
 
 @pytest.mark.asyncio
+
+@pytest.mark.asyncio
+async def test_option_quote_combo_uses_live_bag_quote(monkeypatch):
+    seen: list[tuple] = []
+
+    class Conn:
+        async def get_live_vertical_bag_quote(
+            self, symbol, expiration, long_strike, short_strike, right
+        ):
+            seen.append((symbol, expiration, long_strike, short_strike, right))
+            return {
+                "symbol": symbol,
+                "expiration": expiration,
+                "long_strike": long_strike,
+                "short_strike": short_strike,
+                "right": right,
+                "sec": "BAG",
+                "bid": 0.79,
+                "ask": 0.81,
+                "last": 0.80,
+                "mid": 0.80,
+                "source": "ibkr",
+                "freshness": "live",
+            }
+
+        async def get_live_option_quote(self, *_a, **_k):
+            raise AssertionError("combo path must not quote single legs")
+
+    def _no_mda():
+        raise AssertionError("combo path must not call MDA")
+
+    monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", _no_mda)
+    snap: dict = {}
+    out = json.loads(
+        await _run_tool(
+            "option_quote",
+            {
+                "symbol": "SPY",
+                "expiration": "20260918",
+                "right": "P",
+                "long_strike": 750.0,
+                "short_strike": 745.0,
+            },
+            connector=Conn(),
+            world=_world(),
+            snap=snap,
+            turn=BrainTurn(),
+        )
+    )
+    assert seen == [("SPY", "20260918", 750.0, 745.0, "P")]
+    assert out["sec"] == "BAG"
+    assert out["bid"] == 0.79
+    assert out["ask"] == 0.81
+    assert out["last"] == 0.80
+    assert out["mid"] == 0.80
+    assert out["long_strike"] == 750.0
+    assert out["short_strike"] == 745.0
+    assert out["use"] == "ibkr_live_combo_net"
+    from abcxauto.look_snapshot import check_ticket_numbers, snapshot_bags
+
+    keys = [k for k in snapshot_bags(snap) if k[0] == "BAG"]
+    assert keys, snapshot_bags(snap)
+    ok, code, msg = check_ticket_numbers(
+        "vertical_spread",
+        {
+            "symbol": "SPY",
+            "expiration": "20260918",
+            "right": "P",
+            "long_strike": 750.0,
+            "short_strike": 745.0,
+            "limit_price": 0.80,
+        },
+        snap,
+    )
+    assert ok is True, msg
+    assert code == "ok"
+
+
+def test_option_quote_schema_names_combo_strikes():
+    props = _tool_props("option_quote")
+    assert "long_strike" in props
+    assert "short_strike" in props
+    assert "strike" in props
+    desc = str(getattr(_tool_fn("option_quote"), "description", "") or "")
+    assert "long_strike" in desc
+    assert "BAG" in desc
+
+
 async def test_status_tool():
     class Conn:
         connected = True
