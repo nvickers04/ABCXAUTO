@@ -187,6 +187,26 @@ class PagesMixin:
                                 spacing=2,
                                 tight=True,
                             ),
+                            ft.Container(width=28),
+                            ft.Column(
+                                [
+                                    ft.Text("Fill slip", size=12, color=MUTED),
+                                    self.lbl_sc_slip,
+                                    self.lbl_sc_slip_sub,
+                                ],
+                                spacing=2,
+                                tight=True,
+                            ),
+                            ft.Container(width=28),
+                            ft.Column(
+                                [
+                                    ft.Text("Model $", size=12, color=MUTED),
+                                    self.lbl_sc_spend,
+                                    self.lbl_sc_spend_sub,
+                                ],
+                                spacing=2,
+                                tight=True,
+                            ),
                         ],
                         spacing=12,
                         wrap=True,
@@ -276,6 +296,17 @@ class PagesMixin:
                                     color=MUTED,
                                 ),
                                 self.col_risk_knobs,
+                            ),
+                            self._section(
+                                "Gate rejections",
+                                ft.Text(
+                                    "Refused gates this RTH session and today. "
+                                    "Reason, count, latest example.",
+                                    size=11,
+                                    color=MUTED,
+                                ),
+                                self.lbl_risk_gates,
+                                self.col_risk_gates,
                             ),
                             self._section(
                                 "Size floors",

@@ -1,6 +1,7 @@
 """Engine-to-widget sync for the Pro cockpit. Paint only — same cadence."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -748,7 +749,6 @@ class SyncMixin:
         Throttled by ``_sync_active_page`` — ``force`` is accepted so the page
         builder and the refresh control can paint immediately.
         """
-        _ = force
         self.lbl_sc_netliq.value = self.lbl_equity.value
         self.lbl_sc_netliq.color = self.lbl_equity.color
         sc: dict = {}
@@ -810,6 +810,9 @@ class SyncMixin:
         else:
             self.lbl_sc_strats.value = "Types used: none yet"
             self.lbl_sc_strats.color = MUTED
+        self._paint_fill_quality()
+        self._paint_model_spend()
+        self._schedule_desk_stats(force=force)
 
 
     def _sync_sc_windows(self, sc: dict) -> None:
@@ -1006,6 +1009,265 @@ class SyncMixin:
             bits.append(f"room ${room:,.2f}")
         self.lbl_risk_halt_math.value = " · ".join(bits) or "connect IBKR for the halt math"
         self.lbl_risk_halt_math.color = MUTED
+        self._paint_gate_rejections()
+        self._schedule_desk_stats(force=force)
+
+
+    # ------------------------------------------------------------ desk stats
+    # gate_rejections / fill_quality / model_spend only. Cached for
+    # PAGE_REFRESH_S — fill_quality joins send_marks and can hitch.
+
+    @staticmethod
+    def _desk_stats_clock(ts: Any) -> str:
+        text = str(ts or "").strip()
+        if not text:
+            return ""
+        try:
+            when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return when.astimezone().strftime("%H:%M")
+        except (OSError, OverflowError, TypeError, ValueError):
+            if "T" in text and len(text) >= 16:
+                return text[11:16]
+            return ""
+
+    @staticmethod
+    def _desk_stats_example(latest: Any) -> str:
+        if not isinstance(latest, dict) or not latest:
+            return "—"
+        bits: list[str] = []
+        symbol = str(latest.get("symbol") or "").strip()
+        strategy = str(latest.get("strategy") or "").strip()
+        if symbol and strategy:
+            bits.append(f"{symbol} {strategy}")
+        elif symbol or strategy:
+            bits.append(symbol or strategy)
+        else:
+            reason = str(latest.get("reason") or "").strip()
+            if reason:
+                bits.append(reason[:48])
+        clock = SyncMixin._desk_stats_clock(latest.get("ts"))
+        if clock:
+            bits.append(clock)
+        return " · ".join(bits) if bits else "—"
+
+    @staticmethod
+    def _desk_stats_reason(item: dict) -> str:
+        reason = str(item.get("reason") or "").strip() or "(none)"
+        stage = str(item.get("stage") or "").strip()
+        if stage and stage not in reason:
+            return f"{stage} · {reason}"
+        return reason
+
+    @staticmethod
+    def _window_total(block: Any) -> int:
+        if not isinstance(block, dict):
+            return 0
+        try:
+            return int(block.get("total") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _load_desk_stats(tab: str, equity: float | None) -> dict:
+        """Worker-thread reader. The UI paints from the cache only."""
+        from abcxauto.gate_stats import fill_quality, gate_rejections, model_spend
+
+        out: dict = {}
+        if tab == "risk":
+            try:
+                out["rejections"] = gate_rejections() or {}
+            except Exception:
+                out["rejections"] = {}
+        elif tab == "scorecard":
+            try:
+                out["fill_quality"] = fill_quality() or {}
+            except Exception:
+                out["fill_quality"] = {}
+            try:
+                out["model_spend"] = model_spend(equity=equity) or {}
+            except Exception:
+                out["model_spend"] = {}
+        return out
+
+    def _schedule_desk_stats(self, *, force: bool = False) -> None:
+        if self.tab not in ("risk", "scorecard"):
+            return
+        if force:
+            self._desk_stats_force = True
+        if self._desk_stats_inflight:
+            return
+        now = time.monotonic()
+        if (
+            not self._desk_stats_force
+            and now - float(self._desk_stats_last or 0) < PAGE_REFRESH_S
+        ):
+            return
+        runner = getattr(self.page, "run_task", None)
+        if not callable(runner):
+            return
+        try:
+            runner(self._refresh_desk_stats)
+        except Exception:
+            logger.debug("desk stats schedule failed", exc_info=True)
+
+    async def _refresh_desk_stats(self) -> None:
+        if self._desk_stats_inflight:
+            return
+        force = bool(self._desk_stats_force)
+        self._desk_stats_force = False
+        now = time.monotonic()
+        if not force and now - float(self._desk_stats_last or 0) < PAGE_REFRESH_S:
+            return
+        tab = self.tab
+        if tab not in ("risk", "scorecard"):
+            return
+        equity = None
+        try:
+            raw = getattr(self.engine.state, "equity", None)
+            equity = float(raw) if raw else None
+        except (TypeError, ValueError):
+            equity = None
+        self._desk_stats_inflight = True
+        self._desk_stats_last = now
+        try:
+            chunk = await asyncio.to_thread(self._load_desk_stats, tab, equity)
+            if not isinstance(chunk, dict):
+                chunk = {}
+            cache = dict(self._desk_stats or {})
+            cache.update(chunk)
+            self._desk_stats = cache
+        except Exception:
+            logger.debug("desk stats refresh failed", exc_info=True)
+        finally:
+            self._desk_stats_inflight = False
+        if tab == "risk":
+            self._paint_gate_rejections()
+        elif tab == "scorecard":
+            self._paint_fill_quality()
+            self._paint_model_spend()
+        self._safe_update()
+
+    def _paint_gate_rejections(self) -> None:
+        data = self._desk_stats.get("rejections")
+        if not isinstance(data, dict):
+            data = {}
+        sess = data.get("session") if isinstance(data.get("session"), dict) else {}
+        day = data.get("day") if isinstance(data.get("day"), dict) else {}
+        sess_n = self._window_total(sess)
+        day_n = self._window_total(day)
+        self.lbl_risk_gates.value = f"session {sess_n} · day {day_n}"
+        self.lbl_risk_gates.color = TEXT if (sess_n or day_n) else MUTED
+        reasons = sess.get("by_reason") if isinstance(sess.get("by_reason"), list) else []
+        window = "session"
+        if not reasons:
+            reasons = day.get("by_reason") if isinstance(day.get("by_reason"), list) else []
+            window = "day"
+        clean = [item for item in reasons if isinstance(item, dict)]
+        if not clean:
+            self.col_risk_gates.controls = [
+                ft.Text(
+                    "No gate rejections this session or today.",
+                    size=12,
+                    color=MUTED,
+                )
+            ]
+            return
+        rows: list[ft.Control] = [
+            self._head_row([("reason", 168), ("n", 36), ("latest", None)])
+        ]
+        if window == "day" and sess_n == 0:
+            rows.append(
+                ft.Text("Session is quiet — showing today.", size=11, color=MUTED)
+            )
+        for item in clean[:8]:
+            latest = self._desk_stats_example(item.get("latest"))
+            try:
+                count = int(item.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            rows.append(
+                self._blotter_row([
+                    self._cell(self._desk_stats_reason(item), width=168),
+                    self._cell(str(count), width=36, right=True),
+                    self._cell(latest, expand=True, color=MUTED),
+                ])
+            )
+        self.col_risk_gates.controls = rows
+
+    def _paint_fill_quality(self) -> None:
+        data = self._desk_stats.get("fill_quality")
+        if not isinstance(data, dict):
+            data = {}
+        sess = data.get("session") if isinstance(data.get("session"), dict) else {}
+        day = data.get("day") if isinstance(data.get("day"), dict) else {}
+        sagg = sess.get("aggregate") if isinstance(sess.get("aggregate"), dict) else {}
+        dagg = day.get("aggregate") if isinstance(day.get("aggregate"), dict) else {}
+        slip = sagg.get("sum_slippage_usd")
+        mean = sagg.get("mean_slippage_usd")
+        day_slip = dagg.get("sum_slippage_usd")
+        try:
+            n = int(sagg.get("n") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if isinstance(slip, (int, float)):
+            self.lbl_sc_slip.value = f"${slip:+,.2f}"
+            if slip > 0:
+                self.lbl_sc_slip.color = AMBER
+            elif slip < 0:
+                self.lbl_sc_slip.color = GREEN
+            else:
+                self.lbl_sc_slip.color = MUTED
+        else:
+            self.lbl_sc_slip.value = "—"
+            self.lbl_sc_slip.color = MUTED
+        if n <= 0 and not isinstance(slip, (int, float)):
+            self.lbl_sc_slip_sub.value = "no fills this session"
+        else:
+            noun = "fill" if n == 1 else "fills"
+            bits = [f"{n} {noun}"]
+            if isinstance(mean, (int, float)):
+                bits.append(f"mean ${mean:+,.2f}")
+            if isinstance(day_slip, (int, float)):
+                bits.append(f"day ${day_slip:+,.2f}")
+            self.lbl_sc_slip_sub.value = " · ".join(bits)
+        self.lbl_sc_slip_sub.color = MUTED
+
+    def _paint_model_spend(self) -> None:
+        data = self._desk_stats.get("model_spend")
+        if not isinstance(data, dict):
+            data = {}
+        sess = data.get("session") if isinstance(data.get("session"), dict) else {}
+        day = data.get("day") if isinstance(data.get("day"), dict) else {}
+        try:
+            cost = float(sess["model_cost_usd"]) if sess.get("model_cost_usd") is not None else None
+        except (TypeError, ValueError):
+            cost = None
+        try:
+            calls = int(sess.get("model_calls") or 0)
+        except (TypeError, ValueError):
+            calls = 0
+        try:
+            day_cost = (
+                float(day["model_cost_usd"]) if day.get("model_cost_usd") is not None else None
+            )
+        except (TypeError, ValueError):
+            day_cost = None
+        if cost is None:
+            self.lbl_sc_spend.value = "—"
+            self.lbl_sc_spend.color = MUTED
+            self.lbl_sc_spend_sub.value = "no model spend this session"
+        else:
+            self.lbl_sc_spend.value = f"${cost:,.2f}"
+            self.lbl_sc_spend.color = TEXT if cost else MUTED
+            if cost == 0 and calls == 0:
+                self.lbl_sc_spend_sub.value = "no model spend this session"
+            else:
+                noun = "call" if calls == 1 else "calls"
+                bits = [f"{calls} {noun}"]
+                if isinstance(day_cost, (int, float)):
+                    bits.append(f"day ${day_cost:,.2f}")
+                self.lbl_sc_spend_sub.value = " · ".join(bits)
+        self.lbl_sc_spend_sub.color = MUTED
 
 
     def _sync_settings_page(self, *, force: bool = False) -> None:
