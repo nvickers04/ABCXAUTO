@@ -289,9 +289,31 @@ class WidgetsMixin:
         self.col_sc_windows = ft.Column(spacing=3, tight=True)
         self.col_sc_cards = ft.Column(spacing=3, tight=True)
         self.col_sc_ledger = ft.Column(spacing=3, tight=True)
+        self.lbl_sc_slip = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=MUTED)
+        self.lbl_sc_slip_sub = ft.Text("no fills this session", size=11, color=MUTED)
+        self.lbl_sc_spend = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=MUTED)
+        self.lbl_sc_spend_sub = ft.Text("no model spend this session", size=11, color=MUTED)
+        self._desk_stats: dict = {}
+        self._desk_stats_last = 0.0
+        self._desk_stats_inflight = False
+        self._desk_stats_force = False
         # ---- Risk page
         self.lbl_risk_glance = ft.Text("", size=12, color=MUTED, selectable=True, no_wrap=False)
         self.col_risk_knobs = ft.Column(spacing=3, tight=True)
+        self.lbl_risk_gates = ft.Text(
+            "session 0 · day 0", size=12, color=MUTED, selectable=True
+        )
+        self.col_risk_gates = ft.Column(
+            [
+                ft.Text(
+                    "No gate rejections this session or today.",
+                    size=12,
+                    color=MUTED,
+                )
+            ],
+            spacing=3,
+            tight=True,
+        )
         self.lbl_risk_posture = ft.Text("—", size=13, weight=ft.FontWeight.W_600, color=TEXT)
         self.lbl_risk_floors = ft.Text("", size=12, color=MUTED, selectable=True)
         self.sw_size_floors = ft.Switch(
