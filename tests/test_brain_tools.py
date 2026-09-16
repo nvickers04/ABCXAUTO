@@ -4366,9 +4366,10 @@ async def test_send_then_empty_final_keeps_chat(monkeypatch):
     assert turn.failed is False
     assert turn.look_failed() is False
     assert getattr(g, "chat", None) is not None
-    # Empty GROK after send re-enters this chat (not look-end sit).
-    assert g.chat.n > 2
+    # Empty GROK after send ends the look. Same prompt is not re-billed.
+    assert g.chat.n == 2
     assert turn.trailing_empty_grok is True
+    assert turn.skip_identical_retry is True
 
 
 @pytest.mark.asyncio
@@ -4656,12 +4657,11 @@ async def test_empty_grok_after_tools_reenters_think_same_chat(monkeypatch):
     )
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
     assert "book" in turn.tool_trace
-    assert chat.n == 3
+    assert chat.n == 2
     assert turn.failed is False
-    assert turn.look_failed() is False
-    assert "holding IWM" in (turn.text or "")
     assert g.chat is chat
-    assert turn.trailing_empty_grok is False
+    assert turn.trailing_empty_grok is True
+    assert turn.skip_identical_retry is True
 
 
 @pytest.mark.asyncio
@@ -4731,12 +4731,12 @@ async def test_empty_grok_after_send_reenters_think_same_chat(monkeypatch):
     )
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
     assert turn.sends
-    assert chat.n == 3
+    assert chat.n == 2
     assert turn.failed is False
     assert turn.look_failed() is False
-    assert "QQQ calendar working" in (turn.text or "")
     assert g.chat is chat
-    assert turn.trailing_empty_grok is False
+    assert turn.trailing_empty_grok is True
+    assert turn.skip_identical_retry is True
 
 
 @pytest.mark.asyncio
@@ -4806,12 +4806,13 @@ async def test_empty_grok_after_option_quote_reenters_think_same_chat(monkeypatc
     )
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
     assert "option_quote" in turn.tool_trace
-    assert chat.n == 3
+    assert chat.n == 2
     assert turn.failed is False
     assert turn.look_failed() is False
-    assert "No ticket" in (turn.text or "")
+    assert "pulling SPY" in (turn.text or "")
     assert g.chat is chat
     assert turn.trailing_empty_grok is False
+    assert turn.trailing_think_only is True
     assert getattr(g, "_chat_had_work", False) is True
 
 
@@ -4870,9 +4871,10 @@ async def test_empty_grok_after_quote_or_book_reenters_same_chat(monkeypatch):
         )
         turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
         assert tool_name in turn.tool_trace
-        assert chat.n == 3
-        assert f"{tool_name} in" in (turn.text or "")
+        assert chat.n == 2
         assert g.chat is chat
+        assert turn.trailing_empty_grok is True
+        assert turn.skip_identical_retry is True
 
 
 @pytest.mark.asyncio
@@ -4922,9 +4924,10 @@ async def test_empty_grok_after_tools_does_not_loop_forever(monkeypatch):
         _wake_n=1,
     )
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
-    # 1 tool round + original empty + EMPTY_GROK_TRIES retries.
-    assert chat.n == 1 + 1 + EMPTY_GROK_TRIES
-    assert turn.trailing_empty_grok is True
+    # 1 tool round + one think-only. No identical paid retries.
+    assert chat.n == 2
+    assert turn.trailing_empty_grok is False
+    assert turn.trailing_think_only is True
     assert g.chat is chat
     assert turn.sends == []
 
@@ -4958,6 +4961,7 @@ def test_empty_grok_round_after_send_is_not_look_end():
     quoted = BrainTurn(text="", tool_trace=["option_quote"])
     assert _empty_grok_round_after_work(quoted, "", "empty") is True
     assert _empty_grok_round_after_work(quoted, "", "ok") is True
+    assert _empty_grok_round_after_work(quoted, "", "think_only") is False
     # Recover re-entry: fresh BrainTurn, work already on the kept chat.
     bare_recover = BrainTurn(text="")
     assert _empty_grok_round_after_work(
@@ -5060,10 +5064,10 @@ async def test_empty_after_poke_on_prior_grok_reenters_same_chat(monkeypatch):
     assert g.chat is live
     assert len(created) == 1
     assert second.poked is True
-    assert second.look_failed() is False
-    assert "lots still on" in (second.text or "")
-    assert int(getattr(live, "rounds", 0) or 0) >= 3
-    assert second.trailing_empty_grok is False
+    assert g.chat is live
+    assert int(getattr(live, "rounds", 0) or 0) == 2
+    assert second.trailing_empty_grok is True
+    assert second.skip_identical_retry is True
     clear_interrupt()
 
 
@@ -5111,9 +5115,8 @@ async def test_empty_after_poke_then_tools_reenters_same_chat(monkeypatch):
     )
     assert g.chat is live
     assert "book" in second.tool_trace
-    assert "book in" in (second.text or "")
-    assert second.look_failed() is False
-    assert second.trailing_empty_grok is False
+    assert second.trailing_empty_grok is True
+    assert second.skip_identical_retry is True
     clear_interrupt()
 
 
@@ -5148,7 +5151,7 @@ async def test_silent_grok_tip_wall_clock_aborts_without_stop_empty(monkeypatch)
     t0 = asyncio.get_event_loop().time()
     text, _resp, stop = await stream_round(chat, emit_stage=True)
     elapsed = asyncio.get_event_loop().time() - t0
-    assert stop == "empty"
+    assert stop == "think_only"
     assert not (text or "").strip()
     assert elapsed < 1.0
     # grok_turn on a kept chat recovers the silent tip.
@@ -5184,8 +5187,8 @@ async def test_silent_grok_tip_wall_clock_aborts_without_stop_empty(monkeypatch)
         _chat_had_work=False,
     )
     turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
-    assert "lots still on" in (turn.text or "")
-    assert turn.look_failed() is False
+    assert turn.trailing_think_only is True
+    assert turn.trailing_empty_grok is False
     assert g.chat is live
-    assert live.n >= 2
+    assert live.n == 1
 
