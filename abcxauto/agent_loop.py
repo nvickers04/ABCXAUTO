@@ -734,20 +734,29 @@ async def execute_ticket(
 
     _prepare_close_params(act, positions)
     params = act.get("params") if isinstance(act.get("params"), dict) else {}
-    try:
-        from abcxauto.look_snapshot import check_ticket_numbers
+    # is_new_risk is the clerk's "this is not new risk" predicate (gate_ticket).
+    # Exits/management never run look_numbers. Unknown book still fail-closes.
+    if is_new_risk(strat, params):
+        try:
+            from abcxauto.look_snapshot import check_ticket_numbers
 
-        ok_n, n_code, n_msg = check_ticket_numbers(strat, params, snap)
-    except Exception:
-        logger.debug("look-number gate failed closed", exc_info=True)
-        ok_n, n_code, n_msg = False, "stale_or_invented_number", (
-            "stale_or_invented_number: unverifiable this-look quote/option_quote/book"
-        )
-    if not ok_n:
+            ok_n, n_code, n_msg = check_ticket_numbers(strat, params, snap)
+        except Exception:
+            logger.debug("look-number gate failed closed", exc_info=True)
+            ok_n, n_code, n_msg = False, "stale_or_invented_number", (
+                "stale_or_invented_number: unverifiable this-look quote/option_quote/book"
+            )
+        if not ok_n:
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            act["rationale"] = n_msg
+            _record_clerk_block(act, asked, n_msg, stage="look_numbers")
+            return {"status": "blocked", "note": n_msg, "reason_code": n_code}
+    elif _book_unreliable(world, snap):
+        note = "book unreliable - fail-closed"
         act["strategy"] = act["action"] = BLOCKED_STRAT
-        act["rationale"] = n_msg
-        _record_clerk_block(act, asked, n_msg, stage="look_numbers")
-        return {"status": "blocked", "note": n_msg, "reason_code": n_code}
+        act["rationale"] = note
+        _record_clerk_block(act, asked, note, stage="book_unknown")
+        return {"status": "blocked", "note": note, "reason_code": "book_unreliable"}
 
     try:
         ok, vmsg = validate_action_against_inventory(act, positions)

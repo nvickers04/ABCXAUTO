@@ -609,8 +609,19 @@ def check_ticket_numbers(
         missing.append(f"{field}={val}")
     if not missing:
         return True, "ok", ""
+    if isinstance(params, dict) and params.get("closing_position") is True:
+        flag = "closing_position=true"
+    else:
+        flag = "closing_position=false"
+    if not bag.prints:
+        detail = "legs missing from this look's cache"
+    else:
+        shown = ", ".join(
+            f"{c / 10000.0:g}" for c in sorted(bag.prints)[:16]
+        )
+        detail = f"prints=[{shown}]"
     note = (
         f"{REASON_CODE}: {', '.join(missing)} not in this look's "
-        "quote/option_quote/book"
+        f"quote/option_quote/book; {flag}; {detail}"
     )
     return False, REASON_CODE, note

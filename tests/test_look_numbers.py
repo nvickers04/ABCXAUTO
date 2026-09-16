@@ -443,10 +443,10 @@ def test_modify_stop_does_not_claim_protection_geometry():
     assert msg == ""
 
 
-def _world() -> "object":
+def _world(**kwargs) -> "object":
     from abcxauto.world_state import WorldState
 
-    return WorldState(
+    base = dict(
         cycle=1,
         session_status="regular",
         flat=True,
@@ -468,6 +468,8 @@ def _world() -> "object":
         recent_decisions=[],
         trade_plan=None,
     )
+    base.update(kwargs)
+    return WorldState(**base)
 
 
 @pytest.mark.asyncio
@@ -592,3 +594,309 @@ async def test_kill_look_exception_fail_closes_consistently(monkeypatch):
     assert risk_result.get("status") == "blocked"
     assert risk_result.get("reason_code") == "kill_look_failed_closed"
     assert sent == []
+
+
+def _nok_legs() -> list[dict]:
+    return [
+        {
+            "symbol": "NOK",
+            "secType": "OPT",
+            "sec_type": "OPT",
+            "quantity": 100,
+            "expiration": "20260925",
+            "right": "C",
+            "strike": 10.0,
+            "conId": 11001,
+        },
+        {
+            "symbol": "NOK",
+            "secType": "OPT",
+            "sec_type": "OPT",
+            "quantity": -100,
+            "expiration": "20260925",
+            "right": "C",
+            "strike": 10.5,
+            "conId": 11002,
+        },
+    ]
+
+
+def _nok_ticket(*, closing: bool) -> dict:
+    params = {
+        "long_strike": 10.0,
+        "short_strike": 10.5,
+        "symbol": "NOK",
+        "quantity": 100.0,
+        "limit_price": 0.14,
+        "expiration": "20260925",
+        "right": "C",
+        "card": "defined-risk exit",
+        "closing_position": True if closing else False,
+    }
+    return {
+        "action": "vertical_spread",
+        "strategy": "vertical_spread",
+        "params": params,
+        "rationale": "Defined-risk exit, not new risk.",
+    }
+
+
+def _empty_look_snap(positions: list[dict], *, book_unreliable: bool = False) -> dict:
+    snap = {
+        "account": {"netliquidation": 37000.0},
+        "positions": positions,
+        "open_orders": [],
+        "book_unreliable": book_unreliable,
+    }
+    begin_look(snap)
+    return snap
+
+
+def _capture_send(monkeypatch) -> list:
+    sent: list = []
+
+    async def capture(action, _conn):
+        sent.append(action)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_nok_closing_vertical_empty_cache_is_not_number_gated(monkeypatch):
+    """Journal 356: NOK 10/10.5C close refused by look_numbers with an empty cache."""
+    from abcxauto.agent_loop import execute_ticket
+
+    legs = _nok_legs()
+    sent = _capture_send(monkeypatch)
+    result = await execute_ticket(
+        _nok_ticket(closing=True),
+        MagicMock(),
+        _world(flat=False, positions=legs),
+        _empty_look_snap(legs),
+    )
+    assert result.get("reason_code") != REASON_CODE
+    assert "stale_or_invented_number" not in str(result.get("note") or "")
+    assert result.get("status") == "ok"
+    assert sent and sent[0]["strategy"] == "vertical_spread"
+    assert sent[0]["params"]["closing_position"] is True
+    assert sent[0]["params"]["limit_price"] == 0.14
+
+
+@pytest.mark.asyncio
+async def test_nok_opening_vertical_empty_cache_still_number_gated(monkeypatch):
+    """Anti-regression: the same ticket as new risk still dies on look_numbers."""
+    from abcxauto.agent_loop import execute_ticket
+
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.kill_look_send_block",
+        lambda *_a, **_k: None,
+    )
+    legs = _nok_legs()
+    sent = _capture_send(monkeypatch)
+    ticket = _nok_ticket(closing=False)
+    result = await execute_ticket(
+        ticket,
+        MagicMock(),
+        _world(flat=False, positions=legs),
+        _empty_look_snap(legs),
+    )
+    assert result.get("status") == "blocked"
+    assert result.get("reason_code") == REASON_CODE == "stale_or_invented_number"
+    note = str(result.get("note") or "")
+    assert "limit_price=0.14" in note
+    assert "closing_position=false" in note
+    assert "legs missing from this look's cache" in note
+    assert sent == []
+
+
+def test_look_numbers_refusal_names_flag_and_missing_legs():
+    snap = _empty_look_snap([])
+    ok, code, msg = check_ticket_numbers(
+        "vertical_spread",
+        _nok_ticket(closing=True)["params"],
+        snap,
+    )
+    assert ok is False
+    assert code == REASON_CODE
+    assert "limit_price=0.14" in msg
+    assert "closing_position=true" in msg
+    assert "legs missing from this look's cache" in msg
+
+
+def test_look_numbers_refusal_names_prints_when_cache_has_them():
+    snap: dict = {}
+    begin_look(snap)
+    record_look_tool(
+        snap,
+        "option_quote",
+        {
+            "symbol": "NOK",
+            "expiration": "20260925",
+            "right": "C",
+            "strike": 10.0,
+            "ibkr": {"last": 0.20, "bid": 0.19, "ask": 0.21, "mid": 0.20},
+        },
+    )
+    ok, code, msg = check_ticket_numbers(
+        "vertical_spread",
+        {
+            "symbol": "NOK",
+            "expiration": "20260925",
+            "right": "C",
+            "long_strike": 10.0,
+            "short_strike": 10.5,
+            "limit_price": 0.14,
+            "closing_position": False,
+        },
+        snap,
+    )
+    assert ok is False
+    assert code == REASON_CODE
+    assert "limit_price=0.14" in msg
+    assert "closing_position=false" in msg
+    assert "prints=[" in msg
+    assert "0.2" in msg or "0.19" in msg
+    assert "legs missing" not in msg
+
+
+@pytest.mark.asyncio
+async def test_exit_refused_when_book_unreliable(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+
+    sent = _capture_send(monkeypatch)
+    legs = _nok_legs()
+    result = await execute_ticket(
+        _nok_ticket(closing=True),
+        MagicMock(),
+        _world(flat=False, positions=legs, gates={"book_unreliable": True}),
+        _empty_look_snap(legs, book_unreliable=True),
+    )
+    assert result.get("status") == "blocked"
+    assert result.get("reason_code") == "book_unreliable"
+    assert "unreliable" in str(result.get("note") or "").lower()
+    assert result.get("reason_code") != REASON_CODE
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_close_option_empty_cache_is_not_number_gated(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+
+    pos = [{
+        "symbol": "IBIT",
+        "secType": "OPT",
+        "sec_type": "OPT",
+        "quantity": 2,
+        "expiration": "20260925",
+        "right": "C",
+        "strike": 50.0,
+        "conId": 22001,
+    }]
+    sent = _capture_send(monkeypatch)
+    result = await execute_ticket(
+        {
+            "action": "close_option",
+            "strategy": "close_option",
+            "params": {
+                "symbol": "IBIT",
+                "conId": 22001,
+                "quantity": 2,
+                "limit_price": 0.55,
+                "expiration": "20260925",
+                "right": "C",
+                "strike": 50.0,
+            },
+            "rationale": "close the call",
+        },
+        MagicMock(),
+        _world(flat=False, positions=pos),
+        _empty_look_snap(pos),
+    )
+    assert result.get("reason_code") != REASON_CODE
+    assert "stale_or_invented_number" not in str(result.get("note") or "")
+    assert result.get("status") == "ok"
+    assert sent and sent[0]["strategy"] == "close_option"
+
+
+@pytest.mark.asyncio
+async def test_closing_market_order_empty_cache_is_not_number_gated(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+
+    pos = [{
+        "symbol": "NKE",
+        "secType": "STK",
+        "sec_type": "STK",
+        "quantity": 70,
+        "conId": 9,
+    }]
+    sent = _capture_send(monkeypatch)
+    result = await execute_ticket(
+        {
+            "action": "market_order",
+            "strategy": "market_order",
+            "params": {
+                "symbol": "NKE",
+                "action": "SELL",
+                "quantity": 70,
+                "closing_position": True,
+                "conId": 9,
+            },
+            "rationale": "flatten",
+        },
+        MagicMock(),
+        _world(flat=False, positions=pos),
+        _empty_look_snap(pos),
+    )
+    assert result.get("reason_code") != REASON_CODE
+    assert result.get("status") == "ok"
+    assert sent and sent[0]["strategy"] == "market_order"
+
+
+def test_bracket_oca_close_still_skips_stop_target_claims():
+    close = {"closing_position": True, "stop_price": 12.34, "target_price": 15.0, "symbol": "SPY"}
+    assert ticket_claims("bracket", close) == []
+    assert ticket_claims("oca", close) == []
+    assert ticket_claims("market_bracket", close) == []
+    opening = {"stop_price": 12.34, "target_price": 15.0, "symbol": "SPY"}
+    claimed = {field for _kind, field, _val in ticket_claims("bracket", opening)}
+    assert claimed == {"stop_price", "target_price"}
+
+
+@pytest.mark.asyncio
+async def test_bracket_close_empty_cache_is_not_number_gated(monkeypatch):
+    from abcxauto.agent_loop import execute_ticket
+
+    pos = [{
+        "symbol": "SPY",
+        "secType": "STK",
+        "sec_type": "STK",
+        "quantity": 10,
+        "conId": 7,
+    }]
+    sent = _capture_send(monkeypatch)
+    result = await execute_ticket(
+        {
+            "action": "bracket",
+            "strategy": "bracket",
+            "params": {
+                "symbol": "SPY",
+                "quantity": 10,
+                "direction": "LONG",
+                "stop_price": 12.34,
+                "target_price": 15.0,
+                "closing_position": True,
+                "conId": 7,
+            },
+            "rationale": "close the bracket",
+        },
+        MagicMock(),
+        _world(flat=False, positions=pos),
+        _empty_look_snap(pos),
+    )
+    assert result.get("reason_code") != REASON_CODE
+    assert "stale_or_invented_number" not in str(result.get("note") or "")
+    assert "limit_price" not in str(result.get("note") or "")
+    # Later geometry may still refuse; this gate must not.
+    assert sent == [] or result.get("status") == "ok"
