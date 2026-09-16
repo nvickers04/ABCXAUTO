@@ -3102,10 +3102,11 @@ async def test_research_keep_looking_after_brief_without_poke(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_rth_flat_no_send_reenters_without_poke(monkeypatch, tmp_path):
-    """Flat + no-send RTH must not nap on a book poke that never comes.
+async def test_words_only_flat_rth_does_not_reenter_without_event(monkeypatch, tmp_path):
+    """Words-only on an unchanged flat book waits for a real event.
 
-    2026-09-09: decide-without-send / condition-wait hang. Soften=FAIL.
+    LOOK.md: words only -> stop calling the model. A pulse timeout on the
+    same empty book is not a lead-fact change. Soften=FAIL.
     """
     from abcxauto.park_clock import peek_interrupt
 
@@ -3141,18 +3142,254 @@ async def test_rth_flat_no_send_reenters_without_poke(monkeypatch, tmp_path):
     eng = ProEngine()
     assert eng.start() is None
     deadline = time.time() + 4
-    while time.time() < deadline and len(calls) < 2:
+    while time.time() < deadline and len(calls) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.4
+    while time.time() < idle_until:
         eng.drain_apply()
         await asyncio.sleep(0.05)
     eng.stop_engine()
     eng.drain_apply()
-    assert len(calls) >= 2
+    assert len(calls) == 1
     assert calls[0] is True
+    assert eng._resume_think is False
     from abcxauto.park_clock import load_alarm
 
     assert load_alarm().wake_at is None
     assert peek_interrupt() is None
     assert not (tmp_path / "wake.json").exists()
+
+
+async def _sit_one_words_only_look(monkeypatch, tmp_path, think, *, session="regular"):
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+    _wire_stay_up_engine(monkeypatch, session=session, think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    return eng
+
+
+@pytest.mark.asyncio
+async def test_unprotected_poke_after_words_only_opens_a_look(monkeypatch, tmp_path):
+    calls: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import take_interrupt
+
+        take_interrupt()
+        calls.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "No send.",
+            "sends": 0,
+        }
+
+    eng = await _sit_one_words_only_look(monkeypatch, tmp_path, think)
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.25
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert len(calls) == 1
+    _poke_book(eng, "unprotected", "SPY")
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_order_change_poke_after_words_only_opens_a_look(monkeypatch, tmp_path):
+    calls: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        from abcxauto.park_clock import take_interrupt
+
+        take_interrupt()
+        calls.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "No send.",
+            "sends": 0,
+        }
+
+    eng = await _sit_one_words_only_look(monkeypatch, tmp_path, think)
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.25
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert len(calls) == 1
+    _poke_book(eng, "order_change", "SPY LMT")
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_halt_after_words_only_opens_a_look(monkeypatch, tmp_path):
+    calls: list[bool] = []
+
+    async def think(self, n, g, s, *, resume=False):
+        calls.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "No send.",
+            "sends": 0,
+        }
+
+    eng = await _sit_one_words_only_look(monkeypatch, tmp_path, think)
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    sit_deadline = time.time() + 3
+    while time.time() < sit_deadline:
+        eng.drain_apply()
+        ev = getattr(eng, "_wake_event", None)
+        if len(calls) == 1 and ev is not None and ev._waiters:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("worker never sat after words-only look")
+    assert len(calls) == 1
+    eng.request_wake("halt")
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_material_book_change_after_words_only_opens_a_look(monkeypatch, tmp_path):
+    calls: list[bool] = []
+    state = {"positions": []}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 100000,
+            "_failed": False,
+            "rationale": "No send.",
+            "sends": 0,
+        }
+
+    async def fake_snap(_c):
+        snap = _stay_up_snap("regular")
+        snap["positions"] = list(state["positions"])
+        return snap
+
+    eng = await _sit_one_words_only_look(monkeypatch, tmp_path, think)
+    monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.25
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    assert len(calls) == 1
+    state["positions"] = [
+        {
+            "symbol": "SPY",
+            "quantity": 10,
+            "conId": 99,
+            "avg_cost": 100.0,
+            "market_price": 100.0,
+        }
+    ]
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_clock_and_pct_drift_after_words_only_does_not_reenter(
+    monkeypatch, tmp_path
+):
+    calls: list[bool] = []
+    state = {
+        "nl": 100000.0,
+        "countdown": "2h 00m",
+        "countdown_s": 7200,
+    }
+
+    async def think(self, n, g, s, *, resume=False):
+        calls.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": state["nl"],
+            "_failed": False,
+            "rationale": "No send.",
+            "sends": 0,
+        }
+
+    async def fake_snap(_c):
+        snap = _stay_up_snap("regular")
+        snap["account"] = {
+            "netliquidation": state["nl"],
+            "unrealizedpnl": 0,
+            "dailypnl": -0.01,
+        }
+        hours = dict(snap.get("market_hours") or {})
+        hours["countdown_human"] = state["countdown"]
+        hours["countdown_s"] = state["countdown_s"]
+        snap["market_hours"] = hours
+        return snap
+
+    eng = await _sit_one_words_only_look(monkeypatch, tmp_path, think)
+    monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    state["nl"] = 100000.04
+    state["countdown"] = "1h 58m"
+    state["countdown_s"] = 7080
+    idle_until = time.time() + 0.4
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(calls) == 1
+    assert eng._resume_think is False
 
 
 @pytest.mark.asyncio
@@ -3334,6 +3571,71 @@ async def test_stay_up_lead_changed_detects_wom_set_identity(monkeypatch):
         "abcxauto.world_state.worst_wake_fact",
         lambda **_k: changed,
     )
+    assert await eng._stay_up_lead_changed(g) is True
+
+
+
+@pytest.mark.asyncio
+async def test_stay_up_lead_changed_ignores_clock_and_last_decimal_pct(monkeypatch):
+    snaps = []
+    first = _stay_up_snap("regular")
+    second = _stay_up_snap("regular")
+    second["account"] = {"netliquidation": 100000.04, "unrealizedpnl": -0.03, "dailypnl": -1.12}
+    second["market_hours"] = {
+        "session": "regular",
+        "countdown_human": "1h 10m",
+        "countdown_s": 4200,
+    }
+    snaps.extend([first, second])
+    n = {"i": 0}
+
+    async def fake_snap(_c):
+        i = min(n["i"], 1)
+        n["i"] += 1
+        return snaps[i]
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: "session_cap remaining=10 looks, 99 tokens",
+    )
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    g = SimpleNamespace(chat=None, _last_desk_fact="")
+    assert await eng._stay_up_lead_changed(g) is False
+    assert await eng._stay_up_lead_changed(g) is False
+
+
+@pytest.mark.asyncio
+async def test_stay_up_lead_changed_detects_material_book_lots(monkeypatch):
+    first = _stay_up_snap("regular")
+    second = _stay_up_snap("regular")
+    second["positions"] = [
+        {
+            "symbol": "SPY",
+            "quantity": 10,
+            "conId": 99,
+            "avg_cost": 100.0,
+            "market_price": 100.0,
+        }
+    ]
+    snaps = [first, second]
+    n = {"i": 0}
+
+    async def fake_snap(_c):
+        i = min(n["i"], 1)
+        n["i"] += 1
+        return snaps[i]
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: "session_cap remaining=10 looks, 99 tokens",
+    )
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    g = SimpleNamespace(chat=None, _last_desk_fact="")
+    assert await eng._stay_up_lead_changed(g) is False
     assert await eng._stay_up_lead_changed(g) is True
 
 

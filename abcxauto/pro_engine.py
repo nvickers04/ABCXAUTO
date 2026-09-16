@@ -317,6 +317,7 @@ class ProEngine:
         self._mill_gave_up = False
         self._kill_entry_in_flight = False
         self._force_first_look = False
+        self._stay_up_book_fp = None
         # Armed once per IBKR connect: first flat orphan sweep is skipped.
         self._flat_start_orphan_gate = False
         self._brain_key: tuple = ()
@@ -691,6 +692,9 @@ class ProEngine:
         # Mid-turn poke into the live xAI episode (fill / order_change /
         # unprotected). halt / flat_confirmed are not live pokes.
         note_interrupt(BookEvent(self._wake_reason, self._wake_reason))
+        if reason_l == "halt":
+            # Sitting words-only must look again on halt-state change.
+            self._resume_think = True
         ev = self._wake_event
         if ev is not None:
             ev.set()
@@ -1226,10 +1230,9 @@ class ProEngine:
         synthesize/decide mill with zero tools and zero send. Unpaid
         tickets re-enter the same chat with lots / SEND-THE-TICKET. A mill
         re-enters with TOOL-OR-SEND; after SYNTHESIZE_MILL_TRIES consecutive
-        mill turns, drop the chat and continue cold. Research keep-looking
-        and flat-RTH no-manage keep-looking are the stay-up pulse timeout
-        (desk_mode.research_keep_looking / rth_flat_keep_looking), not a
-        fake poke and not a sit-wake clock. Chat is kept. Overnight park
+        mill turns, drop the chat and continue cold. Research keep-looking is the stay-up pulse timeout
+        (desk_mode.research_keep_looking), not a fake poke and not a
+        sit-wake clock. Words-only flat RTH waits for a real event. Chat is kept. Overnight park
         is park_clock after a closed skip.
         """
         session = self._resolve_session(session)
@@ -1249,8 +1252,8 @@ class ProEngine:
             sends = 0
         # A spoken say or a send/fill is a finished look. Do not wipe chat.
         # Duplicate lead fact (_ended) waits for a poke when lots or
-        # working orders still need manage. Flat no-manage re-enters
-        # on the stay-up pulse, not a fresh desk.
+        # working orders still need manage. Words-only flat RTH waits
+        # for a real event, not a pulse mill.
         # CLOSE/EXIT on an open lot, or a named ticket, with no send is not
         # finished — including when the book is flat. A synthesize/decide
         # mill with zero tools and zero send is not finished either.
@@ -1571,8 +1574,9 @@ class ProEngine:
         return True
 
     async def _stay_up_lead_changed(self, g: Any) -> bool:
-        """True when a collapsible lead fact moved since the last look."""
+        """True when a collapsible lead fact or the book moved since last look."""
         from abcxauto.agent_loop import snap as take_snap
+        from abcxauto.park_clock import book_fingerprint, events_from_diff
         from abcxauto.world_state import (
             build_world_state,
             day_facts,
@@ -1589,6 +1593,14 @@ class ProEngine:
             return False
         if not isinstance(s, dict):
             return False
+        fp = book_fingerprint(s)
+        prev_fp = getattr(self, "_stay_up_book_fp", None)
+        if prev_fp is None:
+            self._stay_up_book_fp = fp
+        else:
+            kinds = {e.kind for e in events_from_diff(prev_fp, fp)}
+            if kinds & {"fill", "order_change", "book_move", "unprotected"}:
+                return True
         world = build_world_state(
             cycle=0, snap=s, opportunities=[], news_items=[]
         )
@@ -2006,12 +2018,12 @@ class ProEngine:
                             # Chat drop is _apply_desk_mode_brain on start.
                             if await self._resume_if_research_rolled_to_rth(sess):
                                 continue
-                            # Stay-up pulse. Research keep-looking and
-                            # flat-RTH no-manage re-enter on timeout —
-                            # no fake fill / order_change / unprotected
-                            # poke. Open lots / working orders still
-                            # wait for a real poke or a changed lead
-                            # fact. session_change into regular is the
+                            # Stay-up pulse. Research keep-looking may
+                            # re-enter on timeout. Words-only flat
+                            # RTH waits for fill / order_change /
+                            # unprotected / poke / halt / a changed
+                            # lead fact or a genuinely changed book.
+                            # session_change into regular is the
                             # same physics as the roll check above.
                             wait = float(PULSE_S)
                             self.state.status = "On"
@@ -2031,47 +2043,19 @@ class ProEngine:
                                 continue
                             if timed_out:
                                 keep_research = False
-                                keep_flat = False
                                 try:
                                     from abcxauto.desk_mode import (
                                         research_keep_looking,
-                                        rth_flat_keep_looking,
                                     )
 
                                     keep_research = research_keep_looking(sess)
-                                    s_pulse = None
-                                    if self.conn is not None:
-                                        try:
-                                            s_pulse = await snap(self.conn)
-                                        except Exception:
-                                            s_pulse = None
-                                    prev_fact = ""
-                                    if g is not None:
-                                        chat = getattr(g, "chat", None)
-                                        if chat is not None:
-                                            prev_fact = str(
-                                                getattr(
-                                                    chat, "_abcx_last_desk_fact", ""
-                                                )
-                                                or ""
-                                            )
-                                        if not prev_fact:
-                                            prev_fact = str(
-                                                getattr(g, "_last_desk_fact", "")
-                                                or ""
-                                            )
-                                    keep_flat = rth_flat_keep_looking(
-                                        sess, s_pulse, desk_fact=prev_fact
-                                    )
                                 except Exception:
                                     keep_research = False
-                                    keep_flat = False
                                 rolled = await self._resume_if_research_rolled_to_rth(
                                     sess
                                 )
                                 if (
                                     keep_research
-                                    or keep_flat
                                     or rolled
                                     or await self._stay_up_lead_changed(g)
                                 ):
@@ -2247,6 +2231,12 @@ class ProEngine:
                     if gen != self._gen or self.stop.is_set():
                         continue
                     out = await self._host_think(n, g, s, resume=resume)
+                    try:
+                        from abcxauto.park_clock import book_fingerprint
+
+                        self._stay_up_book_fp = book_fingerprint(s)
+                    except Exception:
+                        logger.debug("stay-up book fingerprint failed", exc_info=True)
                     if not out.get("_recover"):
                         self._recover_same_chat = False
                     if not out.get("_ended") and not out.get("_recover"):

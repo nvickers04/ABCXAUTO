@@ -472,7 +472,7 @@ class PortfolioMonitor:
         self._prev_unprotected = unprot
 
         halted = bool(get_risk_gate().is_halted)
-        if halted and not self._prev_halted:
+        if halted != self._prev_halted and (halted or self._prev_halted):
             self._emit_wake("halt")
         self._prev_halted = halted
 
