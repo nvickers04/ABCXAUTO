@@ -723,6 +723,88 @@ from abcxauto.broker.orders import IBKROrdersMixin
 from abcxauto.broker.options import IBKROptionsMixin
 
 
+_STOP_ORDER_TYPES = {"STP", "STP LMT", "TRAIL", "TRAIL LIMIT", "TRAIL STOP"}
+
+
+def _flatten_qty(pos: dict) -> float:
+    try:
+        return float(pos.get("quantity") if pos.get("quantity") is not None else pos.get("qty") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _flatten_lot_key(pos: dict) -> str:
+    cid = pos.get("conId") or pos.get("con_id")
+    try:
+        cid_i = int(cid)
+    except (TypeError, ValueError):
+        cid_i = 0
+    if cid_i > 0:
+        return f"con:{cid_i}"
+    symbol = str(pos.get("symbol") or "").upper()
+    sec = str(pos.get("sec_type") or pos.get("secType") or "STK").upper()
+    if sec.startswith("OPT"):
+        return "opt:{}:{}:{}:{}".format(
+            symbol,
+            pos.get("expiration") or pos.get("lastTradeDateOrContractMonth") or "",
+            pos.get("strike") or "",
+            pos.get("right") or "",
+        )
+    return f"stk:{symbol}"
+
+
+def _is_stop_order_row(order: dict) -> bool:
+    raw = str((order or {}).get("order_type") or "").upper().replace("_", " ").replace("-", " ")
+    compact = " ".join(raw.split())
+    return compact in _STOP_ORDER_TYPES or compact.startswith("TRAIL")
+
+
+def _cancel_cleared(out: Any) -> bool:
+    if not isinstance(out, dict):
+        return False
+    if out.get("success") or out.get("already_gone") or out.get("order_gone"):
+        return True
+    return False
+
+
+def _index_stk_stops(orders: List[Dict[str, Any]]) -> Dict[str, dict]:
+    saved: Dict[str, dict] = {}
+    for order in orders or []:
+        if not _is_stop_order_row(order):
+            continue
+        sec = str(order.get("sec_type") or order.get("secType") or "STK").upper()
+        if sec.startswith("OPT"):
+            continue
+        px = order.get("aux_price")
+        if px is None:
+            px = order.get("stop_price")
+        saved[_flatten_lot_key(order)] = {
+            "action": order.get("action"),
+            "quantity": order.get("quantity"),
+            "stop_price": px,
+            "order_id": order.get("order_id"),
+        }
+    return saved
+
+
+def _covering_stop_order(lot: dict, orders: List[Dict[str, Any]]) -> Optional[dict]:
+    key = _flatten_lot_key(lot)
+    symbol = str(lot.get("symbol") or "").upper()
+    want = "SELL" if _flatten_qty(lot) > 0 else "BUY"
+    for order in orders or []:
+        if not _is_stop_order_row(order):
+            continue
+        if str(order.get("action") or "").upper() != want:
+            continue
+        if _flatten_lot_key(order) == key:
+            return order
+        if symbol and str(order.get("symbol") or "").upper() == symbol:
+            sec = str(order.get("sec_type") or order.get("secType") or "STK").upper()
+            if sec.startswith("STK"):
+                return order
+    return None
+
+
 class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBarsMixin):
     """
     IBKR connector with essential trading functionality.
@@ -1823,6 +1905,59 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
     # ========== EMERGENCY OPERATIONS ==========
 
+    async def _last_stop_for_leftover_stk(
+        self,
+        lot: dict,
+        *,
+        saved_stops: Dict[str, dict],
+        live_orders: List[Dict[str, Any]],
+    ) -> dict:
+        """Leave a last-stop on leftover stock, or say why we could not."""
+        covering = _covering_stop_order(lot, live_orders)
+        if covering is not None:
+            return {
+                "protection": "still_working",
+                "protection_order_id": covering.get("order_id"),
+            }
+        key = _flatten_lot_key(lot)
+        saved = saved_stops.get(key) or {}
+        px = saved.get("stop_price")
+        if px is None:
+            px = lot.get("market_price") or lot.get("avg_cost")
+        try:
+            stop_price = float(px)
+        except (TypeError, ValueError):
+            stop_price = 0.0
+        qty = abs(int(_flatten_qty(lot)))
+        symbol = str(lot.get("symbol") or "")
+        action = "SELL" if _flatten_qty(lot) > 0 else "BUY"
+        if stop_price <= 0 or qty <= 0 or not symbol:
+            return {
+                "protection": "none",
+                "reason": "no last-stop price for leftover stock",
+            }
+        place = getattr(self, "place_stop_order", None)
+        if not callable(place):
+            return {"protection": "none", "reason": "place_stop_order missing"}
+        try:
+            placed = await place(symbol, action, qty, stop_price)
+        except Exception as e:
+            logger.critical(
+                "FLATTEN ALL leftover STK %s last-stop raised: %s", symbol, e
+            )
+            return {"protection": "none", "reason": str(e)}
+        if placed.get("success") or placed.get("order_id"):
+            return {
+                "protection": "last_stop",
+                "protection_order_id": placed.get("order_id"),
+                "stop_price": stop_price,
+            }
+        return {
+            "protection": "none",
+            "reason": placed.get("error") or "last-stop rejected",
+            "order_result": placed,
+        }
+
     async def _flatten_one_position(self, pos: dict) -> dict:
         """Close one position leg independently. STK→MKT, OPT→close_option_position."""
         symbol = pos.get("symbol", "")
@@ -1881,7 +2016,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 action=action,
                 quantity=close_qty,
                 order_type="MKT",
-                tif="IOC",
+                tif="GTC",
                 order_name="EMERGENCY_FLATTEN_STK",
             )
             return {
@@ -1907,71 +2042,209 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             }
 
     async def flatten_all(self) -> dict:
-        """Cancel all open orders and close all positions per-leg (STK vs OPT).
+        """Cancel working orders and close every lot. success only if the book is flat.
 
-        Returns a summary dict with cancelled/closed counts and position_results.
-        This is the broker-level nuclear option — caller decides when to invoke.
+        Per-lot outcomes plus leftover lots (and why) go back to the caller.
+        A leftover STK lot gets a last-stop or a loud unprotected failure.
+        Close attempts are not skipped when a cancel is rejected.
         """
         if not await self._ensure_connected():
-            return {"success": False, "error": "Not connected"}
+            return {
+                "success": False,
+                "status": "disconnected",
+                "error": "Not connected",
+                "failed": [],
+                "remaining": [],
+                "position_results": [],
+                "positions_closed": 0,
+                "positions_total": 0,
+                "orders_cancelled": 0,
+                "orders_total": 0,
+                "orders_failed": [],
+                "errors": ["Not connected"],
+            }
 
-        result = {
+        result: Dict[str, Any] = {
             "orders_cancelled": 0,
             "orders_total": 0,
+            "orders_failed": [],
             "positions_closed": 0,
             "positions_total": 0,
             "position_results": [],
+            "remaining": [],
+            "failed": [],
             "errors": [],
         }
 
-        # Step 1: Cancel ALL open orders
+        open_orders: List[Dict[str, Any]] = []
         try:
-            open_orders = await self.get_open_orders()
-            result["orders_total"] = len(open_orders)
-            for order in open_orders:
-                try:
-                    oid = order.get("order_id")
-                    if oid:
-                        await self.cancel_order(oid)
-                        result["orders_cancelled"] += 1
-                except Exception as e:
-                    err_msg = f'cancel order {order.get("order_id")}: {e}'
-                    logger.error(err_msg)
-                    result["errors"].append(err_msg)
+            open_orders = list(await self.get_open_orders() or [])
         except Exception as e:
             err_msg = f"get_open_orders: {e}"
             logger.error(err_msg)
             result["errors"].append(err_msg)
+        result["orders_total"] = len(open_orders)
+        saved_stops = _index_stk_stops(open_orders)
 
-        await _safe_sleep(1)  # Let cancellations process
+        for order in open_orders:
+            oid = order.get("order_id")
+            if not oid:
+                continue
+            try:
+                cancelled = await self.cancel_order(oid)
+            except Exception as e:
+                cancelled = {"error": str(e)}
+            if _cancel_cleared(cancelled):
+                result["orders_cancelled"] += 1
+                continue
+            why = ""
+            if isinstance(cancelled, dict):
+                why = str(cancelled.get("error") or "")
+            why = why or "cancel rejected"
+            row = {
+                "order_id": oid,
+                "symbol": order.get("symbol"),
+                "reason": why,
+            }
+            result["orders_failed"].append(row)
+            err_msg = f"cancel order {oid}: {why}"
+            logger.error(err_msg)
+            result["errors"].append(err_msg)
 
-        # Step 2: Close each position leg independently (STK vs OPT routing)
+        await _safe_sleep(1)
+
+        positions: List[Dict[str, Any]] = []
         try:
-            positions = await self.get_positions()
-            result["positions_total"] = len(positions)
-            for pos in positions:
-                try:
-                    pr = await self._flatten_one_position(pos)
-                    result["position_results"].append(pr)
-                    if pr.get("success") and pr.get("method") != "noop":
-                        result["positions_closed"] += 1
-                    elif not pr.get("success"):
-                        err_msg = f'flatten {pos.get("symbol", "?")}: {pr}'
-                        logger.error(err_msg)
-                        result["errors"].append(err_msg)
-                except Exception as e:
-                    err_msg = f'flatten {pos.get("symbol", "?")}: {e}'
-                    logger.error(err_msg)
-                    result["errors"].append(err_msg)
+            positions = [
+                p for p in (await self.get_positions() or []) if _flatten_qty(p)
+            ]
         except Exception as e:
             err_msg = f"get_positions: {e}"
             logger.error(err_msg)
             result["errors"].append(err_msg)
+        result["positions_total"] = len(positions)
 
-        result["success"] = True
+        for pos in positions:
+            symbol = pos.get("symbol", "?")
+            try:
+                pr = await self._flatten_one_position(pos)
+            except Exception as e:
+                pr = {
+                    "success": False,
+                    "symbol": symbol,
+                    "conId": pos.get("conId") or pos.get("con_id"),
+                    "error": str(e),
+                    "reasoning": f"flatten {symbol} raised: {e}",
+                }
+            pr["lot_key"] = _flatten_lot_key(pos)
+            if pr.get("conId") in (None, "none"):
+                pr["conId"] = pos.get("conId") or pos.get("con_id")
+            result["position_results"].append(pr)
+            if not pr.get("success"):
+                err_msg = f"flatten {symbol}: {pr.get('error') or pr}"
+                logger.error(err_msg)
+                result["errors"].append(err_msg)
+
+        await _safe_sleep(1)
+
+        remaining: Optional[List[Dict[str, Any]]] = None
+        try:
+            remaining = [
+                p for p in (await self.get_positions() or []) if _flatten_qty(p)
+            ]
+        except Exception as e:
+            err_msg = f"reread positions: {e}"
+            logger.error(err_msg)
+            result["errors"].append(err_msg)
+
+        if remaining is None:
+            result["book_unknown"] = True
+            remaining = list(positions)
+
+        remain_keys = {_flatten_lot_key(p) for p in remaining}
+        before_keys = {_flatten_lot_key(p) for p in positions}
+        result["positions_closed"] = len(before_keys - remain_keys)
+        result["remaining"] = remaining
+
+        pr_by_key = {
+            str(pr.get("lot_key") or _flatten_lot_key(pr)): pr
+            for pr in result["position_results"]
+        }
+        for pr in result["position_results"]:
+            key = str(pr.get("lot_key") or "")
+            if pr.get("method") == "noop":
+                pr["status"] = "noop"
+            elif key and key in remain_keys:
+                pr["status"] = "failed"
+                pr["success"] = False
+                if not pr.get("error"):
+                    pr["error"] = "lot still open after flatten"
+            else:
+                pr["status"] = "closed"
+
+        live_orders: List[Dict[str, Any]] = []
+        try:
+            live_orders = list(await self.get_open_orders() or [])
+        except Exception:
+            live_orders = []
+
+        failed: List[Dict[str, Any]] = []
+        for lot in remaining:
+            key = _flatten_lot_key(lot)
+            pr = pr_by_key.get(key) or {}
+            why = str(pr.get("error") or "lot still open after flatten")
+            rec: Dict[str, Any] = {
+                "symbol": lot.get("symbol"),
+                "conId": lot.get("conId") or lot.get("con_id"),
+                "sec_type": str(lot.get("sec_type") or lot.get("secType") or "STK"),
+                "quantity": _flatten_qty(lot),
+                "reason": why,
+            }
+            sec = str(rec["sec_type"]).upper()
+            if sec.startswith("STK"):
+                prot = await self._last_stop_for_leftover_stk(
+                    lot, saved_stops=saved_stops, live_orders=live_orders
+                )
+                rec.update(prot)
+                if prot.get("protection") in ("last_stop", "still_working"):
+                    logger.critical(
+                        "FLATTEN ALL leftover STK %s qty=%s protection=%s",
+                        rec.get("symbol"),
+                        rec.get("quantity"),
+                        prot.get("protection"),
+                    )
+                else:
+                    logger.critical(
+                        "FLATTEN ALL leftover STK %s qty=%s UNPROTECTED: %s",
+                        rec.get("symbol"),
+                        rec.get("quantity"),
+                        prot.get("reason") or why,
+                    )
+            failed.append(rec)
+        result["failed"] = failed
+
+        book_flat = not remaining and not result.get("book_unknown")
+        result["success"] = bool(book_flat)
+        if result.get("book_unknown"):
+            result["status"] = "failed"
+        elif book_flat:
+            result["status"] = "flat"
+        elif result["positions_closed"]:
+            result["status"] = "partial"
+        else:
+            result["status"] = "failed"
+
         logger.critical(
-            f"FLATTEN ALL: cancelled {result['orders_cancelled']}/{result['orders_total']} orders, "
-            f"closed {result['positions_closed']}/{result['positions_total']} (per-leg)"
+            "FLATTEN ALL: success=%s status=%s cancelled %s/%s orders, "
+            "closed %s/%s lots, remaining=%s failed=%s",
+            result["success"],
+            result["status"],
+            result["orders_cancelled"],
+            result["orders_total"],
+            result["positions_closed"],
+            result["positions_total"],
+            len(remaining),
+            len(failed),
         )
         return result
 
