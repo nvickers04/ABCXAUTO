@@ -408,7 +408,22 @@ def test_preview_mirrors_always_armed_refusals_when_gates_off(monkeypatch):
     }
     world = _world(session_status="regular")
 
-    defined = collect_would_refuse(_bracket(), world=world, snap=healthy)
+    unlimited = {
+        "strategy": "ratio_spread",
+        "params": {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "long_strike": 500.0,
+            "short_strike": 510.0,
+            "right": "C",
+            "ratio": 2,
+            "quantity": 1,
+            "card": "preview-ratio",
+        },
+        "rationale": "keep-3 preview",
+        "_desk_session": "regular",
+    }
+    defined = collect_would_refuse(unlimited, world=world, snap=healthy)
     assert any("defined_risk_only" in str(r) for r in defined)
 
     gate.is_halted = True

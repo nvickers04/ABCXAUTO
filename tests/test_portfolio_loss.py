@@ -207,14 +207,15 @@ def test_allowlist_refuses_incomplete_geom_and_undefined_stk(monkeypatch):
     assert why2 == REASON_ALLOWLIST
     reasons = collect_would_refuse(
         {
-            "strategy": "market_bracket",
+            "strategy": "ratio_spread",
             "params": {
                 "symbol": "SPY",
+                "expiration": "20260718",
+                "long_strike": 500.0,
+                "short_strike": 510.0,
+                "right": "C",
+                "ratio": 2,
                 "quantity": 1,
-                "direction": "LONG",
-                "entry_price": 500.0,
-                "stop_price": 495.0,
-                "target_price": 510.0,
                 "card": "other",
             },
             "card": "other",

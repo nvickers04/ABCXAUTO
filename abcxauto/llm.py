@@ -156,6 +156,32 @@ def chat_create_kwargs(
     return kw
 
 
+
+_SECRET_CREATE_KEYS = frozenset({
+    "api_key",
+    "xai_api_key",
+    "authorization",
+    "password",
+    "secret",
+})
+
+
+def _create_kw_for_log(kwargs: Any) -> dict[str, Any]:
+    """model / temperature / max_tokens / include / reasoning. Never secrets."""
+    out: dict[str, Any] = {}
+    if not isinstance(kwargs, dict):
+        return out
+    for key, value in kwargs.items():
+        lk = str(key or "").strip().lower()
+        if not lk or lk in _SECRET_CREATE_KEYS:
+            continue
+        if any(p in lk for p in ("api_key", "secret", "password", "authorization")):
+            continue
+        if lk in ("model", "temperature", "max_tokens", "include") or "reason" in lk or lk == "effort":
+            out[str(key)] = value
+    return out
+
+
 def create_chat(client: Any, **kwargs: Any) -> Any:
     """``chat.create`` that ignores unknown kwargs instead of crashing.
 
@@ -164,6 +190,10 @@ def create_chat(client: Any, **kwargs: Any) -> Any:
     unknown extras one key at a time so one bad alias cannot strip
     ``reasoning_effort``.
     """
+    try:
+        logger.info("chat.create %s", _create_kw_for_log(kwargs))
+    except Exception:
+        logger.debug("chat.create log failed", exc_info=True)
     create = client.chat.create
     try:
         return create(**kwargs)

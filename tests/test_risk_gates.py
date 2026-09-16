@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+from pydantic import BaseModel
 
 from abcxauto.config import Config, get_config
 from abcxauto.proposals import validate_proposal
@@ -1670,6 +1671,23 @@ def test_defined_risk_only_rejects_ratio_and_short_straddle(monkeypatch):
     assert ok_close is True
 
 
+
+class _NakedStkParams(BaseModel):
+    symbol: str
+    quantity: int
+    direction: str
+
+
+def _naked_stk_proposal(strategy="market_bracket", symbol="SIRI"):
+    """Stock entry with no stop. Schema-valid brackets cannot omit stop_price."""
+    from abcxauto.proposals import OrderProposal
+    return OrderProposal(
+        id=1,
+        strategy=strategy,
+        params=_NakedStkParams(symbol=symbol, quantity=10, direction="LONG"),
+        rationale=RATIONALE,
+    )
+
 def _siri_market_bracket():
     """2026-09-02 miss: market_bracket STK SIRI qty 10 around 29.75."""
     return validate_proposal(
@@ -1699,7 +1717,7 @@ def test_defined_risk_only_rejects_market_bracket_stk(monkeypatch):
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
 
-    mb = _siri_market_bracket()
+    mb = _naked_stk_proposal()
     ok, why = check_defined_risk_only(mb)
     assert ok is False
     assert "defined_risk_only" in why
@@ -1719,7 +1737,7 @@ async def test_defined_risk_only_rejects_market_bracket_pre_trade(monkeypatch):
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
     gate = reset_risk_gate()
-    ok, why = await gate.pre_trade_check(_siri_market_bracket(), FakeConnector())
+    ok, why = await gate.pre_trade_check(_naked_stk_proposal(), FakeConnector())
     assert ok is False
     assert "defined_risk_only" in why
     assert cfg.defined_risk_only is True
@@ -1730,11 +1748,13 @@ async def test_defined_risk_only_rejects_naked_bracket_stk(monkeypatch):
     cfg = _cfg(defined_risk_only=True, risk_gates_enabled=True)
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
-    ok, why = check_defined_risk_only(_bracket(symbol="SIRI"))
+    ok, why = check_defined_risk_only(_naked_stk_proposal("bracket", "SIRI"))
     assert ok is False
     assert "defined_risk_only" in why
     gate = reset_risk_gate()
-    ok2, why2 = await gate.pre_trade_check(_bracket(symbol="INTC"), FakeConnector())
+    ok2, why2 = await gate.pre_trade_check(
+        _naked_stk_proposal("bracket", "INTC"), FakeConnector()
+    )
     assert ok2 is False
     assert "defined_risk_only" in why2
 
@@ -1754,11 +1774,11 @@ async def test_defined_risk_only_rejects_stk_when_paper_gates_off(monkeypatch):
             raise AssertionError("market_bracket STK must not place under defined_risk_only")
 
     gate = reset_risk_gate()
-    ok, why = await gate.pre_trade_check(_siri_market_bracket(), GW())
+    ok, why = await gate.pre_trade_check(_naked_stk_proposal(), GW())
     assert ok is False
     assert "defined_risk_only" in why
 
-    result = await execute_proposal(_siri_market_bracket(), GW())
+    result = await execute_proposal(_naked_stk_proposal(), GW())
     assert result.get("status") == "rejected"
     assert "defined_risk_only" in str(result.get("error") or "")
     assert cfg.defined_risk_only is True
@@ -1909,7 +1929,7 @@ def test_defined_risk_only_stays_true_after_reject(monkeypatch):
     cfg = _cfg(defined_risk_only=True)
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
-    ok, why = check_defined_risk_only(_siri_market_bracket())
+    ok, why = check_defined_risk_only(_naked_stk_proposal())
     assert ok is False
     assert "defined_risk_only" in why
     assert cfg.defined_risk_only is True

@@ -289,15 +289,12 @@ def filter_agent_tool_names(
 
 
 def send_strategy_names(*, session: str = "") -> list[str] | None:
-    """None = default enum. Kill RTH send stays vertical_spread (close via param).
-
-    Named-card allowlist accepts other clerk-legal defined-risk ORDER EXAMPLES
-    schemas if they reach send. The tool enum expands only when a named-card
-    schema already in ORDER EXAMPLES needs a key other than vertical_spread.
+    """None = default enum. Kill RTH send offers clerk-legal defined-risk
+    structures that already have an ORDER EXAMPLES schema and a place path.
     """
     if not kill_look_rth(session):
         return None
-    return [PCS_STRATEGY]
+    return list(_kill_look_sendable_strategies())
 
 
 def _params_of(act: dict[str, Any] | None) -> dict[str, Any]:
@@ -350,6 +347,9 @@ _GEOM_FINITE = frozenset({
     "upper_strike",
     "near_strike",
     "far_strike",
+    "stop_price",
+    "target_price",
+    "entry_price",
 })
 _GEOM_TEXT = frozenset({
     "symbol",
@@ -360,6 +360,48 @@ _GEOM_TEXT = frozenset({
 })
 _KILL_LOOK_FORBIDDEN = frozenset({"ratio_spread", "jade_lizard"})
 _KILL_LOOK_SHORT_OK_IF_LONG = frozenset({"straddle", "strangle"})
+_KILL_LOOK_STOCK_ENTRIES = frozenset({"bracket", "market_bracket", "oca"})
+# Operator-facing send order. A name lands here only if ORDER EXAMPLES and
+# STRATEGIES already teach a place path. close_option is an exit, not an open.
+_KILL_LOOK_PREFERRED = (
+    "vertical_spread",
+    "iron_condor",
+    "iron_butterfly",
+    "butterfly",
+    "calendar_spread",
+    "diagonal_spread",
+    "cash_secured_put",
+    "covered_call",
+    "protective_put",
+    "collar",
+    "roll_option",
+    "buy_option",
+    "straddle",
+    "strangle",
+    "bracket",
+    "market_bracket",
+    "oca",
+)
+
+
+def _kill_look_sendable_strategies() -> list[str]:
+    """Defined-risk names with a schema example and a working place path."""
+    from abcxauto.order_examples import NOT_TICKETS, ORDER_EXAMPLES
+    from abcxauto.proposals import STRATEGIES
+    from abcxauto.strategy_params import OPTION_STRATEGIES
+
+    out: list[str] = []
+    for name in _KILL_LOOK_PREFERRED:
+        if name in NOT_TICKETS or name in _KILL_LOOK_FORBIDDEN:
+            continue
+        if name not in ORDER_EXAMPLES:
+            continue
+        entry = STRATEGIES.get(name)
+        if not entry or not entry[1]:
+            continue
+        if name in OPTION_STRATEGIES or name in _KILL_LOOK_STOCK_ENTRIES:
+            out.append(name)
+    return out
 
 
 def _finite_geom(raw: Any) -> float | None:
@@ -385,7 +427,10 @@ def _clerk_legal_defined_risk(strategy: str, params: dict[str, Any]) -> bool:
     if strategy in MANAGEMENT_STRATEGIES or strategy == "close_option":
         return False
     if strategy not in OPTION_STRATEGIES:
-        return False
+        if strategy not in _KILL_LOOK_STOCK_ENTRIES:
+            return False
+        stop = _finite_geom(params.get("stop_price"))
+        return stop is not None and stop > 0
     if strategy in _KILL_LOOK_FORBIDDEN:
         return False
     if strategy in _KILL_LOOK_SHORT_OK_IF_LONG:

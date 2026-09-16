@@ -42,7 +42,11 @@ _SNAP_KEY = "_look_tool_snapshot"
 # Walk-away risk/trade ceiling. A last-relative stop farther than this
 # is not derived from that last — it needs an exact this-look fact.
 DERIVE_STOP_FRAC = 0.25
+# Derived combo nets use one equity-option minTick (broker default 0.01).
+# Identity matching stays at _in_pool (+/-1 or +/-5 canon = $0.0001-$0.0005).
+DERIVE_COMBO_TICK = 0.01
 _PROTECT_STRATS = frozenset({"bracket", "market_bracket", "oca"})
+_MDA_SOURCES = frozenset({"mda", "marketdata", "market_data"})
 
 _PRINT_KEYS = frozenset(
     {
@@ -241,6 +245,8 @@ def _row_is_opt(row: dict[str, Any]) -> bool:
     sec = str(
         row.get("sec") or row.get("secType") or row.get("sec_type") or ""
     ).upper()
+    if sec == "BAG":
+        return False
     if sec in {"OPT", "FOP"} or sec.startswith("OPT"):
         return True
     if row.get("strike") not in (None, "") and (
@@ -250,8 +256,38 @@ def _row_is_opt(row: dict[str, Any]) -> bool:
     return False
 
 
+def _bag_pair(row: dict[str, Any]) -> tuple[int, int] | None:
+    a = _finite(row.get("long_strike"))
+    b = _finite(row.get("short_strike"))
+    if a is None or b is None:
+        return None
+    pair = tuple(sorted((_canon(a), _canon(b))))
+    if pair[0] == pair[1]:
+        return None
+    return pair  # type: ignore[return-value]
+
+
+def _row_is_bag(row: dict[str, Any]) -> bool:
+    sec = str(
+        row.get("sec") or row.get("secType") or row.get("sec_type") or ""
+    ).upper()
+    if sec == "BAG":
+        return True
+    if sec in {"OPT", "FOP", "STK"} or sec.startswith("OPT"):
+        return False
+    return _bag_pair(row) is not None
+
+
 def _inst_key(kind: str, row: dict[str, Any], default_sym: str = "") -> tuple:
     sym = _sym_of(row) or str(default_sym or "").upper().strip()
+    if kind != "quote" and _row_is_bag(row):
+        return (
+            "BAG",
+            sym,
+            _norm_exp(row.get("expiration") or row.get("expiry")),
+            _norm_right(row.get("right")),
+            _bag_pair(row),
+        )
     if kind == "option_quote" or (kind != "quote" and _row_is_opt(row)):
         strike = _finite(row.get("strike"))
         return (
@@ -514,13 +550,18 @@ def _opt_key_matches(
     rights: set[str],
     strikes: set[int],
 ) -> bool:
-    if len(key) < 5 or key[0] != "OPT" or key[1] != sym:
+    if len(key) < 5 or key[0] not in {"OPT", "BAG"} or key[1] != sym:
         return False
     exp, right, strike = key[2], key[3], key[4]
     if exps and exp and exp not in exps:
         return False
     if rights and right and right not in rights:
         return False
+    if key[0] == "BAG":
+        pair = strike
+        if strikes and pair is not None and not set(pair).issubset(strikes):
+            return False
+        return True
     if strikes and strike is not None and strike not in strikes:
         return False
     return True
@@ -580,6 +621,213 @@ def _derived_protection(
     return False
 
 
+def _combo_strikes(params: dict[str, Any] | None) -> tuple[float, float] | None:
+    p = params if isinstance(params, dict) else {}
+    long_k = _finite(p.get("long_strike"))
+    short_k = _finite(p.get("short_strike"))
+    if long_k is None or short_k is None:
+        return None
+    if _canon(long_k) == _canon(short_k):
+        return None
+    return long_k, short_k
+
+
+def _is_combo_ticket(params: dict[str, Any] | None) -> bool:
+    return _combo_strikes(params) is not None
+
+
+def _ibkr_leg_px(row: dict[str, Any]) -> dict[str, float] | None:
+    """IBKR bid/ask/mid/last from one option_quote row. Never MDA."""
+    if not isinstance(row, dict) or _row_is_bag(row):
+        return None
+    ibkr = row.get("ibkr") if isinstance(row.get("ibkr"), dict) else None
+    src = ibkr if ibkr is not None else row
+    source = str(src.get("source") or row.get("source") or "").lower()
+    freshness = str(src.get("freshness") or row.get("freshness") or "").lower()
+    if source in _MDA_SOURCES or "delay" in freshness:
+        return None
+    if ibkr is None and source and source != "ibkr":
+        return None
+    out: dict[str, float] = {}
+    for key in ("bid", "ask", "mid", "last"):
+        fv = _finite(src.get(key))
+        if fv is not None:
+            out[key] = fv
+    if not out:
+        return None
+    return out
+
+
+def _collect_ibkr_legs(
+    snap: dict[str, Any] | None,
+    params: dict[str, Any] | None,
+) -> dict[int, dict[str, float]]:
+    """this-look option_quote IBKR prints keyed by strike canon."""
+    pair = _combo_strikes(params)
+    if not pair:
+        return {}
+    p = params if isinstance(params, dict) else {}
+    sym = str(p.get("symbol") or "").upper().strip()
+    exp = _norm_exp(p.get("expiration") or p.get("expiry"))
+    right = _norm_right(p.get("right"))
+    want = {_canon(pair[0]), _canon(pair[1])}
+    found: dict[int, dict[str, float]] = {}
+    store = _store(snap) if isinstance(snap, dict) else {
+        "quote": [], "option_quote": [], "book": None
+    }
+    for payload in store.get("option_quote") or []:
+        if not isinstance(payload, dict):
+            continue
+        rows = (
+            payload["quotes"]
+            if isinstance(payload.get("quotes"), list)
+            else [payload]
+        )
+        for row in rows:
+            if not isinstance(row, dict) or _row_is_bag(row):
+                continue
+            strike = _finite(row.get("strike"))
+            if strike is None:
+                continue
+            ck = _canon(strike)
+            if ck not in want:
+                continue
+            row_sym = _sym_of(row)
+            if row_sym and sym and row_sym != sym:
+                continue
+            row_exp = _norm_exp(row.get("expiration") or row.get("expiry"))
+            if exp and row_exp and row_exp != exp:
+                continue
+            row_right = _norm_right(row.get("right"))
+            if right and row_right and row_right != right:
+                continue
+            px = _ibkr_leg_px(row)
+            if px is None:
+                continue
+            found[ck] = px
+    return found
+
+
+def _derived_combo_nets(
+    legs: dict[int, dict[str, float]],
+    long_k: float,
+    short_k: float,
+) -> dict[str, float]:
+    long_px = legs.get(_canon(long_k))
+    short_px = legs.get(_canon(short_k))
+    if not long_px or not short_px:
+        return {}
+    lb, la = long_px.get("bid"), long_px.get("ask")
+    sb, sa = short_px.get("bid"), short_px.get("ask")
+    lm, sm = long_px.get("mid"), short_px.get("mid")
+    if lm is None and lb is not None and la is not None:
+        lm = (lb + la) / 2.0
+    if sm is None and sb is not None and sa is not None:
+        sm = (sb + sa) / 2.0
+    out: dict[str, float] = {"width": abs(float(long_k) - float(short_k))}
+    if lb is not None and sa is not None:
+        out["bid"] = lb - sa
+    if la is not None and sb is not None:
+        out["ask"] = la - sb
+    if lm is not None and sm is not None:
+        out["mid"] = lm - sm
+    return out
+
+
+def _combo_bag_prints(
+    by_inst: dict[tuple, _Bags],
+    params: dict[str, Any] | None,
+) -> set[int]:
+    pair = _combo_strikes(params)
+    if not pair:
+        return set()
+    p = params if isinstance(params, dict) else {}
+    sym = str(p.get("symbol") or "").upper().strip()
+    exp = _norm_exp(p.get("expiration") or p.get("expiry"))
+    right = _norm_right(p.get("right"))
+    want = tuple(sorted((_canon(pair[0]), _canon(pair[1]))))
+    prints: set[int] = set()
+    for key, bag in by_inst.items():
+        if key[0] != "BAG" or key[1] != sym:
+            continue
+        if exp and key[2] and key[2] != exp:
+            continue
+        if right and key[3] and key[3] != right:
+            continue
+        if key[4] != want:
+            continue
+        prints |= bag.prints
+    return prints
+
+
+def _in_derived_combo_range(val: float, derived: dict[str, float]) -> bool:
+    if not derived:
+        return False
+    exact: set[int] = set()
+    for key in ("bid", "ask", "mid", "width"):
+        fv = derived.get(key)
+        if fv is None:
+            continue
+        exact.add(_canon(fv))
+        exact.add(_canon(abs(fv)))
+    if exact and _in_pool(exact, val):
+        return True
+    sides = [derived[k] for k in ("bid", "ask") if k in derived]
+    if len(sides) < 2:
+        return False
+    lo = min(abs(sides[0]), abs(sides[1]))
+    hi = max(abs(sides[0]), abs(sides[1]))
+    tick = DERIVE_COMBO_TICK
+    av = abs(val)
+    if lo - tick - 1e-12 <= av <= hi + tick + 1e-12:
+        return True
+    slo, shi = min(sides[0], sides[1]), max(sides[0], sides[1])
+    return slo - tick - 1e-12 <= val <= shi + tick + 1e-12
+
+
+def _combo_credit_ok(
+    val: float,
+    by_inst: dict[tuple, _Bags],
+    params: dict[str, Any] | None,
+    snap: dict[str, Any] | None,
+) -> bool:
+    bag_prints = _combo_bag_prints(by_inst, params)
+    if bag_prints and (_in_pool(bag_prints, val) or _in_pool(bag_prints, abs(val))):
+        return True
+    pair = _combo_strikes(params)
+    if not pair:
+        return False
+    derived = _derived_combo_nets(_collect_ibkr_legs(snap, params), pair[0], pair[1])
+    return _in_derived_combo_range(val, derived)
+
+
+def _combo_refusal_extra(
+    snap: dict[str, Any] | None,
+    params: dict[str, Any] | None,
+) -> str:
+    if not _is_combo_ticket(params):
+        return ""
+    pair = _combo_strikes(params)
+    derived = (
+        _derived_combo_nets(_collect_ibkr_legs(snap, params), pair[0], pair[1])
+        if pair
+        else {}
+    )
+    bid, ask = derived.get("bid"), derived.get("ask")
+    if bid is not None and ask is not None:
+        lo, hi = min(abs(bid), abs(ask)), max(abs(bid), abs(ask))
+        market = f"derived_combo bid={lo:g} ask={hi:g}"
+    elif bid is not None or ask is not None:
+        side = bid if bid is not None else ask
+        market = f"derived_combo bid={abs(side):g} ask="
+    else:
+        market = "derived_combo bid= ask="
+    return (
+        f"{market}; call option_quote with long_strike and short_strike "
+        f"for a live BAG net"
+    )
+
+
 def check_ticket_numbers(
     strategy: str,
     params: dict[str, Any] | None,
@@ -587,13 +835,27 @@ def check_ticket_numbers(
 ) -> tuple[bool, str, str]:
     """Reject when a claimed last / IV / credit / width / stop is not in this look."""
     claims = ticket_claims(strategy, params)
-    if not claims:
+    p = params if isinstance(params, dict) else {}
+    combo = _is_combo_ticket(p)
+    combo_needs_limit = (
+        combo
+        and p.get("closing_position") is not True
+        and _finite(p.get("limit_price")) is None
+    )
+    if not claims and not combo_needs_limit:
         return True, "ok", ""
     by_inst = snapshot_bags(snap)
     bag = _bags_for_ticket(by_inst, strategy, params)
-    direction = str((params or {}).get("direction") or "").upper()
+    direction = str(p.get("direction") or "").upper()
     missing: list[str] = []
+    if combo_needs_limit:
+        missing.append("limit_price")
     for kind, field, val in claims:
+        if kind == "credit" and combo:
+            if _combo_credit_ok(val, by_inst, p, snap):
+                continue
+            missing.append(f"{field}={val}")
+            continue
         if kind == "iv":
             pool = bag.ivs
         elif kind == "width":
@@ -609,8 +871,22 @@ def check_ticket_numbers(
         missing.append(f"{field}={val}")
     if not missing:
         return True, "ok", ""
+    if p.get("closing_position") is True:
+        flag = "closing_position=true"
+    else:
+        flag = "closing_position=false"
+    if not bag.prints:
+        detail = "legs missing from this look's cache"
+    else:
+        shown = ", ".join(
+            f"{c / 10000.0:g}" for c in sorted(bag.prints)[:16]
+        )
+        detail = f"prints=[{shown}]"
     note = (
         f"{REASON_CODE}: {', '.join(missing)} not in this look's "
-        "quote/option_quote/book"
+        f"quote/option_quote/book; {flag}; {detail}"
     )
+    extra = _combo_refusal_extra(snap, p) if combo else ""
+    if extra:
+        note = f"{note}; {extra}"
     return False, REASON_CODE, note

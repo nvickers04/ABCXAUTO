@@ -90,24 +90,30 @@ def _isolate_desk_evidence_and_latches(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolated_journal(tmp_path):
+def _isolated_journal(tmp_path, monkeypatch):
     """Keep the trade journal out of the real journal.db during tests."""
     from abcxauto.memory import reset_journal
 
-    reset_journal(path=str(tmp_path / "journal.db"))
+    path = tmp_path / "journal.db"
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(path))
+    reset_journal(path=str(path))
     yield
-    reset_journal(path=str(tmp_path / "journal.db"))
+    reset_journal(path=str(path))
 
 
 def pytest_configure(config):
     """Redirect settings before test modules import abcxauto.config.
 
     ``load_risk_settings()`` runs at import and would otherwise read the
-    worktree / repo-root ``risk_settings.json``.
+    worktree / repo-root ``risk_settings.json``. Journal and the rotating
+    app log are the same class of leak: first ``get_journal()`` / first
+    ``setup_file_logging()`` would open the live files if the env is empty.
     """
-    os.environ["ABCXAUTO_RISK_SETTINGS_PATH"] = str(
-        Path(tempfile.gettempdir()) / f"abcxauto-pytest-{os.getpid()}-no-settings.json"
-    )
+    tmp = Path(tempfile.gettempdir()) / f"abcxauto-pytest-{os.getpid()}"
+    tmp.mkdir(parents=True, exist_ok=True)
+    os.environ["ABCXAUTO_RISK_SETTINGS_PATH"] = str(tmp / "no-settings.json")
+    os.environ["ABCXAUTO_JOURNAL_PATH"] = str(tmp / "journal.db")
+    os.environ["ABCXAUTO_LOG_PATH"] = str(tmp / "app.log")
 
 
 # Env knobs that overlay the same Config fields as risk_settings.json / .env.
@@ -314,14 +320,13 @@ def _isolate_desk_state(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "ABCXAUTO_RESEARCH_BUDGET_PATH", str(tmp_path / "research_budget.json")
     )
+    monkeypatch.setenv("ABCXAUTO_WORKING_MEMORY_PATH", str(tmp_path / "working_memory.json"))
+    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(tmp_path / "universe_allowlist.json"))
+    monkeypatch.setenv("ABCXAUTO_LAST_TURN_PATH", str(tmp_path / "last_turn.json"))
+    monkeypatch.setenv("ABCXAUTO_THINK_TAIL_PATH", str(tmp_path / "think_tail.txt"))
+    monkeypatch.setenv("ABCXAUTO_THINK_PREV_PATH", str(tmp_path / "think_prev.txt"))
+    monkeypatch.setenv("ABCXAUTO_THINK_SESSION_DIR", str(tmp_path / "think_session"))
+    monkeypatch.setenv("ABCXAUTO_RUN_PATH", str(tmp_path / "run.json"))
     from abcxauto.research_budget import reset_research_budget
 
     reset_research_budget()
-    from abcxauto import think_stream as ts
-
-    monkeypatch.setattr(ts, "LAST_TURN_PATH", tmp_path / "last_turn.json")
-    monkeypatch.setattr(ts, "DESK_BRIEF_PATH", tmp_path / "desk_brief.json")
-    monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
-    monkeypatch.setattr(ts, "THINK_PREV_PATH", tmp_path / "think_prev.txt")
-    monkeypatch.setattr(ts, "THINK_SESSION_DIR", tmp_path / "think_session")
-    monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")
