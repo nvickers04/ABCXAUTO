@@ -1,8 +1,7 @@
 """Portfolio defined-max-loss math. Display only — never a place refuse.
 
 Deterministic sum: defined max-loss(open lots) + working new-risk
-+ candidate. ``portfolio_cap_usd`` default $800 is not a clerk gate.
-Closers / closing_position / unprotected last-stop stay free.
++ candidate. Closers / closing_position / unprotected last-stop stay free.
 Mid / mark / last are not max-loss evidence.
 
 No IBKR import. Unit-testable with plain dicts.
@@ -10,23 +9,11 @@ No IBKR import. Unit-testable with plain dicts.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
-import os
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-PORTFOLIO_CAP_USD_DEFAULT = 800.0
-PORTFOLIO_CAP_KEY = "portfolio_cap_usd"
-PORTFOLIO_CAP_ENV = "ABCXAUTO_PORTFOLIO_CAP_USD"
-
-REASON_PORTFOLIO_USD = "portfolio_usd_max_loss"
-REASON_PORTFOLIO_USD_UNREADABLE = "portfolio_usd_unreadable"
-REASON_PORTFOLIO_USD_CAP = "portfolio_usd_cap_unreadable"
-
-_UNSET = object()
 
 # Same new-risk set as agent_loop._NEW_RISK — copied so this module stays
 # free of agent_loop / send / IBKR imports.
@@ -146,6 +133,170 @@ def _qty_of(params: dict[str, Any]) -> int | None:
     if abs(n) < 1e-9:
         return 0
     return int(abs(n)) if abs(n) >= 1 else None
+
+
+def _row_signed_qty(row: dict[str, Any]) -> float:
+    for key in ("quantity", "position", "qty"):
+        n = _finite(row.get(key))
+        if n is not None:
+            return float(n)
+    return 0.0
+
+
+def _sec_type(row: dict[str, Any]) -> str:
+    return str(
+        row.get("secType") or row.get("sec_type") or row.get("sec") or ""
+    ).strip().upper()
+
+
+def _opt_exp_key(row: dict[str, Any]) -> str:
+    raw = str(
+        row.get("expiration") or row.get("lastTradeDateOrContractMonth") or ""
+    ).replace("-", "")
+    if len(raw) >= 8 and raw[:8].isdigit():
+        return raw[:8]
+    if len(raw) == 6 and raw.isdigit():
+        return "20" + raw
+    return raw
+
+
+def _is_opt_leg(row: dict[str, Any]) -> bool:
+    sec = _sec_type(row)
+    return sec.startswith("OPT") or sec == "FOP"
+
+
+def _leg_premium_per_share(row: dict[str, Any]) -> float | None:
+    raw = row.get("avg_cost")
+    if raw is None:
+        raw = row.get("avgCost") or row.get("averageCost")
+    n = _finite(raw)
+    if n is None:
+        return None
+    sec = _sec_type(row)
+    if sec.startswith("OPT") and abs(n) >= 5.0:
+        mkt = _finite(row.get("market_price") or row.get("marketPrice"))
+        if mkt is None or abs(n) > abs(mkt) * 3:
+            return abs(n) / 100.0
+    return abs(n)
+
+
+def _vertical_max_loss_from_legs(long_leg: dict[str, Any], short_leg: dict[str, Any]) -> float | None:
+    qty_l = abs(_row_signed_qty(long_leg))
+    qty_s = abs(_row_signed_qty(short_leg))
+    qty = min(int(qty_l), int(qty_s))
+    if qty <= 0:
+        return None
+    ls = _finite(long_leg.get("strike"))
+    ss = _finite(short_leg.get("strike"))
+    if ls is None or ss is None:
+        return None
+    width = abs(float(ss) - float(ls))
+    long_p = _leg_premium_per_share(long_leg)
+    short_p = _leg_premium_per_share(short_leg)
+    if long_p is not None and short_p is not None:
+        net = float(long_p) - float(short_p)
+        if net >= 0:
+            return net * 100.0 * qty
+        credit = abs(net)
+        return max(0.0, (width - credit) * 100.0 * qty)
+    return width * 100.0 * qty
+
+
+def _vertical_partner_leg(
+    leg: dict[str, Any], pool: list[dict[str, Any]], used: set[int]
+) -> dict[str, Any] | None:
+    qty = _row_signed_qty(leg)
+    if abs(qty) < 1e-9:
+        return None
+    sym = str(leg.get("symbol") or "").upper()
+    exp = _opt_exp_key(leg)
+    right = str(leg.get("right") or "")[:1].upper()
+    strike = _finite(leg.get("strike"))
+    if not sym or not exp or not right or strike is None:
+        return None
+    want = -1.0 if qty > 0 else 1.0
+    best: dict[str, Any] | None = None
+    best_dist: float | None = None
+    best_idx: int | None = None
+    for idx, p in enumerate(pool):
+        if idx in used or not _is_opt_leg(p):
+            continue
+        pq = _row_signed_qty(p)
+        if pq * want <= 0:
+            continue
+        if str(p.get("symbol") or "").upper() != sym:
+            continue
+        if _opt_exp_key(p) != exp or str(p.get("right") or "")[:1].upper() != right:
+            continue
+        ps = _finite(p.get("strike"))
+        if ps is None or abs(float(ps) - float(strike)) < 1e-9:
+            continue
+        dist = abs(float(ps) - float(strike))
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best = p
+            best_idx = idx
+    if best is not None and best_idx is not None:
+        used.add(best_idx)
+    return best
+
+
+def _synthetic_vertical_row(
+    long_leg: dict[str, Any], short_leg: dict[str, Any]
+) -> dict[str, Any]:
+    qty = min(abs(int(_row_signed_qty(long_leg))), abs(int(_row_signed_qty(short_leg))))
+    loss = _vertical_max_loss_from_legs(long_leg, short_leg)
+    row: dict[str, Any] = {"params": {"quantity": qty}}
+    if loss is not None:
+        row["max_loss"] = loss
+    return row
+
+
+def _bag_has_strike_geometry(row: dict[str, Any]) -> bool:
+    merged = dict(row)
+    merged.update(_params_of(row))
+    return (
+        _finite(merged.get("long_strike")) is not None
+        and _finite(merged.get("short_strike")) is not None
+    )
+
+
+def _normalize_loss_rows(
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Pair bare OPT legs into verticals. Skip unreadable BAG shells."""
+    out: list[dict[str, Any]] = []
+    skipped = False
+    opt_pool: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if _is_opt_leg(row) and abs(_row_signed_qty(row)) >= 1e-9:
+            if _explicit_max_loss_usd(row) is not None:
+                out.append(row)
+                continue
+            if _inferred_vertical_max_loss(row) is not None:
+                out.append(row)
+                continue
+            opt_pool.append(row)
+            continue
+        sec = _sec_type(row)
+        if sec == "BAG" and not _bag_has_strike_geometry(row):
+            skipped = True
+            continue
+        out.append(row)
+    used: set[int] = set()
+    for idx, leg in enumerate(opt_pool):
+        if idx in used:
+            continue
+        partner = _vertical_partner_leg(leg, opt_pool, used)
+        if partner is None:
+            skipped = True
+            continue
+        used.add(idx)
+        long_leg, short_leg = (leg, partner) if _row_signed_qty(leg) > 0 else (partner, leg)
+        out.append(_synthetic_vertical_row(long_leg, short_leg))
+    return out, skipped
 
 
 def is_new_risk_ticket(row: Any) -> bool:
@@ -293,6 +444,34 @@ def _explicit_max_loss_usd(row: Any) -> float | None:
     return None
 
 
+def _inferred_vertical_max_loss(row: dict[str, Any]) -> float | None:
+    merged = dict(row)
+    merged.update(_params_of(row))
+    ls = _finite(merged.get("long_strike"))
+    ss = _finite(merged.get("short_strike"))
+    if ls is None or ss is None:
+        return None
+    limit = _finite(
+        merged.get("limit_price")
+        or merged.get("lmt")
+        or merged.get("lmt_price")
+        or merged.get("credit")
+    )
+    qty = _qty_of(merged)
+    if qty is None:
+        qty = 1
+    fake = {
+        "strategy": "vertical_spread",
+        "params": {
+            "long_strike": ls,
+            "short_strike": ss,
+            "limit_price": limit,
+            "quantity": qty,
+        },
+    }
+    return _structure_max_loss_usd(fake)
+
+
 def defined_max_loss_usd(row: Any) -> float | None:
     """Prefer structure (width − credit). Else explicit defined max-loss.
 
@@ -303,6 +482,9 @@ def defined_max_loss_usd(row: Any) -> float | None:
     structured = _structure_max_loss_usd(row)
     if structured is not None:
         return structured
+    inferred = _inferred_vertical_max_loss(row)
+    if inferred is not None:
+        return inferred
     return _explicit_max_loss_usd(row)
 
 
@@ -318,10 +500,12 @@ def _sum_defined(
     rows: list[dict[str, Any]],
     *,
     skip_exits: bool,
-) -> tuple[float | None, bool]:
-    """Return (sum, unreadable). skip_exits drops working last-stop / exit."""
+) -> tuple[float, bool]:
+    """Return (sum, partial_unreadable). skip_exits drops working last-stop / exit."""
+    normalized, skipped = _normalize_loss_rows(_dict_rows(rows))
     total = 0.0
-    for row in rows:
+    partial = skipped
+    for row in normalized:
         if skip_exits and is_working_exit_or_last_stop(row):
             continue
         qty = _qty_of(_params_of(row))
@@ -329,86 +513,10 @@ def _sum_defined(
             continue
         loss = defined_max_loss_usd(row)
         if loss is None:
-            return None, True
+            partial = True
+            continue
         total += float(loss)
-    return total, False
-
-
-def resolve_portfolio_cap_usd(
-    raw: Any = _UNSET,
-    *,
-    present: bool | None = None,
-) -> dict[str, Any]:
-    """Resolve the display-only USD figure.
-
-    Unset → default 800 (not a refuse). Present + finite ≥ 0 → use it,
-    clamped so persist cannot raise above 800. Present + garbage /
-    non-finite → unreadable. Never a place or preview refuse.
-    """
-    if raw is _UNSET:
-        saw = False if present is None else bool(present)
-        value = None
-    else:
-        saw = True if present is None else bool(present)
-        value = raw
-    if not saw:
-        return {
-            "ok": True,
-            "cap": PORTFOLIO_CAP_USD_DEFAULT,
-            "unreadable": False,
-            "defaulted": True,
-        }
-    if value in (None, ""):
-        return {
-            "ok": False,
-            "cap": None,
-            "unreadable": True,
-            "defaulted": False,
-        }
-    n = _finite(value)
-    if n is None or n < 0:
-        return {
-            "ok": False,
-            "cap": None,
-            "unreadable": True,
-            "defaulted": False,
-        }
-    cap = min(float(n), PORTFOLIO_CAP_USD_DEFAULT)
-    return {
-        "ok": True,
-        "cap": cap,
-        "unreadable": False,
-        "defaulted": False,
-    }
-
-
-def coerce_portfolio_cap_usd(value: Any) -> float:
-    """Operator persist path: finite ≥ 0, cannot raise above the default."""
-    resolved = resolve_portfolio_cap_usd(value, present=True)
-    if not resolved["ok"] or resolved["cap"] is None:
-        raise ValueError("portfolio_cap_usd unreadable")
-    return float(resolved["cap"])
-
-
-def load_portfolio_cap_raw() -> tuple[Any, bool]:
-    """Raw operator-disk / env value. present=True even when garbage.
-
-    File key wins. Env is used only when the file omits the key. Missing
-    both → (unset, False). Display default $800 is not a refuse.
-    """
-    try:
-        from abcxauto.config import risk_settings_path
-
-        path = risk_settings_path()
-        if path.is_file():
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict) and PORTFOLIO_CAP_KEY in raw:
-                return raw.get(PORTFOLIO_CAP_KEY), True
-    except Exception:
-        logger.debug("portfolio cap file read failed", exc_info=True)
-    if PORTFOLIO_CAP_ENV in os.environ:
-        return os.environ.get(PORTFOLIO_CAP_ENV), True
-    return _UNSET, False
+    return total, partial
 
 
 def book_rows_from_context(
@@ -446,37 +554,23 @@ def portfolio_usd_check(
     open_lots: Any = None,
     working: Any = None,
     candidate: Any = None,
-    portfolio_cap_usd: Any = _UNSET,
-    cap_present: bool | None = None,
 ) -> dict[str, Any]:
     """Display sum only. Plain dicts. Never refuses.
 
     ``portfolio_max_loss_usd`` = Σ open + Σ working new-risk + candidate.
     Closers stay free. Unreadable counted max-loss is a fact, not a refuse.
-    Over-cap vs ``portfolio_cap_usd`` is not a clerk refuse.
     """
-    cap_info = resolve_portfolio_cap_usd(portfolio_cap_usd, present=cap_present)
     closer = is_portfolio_usd_closer(candidate)
-    cap = cap_info.get("cap")
     blob = {
         "allow": True,
-        "portfolio_usd_refused": False,
         "portfolio_max_loss_usd": None,
-        "portfolio_cap_usd": cap,
-        "reason": "",
-        "reason_code": "",
         "open_usd": None,
         "working_usd": None,
         "candidate_usd": None,
         "unreadable": False,
         "closer": closer,
-        "cap_unreadable": bool(cap_info.get("unreadable")),
     }
     if closer:
-        return blob
-
-    if cap_info.get("unreadable") or not cap_info.get("ok"):
-        blob["unreadable"] = True
         return blob
 
     open_sum, open_bad = _sum_defined(_dict_rows(open_lots), skip_exits=False)
@@ -488,37 +582,20 @@ def portfolio_usd_check(
     blob["working_usd"] = work_sum
     blob["candidate_usd"] = cand_loss
 
-    if open_bad or work_bad or cand_bad:
+    if cand_bad:
         blob["unreadable"] = True
         return blob
 
-    total = float(open_sum or 0.0) + float(work_sum or 0.0) + float(cand_loss or 0.0)
+    total = float(open_sum) + float(work_sum) + float(cand_loss or 0.0)
     blob["portfolio_max_loss_usd"] = total
-    blob["portfolio_cap_usd"] = cap
+    if open_bad or work_bad:
+        blob["unreadable"] = True
     return blob
 
 
-def stamp_portfolio_usd(out: dict[str, Any], check: dict[str, Any]) -> dict[str, Any]:
-    """Copy display fields. Never stamps a USD refuse."""
+def stamp_portfolio_max_loss(out: dict[str, Any], check: dict[str, Any]) -> dict[str, Any]:
+    """Copy aggregate defined-risk onto a preview/place blob."""
     out["portfolio_max_loss_usd"] = check.get("portfolio_max_loss_usd")
-    out["portfolio_cap_usd"] = check.get("portfolio_cap_usd")
-    out["portfolio_usd_refused"] = False
-    return out
-
-
-def portfolio_usd_block_blob(check: dict[str, Any], act: Any = None) -> dict[str, Any]:
-    """Legacy helper. KEEP-5A refuse is deleted — never a place block."""
-    strat = _strategy_of(act) or "blocked"
-    out = {
-        "status": "ok",
-        "reason_code": "",
-        "note": "",
-        "strategy": strat,
-        "would_refuse": [],
-        "pass": True,
-        "refuse": False,
-    }
-    stamp_portfolio_usd(out, check)
     return out
 
 
@@ -529,64 +606,27 @@ def live_portfolio_usd_check(
     *,
     open_lots: Any = None,
     working: Any = None,
-    portfolio_cap_usd: Any = _UNSET,
-    cap_present: bool | None = None,
 ) -> dict[str, Any]:
-    """Check with book from context. Loads operator cap when unset."""
+    """Check with book from context."""
     lots, orders = book_rows_from_context(act, world=world, snap=snap)
     if open_lots is not None:
         lots = _dict_rows(open_lots)
     if working is not None:
         orders = _dict_rows(working)
-    raw = portfolio_cap_usd
-    present = cap_present
-    if raw is _UNSET and isinstance(act, dict) and PORTFOLIO_CAP_KEY in act:
-        raw = act.get(PORTFOLIO_CAP_KEY)
-        present = True
-    if raw is _UNSET:
-        raw, present = load_portfolio_cap_raw()
     return portfolio_usd_check(
         open_lots=lots,
         working=orders,
         candidate=act,
-        portfolio_cap_usd=raw,
-        cap_present=present,
     )
 
 
-def portfolio_usd_place_block(
-    act: Any,
-    world: Any = None,
-    snap: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Always None. KEEP-5A USD refuse is deleted — never blocks place."""
-    if isinstance(act, dict):
-        try:
-            check = live_portfolio_usd_check(act, world=world, snap=snap)
-            stamp_portfolio_usd(act, check)
-        except Exception:
-            logger.debug("portfolio usd display stamp failed", exc_info=True)
-    return None
-
-
 __all__ = [
-    "PORTFOLIO_CAP_ENV",
-    "PORTFOLIO_CAP_KEY",
-    "PORTFOLIO_CAP_USD_DEFAULT",
-    "REASON_PORTFOLIO_USD",
-    "REASON_PORTFOLIO_USD_CAP",
-    "REASON_PORTFOLIO_USD_UNREADABLE",
     "book_rows_from_context",
-    "coerce_portfolio_cap_usd",
     "defined_max_loss_usd",
     "is_new_risk_ticket",
     "is_portfolio_usd_closer",
     "is_working_exit_or_last_stop",
     "live_portfolio_usd_check",
-    "load_portfolio_cap_raw",
-    "portfolio_usd_block_blob",
     "portfolio_usd_check",
-    "portfolio_usd_place_block",
-    "resolve_portfolio_cap_usd",
-    "stamp_portfolio_usd",
+    "stamp_portfolio_max_loss",
 ]

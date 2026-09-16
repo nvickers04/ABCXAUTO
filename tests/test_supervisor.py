@@ -211,6 +211,10 @@ def test_useful_hours_rth_and_weekend():
     assert useful_hours(now=rth) is True
     early = datetime(2026, 8, 17, 7, 0)
     assert useful_hours(now=early) is False
+    before_desk = datetime(2026, 8, 17, 8, 44)
+    assert useful_hours(now=before_desk) is False
+    desk_open = datetime(2026, 8, 17, 8, 45)
+    assert useful_hours(now=desk_open) is True
     sat = datetime(2026, 8, 15, 10, 0)
     assert useful_hours(now=sat) is False
 

@@ -269,7 +269,7 @@ class MarketDataClient:
             try:
                 await client.aclose()
             except Exception:
-                pass
+                pass  # httpx client already closed or loop is gone.
 
     async def close_all(self):
         """Close every cached HTTP client; caller must run on each loop."""
@@ -279,7 +279,7 @@ class MarketDataClient:
             try:
                 await client.aclose()
             except Exception:
-                pass
+                pass  # httpx client already closed or loop is gone.
 
     def _parse_rate_headers(self, response: httpx.Response) -> None:
         """Extract MDA rate-limit headers and warn when credits run low."""

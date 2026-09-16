@@ -13,7 +13,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,13 +50,35 @@ NEXT_LOOK_S_MAX = 4 * 3600.0
 PARK_SESSIONS = frozenset({"closed", "postmarket"})
 STAY_UP_SESSIONS = frozenset({"regular", "premarket"})
 PAPER_STAY_UP_SESSIONS = STAY_UP_SESSIONS
-# 04:00 ET premarket start is 5.5h before the 09:30 bell.
-PREMARKET_MINUTES_TO_OPEN = 5.5 * 60.0
+# Desk premarket stay-up. Exchange tape still prints from 04:00 ET;
+# Grok looks start 08:45 ET (07:45 CDT), 45 minutes before the 09:30 bell.
+PREMARKET_START_ET = dt_time(8, 45)
+RTH_OPEN_ET = dt_time(9, 30)
+PREMARKET_MINUTES_TO_OPEN = float(
+    (RTH_OPEN_ET.hour * 60 + RTH_OPEN_ET.minute)
+    - (PREMARKET_START_ET.hour * 60 + PREMARKET_START_ET.minute)
+)
 # Pacing class: a 30-minute remaining-to-bell wait is a park, not a look.
 REMAINING_TO_BELL_S = 30 * 60.0
 MTM_BUCKET_PCT = 8.0
 _last_wake = None
 _pending_interrupt = None  # BookEvent | None — set after BookEvent is defined
+_look_abort = False
+
+
+def request_look_abort() -> None:
+    """Stop button: cut the open tip. Not a book poke, not flatten."""
+    global _look_abort
+    _look_abort = True
+
+
+def look_aborted() -> bool:
+    return bool(_look_abort)
+
+
+def clear_look_abort() -> None:
+    global _look_abort
+    _look_abort = False
 
 
 def _path() -> Path:
@@ -274,12 +296,18 @@ def resolve_stay_up_session(
     """Fill a blank snap label from the ET clock. Closed / postmarket stay parked.
 
     A junk look must not sit the desk because IBKR omitted session=. Weekday
-    RTH becomes regular; last-hour-to-open becomes premarket. After the close
-    an empty label stays empty so overnight park can still shut down.
+    RTH becomes regular; 8:45 ET / 7:45 CDT to the bell becomes premarket.
+    After the close an empty label stays empty so overnight park can still
+    shut down.
     """
     sess = str(session or "").strip().lower()
     if sess == "unknown":
         sess = ""
+    if sess == "premarket":
+        inferred, _mins = infer_session_before_open(now=now)
+        if inferred == "closed":
+            return "closed"
+        return sess
     if sess:
         return sess
     inferred, _mins = infer_session_before_open(now=now)
@@ -455,7 +483,7 @@ def clerk_look_s(
     """Overnight / after-close park seconds. Stay-up sessions return 0.
 
     Session-card opening-print wait is a send gate, not this clock.
-    Overnight closed parks until premarket (4:00 ET).
+    Overnight closed parks until desk premarket (8:45 ET / 7:45 CDT).
     """
     _ = next_look_s
     sess = str(session or "").lower()

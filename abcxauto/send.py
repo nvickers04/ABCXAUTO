@@ -129,34 +129,31 @@ def apply_size_pct_nl(
 ) -> dict[str, Any] | None:
     """Fill ``quantity`` from ``size_pct_nl`` × current NL. None if unused.
 
-    Mode bit clamps lottery % even when paper gates are off, except when
-    max_risk_per_trade_pct is 0 (off) — Grok's qty / % stands. A qty
-    already inside the band is left alone (#110). Over-ceiling qty is
-    reduced. Options size off premium × 100, not underlying last.
-    Does not bake 1% or 25% as the working size.
+    Mode bit clamps lottery % even when paper gates are off and even when
+    max_risk_per_trade_pct is 0 — the explore envelope still binds. The
+    self_tune shadow does not. A qty already inside the band is left
+    alone (#110). Over-ceiling qty is reduced. Options size off premium
+    × 100, not underlying last. Does not bake 1% or 25% as the working size.
     """
     if not isinstance(params, dict):
         return None
     from abcxauto.mode_size import (
-        clamp_size_pct_nl,
+        MODE_SIZE_FLOOR,
         implied_size_pct_nl,
-        max_risk_per_trade_off,
-        working_size_ceiling,
+        ticket_size_ceiling,
     )
 
-    cap_off = max_risk_per_trade_off()
     card = params.get("card")
-    ceiling = working_size_ceiling(card=card, type=strategy)
+    ceiling = ticket_size_ceiling(card=card, type=strategy)
     pct_in = params.get(SEND_SIZE_PCT_NL)
-    if cap_off:
-        clamped_pct = _pos_float(pct_in)
-        clamp_note = None
-    else:
-        clamped_pct, clamp_note = clamp_size_pct_nl(
-            pct_in, card=card, type=strategy
-        )
-        if clamp_note and clamped_pct is not None:
-            params[SEND_SIZE_PCT_NL] = float(clamped_pct)
+    clamped_pct = _pos_float(pct_in)
+    clamp_note = None
+    if clamped_pct is not None:
+        bounded = max(MODE_SIZE_FLOOR, min(ceiling, clamped_pct))
+        if bounded != clamped_pct:
+            clamp_note = {"raw": clamped_pct, "clamped": bounded}
+            params[SEND_SIZE_PCT_NL] = float(bounded)
+            clamped_pct = bounded
     pct = params.get(SEND_SIZE_PCT_NL)
     px_mark, mult = option_size_mark(strategy, params, price)
 
@@ -169,8 +166,6 @@ def apply_size_pct_nl(
         has_qty = False
 
     if has_qty:
-        if cap_off:
-            return None
         implied = implied_size_pct_nl(
             qty_n, net_liq, px_mark, multiplier=mult
         )

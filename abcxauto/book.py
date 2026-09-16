@@ -79,10 +79,11 @@ def _peak_dd_pct(net_liq: Optional[float]) -> Optional[float]:
                 gate.update_equity(net_liq)
                 peak = gate.peak_equity or peak
             except Exception:
-                pass
+                logger.warning("book peak-equity update failed", exc_info=True)
         dd = (peak - float(net_liq)) / peak * 100.0
         return round(max(0.0, dd), 4)
     except Exception:
+        logger.debug("book peak drawdown unavailable", exc_info=True)
         return None
 
 
@@ -109,7 +110,7 @@ def clerk_halt_facts(
 
         limit_pct = float(getattr(get_config(), "daily_loss_limit_pct", 25.0) or 0.0)
     except Exception:
-        pass
+        logger.debug("daily-loss limit pct unavailable; using %s", limit_pct, exc_info=True)
     trips_at: Optional[float] = None
     day_vs: Optional[float] = None
     try:
@@ -145,7 +146,7 @@ def _trades_today_and_halt() -> tuple[Optional[int], Optional[bool], Optional[st
         halted = bool(gate.is_halted)
         halt_reason = gate.halt_reason or None
     except Exception:
-        pass
+        logger.warning("book halt/trade-count gate unavailable", exc_info=True)
     if trades is None:
         try:
             from abcxauto.memory import get_journal
@@ -155,7 +156,7 @@ def _trades_today_and_halt() -> tuple[Optional[int], Optional[bool], Optional[st
             if halted is None:
                 halted = int(summary.get("halts") or 0) > 0
         except Exception:
-            pass
+            logger.debug("book journal halt/trade-count fallback failed", exc_info=True)
     return trades, halted, halt_reason
 
 

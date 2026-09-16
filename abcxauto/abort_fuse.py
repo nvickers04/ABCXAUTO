@@ -173,6 +173,7 @@ async def _read_book(
         try:
             raw = await get_orders()
         except Exception as exc:
+            logger.warning("abort fuse cannot read open orders", exc_info=True)
             return None, lots, f"get_open_orders failed: {exc}"
         orders = list(raw or [])
     if lots is None:
@@ -184,6 +185,7 @@ async def _read_book(
                 raw_p = await get_pos()
                 lots = list(raw_p or [])
             except Exception as exc:
+                logger.warning("abort fuse cannot read positions", exc_info=True)
                 return orders, None, f"get_positions failed: {exc}"
     return orders, lots, ""
 

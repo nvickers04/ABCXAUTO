@@ -47,7 +47,24 @@ def test_is_self_tune_alias():
     assert not is_self_tune_strategy("bracket")
 
 
-def test_defaults_are_1k_floor():
+def test_defaults_are_1k_floor(code_defaults):
+    # The operator's .env may pin any of these; a defaults test reads the code.
+    code_defaults(
+        "ABCXAUTO_RISK_POSTURE",
+        "ABCXAUTO_DAILY_LOSS_LIMIT_PCT",
+        "ABCXAUTO_MAX_POSITION_PCT",
+        "ABCXAUTO_MAX_RISK_PER_TRADE_PCT",
+        "ABCXAUTO_MAX_PEAK_DRAWDOWN_PCT",
+        "ABCXAUTO_MAX_OPEN_POSITIONS",
+        "ABCXAUTO_DEFINED_RISK_ONLY",
+        "ABCXAUTO_CASH_ONLY",
+        "ABCXAUTO_AUTO_PANIC_ON_BREACH",
+        "ABCXAUTO_SCAN_FETCH_CAP",
+        "ABCXAUTO_SESSION_LOOK_CAP",
+        "ABCXAUTO_SESSION_TOKEN_CAP",
+        "ABCXAUTO_TRADING_BUDGET_USD",
+        "ABCXAUTO_TARGET_CAPITAL",
+    )
     cfg = get_config()
     assert cfg.risk_posture == "defensive"
     assert cfg.daily_loss_limit_pct == 25.0

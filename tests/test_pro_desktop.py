@@ -171,6 +171,35 @@ def test_playbook_line_paints_run_next(headless_pro):
     assert "unused=" not in line
 
 
+def test_result_status_shows_broker_cancel_after_send_ok(headless_pro):
+    s = headless_pro.engine.state
+    s.last_result = {"success": True, "order_id": 20759, "symbol": "AAPL"}
+    s.broker_rejects = [
+        {
+            "order_id": 20759,
+            "symbol": "AAPL",
+            "kind": "broker_cancel",
+            "reason": (
+                "Order Canceled - reason:We cannot accept an order at a limit price "
+                "at or more aggressive than 2.87."
+            ),
+        }
+    ]
+    headless_pro._sync_widgets()
+    status = headless_pro.lbl_result.value or ""
+    assert "broker-cancelled" in status.lower()
+    assert "2.87" in status
+    assert status != "Result: ok"
+
+
+def test_result_status_self_cancel_stays_ok(headless_pro):
+    s = headless_pro.engine.state
+    s.last_result = {"success": True, "order_id": 99, "symbol": "SPY"}
+    s.broker_rejects = []
+    headless_pro._sync_widgets()
+    assert headless_pro.lbl_result.value == "Result: ok"
+
+
 def test_book_strip_sync(headless_pro):
     s = headless_pro.engine.state
     s.equity = 100_000.0

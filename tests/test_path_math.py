@@ -9,11 +9,171 @@ from abcxauto.path_math import (
     conservative_trade_pnl,
     net_realized_usd,
     net_signed_premium,
+    path_by_structure,
     path_facts,
     path_from_journal,
     path_pnls_from_rows,
     signed_premium_usd,
+    structure_label,
 )
+
+
+def _leg(order_id, sec_type, pnl, qty=1, *, side=None, price=None, strike=None):
+    # qty matters: _closed_fill_pnl treats a qty-blind row as "not a fill".
+    # Legs of one ticket must differ by contract (strike) or print (side /
+    # price) to count as separate legs — that is the journal's fill shape.
+    row = {
+        "order_id": order_id,
+        "sec_type": sec_type,
+        "realized_pnl": pnl,
+        "quantity": qty,
+    }
+    if side is not None:
+        row["side"] = side
+    if price is not None:
+        row["price"] = price
+    if strike is not None:
+        row["strike"] = strike
+    return row
+
+
+def _fill(order_id, sec_type, side, qty, price, pnl, exec_id, symbol="SPY"):
+    """A journal ``fills`` row as ``closing_fills`` / ``record_fills`` shape it."""
+    return {
+        "exec_id": exec_id,
+        "order_id": order_id,
+        "symbol": symbol,
+        "sec_type": sec_type,
+        "side": side,
+        "quantity": qty,
+        "price": price,
+        "commission": 1.0,
+        "realized_pnl": pnl,
+    }
+
+
+def test_structure_label_names_the_shape_not_a_grade():
+    assert structure_label([_leg(1, "OPT", 5.0)]) == "single_option"
+    assert structure_label(
+        [_leg(1, "OPT", 5.0, strike=400), _leg(1, "OPT", -2.0, strike=405)]
+    ) == "spread_2leg"
+    assert structure_label(
+        [_leg(1, "OPT", 1.0, strike=k) for k in (95, 100, 105)]
+    ) == "spread_3leg"
+    assert structure_label([]) == "unknown"
+
+
+def test_structure_label_stock_leg_wins():
+    """A covered call is managed as the share lot, not a two-leg option bet."""
+    legs = [_leg(1, "STK", 10.0), _leg(1, "OPT", -3.0)]
+    assert structure_label(legs) == "stock"
+
+
+def test_bag_parent_row_is_the_wrapper_not_a_leg():
+    """IBKR prints the combo itself (sec_type BAG, realized 0) plus one row
+    per leg. Counting the wrapper turned every vertical into a 3-leg."""
+    vertical = [
+        _fill(13131, "BAG", "SLD", 1, 0.60, 0.0, "0000e22a.6a9654ee.01.01", "HPQ"),
+        _fill(13131, "OPT", "BOT", 1, 0.85, -134.7, "0000e22a.6a9654ee.02.01", "HPQ"),
+        _fill(13131, "OPT", "SLD", 1, 1.45, 168.3, "0000e22a.6a9654ee.03.01", "HPQ"),
+    ]
+    assert structure_label(vertical) == "spread_2leg"
+    fly = [
+        _fill(14698, "BAG", "SLD", 2, 0.19, 0.0, "0001938b.6a97b8d6.01.01", "TLT"),
+        _fill(14698, "OPT", "SLD", 2, 0.17, -63.44, "0001938b.6a97b8d6.02.01", "TLT"),
+        _fill(14698, "OPT", "BOT", 4, 0.40, 193.11, "0001938b.6a97b8d6.03.01", "TLT"),
+        _fill(14698, "OPT", "SLD", 2, 0.82, -141.44, "0001938b.6a97b8d6.04.01", "TLT"),
+    ]
+    assert structure_label(fly) == "spread_3leg"
+    # the wrapper alone says "combo" but not how many legs
+    assert structure_label(vertical[:1]) == "unknown"
+
+
+def test_partial_fills_of_one_contract_are_one_leg():
+    """QQQ oid 18136: one option closed in two executions is not a spread."""
+    partials = [
+        _fill(18136, "OPT", "SLD", 1, 8.18, -110.71, "000182cd.6a9a5854.01.01", "QQQ"),
+        _fill(18136, "OPT", "SLD", 1, 8.18, -110.01, "000182cd.6a9a5855.01.01", "QQQ"),
+    ]
+    assert structure_label(partials) == "single_option"
+    out = path_by_structure(partials, equity=10_000.0, risk_pct=5.0)
+    assert set(out) == {"single_option"}
+    assert out["single_option"]["n"] == 1
+
+
+def test_contract_identity_beats_the_print_fallback():
+    """con_id / local_symbol / strike name the contract; price is the last resort."""
+    same_con = [
+        _leg(1, "OPT", -5.0, side="SLD", price=1.0, strike=None) | {"con_id": 7},
+        _leg(1, "OPT", -6.0, side="SLD", price=1.1, strike=None) | {"con_id": 7},
+    ]
+    assert structure_label(same_con) == "single_option"
+    two_con = [
+        _leg(1, "OPT", -5.0, side="SLD", price=1.0) | {"con_id": 7},
+        _leg(1, "OPT", 4.0, side="SLD", price=1.0) | {"con_id": 8},
+    ]
+    assert structure_label(two_con) == "spread_2leg"
+    by_local = [
+        _leg(1, "OPT", -5.0) | {"local_symbol": "SPY 260918C00650000"},
+        _leg(1, "OPT", 4.0) | {"local_symbol": "SPY 260918C00655000"},
+    ]
+    assert structure_label(by_local) == "spread_2leg"
+
+
+def test_bag_wrapper_nets_as_zero_and_pools_by_leg_count():
+    """Through path_by_structure the wrapper neither adds P&L nor a leg."""
+    rows = [
+        _fill(13209, "BAG", "SLD", 1, 1.06, 0.0, "00020057.6a970096.01.01", "IWM"),
+        _fill(13209, "OPT", "BOT", 1, 0.02, 78.58, "00020057.6a970096.02.01", "IWM"),
+        _fill(13209, "OPT", "SLD", 1, 1.08, -369.42, "00020057.6a970096.03.01", "IWM"),
+        _fill(14698, "BAG", "SLD", 2, 0.19, 0.0, "0001938b.6a97b8d6.01.01", "TLT"),
+        _fill(14698, "OPT", "SLD", 2, 0.17, -63.44, "0001938b.6a97b8d6.02.01", "TLT"),
+        _fill(14698, "OPT", "BOT", 4, 0.40, 193.11, "0001938b.6a97b8d6.03.01", "TLT"),
+        _fill(14698, "OPT", "SLD", 2, 0.82, -141.44, "0001938b.6a97b8d6.04.01", "TLT"),
+    ]
+    out = path_by_structure(rows, equity=10_000.0, risk_pct=5.0)
+    assert set(out) == {"spread_2leg", "spread_3leg"}
+    assert out["spread_2leg"]["n"] == 1
+    assert out["spread_3leg"]["n"] == 1
+    assert [round(x, 2) for x in path_pnls_from_rows(rows)] == [-290.84, -11.77]
+
+
+def test_path_by_structure_splits_pools_and_nets_legs():
+    """A spread's debit and credit wing are one signed close, not W plus L."""
+    rows = [
+        # one 2-leg spread: +100 / -160 nets to -60
+        _leg(10, "OPT", 100.0, side="SLD", price=2.0),
+        _leg(10, "OPT", -160.0, side="BOT", price=3.5),
+        # two single options
+        _leg(11, "OPT", 40.0),
+        _leg(12, "OPT", -20.0),
+        # one stock ticket
+        _leg(13, "STK", 15.0),
+    ]
+    out = path_by_structure(rows, equity=1000.0, risk_pct=5.0)
+    assert set(out) == {"spread_2leg", "single_option", "stock"}
+    # the spread is ONE sample, and it is a loss - not a win and a loss
+    assert out["spread_2leg"]["n"] == 1
+    assert out["single_option"]["n"] == 2
+    assert out["stock"]["n"] == 1
+
+
+def test_path_by_structure_keeps_the_thin_note():
+    """Thin pools must not pretend a sample just because they are split out."""
+    out = path_by_structure(
+        [_leg(1, "OPT", 5.0), _leg(2, "OPT", -3.0)],
+        equity=1000.0,
+        risk_pct=5.0,
+    )
+    assert out["single_option"]["note"] == "thin closed-fill sample"
+
+
+def test_path_by_structure_ignores_rows_without_an_order_id():
+    assert path_by_structure(
+        [{"sec_type": "OPT", "realized_pnl": 5.0}],
+        equity=1000.0,
+        risk_pct=5.0,
+    ) == {}
 
 
 def test_even_money_coin_matches_post():

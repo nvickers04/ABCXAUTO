@@ -1321,3 +1321,176 @@ def test_nav_path_since_and_commissions_since(journal):
         ]
     )
     assert journal.commissions_since("2026-08-28T13:30:00.000Z") == 1.25
+
+
+_OLD_FILLS_DDL = """
+CREATE TABLE fills (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    exec_id TEXT UNIQUE,
+    order_id INTEGER,
+    symbol TEXT,
+    sec_type TEXT,
+    side TEXT,
+    quantity REAL,
+    price REAL,
+    commission REAL,
+    realized_pnl REAL,
+    ibkr_last REAL,
+    bid REAL,
+    ask REAL,
+    sent_price REAL,
+    signed_slippage REAL,
+    spread_paid REAL,
+    fill_label TEXT,
+    quote_reason TEXT
+);
+"""
+
+
+def test_fills_identity_migration_adds_columns_and_preserves_rows(tmp_path):
+    db = tmp_path / "old_fills.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executescript(_OLD_FILLS_DDL)
+        conn.execute(
+            """
+            INSERT INTO fills (
+                ts, exec_id, order_id, symbol, sec_type, side,
+                quantity, price, commission, realized_pnl
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "2026-09-01T14:00:00.000Z",
+                "old-1",
+                10,
+                "SPY",
+                "OPT",
+                "SLD",
+                1.0,
+                1.25,
+                0.65,
+                -5.0,
+            ),
+        )
+        conn.commit()
+        before = {str(r[1]) for r in conn.execute("PRAGMA table_info(fills)")}
+    finally:
+        conn.close()
+    assert "con_id" not in before
+    assert "local_symbol" not in before
+
+    j = TradeJournal(path=str(db), enabled=True)
+    conn = sqlite3.connect(str(db))
+    try:
+        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(fills)")}
+        row = conn.execute(
+            "SELECT exec_id, symbol, realized_pnl, con_id, local_symbol, "
+            "strike, right, expiry FROM fills WHERE exec_id = 'old-1'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert {"con_id", "local_symbol", "strike", "right", "expiry"} <= cols
+    assert row[0] == "old-1"
+    assert row[1] == "SPY"
+    assert row[2] == -5.0
+    assert row[3] is None
+    assert row[4] is None
+    assert row[5] is None
+    assert row[6] is None
+    assert row[7] is None
+    reset_journal(path=str(db), enabled=True)
+
+
+def test_record_fills_round_trips_contract_identity(journal):
+    assert (
+        journal.record_fills(
+            [
+                {
+                    "exec_id": "opt-1",
+                    "order_id": 77,
+                    "symbol": "SPY",
+                    "sec_type": "OPT",
+                    "side": "SLD",
+                    "quantity": 1,
+                    "price": 2.10,
+                    "realized_pnl": -12.0,
+                    "conId": 7654321,
+                    "localSymbol": "SPY   260918C00650000",
+                    "strike": 650,
+                    "right": "C",
+                    "lastTradeDateOrContractMonth": "20260918",
+                }
+            ]
+        )
+        == 1
+    )
+    listed = {r["exec_id"]: r for r in journal.listed_fills()}
+    row = listed["opt-1"]
+    assert row["con_id"] == 7654321
+    assert row["local_symbol"] == "SPY   260918C00650000"
+    assert float(row["strike"]) == 650.0
+    assert row["right"] == "C"
+    assert row["expiry"] == "20260918"
+    closers = journal.closing_fills()
+    assert closers[0]["con_id"] == 7654321
+    assert closers[0]["local_symbol"] == "SPY   260918C00650000"
+
+
+def test_bag_parent_and_legs_keep_own_con_ids(journal):
+    from abcxauto.path_math import structure_label
+
+    fills = [
+        {
+            "exec_id": "bag",
+            "order_id": 13131,
+            "symbol": "HPQ",
+            "sec_type": "BAG",
+            "side": "SLD",
+            "quantity": 1,
+            "price": 0.60,
+            "realized_pnl": 0.0,
+            "con_id": 900001,
+            "local_symbol": "HPQ SEP26 26/27 P",
+        },
+        {
+            "exec_id": "leg-long",
+            "order_id": 13131,
+            "symbol": "HPQ",
+            "sec_type": "OPT",
+            "side": "BOT",
+            "quantity": 1,
+            "price": 0.85,
+            "realized_pnl": -134.7,
+            "con_id": 111,
+            "local_symbol": "HPQ   260918P00026000",
+            "strike": 26,
+            "right": "P",
+            "expiry": "20260918",
+        },
+        {
+            "exec_id": "leg-short",
+            "order_id": 13131,
+            "symbol": "HPQ",
+            "sec_type": "OPT",
+            "side": "SLD",
+            "quantity": 1,
+            "price": 1.45,
+            "realized_pnl": 168.3,
+            "con_id": 222,
+            "local_symbol": "HPQ   260918P00027000",
+            "strike": 27,
+            "right": "P",
+            "expiry": "20260918",
+        },
+    ]
+    assert journal.record_fills(fills) == 3
+    by_exec = {r["exec_id"]: r for r in journal.listed_fills()}
+    assert by_exec["bag"]["con_id"] == 900001
+    assert by_exec["bag"]["sec_type"] == "BAG"
+    assert by_exec["leg-long"]["con_id"] == 111
+    assert by_exec["leg-short"]["con_id"] == 222
+    closers = journal.closing_fills()
+    assert {r["con_id"] for r in closers} == {111, 222}
+    assert structure_label(closers) == "spread_2leg"
+    assert structure_label(list(by_exec.values())) == "spread_2leg"

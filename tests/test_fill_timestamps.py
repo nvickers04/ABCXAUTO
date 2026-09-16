@@ -201,6 +201,91 @@ async def test_get_fills_hands_the_journal_the_instant_tws_meant():
 
 
 @pytest.mark.asyncio
+async def test_get_fills_threads_contract_identity(tmp_path):
+    """BAG parent + two OPT legs each keep their own Fill.contract.conId."""
+    bag = SimpleNamespace(
+        execution=SimpleNamespace(
+            time=TRUE_INSTANT,
+            execId="bag-1",
+            orderId=88,
+            side="SLD",
+            shares=1.0,
+            price=0.60,
+            avgPrice=0.60,
+        ),
+        contract=SimpleNamespace(
+            symbol="HPQ",
+            secType="BAG",
+            conId=900001,
+            localSymbol="HPQ SEP26 26/27 P",
+            strike=0.0,
+            right="",
+            lastTradeDateOrContractMonth="",
+        ),
+        commissionReport=SimpleNamespace(commission=0.0, realizedPNL=0.0),
+    )
+    long_leg = SimpleNamespace(
+        execution=SimpleNamespace(
+            time=TRUE_INSTANT,
+            execId="leg-1",
+            orderId=88,
+            side="BOT",
+            shares=1.0,
+            price=0.85,
+            avgPrice=0.85,
+        ),
+        contract=SimpleNamespace(
+            symbol="HPQ",
+            secType="OPT",
+            conId=111,
+            localSymbol="HPQ   260918P00026000",
+            strike=26.0,
+            right="P",
+            lastTradeDateOrContractMonth="20260918",
+        ),
+        commissionReport=SimpleNamespace(commission=0.65, realizedPNL=-134.7),
+    )
+    short_leg = SimpleNamespace(
+        execution=SimpleNamespace(
+            time=TRUE_INSTANT,
+            execId="leg-2",
+            orderId=88,
+            side="SLD",
+            shares=1.0,
+            price=1.45,
+            avgPrice=1.45,
+        ),
+        contract=SimpleNamespace(
+            symbol="HPQ",
+            secType="OPT",
+            conId=222,
+            localSymbol="HPQ   260918P00027000",
+            strike=27.0,
+            right="P",
+            lastTradeDateOrContractMonth="20260918",
+        ),
+        commissionReport=SimpleNamespace(commission=0.65, realizedPNL=168.3),
+    )
+    rows = await _OfflineConnector([bag, long_leg, short_leg]).get_fills()
+    by_exec = {r["exec_id"]: r for r in rows}
+    assert by_exec["bag-1"]["con_id"] == 900001
+    assert by_exec["bag-1"]["sec_type"] == "BAG"
+    assert by_exec["leg-1"]["con_id"] == 111
+    assert by_exec["leg-1"]["local_symbol"] == "HPQ   260918P00026000"
+    assert by_exec["leg-2"]["con_id"] == 222
+
+    journal = TradeJournal(path=str(tmp_path / "id.db"), enabled=True)
+    assert journal.record_fills(rows) == 3
+    listed = {r["exec_id"]: r for r in journal.listed_fills()}
+    assert listed["bag-1"]["con_id"] == 900001
+    assert listed["leg-1"]["con_id"] == 111
+    assert listed["leg-2"]["local_symbol"] == "HPQ   260918P00027000"
+    from abcxauto.path_math import structure_label
+
+    assert structure_label(journal.closing_fills()) == "spread_2leg"
+
+
+@pytest.mark.asyncio
 async def test_recent_executions_stamp_matches_the_journal_stamp():
     """detect_scrape_from_fills parses these — both reads must agree."""
     fills = [_fake_fill(decoded_exec_time(RAW_TWS_TIME, "UTC"))]

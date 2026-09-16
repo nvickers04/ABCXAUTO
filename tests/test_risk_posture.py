@@ -115,6 +115,8 @@ def test_live_keeps_defensive_identity(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
     clear_risk_settings(path=path)
     load_risk_settings(path)
+    (tmp_path / "playbook_live.json").write_text('{"promoted": true}', encoding="utf-8")
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "playbook_live.json"))
     set_trading_mode("live", live_confirm="I_UNDERSTAND_LIVE_TRADING_RISK")
     cfg = get_config()
     assert cfg.risk_posture == "defensive"
@@ -150,6 +152,8 @@ def test_live_maps_stored_aggressive_to_balanced(tmp_path, monkeypatch):
     clear_risk_settings(path=path)
     load_risk_settings(path)
     update_risk_config(risk_posture="aggressive", persist=True)
+    (tmp_path / "playbook_live.json").write_text('{"promoted": true}', encoding="utf-8")
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "playbook_live.json"))
     set_trading_mode("live", live_confirm="I_UNDERSTAND_LIVE_TRADING_RISK")
     cfg = get_config()
     assert cfg.risk_posture == "aggressive"

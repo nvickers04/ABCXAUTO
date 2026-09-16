@@ -224,7 +224,7 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     assert last["ibkr_connected"] is False
     assert last["book_unreliable"] is True
     assert last["skip_reason"] == "book_unreliable"
-    assert last["flat"] is True
+    assert last["flat"] is False
     assert last["open_lots"][0].startswith("IWM 260821C306 long 1")
     assert "call" in last["open_lots"][0]
     assert "DTE=" in last["open_lots"][0]

@@ -1,28 +1,21 @@
-"""Portfolio USD math is display-only. KEEP-5A refuse is deleted. No TWS."""
+"""Portfolio aggregate defined-max-loss math. Display only. No TWS."""
 
 from __future__ import annotations
 
 import inspect
+import json
 from unittest.mock import MagicMock
 
 import pytest
 
-from abcxauto.config import Config, get_config, update_risk_config
+from abcxauto.config import Config, get_config, load_risk_settings
 from abcxauto.llm import SYSTEM_PROMPT
 from abcxauto.portfolio_loss import (
-    PORTFOLIO_CAP_USD_DEFAULT,
-    REASON_PORTFOLIO_USD,
-    REASON_PORTFOLIO_USD_CAP,
-    REASON_PORTFOLIO_USD_UNREADABLE,
     defined_max_loss_usd,
     is_working_exit_or_last_stop,
     live_portfolio_usd_check,
     portfolio_usd_check,
-    portfolio_usd_place_block,
-    resolve_portfolio_cap_usd,
 )
-from abcxauto.self_tune import OPERATOR_DISK_KEYS, apply_self_tune
-from abcxauto.memory import get_journal
 from abcxauto.send_preview import (
     bind_place_token,
     collect_would_refuse,
@@ -152,20 +145,11 @@ def _connector() -> MagicMock:
     return connector
 
 
-def _no_usd_refuse(blob: dict | None) -> None:
-    reasons = []
-    if isinstance(blob, dict):
-        reasons.extend(blob.get("would_refuse") or [])
-        reasons.append(blob.get("reason_code") or "")
-        reasons.append(blob.get("note") or "")
-        reasons.append(blob.get("reason") or "")
-    text = " ".join(str(r) for r in reasons)
-    assert "portfolio_usd" not in text
-    assert REASON_PORTFOLIO_USD not in text
-    assert REASON_PORTFOLIO_USD_UNREADABLE not in text
-    assert REASON_PORTFOLIO_USD_CAP not in text
-    if isinstance(blob, dict):
-        assert blob.get("portfolio_usd_refused") is not True
+def _assert_no_cap_keys(blob: dict | None) -> None:
+    if not isinstance(blob, dict):
+        return
+    assert "portfolio_cap_usd" not in blob
+    assert "portfolio_usd_refused" not in blob
 
 
 def test_hygiene_f10_port_prompt_lock():
@@ -174,8 +158,7 @@ def test_hygiene_f10_port_prompt_lock():
     assert Config().ibkr_port == 7497
     assert get_config().trading_mode == "paper"
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
-    assert PORTFOLIO_CAP_USD_DEFAULT == 800.0
-    assert get_config().portfolio_cap_usd == 800.0
+    assert not hasattr(get_config(), "portfolio_cap_usd")
 
 
 def test_allowlist_refuses_incomplete_geom_and_undefined_stk(monkeypatch):
@@ -233,64 +216,38 @@ def test_module_has_no_ibkr_import():
     assert "from ib_" not in src
 
 
-def test_cap_unset_is_display_default_not_a_gate():
-    out = resolve_portfolio_cap_usd(present=False)
-    assert out["ok"] is True
-    assert out["cap"] == 800.0
-    assert out["defaulted"] is True
-    assert out["unreadable"] is False
-
-
-def test_cap_garbage_is_unreadable_not_a_refuse():
-    for raw in ("nope", "nan", "inf", "", None, -1, object()):
-        out = resolve_portfolio_cap_usd(raw, present=True)
-        assert out["ok"] is False
-        assert out["unreadable"] is True
-        assert out["cap"] is None
-
-
-def test_open_400_working_200_candidate_300_does_not_refuse():
+def test_open_400_working_200_candidate_300_sums_exposure():
     check = portfolio_usd_check(
         open_lots=[_lot(400)],
         working=[_working(200, oid=11)],
         candidate=_vertical(300),
-        portfolio_cap_usd=800,
-        cap_present=True,
     )
     assert check["portfolio_max_loss_usd"] == pytest.approx(900.0)
-    assert check["portfolio_cap_usd"] == 800.0
-    assert check["portfolio_usd_refused"] is False
     assert check["allow"] is True
-    assert check.get("reason_code") != REASON_PORTFOLIO_USD
 
 
-def test_closer_at_or_over_cap_is_allowed():
+def test_closer_skips_exposure_sum():
     check = portfolio_usd_check(
         open_lots=[_lot(400)],
         working=[_working(200, oid=11)],
         candidate=_closer(),
-        portfolio_cap_usd=800,
-        cap_present=True,
     )
     assert check["closer"] is True
-    assert check["portfolio_usd_refused"] is False
     assert check["allow"] is True
+    assert check["portfolio_max_loss_usd"] is None
 
 
-def test_unprotected_last_stop_allowed_over_cap():
+def test_unprotected_last_stop_skips_exposure_sum():
     check = portfolio_usd_check(
         open_lots=[_lot(800)],
         working=[_working(200, oid=11)],
         candidate=_last_stop(),
-        portfolio_cap_usd=800,
-        cap_present=True,
     )
     assert check["closer"] is True
-    assert check["portfolio_usd_refused"] is False
     assert check["allow"] is True
 
 
-def test_unreadable_candidate_max_loss_does_not_refuse():
+def test_unreadable_candidate_max_loss_marks_unreadable():
     ticket = {
         "strategy": "vertical_spread",
         "params": {"symbol": "SPY", "quantity": 1, "card": "pcs-skew"},
@@ -299,29 +256,23 @@ def test_unreadable_candidate_max_loss_does_not_refuse():
         open_lots=[_lot(400)],
         working=[],
         candidate=ticket,
-        portfolio_cap_usd=800,
-        cap_present=True,
     )
     assert defined_max_loss_usd(ticket) is None
     assert check["unreadable"] is True
-    assert check["portfolio_usd_refused"] is False
     assert check["allow"] is True
-    assert check.get("reason_code") != REASON_PORTFOLIO_USD_UNREADABLE
 
 
-def test_unreadable_open_lot_does_not_refuse_or_invent_zero():
+def test_unreadable_open_lot_partial_sum_still_reports_candidate():
     lot = {"symbol": "SPY", "quantity": 1, "marketValue": 400.0, "mid": 1.25}
     assert defined_max_loss_usd(lot) is None
     check = portfolio_usd_check(
         open_lots=[lot],
         working=[],
         candidate=_vertical(300),
-        portfolio_cap_usd=800,
-        cap_present=True,
     )
     assert check["unreadable"] is True
-    assert check["open_usd"] is None
-    assert check["portfolio_usd_refused"] is False
+    assert check["open_usd"] == pytest.approx(0.0)
+    assert check["portfolio_max_loss_usd"] == pytest.approx(300.0)
     assert check["allow"] is True
 
 
@@ -331,11 +282,8 @@ def test_closer_passes_when_open_max_loss_unreadable():
         open_lots=[lot],
         working=[],
         candidate=_closer(),
-        portfolio_cap_usd=800,
-        cap_present=True,
     )
     assert check["allow"] is True
-    assert check["portfolio_usd_refused"] is False
 
 
 def test_working_exit_oid_not_counted():
@@ -345,12 +293,9 @@ def test_working_exit_oid_not_counted():
         open_lots=[_lot(400)],
         working=[exit_row],
         candidate=_vertical(300),
-        portfolio_cap_usd=800,
-        cap_present=True,
     )
     assert check["working_usd"] == pytest.approx(0.0)
     assert check["portfolio_max_loss_usd"] == pytest.approx(700.0)
-    assert check["portfolio_usd_refused"] is False
     assert check["allow"] is True
 
 
@@ -360,8 +305,6 @@ def test_working_last_stop_oid_not_counted():
         open_lots=[_lot(400)],
         working=[stop],
         candidate=_vertical(300),
-        portfolio_cap_usd=800,
-        cap_present=True,
     )
     assert check["working_usd"] == pytest.approx(0.0)
     assert check["portfolio_max_loss_usd"] == pytest.approx(700.0)
@@ -370,7 +313,6 @@ def test_working_last_stop_oid_not_counted():
 
 def test_structure_width_minus_credit_preferred_over_explicit():
     ticket = _vertical(max_loss=50.0, long_strike=500.0, short_strike=505.0, limit_price=1.25)
-    # width 5 − credit 1.25 = 3.75 × 100 = 375
     assert defined_max_loss_usd(ticket) == pytest.approx(375.0)
 
 
@@ -379,48 +321,21 @@ def test_mid_is_not_max_loss_evidence():
     assert defined_max_loss_usd(row) is None
 
 
-def test_garbage_cap_does_not_refuse_new_risk_or_closer():
-    bad = portfolio_usd_check(
-        open_lots=[],
-        working=[],
-        candidate=_vertical(300),
-        portfolio_cap_usd="nope",
-        cap_present=True,
+def test_legacy_portfolio_cap_key_in_risk_file_is_ignored(tmp_path, monkeypatch):
+    path = tmp_path / "risk_settings.json"
+    path.write_text(
+        json.dumps({"portfolio_cap_usd": 500, "daily_loss_limit_pct": 25}) + "\n",
+        encoding="utf-8",
     )
-    assert bad["unreadable"] is True
-    assert bad["portfolio_usd_refused"] is False
-    assert bad["allow"] is True
-    assert bad.get("reason_code") != REASON_PORTFOLIO_USD_CAP
-    close = portfolio_usd_check(
-        open_lots=[],
-        working=[],
-        candidate=_closer(),
-        portfolio_cap_usd="nope",
-        cap_present=True,
-    )
-    assert close["allow"] is True
-    assert close["portfolio_usd_refused"] is False
+    monkeypatch.setattr("abcxauto.config._risk_settings_path", lambda: path)
+    loaded = load_risk_settings(path)
+    assert "portfolio_cap_usd" not in loaded
+    assert loaded["daily_loss_limit_pct"] == 25.0
+    cfg = get_config()
+    assert not hasattr(cfg, "portfolio_cap_usd")
 
 
-def test_self_tune_cannot_persist_portfolio_cap():
-    assert "portfolio_cap_usd" in OPERATOR_DISK_KEYS
-    before = get_config().portfolio_cap_usd
-    out = apply_self_tune({"portfolio_cap_usd": 2000}, persist=True)
-    rejected = out.get("rejected") or {}
-    assert "portfolio_cap_usd" in rejected
-    assert "operator disk" in rejected["portfolio_cap_usd"]
-    assert get_config().portfolio_cap_usd == before
-    assert get_config().portfolio_cap_usd == 800.0
-
-
-def test_operator_disk_may_lower_not_raise():
-    update_risk_config(portfolio_cap_usd=500, persist=True)
-    assert get_config().portfolio_cap_usd == 500.0
-    update_risk_config(portfolio_cap_usd=2000, persist=True)
-    assert get_config().portfolio_cap_usd == 800.0
-
-
-def test_preview_does_not_refuse_on_portfolio_usd_alone(monkeypatch):
+def test_preview_reports_exposure_without_cap_keys(monkeypatch):
     monkeypatch.setattr(
         "abcxauto.thin_rth_kill_look.kill_look_send_block",
         lambda *a, **k: None,
@@ -431,35 +346,22 @@ def test_preview_does_not_refuse_on_portfolio_usd_alone(monkeypatch):
         "positions": [_lot(400)],
         "open_orders": [_working(200)],
     }
-    reasons = collect_would_refuse(ticket, snap=snap)
-    assert not any("portfolio_usd" in str(r) for r in reasons)
-    assert not any(REASON_PORTFOLIO_USD in str(r) for r in reasons)
     out = preview_ticket(ticket, snap=snap)
-    _no_usd_refuse(out)
+    _assert_no_cap_keys(out)
+    assert out["portfolio_max_loss_usd"] == pytest.approx(900.0)
     assert not any("portfolio_usd" in str(r) for r in (out.get("would_refuse") or []))
-    row = get_journal().get_send_preview(out["preview_id"])
-    if row is not None:
-        assert row.get("portfolio_usd_refused") is not True
 
 
-def test_preview_closer_over_cap_passes():
+def test_preview_closer_has_no_exposure_keys():
     world = _world(positions=[_lot(800)])
     snap = {"account": {"netliquidation": 100000}, "positions": [_lot(800)]}
     out = preview_ticket(_closer(), world=world, snap=snap)
-    assert out["portfolio_usd_refused"] is not True
+    _assert_no_cap_keys(out)
     assert not any("portfolio_usd" in str(r) for r in (out.get("would_refuse") or []))
 
 
-def test_place_block_helper_never_blocks():
-    ticket = _vertical(300)
-    ticket["_live_positions"] = [_lot(400)]
-    ticket["_open_orders"] = [_working(200)]
-    assert portfolio_usd_place_block(ticket) is None
-    assert ticket.get("portfolio_usd_refused") is not True
-
-
 @pytest.mark.asyncio
-async def test_over_cap_place_reaches_execute(monkeypatch):
+async def test_high_aggregate_exposure_place_reaches_execute(monkeypatch):
     dispatched = []
 
     async def _record(action, connector):
@@ -476,11 +378,11 @@ async def test_over_cap_place_reaches_execute(monkeypatch):
     result = await send_action(ticket, _connector())
     assert dispatched == [True]
     assert result["status"] == "ok"
-    _no_usd_refuse(result)
+    _assert_no_cap_keys(result)
 
 
 @pytest.mark.asyncio
-async def test_closer_place_over_cap_reaches_execute(monkeypatch):
+async def test_closer_place_reaches_execute(monkeypatch):
     dispatched = []
 
     async def _record(action, connector):
@@ -519,14 +421,97 @@ async def test_unreadable_candidate_place_reaches_execute(monkeypatch):
     result = await send_action(ticket, _connector())
     assert dispatched == [True]
     assert result["status"] == "ok"
-    _no_usd_refuse(result)
+    _assert_no_cap_keys(result)
 
 
-def test_live_check_uses_fixture_book_without_refuse():
+def test_live_check_uses_fixture_book():
     ticket = _vertical(300)
     ticket["_live_positions"] = [_lot(400)]
     ticket["_open_orders"] = [_working(200)]
-    check = live_portfolio_usd_check(ticket, portfolio_cap_usd=800, cap_present=True)
-    assert check["portfolio_usd_refused"] is False
+    check = live_portfolio_usd_check(ticket)
     assert check["allow"] is True
     assert check["portfolio_max_loss_usd"] == pytest.approx(900.0)
+
+
+def _spy_call_vertical_legs(*, qty: int = 6) -> list[dict]:
+    return [
+        {
+            "symbol": "SPY",
+            "secType": "OPT",
+            "right": "C",
+            "expiration": "20260925",
+            "strike": 755.0,
+            "quantity": qty,
+            "avg_cost": 850.0,
+        },
+        {
+            "symbol": "SPY",
+            "secType": "OPT",
+            "right": "C",
+            "expiration": "20260925",
+            "strike": 765.0,
+            "quantity": -qty,
+            "avg_cost": 420.0,
+        },
+    ]
+
+
+def test_opt_legs_pair_into_vertical_max_loss():
+    legs = _spy_call_vertical_legs(qty=6)
+    check = portfolio_usd_check(
+        open_lots=legs,
+        working=[],
+        candidate=_vertical(
+            3100.0,
+            symbol="NOK",
+            long_strike=10.0,
+            short_strike=10.5,
+            quantity=100,
+            limit_price=0.19,
+        ),
+    )
+    assert check["open_usd"] == pytest.approx(2580.0)
+    assert check["candidate_usd"] == pytest.approx(3100.0)
+    assert check["portfolio_max_loss_usd"] == pytest.approx(5680.0)
+    assert check["allow"] is True
+
+
+def test_bag_working_order_without_strikes_does_not_null_total():
+    legs = _spy_call_vertical_legs(qty=6)
+    bag_entry = {
+        "order_id": 20034,
+        "symbol": "SPY",
+        "secType": "BAG",
+        "order_type": "LMT",
+        "action": "SELL",
+        "quantity": 6,
+        "lmt_price": 5.24,
+        "comboLegs": [{"conId": 1, "ratio": 1}, {"conId": 2, "ratio": 1}],
+    }
+    check = portfolio_usd_check(
+        open_lots=legs,
+        working=[bag_entry],
+        candidate=_vertical(
+            3100.0,
+            symbol="NOK",
+            long_strike=10.0,
+            short_strike=10.5,
+            quantity=100,
+            limit_price=0.19,
+        ),
+    )
+    assert check["portfolio_max_loss_usd"] == pytest.approx(5680.0)
+    assert check["unreadable"] is True
+
+
+def test_bag_row_with_strike_geometry_counts():
+    bag = {
+        "symbol": "SPY",
+        "secType": "BAG",
+        "quantity": 2,
+        "long_strike": 755.0,
+        "short_strike": 765.0,
+        "limit_price": 4.5,
+    }
+    loss = defined_max_loss_usd(bag)
+    assert loss == pytest.approx(1100.0)

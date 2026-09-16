@@ -26,12 +26,12 @@ RISK_CONFIG_KEYS = frozenset({
     "auto_panic_on_breach",
     "defined_risk_only",
     "cash_only",
-    "portfolio_cap_usd",
     "max_peak_drawdown_pct",
     "max_option_premium_pct",
     "max_risk_per_trade_pct",
     "max_symbol_concentration_pct",
     "max_arena_concentration_pct",
+    "mode_size_ceiling_pct",
 })
 # Risk % knobs clamped to the walk-away floor on the operator write path.
 # Grok self_tune cannot persist OPERATOR_DISK_KEYS over the file.
@@ -148,8 +148,10 @@ _DEFAULT_FILE_LOG_PATH = _REPO_ROOT / "logs" / "app.log"
 
 @dataclass(frozen=True)
 class Config:
+    # Secrets carry repr=False: a pytest traceback or a logged Config must
+    # never print the key. asdict()/replace() still see them.
     # xAI / Grok
-    xai_api_key: str = ""
+    xai_api_key: str = field(default="", repr=False)
     model: str = DEFAULT_MODEL  # ABCXAUTO_MODEL is the env form; see get_config()
     # Session brains. Empty = use ``model`` (single-model desks keep working).
     model_rth: str = ""
@@ -170,7 +172,7 @@ class Config:
     pcs_kill_look: bool = True
 
     # MarketData.app
-    marketdata_token: str = ""
+    marketdata_token: str = field(default="", repr=False)
 
     # IBKR
     ibkr_host: str = "127.0.0.1"
@@ -178,7 +180,7 @@ class Config:
     ibkr_client_id: int = 42
     trading_mode: str = "paper"  # must match port family (paper↔7497/4002, live↔7496/4001)
     # Exact phrase required before any live-mode connect (empty = refuse live)
-    live_confirm: str = ""
+    live_confirm: str = field(default="", repr=False)
     # After broker disconnect, halt new entries if still down after N seconds (0 = disable)
     disconnect_halt_s: float = 120.0
 
@@ -204,9 +206,6 @@ class Config:
     auto_panic_on_breach: bool = True
     defined_risk_only: bool = True
     cash_only: bool = True
-    # Display-only portfolio defined-max-loss figure. Default 800 is not a
-    # place/preview refuse. Operator disk may persist it; self_tune cannot.
-    portfolio_cap_usd: float = 800.0
     max_peak_drawdown_pct: float = 25.0
     max_option_premium_pct: float = 25.0
     max_risk_per_trade_pct: float = 25.0
@@ -216,6 +215,10 @@ class Config:
     # One sector/theme/cap arena (catalog we already scan), all names in it.
     # Per-name cap cannot see NVDA+SMCI+ARM+AVGO as one bet.
     max_arena_concentration_pct: float = 25.0
+    # Widest % of NetLiq Grok's own size_pct_nl may reach. The operator sets the
+    # envelope; Grok still picks the size inside it and may tighten via
+    # self_tune. A $1k book cannot buy one option contract at single digits.
+    mode_size_ceiling_pct: float = 8.0
     # 0 = off (no count refuse). A positive N is a Grok/operator ceiling.
     max_open_positions: int = 0
 
@@ -238,19 +241,6 @@ def _env_bool(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw.lower() in ("1", "true", "yes", "on")
-
-
-def _env_portfolio_cap_usd() -> float:
-    """Display default. Not a place or preview refuse."""
-    raw = _env("ABCXAUTO_PORTFOLIO_CAP_USD")
-    if not raw:
-        return 800.0
-    try:
-        from abcxauto.portfolio_loss import coerce_portfolio_cap_usd
-
-        return coerce_portfolio_cap_usd(raw)
-    except (TypeError, ValueError):
-        return 800.0
 
 
 def default_file_log_path() -> Path:
@@ -354,7 +344,6 @@ def _load_env_config() -> Config:
         auto_panic_on_breach=_env_bool("ABCXAUTO_AUTO_PANIC_ON_BREACH", True),
         defined_risk_only=_env_bool("ABCXAUTO_DEFINED_RISK_ONLY", True),
         cash_only=_env_bool("ABCXAUTO_CASH_ONLY", True),
-        portfolio_cap_usd=_env_portfolio_cap_usd(),
         max_peak_drawdown_pct=float(_env("ABCXAUTO_MAX_PEAK_DRAWDOWN_PCT", "25")),
         max_option_premium_pct=float(_env("ABCXAUTO_MAX_OPTION_PREMIUM_PCT", "25")),
         max_risk_per_trade_pct=float(_env("ABCXAUTO_MAX_RISK_PER_TRADE_PCT", "25")),
@@ -363,6 +352,9 @@ def _load_env_config() -> Config:
         ),
         max_arena_concentration_pct=float(
             _env("ABCXAUTO_MAX_ARENA_CONCENTRATION_PCT", "25")
+        ),
+        mode_size_ceiling_pct=float(
+            _env("ABCXAUTO_MODE_SIZE_CEILING_PCT", "8")
         ),
     )
 
@@ -409,10 +401,6 @@ def _coerce_risk_value(key: str, value: Any) -> Any:
         return str(value).strip().lower() in ("1", "true", "yes", "on")
     if key == "max_open_positions":
         return int(max(0, min(10_000, int(float(value)))))
-    if key == "portfolio_cap_usd":
-        from abcxauto.portfolio_loss import coerce_portfolio_cap_usd
-
-        return coerce_portfolio_cap_usd(value)
     return float(value)
 
 
@@ -651,7 +639,7 @@ def get_config() -> Config:
     Precedence: ``.env`` defaults < ``risk_settings.json`` < ``agent_state.json``
     < session overrides.     Operator disk knobs (mop / size% / premium% /
     daily-loss / session_token_cap / floors / defined-risk / cash-only /
-    portfolio_cap_usd / mode+port) are not taken from ``agent_state`` and
+    mode+port) are not taken from ``agent_state`` and
     ``self_tune`` cannot persist over the file. The ``model`` the operator applies from Pro Settings
     beats ``ABCXAUTO_MODEL``. ``model_rth`` / ``model_research`` select the
     session brain when set; empty falls back to ``model``. ``model_params``
@@ -671,6 +659,7 @@ def get_config() -> Config:
         }
         agent_extra = {k: v for k, v in raw.items() if k in allowed}
     except Exception:
+        logger.debug("agent_state extras unavailable", exc_info=True)
         agent_extra = {}
     merged = {**_file_overrides, **agent_extra, **_runtime_overrides}
     valid = {f.name for f in fields(Config)}
@@ -683,7 +672,7 @@ def get_config() -> Config:
         if fixes:
             cfg = replace(cfg, **{k: v for k, v in fixes.items() if k in valid})
     except Exception:
-        pass
+        logger.warning("floor clamp of config fields failed", exc_info=True)
     return cfg
 
 
@@ -937,6 +926,10 @@ def set_trading_mode(mode: str, *, live_confirm: str = "") -> Config:
         confirm = LIVE_CONFIRM_PHRASE
 
     validate_trading_mode_port(normalized, port, confirm)
+    if normalized == "live":
+        from abcxauto.broker.connection import assert_live_playbook
+
+        assert_live_playbook()
     _runtime_overrides.update(
         {
             "trading_mode": normalized,

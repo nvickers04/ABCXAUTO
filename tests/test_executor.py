@@ -447,6 +447,50 @@ class TestCancelOrderLastStopGuard:
         assert result["success"] is True
 
     @pytest.mark.asyncio
+    async def test_bag_combo_limit_cancel_allowed(self):
+        """A resting BAG close is not a last STK stop — cancel must dispatch."""
+        gateway = FakeGateway(
+            positions=[{
+                "symbol": "NOK", "quantity": 1, "sec_type": "BAG",
+                "right": "P", "strategy": "vertical_spread",
+            }],
+            open_orders=[{
+                "order_id": 1503, "symbol": "NOK", "sec_type": "BAG",
+                "action": "SELL", "quantity": 1, "order_type": "LMT",
+                "lmt_price": 0.33,
+            }],
+        )
+        proposal = validate_proposal("cancel_order", {"order_id": 1503}, RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        assert gateway.calls[0][0] == "cancel_order"
+        assert gateway.calls[0][1]["order_id"] == 1503
+
+    @pytest.mark.asyncio
+    async def test_bag_combo_modify_target_dispatches(self):
+        gateway = FakeGateway(
+            positions=[{
+                "symbol": "NOK", "quantity": 1, "sec_type": "BAG",
+                "right": "P", "strategy": "vertical_spread",
+            }],
+            open_orders=[{
+                "order_id": 1503, "symbol": "NOK", "sec_type": "BAG",
+                "action": "SELL", "quantity": 1, "order_type": "LMT",
+                "lmt_price": 0.33,
+            }],
+        )
+        proposal = validate_proposal(
+            "modify_target",
+            {"order_id": 1503, "new_limit_price": 0.22},
+            RATIONALE,
+        )
+        result = await execute_proposal(proposal, gateway)
+        assert result["success"] is True
+        assert gateway.calls[0][0] == "modify_target_price"
+        assert gateway.calls[0][1]["order_id"] == 1503
+        assert gateway.calls[0][1]["new_limit_price"] == 0.22
+
+    @pytest.mark.asyncio
     async def test_fail_closed_when_orders_unreadable(self):
         class BrokenOrders(FakeGateway):
             async def get_open_orders(self):

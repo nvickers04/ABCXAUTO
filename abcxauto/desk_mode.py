@@ -183,7 +183,8 @@ def research_keep_looking(session: str = "") -> bool:
         if kill_look_enabled():
             return False
     except Exception:
-        pass
+        logger.debug("research keep-looking: kill_look_enabled unreadable", exc_info=True)
+        return False
     try:
         from abcxauto.park_clock import honor_park
 
@@ -197,7 +198,8 @@ def research_keep_looking(session: str = "") -> bool:
         if brief_loop_halted():
             return False
     except Exception:
-        pass
+        logger.debug("research keep-looking: brief_loop_halted unreadable", exc_info=True)
+        return False
     return True
 
 

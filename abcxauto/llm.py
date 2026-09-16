@@ -5,13 +5,33 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import random
 import time
+import uuid
 from typing import Any, Callable
 
 from abcxauto.config import DEFAULT_MODEL, RESERVED_CHAT_KEYS, get_config
 
 logger = logging.getLogger(__name__)
+
+_CONV_ID = ""
+
+
+def conv_id() -> str:
+    """Sticky routing key so a look's repeated prefix keeps hitting one server.
+
+    xAI caches per server, so without this the same multi-thousand-token
+    prefix misses on most turns of a look. One id per desk process is the
+    right grain: a look is many turns over one prefix.
+    """
+    global _CONV_ID
+    pinned = (os.environ.get("ABCXAUTO_GROK_CONV_ID") or "").strip()
+    if pinned:
+        return pinned
+    if not _CONV_ID:
+        _CONV_ID = f"abcx-{uuid.uuid4().hex[:16]}"
+    return _CONV_ID
 
 SYSTEM_PROMPT = """\
 You own an Interactive Brokers {mode} book. Strategy is yours.
@@ -219,7 +239,15 @@ class GrokClient:
                 )
             from xai_sdk import AsyncClient
 
-            client = AsyncClient(api_key=cfg.xai_api_key)
+            try:
+                client = AsyncClient(
+                    api_key=cfg.xai_api_key,
+                    metadata=(("x-grok-conv-id", conv_id()),),
+                )
+            except TypeError:
+                # Older SDK without metadata: lose cache stickiness, not the desk.
+                logger.warning("xai_sdk has no metadata= — prompt cache routing off")
+                client = AsyncClient(api_key=cfg.xai_api_key)
         self.client = _wrap_client(client)
         chosen = str(model or "").strip()
         params = dict(getattr(cfg, "model_params", None) or {})

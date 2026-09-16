@@ -6,11 +6,17 @@ midnight restarts), paper/live safety checks, and structured logging.
 
 from __future__ import annotations
 
+import json
+import os
 from enum import Enum
+from pathlib import Path
 from typing import Optional, Tuple
 
 from abcxauto.aio import safe_sleep  # noqa: F401  (re-export for broker modules)
 from abcxauto.config import get_config
+
+_STATE_DIR = Path(__file__).resolve().parents[2] / "data" / "state"
+PLAYBOOK_LIVE_PATH = _STATE_DIR / "playbook_live.json"
 
 # IB API connectivity messages (see IB TWS API Reference → Error Codes)
 ERROR_CONNECTIVITY_LOST = 1100  # IB ↔ TWS lost; TWS may still be up
@@ -131,9 +137,45 @@ def resolve_ibkr_endpoint(mode: str | None = None) -> Tuple[str, int, str]:
     return cfg.ibkr_host, cfg.ibkr_port, mode_str
 
 
+def playbook_live_path() -> Path:
+    raw = (os.environ.get("ABCXAUTO_PLAYBOOK_LIVE_PATH") or "").strip()
+    return Path(raw) if raw else PLAYBOOK_LIVE_PATH
+
+
+def playbook_live_promoted(path: Path | None = None) -> bool:
+    """True only when an on-disk promotion record exists.
+
+    Phrase + live port in ``.env`` is not enough. The file is operator-written;
+    the shell never creates it.
+    """
+    p = path if path is not None else playbook_live_path()
+    if not p.is_file():
+        return False
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    return bool(raw.get("promoted"))
+
+
+def assert_live_playbook() -> None:
+    """Raise if live mode has no promoted playbook on disk."""
+    if playbook_live_promoted():
+        return
+    raise TradingModePortError(
+        "TRADING_MODE=live refused: no promoted playbook. Write "
+        "data/state/playbook_live.json with {\"promoted\": true} only after "
+        "a paper playbook is promoted. Phrase + port in .env is not enough."
+    )
+
+
 def assert_connect_allowed() -> None:
-    """Raise if TRADING_MODE / port / live-confirm are inconsistent."""
+    """Raise if TRADING_MODE / port / live-confirm / playbook are inconsistent."""
     cfg = get_config()
     validate_trading_mode_port(cfg.trading_mode, cfg.ibkr_port, cfg.live_confirm)
+    if (cfg.trading_mode or "").strip().lower() == "live":
+        assert_live_playbook()
 
 

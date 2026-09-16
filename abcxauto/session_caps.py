@@ -220,6 +220,7 @@ def billed_tokens_now() -> int:
             + max(0, int(used.get("cached_tokens") or 0))
         )
     except Exception:
+        logger.warning("session billed-token read failed; treating as 0", exc_info=True)
         return 0
 
 

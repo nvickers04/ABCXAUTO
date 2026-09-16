@@ -636,7 +636,12 @@ class IBKROrdersMixin:
                     try:
                         await self.cancel_order(order_id)
                     except Exception:
-                        pass
+                        logger.warning(
+                            "market_bracket cancel of unfilled entry failed order_id=%s symbol=%s",
+                            order_id,
+                            symbol,
+                            exc_info=True,
+                        )
                 return {
                     'success': False,
                     'filled': False,
@@ -1236,7 +1241,7 @@ class IBKROrdersMixin:
             try:
                 self.ib.cancelMktData(contract)
             except Exception:
-                pass
+                pass  # Quote sub already cancelled or contract never subscribed.
 
         if "trailStopPrice" not in order_attrs:
             return {

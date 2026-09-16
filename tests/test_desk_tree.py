@@ -139,6 +139,36 @@ def test_stop_desk_kills_pro_and_flet_and_drops_lock(tmp_path, monkeypatch):
     assert not lock.is_file()
 
 
+def test_stop_desk_kills_live_lock_owner(tmp_path, monkeypatch):
+    """Hung close leaves the lock owner alive; Stop must kill that tree."""
+    lock = tmp_path / "desk.lock"
+    stop = tmp_path / "operator_stop.json"
+    monkeypatch.setenv("ABCXAUTO_DESK_LOCK_PATH", str(lock))
+    monkeypatch.setenv("ABCXAUTO_OPERATOR_STOP_PATH", str(stop))
+    lock.write_text(json.dumps({"pid": 4242, "ts": "now"}), encoding="utf-8")
+    monkeypatch.setattr(sup, "_pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(sup, "protected_pids", lambda extra=None: {os.getpid()})
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        sup,
+        "kill_pid_tree",
+        lambda root, exclude=None: seen.append(("tree", root)) or [root, 99],
+    )
+    monkeypatch.setattr(
+        sup,
+        "kill_descendant_flet",
+        lambda **k: seen.append(("flet", k.get("root"))) or [],
+    )
+    monkeypatch.setattr(sup, "reap_leftover_desk", lambda **_k: [])
+    out = sup.stop_desk()
+    assert ("tree", 4242) in seen
+    assert ("flet", 4242) in seen
+    assert 4242 in out
+    assert 99 in out
+    assert sup.operator_stopped() is True
+    assert not lock.is_file()
+
+
 def test_leftover_pro_pids_skip_tws_self_and_our_tree(monkeypatch):
     me = os.getpid()
     monkeypatch.setattr(sup, "live_pro_pids", lambda **_k: [me, 88, 99, 42])

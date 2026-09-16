@@ -421,7 +421,12 @@ def collect_would_refuse(
             if not ok_i:
                 reasons.append(str(vmsg or "inventory"))
         except Exception:
-            logger.debug("preview inventory check failed", exc_info=True)
+            logger.warning(
+                "preview inventory check failed closed strat=%s",
+                strat,
+                exc_info=True,
+            )
+            reasons.append("inventory_validation_failed: unverifiable live ledger")
         try:
             from abcxauto.agent_loop import equity_of, is_new_risk
             from abcxauto.mode_size import mode_size_ticket_error
@@ -688,7 +693,7 @@ def preview_ticket(
 
         bind_send_card(work)
     except Exception:
-        pass
+        logger.warning("preview bind_send_card failed", exc_info=True)
     would_refuse = collect_would_refuse(work, world=world, snap=snap)
     digest = ticket_preview_hash(work)
     preview_id = f"prv_{uuid.uuid4().hex[:16]}"
@@ -718,8 +723,6 @@ def preview_ticket(
             token_used=False,
             source=source,
             portfolio_max_loss_usd=usd.get("portfolio_max_loss_usd"),
-            portfolio_cap_usd=usd.get("portfolio_cap_usd"),
-            portfolio_usd_refused=False,
         )
     except Exception:
         logger.debug("preview journal failed", exc_info=True)
@@ -743,11 +746,11 @@ def preview_ticket(
     }
     if usd:
         try:
-            from abcxauto.portfolio_loss import stamp_portfolio_usd
+            from abcxauto.portfolio_loss import stamp_portfolio_max_loss
 
-            stamp_portfolio_usd(out, usd)
+            stamp_portfolio_max_loss(out, usd)
         except Exception:
-            pass
+            logger.debug("preview portfolio stamp failed", exc_info=True)
     if not passed:
         out["reason_code"] = "preview_refuse"
     return out

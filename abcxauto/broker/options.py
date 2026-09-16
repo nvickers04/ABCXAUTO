@@ -506,10 +506,7 @@ class IBKROptionsMixin:
             logger.warning("IBKR option quote failed for %s: %s", sym, exc)
             return {"error": str(exc), "source": "ibkr", "symbol": sym}
         finally:
-            try:
-                self.ib.cancelMktData(contract)
-            except Exception:
-                pass
+            self._mkt_data_cancel_if_live(contract, skip_book=True)
 
     async def get_live_vertical_bag_quote(
         self,
@@ -567,10 +564,7 @@ class IBKROptionsMixin:
             return {"error": str(exc), "source": "ibkr", "symbol": sym}
         finally:
             if combo is not None:
-                try:
-                    self.ib.cancelMktData(combo)
-                except Exception:
-                    pass
+                self._mkt_data_cancel_if_live(combo, skip_book=True)
 
     # ========== VERTICAL SPREADS ==========
 

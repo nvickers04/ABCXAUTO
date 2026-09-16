@@ -128,9 +128,11 @@ def test_capacity_not_in_set_risk_keys():
     assert "risk_posture" not in SET_RISK_KEYS
 
 
-def test_set_trading_mode_paper_live_roundtrip():
+def test_set_trading_mode_paper_live_roundtrip(tmp_path, monkeypatch):
     from abcxauto.config import set_trading_mode
 
+    (tmp_path / "playbook_live.json").write_text('{"promoted": true}', encoding="utf-8")
+    monkeypatch.setenv("ABCXAUTO_PLAYBOOK_LIVE_PATH", str(tmp_path / "playbook_live.json"))
     live = set_trading_mode("live", live_confirm="I_UNDERSTAND_LIVE_TRADING_RISK")
     assert live.trading_mode == "live"
     assert live.ibkr_port in (7496, 4001)

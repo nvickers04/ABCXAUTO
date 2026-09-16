@@ -738,8 +738,11 @@ def mark_review_stale(*, archive_tail: bool = False) -> None:
         "previous_run_id": prev.get("run_id") or run.get("run_id") or "",
         "previous_strat": prev.get("strat") or "",
         "open_lots": list(prev.get("open_lots") or []),
+        "working_orders": [
+            row for row in (prev.get("working_orders") or []) if isinstance(row, dict)
+        ][:12],
         "net_liquidation": prev.get("net_liquidation"),
-        "flat": prev.get("flat"),
+        "flat": prev.get("flat") if not prev.get("working_orders") else False,
         "session": prev.get("session") or {},
         "ibkr_connected": prev.get("ibkr_connected"),
         "mix": prev.get("mix") if isinstance(prev.get("mix"), dict) else {},
@@ -952,6 +955,18 @@ def seed_snap_from_last_turn(snap: dict[str, Any] | None) -> None:
             snap["session_range"] = rng
     if fresh:
         _seed_live_quotes_from_last(snap, data, hits or snap.get("scan_hits"))
+        live_orders = snap.get("open_orders")
+        if not live_orders:
+            seeded = data.get("open_orders")
+            if not isinstance(seeded, list) or not seeded:
+                seeded = data.get("working_orders")
+            if isinstance(seeded, list) and seeded:
+                snap["open_orders"] = [row for row in seeded if isinstance(row, dict)]
+                snap["working_orders"] = [
+                    row
+                    for row in (data.get("working_orders") or seeded)
+                    if isinstance(row, dict)
+                ][:12]
     scan_at = str(data.get("scan_at") or "").strip()
     if scan_at:
         snap["scan_at"] = scan_at
@@ -1115,6 +1130,12 @@ def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
         "session_range": _compact_session_range(row.get("session_range")),
         "ibkr_live_quotes": quotes,
         "fresh": last_look_is_fresh(row),
+        "working_orders": [
+            item for item in (row.get("working_orders") or []) if isinstance(item, dict)
+        ][:12],
+        "broker_rejects": [
+            item for item in (row.get("broker_rejects") or []) if isinstance(item, dict)
+        ][:8],
     }
     if loaded:
         last = _read_json(LAST_TURN_PATH)
@@ -1128,9 +1149,13 @@ def last_look_facts(brief: dict[str, Any] | None = None) -> dict[str, Any]:
             "scan_hits": {},
             "session_range": {},
             "ibkr_live_quotes": {},
+            "working_orders": [],
+            "broker_rejects": [],
         }
     # Leftover say is not the next job. Facts only.
-    return out if (tools or hits or n) else {}
+    return out if (
+        tools or hits or n or out.get("working_orders") or out.get("broker_rejects")
+    ) else {}
 
 
 def last_turn_look_failed(out: dict[str, Any] | None) -> bool:
@@ -1175,6 +1200,16 @@ def write_desk_brief(payload: dict[str, Any]) -> None:
         "sends": sends,
         "send_calls": send_calls,
         "open_lots": list(payload.get("open_lots") or [])[:32],
+        "working_orders": [
+            row
+            for row in (payload.get("working_orders") or [])
+            if isinstance(row, dict)
+        ][:12],
+        "broker_rejects": [
+            row
+            for row in (payload.get("broker_rejects") or [])
+            if isinstance(row, dict)
+        ][:8],
         "net_liquidation": payload.get("net_liquidation"),
         "mix": payload.get("mix") if isinstance(payload.get("mix"), dict) else {},
         "rationale": (payload.get("rationale") or "")[:800],
@@ -1204,6 +1239,76 @@ def _mix_of(out: dict[str, Any], world: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
+def _orders_of(out: dict[str, Any], world: dict[str, Any]) -> list[Any]:
+    for src in (
+        out.get("open_orders"),
+        out.get("orders"),
+        world.get("open_orders"),
+        world.get("orders"),
+    ):
+        if isinstance(src, list) and src:
+            return [row for row in src if isinstance(row, dict)]
+    return []
+
+
+def _fills_of(out: dict[str, Any], world: dict[str, Any]) -> list[dict[str, Any]]:
+    for src in (out.get("fills"), world.get("fills")):
+        if isinstance(src, list) and src:
+            return [row for row in src if isinstance(row, dict)]
+    return []
+
+
+def _broker_rejects_of(
+    out: dict[str, Any],
+    world: dict[str, Any],
+    *,
+    prior: dict[str, Any] | None = None,
+    open_orders: list[Any] | None = None,
+    working_orders: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    from abcxauto.world_state import compact_broker_rejects
+
+    raw: list[dict[str, Any]] = []
+    for src in (out.get("broker_rejects"), world.get("broker_rejects")):
+        if isinstance(src, list) and src:
+            raw.extend(row for row in src if isinstance(row, dict))
+    if not raw and isinstance(prior, dict):
+        raw.extend(
+            row for row in (prior.get("broker_rejects") or []) if isinstance(row, dict)
+        )
+    return compact_broker_rejects(
+        raw, open_orders=open_orders, working_orders=working_orders
+    )
+
+
+def _working_orders_of(
+    out: dict[str, Any],
+    world: dict[str, Any],
+    *,
+    positions: list[Any] | None,
+    prior: dict[str, Any] | None = None,
+    unreliable: bool = False,
+) -> list[dict[str, Any]]:
+    """Compact working tickets for last_turn. A resting BAG is not flat."""
+    from abcxauto.world_state import compact_working_orders
+
+    raw = out.get("working_orders")
+    if isinstance(raw, list) and raw:
+        rows = compact_working_orders(
+            [row for row in raw if isinstance(row, dict)],
+            positions=positions,
+        )
+        if rows:
+            return rows
+    orders = _orders_of(out, world)
+    rows = compact_working_orders(orders, positions=positions)
+    if rows:
+        return rows
+    if unreliable and isinstance(prior, dict):
+        return [row for row in (prior.get("working_orders") or []) if isinstance(row, dict)][:12]
+    return []
+
+
 def write_last_turn_after_send(
     *,
     strat: str,
@@ -1226,11 +1331,13 @@ def write_last_turn_after_send(
     from abcxauto.world_state import book_is_flat, lot_labels
 
     pos = list(positions or [])
+    ords = [row for row in (orders or []) if isinstance(row, dict)]
     lots = lot_labels(pos)
     write_last_turn({
         "strat": strat,
         "sends": int(sends),
         "positions": pos,
+        "open_orders": ords,
         "open_lots": lots,
         "rationale": rationale,
         "tool_trace": list(tool_trace or []),
@@ -1240,9 +1347,10 @@ def write_last_turn_after_send(
         "ibkr_live_last": ibkr_live_last,
         "ibkr_live_quotes": dict(ibkr_live_quotes or {}),
         "world_state": {
-            "flat": book_is_flat(pos, orders),
+            "flat": book_is_flat(pos, ords),
             "open_lots": lots,
             "positions": pos,
+            "open_orders": ords,
             "net_liquidation": net_liquidation,
         },
     })
@@ -1267,7 +1375,7 @@ def write_last_turn(out: dict[str, Any]) -> None:
         ibkr = pulse.get("ibkr_connected")
         if ibkr is None:
             ibkr = fresh.get("ibkr_connected")
-        from abcxauto.world_state import lot_labels
+        from abcxauto.world_state import book_is_flat, lot_labels
 
         open_lots = list(out.get("open_lots") or world.get("open_lots") or [])
         if not open_lots:
@@ -1278,6 +1386,45 @@ def write_last_turn(out: dict[str, Any]) -> None:
         ibkr_down = ibkr is False or "ibkr_down" in str(out.get("validation") or "")
         prior = _read_json(LAST_TURN_PATH)
         if (unreliable or ibkr_down) and not open_lots:
+            open_lots = list(prior.get("open_lots") or [])
+        positions = [
+            row
+            for row in (out.get("positions") or world.get("positions") or [])
+            if isinstance(row, dict)
+        ]
+        working_orders = _working_orders_of(
+            out,
+            world if isinstance(world, dict) else {},
+            positions=positions,
+            prior=prior,
+            unreliable=unreliable or ibkr_down,
+        )
+        orders = _orders_of(out, world if isinstance(world, dict) else {})
+        broker_rejects = _broker_rejects_of(
+            out,
+            world if isinstance(world, dict) else {},
+            prior=prior,
+            open_orders=orders,
+            working_orders=working_orders,
+        )
+        fills = _fills_of(out, world if isinstance(world, dict) else {})
+        if working_orders:
+            persist_flat = False
+        else:
+            persist_flat = book_is_flat(positions, orders, fills)
+        try:
+            sends_n = int(out.get("sends") or out.get("send_calls") or 0)
+        except (TypeError, ValueError):
+            sends_n = 0
+        if persist_flat and not bool(prior.get("flat", True)):
+            if sends_n > 0 or prior.get("working_orders"):
+                persist_flat = False
+        if persist_flat and sends_n > 0 and fills:
+            if not book_is_flat(positions, orders, []):
+                persist_flat = False
+        if not persist_flat and not open_lots:
+            open_lots = lot_labels(positions, fills=fills)
+        if not persist_flat and not open_lots and prior.get("open_lots"):
             open_lots = list(prior.get("open_lots") or [])
         nl = world.get("net_liquidation") or out.get("equity")
         try:
@@ -1310,6 +1457,8 @@ def write_last_turn(out: dict[str, Any]) -> None:
             ),
             "ibkr_connected": ibkr,
             "open_lots": open_lots,
+            "working_orders": working_orders,
+            "broker_rejects": broker_rejects,
             "book_unreliable": bool(
                 out.get("book_unreliable") or gates.get("book_unreliable")
             ),
@@ -1317,7 +1466,7 @@ def write_last_turn(out: dict[str, Any]) -> None:
             "f10_tripped": bool(out.get("f10_tripped")),
             "loop_halted": bool(out.get("loop_halted")),
             "model_cost_post_trip_USD": float(out.get("model_cost_post_trip_USD") or 0.0),
-            "flat": world.get("flat"),
+            "flat": persist_flat,
             "net_liquidation": world.get("net_liquidation") or out.get("equity") or nl,
             "mix": _mix_of(out, world),
             "sends": (

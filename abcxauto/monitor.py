@@ -640,6 +640,7 @@ class PortfolioMonitor:
         try:
             session = get_session_info().get("session")
         except Exception:
+            logger.debug("monitor session probe failed; treating market as active", exc_info=True)
             return True  # fail open — better to review than to skip
         if session == "regular":
             return True
@@ -679,6 +680,14 @@ class PortfolioMonitor:
                 logger.warning(f"Monitor fill ingest failed: {e}")
                 fills = []
 
+        broker_rejects: list = []
+        get_rejects = getattr(self.connector, "get_broker_rejects", None)
+        if callable(get_rejects):
+            try:
+                broker_rejects = list(get_rejects() or [])[:20]
+            except Exception:
+                broker_rejects = []
+
         snapshot = {
             "connected": True,
             "taken_at": datetime.now(timezone.utc).isoformat(),
@@ -686,6 +695,7 @@ class PortfolioMonitor:
             "positions": positions,
             "open_orders": orders,
             "fills": list(fills)[-20:],
+            "broker_rejects": broker_rejects,
             "protection": protection,
         }
         try:

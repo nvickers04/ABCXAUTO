@@ -8,8 +8,11 @@ A last / mid / mark is not a fill. Qty-blind premium is not cash.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _FILL_PX_KEYS = (
     "avg_fill_price",
@@ -468,6 +471,165 @@ def path_facts(
     return out
 
 
+_CON_ID_KEYS = ("con_id", "conId", "contract_id")
+_LOCAL_SYMBOL_KEYS = ("local_symbol", "localSymbol")
+_EXPIRY_KEYS = ("expiry", "expiration", "lastTradeDateOrContractMonth")
+
+
+def _sec_type(row: dict[str, Any]) -> str:
+    return str(row.get("sec_type") or row.get("secType") or "").strip().upper()
+
+
+def _first(row: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        val = row.get(key)
+        if val not in (None, ""):
+            return val
+    return None
+
+
+def _leg_identity(row: dict[str, Any]) -> tuple[Any, ...]:
+    """Contract identity of one fill row, best evidence first.
+
+    ``con_id`` / ``local_symbol`` name the contract outright. Strike, right
+    and expiry do too. The journal ``fills`` table carries none of those
+    (only symbol / sec_type / side / quantity / price), so its fallback is
+    ``(symbol, sec_type, side, price)``: two prints of the same contract at
+    the same price fold into one leg; two strikes of one combo differ in
+    price and stay two legs.
+
+    Known limits of the fallback: a single contract partially filled at two
+    prices counts as two legs, and two combo legs with identical side and
+    price count as one. Journal a ``con_id`` per fill to retire both.
+    """
+    con_id = _first(row, _CON_ID_KEYS)
+    if con_id is not None:
+        return ("con", str(con_id))
+    local = _first(row, _LOCAL_SYMBOL_KEYS)
+    if local is not None:
+        return ("local", str(local).strip().upper())
+    symbol = str(row.get("symbol") or "").strip().upper()
+    sec = _sec_type(row)
+    strike = _finite(row.get("strike"))
+    right = str(row.get("right") or "").strip().upper()
+    expiry = _first(row, _EXPIRY_KEYS)
+    if strike is not None or right or expiry is not None:
+        return ("contract", symbol, sec, strike, right, str(expiry or ""))
+    side = str(row.get("side") or row.get("action") or "").strip().upper()
+    if side in _BUY:
+        side = "BUY"
+    elif side in _SELL:
+        side = "SELL"
+    return ("print", symbol, sec, side, _fill_price(row))
+
+
+def structure_label(legs: list[Any] | None) -> str:
+    """Name one ticket's shape from its legs. A fact, not a grade.
+
+    STK wins the label when any leg is stock: a covered call is managed as
+    the share lot, not as a two-leg option bet.
+
+    A leg is one distinct contract, not one fill row. The IBKR ``BAG``
+    parent print (realized 0) is the combo wrapper, not a leg, and a
+    partial fill is the same contract twice — neither may inflate the
+    count. See ``_leg_identity`` for what "distinct" means per row.
+    """
+    kinds: set[str] = set()
+    contracts: set[tuple[Any, ...]] = set()
+    rows = 0
+    for leg in legs or []:
+        if not isinstance(leg, dict):
+            continue
+        rows += 1
+        kind = _sec_type(leg)
+        if kind:
+            kinds.add(kind)
+        if kind == "BAG":
+            continue
+        contracts.add(_leg_identity(leg))
+    if not rows:
+        return "unknown"
+    if "STK" in kinds:
+        return "stock"
+    if not kinds & _OPT_SEC:
+        return "unknown"
+    count = len(contracts)
+    if count <= 1:
+        return "single_option" if count == 1 else "unknown"
+    return f"spread_{count}leg"
+
+
+def path_by_structure(
+    rows: list[Any] | None,
+    *,
+    equity: float | None,
+    risk_pct: float | None,
+) -> dict[str, dict[str, Any]]:
+    """``path_facts`` per ticket shape. Same math, one pool per structure.
+
+    Nothing can size a calendar differently from a vertical while every
+    closed ticket lands in one undifferentiated pool. Thin pools keep the
+    ``path_facts`` thin note instead of pretending a sample.
+
+    Netting sums ``_closed_fill_pnl`` over every row of the ticket. The
+    IBKR ``BAG`` parent print carries realized 0, so it drops out of the
+    sum on its own; ``structure_label`` skips it for the leg count.
+    """
+    groups: dict[Any, list[dict]] = {}
+    for raw in rows or []:
+        if not isinstance(raw, dict):
+            continue
+        key = _order_key(raw)
+        if key is None:
+            continue
+        groups.setdefault(key, []).append(raw)
+    pools: dict[str, list[float]] = {}
+    for legs in groups.values():
+        total = 0.0
+        seen = False
+        for leg in legs:
+            pnl = _closed_fill_pnl(leg)
+            if pnl is None:
+                continue
+            total += pnl
+            seen = True
+        if not seen or abs(total) <= 1e-9:
+            continue
+        pools.setdefault(structure_label(legs), []).append(total)
+    return {
+        label: path_facts(pnls, equity=equity, risk_pct=risk_pct)
+        for label, pnls in sorted(pools.items())
+    }
+
+
+def structure_edge_summary(
+    by_structure: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Decision-relevant subset of ``path_by_structure`` for a wake fact.
+
+    Full ``path_facts`` is ~16 keys per shape; a wake does not need g_f or
+    snr. Thin pools carry ``thin`` instead of numbers that imply a sample.
+    """
+    out: dict[str, Any] = {}
+    for label, facts in (by_structure or {}).items():
+        if not isinstance(facts, dict):
+            continue
+        n = int(facts.get("n") or 0)
+        if facts.get("note"):
+            out[label] = {"n": n, "thin": True}
+            continue
+        row: dict[str, Any] = {"n": n}
+        p = facts.get("p")
+        if isinstance(p, (int, float)):
+            row["win_pct"] = _round(100.0 * float(p), 1)
+        for src, dst in (("b", "payoff"), ("E", "e_usd"), ("kelly", "kelly")):
+            val = facts.get(src)
+            if isinstance(val, (int, float)):
+                row[dst] = val
+        out[label] = row
+    return out
+
+
 def path_from_journal(
     journal: Any,
     *,
@@ -483,6 +645,7 @@ def path_from_journal(
             try:
                 rows = list(fn() or [])
             except Exception:
+                logger.debug("path_math journal %s failed", name, exc_info=True)
                 rows = []
             if rows:
                 pnls = rows

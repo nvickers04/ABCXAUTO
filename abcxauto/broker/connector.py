@@ -14,6 +14,7 @@ The IBKRConnector class imports the orders mixin from orders.py.
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -36,6 +37,17 @@ from abcxauto.broker.connection import (
 from abcxauto.config import get_config
 
 logger = logging.getLogger(__name__)
+
+
+def _ibkr_double(raw: Any) -> float | None:
+    """IBKR unset doubles arrive as ~1.797e308; treat as absent."""
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return None if v > 1e300 else v
 
 
 def port_is_closed(exc: BaseException) -> bool:
@@ -132,6 +144,12 @@ def fill_ts_iso(
         )
         dt = fixed
     return _iso_z(dt)
+
+
+def _clean_broker_reason(reason: str) -> str:
+    """IBKR reject prose carries literal HTML breaks. Facts read as plain text."""
+    text = re.sub(r"<\s*br\s*/?\s*>", " ", str(reason or ""), flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 # ============================================================
@@ -403,13 +421,10 @@ class IBKRQueriesMixin:
                 if oid is not None and cancel_oid_is_blocked(oid):
                     continue
 
-                lmt_price = t.order.lmtPrice
-                if lmt_price > 1e300:
-                    lmt_price = None
-
-                trail_pct = getattr(t.order, 'trailingPercent', None)
-                aux = t.order.auxPrice
-                if t.order.orderType == 'TRAIL' and trail_pct:
+                lmt_price = _ibkr_double(t.order.lmtPrice)
+                trail_pct = _ibkr_double(getattr(t.order, "trailingPercent", None))
+                aux = _ibkr_double(t.order.auxPrice)
+                if t.order.orderType == "TRAIL" and trail_pct:
                     aux = None
 
                 sec_type = t.contract.secType or 'STK'
@@ -483,31 +498,35 @@ class IBKRQueriesMixin:
                             realized_pnl = None
 
                 sec = getattr(contract, "secType", None) or "STK"
+                raw_con = getattr(contract, "conId", None)
+                try:
+                    con_id = int(raw_con) if raw_con not in (None, "", 0, "0") else None
+                except (TypeError, ValueError):
+                    con_id = None
+                local = getattr(contract, "localSymbol", None) or None
+                expiry = getattr(contract, "lastTradeDateOrContractMonth", None) or None
+                right = getattr(contract, "right", None) or None
+                strike = getattr(contract, "strike", None)
                 row = {
                     "ts": ts,
                     "exec_id": getattr(execution, "execId", None),
                     "order_id": getattr(execution, "orderId", None),
                     "symbol": getattr(contract, "symbol", None),
                     "sec_type": sec,
-                    "conId": getattr(contract, "conId", None),
-                    "con_id": getattr(contract, "conId", None),
+                    "conId": con_id,
+                    "con_id": con_id,
+                    "local_symbol": local,
+                    "localSymbol": local,
+                    "strike": strike,
+                    "right": right,
+                    "expiry": expiry,
+                    "expiration": expiry,
                     "side": getattr(execution, "side", None),
                     "quantity": getattr(execution, "shares", None),
                     "price": getattr(execution, "price", None),
                     "commission": commission,
                     "realized_pnl": realized_pnl,
                 }
-                # BAG legs land as OPT fills — keep strike/right/exp for desk attach.
-                if str(sec).upper() in ("OPT", "FOP"):
-                    row["strike"] = getattr(contract, "strike", None)
-                    row["expiration"] = getattr(
-                        contract, "lastTradeDateOrContractMonth", None
-                    )
-                    row["right"] = getattr(contract, "right", None)
-                    local = getattr(contract, "localSymbol", None)
-                    if local:
-                        row["local_symbol"] = local
-                        row["localSymbol"] = local
                 out.append(row)
             try:
                 from abcxauto.send_marks import attach_fill_quotes
@@ -594,6 +613,43 @@ class IBKRQueriesMixin:
             bag.clear()
         bag[symbol] = (time.monotonic(), dict(payload))
 
+    def _mkt_data_has_live_sub(self, contract: Any) -> bool:
+        """True when ib_insync still tracks a streaming mktData req for contract."""
+        if contract is None or self.ib is None:
+            return False
+        ticker_fn = getattr(self.ib, "ticker", None)
+        if not callable(ticker_fn):
+            return False
+        ticker = ticker_fn(contract)
+        if ticker is None:
+            return False
+        wrapper = getattr(self.ib, "wrapper", None)
+        if wrapper is None:
+            return False
+        mkt = getattr(wrapper, "ticker2ReqId", {}).get("mktData", {})
+        if not isinstance(mkt, dict):
+            return False
+        req_id = mkt.get(ticker, 0)
+        try:
+            return int(req_id or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _mkt_data_cancel_if_live(self, contract: Any, *, skip_book: bool = False) -> None:
+        """Cancel only when ib_insync has an active mktData line for this contract."""
+        if contract is None or self.ib is None:
+            return
+        if skip_book:
+            cid = int(getattr(contract, "conId", 0) or 0)
+            if cid and cid in getattr(self, "_book_sub_live", set()):
+                return
+        if not self._mkt_data_has_live_sub(contract):
+            return
+        try:
+            self.ib.cancelMktData(contract)
+        except Exception:
+            pass
+
     async def get_live_quotes(self, symbols: List[str], *, fresh: bool = False) -> Dict[str, Any]:
         """IBKR live quotes for one scan sweep (parallel, short cache)."""
         from abcxauto.broker.quotes import quote_batch_cap
@@ -667,14 +723,7 @@ class IBKRQueriesMixin:
             logger.warning("IBKR live quote failed for %s: %s", sym, exc)
             return {"error": str(exc), "source": "ibkr", "symbol": sym}
         finally:
-            con_id = int(getattr(contract, "conId", 0) or 0)
-            if con_id and con_id in getattr(self, "_book_subs", {}):
-                pass
-            else:
-                try:
-                    self.ib.cancelMktData(contract)
-                except Exception:
-                    pass
+            self._mkt_data_cancel_if_live(contract, skip_book=True)
 
 
 # Import mixins after defining base classes to avoid circular imports
@@ -855,6 +904,10 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         self._order_status_listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._local_cancel_requests: Dict[int, Dict[str, Any]] = {}
         self._local_cancel_lock = Lock()
+        self._broker_rejects: List[Dict[str, Any]] = []
+        self._broker_reject_lock = Lock()
+        self._order_touch: Dict[int, Dict[str, Any]] = {}
+        self._order_touch_lock = Lock()
         self._riskless_combo_202 = False
 
         # Store strong references to event handlers (prevents weakref issues)
@@ -939,25 +992,113 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             "age_seconds": round(age_s, 2),
         }
 
+    _BROKER_REJECT_CAP = 20
+    _ORDER_TOUCH_CAP = 128
+
+    def _touch_order_meta(self, order_id: int, **fields: Any) -> None:
+        oid = int(order_id or 0)
+        if not oid:
+            return
+        now = datetime.now(timezone.utc)
+        with self._order_touch_lock:
+            row = dict(self._order_touch.get(oid) or {})
+            row.update({k: v for k, v in fields.items() if v not in (None, "")})
+            row["ts"] = now
+            self._order_touch[oid] = row
+            if len(self._order_touch) > self._ORDER_TOUCH_CAP:
+                stale = sorted(
+                    self._order_touch.items(),
+                    key=lambda kv: kv[1].get("ts") or now,
+                )[: len(self._order_touch) - self._ORDER_TOUCH_CAP]
+                for sid, _ in stale:
+                    self._order_touch.pop(sid, None)
+
+    def _ensure_broker_reject_state(self) -> None:
+        if not hasattr(self, "_broker_reject_lock"):
+            self._broker_reject_lock = Lock()
+            self._broker_rejects = []
+
+    def _order_meta_for(self, order_id: int) -> Dict[str, Any]:
+        oid = int(order_id or 0)
+        if not oid:
+            return {}
+        if not hasattr(self, "_order_state_lock"):
+            with getattr(self, "_order_touch_lock", Lock()):
+                touch = getattr(self, "_order_touch", {}).get(oid)
+            return dict(touch) if isinstance(touch, dict) else {}
+        with self._order_state_lock:
+            state = self._order_states.get(oid)
+        if state is not None:
+            return {
+                "symbol": state.symbol,
+                "order_type": state.order_type,
+                "action": state.action,
+            }
+        with self._order_touch_lock:
+            touch = self._order_touch.get(oid)
+        return dict(touch) if isinstance(touch, dict) else {}
+
+    @staticmethod
+    def _clean_broker_reason_text(reason: str) -> str:
+        return _clean_broker_reason(reason)
+
+    def _record_broker_reject(
+        self,
+        order_id: int,
+        reason: str,
+        *,
+        kind: str = "broker_cancel",
+    ) -> None:
+        self._ensure_broker_reject_state()
+        oid = int(order_id or 0)
+        if not oid:
+            return
+        if kind == "broker_cancel":
+            attr = self.get_cancel_attribution(oid)
+            if attr.get("kind") == "self_cancel":
+                return
+        meta = self._order_meta_for(oid)
+        record = {
+            "order_id": oid,
+            "symbol": meta.get("symbol"),
+            "order_type": meta.get("order_type"),
+            "action": meta.get("action"),
+            "kind": kind,
+            "reason": _clean_broker_reason(reason),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        with self._broker_reject_lock:
+            self._broker_rejects = [
+                r for r in self._broker_rejects if int(r.get("order_id") or 0) != oid
+            ]
+            self._broker_rejects.append(record)
+            if len(self._broker_rejects) > self._BROKER_REJECT_CAP:
+                self._broker_rejects = self._broker_rejects[-self._BROKER_REJECT_CAP :]
+
+    def get_broker_rejects(self) -> List[Dict[str, Any]]:
+        self._ensure_broker_reject_state()
+        with self._broker_reject_lock:
+            return [dict(r) for r in self._broker_rejects]
+
     def _unregister_handlers(self):
         """Safely remove event handlers from the current IB instance."""
         target = self._handlers_on_ib or self.ib
         try:
             target.disconnectedEvent -= self._disconnect_handler
         except Exception:
-            pass
+            pass  # Handler was never registered or IB already dropped it.
         try:
             target.execDetailsEvent -= self._execution_handler
         except Exception:
-            pass
+            pass  # Handler was never registered or IB already dropped it.
         try:
             target.orderStatusEvent -= self._order_status_handler
         except Exception:
-            pass
+            pass  # Handler was never registered or IB already dropped it.
         try:
             target.errorEvent -= self._error_handler
         except Exception:
-            pass
+            pass  # Handler was never registered or IB already dropped it.
         self._handlers_on_ib = None
 
     # ── Noisy IBKR error codes to suppress (log at DEBUG instead of WARNING) ──
@@ -1033,8 +1174,10 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                     logger.debug(f"IBKR [202] self-cancel confirmed: order {reqId}")
                 else:
                     logger.warning(f"IBKR [202] broker-cancel: order {reqId} — {errorString}")
+                    self._record_broker_reject(reqId, errorString, kind="broker_cancel")
         elif errorCode in (201, 10198):
             logger.warning(f"IBKR [{errorCode}] order rejected reqId={reqId}: {errorString}")
+            self._record_broker_reject(reqId, errorString, kind="rejected")
         else:
             logger.info(f"IBKR [{errorCode}] reqId={reqId}: {errorString}")
 
@@ -1049,7 +1192,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             try:
                 drop_rt()
             except Exception:
-                pass
+                pass  # Realtime bars already abandoned on this disconnect path.
         self._clear_book_subs(cancel=False)
         self._connected = False
         cause = self._disconnect_cause
@@ -1085,7 +1228,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 if not captured.is_closed() and captured.is_running():
                     return captured
             except Exception:
-                pass
+                pass  # Captured loop already closed; fall through to get_running_loop.
         try:
             return asyncio.get_running_loop()
         except RuntimeError:
@@ -1196,7 +1339,13 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                         from abcxauto.risk_gates import get_risk_gate
 
                         gate = get_risk_gate()
-                        if gate.is_halted:
+                        cleared = gate.resume_disconnect()
+                        if cleared:
+                            logger.info(
+                                f"IBKR reconnected successfully (reason={reason}, "
+                                f"client_id={self.client_id}); disconnect halt cleared."
+                            )
+                        elif gate.is_halted:
                             logger.warning(
                                 f"IBKR reconnected successfully (reason={reason}, "
                                 f"client_id={self.client_id}), but risk-gate halt "
@@ -1211,8 +1360,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                     except Exception:
                         logger.info(
                             f"IBKR reconnected successfully (reason={reason}, "
-                            f"client_id={self.client_id}). "
-                            "Any risk-gate halt remains until human/monitor resume."
+                            f"client_id={self.client_id})."
                         )
                     await self._after_connect_restore()
                     return
@@ -1231,15 +1379,20 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
     async def _after_connect_restore(self) -> None:
         """Resubscribe market data after TWS/Gateway reconnect.
 
-        Does not clear a risk-gate halt — human/monitor must resume.
+        A disconnect-kind halt clears here. Daily-loss / operator halts stay.
         """
         self._disconnect_cause = DisconnectCause.UNKNOWN.value
         self._reconnect_requested = False
         self._heartbeat_failures = 0
         self._reconnect_attempt = 0
         self._disconnect_since = None
-        # Leave _disconnect_halt_fired as-is so we do not re-halt on a later blip
-        # in the same outage window; a fresh disconnect resets it in _on_disconnect.
+        self._disconnect_halt_fired = False
+        try:
+            from abcxauto.risk_gates import get_risk_gate
+
+            get_risk_gate().resume_disconnect()
+        except Exception:
+            logger.debug("disconnect halt clear on restore failed", exc_info=True)
         self._last_heartbeat_ok = time.time()
 
         # Streaming subscribe API removed; nothing to restore.
@@ -1300,6 +1453,12 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 "remaining": trade.orderStatus.remaining,
                 "avg_fill_price": trade.orderStatus.avgFillPrice,
             }
+            self._touch_order_meta(
+                trade.order.orderId,
+                symbol=symbol,
+                order_type=order_type,
+                action=event["action"],
+            )
 
             if status == 'Filled':
                 logger.info(f"[OK] Order FILLED: {order_type} {symbol}")
@@ -1338,7 +1497,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         try:
             self._stop_heartbeat()
         except Exception:
-            pass
+            pass  # Destructor must not raise if the heartbeat thread is already gone.
 
     # ========== CONNECTION ==========
 
@@ -1561,10 +1720,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
             # Cancel all streaming subscriptions
             for ticker in self._tickers.values():
-                try:
-                    self.ib.cancelMktData(ticker.contract)
-                except Exception:
-                    pass
+                self._mkt_data_cancel_if_live(ticker.contract)
             self._tickers.clear()
             self._cancel_account_pnl()
             drop_rt = getattr(self, "abandon_realtime_bars", None)
@@ -1572,7 +1728,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 try:
                     drop_rt()
                 except Exception:
-                    pass
+                    pass  # Realtime bars already abandoned during disconnect.
             self._clear_book_subs(cancel=True)
 
             self.ib.disconnect()
@@ -1865,11 +2021,8 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             for cid, contract in list(self._book_subs.items()):
                 if cid not in live:
                     continue
-                try:
-                    if contract is not None:
-                        self.ib.cancelMktData(contract)
-                except Exception:
-                    pass
+                if contract is not None:
+                    self._mkt_data_cancel_if_live(contract)
         self._book_subs.clear()
         live.clear()
 
@@ -1896,11 +2049,8 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         for cid in gone:
             contract = self._book_subs.pop(cid, None)
             if cid in live:
-                try:
-                    if contract is not None:
-                        self.ib.cancelMktData(contract)
-                except Exception:
-                    pass
+                if contract is not None:
+                    self._mkt_data_cancel_if_live(contract)
                 live.discard(cid)
         for cid, p in want.items():
             c = self._book_subs.get(cid)

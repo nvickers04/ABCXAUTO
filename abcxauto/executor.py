@@ -102,6 +102,11 @@ async def _verify_closes_position(proposal: OrderProposal, connector: Any) -> Op
     try:
         positions = await connector.get_positions()
     except Exception as e:
+        logger.warning(
+            "exit verify fail-closed: cannot read positions symbol=%s",
+            symbol,
+            exc_info=True,
+        )
         return {"error": f"Could not verify position for exit order: {e}"}
 
     held = 0
@@ -315,6 +320,11 @@ async def _verify_cancel_not_last_stop(
     try:
         orders = await connector.get_open_orders()
     except Exception as e:
+        logger.warning(
+            "cancel last-stop fail-closed: cannot read open orders order_id=%s",
+            order_id,
+            exc_info=True,
+        )
         return {
             "error": (
                 f"cancel_order rejected (fail-closed): cannot read open orders ({e}). "
@@ -324,6 +334,11 @@ async def _verify_cancel_not_last_stop(
     try:
         positions = await connector.get_positions()
     except Exception as e:
+        logger.warning(
+            "cancel last-stop fail-closed: cannot read positions order_id=%s",
+            order_id,
+            exc_info=True,
+        )
         return {
             "error": (
                 f"cancel_order rejected (fail-closed): cannot read positions ({e}). "
@@ -608,6 +623,7 @@ async def _verify_riskless_combo_cap(
     try:
         orders = await get()
     except Exception as e:
+        logger.warning("riskless combo fail-closed: cannot read open orders", exc_info=True)
         return riskless_combo_reject(
             f"{REASON_CODE}: cannot read open orders ({e})"
         )
@@ -625,7 +641,10 @@ async def _verify_riskless_combo_cap(
 
 
 async def _verify_arena_concentration(
-    proposal: OrderProposal, connector: Any
+    proposal: OrderProposal,
+    connector: Any,
+    *,
+    look_snap: dict[str, Any] | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Bucket cap on send, even when paper risk_gates_enabled is off.
 
@@ -642,7 +661,9 @@ async def _verify_arena_concentration(
         cap = 25.0
     if cap <= 0:
         return None
-    ok, reason = await check_arena_concentration(proposal, connector)
+    ok, reason = await check_arena_concentration(
+        proposal, connector, snap=look_snap
+    )
     if ok:
         return None
     return {"error": reason, "status": "rejected"}
@@ -664,7 +685,11 @@ def _verify_defined_risk_only(proposal: OrderProposal) -> Optional[Dict[str, Any
 
 
 async def execute_proposal(
-    proposal: OrderProposal, connector: Any, *, source: str = "agent"
+    proposal: OrderProposal,
+    connector: Any,
+    *,
+    source: str = "agent",
+    look_snap: dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Dispatch a validated proposal to the matching gateway method.
 
@@ -690,7 +715,9 @@ async def execute_proposal(
         journal.record_dispatch(journal_id, False, rejection)
         return rejection
 
-    rejection = await _verify_arena_concentration(proposal, connector)
+    rejection = await _verify_arena_concentration(
+        proposal, connector, look_snap=look_snap
+    )
     if rejection:
         logger.warning(f"Proposal #{proposal.id} blocked: {rejection['error']}")
         journal.record_dispatch(journal_id, False, rejection)
@@ -705,7 +732,9 @@ async def execute_proposal(
     cfg = get_config()
     if cfg.risk_gates_enabled and not is_exit_or_management(proposal):
         gate = get_risk_gate()
-        ok, reason = await gate.pre_trade_check(proposal, connector)
+        ok, reason = await gate.pre_trade_check(
+            proposal, connector, snap=look_snap
+        )
         journal.record_gate_decision(journal_id, ok, reason)
         if not ok:
             logger.warning(f"Proposal #{proposal.id} blocked by risk gate: {reason}")
@@ -724,6 +753,11 @@ async def execute_proposal(
         try:
             live = await connector.get_positions()
         except Exception as e:
+            logger.warning(
+                "exit verify fail-closed: cannot read positions proposal=%s",
+                journal_id,
+                exc_info=True,
+            )
             rejection = {"error": f"defined_risk_only: cannot read positions ({e})"}
             journal.record_dispatch(journal_id, False, rejection)
             return rejection
@@ -771,7 +805,12 @@ async def execute_proposal(
 
         quote = await capture_send_quote(connector, proposal) or {}
     except Exception:
-        logger.debug("send_marks quote failed", exc_info=True)
+        logger.warning(
+            "send_marks quote failed proposal=%s strategy=%s",
+            getattr(proposal, "id", None),
+            getattr(proposal, "strategy", ""),
+            exc_info=True,
+        )
         quote = {}
     pcs_lifecycle = None
     try:
@@ -781,7 +820,11 @@ async def execute_proposal(
             journal, connector, proposal, quote, proposal_id=journal_id
         )
     except Exception:
-        logger.debug("pcs fill-λ pre-send failed", exc_info=True)
+        logger.warning(
+            "pcs fill-λ pre-send journal failed proposal=%s",
+            journal_id,
+            exc_info=True,
+        )
     result = await method(**kwargs)
     logger.info(f"Proposal #{proposal.id} result: {result}")
     ok = _dispatch_succeeded(result)
@@ -801,7 +844,12 @@ async def execute_proposal(
         payload = dict(journal_result)
         payload["send_marks"] = public_marks(marks)
     except Exception:
-        logger.debug("send_marks build failed", exc_info=True)
+        logger.warning(
+            "send_marks build failed proposal=%s strategy=%s",
+            journal_id,
+            getattr(proposal, "strategy", ""),
+            exc_info=True,
+        )
         marks = None
     dispatch_id = journal.record_dispatch(journal_id, ok, payload)
     if marks is not None:
@@ -824,7 +872,11 @@ async def execute_proposal(
             lifecycle_id=pcs_lifecycle,
         )
     except Exception:
-        logger.debug("pcs fill-λ post-send failed", exc_info=True)
+        logger.warning(
+            "pcs fill-λ post-send journal failed proposal=%s",
+            journal_id,
+            exc_info=True,
+        )
 
     if (
         cfg.risk_gates_enabled
@@ -1082,11 +1134,16 @@ async def safe_execute(action: dict, connector: Any) -> Dict[str, Any]:
                 }
             )
         except Exception:
-            pass
+            logger.debug("geometry-reject structure event failed", exc_info=True)
         return {
             "status": "rejected",
             "error": err,
             "learn": err,
             "reason_code": err.split(":", 1)[0].strip() if ":" in err else "rejected",
         }
-    return await execute_proposal(proposal, connector, source="cycle")
+    look_snap = action.get("_look_snap") if isinstance(action, dict) else None
+    if not isinstance(look_snap, dict):
+        look_snap = None
+    return await execute_proposal(
+        proposal, connector, source="cycle", look_snap=look_snap
+    )

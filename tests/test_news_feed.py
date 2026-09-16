@@ -6,18 +6,38 @@ import time
 import pytest
 
 from abcxauto.news_feed import (
+    NEWS_BATCH_S,
+    NEWS_BREAKER_COOLDOWN_S,
+    NEWS_BREAKER_FAILURES,
+    NEWS_SYMBOL_COLD_S,
     NEWS_SYMBOL_S,
     NEWS_TRIES,
     _CACHE,
+    _FEED_BREAKER,
+    _HEADLINES,
+    _WARM_SYMBOLS,
     _universe,
     coalesce_news,
     fetch_agent_news,
     fetch_symbols_news,
     format_news_for_prompt,
+    is_real_headline,
+    news_batch_s,
+    news_breaker_cooldown_s,
+    news_breaker_failures,
     news_hard_miss,
+    news_symbol_cold_s,
+    news_symbol_s,
     remember_headlines,
+    remembered_headlines,
     reset_news_cache,
 )
+
+
+def _fast_news_timeouts(monkeypatch, *, sym_s=0.05, cold_s=0.05, batch_s=1.0):
+    monkeypatch.setattr("abcxauto.news_feed.news_symbol_s", lambda: sym_s)
+    monkeypatch.setattr("abcxauto.news_feed.news_symbol_cold_s", lambda: cold_s)
+    monkeypatch.setattr("abcxauto.news_feed.news_batch_s", lambda: batch_s)
 
 
 @pytest.fixture(autouse=True)
@@ -119,11 +139,29 @@ class _MDA:
         return await self._impl(symbol, countback)
 
 
-def test_news_wait_is_fail_fast_not_a_12s_look():
-    """2026-08-26: 12s per symbol was the whole look. A stall must miss fast."""
-    assert NEWS_SYMBOL_S * max(1, int(NEWS_TRIES)) <= 2.0
+def test_news_wait_is_bounded_not_a_12s_look():
+    """Parallel batch + per-symbol caps stay below the old 12s look stall."""
     assert NEWS_SYMBOL_S < 12.0
+    assert NEWS_SYMBOL_COLD_S <= NEWS_BATCH_S
+    assert news_symbol_s() == NEWS_SYMBOL_S
+    assert news_symbol_cold_s() == NEWS_SYMBOL_COLD_S
+    assert news_batch_s() == NEWS_BATCH_S
+    assert news_breaker_failures() == NEWS_BREAKER_FAILURES
+    assert news_breaker_cooldown_s() == NEWS_BREAKER_COOLDOWN_S
     assert NEWS_TRIES == 1
+
+
+def test_news_timeout_env_overrides_and_clamps(monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_NEWS_SYMBOL_S", "99")
+    monkeypatch.setenv("ABCXAUTO_NEWS_SYMBOL_COLD_S", "0.5")
+    monkeypatch.setenv("ABCXAUTO_NEWS_BATCH_S", "1")
+    monkeypatch.setenv("ABCXAUTO_NEWS_BREAKER_FAILURES", "1")
+    monkeypatch.setenv("ABCXAUTO_NEWS_BREAKER_COOLDOWN_S", "10")
+    assert news_symbol_s() == 15.0
+    assert news_symbol_cold_s() == 15.0
+    assert news_batch_s() == 4.0
+    assert news_breaker_failures() == 2
+    assert news_breaker_cooldown_s() == 15.0
 
 
 def test_news_hard_miss_only_when_no_headlines():
@@ -150,7 +188,7 @@ async def test_timeout_is_not_empty_success(monkeypatch):
         return [{"symbol": "NKE", "headline": "should not land"}]
 
     client = _MDA(hang)
-    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    _fast_news_timeouts(monkeypatch)
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["NKE"])
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_agent_news([{"symbol": "NKE"}])
@@ -176,7 +214,7 @@ async def test_timeout_does_not_retry_into_the_stall(monkeypatch):
         return [{"symbol": symbol, "headline": f"{symbol} printed"}]
 
     client = _MDA(once_then_ok)
-    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    _fast_news_timeouts(monkeypatch)
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["AG"])
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_agent_news([{"symbol": "AG"}])
@@ -187,7 +225,7 @@ async def test_timeout_does_not_retry_into_the_stall(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_timeout_does_not_cache_so_next_look_refetches(monkeypatch):
+async def test_timeout_opens_breaker_and_stops_network(monkeypatch):
     n = {"hits": 0}
 
     async def hang(_symbol, _countback):
@@ -196,14 +234,19 @@ async def test_timeout_does_not_cache_so_next_look_refetches(monkeypatch):
         return []
 
     client = _MDA(hang)
-    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    _fast_news_timeouts(monkeypatch)
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["BE"])
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
-    first = await fetch_agent_news([{"symbol": "BE"}])
-    second = await fetch_agent_news([{"symbol": "BE"}])
-    assert first[0].get("error") == "timed out"
-    assert second[0].get("error") == "timed out"
-    assert n["hits"] == 2
+    for _ in range(NEWS_BREAKER_FAILURES):
+        out = await fetch_agent_news([{"symbol": "BE"}])
+        assert out[0].get("error") == "timed out"
+    assert n["hits"] == NEWS_BREAKER_FAILURES
+    blocked = await fetch_agent_news([{"symbol": "BE"}])
+    assert blocked[0].get("status") == "source_unavailable"
+    assert blocked[0].get("error") == "source down"
+    assert "no headlines" not in format_news_for_prompt(blocked)
+    assert n["hits"] == NEWS_BREAKER_FAILURES
+    assert blocked[0].get("retry_after_s", 0) > 0
 
 
 @pytest.mark.asyncio
@@ -215,12 +258,13 @@ async def test_slow_source_does_not_eat_a_12s_look(monkeypatch):
         return [{"symbol": _symbol, "headline": "should not land"}]
 
     client = _MDA(hang)
+    _fast_news_timeouts(monkeypatch, sym_s=0.05, cold_s=0.05, batch_s=0.5)
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     t0 = time.monotonic()
     items = await fetch_symbols_news(["HEI", "WDAY", "GDDY", "SJM", "ROST"])
     elapsed = time.monotonic() - t0
     assert elapsed < 12.0
-    assert elapsed < NEWS_SYMBOL_S + 2.0
+    assert elapsed < news_batch_s() + 0.5
     assert items
     assert {it.get("error") for it in items} == {"timed out"}
     assert [it.get("symbol") for it in items] == ["HEI", "WDAY", "GDDY", "SJM", "ROST"]
@@ -267,11 +311,13 @@ async def test_timeout_returns_rail_headline_not_no_print(monkeypatch):
         [{"symbol": "HPQ", "headline": "HPQ Q3 earnings miss", "source": "mda"}]
     )
     client = _MDA(hang)
-    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    _fast_news_timeouts(monkeypatch)
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_symbols_news(["HPQ"])
     assert news_hard_miss(items) is None
     assert items[0]["headline"] == "HPQ Q3 earnings miss"
+    assert items[0].get("stale") is True
+    assert items[0].get("stale_age_s", 0) >= 0
     assert not items[0].get("error")
     assert "unavailable" not in str(items[0].get("headline"))
     text = format_news_for_prompt(items)
@@ -287,4 +333,204 @@ def test_coalesce_news_replaces_timeout_with_rail_print():
         ["HPQ"],
     )
     assert out[0]["headline"] == "HPQ Q3 earnings miss"
+    assert out[0].get("stale") is True
+    assert out[0].get("stale_age_s", 0) >= 0
     assert not any(it.get("error") for it in out)
+
+
+def test_remembered_headlines_marks_stale_from_bucket_ts(monkeypatch):
+    t = {"now": 1000.0}
+    monkeypatch.setattr("abcxauto.news_feed.time.monotonic", lambda: t["now"])
+    remember_headlines([{"symbol": "SPY", "headline": "Prior print"}])
+    t["now"] = 1240.0
+    rows = remembered_headlines(["SPY"])
+    assert rows[0]["stale"] is True
+    assert rows[0]["stale_age_s"] == 240
+    assert is_real_headline(rows[0])
+
+
+@pytest.mark.asyncio
+async def test_fresh_fetch_is_not_marked_stale(monkeypatch):
+    async def ok(symbol, _countback):
+        return [{"symbol": symbol, "headline": f"{symbol} live"}]
+
+    client = _MDA(ok)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["INTU"])
+    assert items[0]["headline"] == "INTU live"
+    assert not items[0].get("stale")
+    assert "stale_age_s" not in items[0]
+
+
+def test_remember_stale_does_not_reset_or_store_markers(monkeypatch):
+    t = {"now": 1000.0}
+    monkeypatch.setattr("abcxauto.news_feed.time.monotonic", lambda: t["now"])
+    remember_headlines([{"symbol": "SPY", "headline": "Print"}])
+    t["now"] = 1300.0
+    stale_row = remembered_headlines(["SPY"])[0]
+    assert stale_row["stale_age_s"] == 300
+    remember_headlines([stale_row])
+    stored = _HEADLINES["SPY"]["items"][0]
+    assert "stale" not in stored
+    assert "stale_age_s" not in stored
+    t["now"] = 1360.0
+    again = remembered_headlines(["SPY"])[0]
+    assert again["stale_age_s"] == 360
+
+
+@pytest.mark.asyncio
+async def test_breaker_serves_stale_headlines_when_open(monkeypatch):
+    remember_headlines([{"symbol": "SPY", "headline": "Prior SPY print"}])
+
+    async def hang(_symbol, _countback):
+        await asyncio.sleep(30)
+        return []
+
+    client = _MDA(hang)
+    _fast_news_timeouts(monkeypatch)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    for _ in range(NEWS_BREAKER_FAILURES):
+        await fetch_symbols_news(["SPY"])
+    items = await fetch_symbols_news(["SPY"])
+    assert client.calls == ["SPY"] * NEWS_BREAKER_FAILURES
+    assert news_hard_miss(items) is None
+    assert items[0]["headline"] == "Prior SPY print"
+    assert items[0].get("stale") is True
+    assert items[0].get("stale_age_s", 0) >= 0
+
+
+@pytest.mark.asyncio
+async def test_breaker_success_resets_symbol(monkeypatch):
+    calls = {"n": 0}
+
+    async def flap(symbol, _countback):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await asyncio.sleep(30)
+            return []
+        return [{"symbol": symbol, "headline": f"{symbol} live"}]
+
+    client = _MDA(flap)
+    _fast_news_timeouts(monkeypatch)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    miss = await fetch_symbols_news(["NOK"])
+    assert miss[0].get("error") == "timed out"
+    ok = await fetch_symbols_news(["NOK"])
+    assert ok[0]["headline"] == "NOK live"
+    assert news_hard_miss(ok) is None
+    assert calls["n"] == 2
+
+    async def hang(_symbol, _countback):
+        calls["n"] += 1
+        await asyncio.sleep(30)
+        return []
+
+    client._impl = hang
+    for _ in range(NEWS_BREAKER_FAILURES):
+        await fetch_symbols_news(["NOK"])
+    assert calls["n"] == 2 + NEWS_BREAKER_FAILURES
+    stale_blocked = await fetch_symbols_news(["NOK"])
+    assert stale_blocked[0]["headline"] == "NOK live"
+    assert stale_blocked[0].get("stale") is True
+    assert calls["n"] == 2 + NEWS_BREAKER_FAILURES
+
+    reset_news_cache()
+    client.calls.clear()
+    calls["n"] = 0
+    for _ in range(NEWS_BREAKER_FAILURES):
+        await fetch_symbols_news(["XYZ"])
+    blocked = await fetch_symbols_news(["XYZ"])
+    assert blocked[0].get("status") == "source_unavailable"
+    assert blocked[0].get("error") == "source down"
+    assert calls["n"] == NEWS_BREAKER_FAILURES
+
+
+@pytest.mark.asyncio
+async def test_feed_breaker_opens_after_all_miss_batches(monkeypatch):
+    async def hang(_symbol, _countback):
+        await asyncio.sleep(30)
+        return []
+
+    client = _MDA(hang)
+    _fast_news_timeouts(monkeypatch)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    for _ in range(NEWS_BREAKER_FAILURES):
+        await fetch_symbols_news(["AAA", "BBB"])
+    assert _FEED_BREAKER["open_until"] > time.monotonic()
+    before = len(client.calls)
+    items = await fetch_symbols_news(["CCC"])
+    assert len(client.calls) == before
+    assert items[0].get("status") == "source_unavailable"
+    assert news_hard_miss(items) == "source down"
+
+
+@pytest.mark.asyncio
+async def test_slow_success_within_new_budget(monkeypatch):
+    """A 3.5s MDA response succeeds at 6s warm / 10s cold; it failed at 2s."""
+
+    async def slow_ok(symbol, _countback):
+        await asyncio.sleep(3.5)
+        return [{"symbol": symbol, "headline": f"{symbol} late print"}]
+
+    client = _MDA(slow_ok)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["SPY"])
+    assert items[0]["headline"] == "SPY late print"
+    assert news_hard_miss(items) is None
+    assert "SPY" in _WARM_SYMBOLS
+
+
+@pytest.mark.asyncio
+async def test_cold_symbol_gets_longer_budget_than_warm(monkeypatch):
+    async def paced(symbol, _countback):
+        await asyncio.sleep(7.5)
+        return [{"symbol": symbol, "headline": f"{symbol} ok"}]
+
+    client = _MDA(paced)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    cold = await fetch_symbols_news(["NOK"])
+    assert cold[0]["headline"] == "NOK ok"
+    _HEADLINES.clear()
+    warm = await fetch_symbols_news(["NOK"])
+    assert warm[0].get("error") == "timed out"
+    assert client.calls == ["NOK", "NOK"]
+
+
+@pytest.mark.asyncio
+async def test_two_timeouts_do_not_open_breaker(monkeypatch):
+    n = {"hits": 0}
+
+    async def hang(_symbol, _countback):
+        n["hits"] += 1
+        await asyncio.sleep(30)
+        return []
+
+    client = _MDA(hang)
+    _fast_news_timeouts(monkeypatch)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    for _ in range(2):
+        out = await fetch_symbols_news(["SPY"])
+        assert out[0].get("error") == "timed out"
+    assert n["hits"] == 2
+    third = await fetch_symbols_news(["SPY"])
+    assert third[0].get("error") == "timed out"
+    assert n["hits"] == 3
+
+
+@pytest.mark.asyncio
+async def test_breaker_cooldown_uses_softer_default(monkeypatch):
+    assert NEWS_BREAKER_COOLDOWN_S == 90.0
+    assert NEWS_BREAKER_FAILURES == 4
+
+    async def hang(_symbol, _countback):
+        await asyncio.sleep(30)
+        return []
+
+    client = _MDA(hang)
+    _fast_news_timeouts(monkeypatch)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    for _ in range(NEWS_BREAKER_FAILURES):
+        await fetch_symbols_news(["NOK"])
+    blocked = await fetch_symbols_news(["NOK"])
+    assert blocked[0].get("status") == "source_unavailable"
+    assert blocked[0].get("retry_after_s", 999) <= int(NEWS_BREAKER_COOLDOWN_S)

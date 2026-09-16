@@ -312,20 +312,315 @@ def _in_pool(pool: set[int], value: float) -> bool:
     return (c - 5) in pool or (c + 5) in pool or (c - 1) in pool or (c + 1) in pool
 
 
+_COMBO_LIMIT_STRATEGIES = frozenset({"vertical_spread"})
+# Marketable crossing slack scales with spread width and natural ask; per-unit only.
+_COMBO_LIMIT_TICK = 0.05
+_COMBO_LIMIT_CEILING = 0.20
+_COMBO_LIMIT_WIDTH_PCT = 0.04
+_COMBO_LIMIT_ASK_PCT = 0.10
+
+
+def _combo_marketable_slack(ctx: dict[str, Any]) -> float:
+    """Per-contract slack for paying/receiving through the combo bid/ask."""
+    width = max(float(ctx.get("width") or 0.0), 0.0)
+    ask = max(float(ctx.get("ask") or 0.0), 0.0)
+    width_slack = _COMBO_LIMIT_WIDTH_PCT * width
+    ask_slack = _COMBO_LIMIT_ASK_PCT * ask if ask > 0 else 0.0
+    band = min(_COMBO_LIMIT_CEILING, max(width_slack, ask_slack))
+    return max(_COMBO_LIMIT_TICK, band)
+
+
+def _norm_expiration(raw: Any) -> str:
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    return digits[:8] if len(digits) >= 8 else digits
+
+
+def _norm_right(raw: Any) -> str:
+    text = str(raw or "C").strip().upper()
+    return text[0] if text else "C"
+
+
+def _leg_key(
+    sym: str, expiration: str, strike: float, right: str
+) -> tuple[str, str, int, str]:
+    return (
+        str(sym or "").upper().strip(),
+        _norm_expiration(expiration),
+        _canon(strike),
+        _norm_right(right),
+    )
+
+
+def _leg_prints(row: dict[str, Any]) -> dict[str, Any]:
+    ibkr = row.get("ibkr")
+    if isinstance(ibkr, dict) and (
+        ibkr.get("bid") is not None or ibkr.get("ask") is not None
+    ):
+        return ibkr
+    return row
+
+
+def _iter_option_quote_rows(snap: dict[str, Any] | None) -> list[dict[str, Any]]:
+    store = _store(snap) if isinstance(snap, dict) and _SNAP_KEY in snap else {}
+    out: list[dict[str, Any]] = []
+    for payload in store.get("option_quote") or []:
+        if not isinstance(payload, dict):
+            continue
+        quotes = payload.get("quotes")
+        if isinstance(quotes, list):
+            for row in quotes:
+                if isinstance(row, dict):
+                    out.append(row)
+        else:
+            out.append(payload)
+    return out
+
+
+def _find_leg_quote(
+    snap: dict[str, Any] | None,
+    *,
+    symbol: str,
+    expiration: str,
+    strike: float,
+    right: str,
+) -> dict[str, Any] | None:
+    want = _leg_key(symbol, expiration, strike, right)
+    for row in _iter_option_quote_rows(snap):
+        sk = _finite(row.get("strike"))
+        if sk is None:
+            continue
+        got = _leg_key(
+            _sym_of(row) or symbol,
+            str(row.get("expiration") or expiration),
+            sk,
+            str(row.get("right") or right),
+        )
+        if got == want:
+            return _leg_prints(row)
+    return None
+
+
+def _vertical_is_credit(params: dict[str, Any]) -> bool:
+    right = _norm_right(params.get("right"))
+    long_s = _finite(params.get("long_strike"))
+    short_s = _finite(params.get("short_strike"))
+    if long_s is None or short_s is None:
+        return False
+    return (right == "C" and long_s > short_s) or (right == "P" and long_s < short_s)
+
+
+def _combo_quote_from_legs(
+    long_leg: dict[str, Any],
+    short_leg: dict[str, Any],
+    *,
+    is_credit: bool,
+) -> dict[str, float | None]:
+    long_bid = _finite(long_leg.get("bid"))
+    long_ask = _finite(long_leg.get("ask"))
+    short_bid = _finite(short_leg.get("bid"))
+    short_ask = _finite(short_leg.get("ask"))
+    if None in (long_bid, long_ask, short_bid, short_ask):
+        return {"bid": None, "ask": None, "mid": None}
+    if is_credit:
+        bid = short_bid - long_ask
+        ask = short_ask - long_bid
+    else:
+        bid = long_bid - short_ask
+        ask = long_ask - short_bid
+    mid = (bid + ask) / 2.0
+    return {"bid": bid, "ask": ask, "mid": mid}
+
+
+def _combo_limit_refusal(
+    *,
+    limit: float,
+    combo_label: str,
+    bid: float,
+    ask: float,
+    mid: float,
+) -> str:
+    return (
+        f"{REASON_CODE}: limit_price={limit} {combo_label} "
+        f"bid={round(bid, 4)} ask={round(ask, 4)} mid={round(mid, 4)} "
+        "not in this look's quote/option_quote/book"
+    )
+
+
+def _vertical_combo_context(
+    params: dict[str, Any],
+    snap: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    sym = str(params.get("symbol") or "").upper().strip()
+    exp = str(params.get("expiration") or "")
+    long_s = _finite(params.get("long_strike"))
+    short_s = _finite(params.get("short_strike"))
+    right = _norm_right(params.get("right"))
+    if not sym or not exp or long_s is None or short_s is None:
+        return None
+    long_q = _find_leg_quote(
+        snap, symbol=sym, expiration=exp, strike=long_s, right=right
+    )
+    short_q = _find_leg_quote(
+        snap, symbol=sym, expiration=exp, strike=short_s, right=right
+    )
+    if long_q is None or short_q is None:
+        return None
+    is_credit = _vertical_is_credit(params)
+    combo = _combo_quote_from_legs(long_q, short_q, is_credit=is_credit)
+    bid = combo.get("bid")
+    ask = combo.get("ask")
+    mid = combo.get("mid")
+    if bid is None or ask is None or mid is None:
+        return None
+    return {
+        "bid": bid,
+        "ask": ask,
+        "mid": mid,
+        "width": abs(long_s - short_s),
+        "combo_label": "combo_credit" if is_credit else "combo_debit",
+        "is_credit": is_credit,
+    }
+
+
+def _evaluate_vertical_combo_limit(
+    limit: float,
+    params: dict[str, Any],
+    ctx: dict[str, Any],
+) -> tuple[bool, str]:
+    bid = float(ctx["bid"])
+    ask = float(ctx["ask"])
+    mid = float(ctx["mid"])
+    width = float(ctx["width"])
+    combo_label = str(ctx["combo_label"])
+    if limit > width + 1e-9:
+        return False, _combo_limit_refusal(
+            limit=limit,
+            combo_label=combo_label,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+        )
+    is_credit = bool(ctx.get("is_credit"))
+    closing = bool(params.get("closing_position"))
+    opening_sell = is_credit and not closing or (not is_credit and closing)
+    slack = _combo_marketable_slack(ctx)
+    if opening_sell:
+        if limit + 1e-9 < bid - slack:
+            return False, _combo_limit_refusal(
+                limit=limit,
+                combo_label=combo_label,
+                bid=bid,
+                ask=ask,
+                mid=mid,
+            )
+    elif limit > ask + slack + 1e-9:
+        return False, _combo_limit_refusal(
+            limit=limit,
+            combo_label=combo_label,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+        )
+    return True, ""
+
+
+def _combo_ticket_specified(params: dict[str, Any]) -> bool:
+    """Ticket names a 2-leg vertical. Incomplete tickets stay on verbatim."""
+    return (
+        bool(str(params.get("symbol") or "").strip())
+        and bool(str(params.get("expiration") or "").strip())
+        and _finite(params.get("long_strike")) is not None
+        and _finite(params.get("short_strike")) is not None
+    )
+
+
+def _combo_legs_missing_refusal(
+    limit: float,
+    params: dict[str, Any],
+    snap: dict[str, Any] | None,
+) -> str:
+    sym = str(params.get("symbol") or "").upper().strip()
+    exp = str(params.get("expiration") or "")
+    right = _norm_right(params.get("right"))
+    long_s = _finite(params.get("long_strike"))
+    short_s = _finite(params.get("short_strike"))
+    if long_s is not None and short_s is not None:
+        legs = f" {sym} {long_s:g}{right}/{short_s:g}{right}" if sym else ""
+        long_q = _find_leg_quote(
+            snap, symbol=sym, expiration=exp, strike=long_s, right=right
+        )
+        short_q = _find_leg_quote(
+            snap, symbol=sym, expiration=exp, strike=short_s, right=right
+        )
+        if long_q is not None and short_q is not None:
+            return (
+                f"{REASON_CODE}: limit_price={limit} option_quote bid/ask "
+                f"both legs{legs} this look's quote/option_quote/book"
+            )
+    else:
+        legs = f" {sym}" if sym else ""
+    return (
+        f"{REASON_CODE}: limit_price={limit} option_quote both legs{legs} "
+        "this look's quote/option_quote/book"
+    )
+
+
+def check_combo_limit_geometry(
+    strategy: str,
+    params: dict[str, Any] | None,
+    snap: dict[str, Any] | None,
+) -> tuple[bool, str, str]:
+    """Combo limit verdict. Prefer check_ticket_numbers (unified gate)."""
+    strat = str(strategy or "").strip().lower()
+    if strat not in _COMBO_LIMIT_STRATEGIES:
+        return True, "ok", ""
+    p = params if isinstance(params, dict) else {}
+    limit = _finite(p.get("limit_price"))
+    if limit is None or not _combo_ticket_specified(p):
+        return True, "ok", ""
+    ctx = _vertical_combo_context(p, snap)
+    if ctx is None:
+        return False, REASON_CODE, _combo_legs_missing_refusal(limit, p, snap)
+    ok, msg = _evaluate_vertical_combo_limit(limit, p, ctx)
+    if ok:
+        return True, "ok", ""
+    return False, REASON_CODE, msg
+
+
 def check_ticket_numbers(
     strategy: str,
     params: dict[str, Any] | None,
     snap: dict[str, Any] | None,
 ) -> tuple[bool, str, str]:
-    """Reject when a claimed last / IV / credit / width is not in this look's cache."""
+    """Reject when a claimed last / IV / credit / width is not in this look's cache.
+
+    For vertical spreads, limit_price is judged against derived combo bid/ask —
+    never a single-leg last. Missing both-leg quotes fail closed (a long-leg
+    print used as a combo debit is how IBKR 202 kills the ticket).
+    """
     claims = ticket_claims(strategy, params)
     if not claims:
         return True, "ok", ""
+    strat = str(strategy or "").strip().lower()
+    p = params if isinstance(params, dict) else {}
+    combo_limit_ok = False
+    if strat in _COMBO_LIMIT_STRATEGIES:
+        limit = _finite(p.get("limit_price"))
+        if limit is not None and _combo_ticket_specified(p):
+            ctx = _vertical_combo_context(p, snap)
+            if ctx is None:
+                return False, REASON_CODE, _combo_legs_missing_refusal(limit, p, snap)
+            ok_combo, combo_msg = _evaluate_vertical_combo_limit(limit, p, ctx)
+            if not ok_combo:
+                return False, REASON_CODE, combo_msg
+            combo_limit_ok = True
     by_sym = snapshot_bags(snap)
-    sym = str((params or {}).get("symbol") or "").upper().strip()
+    sym = str(p.get("symbol") or "").upper().strip()
     bag = by_sym.get(sym) if sym else None
     missing: list[str] = []
     for kind, field, val in claims:
+        if field == "limit_price" and combo_limit_ok:
+            continue
         if bag is None:
             pool: set[int] = set()
         elif kind == "iv":
@@ -343,3 +638,91 @@ def check_ticket_numbers(
         "quote/option_quote/book"
     )
     return False, REASON_CODE, note
+
+
+_COMBO_NOTIONAL_STRATEGIES = frozenset({"vertical_spread"})
+
+
+def _mid_from_leg_quote(row: dict[str, Any]) -> float | None:
+    mid = _finite(row.get("mid"))
+    if mid is not None:
+        return mid
+    bid = _finite(row.get("bid"))
+    ask = _finite(row.get("ask"))
+    if bid is not None and ask is not None and ask >= bid:
+        return (bid + ask) / 2.0
+    for key in ("last", "mark", "price"):
+        px = _finite(row.get(key))
+        if px is not None:
+            return px
+    return None
+
+
+def notional_premium_from_look(
+    strategy: str,
+    params: dict[str, Any] | None,
+    snap: dict[str, Any] | None,
+) -> float | None:
+    """Option premium per contract from this look's quote/option_quote/book.
+
+    Returns abs(premium) suitable for ×100×qty notional. None when unpriced.
+    """
+    p = params if isinstance(params, dict) else {}
+    strat = str(strategy or "").strip().lower()
+    if strat not in OPTION_STRATEGIES:
+        return None
+    if strat in _COMBO_NOTIONAL_STRATEGIES:
+        ctx = _vertical_combo_context(p, snap)
+        if ctx is None:
+            return None
+        mid = _finite(ctx.get("mid"))
+        if mid is None:
+            return None
+        return abs(mid)
+    strike = _finite(p.get("strike"))
+    exp = str(p.get("expiration") or "")
+    sym = str(p.get("symbol") or "").upper().strip()
+    right = _norm_right(p.get("right"))
+    if not sym or not exp or strike is None:
+        return None
+    row = _find_leg_quote(
+        snap, symbol=sym, expiration=exp, strike=strike, right=right
+    )
+    if row is None:
+        return None
+    mid = _mid_from_leg_quote(row)
+    return abs(mid) if mid is not None else None
+
+
+def size_notional_refusal_hint(
+    strategy: str,
+    params: dict[str, Any] | None,
+    snap: dict[str, Any] | None,
+) -> str:
+    """Actionable suffix: missing input + tool that supplies it."""
+    p = params if isinstance(params, dict) else {}
+    strat = str(strategy or "").strip().lower()
+    sym = str(p.get("symbol") or "").upper().strip() or "?"
+    if strat in _COMBO_NOTIONAL_STRATEGIES:
+        long_s = _finite(p.get("long_strike"))
+        short_s = _finite(p.get("short_strike"))
+        right = _norm_right(p.get("right"))
+        legs = ""
+        if long_s is not None and short_s is not None:
+            legs = f" {long_s:g}{right}/{short_s:g}{right}"
+        ctx = _vertical_combo_context(p, snap)
+        if ctx is None:
+            return (
+                f"limit_price missing — option_quote both legs ({sym}{legs}) this look"
+            )
+        return "limit_price missing — add limit_price from this look's option_quote"
+    if strat in OPTION_STRATEGIES:
+        strike = _finite(p.get("strike"))
+        right = _norm_right(p.get("right"))
+        leg = f" {strike:g}{right}" if strike is not None else ""
+        if notional_premium_from_look(strat, p, snap) is None:
+            return f"limit_price missing — option_quote ({sym}{leg}) this look"
+        return "limit_price missing — add limit_price from this look's option_quote"
+    if strat in ("bracket", "market_bracket"):
+        return f"entry_price missing — quote ({sym}) this look"
+    return "price missing — quote this look"

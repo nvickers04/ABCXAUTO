@@ -51,6 +51,18 @@ def test_resolve_stay_up_session_fills_blank_rth_and_premarket(monkeypatch):
         == "premarket"
     )
     assert (
+        resolve_stay_up_session(
+            "premarket", now=datetime(2026, 8, 27, 8, 0, tzinfo=et)
+        )
+        == "closed"
+    )
+    assert (
+        resolve_stay_up_session(
+            "premarket", now=datetime(2026, 8, 27, 8, 50, tzinfo=et)
+        )
+        == "premarket"
+    )
+    assert (
         resolve_stay_up_session("", now=datetime(2026, 8, 27, 17, 0, tzinfo=et))
         == ""
     )
@@ -392,7 +404,7 @@ def test_clerk_look_s_overnight_closed_still_parks(monkeypatch):
         minutes_to_open=5 * 60,
         next_look_s=1800,
     ) == (5 * 60 - 60.0) * 60.0
-    # Deep overnight parks until premarket (4:00 ET), not the last hour.
+    # Deep overnight parks until desk premarket (8:45 ET / 7:45 CDT).
     assert clerk_look_s(
         flat=True,
         session="closed",
@@ -477,8 +489,13 @@ def test_infer_session_before_open_splits_overnight_from_premarket():
     sess, mins = infer_session_before_open(
         now=datetime(2026, 8, 26, 8, 32, tzinfo=et)
     )
-    assert sess == "premarket"
+    assert sess == "closed"
     assert mins is not None and 50 < mins < 65
+    sess, mins = infer_session_before_open(
+        now=datetime(2026, 8, 26, 8, 50, tzinfo=et)
+    )
+    assert sess == "premarket"
+    assert mins is not None and 35 < mins < 45
 
 
 def test_begin_run_premarket_writes_no_sit_clock(tmp_path, monkeypatch):
@@ -491,7 +508,7 @@ def test_begin_run_premarket_writes_no_sit_clock(tmp_path, monkeypatch):
     monkeypatch.setattr(ts, "RUN_PATH", tmp_path / "run.json")
     monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
     monkeypatch.setattr(
-        "abcxauto.park_clock.et_minutes_to_rth_open", lambda **_k: 58.0
+        "abcxauto.park_clock.et_minutes_to_rth_open", lambda **_k: 40.0
     )
     ts._run = {}
     ts.begin_run()
@@ -572,3 +589,20 @@ def test_grok_turn_resume_is_optional_for_older_mocks():
         resume=True,
     )
     assert star_kwargs.get("resume") is True
+
+
+def test_look_abort_latch_is_not_a_book_poke():
+    from abcxauto.park_clock import (
+        clear_look_abort,
+        look_aborted,
+        peek_interrupt,
+        request_look_abort,
+    )
+
+    clear_look_abort()
+    assert look_aborted() is False
+    request_look_abort()
+    assert look_aborted() is True
+    assert peek_interrupt() is None
+    clear_look_abort()
+    assert look_aborted() is False

@@ -34,12 +34,15 @@ from abcxauto.research_budget import (
     brief_budget_gate,
     brief_loop_halted,
     card_row,
+    default_prove_window_id,
     lab_promote,
     lab_promote_ok,
+    mark_brief_loop_halt,
     note_brief_turn,
     open_research_card,
     parse_model_cost,
     reset_research_budget,
+    resolve_research_card,
     set_gate_verdict,
     set_model_cost_window,
 )
@@ -141,6 +144,32 @@ def test_usd_trip_stops_further_billed_turns():
     )
     assert skip_look_reason("premarket") == REASON_BRIEF_LOOP
     assert research_keep_looking("premarket") is False
+
+
+def test_stale_iso_week_on_disk_does_not_skip_this_week():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from abcxauto.session_caps import reset_session_caps
+
+    now = datetime(2026, 9, 15, 8, 40, tzinfo=ZoneInfo("America/New_York"))
+    assert default_prove_window_id(now=now) == "2026-W38"
+    reset_research_budget()
+    reset_session_caps()
+    open_research_card("research-brief", "2026-W37")
+    mark_brief_loop_halt("research-brief", "2026-W37")
+    write_research_brief(
+        session="premarket",
+        snap={"news_items": []},
+        research_card_id="research-brief",
+        prove_window_id="2026-W37",
+    )
+    card, window = resolve_research_card(now=now)
+    assert card == "research-brief"
+    assert window == "2026-W38"
+    assert resolve_research_card(prove_window_id="2026-W37", now=now)[1] == "2026-W37"
+    assert skip_look_reason("premarket", now=now) != REASON_BRIEF_LOOP
+    assert brief_loop_halted("research-brief", "2026-W37") is True
 
 
 def test_turns_trip_stops_further_billed_turns():

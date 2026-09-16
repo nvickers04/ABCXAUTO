@@ -35,10 +35,12 @@ from abcxauto.thin_rth_kill_look import (
     EST_THIS_LOOK_USD,
     F10_HARD_USD,
     F10_PREFERRED_USD,
+    KILL_LOOK_BOOK_EDIT,
     MODE_ABORT,
     MODE_MANAGE,
     MODE_OPEN,
     PCS_CARD,
+    PCS_STRATEGY,
     REASON_ALLOWLIST,
     REASON_NAMELESS,
     REASON_DIE_TOOL,
@@ -69,6 +71,7 @@ from abcxauto.thin_rth_kill_look import (
     pcs_send_ok,
     research_prompt_ok,
     rth_model_no_xhigh,
+    send_strategy_names,
     skip_look_reason,
     spoken_gather_spin,
     tool_allowed,
@@ -100,6 +103,18 @@ def _tool_names(session: str) -> set[str]:
     return names
 
 
+def _send_strategy_enum(session: str) -> list[str]:
+    for t in agent_tools(session=session):
+        fn = getattr(t, "function", None)
+        if str(getattr(fn, "name", None) or "") != "send":
+            continue
+        params = getattr(fn, "parameters", None) or {}
+        if isinstance(params, str):
+            params = json.loads(params)
+        return list(((params.get("properties") or {}).get("strategy") or {}).get("enum") or [])
+    return []
+
+
 def _pcs_lot() -> dict:
     return {
         "symbol": "SPY",
@@ -125,7 +140,7 @@ def test_hygiene_prompt_port_empty_grok_mill_tries():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
     assert get_config().ibkr_port != 7496
     assert kill_look_port_ok() is True
-    assert EMPTY_GROK_TRIES == 2
+    assert EMPTY_GROK_TRIES == 1
     assert SYNTHESIZE_MILL_TRIES == 2
     assert Config().pcs_kill_look is True
     assert F10_HARD_USD == 15.0
@@ -287,21 +302,60 @@ def test_allowlist_stay_only_on_rth_kill_look(monkeypatch):
     assert "send" in rth
     for dead in DIE_TOOLS:
         assert dead not in rth, dead
-    enum = []
-    for t in agent_tools(session="regular"):
-        fn = getattr(t, "function", None)
-        if str(getattr(fn, "name", None) or "") != "send":
-            continue
-        params = getattr(fn, "parameters", None) or {}
-        if isinstance(params, str):
-            params = json.loads(params)
-        enum = list(((params.get("properties") or {}).get("strategy") or {}).get("enum") or [])
-    assert enum == ["vertical_spread"]
+    enum = _send_strategy_enum("regular")
+    assert set(enum) == {PCS_STRATEGY, *KILL_LOOK_BOOK_EDIT}
+    assert "market_bracket" not in enum
+    assert "hold" not in enum
     research = _tool_names("premarket")
     assert "send" not in research
     assert "web" in research
     assert "news" in research
     assert "scan" in research
+
+
+def test_send_enum_matches_executor_dispatch(monkeypatch):
+    """Advertised send.strategy enum must be a subset of executor STRATEGIES."""
+    from abcxauto.brain_tools import _send_strategy_names_for_look
+    from abcxauto.order_examples import ticket_strategy_names
+    from abcxauto.proposals import STRATEGIES
+
+    default = _send_strategy_names_for_look(session="closed")
+    assert set(default) == {n for n in ticket_strategy_names() if n != "hold"}
+    assert set(default) <= set(STRATEGIES)
+    assert "cancel_order" in default
+    assert "modify_target" in default
+
+    _kill_on(monkeypatch)
+    rth = send_strategy_names(session="regular")
+    assert rth is not None
+    assert set(rth) <= set(STRATEGIES)
+    assert set(rth) == {PCS_STRATEGY, *KILL_LOOK_BOOK_EDIT}
+    live = _send_strategy_enum("regular")
+    assert set(live) == set(rth)
+    assert set(live) == set(_send_strategy_names_for_look(session="regular"))
+
+
+def test_kill_look_send_lets_cancel_and_modify_through(monkeypatch):
+    """Clerk already accepted book edits; the schema must not hide them."""
+    _kill_on(monkeypatch)
+    lot = _pcs_lot()
+    f10 = _allow_f10()
+    cancel = {"strategy": "cancel_order", "params": {"order_id": 1503}}
+    modify = {
+        "strategy": "modify_target",
+        "params": {"order_id": 1503, "new_limit_price": 0.22},
+    }
+    for act in (cancel, modify):
+        assert (
+            kill_look_send_block(
+                act,
+                session="regular",
+                positions=[lot],
+                open_lots=["pcs-skew NOK vert"],
+                f10=f10,
+            )
+            is None
+        )
 
 
 def test_allowlist_tool_gate_and_die_block(monkeypatch):

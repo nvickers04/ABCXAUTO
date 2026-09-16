@@ -27,8 +27,9 @@ def bind_thread_loop(loop: asyncio.AbstractEventLoop | None) -> None:
         if loop.is_closed():
             return
     except Exception:
+        # Closed/torn-down loop objects can raise; skip bind rather than crash the thread.
         return
     try:
         asyncio.set_event_loop(loop)
     except Exception:
-        pass
+        pass  # Policy already has a loop; ib_insync getLoop() will see it.

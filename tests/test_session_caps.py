@@ -41,7 +41,9 @@ def _et(y, m, d, h=10, mi=0):
     return datetime(y, m, d, h, mi, tzinfo=ZoneInfo("America/New_York"))
 
 
-def test_defaults_are_the_rth_ceiling():
+def test_defaults_are_the_rth_ceiling(code_defaults):
+    # The operator's .env may pin these; a defaults test reads the code.
+    code_defaults("ABCXAUTO_SESSION_LOOK_CAP", "ABCXAUTO_SESSION_TOKEN_CAP")
     cfg = get_config()
     assert cfg.session_look_cap == DEFAULT_LOOK_CAP == 160
     assert cfg.session_token_cap == DEFAULT_TOKEN_CAP == 2_500_000
@@ -287,6 +289,16 @@ def test_request_wake_non_whitelist_does_not_set_event():
     eng.request_wake("news")
     assert not eng._wake_event.is_set()
     assert eng._wake_reason == ""
+
+
+def test_ibkr_order_status_filled_wakes_immediately():
+    from abcxauto.park_clock import peek_interrupt
+
+    eng = _armed_wake_engine()
+    eng._on_ibkr_order_status({"status": "Filled", "order_id": 19875})
+    assert eng._wake_event.is_set()
+    assert eng._wake_reason == "fill"
+    assert peek_interrupt() is not None
 
 
 @pytest.mark.parametrize("reason", ["halt", "flat_confirmed"])

@@ -2,10 +2,11 @@
 
 Grok still chooses ``size_pct_nl``. This module is the floor/ceiling that
 choice is clamped to — on send (``apply_size_pct_nl``) and via ``self_tune``.
-It runs even when paper risk gates are off, except when
-``max_risk_per_trade_pct`` is 0 (off): then Grok sizes and this module
-does not veto. 25% is the live walk-away ceiling for the risk knobs,
-not the working size.
+It runs even when paper risk gates are off and even when
+``max_risk_per_trade_pct`` is 0 (off). Off means the % risk floors
+do not bind; the explore envelope still does. The self_tune
+``size_pct_nl`` shadow is not a second clerk cap while that knob is 0.
+25% is the live walk-away ceiling for the risk knobs, not the working size.
 
 Option implied % of NL is premium × 100 (the contract multiplier), never
 underlying last × 100. That stock-equivalent notional is incomparable to
@@ -14,11 +15,15 @@ underlying last × 100. That stock-equivalent notional is incomparable to
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
-# Single-digit % of NL. Not 1. Not 25. Not a working size — a ceiling
-# Grok may tighten. Do not copy this number into SYSTEM_PROMPT.
+logger = logging.getLogger(__name__)
+
+# Default only — the live width is ``explore_ceiling()`` /
+# ``mode_size_ceiling_pct``. Not a working size: a ceiling Grok may tighten.
+# Do not copy this number into SYSTEM_PROMPT.
 MODE_SIZE_CEILING_EXPLORE = 8.0
 MODE_SIZE_FLOOR = 0.25
 SIZE_PCT_NL_KEY = "size_pct_nl"
@@ -32,6 +37,22 @@ def _pos_float(value: Any) -> float | None:
     if not math.isfinite(out) or out <= 0:
         return None
     return out
+
+
+def explore_ceiling() -> float:
+    """Operator envelope for Grok's own ``size_pct_nl``. Falls back to the constant.
+
+    A $1k book cannot reach one option contract inside a single-digit band,
+    so the width is an operator knob, not a baked number. Grok still picks
+    the size inside it and may still tighten via ``self_tune``.
+    """
+    try:
+        from abcxauto.config import get_config
+
+        value = _pos_float(getattr(get_config(), "mode_size_ceiling_pct", None))
+    except Exception:
+        return MODE_SIZE_CEILING_EXPLORE
+    return MODE_SIZE_CEILING_EXPLORE if value is None else value
 
 
 def playbook_mode() -> str:
@@ -100,7 +121,7 @@ def mode_size_ceiling(
     bit = str(mode or playbook_mode() or "explore").strip().lower()
     if bit not in ("explore", "exploit"):
         bit = "explore"
-    explore_hi = MODE_SIZE_CEILING_EXPLORE
+    explore_hi = explore_ceiling()
     if card_is_learning(card, type=type):
         return explore_hi
     if bit != "exploit":
@@ -146,6 +167,22 @@ def max_risk_per_trade_off(cfg: Any = None) -> bool:
     return math.isfinite(v) and v <= 0
 
 
+def ticket_size_ceiling(
+    *,
+    card: Any = None,
+    type: str = "",
+    mode: str | None = None,
+) -> float:
+    """Send envelope that always binds.
+
+    ``max_risk_per_trade_pct`` 0 turns off the % floors, not this band.
+    The self_tune shadow only tightens while max-risk is on.
+    """
+    if max_risk_per_trade_off():
+        return mode_size_ceiling(card=card, type=type, mode=mode)
+    return working_size_ceiling(card=card, type=type, mode=mode)
+
+
 def working_size_ceiling(
     *,
     card: Any = None,
@@ -154,7 +191,7 @@ def working_size_ceiling(
 ) -> float:
     """Ceiling that actually sizes a send. Not 25% unless Grok widened it."""
     hi = mode_size_ceiling(card=card, type=type, mode=mode)
-    default = MODE_SIZE_CEILING_EXPLORE
+    default = explore_ceiling()
     tuned = tuned_size_pct_nl()
     cap = default if tuned is None else tuned
     return max(MODE_SIZE_FLOOR, min(hi, cap))
@@ -232,21 +269,21 @@ def mode_size_ticket_error(
 ) -> str:
     """Reject if the ticket is still over the mode ceiling after clamp.
 
-    One writer. When max_risk is off this returns empty — Grok's qty stands.
+    One writer. The explore envelope binds even when max_risk is 0.
     Option implied uses premium × 100, not the underlying last agent_loop
     quoted for geometry.
     """
-    if max_risk_per_trade_off():
-        return ""
     p = params if isinstance(params, dict) else {}
     card = p.get("card")
-    ceiling = working_size_ceiling(card=card, type=strategy)
+    ceiling = ticket_size_ceiling(card=card, type=strategy)
     pct = _pos_float(p.get(SIZE_PCT_NL_KEY))
     if pct is not None and pct > ceiling + 1e-6:
         return f"mode_size {pct} > {ceiling}"
     try:
         from abcxauto.send import option_size_mark
     except Exception:
+        logger.debug("option_size_mark import failed; using price fallback", exc_info=True)
+
         def option_size_mark(_s, _p, fallback=None):
             return _pos_float(fallback), 1.0
 

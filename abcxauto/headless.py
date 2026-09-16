@@ -177,7 +177,7 @@ def run_headless() -> int:
             str(knobs.get("model") or getattr(cfg, "model", "") or "")
         )
     except Exception:
-        pass
+        logger.warning("headless model-session journal write failed", exc_info=True)
     engine = ProEngine()
 
     stopping = {"done": False}

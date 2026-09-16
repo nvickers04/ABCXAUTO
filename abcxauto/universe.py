@@ -902,7 +902,7 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
                 try:
                     ib.cancelScannerSubscription(sub)
                 except Exception:
-                    pass
+                    pass  # Scanner sub already released; TWS allows only one at a time.
                 # Brief settle so the next arena scan is not cancelled by TWS.
                 await asyncio.sleep(0.35)
     except Exception as exc:

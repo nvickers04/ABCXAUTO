@@ -314,7 +314,9 @@ async def test_one_stalled_news_symbol_does_not_sink_the_tool(monkeypatch):
     """MDA allows 30s per request; one stall is a miss, the rest still land."""
     import asyncio as _asyncio
 
-    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    monkeypatch.setattr("abcxauto.news_feed.news_symbol_s", lambda: 0.05)
+    monkeypatch.setattr("abcxauto.news_feed.news_symbol_cold_s", lambda: 0.05)
+    monkeypatch.setattr("abcxauto.news_feed.news_batch_s", lambda: 1.0)
 
     class MDA:
         is_configured = True
@@ -348,7 +350,7 @@ async def test_news_tool_slow_source_is_fast_hard_miss(monkeypatch):
     import asyncio as _asyncio
     import time as _time
 
-    from abcxauto.news_feed import NEWS_SYMBOL_S, reset_news_cache
+    from abcxauto.news_feed import NEWS_SYMBOL_COLD_S, reset_news_cache
 
     reset_news_cache()
 
@@ -373,7 +375,7 @@ async def test_news_tool_slow_source_is_fast_hard_miss(monkeypatch):
     )
     elapsed = _time.monotonic() - t0
     assert elapsed < 12.0
-    assert elapsed < NEWS_SYMBOL_S + 2.0
+    assert elapsed < NEWS_SYMBOL_COLD_S + 2.0
     assert "timed out" in str(data.get("error") or "")
     assert data["items"]
     assert all(it.get("error") == "timed out" for it in data["items"])
@@ -395,7 +397,9 @@ async def test_news_tool_returns_rail_headline_after_timeout(monkeypatch):
     remember_headlines(
         [{"symbol": "HPQ", "headline": "HPQ Q3 earnings miss", "source": "mda"}]
     )
-    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    monkeypatch.setattr("abcxauto.news_feed.news_symbol_s", lambda: 0.05)
+    monkeypatch.setattr("abcxauto.news_feed.news_symbol_cold_s", lambda: 0.05)
+    monkeypatch.setattr("abcxauto.news_feed.news_batch_s", lambda: 1.0)
 
     class MDA:
         is_configured = True
@@ -417,6 +421,8 @@ async def test_news_tool_returns_rail_headline_after_timeout(monkeypatch):
     )
     assert "error" not in data
     assert data["items"][0]["headline"] == "HPQ Q3 earnings miss"
+    assert data["items"][0].get("stale") is True
+    assert data["items"][0].get("stale_age_s", 0) >= 0
     assert not data["items"][0].get("error")
     reset_news_cache()
 
@@ -5069,9 +5075,41 @@ async def test_empty_after_poke_then_tools_reenters_same_chat(monkeypatch):
     clear_interrupt()
 
 
+def test_think_without_say_ceiling_scales_with_effort(monkeypatch):
+    from abcxauto.brain import (
+        THINK_WITHOUT_SAY_DEFAULT_S,
+        think_without_say_ceiling_s,
+    )
+
+    monkeypatch.delenv("ABCXAUTO_THINK_WITHOUT_SAY_S", raising=False)
+    assert think_without_say_ceiling_s(model="grok-4.6", model_params={}) == (
+        THINK_WITHOUT_SAY_DEFAULT_S
+    )
+    assert think_without_say_ceiling_s(
+        model="grok-4.6", model_params={"reasoning_effort": "low"}
+    ) == 180.0
+    assert think_without_say_ceiling_s(
+        model="grok-4.6", model_params={"reasoning_effort": "medium"}
+    ) == 300.0
+    assert think_without_say_ceiling_s(
+        model="grok-4.6", model_params={"reasoning_effort": "high"}
+    ) == 480.0
+    assert think_without_say_ceiling_s(
+        model="grok-4.6", model_params={"reasoning_effort": "xhigh"}
+    ) == 900.0
+    assert think_without_say_ceiling_s(
+        model="grok-4.6", model_params={"effort": "xhigh"}
+    ) == 900.0
+    assert think_without_say_ceiling_s(model="grok-4.6-xhigh", model_params={}) == 900.0
+    monkeypatch.setenv("ABCXAUTO_THINK_WITHOUT_SAY_S", "0.08")
+    assert think_without_say_ceiling_s(
+        model="grok-4.6", model_params={"reasoning_effort": "xhigh"}
+    ) == 0.08
+
+
 @pytest.mark.asyncio
 async def test_silent_grok_tip_wall_clock_aborts_without_stop_empty(monkeypatch):
-    """Think dribble with no [say] aborts on wall-clock, not only stop==empty."""
+    """Think then genuine silence aborts on idle-bytes, not only stop==empty."""
     import asyncio
 
     from abcxauto import brain
@@ -5140,4 +5178,478 @@ async def test_silent_grok_tip_wall_clock_aborts_without_stop_empty(monkeypatch)
     assert turn.look_failed() is False
     assert g.chat is live
     assert live.n >= 2
+
+
+@pytest.mark.asyncio
+async def test_active_think_tokens_past_old_silent_tip_reach_say(monkeypatch):
+    """Think bytes flowing past the old 48s wall-clock must still reach [say]."""
+    import asyncio
+
+    from abcxauto import brain
+    from abcxauto.brain import stream_round
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    # Old rule: abort STREAM_CHUNK_S * STREAM_IDLE_LIMIT from stream start
+    # even while think tokens arrive. Product 0.12s stands in for 48s.
+    monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.03)
+    monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 4)
+    monkeypatch.setattr(brain, "SILENT_GROK_TIP_S", 0.12)
+    monkeypatch.delenv("ABCXAUTO_SILENT_GROK_TIP_S", raising=False)
+    monkeypatch.setenv("ABCXAUTO_THINK_WITHOUT_SAY_S", "2")
+
+    class Chat:
+        async def stream(self):
+            notes = (
+                "alpha weighs QQQ weeklies versus cash on the book",
+                "bravo checks NU against the overnight park clock",
+                "charlie sizes IBIT against remaining buying power",
+                "delta reads the XLF mark versus the working stop",
+                "echo compares implied vol to the last 47C fill",
+                "foxtrot looks at BAG legs that are still working",
+                "golf notes SPY is not on the book this look",
+                "hotel reviews the unprotected STK gate on disk",
+                "india considers whether the calendar still pays",
+                "juliet is ready to speak the stay-up line now",
+            )
+            acc = ""
+            for note in notes:
+                acc += note + ". "
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=acc
+                )
+                await asyncio.sleep(0.02)
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="lots still on. No ticket.",
+                reasoning_content=acc,
+            )
+
+    t0 = asyncio.get_event_loop().time()
+    text, _resp, stop = await stream_round(Chat(), emit_stage=True)
+    elapsed = asyncio.get_event_loop().time() - t0
+    assert elapsed > 0.12
+    assert stop == "ok"
+    assert "lots still on" in (text or "")
+
+
+@pytest.mark.asyncio
+async def test_no_tokens_still_silent_aborts(monkeypatch):
+    """A stream that never emits think/say bytes still aborts as empty."""
+    import asyncio
+
+    from abcxauto import brain
+    from abcxauto.brain import stream_round
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.02)
+    monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 50)
+    monkeypatch.setenv("ABCXAUTO_SILENT_GROK_TIP_S", "0.08")
+    monkeypatch.setenv("ABCXAUTO_THINK_WITHOUT_SAY_S", "5")
+
+    class Chat:
+        async def stream(self):
+            await asyncio.sleep(10)
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="never reached", reasoning_content=""
+            )
+
+    t0 = asyncio.get_event_loop().time()
+    text, _resp, stop = await stream_round(Chat(), emit_stage=True)
+    elapsed = asyncio.get_event_loop().time() - t0
+    assert stop == "empty"
+    assert not (text or "").strip()
+    assert elapsed < 0.5
+
+
+@pytest.mark.asyncio
+async def test_empty_keepalive_chunks_still_silent_abort(monkeypatch):
+    """Banner keepalives with no think/say bytes still abort (true idle)."""
+    import asyncio
+
+    from abcxauto import brain
+    from abcxauto.brain import stream_round
+    from abcxauto.park_clock import clear_interrupt
+    from abcxauto.think_stream import subscribe, unsubscribe
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.02)
+    monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 50)
+    monkeypatch.setenv("ABCXAUTO_SILENT_GROK_TIP_S", "0.08")
+    monkeypatch.setenv("ABCXAUTO_THINK_WITHOUT_SAY_S", "5")
+    painted: list[str] = []
+
+    def cap(kind: str, text: str) -> None:
+        painted.append(f"{kind}:{text}")
+
+    class Chat:
+        async def stream(self):
+            while True:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+                await asyncio.sleep(0.01)
+
+    subscribe(cap)
+    try:
+        t0 = asyncio.get_event_loop().time()
+        text, _resp, stop = await stream_round(Chat(), emit_stage=True)
+        elapsed = asyncio.get_event_loop().time() - t0
+    finally:
+        unsubscribe(cap)
+    assert stop == "silent"
+    assert not (text or "").strip()
+    assert elapsed < 0.5
+    assert "[stream silent]" in "".join(painted)
+
+
+@pytest.mark.asyncio
+async def test_keepalive_after_say_still_aborts(monkeypatch):
+    """Opened [say] then banner keepalives must not sit forever."""
+    import asyncio
+
+    from abcxauto import brain
+    from abcxauto.brain import stream_round
+    from abcxauto.park_clock import clear_interrupt
+    from abcxauto.think_stream import subscribe, unsubscribe
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.02)
+    monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 50)
+    monkeypatch.setenv("ABCXAUTO_SILENT_GROK_TIP_S", "0.08")
+    monkeypatch.setenv("ABCXAUTO_THINK_WITHOUT_SAY_S", "5")
+    painted: list[str] = []
+
+    def cap(kind: str, text: str) -> None:
+        painted.append(f"{kind}:{text}")
+
+    class Chat:
+        async def stream(self):
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="", reasoning_content="assess the three working BAG exits"
+            )
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="No send. Same three verticals.",
+                reasoning_content="",
+            )
+            while True:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+                await asyncio.sleep(0.01)
+
+    subscribe(cap)
+    try:
+        t0 = asyncio.get_event_loop().time()
+        text, _resp, stop = await stream_round(Chat(), emit_stage=True)
+        elapsed = asyncio.get_event_loop().time() - t0
+    finally:
+        unsubscribe(cap)
+    assert stop == "stalled"
+    assert "No send" in (text or "")
+    assert elapsed < 0.5
+    assert "[stream silent]" in "".join(painted)
+
+
+@pytest.mark.asyncio
+async def test_operator_stop_cuts_open_stream(monkeypatch):
+    """Stop button must abort the open tip, not wait for Grok to finish."""
+    import asyncio
+
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn, stream_round
+    from abcxauto.park_clock import (
+        clear_interrupt,
+        clear_look_abort,
+        request_look_abort,
+    )
+    from abcxauto.think_stream import subscribe, unsubscribe
+
+    clear_interrupt()
+    clear_look_abort()
+    monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.02)
+    monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 50)
+    monkeypatch.setattr(brain, "STREAM_ABORT_BACKOFF_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_SILENT_GROK_TIP_S", "5")
+    monkeypatch.setenv("ABCXAUTO_THINK_WITHOUT_SAY_S", "5")
+    painted: list[str] = []
+
+    def cap(kind: str, text: str) -> None:
+        painted.append(f"{kind}:{text}")
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="", reasoning_content="weigh the three BAG exits"
+            )
+            request_look_abort()
+            while True:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content=f"still speaking {self.n}",
+                    reasoning_content="",
+                )
+                await asyncio.sleep(0.01)
+
+    subscribe(cap)
+    try:
+        t0 = asyncio.get_event_loop().time()
+        text, _resp, stop = await stream_round(Chat(), emit_stage=True)
+        elapsed = asyncio.get_event_loop().time() - t0
+    finally:
+        unsubscribe(cap)
+        clear_look_abort()
+    assert stop == "pause"
+    assert elapsed < 0.5
+    assert "[operator stop]" in "".join(painted)
+
+    clear_look_abort()
+    live = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: live)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=live,
+        _wake_n=1,
+        _chat_had_work=True,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert live.n == 1
+    assert turn.trailing_empty_grok is False
+    assert "[stream retry: silent tip]" not in (turn.text or "")
+    clear_look_abort()
+
+
+@pytest.mark.asyncio
+async def test_think_without_say_ceiling_aborts_endless_dribble(monkeypatch):
+    """Endless unique think with no [say] still hits the wall-clock backstop."""
+    import asyncio
+
+    from abcxauto import brain
+    from abcxauto.brain import stream_round
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.05)
+    monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 50)
+    monkeypatch.setenv("ABCXAUTO_SILENT_GROK_TIP_S", "5")
+    monkeypatch.setenv("ABCXAUTO_THINK_WITHOUT_SAY_S", "0.12")
+
+    class Chat:
+        async def stream(self):
+            acc = ""
+            n = 0
+            pads = "abcdefghijklmnopqrstuvwxyz"
+            while True:
+                acc += f"{pads[n % 26] * 8} distinct thesis {n}. "
+                n += 1
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=acc
+                )
+                await asyncio.sleep(0.01)
+
+    t0 = asyncio.get_event_loop().time()
+    text, _resp, stop = await stream_round(Chat(), emit_stage=True)
+    elapsed = asyncio.get_event_loop().time() - t0
+    assert stop == "empty"
+    assert not (text or "").strip()
+    assert 0.10 <= elapsed < 0.6
+
+
+@pytest.mark.asyncio
+async def test_silent_tip_retry_speaks_without_empty_grok(monkeypatch, caplog):
+    """First stream idle-stalls; second speaks. Same chat, no empty-GROK mill."""
+    import asyncio
+    import logging
+
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+    from abcxauto.think_stream import subscribe, unsubscribe
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.02)
+    monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 50)
+    monkeypatch.setattr(brain, "STREAM_ABORT_BACKOFF_S", 0.0)
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_SILENT_GROK_TIP_S", "0.08")
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+    monkeypatch.setenv("ABCXAUTO_THINK_WITHOUT_SAY_S", "5")
+    caplog.set_level(logging.WARNING, logger="abcxauto.brain")
+    painted: list[str] = []
+
+    def cap(kind: str, text: str) -> None:
+        painted.append(f"{kind}:{text}")
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content="IV on the 47C"
+                )
+                while True:
+                    yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                        content="", reasoning_content=""
+                    )
+                    await asyncio.sleep(0.01)
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="lots still on. No ticket.",
+                reasoning_content="",
+            )
+
+    live = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: live)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=live,
+        _wake_n=1,
+        _chat_had_work=True,
+    )
+    subscribe(cap)
+    try:
+        turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    finally:
+        unsubscribe(cap)
+    assert "lots still on" in (turn.text or "")
+    assert turn.look_failed() is False
+    assert turn.trailing_empty_grok is False
+    assert g.chat is live
+    assert live.n == 2
+    blob = "".join(painted)
+    assert "[stream retry: silent tip]" in blob
+    assert "cannot continue" not in caplog.text
+    assert "empty GROK after tools/send/poke" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_silent_tip_retries_then_empty_grok_then_stops(monkeypatch, caplog):
+    """A permanently silent tip is bounded: silent retries + one empty recover."""
+    import asyncio
+    import logging
+
+    from abcxauto import brain
+    from abcxauto.brain import EMPTY_GROK_TRIES, SILENT_TIP_RETRIES, grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.02)
+    monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 50)
+    monkeypatch.setattr(brain, "STREAM_ABORT_BACKOFF_S", 0.0)
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_SILENT_GROK_TIP_S", "0.08")
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+    monkeypatch.setenv("ABCXAUTO_THINK_WITHOUT_SAY_S", "5")
+    caplog.set_level(logging.WARNING, logger="abcxauto.brain")
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                content="", reasoning_content=f"IV on the 47C look {self.n}"
+            )
+            while True:
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+                await asyncio.sleep(0.01)
+
+    live = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: live)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=live,
+        _wake_n=1,
+        _chat_had_work=True,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    want = 1 + SILENT_TIP_RETRIES + EMPTY_GROK_TRIES
+    assert live.n == want
+    assert live.n <= 4
+    assert turn.trailing_empty_grok is True
+    assert "cannot continue" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_think_without_say_ceiling_is_not_silent_tip_retry(monkeypatch):
+    """Endless unique think with no [say] is the ceiling, not a silent stall."""
+    import asyncio
+
+    from abcxauto import brain
+    from abcxauto.brain import EMPTY_GROK_TRIES, grok_turn
+    from abcxauto.park_clock import clear_interrupt
+    from abcxauto.think_stream import subscribe, unsubscribe
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "STREAM_CHUNK_S", 0.05)
+    monkeypatch.setattr(brain, "STREAM_IDLE_LIMIT", 50)
+    monkeypatch.setattr(brain, "STREAM_ABORT_BACKOFF_S", 0.0)
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_SILENT_GROK_TIP_S", "5")
+    monkeypatch.setenv("ABCXAUTO_THINK_WITHOUT_SAY_S", "0.12")
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+    painted: list[str] = []
+
+    def cap(kind: str, text: str) -> None:
+        painted.append(f"{kind}:{text}")
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            acc = ""
+            k = 0
+            pads = "abcdefghijklmnopqrstuvwxyz"
+            while True:
+                acc += f"{pads[k % 26] * 8} distinct thesis {self.n}-{k}. "
+                k += 1
+                yield SimpleNamespace(tool_calls=[]), SimpleNamespace(
+                    content="", reasoning_content=acc
+                )
+                await asyncio.sleep(0.01)
+
+    live = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: live)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=live,
+        _wake_n=1,
+        _chat_had_work=True,
+    )
+    subscribe(cap)
+    try:
+        turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    finally:
+        unsubscribe(cap)
+    blob = "".join(painted)
+    assert "[stream retry: silent tip]" not in blob
+    assert live.n == 1 + EMPTY_GROK_TRIES
+    assert turn.trailing_empty_grok is True
+    assert not (turn.text or "").strip()
 

@@ -2606,7 +2606,9 @@ async def test_failed_look_keeps_looking_without_set_wake_clock(monkeypatch, tmp
     eng.stop_engine()
     eng.drain_apply()
     assert len(times) >= want
-    assert resumes[1 + EMPTY_GROK_RECOVER_TRIES] is False
+    # First look may already be resume=True on stay-up. After the
+    # same-chat cap a cold look must appear (resume=False).
+    assert False in resumes[EMPTY_GROK_RECOVER_TRIES:]
     assert looking
     from abcxauto.park_clock import load_alarm
 

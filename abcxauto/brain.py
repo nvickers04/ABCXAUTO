@@ -87,6 +87,9 @@ class BrainTurn:
     # Read results already fetched this think, keyed by tool + args. A repeat
     # ask is answered from here so the think moves forward instead of spinning.
     tool_cache: dict[str, str] = field(default_factory=dict)
+    # Superseded tool results stubbed in place this look (context_prune).
+    pruned_results: int = 0
+    pruned_chars: int = 0
     # One merged scan tape this look. Survives a stay-up poke so a later
     # scan() folds into the same bag instead of paging IBKR again.
     scan_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -129,6 +132,9 @@ _OVERLOAD_MARKERS = (
 # Same chat, same look — do not sit dead with an empty tip.
 STREAM_ABORT_TRIES = 3
 STREAM_ABORT_BACKOFF_S = 1.0
+# Idle-bytes abort (silent_grok_tip_s). Same chat, same look — do not
+# spend EMPTY_GROK_TRIES on a transient xAI stall. Per look, not per round.
+SILENT_TIP_RETRIES = 2
 _STREAM_ABORT_MARKERS = (
     "unavailable",
     "connection aborted",
@@ -146,13 +152,24 @@ _STREAM_ABORT_MARKERS = (
 # Not a sit clock, not _cold_next, not a new messages list.
 # A poke / desk-fact inject on a kept chat is the same class — #153
 # keyed recover on this-round tool_trace, so a post-poke empty sat.
-EMPTY_GROK_TRIES = 2
+EMPTY_GROK_TRIES = 1
 EMPTY_GROK_DEAD_S = 2.0
-EMPTY_GROK_RECOVER_TRIES = 2
-# Wall-clock for a GROK tip with no [say]. Not stream stop==empty.
-# Matches STREAM_CHUNK_S * STREAM_IDLE_LIMIT so a silent banner aborts
-# even when think tokens keep resetting the per-chunk idle counter.
+EMPTY_GROK_RECOVER_TRIES = 1
+# No think/say *bytes* for this long → hung tip. Empty keepalive chunks
+# reset STREAM_IDLE and must not keep a dead banner alive. Actively
+# streaming reasoning tokens reset this timer — they are not silence.
 SILENT_GROK_TIP_S = float(STREAM_CHUNK_S * STREAM_IDLE_LIMIT)
+# Backstop: think-only with no [say] from stream start. Not idle. Scaled
+# by reasoning_effort so high/xhigh can finish. grok-4.6 API default
+# effort is high, so unspecified matches high. Env clamp is 30 min.
+THINK_WITHOUT_SAY_S = {
+    "low": 180.0,
+    "medium": 300.0,
+    "high": 480.0,
+    "xhigh": 900.0,
+}
+THINK_WITHOUT_SAY_DEFAULT_S = 480.0
+THINK_WITHOUT_SAY_MAX_S = 1800.0
 
 
 def provider_overloaded(err: Any) -> bool:
@@ -190,7 +207,11 @@ def empty_grok_dead_s() -> float:
 
 
 def silent_grok_tip_s() -> float:
-    """Wall-clock to abort a GROK tip with no [say]. Env override for tests."""
+    """Abort a GROK tip after this many seconds with no think/say bytes.
+
+    Idle only. Empty keepalive chunks do not count as bytes. Env override
+    for tests; 120s clamp is enough — a dead stream should not wait longer.
+    """
     raw = (os.environ.get("ABCXAUTO_SILENT_GROK_TIP_S") or "").strip()
     if raw:
         try:
@@ -198,6 +219,51 @@ def silent_grok_tip_s() -> float:
         except ValueError:
             pass
     return float(SILENT_GROK_TIP_S)
+
+
+def _reasoning_effort_level(model: str = "", params: Any = None) -> str:
+    """xhigh | high | medium | low | '' from model id and model_params."""
+    bits = [str(model or "")]
+    if isinstance(params, dict):
+        for key in ("reasoning_effort", "effort"):
+            bits.append(str(params.get(key, "") or ""))
+    blob = " ".join(bits).lower()
+    if "xhigh" in blob:
+        return "xhigh"
+    if re.search(r"\bhigh\b", blob):
+        return "high"
+    if re.search(r"\bmedium\b", blob):
+        return "medium"
+    if re.search(r"\blow\b", blob):
+        return "low"
+    return ""
+
+
+def think_without_say_ceiling_s(
+    *, model: str = "", model_params: Any = None
+) -> float:
+    """Wall-clock backstop for think-only with no [say]. Env override for tests.
+
+    Distinct from silent_grok_tip_s (true idle). Unspecified effort uses
+    high because grok-4.6 defaults reasoning_effort to high.
+    """
+    raw = (os.environ.get("ABCXAUTO_THINK_WITHOUT_SAY_S") or "").strip()
+    if raw:
+        try:
+            return max(0.0, min(float(THINK_WITHOUT_SAY_MAX_S), float(raw)))
+        except ValueError:
+            pass
+    if not model and model_params is None:
+        try:
+            from abcxauto.config import get_config
+
+            cfg = get_config()
+            model = str(getattr(cfg, "model", "") or "")
+            model_params = getattr(cfg, "model_params", None)
+        except Exception:
+            pass
+    level = _reasoning_effort_level(model, model_params)
+    return float(THINK_WITHOUT_SAY_S.get(level, THINK_WITHOUT_SAY_DEFAULT_S))
 
 
 def _empty_grok_round_after_work(
@@ -232,7 +298,7 @@ def _empty_grok_round_after_work(
         or bool(getattr(turn, "poked", False))
     ):
         return False
-    if stop in ("interrupt", "loop"):
+    if stop in ("interrupt", "loop", "pause"):
         return False
     if stop in ("empty", "silent"):
         return True
@@ -317,7 +383,9 @@ async def _write_last_turn_after_send(
 
         world.flat = book_is_flat(positions, orders)
     except Exception:
-        world.flat = not bool(positions)
+        world.flat = not bool(positions) and not any(
+            isinstance(o, dict) for o in orders
+        )
     from abcxauto.think_stream import write_last_turn_after_send
 
     write_last_turn_after_send(
@@ -524,7 +592,15 @@ _FAT_CLIP_KEYS = (
 )
 _FAT_NEST_FIRST = ("last_look", "world", "playbook", "day")
 _LIVE_BOOK_ROOTS = frozenset(
-    {"world", "day", "open_lots", "working_orders", "positions", "fills"}
+    {
+        "world",
+        "day",
+        "open_lots",
+        "working_orders",
+        "positions",
+        "fills",
+        "broker_rejects",
+    }
 )
 _LIVE_BOOK_KEEP = (
     "day",
@@ -533,6 +609,7 @@ _LIVE_BOOK_KEEP = (
     "working_orders",
     "positions",
     "fills",
+    "broker_rejects",
     "ibkr_live_quotes",
     "sends_this_turn",
     "ibkr_connected",
@@ -739,7 +816,12 @@ def _piece(obj: Any, *names: str) -> str:
 
 
 async def stream_round(
-    chat: Any, *, stage: str = "grok", emit_stage: bool = True
+    chat: Any,
+    *,
+    stage: str = "grok",
+    emit_stage: bool = True,
+    model: str = "",
+    model_params: Any = None,
 ) -> tuple[str, Any, str]:
     """One model call on this chat. Returns (assistant text, response, stop_reason)."""
     if emit_stage:
@@ -755,24 +837,40 @@ async def stream_round(
     idle = 0
     reason = "ok"
     tip_t0 = time.monotonic()
+    last_byte_t = tip_t0
+    silent_s = silent_grok_tip_s()
+    ceiling_s = think_without_say_ceiling_s(model=model, model_params=model_params)
     while True:
         try:
-            from abcxauto.park_clock import peek_interrupt
+            from abcxauto.park_clock import look_aborted, peek_interrupt
 
+            if look_aborted():
+                think_emit("tool", "\n[operator stop]\n")
+                reason = "pause"
+                break
             if peek_interrupt() is not None:
                 reason = "interrupt"
                 break
         except Exception:
             pass
-        silent_s = silent_grok_tip_s()
+        now = time.monotonic()
+        if silent_s > 0 and (now - last_byte_t) >= silent_s:
+            # True idle — no think/say bytes. Empty keepalives are not
+            # bytes. Applies after [say] too: a hung tip that opened
+            # [say] then sat on banner chunks used to skip this check.
+            # "silent" is a stall (retry same chat). "empty" is reserved
+            # for think-without-say ceiling and a clean no-content finish.
+            think_emit("tool", "\n[stream silent]\n")
+            reason = "silent" if not (o or "").strip() else "stalled"
+            break
         if (
-            silent_s > 0
+            ceiling_s > 0
             and not saw_say
             and not o
-            and (time.monotonic() - tip_t0) >= silent_s
+            and (now - tip_t0) >= ceiling_s
         ):
-            # Wall-clock hung tip — think dribble resets STREAM_IDLE but
-            # never [say]. stop==empty is not required.
+            # Think-only backstop. Tokens may still be flowing; the look
+            # must still terminate.
             think_emit("tool", "\n[stream silent]\n")
             reason = "empty"
             break
@@ -793,6 +891,7 @@ async def stream_round(
         rc = _piece(ch, "reasoning_content", "reasoning")
         think_acc, think_piece = _delta(think_acc, rc)
         if think_piece:
+            last_byte_t = time.monotonic()
             if not saw_think:
                 think_emit("say", "\n[think]\n")
                 saw_think = True
@@ -801,6 +900,7 @@ async def stream_round(
         if content:
             say_acc, say_piece = _delta(say_acc, content)
             if say_piece:
+                last_byte_t = time.monotonic()
                 if not saw_say:
                     think_emit("say", "\n[say]\n")
                     saw_say = True
@@ -903,7 +1003,12 @@ async def grok(g: GrokClient, p: str, *, stage: str = "grok") -> str:
         g, messages=[system(build_system_prompt()), user(p)]
     )
     chat = create_chat(g.client, **create_kw)
-    text, _, _ = await stream_round(chat, stage=stage)
+    text, _, _ = await stream_round(
+        chat,
+        stage=stage,
+        model=str(getattr(g, "model", "") or ""),
+        model_params=getattr(g, "model_params", None),
+    )
     return text
 
 
@@ -1191,6 +1296,7 @@ async def _inject_live_poke(
 def _book_facts(world: WorldState) -> dict[str, Any]:
     from abcxauto.world_state import (
         COMBO_FACT,
+        compact_broker_rejects,
         compact_position,
         compact_working_orders,
         open_upnl_of,
@@ -1218,6 +1324,10 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         ],
         "working_orders": compact_working_orders(
             world.open_orders, positions=world.positions
+        ),
+        "broker_rejects": compact_broker_rejects(
+            getattr(world, "broker_rejects", None),
+            open_orders=getattr(world, "open_orders", None),
         ),
         "fills": [
             {
@@ -1579,9 +1689,54 @@ def _tool_key(name: str, args: dict[str, Any]) -> str:
         return f"{name}:?"
 
 
+def _prune_after_read(
+    chat: Any, turn: BrainTurn, name: str, args: dict[str, Any], tc: Any, result: str
+) -> None:
+    """Stub the earlier copy of a read this result supersedes. Shell-side only."""
+    try:
+        from abcxauto.context_prune import prune_superseded
+
+        n, saved = prune_superseded(
+            chat,
+            name=name,
+            args=args,
+            tool_call_id=getattr(tc, "id", None),
+            is_fact=_is_fact_result(result),
+        )
+    except Exception:
+        logger.debug("context prune failed", exc_info=True)
+        return
+    if n:
+        turn.pruned_results += n
+        turn.pruned_chars += saved
+
+
+def _log_context_prune(chat: Any, turn: BrainTurn) -> None:
+    if not turn.pruned_results:
+        return
+    try:
+        from abcxauto.context_prune import payload_chars
+        from abcxauto.scorecard import estimate_tokens
+
+        now_chars = payload_chars(chat)
+        after = estimate_tokens("x" * now_chars) if now_chars else 0
+        before = estimate_tokens("x" * (now_chars + turn.pruned_chars))
+        logger.info(
+            "context prune: %d superseded tool results stubbed; chat payload ~%d "
+            "tokens (~%d unpruned, saved ~%d)",
+            turn.pruned_results,
+            after,
+            before,
+            before - after,
+        )
+    except Exception:
+        logger.debug("context prune log failed", exc_info=True)
+
+
 def _cached_read(turn: BrainTurn, name: str, args: dict[str, Any]) -> str | None:
     """Same read, same args, same think — hand back what we already fetched."""
-    if name in _MUTATING_TOOLS:
+    if name in _MUTATING_TOOLS or name == "stance":
+        # stance writes a file; a cached copy would answer a read after a clear.
         return None
     hit = turn.tool_cache.get(_tool_key(name, args))
     if hit is None:
@@ -1727,6 +1882,7 @@ async def _dispatch_tool_calls(
                     )
                 else:
                     _append_tool_result(chat, row[0], row[1])
+                    _prune_after_read(chat, turn, item[0], item[1], row[0], row[1])
 
     for item in writes:
         try:
@@ -1965,6 +2121,7 @@ async def _grok_turn_impl(
     ran_out = True
     abort_tries = 0
     empty_tries = 0
+    silent_tries = 0
     while turn.steps < turn_cap:
         try:
             from abcxauto.thin_rth_kill_look import is_f10_look_halt, skip_look_reason
@@ -2010,8 +2167,12 @@ async def _grok_turn_impl(
             logger.debug("research brief mid-look halt check failed", exc_info=True)
         turn.steps += 1
         try:
-            from abcxauto.park_clock import peek_interrupt
+            from abcxauto.park_clock import look_aborted, peek_interrupt
 
+            if look_aborted():
+                think_emit("tool", "\n[operator stop]\n")
+                ran_out = False
+                break
             if peek_interrupt() is not None:
                 ok = await _inject_live_poke(
                     chat, connector=connector, world=world, snap=snap, turn=turn
@@ -2023,7 +2184,11 @@ async def _grok_turn_impl(
                     except Exception:
                         logger.debug("chat work stamp failed", exc_info=True)
                 continue
-            text, response, stop = await stream_round(chat)
+            text, response, stop = await stream_round(
+                chat,
+                model=str(getattr(g, "model", "") or ""),
+                model_params=getattr(g, "model_params", None),
+            )
         except Exception as exc:
             if (
                 is_stream_abort_error(exc)
@@ -2049,6 +2214,21 @@ async def _grok_turn_impl(
             turn.stream_error = str(exc)
             ran_out = False
             break
+        if stop == "pause":
+            ran_out = False
+            break
+        if stop == "silent" and silent_tries < SILENT_TIP_RETRIES:
+            silent_tries += 1
+            logger.warning(
+                "stream abort retry %s/%s same chat: silent tip",
+                silent_tries,
+                SILENT_TIP_RETRIES,
+            )
+            think_emit("tool", "\n[stream retry: silent tip]\n")
+            turn.stream_error = ""
+            turn.failed = False
+            await asyncio.sleep(STREAM_ABORT_BACKOFF_S)
+            continue
         # Keep every spoken chunk, including a later empty / interrupt /
         # repeat-text stop. Junk is the whole look, not the last assistant turn.
         if text:
@@ -2153,6 +2333,7 @@ async def _grok_turn_impl(
     if ran_out:
         turn.tool_budget_hit = True
         think_emit("tool", "\n[think stopped: step ceiling]\n")
+    _log_context_prune(chat, turn)
     if (
         not turn.ended
         and not turn.parked

@@ -248,8 +248,7 @@ class IBKRBarsMixin:
                 try:
                     cancel(bars)
                 except Exception:
-                    pass
-        subs.clear()
+                    pass  # Subscription already gone or ib_insync already cancelled.
         buf.clear()
         lru.clear()
         getattr(self, "_rt_keys", {}).clear()
@@ -271,7 +270,7 @@ class IBKRBarsMixin:
             try:
                 cancel(bars)
             except Exception:
-                pass
+                pass  # Subscription already gone or ib_insync already cancelled.
 
     def _stop_rt_bars(self, symbol: str) -> None:
         sym = str(symbol or "").strip().upper()
