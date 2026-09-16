@@ -227,6 +227,8 @@ async def snap(c: Any) -> dict:
     acct_ok = acct_nl > 0
     taken = datetime.now(timezone.utc).isoformat()
     protection = build_protection_report(pl, ol)
+    # Explicit True only — a missing ibkr_data_stale must not flip the flag.
+    stale_book = acct_d.get("ibkr_data_stale") is True
     base = {
         "taken_at": taken,
         "account": acct_d,
@@ -235,7 +237,7 @@ async def snap(c: Any) -> dict:
         "spy_quote": spy if isinstance(spy, dict) else {},
         "vix_quote": vix if isinstance(vix, dict) else {},
         "protection": protection,
-        "book_unreliable": not (pos_ok and ord_ok and acct_ok),
+        "book_unreliable": (not (pos_ok and ord_ok and acct_ok)) or stale_book,
         "ibkr_live_quotes": _seed_live_quotes(spy, vix),
         "candle_source": "none",
     }

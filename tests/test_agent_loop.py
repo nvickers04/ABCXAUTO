@@ -412,6 +412,47 @@ async def test_snap_empty_account_is_unreliable(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_snap_explicit_ibkr_data_stale_marks_book_unreliable(monkeypatch):
+    async def stale(_c, name: str, _a=None):
+        if name == "account_summary":
+            return {
+                "netliquidation": 1000,
+                "unrealizedpnl": 0,
+                "ibkr_data_stale": True,
+            }
+        return await _fake_tool(_c, name, _a)
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", stale)
+    out = await snap(FakeConnector())
+    assert out["account"]["ibkr_data_stale"] is True
+    assert out["book_unreliable"] is True
+
+
+@pytest.mark.asyncio
+async def test_snap_missing_ibkr_data_stale_does_not_flip_book(monkeypatch):
+    out = await snap(FakeConnector())
+    assert "ibkr_data_stale" not in out["account"]
+    assert out["book_unreliable"] is False
+
+
+@pytest.mark.asyncio
+async def test_snap_ibkr_data_stale_false_is_not_unreliable(monkeypatch):
+    async def not_stale(_c, name: str, _a=None):
+        if name == "account_summary":
+            return {
+                "netliquidation": 1000,
+                "unrealizedpnl": 0,
+                "ibkr_data_stale": False,
+            }
+        return await _fake_tool(_c, name, _a)
+
+    monkeypatch.setattr("abcxauto.agent_loop._tool", not_stale)
+    out = await snap(FakeConnector())
+    assert out["account"]["ibkr_data_stale"] is False
+    assert out["book_unreliable"] is False
+
+
+@pytest.mark.asyncio
 async def test_snap_loads_option_facts_for_open_legs(monkeypatch):
     async def with_opt(_c, name: str, _a=None):
         if name == "positions":
