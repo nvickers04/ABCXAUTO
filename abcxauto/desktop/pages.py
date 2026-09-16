@@ -292,10 +292,13 @@ class PagesMixin:
                                 self.lbl_risk_halt_state,
                                 self.lbl_risk_halt_math,
                                 ft.Text(
-                                    "Halt / Resume is the rail button. Exits always bypass it.",
+                                    "Halt / Resume is the rail button. Flatten All is "
+                                    "on this page — confirm, then the engine flattens "
+                                    "on the IB loop. Exits always bypass Halt.",
                                     size=11,
                                     color=MUTED,
                                 ),
+                                self.btn_flatten,
                             ),
                             self._section(
                                 "As persisted",

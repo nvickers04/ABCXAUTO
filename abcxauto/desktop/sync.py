@@ -891,7 +891,7 @@ class SyncMixin:
 
     def _risk_settings_lines(self) -> list[str]:
         """Persisted knobs from get_config / risk_settings.json. Display only."""
-        from abcxauto.config import get_config, load_risk_settings, resolve_effective_posture
+        from abcxauto.config import load_risk_settings, resolve_effective_posture
 
         try:
             load_risk_settings()
@@ -922,8 +922,6 @@ class SyncMixin:
 
 
     def _sync_risk_settings_view(self) -> None:
-        from abcxauto.config import get_config
-
         cfg = get_config()
         self.lbl_risk_glance.value = "\n".join(self._risk_settings_lines())
         for key, _label, _hint in RISK_FIELDS:
@@ -935,7 +933,7 @@ class SyncMixin:
 
 
     def _sync_risk_page(self, *, force: bool = False) -> None:
-        from abcxauto.config import get_config, resolve_effective_posture
+        from abcxauto.config import resolve_effective_posture
 
         self._sync_risk_settings_view()
         cfg = get_config()
@@ -1609,6 +1607,7 @@ class SyncMixin:
             RED if health == "red" else (AMBER if health == "amber" else GREEN)
         )
         self._sync_active_page()
+        self._maybe_finish_flatten_report()
         try:
             pulse = s.reality_pulse or {}
             if pulse:

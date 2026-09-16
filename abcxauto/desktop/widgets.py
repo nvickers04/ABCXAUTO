@@ -301,6 +301,10 @@ class WidgetsMixin:
         )
         self.lbl_risk_halt_state = ft.Text("", size=13, weight=ft.FontWeight.W_600, color=GREEN)
         self.lbl_risk_halt_math = ft.Text("", size=12, color=MUTED, selectable=True)
+        self.btn_flatten = self._btn(
+            "Flatten All", outlined=True, on_click=self._open_flatten_confirm_dialog
+        )
+        self._flatten_waiting = False
         # An open edit must survive the 3s page repaint, so a touched field is
         # dirty until it is applied or the page is refreshed.
         self.fields: dict[str, ft.TextField] = {}
