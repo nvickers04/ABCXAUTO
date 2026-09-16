@@ -16,6 +16,7 @@ from abcxauto.proposals import (
 from abcxauto.risk_gates import (
     check_defined_risk_only,
     get_risk_gate,
+    ibkr_data_stale_reason,
     is_exit_or_management,
 )
 
@@ -663,6 +664,21 @@ def _verify_defined_risk_only(proposal: OrderProposal) -> Optional[Dict[str, Any
     return {"error": reason, "status": "rejected"}
 
 
+def _verify_ibkr_data_stale(
+    proposal: OrderProposal, connector: Any
+) -> Optional[Dict[str, Any]]:
+    """Readable refuse when the book is explicitly stale (#201). Exits pass.
+
+    Missing ``ibkr_data_stale`` is no signal — never a block.
+    """
+    if is_exit_or_management(proposal):
+        return None
+    reason = ibkr_data_stale_reason(connector=connector)
+    if not reason:
+        return None
+    return {"error": reason, "status": "rejected"}
+
+
 async def execute_proposal(
     proposal: OrderProposal, connector: Any, *, source: str = "agent"
 ) -> Dict[str, Any]:
@@ -697,6 +713,12 @@ async def execute_proposal(
         return rejection
 
     rejection = _verify_defined_risk_only(proposal)
+    if rejection:
+        logger.warning(f"Proposal #{proposal.id} blocked: {rejection['error']}")
+        journal.record_dispatch(journal_id, False, rejection)
+        return rejection
+
+    rejection = _verify_ibkr_data_stale(proposal, connector)
     if rejection:
         logger.warning(f"Proposal #{proposal.id} blocked: {rejection['error']}")
         journal.record_dispatch(journal_id, False, rejection)

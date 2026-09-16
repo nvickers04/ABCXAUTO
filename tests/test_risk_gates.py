@@ -9,13 +9,16 @@ import pytest
 from abcxauto.config import Config, get_config
 from abcxauto.proposals import validate_proposal
 from abcxauto.risk_gates import (
+    LIVE_IBKR_PORTS,
     arena_concentration_error,
     arena_exposure_usd,
     check_arena_concentration,
     check_defined_risk_only,
     estimate_bracket_risk_dollars,
     estimate_notional,
+    ibkr_data_stale_reason,
     is_exit_or_management,
+    live_desk,
     reset_risk_gate,
     risk_base_usd,
     sizing_floors_active,
@@ -740,7 +743,38 @@ def test_live_ports_force_floors_even_when_trading_mode_is_paper():
         assert cfg.trading_mode == "paper"
         assert cfg.sizing_floors is False
         assert cfg.is_paper is False
+        assert live_desk(cfg) is True
         assert sizing_floors_active(cfg) is True
+
+
+def test_live_desk_is_one_definition_across_gates_tune_and_send():
+    """risk_gates / self_tune / send share LIVE_IBKR_PORTS and live_desk."""
+    import abcxauto.risk_gates as gates
+    import abcxauto.self_tune as tune
+    import abcxauto.send as send
+
+    assert LIVE_IBKR_PORTS == frozenset({7496, 4001})
+    assert send.LIVE_IBKR_PORTS is LIVE_IBKR_PORTS
+    assert not hasattr(gates, "_LIVE_IBKR_PORTS")
+    assert not hasattr(tune, "_LIVE_IBKR_PORTS")
+    assert not hasattr(send, "_LIVE_IBKR_PORTS")
+    assert tune.live_desk is live_desk
+
+    for port in LIVE_IBKR_PORTS:
+        paper_live = _cfg(trading_mode="paper", sizing_floors=False, ibkr_port=port)
+        assert live_desk(paper_live) is True
+        assert sizing_floors_active(paper_live) is True
+        assert send._paper_live_port(paper_live) == port
+
+    for port in (7497, 4002):
+        paper = _cfg(trading_mode="paper", sizing_floors=False, ibkr_port=port)
+        assert live_desk(paper) is False
+        assert sizing_floors_active(paper) is False
+        assert send._paper_live_port(paper) is None
+
+    live = _cfg(trading_mode="live", sizing_floors=False, ibkr_port=7496)
+    assert live_desk(live) is True
+    assert send._paper_live_port(live) is None
 
 
 @pytest.mark.asyncio
@@ -907,6 +941,66 @@ async def test_fail_closed_on_missing_account_data(gate):
 
     conn4 = FakeConnector(account={"netliquidation": float("nan"), "dailypnl": 0.0})
     ok, reason = await gate.pre_trade_check(_bracket(), conn4)
+    assert ok is False
+    assert "fail-closed" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_null_or_zero_net_liq_fails_closed_for_new_risk(gate):
+    """Null / zero NetLiq is unknown book — refuse new risk, never 0% pass."""
+    exit_order = _market_order_exit()
+    for account in (
+        {"netliquidation": None, "dailypnl": 0.0, "TotalCashValue": 1.0},
+        {"netliquidation": 0, "dailypnl": 0.0, "TotalCashValue": 1.0},
+        {"netliquidation": 0.0, "dailypnl": 0.0, "TotalCashValue": 1.0},
+        {"NetLiquidation": 0, "DailyPnL": 0.0, "TotalCashValue": 1.0},
+    ):
+        conn = FakeConnector(account=account)
+        ok, reason = await gate.pre_trade_check(_bracket(), conn)
+        assert ok is False, account
+        assert "fail-closed" in reason.lower()
+        assert "netliquidation" in reason.lower() or "non-positive" in reason.lower()
+        ok, reason = await gate.pre_trade_check(exit_order, conn)
+        assert ok is True
+        assert "bypass" in reason
+
+
+def test_arena_concentration_fails_closed_on_null_or_zero_nl():
+    """The old helper returned 0.0 on book<=0, so 0% never exceeded the cap."""
+    from abcxauto.world_state import pct_of_nl
+
+    import abcxauto.risk_gates as gates
+
+    assert not hasattr(gates, "_pct_of_nl")
+    assert pct_of_nl(50.0, 0.0) is None
+    assert pct_of_nl(50.0, None) is None
+
+    lots = [_lot("NVDA", mv=1_000.0)]
+    ticket = _bracket(qty=1, entry=100.0, symbol="AMD")
+    for nl in (None, 0, 0.0):
+        err = arena_concentration_error(
+            ticket,
+            lots,
+            nl,
+            membership=_TECH_MEMBERSHIP,
+            cap_pct=25.0,
+        )
+        assert err, f"null/zero NL must refuse, got {err!r} for {nl!r}"
+        assert "size_arena_concentration" in err
+
+
+@pytest.mark.asyncio
+async def test_check_arena_concentration_fails_closed_on_zero_nl(monkeypatch):
+    cfg = _cfg(max_arena_concentration_pct=25.0)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr(
+        "abcxauto.universe.membership_rows", lambda **_k: _TECH_MEMBERSHIP
+    )
+    conn = FakeConnector(
+        account={"netliquidation": 0.0, "dailypnl": 0.0},
+        positions=[_lot("NVDA", mv=1_000.0)],
+    )
+    ok, reason = await check_arena_concentration(_bracket(symbol="AMD"), conn)
     assert ok is False
     assert "fail-closed" in reason.lower()
 
@@ -1754,6 +1848,121 @@ async def test_paper_must_not_place_on_7496_defined_risk_stays_on(monkeypatch):
     assert cfg.defined_risk_only is True
     assert cfg.trading_mode == "paper"
     assert cfg.ibkr_port == 7496
+
+
+@pytest.mark.asyncio
+async def test_paper_on_live_port_still_refuses_after_shared_live_desk(monkeypatch):
+    """Shared LIVE_IBKR_PORTS still blocks paper send on 7496 / 4001."""
+    from abcxauto.send import send_action
+
+    for port in LIVE_IBKR_PORTS:
+        cfg = _cfg(trading_mode="paper", ibkr_port=port)
+        assert live_desk(cfg) is True
+        monkeypatch.setattr("abcxauto.send.get_config", lambda c=cfg: c)
+
+        async def _must_not_execute(*_a, **_k):
+            raise AssertionError("safe_execute must not run on paper + live port")
+
+        monkeypatch.setattr("abcxauto.send.safe_execute", _must_not_execute)
+        result = await send_action(
+            {
+                "strategy": "market_bracket",
+                "params": {
+                    "symbol": "SPY",
+                    "quantity": 1,
+                    "direction": "LONG",
+                    "stop_price": 495.0,
+                    "target_price": 510.0,
+                },
+                "rationale": "must not reach live",
+            },
+            FakeConnector(),
+        )
+        assert result["status"] == "blocked"
+        assert result.get("reason_code") == "live_port_paper"
+        assert str(port) in str(result.get("note") or "")
+
+
+def test_ibkr_data_stale_reason_only_explicit_true():
+    assert ibkr_data_stale_reason() == ""
+    assert ibkr_data_stale_reason(account={"netliquidation": 1}) == ""
+    assert ibkr_data_stale_reason(account={"ibkr_data_stale": False}) == ""
+    assert ibkr_data_stale_reason(account={"ibkr_data_stale": None}) == ""
+    assert ibkr_data_stale_reason(account={"ibkr_data_stale": True}) == "ibkr_data_stale"
+
+    class Public:
+        ibkr_data_stale = True
+
+    class Missing:
+        pass
+
+    class PrivateOnly:
+        _ibkr_data_stale = True
+
+    class PublicFalse:
+        ibkr_data_stale = False
+        _ibkr_data_stale = True
+
+    assert ibkr_data_stale_reason(connector=Public()) == "ibkr_data_stale"
+    assert ibkr_data_stale_reason(connector=Missing()) == ""
+    assert ibkr_data_stale_reason(connector=PrivateOnly()) == ""
+    assert ibkr_data_stale_reason(connector=PublicFalse()) == ""
+
+
+@pytest.mark.asyncio
+async def test_ibkr_data_stale_blocks_new_risk_not_exits(gate):
+    conn = FakeConnector()
+    conn.ibkr_data_stale = True
+    ok, reason = await gate.pre_trade_check(_bracket(), conn)
+    assert ok is False
+    assert reason == "ibkr_data_stale"
+    ok, reason = await gate.pre_trade_check(_market_order_exit(), conn)
+    assert ok is True
+    assert "bypass" in reason
+
+
+@pytest.mark.asyncio
+async def test_ibkr_data_stale_account_true_blocks_even_on_error_payload(gate):
+    conn = FakeConnector(account={"error": "timeout", "ibkr_data_stale": True})
+    ok, reason = await gate.pre_trade_check(_bracket(), conn)
+    assert ok is False
+    assert reason == "ibkr_data_stale"
+
+
+@pytest.mark.asyncio
+async def test_ibkr_data_stale_missing_field_is_no_signal(gate):
+    conn = FakeConnector()
+    assert "ibkr_data_stale" not in conn.account
+    ok, reason = await gate.pre_trade_check(_bracket(), conn)
+    assert ok is True, reason
+
+    conn._ibkr_data_stale = True
+    ok, reason = await gate.pre_trade_check(_bracket(), conn)
+    assert ok is True, reason
+
+
+@pytest.mark.asyncio
+async def test_ibkr_data_stale_blocks_when_paper_gates_are_off(monkeypatch):
+    from abcxauto.executor import execute_proposal
+
+    cfg = _cfg(
+        risk_gates_enabled=False,
+        defined_risk_only=False,
+        max_arena_concentration_pct=0,
+    )
+    monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+
+    class Stale(FakeConnector):
+        ibkr_data_stale = True
+
+        async def place_bracket_order(self, **kwargs):
+            raise AssertionError("stale book must not place")
+
+    result = await execute_proposal(_bracket(), Stale())
+    assert result.get("status") == "rejected"
+    assert result.get("error") == "ibkr_data_stale"
 
 
 def test_estimate_notional_csp_and_option_limit():
