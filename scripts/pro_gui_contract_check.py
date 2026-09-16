@@ -5,6 +5,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 PRO = REPO / "abcxauto" / "pro_desktop.py"
+DESKTOP = REPO / "abcxauto" / "desktop"
 REQUIRED = (
     "ABCXAUTO",
     "Grok stream",
@@ -37,15 +38,28 @@ REQUIRED = (
 )
 
 
+def cockpit_source_paths() -> list[Path]:
+    paths = [PRO]
+    if DESKTOP.is_dir():
+        paths.extend(sorted(p for p in DESKTOP.rglob("*.py") if p.is_file()))
+    return paths
+
+
+def cockpit_source_text() -> str:
+    return "\n".join(p.read_text(encoding="utf-8") for p in cockpit_source_paths())
+
+
 def main() -> int:
-    text = PRO.read_text(encoding="utf-8")
-    tree = ast.parse(text)
-    imports = {
-        alias.name.split(".")[0]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    }
+    text = cockpit_source_text()
+    imports: set[str] = set()
+    for path in cockpit_source_paths():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imports.update(
+            alias.name.split(".")[0]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        )
     lines, ok = [], True
     if "flet" not in imports:
         lines.append("FAIL: flet import missing")

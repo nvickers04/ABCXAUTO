@@ -21,419 +21,64 @@ import flet as ft
 
 from abcxauto.broker.connection import LIVE_CONFIRM_PHRASE
 from abcxauto.config import get_config, setup_file_logging
+from abcxauto.desktop.stream import (
+    current_look_text,
+    format_token_count,
+    grok_sub_color,
+    grok_sub_state,
+    last_card_send_label,
+    session_cap_idle_line,
+    stream_line_kind,
+    stream_view_lines,
+    think_tail_in_flight,
+    think_tail_last_marker,
+    think_tail_last_say,
+    think_tail_tool_chips,
+)
+from abcxauto.desktop.tokens import (
+    AMBER,
+    ASIDE_W,
+    ASSETS_DIR,
+    AGENT_FIELD_KEYS,
+    BG,
+    BLUE,
+    BORDER,
+    BRAIN_FIELDS,
+    CARD_STATUS_COLOR,
+    CENTER_MIN_W,
+    FLOOR_GATES,
+    GREEN,
+    HOVER,
+    LINK_FIELDS,
+    LOGO_SRC,
+    MUTED,
+    NAV,
+    NAV_SUBTITLES,
+    NAV_TITLES,
+    NOTE_COLOR,
+    PACING_FIELDS,
+    PAGE_REFRESH_S,
+    PRO_TITLE,
+    RAIL_BTN_W,
+    RAIL_W,
+    RED,
+    RISK_FIELDS,
+    STREAM_ALARM,
+    STREAM_FONT_SIZE,
+    STREAM_POKE,
+    STREAM_TAIL_CHARS,
+    STREAM_WARN,
+    SURFACE,
+    TAIL_LIVE_S,
+    TEXT,
+    TITLE,
+    WHITE,
+)
 from abcxauto.pro_engine import ProEngine
 from abcxauto.reality_pulse import build_reality_pulse, format_desk_clock, pulse_clock_view
 from abcxauto.think_stream import think_session_text
 
 logger = logging.getLogger(__name__)
-
-# X Lights Out palette — look only; nav/controls are product labels
-BG = "#000000"
-SURFACE = "#16181c"
-HOVER = "#181818"
-BORDER = "#2f3336"
-TEXT = "#e7e9ea"
-MUTED = "#71767b"
-GREEN = "#00ba7c"
-RED = "#f4212e"
-BLUE = "#1d9bf0"
-AMBER = "#ffd400"
-WHITE = "#ffffff"
-
-ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
-LOGO_SRC = "abcxauto_logo.png"
-TITLE = "ABCXAUTO Pro"
-PRO_TITLE = TITLE
-
-# Tabs are the primary navigation, so the rail only carries the action pills and
-# the account block — the width it used to spend on nav goes to the stream.
-RAIL_W = 200
-ASIDE_W = 320
-CENTER_MIN_W = 520
-RAIL_BTN_W = 168
-
-# key, label, outlined icon, filled icon
-NAV = [
-    ("overview", "Dashboard", ft.Icons.DASHBOARD_OUTLINED, ft.Icons.DASHBOARD),
-    (
-        "positions",
-        "Positions",
-        ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED,
-        ft.Icons.ACCOUNT_BALANCE_WALLET,
-    ),
-    ("notebook", "Playbook", ft.Icons.MENU_BOOK_OUTLINED, ft.Icons.MENU_BOOK),
-    ("scorecard", "Scorecard", ft.Icons.BAR_CHART_OUTLINED, ft.Icons.BAR_CHART),
-    ("risk", "Risk", ft.Icons.SHIELD_OUTLINED, ft.Icons.SHIELD),
-    ("settings", "Settings", ft.Icons.TUNE_OUTLINED, ft.Icons.TUNE),
-]
-NAV_TITLES = {
-    "overview": "Dashboard",
-    "positions": "Positions",
-    "notebook": "Playbook",
-    "scorecard": "Scorecard",
-    "risk": "Risk",
-    "settings": "Settings",
-}
-NAV_SUBTITLES = {
-    "overview": "Grok thinking, live. Looks, tools, tickets as they happen.",
-    "positions": "Broker book — lots, working orders, fills, activity.",
-    "notebook": "Grok's setup cards. Playbook, not law.",
-    "scorecard": "Are the setups beating the model bill?",
-    "risk": "The walk-away floor. Grok self_tunes inside it.",
-    "settings": "Brain, pacing and link. Applies without a restart.",
-}
-CARD_STATUS_COLOR = {"working": GREEN, "testing": AMBER, "retired": MUTED}
-# Settings fields, grouped the way the page shows them. label, hint.
-BRAIN_FIELDS = (
-    ("model", "Model", "beats ABCXAUTO_MODEL — next look rebuilds"),
-    ("model_rth", "RTH model", "empty = Model — thin sender"),
-    ("model_research", "Research model", "empty = Model — premarket/AH, no send"),
-    ("temperature", "Temperature", "0.0 – 2.0"),
-    ("max_tokens", "Max tokens", "1024 – 131072 per turn"),
-    (
-        "model_params",
-        "Model params",
-        "JSON object — shared effort/thinking. Empty = none. Next look rebuilds",
-    ),
-    (
-        "model_params_rth",
-        "RTH params",
-        "JSON object — empty = Model params. xhigh stripped when RTH thin is on",
-    ),
-    (
-        "model_params_research",
-        "Research params",
-        "JSON object — empty = Model params. Premarket/AH only",
-    ),
-)
-PACING_FIELDS = (
-    ("monitor_poll_s", "Monitor poll", "seconds, 5 – 900"),
-    ("monitor_review_s", "Monitor review", "seconds, 30 – 21600"),
-    ("disconnect_halt_s", "Disconnect halt", "seconds down before halt, 1 – 900"),
-    (
-        "session_look_cap",
-        "Session look cap",
-        "1 – 400 looks this session (premarket / RTH). Hit stays idle",
-    ),
-    (
-        "session_token_cap",
-        "Session token cap",
-        "50000 – 10000000 billed tokens this session. Hit stays idle",
-    ),
-)
-LINK_FIELDS = (
-    ("ibkr_host", "IBKR host", "TWS host — disconnected only"),
-    ("ibkr_client_id", "IBKR client id", "one per process — disconnected only"),
-)
-AGENT_FIELD_KEYS = frozenset(
-    k for k, _l, _h in (*BRAIN_FIELDS, *PACING_FIELDS, *LINK_FIELDS)
-)
-# The walk-away floor. Operator may re-arm; nothing in the UI may disarm.
-FLOOR_GATES = (
-    ("defined_risk_only", "Defined-risk only"),
-    ("cash_only", "Cash only"),
-    ("risk_gates_enabled", "Pre-trade gates"),
-    ("auto_panic_on_breach", "Auto-panic on breach"),
-)
-RISK_FIELDS = (
-    ("max_risk_per_trade_pct", "Max risk / trade", "% of NetLiq, 0 = off, else 0.25 – 25"),
-    ("daily_loss_limit_pct", "Daily loss limit", "% of NetLiq, 0.5 – 25"),
-    ("max_position_pct", "Max position", "% of NetLiq, 0 = off, else 5 – 25"),
-    ("max_symbol_concentration_pct", "Max per name", "% of NetLiq, all lots, 5 – 25"),
-    ("max_arena_concentration_pct", "Max per arena", "% of NetLiq, one sector/theme arena, 5 – 25"),
-    ("max_peak_drawdown_pct", "Peak drawdown", "% of NetLiq, 2 – 25"),
-    ("max_option_premium_pct", "Max option premium", "% of NetLiq, 0 = off, else 1 – 25"),
-    ("max_open_positions", "Max open lots", "0 = off — Grok may set N for this book"),
-    ("portfolio_cap_usd", "Portfolio max-loss $", "Display only. Not a place refuse. Default 800 is not a gate"),
-)
-# ProEngine._note kinds. Anything not listed still paints its message in MUTED,
-# so a new note kind is visible the day it is added.
-NOTE_COLOR = {
-    "err": RED,
-    "error": RED,
-    "retry": AMBER,
-    "park": AMBER,
-    "pause": AMBER,
-    "cap": AMBER,
-}
-PAGE_REFRESH_S = 3.0
-# Length-growth hold. Tool waits and the post-look snap are longer than this;
-# think_tail_in_flight is what keeps those ticks looking.
-TAIL_LIVE_S = 12.0
-# Markers that mean the tail is still inside a look, not an idle desk.
-_IN_FLIGHT_MARKERS = frozenset({"think", "tool", "banner", "cached", "send", "warn"})
-# Tool-chip window on the live RAM buffer — not the pane. The pane reads
-# today's think_session file. think_tail.txt stays an 8kb overwrite stub.
-STREAM_TAIL_CHARS = 8000
-# Wrapped tool output at 13px Consolas in a narrow column is hard to read; the
-# stream is the surface the operator actually sits and reads.
-STREAM_FONT_SIZE = 14
-# Markers think_stream/brain emit. The text is Grok's — we colour it, never
-# rewrite it. Anything unlisted paints as prose, so a new marker still shows.
-STREAM_ALARM = (
-    "[stream failed",
-    "[stream stalled]",
-    "[stream loop]",
-    "timed out",
-)
-STREAM_WARN = ("[think stopped:", "[truncated: max_tokens]")
-STREAM_POKE = ("[fill]", "[order_change]", "[unprotected]", "[stop_dist]")
-
-
-def stream_line_kind(line: str) -> str:
-    """Marker class for one raw stream line. Reads the text, never edits it."""
-    s = (line or "").strip()
-    if not s:
-        return "blank"
-    if (
-        s.startswith("--- GROK")
-        or s.startswith("--- CLERK")
-        or s.startswith("=== run")
-    ):
-        return "banner"
-    if s == "[think]":
-        return "think"
-    if s == "[say]":
-        return "say"
-    if s == "[clerk]":
-        return "clerk"
-    if s in STREAM_POKE:
-        return "poke"
-    if any(frag in s for frag in STREAM_ALARM):
-        return "alarm"
-    if any(frag in s for frag in STREAM_WARN):
-        return "warn"
-    if s.startswith("[") and s.endswith("]"):
-        if "= already have it" in s:
-            return "cached"
-        return "send" if s == "[send]" else "tool"
-    if s.startswith("hits=") and " src=" in s:
-        return "scan"
-    if s.startswith("{"):
-        # Compact tool dumps from emit(). Chips are [book], not {…}.
-        return "json"
-    return "prose"
-
-
-def stream_view_lines(body: str) -> list[str]:
-    """What the think pane paints from think_session_text.
-
-    JSON object dumps stay on the ET keep-file (Copy stream / disk). The pane
-    keeps [think]/[say]/[tool] chips, banners, and prose so the look is
-    readable. Consecutive JSON object lines collapse to one muted stub.
-    """
-    out: list[str] = []
-    json_chars = 0
-    json_n = 0
-
-    def _flush_json() -> None:
-        nonlocal json_chars, json_n
-        if not json_n:
-            return
-        if json_n == 1:
-            out.append(f"{{json {json_chars:,} chars}}")
-        else:
-            out.append(f"{{json {json_n} lines, {json_chars:,} chars}}")
-        json_chars = 0
-        json_n = 0
-
-    for raw in (body or "").splitlines():
-        kind = stream_line_kind(raw)
-        if kind == "blank":
-            continue
-        if kind == "json":
-            json_n += 1
-            json_chars += len(raw.strip())
-            continue
-        _flush_json()
-        out.append(raw)
-    _flush_json()
-    return out
-
-
-def current_look_text(buf: str) -> str:
-    """The live look: from the last GROK banner, not a clerk speaker."""
-    text = buf or ""
-    grok = text.rfind("--- GROK")
-    return text[grok:] if grok >= 0 else text
-
-
-def think_tail_tool_chips(buf: str) -> list[str]:
-    """Tool names from the readable tail's [chip] lines, not last_turn.tool_trace.
-
-    Each model step paints ``--- GROK ---``, so the last banner is often an
-    open [think] with [book]/[scan]/… still above it. Counting only
-    current_look_text then paints 0 tools on a live look.
-    """
-    names: list[str] = []
-    for raw in (buf or "")[-STREAM_TAIL_CHARS:].splitlines():
-        if stream_line_kind(raw) != "tool":
-            continue
-        inner = raw.strip()[1:-1].strip()
-        if inner:
-            names.append(inner.split()[0])
-    return names
-
-
-def think_tail_last_marker(buf: str) -> str:
-    """Last stream marker in the tail. Prose keeps the marker it follows."""
-    last = ""
-    for raw in (buf or "").splitlines():
-        kind = stream_line_kind(raw)
-        if kind in (
-            "think",
-            "say",
-            "tool",
-            "banner",
-            "cached",
-            "send",
-            "warn",
-            "alarm",
-            "poke",
-        ):
-            last = kind
-    return last
-
-
-def think_tail_in_flight(buf: str) -> bool:
-    """True when the tail is still inside a look (open think, tool, or new banner)."""
-    return think_tail_last_marker(current_look_text(buf)) in _IN_FLIGHT_MARKERS
-
-
-def _say_is_real(text: str) -> bool:
-    t = " ".join((text or "").split())
-    return bool(t) and t not in {"?", "—", "-", ".", "…"}
-
-
-def think_tail_last_say(buf: str) -> str:
-    """Last real assistant [say] in the tail. Junk '?' does not wipe an earlier say."""
-    found: list[str] = []
-    lines = (buf or "").splitlines()
-    i = 0
-    while i < len(lines):
-        if lines[i].strip() != "[say]":
-            i += 1
-            continue
-        i += 1
-        parts: list[str] = []
-        while i < len(lines):
-            kind = stream_line_kind(lines[i])
-            if kind not in ("prose", "blank"):
-                break
-            bit = lines[i].strip()
-            if bit:
-                parts.append(bit)
-            i += 1
-        text = " ".join(parts).strip()
-        if _say_is_real(text):
-            found.append(text)
-    return found[-1] if found else ""
-
-
-def last_card_send_label(rows: list[dict[str, Any]] | None = None) -> str:
-    """Last named send row when the caller already has it. Persist is gone."""
-    if rows is None:
-        return ""
-    if not rows:
-        return ""
-    row = rows[-1] if isinstance(rows[-1], dict) else {}
-    card = str(row.get("card") or "").strip()
-    if not card:
-        return ""
-    symbol = str(row.get("symbol") or "").strip()
-    return f"{symbol} · {card}" if symbol else card
-
-
-def grok_sub_state(
-    *,
-    running: bool,
-    status: str = "",
-    fail_streak: int = 0,
-    parked: bool = False,
-    tail_moved: bool = False,
-    tail_live: bool = False,
-    paused: bool = False,
-    session_capped: bool = False,
-) -> str:
-    """One process, one state: looking | sat | idle | paused | look failed | off.
-
-    Cap-idle and overnight park are idle, not sat. A leftover open think after
-    the cap is not live. Paused is operator stop. Sat is only between looks.
-    """
-    if paused:
-        return "paused"
-    if not running:
-        return "off"
-    st = (status or "").lower()
-    # Session cap / park beat a leftover open think. That look is not live.
-    if session_capped or st == "idle" or parked or st == "parked":
-        return "idle"
-    looking = (
-        st.startswith("thinking")
-        or st.startswith("grok")
-        or bool(tail_moved)
-        or bool(tail_live)
-    )
-    if looking:
-        return "looking"
-    if int(fail_streak or 0) > 0:
-        return "look failed"
-    return "sat"
-
-
-def grok_sub_color(state: str) -> str:
-    if state == "looking":
-        return GREEN
-    if state in ("look failed", "idle", "paused"):
-        return AMBER
-    if state == "sat":
-        return TEXT
-    return MUTED
-
-
-def format_token_count(n: int | float | None) -> str:
-    """Compact billed-token count for the strip (2.533M/2.5M)."""
-    try:
-        count = int(n or 0)
-    except (TypeError, ValueError):
-        return "0"
-    if abs(count) >= 1_000_000:
-        text = f"{count / 1_000_000:.3f}".rstrip("0").rstrip(".")
-        return f"{text}M"
-    if abs(count) >= 1000:
-        text = f"{count / 1000:.1f}".rstrip("0").rstrip(".")
-        return f"{text}k"
-    return str(count)
-
-
-def session_cap_idle_line(used: dict | None = None) -> str:
-    """Which cap tripped, with the numbers. Never sat."""
-    row = used if isinstance(used, dict) else {}
-    why = str(row.get("why") or "").strip().lower()
-    try:
-        looks = int(row.get("looks") or 0)
-        look_cap = int(row.get("look_cap") or 0)
-    except (TypeError, ValueError):
-        looks, look_cap = 0, 0
-    try:
-        tokens = int(row.get("tokens") or 0)
-        token_cap = int(row.get("token_cap") or 0)
-    except (TypeError, ValueError):
-        tokens, token_cap = 0, 0
-    look_hit = why in ("looks", "looks+tokens") or (look_cap > 0 and looks >= look_cap)
-    token_hit = why in ("tokens", "looks+tokens") or (
-        token_cap > 0 and tokens >= token_cap
-    )
-    bits: list[str] = []
-    if look_hit:
-        bits.append(f"look cap {looks}/{look_cap}")
-    if token_hit:
-        bits.append(
-            f"token cap {format_token_count(tokens)}/{format_token_count(token_cap)}"
-        )
-    if not bits:
-        return "session cap — idle"
-    return f"{' · '.join(bits)} — idle"
 
 
 class ProTerminal:
