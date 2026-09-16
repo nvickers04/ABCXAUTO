@@ -53,8 +53,8 @@ def test_pct_of_nl_digits_for_display():
 
 
 def test_risk_gates_helper_still_disagrees_on_zero_book():
-    """Migration note: gates treat missing book as 0.0, not None."""
-    from abcxauto.risk_gates import _pct_of_nl
+    """#207 finished the migration: gates use shared pct_of_nl (None on empty book)."""
+    import abcxauto.risk_gates as gates
 
-    assert _pct_of_nl(50.0, 0.0) == 0.0
+    assert not hasattr(gates, "_pct_of_nl")
     assert pct_of_nl(50.0, 0.0) is None
