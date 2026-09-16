@@ -296,7 +296,12 @@ def test_allowlist_stay_only_on_rth_kill_look(monkeypatch):
         if isinstance(params, str):
             params = json.loads(params)
         enum = list(((params.get("properties") or {}).get("strategy") or {}).get("enum") or [])
-    assert enum == ["vertical_spread"]
+    from abcxauto.thin_rth_kill_look import send_strategy_names
+    assert enum == send_strategy_names(session="regular")
+    assert "vertical_spread" in enum
+    assert "iron_condor" in enum
+    assert "market_bracket" in enum
+    assert "ratio_spread" not in enum
     research = _tool_names("premarket")
     assert "send" not in research
     assert "web" in research
@@ -689,13 +694,15 @@ async def test_execute_ticket_kill_look_blocks_non_pcs(monkeypatch):
     world = _world(session_status="regular", flat=True)
     result = await execute_ticket(
         {
-            "strategy": "market_bracket",
+            "strategy": "ratio_spread",
             "params": {
                 "symbol": "SPY",
+                "expiration": "20260718",
+                "long_strike": 500.0,
+                "short_strike": 510.0,
+                "right": "C",
+                "ratio": 2,
                 "quantity": 1,
-                "direction": "LONG",
-                "stop_price": 1.0,
-                "target_price": 2.0,
                 "card": "other",
             },
             "card": "other",

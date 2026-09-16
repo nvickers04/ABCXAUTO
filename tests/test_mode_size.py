@@ -541,18 +541,9 @@ def test_defined_risk_only_still_rejects_stk_and_allows_last_stop_when_max_risk_
     monkeypatch.setattr("abcxauto.risk_gates.get_config", get_config)
     monkeypatch.setattr("abcxauto.proposals.get_config", get_config)
 
-    mb = validate_proposal(
-        "market_bracket",
-        {
-            "symbol": "SIRI",
-            "quantity": 10,
-            "direction": "LONG",
-            "stop_price": 28.50,
-            "target_price": 31.00,
-        },
-        RATIONALE,
-        quote_last=29.75,
-    )
+    from tests.test_risk_gates import _naked_stk_proposal
+
+    mb = _naked_stk_proposal()
     ok, why = check_defined_risk_only(mb)
     assert ok is False
     assert "defined_risk_only" in why
