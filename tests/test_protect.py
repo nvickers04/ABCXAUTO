@@ -1477,7 +1477,7 @@ async def test_execute_ticket_uses_scan_hit_last_when_quote_map_misses(monkeypat
             "ibkr_live_quotes": {},
             "scan_hits": {
                 "quoted": 1,
-                "rows": [{"symbol": "SNDK", "last": 91.5}],
+                "rows": [{"symbol": "SNDK", "last": 91.5, "ibkr": {"last": 91.5}}],
             },
             "session_range": {
                 "SNDK": {
