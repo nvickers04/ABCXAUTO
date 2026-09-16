@@ -785,9 +785,14 @@ def _wire_stay_up_engine(monkeypatch, *, session: str, think, paper: bool = True
     monkeypatch.setattr("abcxauto.park_clock.min_look_s", lambda: 0.01)
     if session in ("closed", "postmarket"):
         # Labeled overnight snaps must not follow the wall-clock premarket roll.
+        # start() uses et_minutes_to_rth_open, not infer_session_before_open.
         monkeypatch.setattr(
             "abcxauto.park_clock.infer_session_before_open",
             lambda **_k: (session, 12 * 60.0),
+        )
+        monkeypatch.setattr(
+            "abcxauto.park_clock.et_minutes_to_rth_open",
+            lambda **_k: 12 * 60.0,
         )
 
 
@@ -796,6 +801,10 @@ def _freeze_overnight_closed(monkeypatch) -> None:
     monkeypatch.setattr(
         "abcxauto.park_clock.infer_session_before_open",
         lambda **_k: ("closed", 12 * 60.0),
+    )
+    monkeypatch.setattr(
+        "abcxauto.park_clock.et_minutes_to_rth_open",
+        lambda **_k: 12 * 60.0,
     )
 
 
@@ -834,8 +843,15 @@ def test_desk_mode_brain_rebuilds_on_research_to_rth_roll(monkeypatch):
     assert getattr(eng, "_research_color_injected", True) is False
 
 
-def test_research_stay_up_rolled_to_rth_is_premarket_to_regular():
+def test_research_stay_up_rolled_to_rth_is_premarket_to_regular(monkeypatch):
     """A: last research stay-up + clock/snap regular is the RTH roll."""
+    # Empty last must not clock-fill into the live ET session. Premarket
+    # wall-clock would make ("", "regular") look like a finished research roll.
+    monkeypatch.setattr(
+        "abcxauto.park_clock.infer_session_before_open",
+        lambda **_k: ("", None),
+    )
+    monkeypatch.setattr("abcxauto.opportunity_scan.rth_now", lambda now=None: False)
     eng = ProEngine()
     assert eng._research_stay_up_rolled_to_rth("premarket", "regular") is True
     assert eng._research_stay_up_rolled_to_rth("premarket", "premarket") is False
