@@ -449,7 +449,9 @@ def apply_self_tune(
 
             if persist:
                 cur = load_allowlist()
-                save_allowlist({**cur, **universe_payload})
+                blob = {**cur, **universe_payload}
+                blob["refresh_pending"] = True
+                save_allowlist(blob)
             applied["universe"] = universe_payload
         except Exception as exc:
             logger.exception("self_tune universe failed")

@@ -1166,6 +1166,49 @@ def build_expectancy(
     return ranked
 
 
+def _normalize_regime(raw: Any) -> dict[str, Any] | None:
+    """Named day theme. Not an arena apply. Empty/missing is none."""
+    if not isinstance(raw, dict):
+        return None
+    theme = str(raw.get("theme") or raw.get("name") or raw.get("thesis") or "").strip()
+    catalyst = str(raw.get("catalyst") or "").strip()
+    source = str(raw.get("source") or "").strip()
+    invalidate = str(raw.get("invalidate") or "").strip()
+    arenas: list[str] = []
+    for item in raw.get("arenas") or []:
+        name = str(item or "").strip()
+        if name and name not in arenas:
+            arenas.append(name)
+    if not (theme or catalyst or source or arenas or invalidate):
+        return None
+    return {
+        "theme": theme,
+        "catalyst": catalyst,
+        "source": source,
+        "arenas": arenas,
+        "invalidate": invalidate,
+    }
+
+
+def _regime_age_token(brief: dict[str, Any] | None, *, now: datetime | None = None) -> str:
+    row = brief if isinstance(brief, dict) else {}
+    ts = _parse_iso(str(row.get("as_of") or row.get("ts") or ""))
+    if ts is None:
+        return "never"
+    clock = now or _utc_now()
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    age = max(0.0, (clock - ts).total_seconds())
+    if age < 90:
+        return f"{int(age)}s"
+    if age < 3600:
+        return f"{int(age // 60)}m"
+    hours = age / 3600.0
+    if abs(hours - round(hours)) < 0.05:
+        return f"{int(round(hours))}h"
+    return f"{hours:.1f}h"
+
+
 def write_research_brief(
     *,
     session: str = "",
@@ -1207,6 +1250,10 @@ def write_research_brief(
         note = "no AH/PM catalyst expectancy this look — news/scan/web returned none"
         if note not in uns:
             uns.append(note)
+    snap_bag = snap if isinstance(snap, dict) else {}
+    regime = _normalize_regime(snap_bag.get("regime"))
+    if regime is None:
+        regime = _normalize_regime(load_research_brief().get("regime"))
     payload = {
         "as_of": _iso(now),
         "session": sess,
@@ -1218,6 +1265,8 @@ def write_research_brief(
         "tickets": [],
         "tool_trace": list(getattr(turn, "tool_trace", None) or [])[:24],
     }
+    if regime is not None:
+        payload["regime"] = regime
     try:
         from abcxauto.research_budget import stamp_brief_lineage
 
@@ -1272,15 +1321,19 @@ def rth_research_color(
         )
     if research_brief_stale(brief, now=now):
         as_of = str(brief.get("as_of") or "")
+        stale_reg = _normalize_regime(brief.get("regime"))
+        extra = " regime=stale" if stale_reg else ""
         return (
             "prior_session_research=stale "
-            f"as_of={as_of} (color, never a live trigger)."
+            f"as_of={as_of}{extra} (color, never a live trigger)."
         )
     if not full:
         n = len(brief.get("expectancy") or [])
+        reg = _normalize_regime(brief.get("regime"))
+        theme = f" regime={reg['theme']}" if reg and reg.get("theme") else ""
         return (
             "prior_session_research=on_disk "
-            f"expectancy={n} (color, never a live trigger)."
+            f"expectancy={n}{theme} (color, never a live trigger)."
         )
     bits = [
         "prior_session_research(color, not a live trigger):",
@@ -1289,6 +1342,15 @@ def rth_research_color(
     sess = str(brief.get("session") or "")
     if as_of or sess:
         bits.append(f"as_of={as_of} session={sess}.")
+    regime = _normalize_regime(brief.get("regime"))
+    if regime:
+        arenas = ",".join(regime.get("arenas") or []) or "none"
+        bits.append(
+            f"regime={regime.get('theme') or '?'} catalyst={regime.get('catalyst') or '?'} "
+            f"arenas={arenas} src={regime.get('source') or '?'} "
+            f"invalidate={regime.get('invalidate') or '?'} "
+            f"age={_regime_age_token(brief, now=now)}."
+        )
     for row in (brief.get("expectancy") or [])[:EXPECTANCY_CAP]:
         if not isinstance(row, dict):
             continue

@@ -1297,6 +1297,15 @@ def _minutes_to_open(world: Any) -> int | None:
     return None
 
 
+def _universe_watch_line() -> str:
+    try:
+        from abcxauto.universe import membership_watch_line
+
+        return membership_watch_line()
+    except Exception:
+        return ""
+
+
 def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
     """Session forest: IBKR day, open uPnL, NL vs start minus model. Not one number."""
     sc = scorecard if isinstance(scorecard, dict) else {}
@@ -1436,6 +1445,7 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "countdown_to": sess_block.get("countdown_to"),
         "countdown_human": sess_block.get("countdown_human"),
         "tradable_now": pulse.get("tradable_now"),
+        "watch": _universe_watch_line(),
     }
 
 

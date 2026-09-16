@@ -423,6 +423,9 @@ async def criteria_scan(
     filters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One screen this look: arena | scan_code | symbols[]. No persist, no MDA daily-120."""
+    from abcxauto.universe import maybe_refresh_pending_universe, membership_watch_line
+
+    await maybe_refresh_pending_universe(connector)
     asked = normalize_tickers(symbols or [], cap=cap)
     has_arena = bool(str(arena or "").strip())
     has_code = bool(str(scan_code or "").strip())
@@ -525,6 +528,7 @@ async def criteria_scan(
     else:
         out["rank_meaning"] = "not ranked"
         out["note"] = "fat drill-down; ranked arena/scan_code screens stay thin"
+    out["watch"] = membership_watch_line()
     return out
 
 
