@@ -225,6 +225,10 @@ async def snap(c: Any) -> dict:
     except (TypeError, ValueError):
         acct_nl = 0.0
     acct_ok = acct_nl > 0
+    # Missing is no signal — #201 exposes the public flag; do not read private.
+    stale = acct_d.get("ibkr_data_stale") is True or getattr(
+        c, "ibkr_data_stale", None
+    ) is True
     taken = datetime.now(timezone.utc).isoformat()
     protection = build_protection_report(pl, ol)
     base = {
@@ -235,7 +239,8 @@ async def snap(c: Any) -> dict:
         "spy_quote": spy if isinstance(spy, dict) else {},
         "vix_quote": vix if isinstance(vix, dict) else {},
         "protection": protection,
-        "book_unreliable": not (pos_ok and ord_ok and acct_ok),
+        "ibkr_data_stale": stale,
+        "book_unreliable": not (pos_ok and ord_ok and acct_ok) or stale,
         "ibkr_live_quotes": _seed_live_quotes(spy, vix),
         "candle_source": "none",
     }
@@ -627,24 +632,39 @@ async def execute_ticket(
             )
             return blocked
     except Exception:
-        logger.debug("kill-look send gate failed", exc_info=True)
+        logger.exception("kill-look send gate failed")
+        asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
+        params = act.get("params") if isinstance(act.get("params"), dict) else {}
         try:
             from abcxauto.thin_rth_kill_look import REASON_MODEL_COST, kill_look_rth
+            from abcxauto.token_ttl import ticket_is_exit
 
-            if kill_look_rth(sess):
-                params = act.get("params") if isinstance(act.get("params"), dict) else {}
-                asked = str(act.get("strategy") or act.get("action") or "").strip().lower()
-                if is_new_risk(asked, params):
-                    note = "kill-look gate failed closed"
-                    _record_clerk_block(act, asked, note, stage="kill_look")
-                    return {
-                        "status": "blocked",
-                        "note": note,
-                        "reason_code": REASON_MODEL_COST,
-                        "strategy": "blocked",
-                    }
+            rth = bool(kill_look_rth(sess))
+            is_exit = bool(ticket_is_exit(act))
+            reason = REASON_MODEL_COST
         except Exception:
-            logger.debug("kill-look fail-closed fallback failed", exc_info=True)
+            logger.exception("kill-look fail-closed fallback failed")
+            rth = str(sess or "").strip().lower() == "regular"
+            is_exit = bool(params.get("closing_position") is True) or asked in (
+                "close_option",
+                "modify_stop",
+                "modify_target",
+                "cancel_order",
+                "trailing_stop",
+                "trailing_stop_limit",
+                "roll_option",
+                "oca",
+            )
+            reason = "kill_look_gate_failed"
+        if rth and not is_exit:
+            note = "kill-look gate failed closed"
+            _record_clerk_block(act, asked, note, stage="kill_look")
+            return {
+                "status": "blocked",
+                "note": note,
+                "reason_code": reason,
+                "strategy": "blocked",
+            }
     positions = list(snap.get("positions") or world.positions or [])
     orders = list(snap.get("open_orders") or world.open_orders or [])
     asked = str(act.get("strategy") or act.get("action") or "").strip().lower()

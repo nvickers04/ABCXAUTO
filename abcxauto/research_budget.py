@@ -17,6 +17,7 @@ import json
 import logging
 import math
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,9 @@ _DEFAULT_PATH = _REPO / "data" / "state" / "research_budget.json"
 
 _cache: dict[str, Any] | None = None
 _cache_path: str = ""
+_cache_mtime: float = -1.0
+_DIRTY_MTIME = -2.0
+_io = threading.RLock()
 
 
 def _path() -> Path:
@@ -56,9 +60,10 @@ def _path() -> Path:
 
 def reset_research_budget() -> None:
     """Drop the in-memory cache (tests)."""
-    global _cache, _cache_path
+    global _cache, _cache_path, _cache_mtime
     _cache = None
     _cache_path = ""
+    _cache_mtime = -1.0
 
 
 def _et_now(now: datetime | None = None) -> datetime:
@@ -163,60 +168,83 @@ def _row_of(raw: Any, research_card_id: str = "", prove_window_id: str = "") -> 
     }
 
 
+def _file_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return -1.0
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _load_table() -> dict[str, dict[str, Any]]:
-    global _cache, _cache_path
-    p = str(_path())
-    if _cache is not None and _cache_path == p:
-        return _cache
-    table: dict[str, dict[str, Any]] = {}
-    path = _path()
-    blob: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                blob = raw
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            blob = {}
-    cards = blob.get("cards") if isinstance(blob.get("cards"), dict) else {}
-    for raw_key, raw_row in dict(cards or {}).items():
-        key = str(raw_key or "")
-        if not key:
-            continue
-        row = _row_of(raw_row)
-        if not row["research_card_id"] or not row["prove_window_id"]:
-            parts = key.split("::", 1)
-            if len(parts) == 2:
-                row["research_card_id"] = row["research_card_id"] or parts[0]
-                row["prove_window_id"] = row["prove_window_id"] or parts[1]
-        table[key] = row
-    _cache = table
-    _cache_path = p
-    return table
+    global _cache, _cache_path, _cache_mtime
+    with _io:
+        path = _path()
+        p = str(path)
+        mtime = _file_mtime(path)
+        if (
+            _cache is not None
+            and _cache_path == p
+            and (_cache_mtime == _DIRTY_MTIME or mtime == _cache_mtime)
+        ):
+            return _cache
+        table: dict[str, dict[str, Any]] = {}
+        blob: dict[str, Any] = {}
+        if path.is_file():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    blob = raw
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                blob = {}
+        cards = blob.get("cards") if isinstance(blob.get("cards"), dict) else {}
+        for raw_key, raw_row in dict(cards or {}).items():
+            key = str(raw_key or "")
+            if not key:
+                continue
+            row = _row_of(raw_row)
+            if not row["research_card_id"] or not row["prove_window_id"]:
+                parts = key.split("::", 1)
+                if len(parts) == 2:
+                    row["research_card_id"] = row["research_card_id"] or parts[0]
+                    row["prove_window_id"] = row["prove_window_id"] or parts[1]
+            table[key] = row
+        _cache = table
+        _cache_path = p
+        _cache_mtime = mtime
+        return table
 
 
 def _save_table(table: dict[str, dict[str, Any]]) -> None:
-    global _cache, _cache_path
-    path = _path()
-    clean: dict[str, dict[str, Any]] = {}
-    for raw_key, raw_row in dict(table or {}).items():
-        key = str(raw_key or "")
-        if not key:
-            continue
-        row = _row_of(raw_row)
-        if not row["research_card_id"] or not row["prove_window_id"]:
-            continue
-        clean[card_key(row["research_card_id"], row["prove_window_id"])] = row
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"cards": clean}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except OSError:
-        logger.debug("research_budget write failed", exc_info=True)
-    _cache = clean
-    _cache_path = str(path)
+    global _cache, _cache_path, _cache_mtime
+    with _io:
+        path = _path()
+        clean: dict[str, dict[str, Any]] = {}
+        for raw_key, raw_row in dict(table or {}).items():
+            key = str(raw_key or "")
+            if not key:
+                continue
+            row = _row_of(raw_row)
+            if not row["research_card_id"] or not row["prove_window_id"]:
+                continue
+            clean[card_key(row["research_card_id"], row["prove_window_id"])] = row
+        try:
+            _atomic_write(
+                path,
+                json.dumps({"cards": clean}, indent=2) + "\n",
+            )
+            _cache_mtime = _file_mtime(path)
+        except OSError:
+            logger.debug("research_budget write failed", exc_info=True)
+            _cache_mtime = _DIRTY_MTIME
+        _cache = clean
+        _cache_path = str(path)
 
 
 def card_row(
@@ -255,16 +283,17 @@ def open_research_card(
     window = str(prove_window_id or "").strip()
     if not card or not window:
         return _empty_row(card, window)
-    table = _load_table()
-    key = card_key(card, window)
-    row = table.get(key)
-    if not isinstance(row, dict):
-        row = _empty_row(card, window)
-        row["gate_verdict"] = _verdict_of(gate_verdict)
-        table[key] = row
-        _save_table(table)
+    with _io:
+        table = _load_table()
+        key = card_key(card, window)
+        row = table.get(key)
+        if not isinstance(row, dict):
+            row = _empty_row(card, window)
+            row["gate_verdict"] = _verdict_of(gate_verdict)
+            table[key] = row
+            _save_table(table)
+            return dict(row)
         return dict(row)
-    return dict(row)
 
 
 def ensure_research_card(
@@ -384,16 +413,17 @@ def mark_brief_loop_halt(
     window = str(prove_window_id or "").strip()
     if not card or not window:
         return _empty_row(card, window)
-    table = _load_table()
-    key = card_key(card, window)
-    row = _row_of(table.get(key) or _empty_row(card, window), card, window)
-    row["brief_loop_halted"] = True
-    row["halt_reason"] = str(reason or REASON_BRIEF_LOOP)
-    if missing_cost:
-        row["model_cost_window_USD"] = None
-    table[key] = row
-    _save_table(table)
-    return dict(row)
+    with _io:
+        table = _load_table()
+        key = card_key(card, window)
+        row = _row_of(table.get(key) or _empty_row(card, window), card, window)
+        row["brief_loop_halted"] = True
+        row["halt_reason"] = str(reason or REASON_BRIEF_LOOP)
+        if missing_cost:
+            row["model_cost_window_USD"] = None
+        table[key] = row
+        _save_table(table)
+        return dict(row)
 
 
 def brief_loop_halted(
@@ -511,33 +541,34 @@ def note_brief_turn(
         halted["billed"] = False
         halted["reason_code"] = REASON_BRIEF_COST
         return halted
-    table = _load_table()
-    key = card_key(card, window)
-    row = _row_of(table.get(key) or _empty_row(card, window), card, window)
-    so_far = parse_model_cost(row.get("model_cost_window_USD"))
-    if so_far is None:
-        halted = mark_brief_loop_halt(
-            card, window, reason=REASON_BRIEF_COST, missing_cost=True
-        )
-        halted["billed"] = False
-        halted["reason_code"] = REASON_BRIEF_COST
-        return halted
-    row["turns"] = _int_ge0(row.get("turns")) + 1
-    row["tool_calls"] = _int_ge0(row.get("tool_calls")) + add_tools
-    row["model_cost_window_USD"] = so_far + add
-    if (
-        row["turns"] >= BRIEF_CARD_TURNS_MAX
-        or row["tool_calls"] >= BRIEF_CARD_TOOLS_MAX
-        or float(row["model_cost_window_USD"]) > BRIEF_CARD_MODEL_HARD_USD
-    ):
-        row["brief_loop_halted"] = True
-        row["halt_reason"] = REASON_BRIEF_LOOP
-    table[key] = row
-    _save_table(table)
-    out = dict(row)
-    out["billed"] = True
-    out["reason_code"] = str(row.get("halt_reason") or "")
-    return out
+    with _io:
+        table = _load_table()
+        key = card_key(card, window)
+        row = _row_of(table.get(key) or _empty_row(card, window), card, window)
+        so_far = parse_model_cost(row.get("model_cost_window_USD"))
+        if so_far is None:
+            halted = mark_brief_loop_halt(
+                card, window, reason=REASON_BRIEF_COST, missing_cost=True
+            )
+            halted["billed"] = False
+            halted["reason_code"] = REASON_BRIEF_COST
+            return halted
+        row["turns"] = _int_ge0(row.get("turns")) + 1
+        row["tool_calls"] = _int_ge0(row.get("tool_calls")) + add_tools
+        row["model_cost_window_USD"] = so_far + add
+        if (
+            row["turns"] >= BRIEF_CARD_TURNS_MAX
+            or row["tool_calls"] >= BRIEF_CARD_TOOLS_MAX
+            or float(row["model_cost_window_USD"]) > BRIEF_CARD_MODEL_HARD_USD
+        ):
+            row["brief_loop_halted"] = True
+            row["halt_reason"] = REASON_BRIEF_LOOP
+        table[key] = row
+        _save_table(table)
+        out = dict(row)
+        out["billed"] = True
+        out["reason_code"] = str(row.get("halt_reason") or "")
+        return out
 
 
 def set_gate_verdict(
@@ -548,16 +579,17 @@ def set_gate_verdict(
     card = str(research_card_id or "").strip()
     window = str(prove_window_id or "").strip()
     token = _verdict_of(verdict)
-    row = ensure_research_card(card, window)
-    if not card or not window or not token:
-        return row
-    table = _load_table()
-    key = card_key(card, window)
-    row = _row_of(table.get(key) or row, card, window)
-    row["gate_verdict"] = token
-    table[key] = row
-    _save_table(table)
-    return dict(row)
+    with _io:
+        row = ensure_research_card(card, window)
+        if not card or not window or not token:
+            return row
+        table = _load_table()
+        key = card_key(card, window)
+        row = _row_of(table.get(key) or row, card, window)
+        row["gate_verdict"] = token
+        table[key] = row
+        _save_table(table)
+        return dict(row)
 
 
 def set_model_cost_window(
@@ -573,14 +605,15 @@ def set_model_cost_window(
         return mark_brief_loop_halt(
             card, window, reason=REASON_BRIEF_COST, missing_cost=True
         )
-    row = ensure_research_card(card, window)
-    table = _load_table()
-    key = card_key(card, window)
-    row = _row_of(table.get(key) or row, card, window)
-    row["model_cost_window_USD"] = parsed
-    table[key] = row
-    _save_table(table)
-    return dict(row)
+    with _io:
+        row = ensure_research_card(card, window)
+        table = _load_table()
+        key = card_key(card, window)
+        row = _row_of(table.get(key) or row, card, window)
+        row["model_cost_window_USD"] = parsed
+        table[key] = row
+        _save_table(table)
+        return dict(row)
 
 
 def lab_promote_ok(row: dict[str, Any] | None) -> bool:

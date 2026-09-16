@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,9 @@ TOKEN_CAP_RANGE = (50_000, 10_000_000)
 
 _cache: dict[str, Any] | None = None
 _cache_path: str = ""
+_cache_mtime: float = -1.0
+_DIRTY_MTIME = -2.0
+_io = threading.RLock()
 
 
 def _path() -> Path:
@@ -115,64 +119,88 @@ def _row_of(raw: Any, key: str = "") -> dict[str, Any]:
     }
 
 
+def _file_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return -1.0
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _load_table() -> dict[str, dict[str, Any]]:
     """All session rows. Premarket and RTH keep separate budgets."""
-    global _cache, _cache_path
-    p = str(_path())
-    if _cache is not None and _cache_path == p:
-        return _cache
-    table: dict[str, dict[str, Any]] = {}
-    path = _path()
-    blob: dict[str, Any] = {}
-    if path.is_file():
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                blob = raw
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            blob = {}
-    sessions = blob.get("sessions") if isinstance(blob.get("sessions"), dict) else None
-    if sessions:
-        for raw_key, raw_row in sessions.items():
-            key = str(raw_key or "")
-            if not key:
-                continue
-            table[key] = _row_of(raw_row, key)
-    elif str(blob.get("key") or ""):
-        # Legacy single-row file from before dual-mode.
-        row = _row_of(blob)
-        table[str(blob.get("key"))] = row
-    _cache = table
-    _cache_path = p
-    return table
+    global _cache, _cache_path, _cache_mtime
+    with _io:
+        path = _path()
+        p = str(path)
+        mtime = _file_mtime(path)
+        if (
+            _cache is not None
+            and _cache_path == p
+            and (_cache_mtime == _DIRTY_MTIME or mtime == _cache_mtime)
+        ):
+            return _cache
+        table: dict[str, dict[str, Any]] = {}
+        blob: dict[str, Any] = {}
+        if path.is_file():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    blob = raw
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                blob = {}
+        sessions = blob.get("sessions") if isinstance(blob.get("sessions"), dict) else None
+        if sessions:
+            for raw_key, raw_row in sessions.items():
+                key = str(raw_key or "")
+                if not key:
+                    continue
+                table[key] = _row_of(raw_row, key)
+        elif str(blob.get("key") or ""):
+            # Legacy single-row file from before dual-mode.
+            row = _row_of(blob)
+            table[str(blob.get("key"))] = row
+        _cache = table
+        _cache_path = p
+        _cache_mtime = mtime
+        return table
 
 
 def _save_table(table: dict[str, dict[str, Any]]) -> None:
-    global _cache, _cache_path
-    path = _path()
-    clean: dict[str, dict[str, Any]] = {}
-    for raw_key, raw_row in dict(table or {}).items():
-        key = str(raw_key or "")
-        if not key:
-            continue
-        clean[key] = _row_of(raw_row, key)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"sessions": clean}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    except OSError:
-        logger.debug("session_caps write failed", exc_info=True)
-    _cache = clean
-    _cache_path = str(path)
+    global _cache, _cache_path, _cache_mtime
+    with _io:
+        path = _path()
+        clean: dict[str, dict[str, Any]] = {}
+        for raw_key, raw_row in dict(table or {}).items():
+            key = str(raw_key or "")
+            if not key:
+                continue
+            clean[key] = _row_of(raw_row, key)
+        try:
+            _atomic_write(
+                path,
+                json.dumps({"sessions": clean}, indent=2) + "\n",
+            )
+            _cache_mtime = _file_mtime(path)
+        except OSError:
+            logger.debug("session_caps write failed", exc_info=True)
+            _cache_mtime = _DIRTY_MTIME
+        _cache = clean
+        _cache_path = str(path)
 
 
 def reset_session_caps() -> None:
     """Drop the in-memory cache (tests)."""
-    global _cache, _cache_path
+    global _cache, _cache_path, _cache_mtime
     _cache = None
     _cache_path = ""
+    _cache_mtime = -1.0
 
 
 def _caps() -> tuple[int, int]:
@@ -271,13 +299,14 @@ def note_look(
         add = max(0, int(tokens or 0))
     except (TypeError, ValueError):
         add = 0
-    state = _state_for(session, now=now)
-    state["looks"] = int(state.get("looks") or 0) + 1
-    state["tokens"] = int(state.get("tokens") or 0) + add
-    table = _load_table()
-    table[str(state.get("key") or "")] = state
-    _save_table(table)
-    return usage(session, now=now)
+    with _io:
+        state = _state_for(session, now=now)
+        state["looks"] = int(state.get("looks") or 0) + 1
+        state["tokens"] = int(state.get("tokens") or 0) + add
+        table = _load_table()
+        table[str(state.get("key") or "")] = state
+        _save_table(table)
+        return usage(session, now=now)
 
 
 def _iso_week_key(*, now: datetime | None = None) -> str:
@@ -327,22 +356,24 @@ def f10_loop_halted(*, now: datetime | None = None) -> bool:
 def mark_f10_loop_halt(*, now: datetime | None = None) -> dict[str, Any]:
     """Latch F10 hard trip + loop halt for this scored session. Idempotent."""
     key = f10_halt_key(now=now)
-    table = _load_table()
-    row = _row_of(table.get(key) or _empty(key), key)
-    row["f10_tripped"] = True
-    row["loop_halted"] = True
-    row["model_cost_post_trip_usd"] = 0.0
-    table[key] = row
-    _save_table(table)
-    return dict(row)
+    with _io:
+        table = _load_table()
+        row = _row_of(table.get(key) or _empty(key), key)
+        row["f10_tripped"] = True
+        row["loop_halted"] = True
+        row["model_cost_post_trip_usd"] = 0.0
+        table[key] = row
+        _save_table(table)
+        return dict(row)
 
 
 def note_research_look(*, now: datetime | None = None) -> int:
     """Count one AH/PM research look against the weekly cap."""
     key = _iso_week_key(now=now)
-    table = _load_table()
-    row = table.get(key) or _empty(key)
-    row["looks"] = int(row.get("looks") or 0) + 1
-    table[key] = _row_of(row, key)
-    _save_table(table)
-    return int(table[key].get("looks") or 0)
+    with _io:
+        table = _load_table()
+        row = table.get(key) or _empty(key)
+        row["looks"] = int(row.get("looks") or 0) + 1
+        table[key] = _row_of(row, key)
+        _save_table(table)
+        return int(table[key].get("looks") or 0)
