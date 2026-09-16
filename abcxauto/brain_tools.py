@@ -1137,6 +1137,19 @@ AGENT_TOOLS = [
                 },
                 "custom_symbols": _SYMBOLS_SCHEMA,
                 "exclude_symbols": _SYMBOLS_SCHEMA,
+                "regime": {
+                    "type": "object",
+                    "properties": {
+                        "theme": {"type": "string"},
+                        "catalyst": {"type": "string"},
+                        "source": {"type": "string"},
+                        "arenas": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": _catalog_arena_ids()},
+                        },
+                        "invalidate": {"type": "string"},
+                    },
+                },
                 "rationale": {"type": "string"},
             },
             [],

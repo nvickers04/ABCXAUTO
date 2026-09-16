@@ -382,6 +382,8 @@ def apply_self_tune(
         if key in ("enabled_arenas", "custom_symbols", "exclude_symbols"):
             universe_payload[key] = value
             continue
+        if key == "regime":
+            continue
         rejected[key] = "unknown or not agent-tunable"
 
     if isinstance(raw.get("universe"), dict):
@@ -442,6 +444,22 @@ def apply_self_tune(
             except Exception:
                 logger.exception("self_tune persist size_pct_nl failed")
         applied.update(extra_size)
+
+    regime_applied: dict[str, Any] | None = None
+    if "regime" in raw or "regime" in flat:
+        from abcxauto.desk_mode import persist_research_regime, validate_regime_payload
+
+        names, err = validate_regime_payload(raw.get("regime", flat.get("regime")))
+        if err:
+            rejected["regime"] = err
+        elif names:
+            try:
+                persist_research_regime(names, persist=persist)
+                regime_applied = names
+                applied["regime"] = names
+            except Exception as exc:
+                logger.exception("self_tune regime failed")
+                rejected["regime"] = str(exc)
 
     if universe_payload:
         try:

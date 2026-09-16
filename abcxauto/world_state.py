@@ -2101,6 +2101,14 @@ def format_wake(
             body = f"{body} {mode_bit}".strip()
     except Exception:
         logger.debug("desk mode wake bit failed", exc_info=True)
+    try:
+        from abcxauto.universe import membership_wake_bit
+
+        watch = membership_wake_bit()
+        if watch:
+            body = f"{body} watch={watch}.".strip()
+    except Exception:
+        logger.debug("wake watch bit failed", exc_info=True)
     lead = worst_wake_fact(unprotected=unprotected, day=day, session=session)
     if lead:
         if not lead.endswith("."):

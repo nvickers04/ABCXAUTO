@@ -1166,6 +1166,15 @@ def build_expectancy(
     return ranked
 
 
+_REGIME_FIELD_CAPS = {
+    "theme": 80,
+    "catalyst": 48,
+    "source": 80,
+    "invalidate": 120,
+}
+_LECTURE_OPENERS = ("always ", "never ", "do not ", "don't ", "you must ", "ban ")
+
+
 def _normalize_regime(raw: Any) -> dict[str, Any] | None:
     """Named day theme. Not an arena apply. Empty/missing is none."""
     if not isinstance(raw, dict):
@@ -1181,18 +1190,87 @@ def _normalize_regime(raw: Any) -> dict[str, Any] | None:
             arenas.append(name)
     if not (theme or catalyst or source or arenas or invalidate):
         return None
-    return {
+    out = {
         "theme": theme,
         "catalyst": catalyst,
         "source": source,
         "arenas": arenas,
         "invalidate": invalidate,
     }
+    as_of = str(raw.get("as_of") or "").strip()
+    if as_of:
+        out["as_of"] = as_of
+    return out
+
+
+def _lecture_error(raw: dict[str, Any]) -> str:
+    """Reject imperative openers / overlong prose. Observation, not a lecture."""
+    for key, cap in _REGIME_FIELD_CAPS.items():
+        text = str(raw.get(key) or "").strip()
+        if not text:
+            continue
+        if len(text) > cap:
+            return f"lecture: {key} over {cap} chars"
+        low = text.lower()
+        if any(low.startswith(op) for op in _LECTURE_OPENERS):
+            return f"lecture: {key} is imperative"
+    return ""
+
+
+def validate_regime_payload(raw: Any) -> tuple[dict[str, Any] | None, str]:
+    """Schema write path. Unknown arenas rejected; never auto-applied."""
+    if not isinstance(raw, dict):
+        return None, "regime must be an object"
+    note = _lecture_error(raw)
+    if note:
+        return None, note
+    norm = _normalize_regime(raw)
+    if norm is None:
+        return None, "regime empty"
+    arenas = list(norm.get("arenas") or [])
+    if arenas:
+        from abcxauto.universe import validate_enabled_arenas
+
+        names, err = validate_enabled_arenas(arenas)
+        if err:
+            return None, err
+        norm["arenas"] = names or []
+    return norm, ""
+
+
+def persist_research_regime(
+    regime: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    persist: bool = True,
+) -> dict[str, Any]:
+    """Stamp regime onto the brief. Does not touch enabled_arenas."""
+    brief = dict(load_research_brief() or {})
+    stamped = dict(regime)
+    stamped["as_of"] = _iso(now)
+    brief["regime"] = stamped
+    if not str(brief.get("as_of") or "").strip():
+        brief["as_of"] = stamped["as_of"]
+        brief.setdefault("session", "")
+        brief.setdefault("mode", "research")
+        brief.setdefault("expectancy", [])
+        brief.setdefault("facts", [])
+        brief.setdefault("symbols", [])
+        brief.setdefault("tickets", [])
+    if persist:
+        path = research_brief_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(brief, indent=2) + chr(10), encoding="utf-8")
+        except OSError:
+            logger.debug("research regime persist failed", exc_info=True)
+    return brief
 
 
 def _regime_age_token(brief: dict[str, Any] | None, *, now: datetime | None = None) -> str:
     row = brief if isinstance(brief, dict) else {}
-    ts = _parse_iso(str(row.get("as_of") or row.get("ts") or ""))
+    reg = row.get("regime") if isinstance(row.get("regime"), dict) else {}
+    ts = _parse_iso(str(reg.get("as_of") or row.get("as_of") or row.get("ts") or ""))
     if ts is None:
         return "never"
     clock = now or _utc_now()

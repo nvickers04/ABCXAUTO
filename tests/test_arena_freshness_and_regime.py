@@ -312,3 +312,127 @@ async def test_membership_and_scan_hits_are_not_send_geometry():
     )
     assert ok is False
     assert code == REASON_CODE
+
+
+def test_self_tune_writes_regime_persists_to_wake():
+    before = load_allowlist()
+    out = apply_self_tune(
+        {
+            "regime": {
+                "theme": "rate-sensitive",
+                "catalyst": "announcement",
+                "source": "odds/Fed September",
+                "arenas": ["financials", "commodities"],
+                "invalidate": "FOMC holds and 2s10s unchanged",
+            }
+        },
+        persist=True,
+    )
+    assert out["status"] == "ok"
+    applied = (out.get("applied") or {}).get("regime") or {}
+    assert applied["theme"] == "rate-sensitive"
+    assert applied["arenas"] == ["financials", "commodities"]
+    assert "invalidate" in applied
+    disk = load_research_brief()
+    reg = disk.get("regime") or {}
+    assert reg["theme"] == "rate-sensitive"
+    assert reg["as_of"]
+    assert reg["invalidate"]
+    after = load_allowlist()
+    assert after["enabled_arenas"] == before["enabled_arenas"]
+    assert "financials" not in after["enabled_arenas"]
+    wake = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={"research_brief_full": True},
+    )
+    assert "rate-sensitive" in wake
+    assert "FOMC" in wake or "invalidate=" in wake
+    assert "send=allowed" in wake
+
+
+def test_self_tune_regime_unknown_arena_names_catalog():
+    from abcxauto.universe import ARENA_CATALOG
+
+    before = load_allowlist()
+    out = apply_self_tune(
+        {
+            "regime": {
+                "theme": "rates",
+                "catalyst": "announcement",
+                "source": "odds",
+                "arenas": ["financials", "not_a_real_arena"],
+                "invalidate": "odds reprice",
+            }
+        },
+        persist=True,
+    )
+    rejected = out.get("rejected") or {}
+    err = str(rejected.get("regime") or "")
+    assert "not_a_real_arena" in err
+    for name in ARENA_CATALOG:
+        assert name in err
+    assert "financials" not in (load_allowlist()["enabled_arenas"])
+    assert load_allowlist()["enabled_arenas"] == before["enabled_arenas"]
+    assert "regime" not in (load_research_brief() or {})
+
+
+def test_self_tune_regime_rejects_lecture():
+    before = load_allowlist()
+    out = apply_self_tune(
+        {
+            "regime": {
+                "theme": "Always fade financials into the close",
+                "catalyst": "announcement",
+                "source": "odds",
+                "arenas": ["financials"],
+                "invalidate": "You must hold through the print",
+            }
+        },
+        persist=True,
+    )
+    err = str((out.get("rejected") or {}).get("regime") or "")
+    assert err
+    assert "lecture" in err.lower() or "imperative" in err.lower()
+    assert load_allowlist()["enabled_arenas"] == before["enabled_arenas"]
+    assert "regime" not in (load_research_brief() or {})
+
+
+def test_wake_carries_compact_watch_for_stale_sort():
+    from abcxauto.universe import WAKE_WATCH_MAX_CHARS, membership_wake_bit
+
+    save_allowlist(
+        {
+            "enabled_arenas": ["top_gainers", "mega_cap"],
+            "refreshed_at": (datetime.now(timezone.utc) - timedelta(hours=4)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+        }
+    )
+    bit = membership_wake_bit()
+    added = f" watch={bit}."
+    assert "4h" in bit
+    assert "top_gainers" in bit
+    assert "old=" in bit
+    assert "age=" not in bit
+    assert "stale=" not in bit
+    assert len(added) <= WAKE_WATCH_MAX_CHARS
+    # ~4 chars/token; keep the wake add under 25 tokens.
+    tokens = max(1, (len(added) + 3) // 4)
+    assert tokens <= 25
+    wake = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={"research_brief_full": True},
+    )
+    assert "watch=" in wake
+    assert "top_gainers" in wake
+    assert "old=" in wake
+    assert "desk_mode=rth" in wake
+

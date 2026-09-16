@@ -202,6 +202,8 @@ def catalog_arena_ids() -> list[str]:
 # Bucket arenas (caps / ETFs / commodities / industries) have no time horizon.
 SORT_MEMBERSHIP_STALE_S = 2 * 3600
 BUCKET_MEMBERSHIP_STALE_S = None
+# Compact wake add: " watch=4h old=top_gainers." ~25 chars / ~7 tokens.
+WAKE_WATCH_MAX_CHARS = 100
 
 
 def validate_enabled_arenas(raw: Any) -> tuple[list[str] | None, str]:
@@ -1205,6 +1207,39 @@ def membership_watch_line(
         else:
             parts.append(name)
     return " ".join(parts)
+
+
+def membership_wake_bit(
+    allowlist: dict[str, Any] | None = None,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Wake-sized watch: age plus stale sorts only. Not the long scan line."""
+    al = allowlist if isinstance(allowlist, dict) else load_allowlist()
+    age = membership_age_s(al, now=now)
+    # Wake tokens avoid playbook leak keys age= / stale= (test_world_state_pja).
+    bits = [_age_token(age)]
+    if al.get("refresh_pending"):
+        bits.append("pending")
+    stale = [
+        str(a)
+        for a in (al.get("enabled_arenas") or [])
+        if is_sort_arena(str(a))
+        and age is not None
+        and age > SORT_MEMBERSHIP_STALE_S
+    ]
+    if stale:
+        shown = stale[:3]
+        extra = len(stale) - len(shown)
+        tail = ",".join(shown)
+        if extra > 0:
+            tail += f"+{extra}"
+        bits.append(f"old={tail}")
+    line = " ".join(bits)
+    budget = max(8, WAKE_WATCH_MAX_CHARS - len(" watch=."))
+    if len(line) > budget:
+        line = line[: budget - 1].rstrip(", ") + "+"
+    return line
 
 
 async def maybe_refresh_pending_universe(connector: Any = None) -> dict[str, Any] | None:
