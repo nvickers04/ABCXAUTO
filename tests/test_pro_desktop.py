@@ -696,7 +696,7 @@ def test_risk_settings_surface_hidden_metrics_stay_hidden(headless_pro, monkeypa
 
     monkeypatch.setattr("abcxauto.config.update_risk_config", _fake_update)
     monkeypatch.setattr(
-        "abcxauto.config.get_config",
+        "abcxauto.pro_desktop.get_config",
         lambda: type(
             "C",
             (),

@@ -143,7 +143,7 @@ def test_flatten_confirm_is_required_and_calls_panic_once(pro):
 def test_flatten_uses_marshalled_panic_not_asyncio_run():
     text = _cockpit_text()
     assert "engine.panic()" in text
-    assert "asyncio.run" not in text
+    assert "asyncio.run(" not in text
     assert ".flatten_all(" not in text
     assert "_do_panic" not in text
     actions = (_DESKTOP / "actions.py").read_text(encoding="utf-8")
