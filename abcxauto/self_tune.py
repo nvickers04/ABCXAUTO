@@ -437,8 +437,9 @@ def apply_self_tune(
         try:
             from abcxauto.universe import load_allowlist, save_allowlist
 
-            cur = load_allowlist()
-            save_allowlist({**cur, **universe_payload})
+            if persist:
+                cur = load_allowlist()
+                save_allowlist({**cur, **universe_payload})
             applied["universe"] = universe_payload
         except Exception as exc:
             logger.exception("self_tune universe failed")

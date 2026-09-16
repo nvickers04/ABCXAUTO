@@ -511,6 +511,81 @@ def test_nested_self_tune_universe(tmp_path, monkeypatch):
     assert "universe" in out["applied"]
 
 
+def test_persist_false_universe_does_not_write_allowlist(tmp_path, monkeypatch):
+    """A dry tune must not overwrite the desk allowlist or agent_state."""
+    import json
+
+    uni = tmp_path / "universe_allowlist.json"
+    agent = tmp_path / "agent_state.json"
+    seed = {
+        "custom_symbols": ["AAPL"],
+        "enabled_arenas": ["mega_cap"],
+        "exclude_symbols": [],
+        "legal_symbols": ["AAPL"],
+        "membership": [],
+        "refreshed_at": "",
+        "source": "seed",
+    }
+    uni.write_text(json.dumps(seed, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    before = uni.read_bytes()
+    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(uni))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(agent))
+
+    out = apply_self_tune(
+        {
+            "universe": {"enabled_arenas": ["index_etfs"], "custom_symbols": ["SPY"]},
+            "scan_fetch_cap": 4,
+            "size_pct_nl": 3.0,
+        },
+        persist=False,
+    )
+    assert out["status"] == "ok"
+    assert "universe" in out["applied"]
+    assert uni.read_bytes() == before
+    assert not agent.exists()
+
+
+def test_persist_true_universe_still_writes_allowlist(tmp_path, monkeypatch):
+    import json
+
+    uni = tmp_path / "universe_allowlist.json"
+    agent = tmp_path / "agent_state.json"
+    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(uni))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(agent))
+
+    out = apply_self_tune(
+        {
+            "universe": {"enabled_arenas": ["index_etfs"], "custom_symbols": ["SPY"]},
+            "scan_fetch_cap": 4,
+        },
+        persist=True,
+    )
+    assert out["status"] == "ok"
+    assert "universe" in out["applied"]
+    assert uni.is_file()
+    data = json.loads(uni.read_text(encoding="utf-8"))
+    assert "index_etfs" in data["enabled_arenas"]
+    assert "SPY" in data["custom_symbols"]
+    assert agent.is_file()
+    agent_data = json.loads(agent.read_text(encoding="utf-8"))
+    assert agent_data.get("scan_fetch_cap") == 4
+
+
+def test_persist_false_still_rejects_floor_loosening(tmp_path, monkeypatch):
+    path = tmp_path / "risk.json"
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(tmp_path / "agent.json"))
+    clear_risk_settings(path=path)
+    load_risk_settings(path)
+    from abcxauto.config import update_risk_config
+
+    update_risk_config(daily_loss_limit_pct=25.0, persist=True)
+    out = apply_self_tune({"daily_loss_limit_pct": 50.0}, persist=False)
+    assert get_config().daily_loss_limit_pct == 25.0
+    assert "daily_loss_limit_pct" in (out.get("rejected") or {})
+    assert "daily_loss_limit_pct" not in (out.get("applied") or {})
+
+
 def test_prompt_extra_is_gone():
     out = apply_self_tune({"prompt_extra": "Prefer cheap defined-risk verticals."}, persist=False)
     assert "prompt_extra" in (out.get("rejected") or {})
