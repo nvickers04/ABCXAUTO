@@ -8,8 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from abcxauto.brain import AGENT_TOOLS, BrainTurn, _book_payload, _reset_chat, drop_live_chat
+from abcxauto.brain import AGENT_TOOLS, BrainTurn, _book_payload, _reset_chat, agent_tools, drop_live_chat
 from abcxauto.brain_tools import _run_tool
+from abcxauto.thin_rth_kill_look import DIE_TOOLS, STAY_TOOLS, die_tool_block, tool_allowed
 from abcxauto.desk_mode import (
     load_research_brief,
     research_brief_stale,
@@ -23,6 +24,52 @@ from abcxauto.memory.notes import MAX_BODY, lecture_error
 from abcxauto.working_memory import remember, working_memory_lines
 from abcxauto.world_state import WorldState, day_facts, format_wake
 from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
+
+
+# Billed JSON schema of name+description+parameters. chars/4 ~ tokens.
+# Before trim: recall 1027/257, research_brief 237/60.
+RECALL_SCHEMA_MAX_CHARS = 700
+RESEARCH_BRIEF_SCHEMA_MAX_CHARS = 200
+
+_STAY_PIN = frozenset({
+    "book",
+    "status",
+    "quote",
+    "option_chain",
+    "option_quote",
+    "fills",
+    "send",
+    "recall",
+    "research_brief",
+})
+_DIE_PIN = frozenset({
+    "scan",
+    "news",
+    "candles",
+    "odds",
+    "self_tune",
+    "web",
+    "option_facts",
+    "write_research_brief",
+    "note",
+})
+
+
+def _tool_schema_json(name: str) -> str:
+    for t in AGENT_TOOLS:
+        fn = getattr(t, "function", None)
+        if str(getattr(fn, "name", None) or "") != name:
+            continue
+        blob = {
+            "type": "function",
+            "function": {
+                "name": fn.name,
+                "description": fn.description,
+                "parameters": fn.parameters,
+            },
+        }
+        return json.dumps(blob, separators=(",", ":"), sort_keys=True)
+    raise AssertionError(f"missing tool {name}")
 
 
 def _names_of(tools) -> set[str]:
@@ -499,3 +546,110 @@ def test_ingest_look_records_book_unreliable_once():
     assert "book_unreliable" in codes or any("book_unreliable" in (r.get("body") or "") for r in live)
     assert "nl_unknown" in codes or any("NL unknown" in (r.get("body") or "") for r in live)
     assert len(live) <= 4
+
+
+def test_kill_look_stay_and_die_sets_are_exact():
+    assert STAY_TOOLS == _STAY_PIN
+    assert DIE_TOOLS == _DIE_PIN
+    assert STAY_TOOLS.isdisjoint(DIE_TOOLS)
+    assert "note" in DIE_TOOLS and "note" not in STAY_TOOLS
+    assert "scan" in DIE_TOOLS
+    assert "send" in STAY_TOOLS
+
+
+def test_recall_and_brief_are_stay_on_rth_kill_look(monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
+    rth = _names_of(agent_tools(session="regular"))
+    assert rth == STAY_TOOLS == _STAY_PIN
+    assert "recall" in rth
+    assert "research_brief" in rth
+    for dead in DIE_TOOLS:
+        assert dead not in rth, dead
+    assert tool_allowed("recall", session="regular") is True
+    assert tool_allowed("research_brief", session="regular") is True
+    assert tool_allowed("scan", session="regular") is False
+    assert die_tool_block("recall", session="regular") is None
+    assert die_tool_block("research_brief", session="regular") is None
+    assert die_tool_block("scan", session="regular") is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_notes_and_brief_during_rth_kill_look(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
+    body = "book_unreliable printed while lots still existed"
+    _write(body, id="rth-fetch", tags=["nl"])
+    world = _world(session_status="regular")
+    listed = json.loads(
+        await _run_tool(
+            "recall",
+            {"op": "list"},
+            connector=None,
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert listed.get("error") is None
+    assert "rth-fetch" in (listed.get("ids") or [])
+    got = json.loads(
+        await _run_tool(
+            "recall",
+            {"op": "get", "ids": ["rth-fetch"]},
+            connector=None,
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert body in json.dumps(got)
+    missing = json.loads(
+        await _run_tool(
+            "research_brief",
+            {},
+            connector=None,
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert missing.get("error") is None
+    assert missing.get("missing") is True
+    write_research_brief(
+        session="premarket",
+        snap={"news_items": [{"symbol": "AMD", "headline": "AMD raises guidance after hours"}]},
+        now=datetime.now(timezone.utc) - timedelta(hours=30),
+    )
+    stale = json.loads(
+        await _run_tool(
+            "research_brief",
+            {},
+            connector=None,
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert stale.get("stale") is True
+    wake = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={},
+    )
+    assert "stale" in wake
+    assert "send=allowed" in wake
+    assert "desk_mode=rth" in wake
+
+
+def test_recall_and_brief_schema_stay_under_budget():
+    recall = _tool_schema_json("recall")
+    brief = _tool_schema_json("research_brief")
+    assert len(recall) <= RECALL_SCHEMA_MAX_CHARS
+    assert len(brief) <= RESEARCH_BRIEF_SCHEMA_MAX_CHARS
+    assert "e.g." not in recall
+    assert "e.g." not in brief
+    assert "Never" not in recall
+    assert "law" not in recall.lower()

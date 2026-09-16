@@ -1148,44 +1148,31 @@ AGENT_TOOLS = [
     ),
     tool(
         name="recall",
-        description=(
-            "Durable journal notes. Fetch only. Never send geometry. "
-            "op=list|get|write|invalidate. list is pointer+ids; get needs ids/tags."
-        ),
+        description="Durable notes. Fetch only.",
         parameters=_schema(
             {
                 "op": {
                     "type": "string",
                     "enum": ["list", "get", "write", "invalidate"],
-                    "description": "list pointer+ids; get bodies; write; invalidate.",
                 },
                 "ids": {"type": "array", "items": {"type": "string"}},
-                "id": {"type": "string", "description": "Slug for write/invalidate/get."},
+                "id": {"type": "string"},
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "kind": {
                     "type": "string",
                     "enum": ["fact", "event", "invalidate"],
                 },
-                "symbol": _QUOTE_SCHEMA,
-                "body": {
-                    "type": "string",
-                    "description": "Observation <=160 chars. Not a law.",
-                },
+                "symbol": {"type": "string"},
+                "body": {"type": "string"},
                 "evidence": {"type": "string"},
-                "invalidate": {
-                    "type": "string",
-                    "description": "Evidence that kills the note.",
-                },
+                "invalidate": {"type": "string"},
             },
             [],
         ),
     ),
     tool(
         name="research_brief",
-        description=(
-            "Fetch prior-session research brief. Color only, never a live trigger. "
-            "Not send geometry."
-        ),
+        description="Prior-session brief. Color only.",
         parameters=_schema({}, []),
     ),
 ]

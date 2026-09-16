@@ -31,6 +31,8 @@ STAY_TOOLS = frozenset({
     "option_quote",
     "fills",
     "send",
+    "recall",
+    "research_brief",
 })
 DIE_TOOLS = frozenset({
     "scan",
@@ -41,9 +43,7 @@ DIE_TOOLS = frozenset({
     "web",
     "option_facts",
     "write_research_brief",
-    "research_brief",
     "note",
-    "recall",
 })
 
 # F10 dollars. Not raiseable Settings knobs. Preferred is an ops tripwire.
