@@ -382,6 +382,7 @@ class PortfolioMonitor:
         self._orders_seeded: bool = False
         self._prev_halted: bool = False
         self._prev_had_plan: bool | None = None
+        self._auto_panic_flatten_done: bool = False
         self.reconciler: Any = None
 
     # ------------------------------------------------------------------
@@ -590,16 +591,17 @@ class PortfolioMonitor:
         return True
 
     async def _maybe_auto_panic(self, snapshot: Dict[str, Any]) -> None:
-        """On daily-loss breach: halt once, flatten_all, inject a clear message.
+        """On daily-loss breach: halt if needed, flatten_all once, inject.
 
-        The risk-gate halt latch guards against repeated flatten on every poll.
+        A send-path daily_loss halt does not skip flatten. The once-flag
+        stops a flatten storm on later polls; new entries stay blocked.
         """
         cfg = self.cfg
         if not cfg.auto_panic_on_breach or cfg.daily_loss_limit_pct <= 0:
             return
-
-        gate = get_risk_gate()
-        if gate.is_halted:
+        # A send-path daily_loss halt must not suppress flatten. Flatten
+        # once per monitor instance; the latch still blocks new entries.
+        if self._auto_panic_flatten_done:
             return
 
         account = snapshot.get("account") or {}
@@ -617,8 +619,11 @@ class PortfolioMonitor:
             f"{cfg.daily_loss_limit_pct}% of NL ({limit:.2f} on {net_liq:.2f})"
         )
         logger.critical(reason)
-        gate.halt(reason, kind="auto_panic")
+        gate = get_risk_gate()
+        if not gate.is_halted:
+            gate.halt(reason, kind="auto_panic")
 
+        self._auto_panic_flatten_done = True
         flatten_result: Any = {"skipped": True}
         try:
             if hasattr(self.connector, "flatten_all"):

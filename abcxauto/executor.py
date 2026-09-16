@@ -703,9 +703,11 @@ async def execute_proposal(
         return rejection
 
     cfg = get_config()
-    if cfg.risk_gates_enabled and not is_exit_or_management(proposal):
+    # Always-armed breakers (daily-loss, defined-risk, cash-only, halt latch)
+    # live inside pre_trade_check. risk_gates_enabled only switches sizing.
+    if not is_exit_or_management(proposal):
         gate = get_risk_gate()
-        ok, reason = await gate.pre_trade_check(proposal, connector)
+        ok, reason = await gate.pre_trade_check(proposal, connector, cfg=cfg)
         journal.record_gate_decision(journal_id, ok, reason)
         if not ok:
             logger.warning(f"Proposal #{proposal.id} blocked by risk gate: {reason}")

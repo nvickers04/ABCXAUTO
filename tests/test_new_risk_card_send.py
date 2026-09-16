@@ -123,6 +123,8 @@ def _paper_no_risk_gates(monkeypatch) -> None:
             "defined_risk_only": False,
             "risk_posture": "balanced",
             "max_arena_concentration_pct": 0,
+            "cash_only": False,
+            "daily_loss_limit_pct": 0,
         }
     )
     monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)

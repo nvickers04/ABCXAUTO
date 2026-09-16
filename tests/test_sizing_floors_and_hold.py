@@ -145,7 +145,7 @@ async def test_floors_off_skips_pct_but_blocks_unknown_option_and_short(monkeypa
         account={
             "netliquidation": 10_000.0,
             "dailypnl": 0.0,  # daily-loss is always-on; keep PnL above the floor
-            "TotalCashValue": 100.0,
+            "TotalCashValue": 100_000.0,
         }
     )
     # Huge bracket would fail % floors — passes when OFF
