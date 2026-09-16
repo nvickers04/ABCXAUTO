@@ -2083,14 +2083,22 @@ def format_wake(
     try:
         from abcxauto.desk_mode import desk_mode_wake_bit
 
-        full = True
-        if isinstance(day, dict) and day.get("research_brief_full") is False:
-            full = False
+        full = False
+        if isinstance(day, dict) and day.get("research_brief_full") is True:
+            full = True
         mode_bit = desk_mode_wake_bit(session, rth_full=full)
         if mode_bit:
             body = f"{body} {mode_bit}".strip()
     except Exception:
         logger.debug("desk mode wake bit failed", exc_info=True)
+    try:
+        from abcxauto.memory.notes import notes_wake_bit
+
+        note_bit = notes_wake_bit()
+        if note_bit:
+            body = f"{body} {note_bit}".strip()
+    except Exception:
+        logger.debug("notes wake bit failed", exc_info=True)
     lead = worst_wake_fact(unprotected=unprotected, day=day, session=session)
     if lead:
         if not lead.endswith("."):

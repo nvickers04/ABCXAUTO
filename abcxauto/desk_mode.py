@@ -1278,9 +1278,17 @@ def rth_research_color(
         )
     if not full:
         n = len(brief.get("expectancy") or [])
+        age_bit = ""
+        ts = _parse_iso(str(brief.get("as_of") or brief.get("ts") or ""))
+        clock = now or _utc_now()
+        if ts is not None:
+            if clock.tzinfo is None:
+                clock = clock.replace(tzinfo=timezone.utc)
+            age = max(0, int((clock - ts).total_seconds() // 86400))
+            age_bit = f" age={age}d"
         return (
             "prior_session_research=on_disk "
-            f"expectancy={n} (color, never a live trigger)."
+            f"expectancy={n}{age_bit} (color, never a live trigger)."
         )
     bits = [
         "prior_session_research(color, not a live trigger):",

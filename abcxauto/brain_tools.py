@@ -1146,6 +1146,48 @@ AGENT_TOOLS = [
             [],
         ),
     ),
+    tool(
+        name="recall",
+        description=(
+            "Durable journal notes. Fetch only. Never send geometry. "
+            "op=list|get|write|invalidate. list is pointer+ids; get needs ids/tags."
+        ),
+        parameters=_schema(
+            {
+                "op": {
+                    "type": "string",
+                    "enum": ["list", "get", "write", "invalidate"],
+                    "description": "list pointer+ids; get bodies; write; invalidate.",
+                },
+                "ids": {"type": "array", "items": {"type": "string"}},
+                "id": {"type": "string", "description": "Slug for write/invalidate/get."},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "kind": {
+                    "type": "string",
+                    "enum": ["fact", "event", "invalidate"],
+                },
+                "symbol": _QUOTE_SCHEMA,
+                "body": {
+                    "type": "string",
+                    "description": "Observation <=160 chars. Not a law.",
+                },
+                "evidence": {"type": "string"},
+                "invalidate": {
+                    "type": "string",
+                    "description": "Evidence that kills the note.",
+                },
+            },
+            [],
+        ),
+    ),
+    tool(
+        name="research_brief",
+        description=(
+            "Fetch prior-session research brief. Color only, never a live trigger. "
+            "Not send geometry."
+        ),
+        parameters=_schema({}, []),
+    ),
 ]
 
 
@@ -2321,6 +2363,25 @@ async def _run_tool(
                 tool_trace=getattr(turn, "tool_trace", None),
                 text=str(getattr(turn, "text", "") or ""),
             )
+        )
+    if name == "recall":
+        from abcxauto.memory.notes import recall_tool
+
+        return _hub()._clip(recall_tool(args if isinstance(args, dict) else {}))
+    if name == "research_brief":
+        from abcxauto.desk_mode import load_research_brief, research_brief_stale
+
+        brief = load_research_brief()
+        missing = not bool(brief)
+        stale = True if missing else research_brief_stale(brief)
+        return _hub()._clip(
+            {
+                "brief": brief or {},
+                "missing": missing,
+                "stale": stale,
+                "use": "color, never a live trigger",
+                "send_geometry": False,
+            }
         )
     return json.dumps({"error": f"unknown tool {name}"})
 

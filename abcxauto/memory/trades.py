@@ -104,6 +104,13 @@ class JournalTrades:
                     ),
                 )
                 conn.commit()
+            if not allowed:
+                try:
+                    from abcxauto.memory.notes import record_gate_note
+
+                    record_gate_note(reason, stage=stage_val)
+                except Exception:
+                    logger.debug("gate note failed", exc_info=True)
         except Exception:
             logger.exception("journal.record_gate_decision failed")
 
@@ -376,6 +383,12 @@ class JournalTrades:
                     (_row_ts(ts), reason or None, kind or "halt"),
                 )
                 conn.commit()
+            try:
+                from abcxauto.memory.notes import record_halt_note
+
+                record_halt_note(reason, kind=kind or "halt")
+            except Exception:
+                logger.debug("halt note failed", exc_info=True)
         except Exception:
             logger.exception("journal.record_halt failed")
 

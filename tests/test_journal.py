@@ -52,6 +52,7 @@ def test_schema_creation(journal, tmp_path):
         "pcs_kill_sessions",
         "pcs_fill_events",
         "send_previews",
+        "notes",
     } <= tables
 
 

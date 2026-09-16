@@ -88,6 +88,7 @@ class JournalFills:
         try:
             self._ensure_schema()
             inserted = 0
+            new_fills: list = []
             with self._connect() as conn:
                 anchors: dict = {}
                 for row in conn.execute(
@@ -189,6 +190,8 @@ class JournalFills:
                             ),
                         )
                         inserted += int(cur.rowcount or 0)
+                        if int(cur.rowcount or 0):
+                            new_fills.append(fill)
                         if (
                             int(cur.rowcount or 0)
                             and isinstance(raw_mark, dict)
@@ -208,6 +211,13 @@ class JournalFills:
                             "journal.record_fills row failed exec_id=%s", exec_id
                         )
                 conn.commit()
+            for fill in new_fills:
+                try:
+                    from abcxauto.memory.notes import record_fill_note
+
+                    record_fill_note(fill)
+                except Exception:
+                    logger.debug("fill note failed", exc_info=True)
             return inserted
         except Exception:
             logger.exception("journal.record_fills failed")
@@ -482,6 +492,12 @@ class JournalFills:
             ingest_pcs_from_look(self, bag)
         except Exception:
             logger.debug("journal.ingest_look pcs fill-λ failed", exc_info=True)
+        try:
+            from abcxauto.memory.notes import record_book_health_notes
+
+            record_book_health_notes(bag)
+        except Exception:
+            logger.debug("journal.ingest_look notes failed", exc_info=True)
         return {"fills_inserted": int(inserted or 0), "sends_resolved": int(resolved or 0)}
 
     def dispatched_order_ids(self, limit: int = 4000) -> set:
