@@ -614,8 +614,8 @@ async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
     for hit in bag.get("hits") or []:
         if not isinstance(hit, dict):
             continue
-        assert set(hit) <= {"symbol", "gap%", "rank"}
-        assert len(hit) <= 3
+        assert set(hit) <= {"symbol", "gap%", "rank", "arena"}
+        assert len(hit) <= 4
         assert "on_book" not in hit
         if hit.get("symbol") == "PSQL":
             assert hit.get("gap%") == pytest.approx(73.4)

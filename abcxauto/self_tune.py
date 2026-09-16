@@ -390,6 +390,16 @@ def apply_self_tune(
             if k in ("enabled_arenas", "custom_symbols", "exclude_symbols")
         })
 
+    if "enabled_arenas" in universe_payload:
+        from abcxauto.universe import validate_enabled_arenas
+
+        names, err = validate_enabled_arenas(universe_payload["enabled_arenas"])
+        if err:
+            rejected["enabled_arenas"] = err
+            universe_payload.pop("enabled_arenas", None)
+        else:
+            universe_payload["enabled_arenas"] = names
+
     persist_kw = {"persist": persist}
     risk_payload = _strip_operator_disk(risk_payload)
     controls_payload = _strip_operator_disk(controls_payload)

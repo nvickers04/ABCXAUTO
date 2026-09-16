@@ -192,6 +192,38 @@ _DEFAULT_ENABLED = ("most_active", "index_etfs", "mega_cap")
 _BUCKET_GROUPS = frozenset({"industries", "caps", "etfs", "commodities"})
 
 
+def catalog_arena_ids() -> list[str]:
+    """Watchlist arena ids Grok may set via self_tune.enabled_arenas."""
+    return list(ARENA_CATALOG.keys())
+
+
+def validate_enabled_arenas(raw: Any) -> tuple[list[str] | None, str]:
+    """Normalize catalog ids. Unknown names are an error, never dropped."""
+    if not isinstance(raw, list):
+        return None, (
+            "enabled_arenas must be a list; valid="
+            + ",".join(catalog_arena_ids())
+        )
+    out: list[str] = []
+    unknown: list[str] = []
+    for item in raw:
+        name = str(item or "").strip()
+        if not name:
+            continue
+        canon = name.lower()
+        if canon in ARENA_CATALOG:
+            if canon not in out:
+                out.append(canon)
+            continue
+        unknown.append(name)
+    if unknown:
+        return None, (
+            "unknown arena(s): " + ", ".join(unknown) + "; valid="
+            + ",".join(catalog_arena_ids())
+        )
+    return out, ""
+
+
 def _build_known_scan_codes() -> dict[str, dict[str, Any]]:
     """Standing IBKR scanCodes from group=scans arenas (documented TWS ids only)."""
     out: dict[str, dict[str, Any]] = {}
@@ -957,9 +989,14 @@ async def refresh_legal_set(
     dump ARENA_CATALOG names. Never invent SPY/QQQ/IWM.
     """
     al = dict(allowlist if allowlist is not None else load_allowlist())
-    enabled = list(al.get("enabled_arenas") or _DEFAULT_ENABLED)
+    raw_enabled = al.get("enabled_arenas")
+    if isinstance(raw_enabled, list):
+        enabled = [str(a) for a in raw_enabled if str(a) in ARENA_CATALOG]
+    else:
+        enabled = list(_DEFAULT_ENABLED)
     custom = normalize_symbols(al.get("custom_symbols") or [])
-    exclude = set(normalize_symbols(al.get("exclude_symbols") or []))
+    exclude_list = normalize_symbols(al.get("exclude_symbols") or [])
+    exclude = set(exclude_list)
 
     legal: list[str] = []
     membership: list[dict[str, str]] = []
@@ -1002,6 +1039,8 @@ async def refresh_legal_set(
     source = "+".join(sources) if sources else "empty"
     al["legal_symbols"] = legal
     al["membership"] = membership
+    al["custom_symbols"] = custom
+    al["exclude_symbols"] = exclude_list
     al["source"] = source
     al["refreshed_at"] = _utc_now()
     if persist:

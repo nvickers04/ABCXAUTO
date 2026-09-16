@@ -55,6 +55,15 @@ _QUOTE_SCHEMA = {"type": "string", "description": "Ticker, e.g. AAPL"}
 _SYMBOLS_SCHEMA = {"type": "array", "items": {"type": "string"}}
 
 
+def _catalog_arena_ids() -> list[str]:
+    try:
+        from abcxauto.universe import catalog_arena_ids
+
+        return catalog_arena_ids()
+    except Exception:
+        return []
+
+
 def _scan_arena_keys() -> list[str]:
     try:
         from abcxauto.universe import known_screen_keys
@@ -1113,7 +1122,10 @@ AGENT_TOOLS = [
                     ),
                 },
                 "session_look_cap": {"type": "integer"},
-                "enabled_arenas": _SYMBOLS_SCHEMA,
+                "enabled_arenas": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": _catalog_arena_ids()},
+                },
                 "custom_symbols": _SYMBOLS_SCHEMA,
                 "exclude_symbols": _SYMBOLS_SCHEMA,
                 "rationale": {"type": "string"},

@@ -173,7 +173,7 @@ def overlay_hits(
 
 # Thin ranked default: symbol · gap% · at most one optional triage field.
 # gap% is the on-row IBKR/scanner metric (not a new quote). #186 decorate-clip is dead.
-THIN_RANKED_KEYS = frozenset({"symbol", "gap%", "rank"})
+THIN_RANKED_KEYS = frozenset({"symbol", "gap%", "rank", "arena"})
 _FAT_SCAN_KEYS = frozenset(
     {
         "last",
@@ -270,7 +270,7 @@ def is_thin_ranked_row(row: Any) -> bool:
         return False
     if "gap%" in keys or "rank" in keys:
         return True
-    return keys == {"symbol"}
+    return keys <= {"symbol", "arena"}
 
 
 def thin_ranked_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -281,6 +281,9 @@ def thin_ranked_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if not sym:
         return None
     out: dict[str, Any] = {"symbol": sym}
+    arena = str(row.get("arena") or "").strip()
+    if arena:
+        out["arena"] = arena
     gap = row_gap_pct(row)
     if gap is not None:
         out["gap%"] = gap
@@ -485,6 +488,11 @@ async def criteria_scan(
         turn_symbols=turn_symbols,
         scanner_rows=scanner_rows,
     )
+    if arena_id:
+        label = str(arena_id)
+        for row in rows:
+            if isinstance(row, dict) and row.get("symbol"):
+                row.setdefault("arena", label)
     screen = bool(has_arena or has_code)
     if screen:
         # Arena / scan_code: thin at the tool. No quote sweep. #186 clip-rescue is dead.
