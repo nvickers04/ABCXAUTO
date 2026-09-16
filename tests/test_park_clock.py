@@ -54,6 +54,11 @@ def test_resolve_stay_up_session_fills_blank_rth_and_premarket(monkeypatch):
         resolve_stay_up_session("", now=datetime(2026, 8, 27, 17, 0, tzinfo=et))
         == ""
     )
+    # Thanksgiving 2026 is a Thursday holiday — not a weekday-RTH fill.
+    assert (
+        resolve_stay_up_session("", now=datetime(2026, 11, 26, 10, 16, tzinfo=et))
+        == ""
+    )
 
 
 def test_first_boot_wakes_once():

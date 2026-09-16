@@ -14,7 +14,7 @@ Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of
 | **Code** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, overnight / after-close park |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No approval step. |
 
-Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` / `model_rth` / `model_research` / `model_params` / `model_params_rth` / `model_params_research` persist to `risk_settings.json`, which beats the env forms. DESK launch reloads those knobs. Default stays grok-4.6 (+ xhigh suffix) until the operator flips. Grok is the only RTH process. There is no clerk.
+Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` / `model_rth` / `model_research` / `model_params` / `model_params_rth` / `model_params_research` persist to `risk_settings.json`, which beats the env forms. DESK launch reloads those knobs. Default stays grok-4.6 (+ xhigh suffix) until the operator flips. Grok is the only RTH process. There is no clerk process (`clerk_*` names are in-process gates).
 
 ## Hard gates (code)
 
@@ -123,6 +123,8 @@ Tickets must match `ORDER EXAMPLES` (`abcxauto/order_examples.py`). Stock entrie
 
 Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** max position, **25%** risk/trade, **25%** per name, defined-risk on, cash-only, `trading_budget_usd=0` (full NetLiq). Book width is Grok's; `max_open_positions` default **0** (off).
 
+Precedence: Settings / `risk_settings.json` > env > default. `scan_fetch_cap` is self_tune / `agent_state.json`, not a Settings key.
+
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `ABCXAUTO_MODEL` | `grok-4.6` | Brain id — Pro Settings `model` wins over this. Set `grok-4.7` when available |
@@ -138,11 +140,14 @@ Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** 
 | `ABCXAUTO_MAX_POSITION_PCT` | `25` | Max position vs NetLiq |
 | `ABCXAUTO_MAX_RISK_PER_TRADE_PCT` | `25` | Max risk per ticket vs NetLiq |
 | `ABCXAUTO_MAX_SYMBOL_CONCENTRATION_PCT` | `25` | Max one underlying, all lots, vs NetLiq |
+| `ABCXAUTO_MAX_ARENA_CONCENTRATION_PCT` | `25` | One sector/theme arena vs NetLiq |
+| `ABCXAUTO_SIZING_FLOORS` | `false` | Paper size/loss floors (live forced ON) |
 | `ABCXAUTO_DEFINED_RISK_ONLY` | `true` | Locked on |
-| `ABCXAUTO_JOURNAL_PATH` | `journal.db` | Clerk SQLite journal |
-| `ABCXAUTO_DEFAULT_LOOK_S` | `90` (`60` open-book; `600` flat hunt) | Clerk look when a card has no `next_look_s` |
+| `ABCXAUTO_PCS_KILL_LOOK` | `true` | PCS kill-window LOOK contract (not a Settings knob) |
+| `ABCXAUTO_JOURNAL_PATH` | `journal.db` | SQLite journal (code-written) |
+| `ABCXAUTO_DEFAULT_LOOK_S` | `90` | Overnight / after-close park seconds. Stay-up (`clerk_look_s`) is 0 |
 
-See `.env.template` for the rest. Live: `TRADING_MODE=live`, port **7496**, `ABCXAUTO_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING_RISK`. Same gates as paper.
+See `.env.template` for the rest (paths, monitor, vestigial unread names). Live: `TRADING_MODE=live`, port **7496**, `ABCXAUTO_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING_RISK`. Same gates as paper.
 
 ## Architecture
 

@@ -286,7 +286,7 @@ def resolve_stay_up_session(
     if inferred:
         return inferred
     try:
-        from abcxauto.opportunity_scan import rth_now
+        from abcxauto.marketdata.market_hours import rth_now
 
         if rth_now(now=now):
             return "regular"
@@ -343,23 +343,13 @@ def _floor_look_s(sec: float, *, session: str = "") -> float:
 
 
 def et_minutes_to_rth_open(*, now: datetime | None = None) -> float | None:
-    """Minutes to today's 09:30 ET. None when already open or not a weekday."""
+    """Minutes to today's 09:30 ET. None when already open or not a session day."""
     try:
-        from zoneinfo import ZoneInfo
+        from abcxauto.marketdata.market_hours import minutes_to_rth_open
 
-        clock = now or datetime.now(ZoneInfo("America/New_York"))
-        if clock.tzinfo is None:
-            clock = clock.replace(tzinfo=ZoneInfo("America/New_York"))
-        else:
-            clock = clock.astimezone(ZoneInfo("America/New_York"))
+        return minutes_to_rth_open(now=now)
     except Exception:
         return None
-    if clock.weekday() >= 5:
-        return None
-    bell = clock.replace(hour=9, minute=30, second=0, microsecond=0)
-    if clock >= bell:
-        return None
-    return (bell - clock).total_seconds() / 60.0
 
 
 def infer_session_before_open(*, now: datetime | None = None) -> tuple[str, float | None]:
