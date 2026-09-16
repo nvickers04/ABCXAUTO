@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from abcxauto.aio import run_on_loop
 from abcxauto.broker.connector import get_ibkr_connector
 from abcxauto.config import get_config
 from abcxauto.llm import GrokClient
@@ -250,6 +251,8 @@ class ProEngine:
         self.state = ViewState()
         self.monitor: Any = None
         self._worker_loop: asyncio.AbstractEventLoop | None = None
+        self._panic_requested = False
+        self._panic_future: Any = None
         self._wake_event: asyncio.Event | None = None
         self._wake_reason: str = ""
         self._wake_gate: Any = None
@@ -293,6 +296,8 @@ class ProEngine:
             return None
         self._gen += 1
         gen = self._gen
+        self._panic_requested = False
+        self._panic_future = None
         self.stop.clear()
         self.pause.clear()
         self.state.autonomous = False
@@ -342,6 +347,8 @@ class ProEngine:
             return None
         self._gen += 1
         gen = self._gen
+        self._panic_requested = False
+        self._panic_future = None
         self.stop.clear()
         self.pause.clear()
         self.state.autonomous = True
@@ -386,14 +393,11 @@ class ProEngine:
         cfg = set_trading_mode(mode, live_confirm=live_confirm)
         self.ui.put(("log", f"TRADING MODE → {cfg.trading_mode} port={cfg.ibkr_port}"))
         self.ui.put(("trading_mode", cfg.trading_mode))
-        loop = self._worker_loop
-        if loop is not None and loop.is_running():
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    self._reconnect_after_mode_switch(), loop
-                )
-            except Exception as e:
-                self.ui.put(("error", f"Mode reconnect schedule failed: {e}"))
+        try:
+            if run_on_loop(self._reconnect_after_mode_switch(), self._worker_loop) is None:
+                pass
+        except Exception as e:
+            self.ui.put(("error", f"Mode reconnect schedule failed: {e}"))
 
     async def _reconnect_after_mode_switch(self) -> None:
         try:
@@ -500,7 +504,8 @@ class ProEngine:
             except Exception as e:
                 self.ui.put(("error", f"Refresh failed: {e}"))
 
-        asyncio.run_coroutine_threadsafe(_once(), loop)
+        if run_on_loop(_once(), loop) is None:
+            return "Not connected — Connect IBKR first"
         return None
 
     def _stop_monitor(self) -> None:
@@ -699,8 +704,46 @@ class ProEngine:
             self.ui.put(("log", f"Monitor start skipped: {e}"))
 
     def panic(self) -> None:
-        self.stop_engine()
-        threading.Thread(target=lambda: asyncio.run(self._do_panic()), daemon=True).start()
+        """Flatten on the IBKR worker loop. Never ``asyncio.run`` a second loop."""
+        loop = self._worker_loop
+        self._panic_requested = True
+        self.stop.set()
+        self.pause.clear()
+        self.state.running = False
+        self.state.paused = False
+        self.state.autonomous = False
+        self.state.connected = False
+        self.state.status = "Safe"
+        ev = self._wake_event
+        if ev is not None and loop is not None:
+            try:
+                if loop.is_running():
+                    loop.call_soon_threadsafe(ev.set)
+            except Exception:
+                pass
+        try:
+            fut = run_on_loop(self._do_panic(), loop)
+        except Exception as e:
+            self.ui.put(("error", f"PANIC schedule failed: {e}"))
+            self._finish_panic_teardown()
+            return
+        if fut is None:
+            self.ui.put(
+                ("error", "PANIC: IBKR worker loop not running — flatten skipped")
+            )
+            self._finish_panic_teardown()
+            return
+        self._panic_future = fut
+
+    def _finish_panic_teardown(self) -> None:
+        if not getattr(self, "_panic_requested", False):
+            return
+        try:
+            self.stop_engine()
+        except Exception:
+            pass
+        self._panic_requested = False
+        self._panic_future = None
 
 
     def _publish_ibkr_account(self) -> None:
@@ -1531,6 +1574,7 @@ class ProEngine:
         try:
             from abcxauto.memory import get_journal
 
+            # Look-boundary ingest only. Monitor poll must not also write.
             get_journal().ingest_look(s)
         except Exception:
             logger.debug("look journal ingest failed", exc_info=True)
@@ -1664,9 +1708,27 @@ class ProEngine:
             "brief_loop_halted": bool(getattr(turn, "brief_loop_halted", False)),
         }
 
+    async def _await_scheduled_panic(self) -> None:
+        """Finish flatten on this loop before asyncio.run tears the loop down."""
+        fut = getattr(self, "_panic_future", None)
+        if fut is not None:
+            try:
+                await asyncio.wrap_future(fut)
+            except Exception:
+                pass
+            self._panic_future = None
+            return
+        if getattr(self, "_panic_requested", False):
+            try:
+                await self._do_panic()
+            except Exception as e:
+                self.ui.put(("error", f"PANIC ERROR: {e}"))
+
     async def _do_panic(self) -> None:
         try:
-            conn = self.conn or get_ibkr_connector()
+            conn = self.conn
+            if conn is None:
+                conn = get_ibkr_connector()
             if not getattr(conn, "connected", False):
                 await conn.connect()
             before_ledger = []
@@ -1723,15 +1785,19 @@ class ProEngine:
                 self._note("CONNECT", "TWS not listening — retry 15s")
                 for _ in range(15):
                     if gen != self._gen or self.stop.is_set():
+                        await self._await_scheduled_panic()
                         self._worker_loop = None
                         self.worker = None
+                        self._finish_panic_teardown()
                         return
                     await asyncio.sleep(1)
             if gen != self._gen or self.stop.is_set() or not getattr(self.conn, "connected", False):
                 self.ui.put(("conn", False))
                 self.state.connected = False
+                await self._await_scheduled_panic()
                 self._worker_loop = None
                 self.worker = None
+                self._finish_panic_teardown()
                 return
             self.ui.put(("conn", True))
             self.state.connected = True
@@ -1765,9 +1831,11 @@ class ProEngine:
             self.state.status = "Safe"
             self.state.last_error = msg
             self._note("ERR", msg)
+            await self._await_scheduled_panic()
             self._worker_loop = None
             self.worker = None
             self.conn = None
+            self._finish_panic_teardown()
             return
         from abcxauto.park_clock import peek_interrupt, take_interrupt
 
@@ -2139,6 +2207,7 @@ class ProEngine:
                     if not out.get("_recover"):
                         self._recover_same_chat = False
                     if not out.get("_ended") and not out.get("_recover"):
+                        # Real look only. A thrown think must not burn the cap.
                         note_look(
                             session=session,
                             tokens=max(0, billed_tokens_now() - before_tok),
@@ -2210,14 +2279,12 @@ class ProEngine:
                                 self._note("WAKE", "next look seed failed")
                     self._rearm_after_think(out, session=session)
                 except Exception as e:
-                    note_look(
-                        session=session,
-                        tokens=max(0, billed_tokens_now() - before_tok),
-                    )
                     self.ui.put(("error", str(e)))
                     payload = {"_failed": True, "_stream_error": str(e)}
                     self._rearm_after_think(payload, session=session)
         finally:
+            await self._await_scheduled_panic()
             self._stop_monitor()
             self._worker_loop = None
             self._wake_event = None
+            self._finish_panic_teardown()

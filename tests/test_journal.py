@@ -370,6 +370,67 @@ def test_thread_safety_smoke(journal):
     assert summary["dispatch_ok"] == 80
 
 
+def test_connect_sets_wal_and_busy_timeout(journal):
+    with journal._connect() as conn:
+        mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).upper()
+        busy = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    assert mode == "WAL"
+    assert busy >= 1000
+
+
+def test_concurrent_ingest_look_does_not_raise_locked(tmp_path):
+    """Two journal handles + threads: ingest_look must not raise locked."""
+    db = tmp_path / "concurrent.db"
+    left = TradeJournal(path=str(db), enabled=True, timeout=5.0)
+    right = TradeJournal(path=str(db), enabled=True, timeout=5.0)
+    errors: list = []
+
+    def writer(journal: TradeJournal, n: int) -> None:
+        try:
+            for i in range(12):
+                journal.ingest_look(
+                    {
+                        "account": {"netliquidation": 10_000.0 + n + i},
+                        "positions": [],
+                        "open_orders": [],
+                        "fills": [
+                            {
+                                "exec_id": f"c-{n}-{i}",
+                                "order_id": n * 100 + i,
+                                "symbol": "SPY",
+                                "sec_type": "STK",
+                                "side": "BOT",
+                                "quantity": 1,
+                                "price": 1.0 + i,
+                            }
+                        ],
+                        "taken_at": f"2026-08-31T14:{n:02d}:{i:02d}Z",
+                    }
+                )
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futs = []
+        for n in range(4):
+            futs.append(pool.submit(writer, left, n))
+            futs.append(pool.submit(writer, right, n + 4))
+        for fut in futs:
+            fut.result(timeout=20)
+
+    assert errors == []
+    conn = sqlite3.connect(str(db))
+    try:
+        snaps = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        fills = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+        mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).upper()
+    finally:
+        conn.close()
+    assert snaps == 96
+    assert fills == 96
+    assert mode == "WAL"
+
+
 def test_record_methods_swallow_errors(tmp_path):
     # Point at a path that cannot be a SQLite DB (existing directory).
     bad = tmp_path / "not_a_file"

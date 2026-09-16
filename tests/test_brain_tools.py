@@ -1004,6 +1004,23 @@ def test_clip_keeps_run_when_hits_overflow():
     assert "hits" not in data or data.get("_clipped")
 
 
+def test_clip_keeps_run_on_fat_non_book_payload():
+    """Oversized non-live-book dict with run used to NameError on ``kept``."""
+    raw = _clip(
+        {
+            "ok": True,
+            "run": {"next": "send", "card": "flush bounce"},
+            "essay": "n" * 30_000,
+        }
+    )
+    data = json.loads(raw)
+    assert data["run"]["next"] == "send"
+    assert data["run"]["card"] == "flush bounce"
+    assert data.get("_clipped") == "payload"
+    assert data.get("ok") is True
+    assert "essay" not in data
+
+
 def _fat_scan_hits(n: int = 80, pad: int = 800) -> dict:
     return {
         "arena": "most_active",

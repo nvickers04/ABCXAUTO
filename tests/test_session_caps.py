@@ -611,3 +611,36 @@ def test_health_strip_cap_idle_does_not_say_next_look(monkeypatch):
     assert "sat" not in (pro.lbl_hs_state.value or "")
     assert "next look" not in shown
     assert "set_wake" not in shown
+
+
+@pytest.mark.asyncio
+async def test_failed_think_does_not_bill_look_cap(monkeypatch, tmp_path):
+    """Exception in _host_think must not increment the session look cap."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setenv("ABCXAUTO_SESSION_CAPS_PATH", str(tmp_path / "caps.json"))
+    reset_session_caps()
+    update_agent_config(session_look_cap=2, persist=False)
+
+    async def boom(self, n, g, s, *, resume=False):
+        raise RuntimeError("llm down")
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=boom)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    saw_err = False
+    while time.time() < deadline:
+        eng.drain_apply()
+        if any(r.get("type") == "error" for r in eng.state.records):
+            saw_err = True
+            break
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.4
+    while time.time() < idle_until:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert saw_err
+    assert usage("regular")["looks"] == 0
+    assert is_capped("regular") is False
