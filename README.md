@@ -14,7 +14,7 @@ Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of
 | **Code** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, overnight / after-close park |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No approval step. |
 
-Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` / `model_rth` / `model_research` / `model_params` / `model_params_rth` / `model_params_research` persist to `risk_settings.json`, which beats the env forms. DESK launch reloads those knobs. Default stays grok-4.6 (+ xhigh suffix) until the operator flips. Grok is the only RTH process. There is no clerk process (`clerk_*` names are in-process gates).
+Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` / `model_rth` / `model_research` / `model_params` / `model_params_rth` / `model_params_research` persist to `risk_settings.json`, which beats the env forms. DESK launch reloads those knobs. Default stays grok-4.6 (set `reasoning_effort` in `model_params`; a leftover `-xhigh` on the model id is rewritten, not sent). Grok is the only RTH process. There is no clerk process (`clerk_*` names are in-process gates).
 
 ## Hard gates (code)
 
@@ -127,7 +127,7 @@ Precedence: Settings / `risk_settings.json` > env > default. `scan_fetch_cap` is
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ABCXAUTO_MODEL` | `grok-4.6` | Brain id — Pro Settings `model` wins over this. Set `grok-4.7` when available |
+| `ABCXAUTO_MODEL` | `grok-4.6` | Real brain id — Pro Settings `model` wins. Leftover `-low\|-high\|-xhigh` suffix is rewritten to `reasoning_effort`. Set `grok-4.7` when available |
 | `ABCXAUTO_MODEL_RTH` | (empty) | RTH id; empty = `model`. Settings `model_rth` |
 | `ABCXAUTO_MODEL_RESEARCH` | (empty) | Premarket/AH id; empty = `model`. Settings `model_research` |
 | `ABCXAUTO_MODEL_PARAMS` | `{}` | Shared extra `chat.create` kwargs as JSON (`reasoning_effort` / `effort` alias: low\|medium\|high\|xhigh). Settings `model_params`. Unknown keys are refused. |

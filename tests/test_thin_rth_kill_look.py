@@ -613,7 +613,7 @@ def test_dual_mode_rth_strips_xhigh_ah_one_shot_and_week_cap(monkeypatch):
     assert rth_model_no_xhigh("grok-4.6-xhigh-fast") == "grok-4.6-fast"
     cfg = SimpleNamespace(model="grok-4.6-xhigh", model_rth="", model_research="grok-4.6-xhigh")
     assert session_model("regular", cfg) == "grok-4.6"
-    assert session_model("premarket", cfg) == "grok-4.6-xhigh"
+    assert session_model("premarket", cfg) == "grok-4.6"
     assert research_keep_looking("premarket") is False
     assert research_keep_looking("regular") is False
     reset_session_caps()

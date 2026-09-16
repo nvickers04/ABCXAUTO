@@ -667,11 +667,23 @@ def _model_token(raw: Any) -> str:
     return str(raw or "").strip()
 
 
+def _stripped_model(raw: Any) -> str:
+    """Real model id. Leftover reasoning suffixes are not models."""
+    from abcxauto.config import DEFAULT_MODEL, split_model_effort_suffix
+
+    token = _model_token(raw)
+    if not token:
+        return ""
+    base, _effort = split_model_effort_suffix(token)
+    return base or DEFAULT_MODEL
+
+
 def session_model(session: str = "", cfg: Any = None) -> str:
     """RTH uses ``model_rth`` when set; research uses ``model_research`` when set.
 
     Unset session models fall back to the current ``model`` knob so a single-model
-    desk does not break.
+    desk does not break. A leftover ``-xhigh`` (or other effort) suffix is
+    stripped so ``chat.create`` never sees a non-model id.
     """
     if cfg is None:
         from abcxauto.config import get_config
@@ -679,16 +691,19 @@ def session_model(session: str = "", cfg: Any = None) -> str:
         cfg = get_config()
     from abcxauto.config import DEFAULT_MODEL
 
-    base = _model_token(getattr(cfg, "model", None)) or DEFAULT_MODEL
+    base_raw = _model_token(getattr(cfg, "model", None))
+    base = _stripped_model(base_raw) or DEFAULT_MODEL
     if is_rth_session(session):
-        token = _model_token(getattr(cfg, "model_rth", None)) or base
+        raw = _model_token(getattr(cfg, "model_rth", None)) or base_raw
+        token = _stripped_model(raw) or DEFAULT_MODEL
         try:
             from abcxauto.thin_rth_kill_look import rth_model_no_xhigh
 
             return rth_model_no_xhigh(token)
         except Exception:
             return token
-    return _model_token(getattr(cfg, "model_research", None)) or base
+    raw = _model_token(getattr(cfg, "model_research", None)) or base_raw
+    return _stripped_model(raw) or DEFAULT_MODEL
 
 
 def _params_map(raw: Any) -> dict[str, Any]:
@@ -705,23 +720,32 @@ def _params_map(raw: Any) -> dict[str, Any]:
 def session_model_params(session: str = "", cfg: Any = None) -> dict[str, Any]:
     """RTH/research ``model_params_*`` when set; else shared ``model_params``.
 
-    Invalid maps fail-closed to ``{}``. RTH thin strips xhigh effort so
-    params cannot undo ``rth_model_no_xhigh`` / F10.
+    Invalid maps fail-closed to ``{}``. A leftover effort suffix on the
+    session model id is folded into ``reasoning_effort``. RTH thin then
+    strips xhigh effort so params cannot undo ``rth_model_no_xhigh`` / F10.
     """
     if cfg is None:
         from abcxauto.config import get_config
 
         cfg = get_config()
+    from abcxauto.config import bind_model_and_params
+
     shared = _params_map(getattr(cfg, "model_params", None))
+    shared_model = _model_token(getattr(cfg, "model", None))
     if is_rth_session(session):
+        raw_rth = _model_token(getattr(cfg, "model_rth", None))
         chosen = _params_map(getattr(cfg, "model_params_rth", None)) or shared
+        _model, chosen = bind_model_and_params(raw_rth or shared_model, chosen)
         try:
             from abcxauto.thin_rth_kill_look import rth_params_no_xhigh
 
             return rth_params_no_xhigh(chosen)
         except Exception:
             return {}
-    return _params_map(getattr(cfg, "model_params_research", None)) or shared
+    raw_research = _model_token(getattr(cfg, "model_research", None))
+    chosen = _params_map(getattr(cfg, "model_params_research", None)) or shared
+    _model, chosen = bind_model_and_params(raw_research or shared_model, chosen)
+    return chosen
 
 
 def research_send_block(*, session: str = "") -> dict[str, Any]:
