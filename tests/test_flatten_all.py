@@ -150,63 +150,110 @@ def test_flatten_uses_marshalled_panic_not_asyncio_run():
     assert actions.count("self.engine.panic()") == 1
 
 
-def test_partial_flatten_reports_honestly(pro):
+def test_flatten_outcome_reads_honest_fields():
     from abcxauto.pro_desktop import AMBER, GREEN, RED
+
+    # success=True used to lie when lots remained. Green only when the book is flat.
+    stale_lie, stale_color = ProTerminal._flatten_outcome(
+        {
+            "success": True,
+            "status": "flat",
+            "remaining": [],
+            "failed": [],
+            "positions_closed": 2,
+            "positions_total": 3,
+        }
+    )
+    assert stale_lie == "Flattened — book is flat"
+    assert stale_color == GREEN
+    assert "2/3" not in stale_lie
 
     line, color = ProTerminal._flatten_outcome(
         {
-            "success": True,
-            "positions_closed": 2,
-            "positions_total": 3,
-            "orders_cancelled": 1,
-            "orders_total": 1,
-            "errors": ["flatten SPY: timeout"],
+            "success": False,
+            "status": "partial",
+            "remaining": [{"symbol": "SPY"}],
+            "failed": [
+                {
+                    "symbol": "SPY",
+                    "reason": "close rejected",
+                    "protection": "last_stop",
+                }
+            ],
         }
     )
     assert line.startswith("Partial flatten")
-    assert "2/3 lots closed" in line
     assert "1 still open" in line
+    assert "SPY last-stop restored" in line
+    assert "close rejected" in line
+    assert "2/3" not in line
     assert "success" not in line.lower()
     assert color == AMBER
 
-    clean, clean_color = ProTerminal._flatten_outcome(
+    working, working_color = ProTerminal._flatten_outcome(
         {
-            "success": True,
-            "positions_closed": 3,
-            "positions_total": 3,
-            "orders_cancelled": 2,
-            "orders_total": 2,
-            "errors": [],
+            "success": False,
+            "status": "failed",
+            "remaining": [{"symbol": "SPY"}],
+            "failed": [
+                {
+                    "symbol": "SPY",
+                    "reason": "close rejected",
+                    "protection": "still_working",
+                    "protection_order_id": 11,
+                }
+            ],
         }
     )
-    assert clean.startswith("Flattened")
-    assert "3/3 lots closed" in clean
-    assert "still open" not in clean
-    assert clean_color == GREEN
+    assert "SPY last-stop still working" in working
+    assert working_color == AMBER
+
+    bare, bare_color = ProTerminal._flatten_outcome(
+        {
+            "success": False,
+            "status": "failed",
+            "remaining": [{"symbol": "AAPL"}],
+            "failed": [
+                {
+                    "symbol": "AAPL",
+                    "reason": "no last-stop price for leftover stock",
+                    "protection": "none",
+                }
+            ],
+        }
+    )
+    assert "AAPL unprotected" in bare
+    assert "no last-stop price" in bare
+    assert bare_color == AMBER
 
     failed, fail_color = ProTerminal._flatten_outcome(
-        {"success": False, "error": "Not connected"}
+        {"success": False, "status": "disconnected", "error": "Not connected"}
     )
     assert failed.startswith("Flatten failed")
     assert "Not connected" in failed
     assert fail_color == RED
 
+
+def test_partial_flatten_toast_uses_failed_row(pro):
     pro._flatten_waiting = True
     pro.engine.state.records.append(
         {
             "type": "panic",
             "msg": (
-                '{"success": true, "positions_closed": 1, "positions_total": 2, '
-                '"orders_cancelled": 0, "orders_total": 0, '
-                '"errors": ["flatten AAPL: rejected"]}'
+                '{"success": false, "status": "partial", '
+                '"remaining": [{"symbol": "AAPL"}], '
+                '"failed": [{"symbol": "AAPL", "reason": "close rejected", '
+                '"protection": "none"}]}'
             ),
         }
     )
     pro._maybe_finish_flatten_report()
     toast = _toast_text(pro)
     assert toast.startswith("Partial flatten")
-    assert "1/2 lots closed" in toast
     assert "1 still open" in toast
+    assert "AAPL unprotected" in toast
+    assert "close rejected" in toast
+    assert "1/2" not in toast
     assert "success" not in toast.lower()
     assert pro._flatten_waiting is False
 
