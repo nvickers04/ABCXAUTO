@@ -274,8 +274,9 @@ def resolve_stay_up_session(
     """Fill a blank snap label from the ET clock. Closed / postmarket stay parked.
 
     A junk look must not sit the desk because IBKR omitted session=. Weekday
-    RTH becomes regular; last-hour-to-open becomes premarket. After the close
-    an empty label stays empty so overnight park can still shut down.
+    RTH becomes regular via ``opportunity_scan.rth_now`` (NYSE clock);
+    last-hour-to-open becomes premarket. After the close an empty label
+    stays empty so overnight park can still shut down.
     """
     sess = str(session or "").strip().lower()
     if sess == "unknown":
@@ -286,7 +287,7 @@ def resolve_stay_up_session(
     if inferred:
         return inferred
     try:
-        from abcxauto.marketdata.market_hours import rth_now
+        from abcxauto.opportunity_scan import rth_now
 
         if rth_now(now=now):
             return "regular"
