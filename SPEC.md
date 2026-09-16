@@ -27,9 +27,12 @@ Switch the brain from Pro Settings — `model` / `model_rth` / `model_research`
 DESK launch (`_start_pro`, `prepare_desk_start`, `begin_run`, `run_app`,
 headless) reloads those knobs from disk — grok-4.6 is the default, not a
 hardcoded sole path. Session `model_params_rth` / `model_params_research`
-fall back to shared `model_params`. RTH thin still strips xhigh from the
-id and from RTH params (F10 stays armed). Default stays grok-4.6 (+ xhigh
-as a suffix the operator already uses) until they flip. `self_tune` cannot
+fall back to shared `model_params`. `grok-4.6-xhigh` is not an xAI model
+id. A leftover reasoning suffix on `model` / `model_rth` / `model_research`
+is rewritten to the real id plus `reasoning_effort` (Settings / env /
+`risk_settings.json` / `chat.create`). RTH thin still drops xhigh effort
+from RTH params (F10 stays armed). Default stays grok-4.6 (SDK `high`
+unless `model_params.reasoning_effort` is set). `self_tune` cannot
 overwrite those knobs. Desk knobs only — this does not rewire Cursor
 CloudAgent / Grok Bot launch. Grok is the only RTH process.
 

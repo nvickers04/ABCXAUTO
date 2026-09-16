@@ -12,7 +12,7 @@ from typing import Any, Callable
 from abcxauto.config import (
     DEFAULT_MODEL,
     RESERVED_CHAT_KEYS,
-    coerce_model_params,
+    bind_model_and_params,
     get_config,
 )
 
@@ -114,10 +114,16 @@ def chat_create_kwargs(
     Dedicated knobs (model / temperature / max_tokens / include / tools /
     messages) win. ``effort`` is sent as ``reasoning_effort``. Unknown
     extras are dropped here with an error log — Settings already refused
-    them, so this is the last line of defense for a raw map.
+    them, so this is the last line of defense for a raw map. A leftover
+    effort suffix on the model id is stripped and folded into
+    ``reasoning_effort`` so the wire never sees ``grok-4.6-xhigh``.
     """
+    model, extras = bind_model_and_params(
+        getattr(g, "model", None) or DEFAULT_MODEL,
+        getattr(g, "model_params", None) or {},
+    )
     kw: dict[str, Any] = {
-        "model": g.model,
+        "model": model,
         "messages": messages,
         "temperature": g.temperature,
         "max_tokens": int(g.max_tokens or 8192),
@@ -125,7 +131,6 @@ def chat_create_kwargs(
     }
     if tools is not None:
         kw["tools"] = list(tools)
-    extras = coerce_model_params(getattr(g, "model_params", None) or {}, strict=False)
     for key, value in extras.items():
         if key in RESERVED_CHAT_KEYS or key in kw:
             continue
@@ -170,10 +175,24 @@ def log_chat_create_kwargs(kwargs: dict[str, Any]) -> str:
 def create_chat(client: Any, **kwargs: Any) -> Any:
     """``chat.create`` that refuses to silently strip extras.
 
-    Tries the full set. On ``TypeError``, drop ``include`` first (older
-    clients), then drop unknown extras one key at a time and log each
-    drop so a bad alias cannot hide ``reasoning_effort``.
+    A leftover effort suffix on ``model`` is rewritten to the real id plus
+    ``reasoning_effort`` before the SDK sees it. Tries the full set. On
+    ``TypeError``, drop ``include`` first (older clients), then drop
+    unknown extras one key at a time and log each drop so a bad alias
+    cannot hide ``reasoning_effort``.
     """
+    kwargs = dict(kwargs)
+    bound_model, bound_extras = bind_model_and_params(
+        kwargs.get("model") or DEFAULT_MODEL,
+        (
+            {"reasoning_effort": kwargs["reasoning_effort"]}
+            if "reasoning_effort" in kwargs
+            else {}
+        ),
+    )
+    kwargs["model"] = bound_model
+    if "reasoning_effort" in bound_extras:
+        kwargs["reasoning_effort"] = bound_extras["reasoning_effort"]
     log_chat_create_kwargs(kwargs)
     create = client.chat.create
     try:
@@ -285,29 +304,36 @@ class GrokClient:
         if sess:
             self.apply_session(sess, model=chosen)
         else:
-            self.model = chosen or cfg.model or DEFAULT_MODEL
-            self.model_params = coerce_model_params(
+            self.model, self.model_params = bind_model_and_params(
+                chosen or cfg.model or DEFAULT_MODEL,
                 getattr(cfg, "model_params", None) or {},
-                strict=False,
             )
         logger.info("Grok client ready (model=%s)", self.model)
 
     def apply_session(self, session: str = "", *, model: str = "") -> None:
         """Bind model + params to this session so RTH thin / fallback apply."""
-        from abcxauto.desk_mode import session_model, session_model_params
+        from abcxauto.desk_mode import is_rth_session, session_model, session_model_params
 
         cfg = get_config()
         sess = str(session or "").strip()
         chosen = str(model or "").strip()
         if sess:
+            extras = session_model_params(sess, cfg)
             if not chosen:
                 chosen = session_model(sess, cfg)
-            self.model_params = session_model_params(sess, cfg)
+            self.model, self.model_params = bind_model_and_params(chosen, extras)
+            if is_rth_session(sess):
+                from abcxauto.thin_rth_kill_look import (
+                    rth_model_no_xhigh,
+                    rth_params_no_xhigh,
+                )
+
+                self.model = rth_model_no_xhigh(self.model)
+                self.model_params = rth_params_no_xhigh(self.model_params)
         else:
-            self.model_params = coerce_model_params(
+            self.model, self.model_params = bind_model_and_params(
+                chosen or cfg.model or DEFAULT_MODEL,
                 getattr(cfg, "model_params", None) or {},
-                strict=False,
             )
-        self.model = chosen or cfg.model or DEFAULT_MODEL
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens

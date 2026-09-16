@@ -85,8 +85,8 @@ NAV_SUBTITLES = {
 CARD_STATUS_COLOR = {"working": GREEN, "testing": AMBER, "retired": MUTED}
 # Settings fields, grouped the way the page shows them. label, hint.
 BRAIN_FIELDS = (
-    ("model", "Model", "beats ABCXAUTO_MODEL — next look rebuilds"),
-    ("model_rth", "RTH model", "empty = Model — thin sender"),
+    ("model", "Model", "real id (grok-4.6). leftover -xhigh becomes reasoning_effort"),
+    ("model_rth", "RTH model", "empty = Model — thin sender. leftover suffix rewritten"),
     ("model_research", "Research model", "empty = Model — premarket/AH, no send"),
     ("temperature", "Temperature", "0.0 – 2.0"),
     ("max_tokens", "Max tokens", "1024 – 131072 per turn"),
