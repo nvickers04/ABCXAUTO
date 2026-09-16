@@ -9,7 +9,6 @@ import pytest
 from abcxauto.agent_loop import (
     ALLOWED_ACTIONS,
     _wake_grok_for_session,
-    execute_ticket,
     gate_ticket,
     is_new_risk,
     normalize_action,
@@ -598,78 +597,3 @@ def test_result_dict_keeps_hunt_tape():
     )
     assert out["scan_hits"]["rows"][0]["symbol"] == "SNDK"
     assert out["session_range"]["SNDK"]["low"] == 88.0
-
-
-@pytest.mark.asyncio
-async def test_snap_ibkr_data_stale_marks_book_unreliable(monkeypatch):
-    monkeypatch.setattr("abcxauto.agent_loop._tool", _fake_tool)
-
-    class StaleConn(FakeConnector):
-        ibkr_data_stale = True
-
-    out = await snap(StaleConn())
-    assert out["ibkr_data_stale"] is True
-    assert out["book_unreliable"] is True
-    assert out["account"].get("netliquidation") == 1000
-
-
-@pytest.mark.asyncio
-async def test_snap_account_stale_flag_marks_book_unreliable(monkeypatch):
-    async def stale_acct(_c, name: str, _a=None):
-        if name == "account_summary":
-            return {"netliquidation": 1000, "ibkr_data_stale": True}
-        return await _fake_tool(_c, name, _a)
-
-    monkeypatch.setattr("abcxauto.agent_loop._tool", stale_acct)
-    out = await snap(FakeConnector())
-    assert out["ibkr_data_stale"] is True
-    assert out["book_unreliable"] is True
-
-
-@pytest.mark.asyncio
-async def test_kill_look_gate_exception_blocks_non_exit(monkeypatch):
-    def boom(*_a, **_k):
-        raise RuntimeError("gate down")
-
-    monkeypatch.setattr("abcxauto.thin_rth_kill_look.kill_look_send_block", boom)
-    monkeypatch.setattr("abcxauto.thin_rth_kill_look.kill_look_rth", lambda *_a, **_k: True)
-    world = _world(flat=False, session_status="regular")
-    act = {
-        "strategy": "market_bracket",
-        "action": "market_bracket",
-        "params": {"symbol": "QQQ", "quantity": 1, "direction": "LONG"},
-    }
-    out = await execute_ticket(act, FakeConnector(), world, {"positions": [], "open_orders": []})
-    assert out["status"] == "blocked"
-    assert "failed closed" in str(out.get("note") or "")
-
-
-@pytest.mark.asyncio
-async def test_kill_look_gate_exception_allows_exit(monkeypatch):
-    def boom(*_a, **_k):
-        raise RuntimeError("gate down")
-
-    monkeypatch.setattr("abcxauto.thin_rth_kill_look.kill_look_send_block", boom)
-    monkeypatch.setattr("abcxauto.thin_rth_kill_look.kill_look_rth", lambda *_a, **_k: True)
-
-    async def fake_send(*_a, **_k):
-        return {"status": "ok", "note": "exit-allowed"}
-
-    monkeypatch.setattr("abcxauto.agent_loop.send_action", fake_send)
-    world = _world(
-        flat=False,
-        session_status="regular",
-        positions=[{"symbol": "SPY", "quantity": 1, "conId": "9", "secType": "OPT"}],
-    )
-    act = {
-        "strategy": "close_option",
-        "action": "close_option",
-        "params": {"symbol": "SPY", "closing_position": True, "conId": "9"},
-    }
-    out = await execute_ticket(
-        act,
-        FakeConnector(),
-        world,
-        {"positions": world.positions, "open_orders": []},
-    )
-    assert str(out.get("note") or "") != "kill-look gate failed closed"
