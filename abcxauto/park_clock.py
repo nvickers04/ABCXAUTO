@@ -277,8 +277,9 @@ def resolve_stay_up_session(
     """Fill a blank snap label from the ET clock. Closed / postmarket stay parked.
 
     A junk look must not sit the desk because IBKR omitted session=. Weekday
-    RTH becomes regular; last-hour-to-open becomes premarket. After the close
-    an empty label stays empty so overnight park can still shut down.
+    RTH becomes regular via ``opportunity_scan.rth_now`` (NYSE clock);
+    last-hour-to-open becomes premarket. After the close an empty label
+    stays empty so overnight park can still shut down.
     """
     sess = str(session or "").strip().lower()
     if sess == "unknown":
@@ -346,23 +347,13 @@ def _floor_look_s(sec: float, *, session: str = "") -> float:
 
 
 def et_minutes_to_rth_open(*, now: datetime | None = None) -> float | None:
-    """Minutes to today's 09:30 ET. None when already open or not a weekday."""
+    """Minutes to today's 09:30 ET. None when already open or not a session day."""
     try:
-        from zoneinfo import ZoneInfo
+        from abcxauto.marketdata.market_hours import minutes_to_rth_open
 
-        clock = now or datetime.now(ZoneInfo("America/New_York"))
-        if clock.tzinfo is None:
-            clock = clock.replace(tzinfo=ZoneInfo("America/New_York"))
-        else:
-            clock = clock.astimezone(ZoneInfo("America/New_York"))
+        return minutes_to_rth_open(now=now)
     except Exception:
         return None
-    if clock.weekday() >= 5:
-        return None
-    bell = clock.replace(hour=9, minute=30, second=0, microsecond=0)
-    if clock >= bell:
-        return None
-    return (bell - clock).total_seconds() / 60.0
 
 
 def infer_session_before_open(*, now: datetime | None = None) -> tuple[str, float | None]:

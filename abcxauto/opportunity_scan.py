@@ -51,17 +51,15 @@ def mda_last_kind(resolution: str | None) -> str:
 
 
 def scan_fetch_cap() -> int:
-    raw = (os.environ.get("ABCXAUTO_SCAN_FETCH_CAP") or "").strip()
-    if not raw:
-        try:
-            from abcxauto.config import get_config
-
-            return max(1, int(getattr(get_config(), "scan_fetch_cap", 8) or 8))
-        except Exception:
-            return 8
+    """Max MDA symbols per scan. Goes through ``get_config()`` so Settings /
+    ``self_tune`` beat a leftover env value.
+    """
     try:
-        return max(1, min(32, int(raw)))
-    except ValueError:
+        from abcxauto.config import get_config
+
+        raw = int(getattr(get_config(), "scan_fetch_cap", 8) or 8)
+        return max(1, min(32, raw))
+    except Exception:
         return 8
 
 
@@ -644,7 +642,16 @@ def _rth_bars(session: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]
             untimed.append(bar)
             continue
         timed.append(bar)
-        if _RTH_START_MIN <= mins < _RTH_END_MIN:
+        start, end = _RTH_START_MIN, _RTH_END_MIN
+        stamp = _bar_et(bar)
+        if stamp is not None:
+            try:
+                from abcxauto.marketdata.market_hours import rth_minute_bounds
+
+                start, end = rth_minute_bounds(stamp)
+            except Exception:
+                pass
+        if start <= mins < end:
             rth.append(bar)
     if rth:
         return rth, "rth"
@@ -781,16 +788,10 @@ def session_range_from_bars(
 
 
 def rth_now(*, now: datetime | None = None) -> bool:
-    """True during the NYSE regular session on a weekday."""
-    clock = now if isinstance(now, datetime) else datetime.now(ZoneInfo("America/New_York"))
-    if clock.tzinfo is None:
-        clock = clock.replace(tzinfo=ZoneInfo("America/New_York"))
-    else:
-        clock = clock.astimezone(ZoneInfo("America/New_York"))
-    if clock.weekday() >= 5:
-        return False
-    mins = clock.hour * 60 + clock.minute
-    return _RTH_START_MIN <= mins < _RTH_END_MIN
+    """True during the NYSE regular session (holidays and early closes)."""
+    from abcxauto.marketdata.market_hours import rth_now as session_rth_now
+
+    return session_rth_now(now=now)
 
 
 def session_range_from_live_open(

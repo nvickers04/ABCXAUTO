@@ -62,7 +62,7 @@ LAUNCH_MODEL_KEYS = (
     "model_params_rth",
     "model_params_research",
 )
-# Clerk-owned chat.create kwargs. model_params may not overwrite these.
+# Code-owned chat.create kwargs. model_params may not overwrite these.
 RESERVED_CHAT_KEYS = frozenset({
     "model",
     "messages",
@@ -456,7 +456,7 @@ def _json_safe_param(value: Any, *, depth: int = 0) -> bool:
 def coerce_model_params(value: Any) -> dict[str, Any]:
     """JSON object of extra chat.create kwargs. Unknown keys stay.
 
-    Empty / missing → {}. Reserved clerk keys (model, messages, tools,
+    Empty / missing → {}. Reserved code keys (model, messages, tools,
     include, temperature, max_tokens) are dropped so dedicated knobs win.
     """
     if value is None or value == "":
@@ -616,6 +616,10 @@ def save_risk_settings(
     return settings_path
 
 
+# Settings / risk_settings.json > env > default. Session _runtime_overrides
+# beat the file for this process. agent_state.json is not a general overlay.
+CONFIG_PRECEDENCE = ("settings", "env", "default")
+
 # Load once at import so Pro / agent see last Apply without an extra call.
 load_risk_settings()
 
@@ -646,19 +650,21 @@ def launch_model_knobs(*, reload: bool = True) -> dict[str, Any]:
 
 
 def get_config() -> Config:
-    """Env-backed config plus file-persisted risk knobs, agent_state, session overrides.
+    """Env-backed config plus Settings file and session overrides.
 
-    Precedence: ``.env`` defaults < ``risk_settings.json`` < ``agent_state.json``
-    < session overrides.     Operator disk knobs (mop / size% / premium% /
-    daily-loss / session_token_cap / floors / defined-risk / cash-only /
+    Precedence for Settings knobs: ``risk_settings.json`` > env > default
+    (``CONFIG_PRECEDENCE``). Session ``_runtime_overrides`` beat the file for
+    this process. ``agent_state.json`` is not a general overlay — only
+    ``scan_fetch_cap`` from ``self_tune`` is merged, and it beats env.
+    Operator disk knobs (mop / size% / premium% / daily-loss /
+    session_token_cap / floors / defined-risk / cash-only /
     portfolio_cap_usd / mode+port) are not taken from ``agent_state`` and
-    ``self_tune`` cannot persist over the file. The ``model`` the operator applies from Pro Settings
-    beats ``ABCXAUTO_MODEL``. ``model_rth`` / ``model_research`` select the
-    session brain when set; empty falls back to ``model``. ``model_params``
-    / ``model_params_rth`` / ``model_params_research`` are extra
-    ``chat.create`` kwargs (JSON object; session maps fall back to shared).
-    Unknown future keys pass through. ``scan_fetch_cap`` from ``self_tune``
-    beats both.
+    ``self_tune`` cannot persist over the file. The ``model`` the operator
+    applies from Pro Settings beats ``ABCXAUTO_MODEL``. ``model_rth`` /
+    ``model_research`` select the session brain when set; empty falls back
+    to ``model``. ``model_params`` / ``model_params_rth`` /
+    ``model_params_research`` are extra ``chat.create`` kwargs (JSON object;
+    session maps fall back to shared). Unknown future keys pass through.
     """
     base = _load_env_config()
     agent_extra: dict[str, Any] = {}

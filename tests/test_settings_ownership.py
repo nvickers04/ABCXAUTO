@@ -238,8 +238,12 @@ def test_opportunity_scan_still_reads_the_cap(monkeypatch):
     assert normalize_tickers(["AAPL", "MSFT", "NVDA"]) == ["AAPL", "MSFT"]
 
 
-def test_the_scan_cap_env_form_still_wins_for_the_scanner(monkeypatch):
+def test_the_scan_cap_env_form_beats_default_not_self_tune(monkeypatch):
     monkeypatch.setenv("ABCXAUTO_SCAN_FETCH_CAP", "3")
+    get_config.cache_clear()
     from abcxauto.opportunity_scan import scan_fetch_cap
+    from abcxauto.self_tune import apply_self_tune
 
     assert scan_fetch_cap() == 3
+    apply_self_tune({"scan_fetch_cap": 2}, persist=True)
+    assert scan_fetch_cap() == 2
