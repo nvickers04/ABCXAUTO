@@ -83,7 +83,7 @@ async def test_host_think_ingests_look_snap_fills(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_single_ingest_per_look_monitor_poll_does_not(monkeypatch):
-    """Look writes the journal once. Monitor poll must not ingest_look again."""
+    """Look writes the snapshot row. Monitor poll must not call ingest_look."""
     from abcxauto.monitor import PortfolioMonitor
 
     calls: list = []

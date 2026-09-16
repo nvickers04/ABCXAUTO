@@ -244,9 +244,36 @@ def test_symbol_fallback_when_conids_absent():
     assert report["unprotected_symbols"] == []
 
 
+def _poll_session():
+    class Session:
+        def emit(self, *_a, **_k):
+            pass
+
+    return Session()
+
+
+def _poll_connector(*, fills=None, orders=None):
+    class Connector:
+        connected = True
+
+        async def get_positions(self):
+            return []
+
+        async def get_open_orders(self):
+            return list(orders or [])
+
+        async def get_account_summary(self):
+            return {"netliquidation": 100_000.0, "dailypnl": 0.0}
+
+        async def get_fills(self):
+            return list(fills or [])
+
+    return Connector()
+
+
 @pytest.mark.asyncio
-async def test_take_snapshot_includes_fills_without_journal_ingest(tmp_path, monkeypatch):
-    """Poll still carries fills on the snap. Journal ingest is the look's job."""
+async def test_poll_persists_fill_without_a_look(tmp_path, monkeypatch):
+    """An unpoked fill must land in the journal even when no look runs."""
     db = tmp_path / "monitor_fills.db"
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(db))
     monkeypatch.setenv("ABCXAUTO_JOURNAL_ENABLED", "true")
@@ -267,26 +294,7 @@ async def test_take_snapshot_includes_fills_without_journal_ingest(tmp_path, mon
         }
     ]
 
-    class Session:
-        def emit(self, *_a, **_k):
-            pass
-
-    class Connector:
-        connected = True
-
-        async def get_positions(self):
-            return []
-
-        async def get_open_orders(self):
-            return []
-
-        async def get_account_summary(self):
-            return {"netliquidation": 100_000.0, "dailypnl": 0.0}
-
-        async def get_fills(self):
-            return fills
-
-    mon = PortfolioMonitor(Session(), Connector())
+    mon = PortfolioMonitor(_poll_session(), _poll_connector(fills=fills))
     snap = await mon.take_snapshot()
     assert snap["connected"] is True
     assert snap["fills"][0]["exec_id"] == "mon-exec-1"
@@ -296,11 +304,9 @@ async def test_take_snapshot_includes_fills_without_journal_ingest(tmp_path, mon
         rows = conn.execute(
             "SELECT exec_id, order_id, symbol FROM fills"
         ).fetchall()
-        snaps = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
     finally:
         conn.close()
-    assert rows == []
-    assert snaps == 0
+    assert rows == [("mon-exec-1", 42, "AAPL")]
 
     await mon.take_snapshot()
     conn = sqlite3.connect(str(db))
@@ -308,7 +314,41 @@ async def test_take_snapshot_includes_fills_without_journal_ingest(tmp_path, mon
         n = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     finally:
         conn.close()
-    assert n == 0
+    assert n == 1
+
+
+@pytest.mark.asyncio
+async def test_poll_writes_no_snapshot_row(tmp_path, monkeypatch):
+    """Poll may persist fills. The snapshots table is look-only."""
+    db = tmp_path / "monitor_nosnap.db"
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(db))
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_ENABLED", "true")
+    reset_journal(path=str(db), enabled=True)
+
+    mon = PortfolioMonitor(
+        _poll_session(),
+        _poll_connector(
+            fills=[
+                {
+                    "exec_id": "idle-fill",
+                    "order_id": 7,
+                    "symbol": "SPY",
+                    "side": "BOT",
+                    "quantity": 1,
+                    "price": 500.0,
+                }
+            ]
+        ),
+    )
+    await mon.take_snapshot()
+    conn = sqlite3.connect(str(db))
+    try:
+        snaps = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        fills = conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
+    finally:
+        conn.close()
+    assert snaps == 0
+    assert fills == 1
 
 
 @pytest.mark.asyncio

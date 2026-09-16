@@ -688,8 +688,12 @@ class PortfolioMonitor:
             "fills": list(fills)[-20:],
             "protection": protection,
         }
-        # Look-boundary ingest lives on ProEngine._host_think. A second
-        # ingest_look on every poll doubled snapshots and WAL writers.
+        # Snapshot rows are look-only. Fills and missed sends persist here
+        # so P&L truth does not wait on an idle look.
+        try:
+            get_journal().ingest_poll(snapshot)
+        except Exception as e:
+            logger.warning(f"Monitor poll journal ingest failed: {e}")
         try:
             from abcxauto.pcs_fill_lambda import refresh_pcs_manage
 

@@ -1553,10 +1553,30 @@ class TradeJournal:
             logger.exception("journal.resolve_unfilled_sends failed")
             return 0
 
-    def ingest_look(self, snap: Optional[dict] = None) -> dict:
-        """Persist this look's book on the existing journal. Same writer as monitor.
+    def ingest_poll(self, snap: Optional[dict] = None) -> dict:
+        """Persist fills and missed sends from a monitor poll. No snapshot row.
 
-        Snapshot + fills + missed-send resolve. Not a second ledger.
+        P&L truth cannot wait on a look. Snapshot rows are look-only.
+        """
+        bag = snap if isinstance(snap, dict) else {}
+        open_orders = (
+            bag.get("open_orders") if isinstance(bag.get("open_orders"), list) else []
+        )
+        fills = bag.get("fills") if isinstance(bag.get("fills"), list) else []
+        taken = bag.get("taken_at")
+        ts = taken if isinstance(taken, str) and taken.strip() else None
+        inserted = self.record_fills(fills)
+        resolved = 0
+        try:
+            resolved = self.resolve_unfilled_sends(open_orders, ts=ts)
+        except Exception:
+            logger.exception("journal.ingest_poll resolve failed")
+        return {"fills_inserted": int(inserted or 0), "sends_resolved": int(resolved or 0)}
+
+    def ingest_look(self, snap: Optional[dict] = None) -> dict:
+        """Persist this look's book. Snapshot row is look-only.
+
+        Fills and missed-send resolve also run here (idempotent with ``ingest_poll``).
         """
         bag = snap if isinstance(snap, dict) else {}
         account = bag.get("account") if isinstance(bag.get("account"), dict) else {}
