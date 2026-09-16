@@ -21,6 +21,9 @@ playbook_live.json
 # Machine state, not source: the desk rewrites all of this every look — briefs,
 # wakes, the think tail, restart scratch, UI screenshots. Nothing here is tracked.
 data/state/
+# Older copies of settings/journal that landed under data/; not source.
+data/config/
+data/journal/
 # Scratch that keeps landing at the repo root: one-off patch scripts and the
 # file a mistyped PowerShell redirect leaves behind.
 _patch_*.py
@@ -29,3 +32,24 @@ _patch_*.py
 # beside the db it rewrites.
 journal.db.bak-*
 journal.db.fill-ts-fix-*.json
+# Recurrence guards. logs/ is already ignored; these catch the same junk if it
+# is copied to the repo root, another folder, or if logs/ is ever force-added.
+# Do not use launch* (that would hide .vscode/launch.json) or *.png (assets/).
+*test-polluted*
+*.log.[0-9]
+app.log.*
+desk.out
+desk.out.*
+/launch.out
+/launch.err
+launch_now.txt
+launch_now.err.txt
+/*.out
+/*.err
+*.bak-*
+journal.db.*
+*.diff
+/_*.py
+/_*.diff
+/_*.png
+/_ui_shot*.png
