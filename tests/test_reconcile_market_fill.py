@@ -215,15 +215,27 @@ async def test_perm_id_finds_the_trade():
 @pytest.mark.asyncio
 async def test_market_bracket_refuses_qty_blind_oca():
     class _Bracket(_Harness):
-        async def place_market_order(self, symbol, action, quantity, **_k):
+        def __init__(self):
+            super().__init__()
+            self._target_placed = False
+
+        async def _ensure_connected(self):
+            return True
+
+        async def _prepare_contract(self, symbol: str):
+            return SimpleNamespace(symbol=symbol)
+
+        async def _place_parent_with_stop(self, *_a, **_k):
+            parent = _Trade(order_id=1, action="BUY", filled=0, avg=0, status="Filled")
+            stop = _Trade(order_id=2, action="SELL", status="Submitted")
+            return parent, stop
+
+        async def _wait_for_fill(self, trade, timeout: float = 30.0):
             return {
-                "success": True,
                 "filled": True,
-                "order_id": 1,
-                "filled_quantity": 0,
+                "status": "Filled",
                 "avg_fill_price": None,
-                "symbol": symbol,
-                "action": action,
+                "filled_quantity": 0,
             }
 
         async def place_oca(self, *_a, **_k):
@@ -233,6 +245,15 @@ async def test_market_bracket_refuses_qty_blind_oca():
             return {"success": True}
 
     h = _Bracket()
+    h.ib = SimpleNamespace(
+        trades=lambda: [],
+        fills=lambda: [],
+        openTrades=lambda: [],
+        placeOrder=lambda *_a, **_k: (_ for _ in ()).throw(
+            AssertionError("must not place a target sized from the ticket qty")
+        ),
+        cancelOrder=lambda *_a, **_k: None,
+    )
     out = await h.place_market_bracket("NVDA", 10, "LONG", 170.0, 190.0)
     assert out.get("success") is False
     assert out.get("filled") is False

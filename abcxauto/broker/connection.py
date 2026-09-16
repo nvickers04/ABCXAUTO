@@ -7,7 +7,7 @@ midnight restarts), paper/live safety checks, and structured logging.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from abcxauto.aio import safe_sleep  # noqa: F401  (re-export for broker modules)
 from abcxauto.config import get_config
@@ -85,6 +85,17 @@ def validate_trading_mode_port(
     raise TradingModePortError(
         f"Unknown TRADING_MODE={mode!r}; expected 'paper' or 'live'"
     )
+
+
+def stale_new_risk_block(owner: Any) -> Optional[dict]:
+    """Refuse new risk when the IBKR book is stale. Exits do not call this."""
+    if bool(getattr(owner, "_ibkr_data_stale", False)):
+        return {
+            "error": "ibkr_data_stale",
+            "status": "rejected",
+            "ibkr_data_stale": True,
+        }
+    return None
 
 
 def classify_error_code(error_code: int) -> Optional[str]:

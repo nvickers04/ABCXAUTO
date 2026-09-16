@@ -50,6 +50,7 @@ def connection_status(connector: Any = None) -> Dict[str, Any]:
         host = str(getattr(cfg, "ibkr_host", "") or "")
     return {
         "ibkr_connected": bool(getattr(conn, "connected", False)),
+        "ibkr_data_stale": bool(getattr(conn, "ibkr_data_stale", False)),
         "ibkr_host": host,
         "ibkr_port": _as_int(getattr(conn, "port", None), int(getattr(cfg, "ibkr_port", 0) or 0)),
         "ibkr_client_id": _as_int(

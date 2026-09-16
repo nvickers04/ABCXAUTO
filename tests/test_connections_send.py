@@ -15,6 +15,7 @@ def test_connection_status_keys():
     status = connection_status(connector)
     assert set(status.keys()) >= {
         "ibkr_connected",
+        "ibkr_data_stale",
         "ibkr_host",
         "ibkr_port",
         "ibkr_client_id",

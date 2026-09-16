@@ -604,12 +604,16 @@ class _BracketHarness(IBKROrdersMixin):
 
     def _place(self, contract, order):
         self._next_id += 1
-        trade = _Trade(self._next_id)
+        status = "Cancelled" if getattr(order, "orderType", None) == "STP" else "Submitted"
+        trade = _Trade(self._next_id, status=status)
+        trade.order.orderType = getattr(order, "orderType", "LMT")
         self._placed.append(order)
-        # After entry fill path, first protection placeOrder raises
-        if len(self._placed) == 2:
-            raise RuntimeError("socket died mid-bracket")
         return trade
+
+    async def get_positions(self):
+        if any(getattr(o, "orderType", None) == "MKT" for o in self._placed):
+            return []
+        return [{"symbol": "SPY", "quantity": 10, "sec_type": "STK"}]
 
 
 @pytest.mark.asyncio
@@ -635,7 +639,7 @@ async def test_bracket_exception_after_fill_emergency_flatten(monkeypatch):
     assert result.get("success") is False
     assert "emergency_exit" in result
     assert result["emergency_exit"].get("attempted") is True
-    # Entry + failed stop attempt + emergency MKT
+    assert result.get("protection") == "flat"
     assert any(getattr(o, "orderType", None) == "MKT" for o in harness._placed)
     mkt = next(o for o in harness._placed if getattr(o, "orderType", None) == "MKT")
     assert mkt.action == "SELL"
