@@ -75,12 +75,13 @@ def test_missing_rationale_rejected():
 
 
 def test_missing_required_field_rejected():
-    with pytest.raises(ProposalValidationError, match="limit_price"):
+    with pytest.raises(ProposalValidationError, match="limit_price") as exc:
         validate_proposal(
             "limit_order",
             {"symbol": "AAPL", "action": "BUY", "quantity": 10},
             RATIONALE,
         )
+    assert "ORDER EXAMPLES" in str(exc.value)
 
 
 def test_negative_quantity_rejected():

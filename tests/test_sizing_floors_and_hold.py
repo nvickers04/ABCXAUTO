@@ -447,7 +447,7 @@ def test_size_pct_nl_hoisted_not_converted():
 
 
 def test_size_pct_nl_is_clerk_send_annotation():
-    """size_pct_nl lives on send/tool_args — not brain AGENT_TOOLS schema."""
+    """size_pct_nl is Grok's size — hoist + send schema, clerk fills qty."""
     from abcxauto.send import SEND_SIZE_PCT_NL
     from abcxauto.tool_args import SEND_SIZE_PCT_NL as TA_KEY
     from abcxauto import tool_args as ta
@@ -466,4 +466,4 @@ def test_size_pct_nl_is_clerk_send_annotation():
             send = t
             break
     assert send is not None
-    assert "size_pct_nl" not in str(send)
+    assert "size_pct_nl" in str(send)

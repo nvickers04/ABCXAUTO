@@ -51,7 +51,10 @@ CAPACITY_KEYS = frozenset({
 PERSISTED_OPERATOR_KEYS = RISK_CONFIG_KEYS | CAPACITY_KEYS
 # Default brain id. Operator Settings / env / risk_settings.json override it.
 # Flipping to grok-4.7 (or any later id) is a knob change, not a code hunt.
-# Stay on grok-4.6 + xhigh until the operator flips — do not bake 4.7 in.
+# Stay on grok-4.6 until the operator flips — do not bake 4.7 in.
+# DEFAULT_MODEL_XHIGH is the leftover spelling the operator typed as a
+# model id. It is not an xAI model. Code rewrites it to grok-4.6 +
+# reasoning_effort=xhigh and must never send it on the wire.
 DEFAULT_MODEL = "grok-4.6"
 DEFAULT_MODEL_XHIGH = "grok-4.6-xhigh"
 LAUNCH_MODEL_KEYS = (
@@ -70,6 +73,34 @@ RESERVED_CHAT_KEYS = frozenset({
     "include",
     "temperature",
     "max_tokens",
+})
+# Settings still accept ``effort``; xAI SDK 1.19 ``chat.create`` wants
+# ``reasoning_effort``. Values from xai_sdk.types.chat.ReasoningEffort.
+# ``thinking`` is not a create kwarg (stream already surfaces reasoning_content).
+REASONING_EFFORT_VALUES = frozenset({"none", "low", "medium", "high", "xhigh"})
+_CHAT_EXTRA_ALIASES = {"effort": "reasoning_effort"}
+_REFUSED_CHAT_EXTRAS = {
+    "thinking": (
+        "not a chat.create kwarg — stream already surfaces reasoning_content; "
+        "use reasoning_effort=low|medium|high|xhigh"
+    ),
+}
+# Simple extras on xai_sdk.chat.BaseClient.create (1.19). Complex objects
+# (tools, search_parameters, response_format) stay clerk-owned or unused.
+ALLOWED_MODEL_PARAM_KEYS = frozenset({
+    "reasoning_effort",
+    "effort",
+    "seed",
+    "top_p",
+    "logprobs",
+    "top_logprobs",
+    "parallel_tool_calls",
+    "store_messages",
+    "use_encrypted_content",
+    "max_turns",
+    "service_tier",
+    "user",
+    "conversation_id",
 })
 # Brain / pacing / link knobs the operator sets from Pro Settings.
 # scan_fetch_cap is deliberately absent: self_tune is its only writer.
@@ -138,6 +169,18 @@ _AGENT_JSON_OBJECT_KEYS = frozenset({
 _MODEL_PARAM_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _MODEL_PARAMS_MAX_KEYS = 32
 _MODEL_PARAMS_MAX_CHARS = 4096
+# Trailing / embedded reasoning suffix on a model id. ``grok-4.6-xhigh``
+# and ``grok-4.6-xhigh-fast`` → strip the effort token. Real ids such as
+# ``grok-4-1-fast-reasoning`` do not end in an effort value, so they stay.
+_EFFORT_SUFFIX_RE = re.compile(
+    r"-(none|low|medium|high|xhigh)(?=-|$)",
+    re.IGNORECASE,
+)
+_MODEL_EFFORT_PAIRS = (
+    ("model", "model_params"),
+    ("model_rth", "model_params_rth"),
+    ("model_research", "model_params_research"),
+)
 RISK_POSTURES = frozenset({"defensive", "balanced", "aggressive"})
 _runtime_overrides: dict[str, Any] = {}
 _file_overrides: dict[str, Any] = {}
@@ -154,7 +197,8 @@ class Config:
     # Session brains. Empty = use ``model`` (single-model desks keep working).
     model_rth: str = ""
     model_research: str = ""
-    # Extra chat.create kwargs (effort + future keys). JSON object.
+    # Extra chat.create kwargs. JSON object. ``effort`` is an alias for
+    # ``reasoning_effort`` (low|medium|high|xhigh). Unknown keys are refused.
     # Session maps fall back to ``model_params`` when empty.
     model_params: dict[str, Any] = field(default_factory=dict)
     model_params_rth: dict[str, Any] = field(default_factory=dict)
@@ -315,14 +359,28 @@ def setup_file_logging(
 @lru_cache(maxsize=1)
 def _load_env_config() -> Config:
     load_dotenv()
+    model_knobs = {
+        "model": _env("ABCXAUTO_MODEL", DEFAULT_MODEL),
+        "model_rth": _env("ABCXAUTO_MODEL_RTH"),
+        "model_research": _env("ABCXAUTO_MODEL_RESEARCH"),
+        "model_params": _env_model_params("ABCXAUTO_MODEL_PARAMS"),
+        "model_params_rth": _env_model_params("ABCXAUTO_MODEL_PARAMS_RTH"),
+        "model_params_research": _env_model_params("ABCXAUTO_MODEL_PARAMS_RESEARCH"),
+    }
+    folded, problems = fold_model_effort_suffixes(model_knobs, strict=False)
+    if problems:
+        logger.error(
+            "ABCXAUTO_MODEL* suffix rewrite: %s",
+            "; ".join(msg for _k, msg in problems),
+        )
     return Config(
         xai_api_key=_env("XAI_API_KEY") or _env("GROK_API_KEY"),
-        model=_env("ABCXAUTO_MODEL", DEFAULT_MODEL),
-        model_rth=_env("ABCXAUTO_MODEL_RTH"),
-        model_research=_env("ABCXAUTO_MODEL_RESEARCH"),
-        model_params=_env_model_params("ABCXAUTO_MODEL_PARAMS"),
-        model_params_rth=_env_model_params("ABCXAUTO_MODEL_PARAMS_RTH"),
-        model_params_research=_env_model_params("ABCXAUTO_MODEL_PARAMS_RESEARCH"),
+        model=folded["model"],
+        model_rth=folded["model_rth"],
+        model_research=folded["model_research"],
+        model_params=folded["model_params"],
+        model_params_rth=folded["model_params_rth"],
+        model_params_research=folded["model_params_research"],
         temperature=float(_env("ABCXAUTO_TEMPERATURE", "0.3")),
         max_tokens=int(_env("ABCXAUTO_MAX_TOKENS", "8192")),
         session_look_cap=int(_env("ABCXAUTO_SESSION_LOOK_CAP", "160")),
@@ -453,11 +511,83 @@ def _json_safe_param(value: Any, *, depth: int = 0) -> bool:
     return False
 
 
-def coerce_model_params(value: Any) -> dict[str, Any]:
-    """JSON object of extra chat.create kwargs. Unknown keys stay.
+def normalize_model_params(extras: Any) -> tuple[dict[str, Any], list[str]]:
+    """Map Settings aliases onto SDK names. Return ``(cleaned, problems)``.
+
+    Does not raise. Reserved clerk keys are dropped. ``effort`` becomes
+    ``reasoning_effort``. Unknown keys and bad values are listed in
+    ``problems`` and omitted from ``cleaned``.
+    """
+    if not isinstance(extras, dict):
+        return {}, ["model_params must be a JSON object"]
+    out: dict[str, Any] = {}
+    aliases: dict[str, Any] = {}
+    problems: list[str] = []
+    allowed_show = ", ".join(sorted(ALLOWED_MODEL_PARAM_KEYS - {"effort"} | {"effort (alias)"}))
+    for raw_key, raw_val in extras.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        if not _MODEL_PARAM_KEY_RE.match(key):
+            problems.append(f"{raw_key!r} must be a Python identifier")
+            continue
+        if key in RESERVED_CHAT_KEYS:
+            continue
+        if not _json_safe_param(raw_val):
+            problems.append(f"{key} is not JSON-safe")
+            continue
+        if key in _REFUSED_CHAT_EXTRAS:
+            problems.append(f"{key}: {_REFUSED_CHAT_EXTRAS[key]}")
+            continue
+        mapped = _CHAT_EXTRA_ALIASES.get(key)
+        dest = mapped or key
+        if dest not in ALLOWED_MODEL_PARAM_KEYS and dest not in _CHAT_EXTRA_ALIASES.values():
+            problems.append(
+                f"{key}: unknown chat.create kwarg (allowed: {allowed_show})"
+            )
+            continue
+        if dest == "reasoning_effort":
+            token = str(raw_val or "").strip().lower()
+            if token not in REASONING_EFFORT_VALUES:
+                problems.append(
+                    f"{key}={raw_val!r} is not a reasoning_effort value "
+                    f"({ '|'.join(sorted(REASONING_EFFORT_VALUES)) })"
+                )
+                continue
+            if mapped:
+                aliases[dest] = token
+            else:
+                out[dest] = token
+            continue
+        if mapped:
+            aliases[dest] = raw_val
+            continue
+        out[dest] = raw_val
+    if "reasoning_effort" in aliases:
+        aliased = aliases["reasoning_effort"]
+        explicit = out.get("reasoning_effort")
+        if explicit is not None and explicit != aliased:
+            problems.append(
+                f"effort={aliased!r} disagrees with reasoning_effort={explicit!r}"
+            )
+        elif explicit is None:
+            out["reasoning_effort"] = aliased
+    for key, value in aliases.items():
+        if key == "reasoning_effort":
+            continue
+        if key not in out:
+            out[key] = value
+    return out, problems
+
+
+def coerce_model_params(value: Any, *, strict: bool = True) -> dict[str, Any]:
+    """JSON object of extra chat.create kwargs.
 
     Empty / missing → {}. Reserved clerk keys (model, messages, tools,
     include, temperature, max_tokens) are dropped so dedicated knobs win.
+    ``effort`` is stored as ``reasoning_effort``. Unknown keys / values
+    raise when ``strict`` (Settings). Env / file load use ``strict=False``
+    and log the dropped keys instead of wiping a valid map.
     """
     if value is None or value == "":
         return {}
@@ -473,22 +603,125 @@ def coerce_model_params(value: Any) -> dict[str, Any]:
         raise ValueError("model_params must be a JSON object")
     if len(value) > _MODEL_PARAMS_MAX_KEYS:
         raise ValueError(f"model_params has too many keys (max {_MODEL_PARAMS_MAX_KEYS})")
-    out: dict[str, Any] = {}
-    for raw_key, raw_val in value.items():
-        key = str(raw_key).strip()
-        if not key or not _MODEL_PARAM_KEY_RE.match(key):
-            raise ValueError(
-                f"model_params key {raw_key!r} must be a Python identifier"
-            )
-        if key in RESERVED_CHAT_KEYS:
-            continue
-        if not _json_safe_param(raw_val):
-            raise ValueError(f"model_params.{key} is not JSON-safe")
-        out[key] = raw_val
+    out, problems = normalize_model_params(value)
     blob = json.dumps(out, sort_keys=True, default=str)
     if len(blob) > _MODEL_PARAMS_MAX_CHARS:
         raise ValueError("model_params JSON is too large")
+    if problems:
+        msg = "model_params: " + "; ".join(problems)
+        if strict:
+            raise ValueError(msg)
+        logger.error("%s — dropped", msg)
     return out
+
+
+def split_model_effort_suffix(model: str) -> tuple[str, str | None]:
+    """Split a leftover reasoning suffix off a model id.
+
+    ``grok-4.6-xhigh`` → ``(grok-4.6, xhigh)``. ``grok-4.6-xhigh-fast`` →
+    ``(grok-4.6-fast, xhigh)``. A real id with no effort token is unchanged.
+    Empty stays empty so session fallback still works.
+    """
+    token = str(model or "").strip()
+    if not token:
+        return "", None
+    found: list[str] = []
+
+    def _drop(match: re.Match[str]) -> str:
+        found.append(match.group(1).lower())
+        return ""
+
+    stripped = _EFFORT_SUFFIX_RE.sub(_drop, token)
+    stripped = stripped.replace("--", "-").strip("-")
+    return stripped, (found[-1] if found else None)
+
+
+def fold_model_effort_suffixes(
+    knobs: dict[str, Any],
+    *,
+    current: dict[str, Any] | None = None,
+    strict: bool = True,
+) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+    """Rewrite suffixed model ids onto the real id + ``reasoning_effort``.
+
+    Settings (``strict``) refuse when the suffix disagrees with an explicit
+    effort. Env / disk keep the explicit effort, still strip the fake id.
+    """
+    out = dict(knobs)
+    problems: list[tuple[str, str]] = []
+    prior = current or {}
+    for model_key, params_key in _MODEL_EFFORT_PAIRS:
+        if model_key not in out:
+            continue
+        raw = out[model_key]
+        if raw in (None, ""):
+            continue
+        base, effort = split_model_effort_suffix(str(raw))
+        if not effort:
+            continue
+        rewritten = base or DEFAULT_MODEL
+        logger.error(
+            "%s=%r is not a model id — using %s + reasoning_effort=%s",
+            model_key,
+            raw,
+            rewritten,
+            effort,
+        )
+        if params_key in out:
+            params = dict(out[params_key] or {})
+        elif prior.get(params_key):
+            params = dict(prior[params_key] or {})
+        else:
+            params = {}
+        cleaned = coerce_model_params(params, strict=False)
+        existing = cleaned.get("reasoning_effort")
+        if existing and existing != effort:
+            msg = (
+                f"{model_key} suffix {effort!r} disagrees with "
+                f"{params_key}.reasoning_effort={existing!r}"
+            )
+            problems.append((model_key, msg))
+            if strict:
+                continue
+            out[model_key] = rewritten
+            out[params_key] = cleaned
+            continue
+        cleaned["reasoning_effort"] = effort
+        out[model_key] = rewritten
+        out[params_key] = cleaned
+    return out, problems
+
+
+def bind_model_and_params(
+    model: str,
+    params: Any = None,
+) -> tuple[str, dict[str, Any]]:
+    """Last-line rewrite so ``chat.create`` never sees a suffixed id."""
+    extras = coerce_model_params(params or {}, strict=False)
+    raw = str(model or "").strip()
+    if not raw:
+        return "", extras
+    base, effort = split_model_effort_suffix(raw)
+    chosen = base or DEFAULT_MODEL
+    if effort:
+        if extras.get("reasoning_effort") and extras["reasoning_effort"] != effort:
+            logger.error(
+                "model id %s suffix %s disagrees with reasoning_effort=%s — "
+                "sending %s + explicit effort",
+                raw,
+                effort,
+                extras["reasoning_effort"],
+                chosen,
+            )
+        elif "reasoning_effort" not in extras:
+            extras["reasoning_effort"] = effort
+        logger.error(
+            "model id %s is not a model — sending model=%s reasoning_effort=%s",
+            raw,
+            chosen,
+            extras.get("reasoning_effort") or effort,
+        )
+    return chosen, extras
 
 
 def _env_model_params(name: str = "ABCXAUTO_MODEL_PARAMS") -> dict[str, Any]:
@@ -496,9 +729,9 @@ def _env_model_params(name: str = "ABCXAUTO_MODEL_PARAMS") -> dict[str, Any]:
     if not raw:
         return {}
     try:
-        return coerce_model_params(raw)
+        return coerce_model_params(raw, strict=False)
     except (TypeError, ValueError) as exc:
-        logger.warning("Ignoring invalid %s: %s", name, exc)
+        logger.error("Ignoring invalid %s: %s", name, exc)
         return {}
 
 
@@ -557,6 +790,39 @@ def clamp_agent_knobs(
                 notes[key] = {"raw": coerced, "clamped": bounded}
             coerced = bounded
         applied[key] = coerced
+    if any(model_key in applied for model_key, _params_key in _MODEL_EFFORT_PAIRS):
+        current: dict[str, Any] = {}
+        try:
+            cfg = get_config()
+            current = {
+                "model": cfg.model,
+                "model_rth": cfg.model_rth,
+                "model_research": cfg.model_research,
+                "model_params": dict(cfg.model_params or {}),
+                "model_params_rth": dict(cfg.model_params_rth or {}),
+                "model_params_research": dict(cfg.model_params_research or {}),
+            }
+        except Exception:
+            current = {}
+        before = dict(applied)
+        folded, problems = fold_model_effort_suffixes(
+            applied, current=current, strict=True
+        )
+        for key, msg in problems:
+            rejected[key] = msg
+            folded.pop(key, None)
+        for model_key, params_key in _MODEL_EFFORT_PAIRS:
+            raw = before.get(model_key)
+            new = folded.get(model_key)
+            if raw and new and raw != new:
+                notes[model_key] = {
+                    "raw": raw,
+                    "rewritten": new,
+                    "reasoning_effort": (folded.get(params_key) or {}).get(
+                        "reasoning_effort"
+                    ),
+                }
+        applied = folded
     return applied, notes, rejected
 
 
@@ -581,10 +847,19 @@ def _read_risk_file(settings_path: Path) -> dict[str, Any]:
         if key not in PERSISTED_SETTINGS_KEYS:
             continue
         try:
-            cleaned[key] = _coerce_persisted_value(key, value)
+            if key in _AGENT_JSON_OBJECT_KEYS:
+                cleaned[key] = coerce_model_params(value, strict=False)
+            else:
+                cleaned[key] = _coerce_persisted_value(key, value)
         except (TypeError, ValueError):
-            logger.warning("Ignoring invalid risk setting %s=%r", key, value)
-    return cleaned
+            logger.error("Ignoring invalid risk setting %s=%r", key, value)
+    folded, problems = fold_model_effort_suffixes(cleaned, strict=False)
+    if problems:
+        logger.error(
+            "risk_settings.json suffix rewrite: %s",
+            "; ".join(msg for _k, msg in problems),
+        )
+    return folded
 
 
 def load_risk_settings(path: Path | None = None) -> dict[str, Any]:
@@ -607,6 +882,12 @@ def save_risk_settings(
         if key not in PERSISTED_SETTINGS_KEYS:
             continue
         current[key] = _coerce_persisted_value(key, value)
+    current, problems = fold_model_effort_suffixes(current, strict=False)
+    if problems:
+        logger.error(
+            "risk_settings.json suffix rewrite on save: %s",
+            "; ".join(msg for _k, msg in problems),
+        )
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(
         json.dumps(current, indent=2, sort_keys=True) + "\n",
@@ -624,10 +905,11 @@ def launch_model_knobs(*, reload: bool = True) -> dict[str, Any]:
     """Brain knobs a DESK launch will think with.
 
     Reloads ``risk_settings.json`` so Settings Apply on disk is the launch
-    path. Default remains ``DEFAULT_MODEL`` (grok-4.6). xhigh is an id
-    suffix / ``model_params`` value the operator already uses — not a 4.7
-    flip and not a hardcoded sole path. This is a desk knob reload, not a
-    Cursor CloudAgent / Grok Bot launch rewire.
+    path. Default remains ``DEFAULT_MODEL`` (grok-4.6). ``xhigh`` is
+    ``reasoning_effort``, not a model-id suffix. A leftover
+    ``grok-4.6-xhigh`` spelling is rewritten to ``grok-4.6`` +
+    ``reasoning_effort=xhigh`` and is never sent on the wire. This is a
+    desk knob reload, not a Cursor CloudAgent / Grok Bot launch rewire.
     """
     if reload:
         load_risk_settings()
@@ -657,7 +939,8 @@ def get_config() -> Config:
     session brain when set; empty falls back to ``model``. ``model_params``
     / ``model_params_rth`` / ``model_params_research`` are extra
     ``chat.create`` kwargs (JSON object; session maps fall back to shared).
-    Unknown future keys pass through. ``scan_fetch_cap`` from ``self_tune``
+    Unknown ``model_params`` keys are refused at Settings; env / disk
+    drop them with an error log. ``scan_fetch_cap`` from ``self_tune``
     beats both.
     """
     base = _load_env_config()
@@ -676,6 +959,23 @@ def get_config() -> Config:
     valid = {f.name for f in fields(Config)}
     cleaned = {k: v for k, v in merged.items() if k in valid}
     cfg = replace(base, **cleaned) if cleaned else base
+    knobs = {
+        "model": cfg.model,
+        "model_rth": cfg.model_rth,
+        "model_research": cfg.model_research,
+        "model_params": dict(cfg.model_params or {}),
+        "model_params_rth": dict(cfg.model_params_rth or {}),
+        "model_params_research": dict(cfg.model_params_research or {}),
+    }
+    folded, problems = fold_model_effort_suffixes(knobs, strict=False)
+    if problems:
+        logger.error(
+            "config model suffix rewrite: %s",
+            "; ".join(msg for _k, msg in problems),
+        )
+    changed = {k: v for k, v in folded.items() if v != getattr(cfg, k)}
+    if changed:
+        cfg = replace(cfg, **changed)
     try:
         from abcxauto.self_tune import floor_clamp_config_fields
 

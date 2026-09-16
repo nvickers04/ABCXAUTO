@@ -70,13 +70,37 @@ _ARG_KEYS = {
     "right": ("right", "cp", "call_put", "put_call"),
     "resolution": ("resolution", "interval", "timeframe", "tf"),
     "countback": ("countback", "count", "bars", "n"),
-    "strategy": ("strategy", "action", "order_type", "type"),
+    # action is BUY/SELL on exits — not a strategy alias.
+    "strategy": ("strategy", "order_type", "type"),
     "rationale": ("rationale", "reason", "why", "note"),
     "query": ("query", "q", "search", "event"),
     "target_conId": ("target_conId", "target_conid", "conId", "con_id"),
+    "long_strike": ("long_strike", "longStrike"),
+    "short_strike": ("short_strike", "shortStrike"),
+    "put_long_strike": ("put_long_strike", "putLongStrike"),
+    "put_short_strike": ("put_short_strike", "putShortStrike"),
+    "call_short_strike": ("call_short_strike", "callShortStrike"),
+    "call_long_strike": ("call_long_strike", "callLongStrike"),
+    "put_strike": ("put_strike", "putStrike"),
+    "call_strike": ("call_strike", "callStrike"),
+    "near_expiration": ("near_expiration", "nearExpiration", "near_expiry"),
+    "far_expiration": ("far_expiration", "farExpiration", "far_expiry"),
+    "near_strike": ("near_strike", "nearStrike"),
+    "far_strike": ("far_strike", "farStrike"),
+    "center_strike": ("center_strike", "centerStrike"),
+    "wing_width": ("wing_width", "wingWidth"),
+    "lower_strike": ("lower_strike", "lowerStrike"),
+    "middle_strike": ("middle_strike", "middleStrike"),
+    "upper_strike": ("upper_strike", "upperStrike"),
+    "new_stop_price": ("new_stop_price", "newStopPrice"),
+    "new_limit_price": ("new_limit_price", "newLimitPrice"),
+    "trail_percent": ("trail_percent", "trailPercent"),
+    "limit_offset": ("limit_offset", "limitOffset"),
+    "closing_position": ("closing_position", "closingPosition"),
+    "size_pct_nl": ("size_pct_nl", "sizePctNl"),
 }
 
-_SEND_HOIST = (
+_SEND_HOIST_ALWAYS = (
     "symbol",
     "direction",
     "quantity",
@@ -106,7 +130,25 @@ _SEND_HOIST = (
     # Playbook card this ticket comes from. Hoisted so the new-risk gate and
     # the attribution log read the same key wherever Grok put it.
     "card",
+    "preview",
+    "preview_token",
+    "target_conId",
 )
+
+
+def _send_hoist_keys() -> tuple[str, ...]:
+    """ORDER EXAMPLES keys plus clerk aliases. Computed once per process."""
+    try:
+        from abcxauto.order_examples import send_ticket_field_names
+
+        taught = send_ticket_field_names()
+    except Exception:
+        taught = []
+    return tuple(dict.fromkeys([*taught, *_SEND_HOIST_ALWAYS]))
+
+
+# Tests and hoist_send_params read this name.
+_SEND_HOIST = _send_hoist_keys()
 
 # Clerk-owned send size: percent of current NetLiquidation (not brain schema).
 SEND_SIZE_PCT_NL = "size_pct_nl"
@@ -172,6 +214,23 @@ def _norm_option_spec(src: dict[str, Any]) -> dict[str, Any] | None:
         "strike": strike,
         "right": _norm_right(right),
     }
+
+
+def option_quote_missing(args: dict[str, Any] | None) -> list[str]:
+    """Which of symbol/expiration/strike/right are still missing after aliases."""
+    src = dict(args) if isinstance(args, dict) else {}
+    raw_list = src.get("contracts") or src.get("quotes") or src.get("options")
+    if isinstance(raw_list, list):
+        for item in raw_list:
+            if isinstance(item, dict) and _norm_option_spec(item):
+                return []
+    needed = ("symbol", "expiration", "strike", "right")
+    missing: list[str] = []
+    for dest in needed:
+        keys = _ARG_KEYS.get(dest, (dest,))
+        if _first(src, *keys) in (None, ""):
+            missing.append(dest)
+    return missing
 
 
 def option_quote_specs(args: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -302,8 +361,8 @@ def hoist_send_params(args: dict[str, Any]) -> dict[str, Any]:
     if params.get("right"):
         params["right"] = _norm_right(params["right"])
     out["params"] = params
-    if out.get("strategy") in (None, "") and out.get("action"):
-        out["strategy"] = out["action"]
+    # BUY/SELL/LONG/SHORT are sides, not strategy names. Leave strategy empty
+    # so send can name the fix instead of rejecting "Unknown strategy 'SELL'".
     return out
 
 
