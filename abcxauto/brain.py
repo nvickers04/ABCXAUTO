@@ -443,7 +443,7 @@ def _tape_payload(data: Any) -> bool:
 
 
 def _scan_payload(data: Any) -> bool:
-    """A ranked screen page. Gets SCAN_CLIP_CHARS so rows survive a re-read."""
+    """A ranked screen page. First delivery uses SCAN_CLIP_CHARS; a re-read is a stub."""
     if not isinstance(data, dict) or "hits" not in data:
         return False
     return bool(data.get("ranked") or data.get("provenance"))
@@ -2012,8 +2012,9 @@ def _cached_read(turn: BrainTurn, name: str, args: dict[str, Any]) -> str | None
         data["repeat_of_this_think"] = True
         if _tape_payload(data):
             return _clip(data, max_chars=CANDLES_CLIP_CHARS)
-        if _scan_payload(data):
-            return _clip(data, max_chars=SCAN_CLIP_CHARS)
+        if name == "scan" and data.get("ok") is not False:
+            stub = _scan_reuse_stub(cached=data)
+            return json.dumps(stub, default=str)
         return _clip(data)
     return hit
 

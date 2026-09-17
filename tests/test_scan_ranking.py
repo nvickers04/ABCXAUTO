@@ -159,6 +159,72 @@ async def test_scan_tool_does_not_pin_skip_class_as_deepest(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reused_scan_is_a_pointer_not_another_tape(monkeypatch):
+    """Second scan() this look must not re-bill merged hits or news."""
+
+    async def _fake_scan(**_kw):
+        return {
+            "ok": True,
+            "source": "ibkr",
+            "arena": "top_gainers",
+            "scan_code": "TOP_PERC_GAIN",
+            "symbols": ["SNDK", "MRVL"],
+            "hits": [
+                {"symbol": "SNDK", "open_gap_pct": -6.5, "last": 1485.0},
+                {"symbol": "MRVL", "open_gap_pct": -6.8, "last": 72.0},
+            ],
+            "quoted": 2,
+            "ranked": True,
+        }
+
+    async def _no_tags(_conn):
+        return {}
+
+    async def _news(_syms):
+        return [
+            {"symbol": "SNDK", "headline": "noise", "source": "mda"},
+            {"symbol": "MRVL", "headline": "more noise", "source": "mda"},
+        ]
+
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.brain._mda_news", _news)
+    world = _world()
+    snap: dict = {}
+    turn = BrainTurn()
+    first = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "top_gainers", "with": ["news"]},
+            connector=None,
+            world=world,
+            snap=snap,
+            turn=turn,
+        )
+    )
+    assert first.get("hits")
+    assert first.get("reused") is not True
+    second = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "top_losers"},
+            connector=None,
+            world=world,
+            snap=snap,
+            turn=turn,
+        )
+    )
+    assert second["reused"] is True
+    assert "hits" not in second
+    assert "news" not in second
+    assert "rows" not in second
+    assert second["hits_n"] >= 2
+    assert "SNDK" in second["symbols"]
+    assert second["note"].startswith("this look already has that screen")
+    assert second["asked"]["arena"] == "top_losers"
+
+
+@pytest.mark.asyncio
 async def test_identical_scan_args_this_look_hit_the_cache(monkeypatch):
     n = {"calls": 0}
 
@@ -206,8 +272,13 @@ async def test_identical_scan_args_this_look_hit_the_cache(monkeypatch):
     assert first.get("reused") is not True
     assert "screens_this_look" not in first
     assert first.get("repeat_of_this_think") is not True
+    assert "SNDK" in (first.get("symbols") or [])
+    assert first.get("hits")
     assert second["reused"] is True
     assert second.get("repeat_of_this_think") is True
+    assert "hits" not in second
+    assert second["hits_n"] == len(first.get("symbols") or [])
+    assert "SNDK" in (second.get("symbols") or [])
     assert "screens_this_look" not in second
     # Alias of the same screen is the same look key.
     alias = json.loads(
@@ -310,6 +381,7 @@ async def test_stay_up_poke_does_not_refetch_the_same_scan(monkeypatch):
     assert n["calls"] == 3
     assert again["reused"] is True
     assert again.get("repeat_of_this_think") is True
+    assert "hits" not in again
     assert "screens_this_look" not in again
 
 
@@ -364,8 +436,12 @@ async def test_parallel_identical_scan_args_fetch_once(monkeypatch):
     rows = [json.loads(r) for r in raw]
     assert n["calls"] == 3
     assert rows[0].get("reused") is not True
+    assert rows[0].get("hits")
     assert "screens_this_look" not in rows[0]
     assert sum(1 for r in rows[1:] if r.get("reused") is True) == 3
+    for row in rows[1:]:
+        assert "hits" not in row
+        assert row["hits_n"] == len(rows[0].get("symbols") or [])
     for row in rows:
         assert "screens_this_look" not in row
         assert row["deepest_symbol"] == rows[0]["deepest_symbol"]
@@ -668,4 +744,7 @@ async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
     )
     assert ibkr["calls"] == first_ibkr
     assert again.get("repeat_of_this_think") is True
+    assert again["reused"] is True
+    assert "hits" not in again
+    assert again["hits_n"] == len(bag.get("symbols") or [])
     assert again["deepest_symbol"] == bag["deepest_symbol"]

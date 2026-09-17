@@ -5592,11 +5592,11 @@ def test_scan_clip_keeps_ranked_page_plus_news():
     assert len(kept["news"]) == 32
     assert kept["provenance"]["ibkr_rows"] == 30
 
-    # Same screen asked twice in one look: the cached hand-back must not
-    # re-clip at the 8k default and quietly drop the tail of the page.
+    # Same screen asked twice: pointer, not another 28k copy of the page.
     from types import SimpleNamespace
 
     from abcxauto.brain import _cached_read, _tool_key
+    from abcxauto.brain_tools import _SCAN_REUSE_NOTE
 
     args = {"arena": "most_active"}
     turn = SimpleNamespace(
@@ -5604,7 +5604,10 @@ def test_scan_clip_keeps_ranked_page_plus_news():
     )
     again = json.loads(_cached_read(turn, "scan", args))
     assert again["repeat_of_this_think"] is True
-    assert "_dropped" not in again
-    assert len(again["hits"]) == 30
-    assert again["provenance"]["ibkr_rows"] == 30
+    assert again["reused"] is True
+    assert again["hits_n"] == 30
+    assert "hits" not in again
+    assert "news" not in again
+    assert again["note"] == _SCAN_REUSE_NOTE
+    assert again["deepest_symbol"] == "S29"
 

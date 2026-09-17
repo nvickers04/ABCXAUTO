@@ -457,6 +457,77 @@ def _scan_public_payload(out: dict[str, Any]) -> dict[str, Any]:
     return slim
 
 
+_SCAN_REUSE_NOTE = (
+    "this look already has that screen — rows are on the first scan() page"
+)
+
+
+def _scan_reuse_stub(
+    snap: dict[str, Any] | None = None,
+    *,
+    asked_arena: str = "",
+    asked_code: str = "",
+    cached: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Pointer, not another copy of the look tape.
+
+    A second scan() this look used to re-append the merged hits (and news).
+    Grok then paid to parse the same bag and called it messy.
+    """
+    bag = snap if isinstance(snap, dict) else {}
+    seed = cached if isinstance(cached, dict) else {}
+    merged = bag.get("scan_hits") if isinstance(bag.get("scan_hits"), dict) else {}
+    rows = [
+        r
+        for r in list(merged.get("rows") or seed.get("hits") or seed.get("rows") or [])
+        if isinstance(r, dict)
+    ]
+    symbols = [
+        str(r.get("symbol")).upper()
+        for r in rows
+        if r.get("symbol")
+    ]
+    if not symbols:
+        symbols = [str(s).upper() for s in (seed.get("symbols") or []) if s]
+    arenas = [
+        str(x)
+        for x in (bag.get("scan_arenas") or seed.get("already") or seed.get("arenas") or [])
+        if str(x).strip()
+    ]
+    n = len(symbols)
+    if not n:
+        try:
+            n = int(seed.get("hits_n") or 0)
+        except (TypeError, ValueError):
+            n = 0
+    facts = _scan_gate_facts(rows) if rows else {
+        "deepest_open_gap_pct": seed.get("deepest_open_gap_pct"),
+        "deepest_symbol": seed.get("deepest_symbol"),
+    }
+    asked_arena = str(asked_arena or "").strip()
+    asked_code = str(asked_code or "").strip()
+    if not asked_arena and not asked_code and isinstance(seed.get("asked"), dict):
+        asked_arena = str(seed["asked"].get("arena") or "").strip()
+        asked_code = str(seed["asked"].get("scan_code") or "").strip()
+    out: dict[str, Any] = {
+        "ok": True,
+        "source": str(merged.get("source") or seed.get("source") or "ibkr"),
+        "reused": True,
+        "repeat_of_this_think": True,
+        "empty": n == 0,
+        "note": _SCAN_REUSE_NOTE,
+        "already": arenas,
+        "hits_n": n,
+        "symbols": symbols,
+    }
+    if asked_arena or asked_code:
+        out["asked"] = {"arena": asked_arena, "scan_code": asked_code}
+    for key, val in facts.items():
+        if val is not None:
+            out[key] = val
+    return out
+
+
 def _emit_scan_look_line(snap: dict[str, Any], out: dict[str, Any]) -> None:
     """One trophy line per look. Not per page. No screens=N."""
     if snap.get("scan_streamed"):
@@ -1924,15 +1995,12 @@ async def _run_tool(
             return _clip_scan(_scan_public_payload(out))
 
         async def _repeat_look_bag() -> str:
-            reused = _scan_out_from_snap(snap, qmap)
-            reused["repeat_of_this_think"] = True
-            reused["reused"] = True
-            reused["note"] = "this screen already fetched this look"
-            await _attach_optional_news(reused)
-            _attach_scan_run(reused, turn=turn, world=world)
             think_emit("tool", "\n[scan = already have it]\n")
-            turn.scan_cache[_LOOK_SCAN_CACHE_KEY] = deepcopy(reused)
-            return _clip_scan(_scan_public_payload(reused))
+            stub = _scan_reuse_stub(
+                snap, asked_arena=c_arena, asked_code=c_code
+            )
+            _attach_scan_run(stub, turn=turn, world=world)
+            return _clip_scan(stub)
 
         async with lock:
             if asked_symbols:
@@ -2517,6 +2585,9 @@ __all__ = [
     '_union_scan_hits',
     '_scan_screen_on_look',
     '_scan_out_from_snap',
+    '_scan_public_payload',
+    '_SCAN_REUSE_NOTE',
+    '_scan_reuse_stub',
     '_emit_scan_look_line',
     '_ingest_scan_payload',
     '_quote_last',
