@@ -151,6 +151,7 @@ def usage_from_response(
         blob,
         "cached_tokens",
         "cached_prompt_tokens",
+        "cached_prompt_text_tokens",
         "prompt_tokens_details.cached_tokens",
     )
     out = _usage_int(blob, "completion_tokens", "output_tokens")
@@ -168,6 +169,10 @@ def usage_from_response(
             "output_tokens": out + reason,
             "reasoning_tokens": reason,
         }
+    # prompt_tokens is the full prompt. estimate_cost_usd treats input and
+    # cached as disjoint; subtract so cached is not billed at the uncached rate.
+    if cached and inn >= cached:
+        inn = inn - cached
     billed_out = out if out else reason
     return {
         "input_tokens": inn,

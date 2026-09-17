@@ -362,9 +362,12 @@ async def _write_last_turn_after_send(
     )
 
 
-# Compact 4×80 OHLC bars plus session still fit; the old 24k clip dropped
-# the series to save the run sheet and Grok sized off a metadata stub.
-CANDLES_CLIP_CHARS = 48_000
+# Result clips. A clipped blob stays on the kept chat and is re-billed on
+# every later call in the look. chars/4 ≈ tokens; grok-4.6 input is $2/MTok.
+# 8_000 chars ≈ 2_000 tok ≈ $0.004 per subsequent call (was 24k / $0.012).
+# Candles need more OHLC: 16_000 ≈ 4_000 tok ≈ $0.008 (was 48k / $0.024).
+CLIP_CHARS = 8_000
+CANDLES_CLIP_CHARS = 16_000
 
 _CANDLES_LEAD = (
     "symbol",
@@ -511,6 +514,20 @@ def _clip_candles(data: dict[str, Any], max_chars: int = CANDLES_CLIP_CHARS) -> 
         if not trimmed:
             continue
         trial["_clipped"] = "bars_tail"
+        dropped = 0
+        if isinstance(payload.get("bars"), list) and isinstance(trial.get("bars"), list):
+            dropped += max(0, len(payload["bars"]) - len(trial["bars"]))
+        old_series = payload.get("series")
+        new_series = trial.get("series")
+        if isinstance(old_series, list) and isinstance(new_series, list):
+            for prev, nxt in zip(old_series, new_series):
+                if isinstance(prev, dict) and isinstance(nxt, dict):
+                    pb = prev.get("bars")
+                    nb = nxt.get("bars")
+                    if isinstance(pb, list) and isinstance(nb, list):
+                        dropped += max(0, len(pb) - len(nb))
+        if dropped:
+            trial["_dropped"] = dropped
         text = json.dumps(_candles_lead(trial), default=str)
         if len(text) <= max_chars:
             return text
@@ -571,13 +588,26 @@ _LIVE_BOOK_KEEP = (
 )
 
 
+def _note_clip(container: dict[str, Any], key: str, dropped: int = 0) -> None:
+    """Short honest trim marker. Not prose."""
+    container["_clipped"] = key
+    extra = int(dropped or 0)
+    if extra > 0:
+        container["_dropped"] = int(container.get("_dropped") or 0) + extra
+
+
 def _pop_fat_key(container: dict[str, Any]) -> str | None:
     """Drop the next fat key. Clip marker stays on this container."""
     for key in _FAT_CLIP_KEYS:
         if key not in container:
             continue
-        container.pop(key)
-        container["_clipped"] = key
+        val = container.pop(key)
+        dropped = 0
+        if isinstance(val, list):
+            dropped = len(val)
+        elif isinstance(val, dict) and isinstance(val.get("rows"), list):
+            dropped = len(val["rows"])
+        _note_clip(container, key, dropped)
         return key
     return None
 
@@ -623,27 +653,134 @@ def _keep_live_book(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(look, dict) and look.get("_clipped"):
         out["last_look"] = {
             k: look[k]
-            for k in ("fresh", "send_calls", "tools", "_clipped")
+            for k in ("fresh", "send_calls", "tools", "_clipped", "_dropped")
             if k in look
         }
     return out
 
 
-def _clip(data: Any, max_chars: int = 24_000) -> str:
+# List fields: drop tail rows (ranked head stays). Never slice JSON mid-byte.
+_ROW_LIST_KEYS = (
+    "hits",
+    "news",
+    "rows",
+    "symbols",
+    "sessions",
+    "notes",
+    "scan_tape",
+)
+_FAT_SCALAR_KEYS = ("pad", "essay", "tree", "metrics", "card_scores", "types")
+_DICT_ROW_KEYS = ("session_range",)
+
+
+def _iter_row_lists(
+    data: dict[str, Any], *, skip_live: bool = True
+) -> list[tuple[dict[str, Any], str, list[Any]]]:
+    found: list[tuple[dict[str, Any], str, list[Any]]] = []
+    for key, val in list(data.items()):
+        if str(key).startswith("_"):
+            continue
+        if skip_live and key in _LIVE_BOOK_ROOTS:
+            continue
+        if key in _ROW_LIST_KEYS and isinstance(val, list):
+            found.append((data, key, val))
+        elif isinstance(val, dict):
+            if isinstance(val.get("rows"), list):
+                found.append((val, "rows", val["rows"]))
+            found.extend(_iter_row_lists(val, skip_live=skip_live))
+    return found
+
+
+def _pop_scalar_fat(data: dict[str, Any]) -> bool:
+    changed = False
+    for key in _FAT_SCALAR_KEYS:
+        if key in data:
+            data.pop(key, None)
+            _note_clip(data, key)
+            changed = True
+    for key, val in list(data.items()):
+        if str(key).startswith("_") or key in _LIVE_BOOK_ROOTS:
+            continue
+        if isinstance(val, dict) and _pop_scalar_fat(val):
+            if not data.get("_clipped"):
+                _note_clip(data, key)
+            changed = True
+    return changed
+
+
+def _trim_dict_row_key(container: dict[str, Any], key: str) -> int:
+    blob = container.get(key)
+    if not isinstance(blob, dict) or len(blob) <= 1:
+        return 0
+    items = [(k, v) for k, v in blob.items() if not str(k).startswith("_")]
+    if len(items) <= 1:
+        return 0
+    keep = max(1, len(items) // 2)
+    dropped = len(items) - keep
+    kept = dict(items[:keep])
+    for mark in ("_clipped", "_dropped"):
+        if mark in blob:
+            kept[mark] = blob[mark]
+    container[key] = kept
+    _note_clip(container, key, dropped)
+    _note_clip(kept, key, dropped)
+    return dropped
+
+
+def _trim_one_row_list(data: dict[str, Any]) -> int:
+    """Drop the tail of the longest row list. Returns rows dropped."""
+    lists = _iter_row_lists(data)
+    if not lists:
+        dropped = 0
+        for key in _DICT_ROW_KEYS:
+            if isinstance(data.get(key), dict):
+                dropped += _trim_dict_row_key(data, key)
+            look = data.get("last_look")
+            if isinstance(look, dict) and isinstance(look.get(key), dict):
+                n = _trim_dict_row_key(look, key)
+                if n:
+                    _note_clip(data, key, n)
+                dropped += n
+        return dropped
+    owner, key, rows = max(lists, key=lambda item: len(item[2]))
+    if len(rows) <= 1:
+        return 0
+    keep = max(1, len(rows) // 2)
+    dropped = len(rows) - keep
+    owner[key] = rows[:keep]
+    _note_clip(owner, key, dropped)
+    if owner is not data:
+        _note_clip(data, key, dropped)
+    return dropped
+
+
+def _clip(data: Any, max_chars: int | None = None) -> str:
     """Keep the live book when the payload overflows. Fat scan clips first."""
     if _tape_payload(data):
-        return _clip_candles(data, max_chars=max_chars)
+        cap = CANDLES_CLIP_CHARS if max_chars is None else int(max_chars)
+        return _clip_candles(data, max_chars=cap)
+    cap = CLIP_CHARS if max_chars is None else int(max_chars)
     text = json.dumps(data, default=str)
-    if len(text) <= max_chars:
+    if len(text) <= cap:
         return text
     if isinstance(data, dict):
         slim = dict(data)
-        while len(json.dumps(slim, default=str)) > max_chars:
+        _pop_scalar_fat(slim)
+        text = json.dumps(slim, default=str)
+        if len(text) <= cap:
+            return text
+        while len(json.dumps(slim, default=str)) > cap:
+            if _trim_one_row_list(slim) <= 0:
+                break
+        text = json.dumps(slim, default=str)
+        if len(text) <= cap:
+            return text
+        while len(json.dumps(slim, default=str)) > cap:
             slim, changed = _clip_fat_once(slim)
             if not changed:
                 break
             text = json.dumps(slim, default=str)
-            if len(text) <= max_chars:
+            if len(text) <= cap:
                 return text
         if _is_live_book(slim):
             return json.dumps(_keep_live_book(slim), default=str)
@@ -652,9 +789,21 @@ def _clip(data: Any, max_chars: int = 24_000) -> str:
             kept["run"] = slim["run"]
         if kept:
             kept["ok"] = slim.get("ok")
-            kept["_clipped"] = "payload"
-            return json.dumps(kept, default=str)[:max_chars]
-    return text[:max_chars] + "... [truncated]"
+            _note_clip(kept, "payload")
+            if slim.get("_dropped"):
+                kept["_dropped"] = slim["_dropped"]
+            out = json.dumps(kept, default=str)
+            if len(out) <= cap:
+                return out
+        stub = {
+            "ok": slim.get("ok"),
+            "error": "clipped",
+            "_clipped": slim.get("_clipped") or "payload",
+        }
+        if slim.get("_dropped"):
+            stub["_dropped"] = slim["_dropped"]
+        return json.dumps(stub, default=str)
+    return json.dumps({"_clipped": "payload", "error": "clipped"}, default=str)
 
 
 _CADENCE_LOOP = re.compile(
@@ -905,20 +1054,28 @@ async def stream_round(
 
         from abcxauto.config import get_config
 
+        inn = int(used.get("input_tokens") or 0)
+        out = int(used.get("output_tokens") or 0)
+        cached = int(used.get("cached_tokens") or 0)
+        model_id = str(getattr(get_config(), "model", "") or "")
+        if inn <= 0 and out <= 0 and cached <= 0:
+            logger.info("model usage journal skip: zero tokens (row would be dropped)")
         get_journal().record_model_usage(
             stage=stage,
-            model=str(getattr(get_config(), "model", "") or ""),
-            input_tokens=int(used.get("input_tokens") or 0),
-            output_tokens=int(used.get("output_tokens") or 0),
-            cached_tokens=int(used.get("cached_tokens") or 0),
-            cost_usd=estimate_cost_usd(
-                int(used.get("input_tokens") or 0),
-                int(used.get("output_tokens") or 0),
-                cached_tokens=int(used.get("cached_tokens") or 0),
-            ),
+            model=model_id,
+            input_tokens=inn,
+            output_tokens=out,
+            cached_tokens=cached,
+            cost_usd=estimate_cost_usd(inn, out, cached_tokens=cached),
         )
+        try:
+            from abcxauto.look_meter import note_model_call
+
+            note_model_call(used, model=model_id)
+        except Exception:
+            logger.exception("look_meter note_model_call failed")
     except Exception:
-        logger.debug("model usage journal failed", exc_info=True)
+        logger.exception("model usage journal failed")
     return o, last_resp, reason
 
 
@@ -1597,19 +1754,42 @@ async def grok_turn(
     with no tool_calls: stop calling the model. Chat kept. Do not call
     the model again because it spoke. A poke does not start a new
     messages list. A fresh BrainTurn still drops refused send tickets so
-    they cannot be the next look's send target. ``recover`` re-enters
+    they cannot be the next look's send target.     ``recover`` re-enters
     stream_round on the open chat — no wake re-intro, no new messages list.
     """
-    return await _grok_turn_impl(
-        g,
-        connector=connector,
-        world=world,
-        snap=snap,
-        wake=wake,
-        turn=BrainTurn(),
-        resume=resume,
-        recover=recover,
-    )
+    try:
+        from abcxauto.look_meter import look_meter_scope
+    except Exception:
+        logger.exception("look_meter import failed")
+        return await _grok_turn_impl(
+            g,
+            connector=connector,
+            world=world,
+            snap=snap,
+            wake=wake,
+            turn=BrainTurn(),
+            resume=resume,
+            recover=recover,
+        )
+
+    model_id = str(getattr(g, "model", "") or "")
+    with look_meter_scope(world=world, snap=snap, model=model_id) as meter:
+        turn = await _grok_turn_impl(
+            g,
+            connector=connector,
+            world=world,
+            snap=snap,
+            wake=wake,
+            turn=BrainTurn(),
+            resume=resume,
+            recover=recover,
+        )
+        if meter is not None:
+            try:
+                meter.note_tools(list(turn.tool_trace or []))
+            except Exception:
+                logger.debug("look_meter tool_trace stamp failed", exc_info=True)
+        return turn
 
 
 def grok_turn_kwargs(
@@ -1793,6 +1973,14 @@ def _append_tool_result(chat: Any, tc: Any, result: str) -> None:
     except TypeError:
         chat.append(tool_result(result))
     _emit_paid_look(tc, result)
+    try:
+        from abcxauto.look_meter import note_tool_result
+
+        fn = getattr(tc, "function", None)
+        name = str(getattr(fn, "name", None) or getattr(tc, "name", "") or "")
+        note_tool_result(name, result)
+    except Exception:
+        logger.exception("look_meter note_tool_result failed")
 
 
 def _tool_key(name: str, args: dict[str, Any]) -> str:
