@@ -23,7 +23,7 @@ Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro S
 - Defined-risk and cash-only
 - Size vs `max_risk_per_trade_pct` of NetLiq; daily-loss halt; max position %; optional capacity `max_open_positions` (default 0 = off; a positive N is Grok's ceiling)
 - One name across every lot vs `max_symbol_concentration_pct` — `max_position_pct` only sees one ticket, so N orders in a name could stack past it. Stock and its options sum
-- One sector/theme arena across names vs `max_arena_concentration_pct` — per-name cannot see NVDA+SMCI+ARM+AVGO as one bet. Scan sorts are not the bucket. Fires on send even when paper gates are off
+- Defined max-loss by symbol and by underlying is a book fact (`defined_risk_concentration`), not a send refuse
 - Unprotected STK: last-stop at IBKR; hold is blocked until it exists. Combo close (`closing_position` on the matching multi-leg send) is one BAG, not new risk
 - Ticket geometry uses **IBKR last**, not MDA
 - Ticket last / IV / credit / width must be in this look's `quote` / `option_quote` / `book` cache
@@ -143,7 +143,6 @@ Precedence: Settings / `risk_settings.json` > env > default. `scan_fetch_cap` is
 | `ABCXAUTO_MAX_POSITION_PCT` | `25` | Max position vs NetLiq |
 | `ABCXAUTO_MAX_RISK_PER_TRADE_PCT` | `25` | Max risk per ticket vs NetLiq |
 | `ABCXAUTO_MAX_SYMBOL_CONCENTRATION_PCT` | `25` | Max one underlying, all lots, vs NetLiq |
-| `ABCXAUTO_MAX_ARENA_CONCENTRATION_PCT` | `25` | One sector/theme arena vs NetLiq |
 | `ABCXAUTO_SIZING_FLOORS` | `false` | Paper size/loss floors (live forced ON) |
 | `ABCXAUTO_DEFINED_RISK_ONLY` | `true` | Locked on |
 | `ABCXAUTO_PCS_KILL_LOOK` | `true` | PCS kill-window LOOK contract (not a Settings knob) |
