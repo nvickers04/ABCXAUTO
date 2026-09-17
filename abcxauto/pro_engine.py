@@ -17,13 +17,18 @@ from typing import Any
 from abcxauto.broker.connector import get_ibkr_connector
 from abcxauto.config import get_config
 from abcxauto.llm import GrokClient
-from abcxauto.agent_loop import (
-    equity_of,
-    format_position_inventory,
-    pnl_of,
-    risk_label,
-    snap,
-)
+
+
+def _agent_loop():
+    """Lazy: agent_loop → monitor → risk_gates, which may be mid-rebuild."""
+    from abcxauto import agent_loop as _al
+
+    return _al
+
+
+def snap(*a, **k):
+    """Patch seam. Tests setattr this; production forwards to agent_loop.snap."""
+    return _agent_loop().snap(*a, **k)
 
 logger = logging.getLogger(__name__)
 
@@ -363,9 +368,6 @@ class ProEngine:
         except Exception:
             logger.exception("immutable floor seed failed")
         already = bool(self.worker and self.worker.is_alive())
-        # Connect path already refreshes universe; only re-scan when START
-        # resumes an existing IBKR worker (Connect then START).
-        self._universe_refresh_on_start = already
         if already:
             self.pause.clear()
             self.state.autonomous = True
@@ -880,7 +882,7 @@ class ProEngine:
                         for r in data.get("position_results", [])
                         if r.get("reasoning")
                     ),
-                    "inventory": format_position_inventory(
+                    "inventory": _agent_loop().format_position_inventory(
                         data.get("before_ledger") or []
                     ),
                 }
@@ -1026,7 +1028,7 @@ class ProEngine:
         s.pace = dict(d.get("pace") or {})
         s.positions = d.get("positions") or []
         s.open_orders = d.get("open_orders") or []
-        s.inventory = d.get("inventory") or format_position_inventory(s.positions)
+        s.inventory = d.get("inventory") or _agent_loop().format_position_inventory(s.positions)
         # Book strip / mandate health
         unprotected = _unprotected_list(d)
         s.unprotected_count = len(unprotected)
@@ -1710,8 +1712,8 @@ class ProEngine:
         else:
             failed = bool(getattr(turn, "failed", False))
         acct = s.get("account") or {}
-        pnl = pnl_of(acct) if isinstance(acct, dict) else 0.0
-        eq = equity_of(acct) if isinstance(acct, dict) else 0.0
+        pnl = _agent_loop().pnl_of(acct) if isinstance(acct, dict) else 0.0
+        eq = _agent_loop().equity_of(acct) if isinstance(acct, dict) else 0.0
         act = dict(turn.last_act or {})
         result = dict(turn.last_result or {})
         strat = str(turn.last_strat or act.get("strategy") or "")
@@ -1729,14 +1731,14 @@ class ProEngine:
             "pnl": pnl,
             "equity": eq,
             "pnl_chg": 0,
-            "risk": risk_label(s),
+            "risk": _agent_loop().risk_label(s),
             "action_obj": act,
             "result": result,
             "strat": strat,
             "rationale": act.get("rationale") or (turn.text or "")[:1200],
             "positions": s.get("positions") or [],
             "open_orders": s.get("open_orders") or [],
-            "inventory": format_position_inventory(s.get("positions") or []),
+            "inventory": _agent_loop().format_position_inventory(s.get("positions") or []),
             "reality_pulse": s.get("reality_pulse") or {},
             "world_state": world.to_dict() if hasattr(world, "to_dict") else {},
             "tool_trace": list(getattr(turn, "tool_trace", None) or []),
@@ -1865,14 +1867,6 @@ class ProEngine:
                 self.state.running = False
                 self.state.status = "Connected"
             self._note("CONNECT", "IBKR linked")
-            try:
-                from abcxauto.universe import refresh_legal_set
-
-                al = await refresh_legal_set(self.conn, persist=True)
-                n = len(al.get("legal_symbols") or [])
-                self._note("UNIVERSE", f"sandbox refreshed n={n} src={al.get('source')}")
-            except Exception as ue:
-                self._note("UNIVERSE", f"refresh skipped: {ue}")
             # First connect only — mid-loop monitor rebuilds must not re-arm.
             self._flat_start_orphan_gate = True
             self._start_monitor()
@@ -1910,19 +1904,6 @@ class ProEngine:
                 elif mon_key != self._monitor_key:
                     self._note("MONITOR", f"pacing changed → restart {mon_key[1]}s/{mon_key[2]}s")
                     self._start_monitor()
-                if getattr(self, "_universe_refresh_on_start", False) and self.conn is not None:
-                    self._universe_refresh_on_start = False
-                    try:
-                        from abcxauto.universe import refresh_legal_set
-
-                        al = await refresh_legal_set(self.conn, persist=True)
-                        n_legal = len(al.get("legal_symbols") or [])
-                        self._note(
-                            "UNIVERSE",
-                            f"start refresh n={n_legal} src={al.get('source')}",
-                        )
-                    except Exception as ue:
-                        self._note("UNIVERSE", f"start refresh skipped: {ue}")
                 if self.pause.is_set() and not getattr(self, "_think_parked", False):
                     await asyncio.sleep(0.25)
                     continue

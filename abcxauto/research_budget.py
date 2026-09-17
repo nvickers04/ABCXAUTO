@@ -7,8 +7,9 @@ Promote/lab refuses unless gate_verdict=PASS and model_cost_window present
 missing for promote.
 
 V0 constants are code constants — not self_tune-raiseable.
-AH_RESEARCH_LOOKS_PER_WEEK and RESEARCH_PROMPT_TOKENS_MAX stay additional
-rails. Paper 7497. Not looking. Do not grow SYSTEM_PROMPT.
+AH_RESEARCH_LOOKS_PER_WEEK is 0 (off). After-hours cost is the F10 dollar
+fuse; RESEARCH_PROMPT_TOKENS_MAX stays the runaway-prompt rail.
+Paper 7497. Not looking. Do not grow SYSTEM_PROMPT.
 """
 
 from __future__ import annotations

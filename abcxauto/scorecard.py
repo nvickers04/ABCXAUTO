@@ -676,6 +676,13 @@ def compute_scorecard(
         except (TypeError, ValueError):
             end_nl = None
         dd = max_dd_usd(path_pts) if sess_base is not None else None
+        by_card: list[Any] = []
+        try:
+            from abcxauto.memory import pnl_by_card
+
+            by_card = list(pnl_by_card(since=start_ts, journal=journal) or [])
+        except Exception:
+            by_card = []
         session = {
             "kind": "rth",
             "model": model_name,
@@ -696,6 +703,7 @@ def compute_scorecard(
             "max_dd_usd": dd,
             "spy_return_pct": spy_return_pct("rth", spy_px, session=True),
             "start_obs_ts": start_obs,
+            "by_card": by_card,
         }
 
     fastest_beating = None
