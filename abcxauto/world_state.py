@@ -1297,15 +1297,6 @@ def _minutes_to_open(world: Any) -> int | None:
     return None
 
 
-def _universe_watch_line() -> str:
-    try:
-        from abcxauto.universe import membership_watch_line
-
-        return membership_watch_line()
-    except Exception:
-        return ""
-
-
 def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, Any]:
     """Session forest: IBKR day, open uPnL, NL vs start minus model. Not one number."""
     sc = scorecard if isinstance(scorecard, dict) else {}
@@ -1361,21 +1352,17 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
 
         floors = bool(sizing_floors_active())
     except Exception:
-        floors = None
+        try:
+            floors = bool(getattr(get_config(), "sizing_floors", False))
+        except Exception:
+            floors = None
     port = dict(getattr(world, "portfolio_risk", None) or {})
-    tape_seed: list[str] = []
-    try:
-        from abcxauto.opportunity_scan import tape_seed_symbols
-
-        tape_seed = tape_seed_symbols(getattr(world, "positions", None))
-    except Exception:
-        tape_seed = []
     mins_open = _minutes_to_open(world)
     pulse = getattr(world, "pulse", None) if isinstance(getattr(world, "pulse", None), dict) else {}
     sess_block = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
     vol_rows = _day_vol(world)
     alarms = _wake_lot_alarms(world)
-    return {
+    facts: dict[str, Any] = {
         "nl": nl,
         "ibkr_daily_pnl": daily,
         "daily_pnl": daily,
@@ -1439,14 +1426,30 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "portfolio_risk": port,
         "exposure": port.get("exposure"),
         "capital_liquidity": port.get("capital_liquidity"),
-        # Optional seed for tools; format_wake does not print tape=.
-        "tape_seed": tape_seed,
         "minutes_to_open": mins_open,
         "countdown_to": sess_block.get("countdown_to"),
         "countdown_human": sess_block.get("countdown_human"),
         "tradable_now": pulse.get("tradable_now"),
-        "watch": _universe_watch_line(),
     }
+    # Assumed sibling (risk-gate worker, not in this base):
+    #   defined_risk_concentration(positions, net_liq) -> {
+    #     by_symbol: {sym: {usd, pct_nl}},
+    #     by_underlying: {sym: {usd, pct_nl}},
+    #     unknown: [unpriced lot labels],
+    #     usd: float, pct_nl: float|None,
+    #   }
+    try:
+        from abcxauto.risk_gates import defined_risk_concentration
+
+        max_loss = defined_risk_concentration(
+            getattr(world, "positions", None),
+            nl,
+        )
+        if isinstance(max_loss, dict):
+            facts["defined_risk_concentration"] = max_loss
+    except Exception:
+        pass
+    return facts
 
 
 def _session_cap_day(world: Any) -> dict[str, Any]:
@@ -1996,7 +1999,7 @@ def format_wake(
     ibkr_up: bool,
     day: dict[str, Any] | None = None,
 ) -> str:
-    """Desk brief. Live book facts; no canned tape= names. Scan is a tool.
+    """Desk brief. Live book facts; no tape= and no watch=. Scan is a tool.
 
     ``cycle`` is journal/logs. Not painted on the brief.
     """
@@ -2102,21 +2105,13 @@ def format_wake(
     except Exception:
         logger.debug("desk mode wake bit failed", exc_info=True)
     try:
-        from abcxauto.universe import membership_wake_bit
+        from abcxauto.memory import memory_wake_bit
 
-        watch = membership_wake_bit()
-        if watch:
-            body = f"{body} watch={watch}.".strip()
-    except Exception:
-        logger.debug("wake watch bit failed", exc_info=True)
-    try:
-        from abcxauto.memory.notes import notes_wake_bit
-
-        note_bit = notes_wake_bit()
+        note_bit = memory_wake_bit()
         if note_bit:
             body = f"{body} {note_bit}".strip()
     except Exception:
-        logger.debug("notes wake bit failed", exc_info=True)
+        logger.debug("memory wake bit failed", exc_info=True)
     lead = worst_wake_fact(unprotected=unprotected, day=day, session=session)
     if lead:
         if not lead.endswith("."):
@@ -2343,7 +2338,6 @@ class WorldState:
             "envelope": self.envelope,
             "regime": self.regime,
             "portfolio_risk": self.portfolio_risk,
-            "working_thesis": self.working_thesis[:400],
             "recent_decisions": self.recent_decisions[:3],
             "trade_plan": self.trade_plan,
             "trade_plans": list(self.trade_plans[:12]),
@@ -2409,11 +2403,9 @@ def build_world_state(
     gates = env_snap.get("current") or {}
     envelope = env_snap.get("envelope") or {}
 
-    thesis = ""
     recent: list[dict] = []
     try:
         j = get_journal()
-        thesis = j.get_working_thesis() or ""
         recent = j.recent_decisions(limit=5)
     except Exception:
         pass
@@ -2478,7 +2470,7 @@ def build_world_state(
         envelope=envelope,
         regime=regime,
         portfolio_risk=port_risk,
-        working_thesis=thesis,
+        working_thesis="",
         recent_decisions=[
             {
                 "strategy": d.get("strategy"),

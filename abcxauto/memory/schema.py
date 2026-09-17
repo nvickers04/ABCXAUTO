@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+from abcxauto.memory.cards import CARDS_DDL
 from abcxauto.memory.journal_support import (
     _DEFAULT_DB_PATH,
     _ensure_columns,
@@ -103,12 +104,6 @@ CREATE TABLE IF NOT EXISTS decisions (
     rationale TEXT,
     portfolio_json TEXT,
     outcome_json TEXT
-);
-
-CREATE TABLE IF NOT EXISTS working_thesis (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    ts TEXT NOT NULL,
-    text TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS judgments (
@@ -254,6 +249,38 @@ CREATE TABLE IF NOT EXISTS notes (
     rev INTEGER NOT NULL DEFAULT 1,
     invalidated_at TEXT,
     reason_code TEXT
+);
+
+CREATE TABLE IF NOT EXISTS cards (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    screen TEXT,
+    scan_code TEXT,
+    evidence_json TEXT,
+    direction TEXT,
+    expectation TEXT,
+    invalidate TEXT,
+    expires_at TEXT NOT NULL,
+    invalidated_at TEXT,
+    source TEXT NOT NULL,
+    rev INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS card_links (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    card_id TEXT,
+    card_label TEXT NOT NULL,
+    proposal_id INTEGER,
+    dispatch_id INTEGER,
+    exec_id TEXT,
+    fill_id INTEGER,
+    order_id INTEGER,
+    symbol TEXT,
+    strategy TEXT,
+    resolved INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL
 );
 """
 
@@ -471,6 +498,7 @@ class JournalSchema:
                         ON notes(source, reason_code, ts);
                     """
                 )
+                conn.executescript(CARDS_DDL)
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.commit()
             self._initialized = True

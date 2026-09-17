@@ -1150,127 +1150,6 @@ def build_expectancy(
     return ranked
 
 
-_REGIME_FIELD_CAPS = {
-    "theme": 80,
-    "catalyst": 48,
-    "source": 80,
-    "invalidate": 120,
-}
-_LECTURE_OPENERS = ("always ", "never ", "do not ", "don't ", "you must ", "ban ")
-
-
-def _normalize_regime(raw: Any) -> dict[str, Any] | None:
-    """Named day theme. Not an arena apply. Empty/missing is none."""
-    if not isinstance(raw, dict):
-        return None
-    theme = str(raw.get("theme") or raw.get("name") or raw.get("thesis") or "").strip()
-    catalyst = str(raw.get("catalyst") or "").strip()
-    source = str(raw.get("source") or "").strip()
-    invalidate = str(raw.get("invalidate") or "").strip()
-    arenas: list[str] = []
-    for item in raw.get("arenas") or []:
-        name = str(item or "").strip()
-        if name and name not in arenas:
-            arenas.append(name)
-    if not (theme or catalyst or source or arenas or invalidate):
-        return None
-    out = {
-        "theme": theme,
-        "catalyst": catalyst,
-        "source": source,
-        "arenas": arenas,
-        "invalidate": invalidate,
-    }
-    as_of = str(raw.get("as_of") or "").strip()
-    if as_of:
-        out["as_of"] = as_of
-    return out
-
-
-def _lecture_error(raw: dict[str, Any]) -> str:
-    """Reject imperative openers / overlong prose. Observation, not a lecture."""
-    for key, cap in _REGIME_FIELD_CAPS.items():
-        text = str(raw.get(key) or "").strip()
-        if not text:
-            continue
-        if len(text) > cap:
-            return f"lecture: {key} over {cap} chars"
-        low = text.lower()
-        if any(low.startswith(op) for op in _LECTURE_OPENERS):
-            return f"lecture: {key} is imperative"
-    return ""
-
-
-def validate_regime_payload(raw: Any) -> tuple[dict[str, Any] | None, str]:
-    """Schema write path. Unknown arenas rejected; never auto-applied."""
-    if not isinstance(raw, dict):
-        return None, "regime must be an object"
-    note = _lecture_error(raw)
-    if note:
-        return None, note
-    norm = _normalize_regime(raw)
-    if norm is None:
-        return None, "regime empty"
-    arenas = list(norm.get("arenas") or [])
-    if arenas:
-        from abcxauto.universe import validate_enabled_arenas
-
-        names, err = validate_enabled_arenas(arenas)
-        if err:
-            return None, err
-        norm["arenas"] = names or []
-    return norm, ""
-
-
-def persist_research_regime(
-    regime: dict[str, Any],
-    *,
-    now: datetime | None = None,
-    persist: bool = True,
-) -> dict[str, Any]:
-    """Stamp regime onto the brief. Does not touch enabled_arenas."""
-    brief = dict(load_research_brief() or {})
-    stamped = dict(regime)
-    stamped["as_of"] = _iso(now)
-    brief["regime"] = stamped
-    if not str(brief.get("as_of") or "").strip():
-        brief["as_of"] = stamped["as_of"]
-        brief.setdefault("session", "")
-        brief.setdefault("mode", "research")
-        brief.setdefault("expectancy", [])
-        brief.setdefault("facts", [])
-        brief.setdefault("symbols", [])
-        brief.setdefault("tickets", [])
-    if persist:
-        path = research_brief_path()
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(brief, indent=2) + chr(10), encoding="utf-8")
-        except OSError:
-            logger.debug("research regime persist failed", exc_info=True)
-    return brief
-
-
-def _regime_age_token(brief: dict[str, Any] | None, *, now: datetime | None = None) -> str:
-    row = brief if isinstance(brief, dict) else {}
-    reg = row.get("regime") if isinstance(row.get("regime"), dict) else {}
-    ts = _parse_iso(str(reg.get("as_of") or row.get("as_of") or row.get("ts") or ""))
-    if ts is None:
-        return "never"
-    clock = now or _utc_now()
-    if clock.tzinfo is None:
-        clock = clock.replace(tzinfo=timezone.utc)
-    age = max(0.0, (clock - ts).total_seconds())
-    if age < 90:
-        return f"{int(age)}s"
-    if age < 3600:
-        return f"{int(age // 60)}m"
-    hours = age / 3600.0
-    if abs(hours - round(hours)) < 0.05:
-        return f"{int(round(hours))}h"
-    return f"{hours:.1f}h"
-
-
 def write_research_brief(
     *,
     session: str = "",
@@ -1312,10 +1191,6 @@ def write_research_brief(
         note = "no AH/PM catalyst expectancy this look — news/scan/web returned none"
         if note not in uns:
             uns.append(note)
-    snap_bag = snap if isinstance(snap, dict) else {}
-    regime = _normalize_regime(snap_bag.get("regime"))
-    if regime is None:
-        regime = _normalize_regime(load_research_brief().get("regime"))
     payload = {
         "as_of": _iso(now),
         "session": sess,
@@ -1327,8 +1202,6 @@ def write_research_brief(
         "tickets": [],
         "tool_trace": list(getattr(turn, "tool_trace", None) or [])[:24],
     }
-    if regime is not None:
-        payload["regime"] = regime
     try:
         from abcxauto.research_budget import stamp_brief_lineage
 
@@ -1383,16 +1256,12 @@ def rth_research_color(
         )
     if research_brief_stale(brief, now=now):
         as_of = str(brief.get("as_of") or "")
-        stale_reg = _normalize_regime(brief.get("regime"))
-        extra = " regime=stale" if stale_reg else ""
         return (
             "prior_session_research=stale "
-            f"as_of={as_of}{extra} (color, never a live trigger)."
+            f"as_of={as_of} (color, never a live trigger)."
         )
     if not full:
         n = len(brief.get("expectancy") or [])
-        reg = _normalize_regime(brief.get("regime"))
-        theme = f" regime={reg['theme']}" if reg and reg.get("theme") else ""
         age_bit = ""
         ts = _parse_iso(str(brief.get("as_of") or brief.get("ts") or ""))
         clock = now or _utc_now()
@@ -1403,7 +1272,7 @@ def rth_research_color(
             age_bit = f" age={age}d"
         return (
             "prior_session_research=on_disk "
-            f"expectancy={n}{theme}{age_bit} (color, never a live trigger)."
+            f"expectancy={n}{age_bit} (color, never a live trigger)."
         )
     bits = [
         "prior_session_research(color, not a live trigger):",
@@ -1412,15 +1281,6 @@ def rth_research_color(
     sess = str(brief.get("session") or "")
     if as_of or sess:
         bits.append(f"as_of={as_of} session={sess}.")
-    regime = _normalize_regime(brief.get("regime"))
-    if regime:
-        arenas = ",".join(regime.get("arenas") or []) or "none"
-        bits.append(
-            f"regime={regime.get('theme') or '?'} catalyst={regime.get('catalyst') or '?'} "
-            f"arenas={arenas} src={regime.get('source') or '?'} "
-            f"invalidate={regime.get('invalidate') or '?'} "
-            f"age={_regime_age_token(brief, now=now)}."
-        )
     for row in (brief.get("expectancy") or [])[:EXPECTANCY_CAP]:
         if not isinstance(row, dict):
             continue

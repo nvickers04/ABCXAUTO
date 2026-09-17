@@ -501,34 +501,64 @@ def test_set_risk_alias_no_approval():
     assert get_config().max_risk_per_trade_pct != 0.6
 
 
-def test_nested_self_tune_universe(tmp_path, monkeypatch):
-    uni = tmp_path / "uni.json"
-    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(uni))
-    out = apply_self_tune(
-        {"universe": {"enabled_arenas": ["index_etfs"], "custom_symbols": ["SPY"]}},
-        persist=False,
-    )
-    assert out["status"] == "ok"
-    assert "universe" in out["applied"]
-
-
-def test_persist_false_universe_does_not_write_allowlist(tmp_path, monkeypatch):
-    """A dry tune must not overwrite the desk allowlist or agent_state."""
+def test_self_tune_cannot_write_any_universe_state(tmp_path, monkeypatch):
+    """Watchlist is gone. persist=True must not create or mutate one."""
     import json
 
     uni = tmp_path / "universe_allowlist.json"
+    seed = tmp_path / "already.json"
+    seed.write_text(json.dumps({"enabled_arenas": ["mega_cap"]}) + "\n", encoding="utf-8")
+    before = seed.read_bytes()
+    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(uni))
+    monkeypatch.setenv("ABCXAUTO_UNIVERSE_ALLOWLIST_PATH", str(seed))
+    monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
+
+    blocked = apply_self_tune(
+        {"universe": {"enabled_arenas": ["index_etfs"], "custom_symbols": ["SPY"]}},
+        persist=True,
+    )
+    assert blocked["status"] == "blocked"
+    assert "universe" in (blocked.get("rejected") or {})
+    assert "universe" not in (blocked.get("applied") or {})
+    assert not uni.exists()
+    assert seed.read_bytes() == before
+
+    mixed = apply_self_tune(
+        {
+            "enabled_arenas": ["mega_cap"],
+            "custom_symbols": ["AAPL"],
+            "exclude_symbols": ["MSFT"],
+            "max_arena_concentration_pct": 5.0,
+            "regime": {"theme": "rate-sensitive", "arenas": ["financials"]},
+            "scan_fetch_cap": 4,
+        },
+        persist=True,
+    )
+    rejected = mixed.get("rejected") or {}
+    applied = mixed.get("applied") or {}
+    assert mixed["status"] == "ok"
+    assert applied.get("scan_fetch_cap") == 4
+    for key in (
+        "enabled_arenas",
+        "custom_symbols",
+        "exclude_symbols",
+        "max_arena_concentration_pct",
+        "regime",
+    ):
+        assert key in rejected
+        assert key not in applied
+    assert "universe" not in applied
+    assert not uni.exists()
+    assert seed.read_bytes() == before
+    from abcxauto.desk_mode import load_research_brief
+
+    assert "regime" not in (load_research_brief() or {})
+
+
+def test_persist_false_universe_still_does_not_write(tmp_path, monkeypatch):
+    """A dry tune must not invent a watchlist or agent_state for deleted knobs."""
+    uni = tmp_path / "universe_allowlist.json"
     agent = tmp_path / "agent_state.json"
-    seed = {
-        "custom_symbols": ["AAPL"],
-        "enabled_arenas": ["mega_cap"],
-        "exclude_symbols": [],
-        "legal_symbols": ["AAPL"],
-        "membership": [],
-        "refreshed_at": "",
-        "source": "seed",
-    }
-    uni.write_text(json.dumps(seed, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    before = uni.read_bytes()
     monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(uni))
     monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(agent))
 
@@ -541,35 +571,10 @@ def test_persist_false_universe_does_not_write_allowlist(tmp_path, monkeypatch):
         persist=False,
     )
     assert out["status"] == "ok"
-    assert "universe" in out["applied"]
-    assert uni.read_bytes() == before
+    assert "universe" in (out.get("rejected") or {})
+    assert "universe" not in (out.get("applied") or {})
+    assert not uni.exists()
     assert not agent.exists()
-
-
-def test_persist_true_universe_still_writes_allowlist(tmp_path, monkeypatch):
-    import json
-
-    uni = tmp_path / "universe_allowlist.json"
-    agent = tmp_path / "agent_state.json"
-    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(uni))
-    monkeypatch.setenv("ABCXAUTO_AGENT_STATE_PATH", str(agent))
-
-    out = apply_self_tune(
-        {
-            "universe": {"enabled_arenas": ["index_etfs"], "custom_symbols": ["SPY"]},
-            "scan_fetch_cap": 4,
-        },
-        persist=True,
-    )
-    assert out["status"] == "ok"
-    assert "universe" in out["applied"]
-    assert uni.is_file()
-    data = json.loads(uni.read_text(encoding="utf-8"))
-    assert "index_etfs" in data["enabled_arenas"]
-    assert "SPY" in data["custom_symbols"]
-    assert agent.is_file()
-    agent_data = json.loads(agent.read_text(encoding="utf-8"))
-    assert agent_data.get("scan_fetch_cap") == 4
 
 
 def test_persist_false_still_rejects_floor_loosening(tmp_path, monkeypatch):

@@ -23,7 +23,26 @@ import logging
 import math
 from typing import Any
 
-from abcxauto.risk_gates import live_desk
+try:
+    from abcxauto.risk_gates import live_desk
+except ImportError:
+    def live_desk(cfg: Any = None) -> bool:
+        """Paper/live predicate. Used if risk_gates cannot import mid-rebuild."""
+        c = cfg
+        if c is None:
+            from abcxauto.config import get_config
+
+            c = get_config()
+        mode = str(getattr(c, "trading_mode", "paper") or "paper").strip().lower()
+        if mode == "live":
+            return True
+        if getattr(c, "is_paper", None) is False:
+            return True
+        try:
+            port = int(getattr(c, "ibkr_port", 0) or 0)
+        except (TypeError, ValueError):
+            port = 0
+        return port in (7496, 4001)
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +55,6 @@ RISK_FLOOR: dict[str, tuple[float, float]] = {
     "max_peak_drawdown_pct": (2.0, 40.0),
     "max_option_premium_pct": (1.0, 25.0),
     "max_symbol_concentration_pct": (5.0, 25.0),
-    "max_arena_concentration_pct": (5.0, 25.0),
 }
 # Paper peak-DD ceiling is RISK_FLOOR[1]=40. Live walk-away stays 25.
 _LIVE_PEAK_DRAWDOWN_CEILING = 25.0
@@ -117,6 +135,17 @@ OPERATOR_DISK_KEYS: frozenset[str] = frozenset({
     "model_params_research",
 })
 _OPERATOR_DISK_REJECT = "operator disk — file wins"
+_WATCHLIST_KEYS = frozenset({
+    "enabled_arenas",
+    "custom_symbols",
+    "exclude_symbols",
+    "legal_symbols",
+    "membership",
+    "refresh_pending",
+    "universe",
+})
+_WATCHLIST_REJECT = "no persisted watchlist — hunt via live screens"
+_REGIME_REJECT = "regime is gone — bind a card"
 # agent_state.json may hold Grok working size + scan depth. Never operator knobs.
 _AGENT_STATE_KEYS = frozenset({"scan_fetch_cap", "size_pct_nl"})
 
@@ -141,7 +170,6 @@ UNSUPERVISED_DEFAULTS: dict[str, Any] = {
     "max_peak_drawdown_pct": 25.0,
     "max_option_premium_pct": 25.0,
     "max_symbol_concentration_pct": 25.0,
-    "max_arena_concentration_pct": 25.0,
     "max_open_positions": 0,
     "scan_fetch_cap": 8,
 }
@@ -240,7 +268,7 @@ def _flatten_params(params: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if not isinstance(params, dict):
         return out
-    nested_keys = ("risk", "universe")
+    nested_keys = ("risk",)
     for nk in nested_keys:
         blob = params.get(nk)
         if isinstance(blob, dict):
@@ -290,9 +318,14 @@ def apply_self_tune(
     scan_cap: int | None = None
     session_caps_payload: dict[str, Any] = {}
     size_pct: float | None = None
-    universe_payload: dict[str, Any] = {}
 
     for key, value in flat.items():
+        if key in _WATCHLIST_KEYS:
+            rejected[key] = _WATCHLIST_REJECT
+            continue
+        if key == "regime":
+            rejected[key] = _REGIME_REJECT
+            continue
         if key in OPERATOR_DISK_KEYS:
             rejected[key] = _OPERATOR_DISK_REJECT
             ignored_operator.append(key)
@@ -398,28 +431,7 @@ def apply_self_tune(
                 clamped[key] = {"raw": value, "clamped": new_v}
             size_pct = float(new_v)
             continue
-        if key in ("enabled_arenas", "custom_symbols", "exclude_symbols"):
-            universe_payload[key] = value
-            continue
-        if key == "regime":
-            continue
         rejected[key] = "unknown or not agent-tunable"
-
-    if isinstance(raw.get("universe"), dict):
-        universe_payload.update({
-            k: v for k, v in raw["universe"].items()
-            if k in ("enabled_arenas", "custom_symbols", "exclude_symbols")
-        })
-
-    if "enabled_arenas" in universe_payload:
-        from abcxauto.universe import validate_enabled_arenas
-
-        names, err = validate_enabled_arenas(universe_payload["enabled_arenas"])
-        if err:
-            rejected["enabled_arenas"] = err
-            universe_payload.pop("enabled_arenas", None)
-        else:
-            universe_payload["enabled_arenas"] = names
 
     persist_kw = {"persist": persist}
     risk_payload = _strip_operator_disk(risk_payload)
@@ -464,36 +476,6 @@ def apply_self_tune(
                 logger.exception("self_tune persist size_pct_nl failed")
         applied.update(extra_size)
 
-    regime_applied: dict[str, Any] | None = None
-    if "regime" in raw or "regime" in flat:
-        from abcxauto.desk_mode import persist_research_regime, validate_regime_payload
-
-        names, err = validate_regime_payload(raw.get("regime", flat.get("regime")))
-        if err:
-            rejected["regime"] = err
-        elif names:
-            try:
-                persist_research_regime(names, persist=persist)
-                regime_applied = names
-                applied["regime"] = names
-            except Exception as exc:
-                logger.exception("self_tune regime failed")
-                rejected["regime"] = str(exc)
-
-    if universe_payload:
-        try:
-            from abcxauto.universe import load_allowlist, save_allowlist
-
-            if persist:
-                cur = load_allowlist()
-                blob = {**cur, **universe_payload}
-                blob["refresh_pending"] = True
-                save_allowlist(blob)
-            applied["universe"] = universe_payload
-        except Exception as exc:
-            logger.exception("self_tune universe failed")
-            rejected["universe"] = str(exc)
-
     if not applied:
         return {
             "status": "blocked",
@@ -516,7 +498,7 @@ def apply_self_tune(
         logger.debug("journal self_tune record failed", exc_info=True)
 
     _file_wins_operator_keys()
-    after = {k: getattr(get_config(), k, None) for k in list(applied) if k != "universe"}
+    after = {k: getattr(get_config(), k, None) for k in list(applied)}
     if size_pct is not None:
         after[_SIZE_PCT_NL_KEY] = size_pct
     return {

@@ -280,6 +280,8 @@ def test_day_facts_carry_edge_and_clones():
     assert day["open_lots"] == ["XLF STK long 1", "XLF STK long 1"]
     assert "max_risk_per_trade_pct" in day
     assert day["max_risk_per_trade_pct"] == day.get("risk_per_trade_pct")
+    assert "watch" not in day
+    assert "tape_seed" not in day
 
 
 def test_format_wake_includes_day_facts():

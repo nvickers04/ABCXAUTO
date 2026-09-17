@@ -65,8 +65,18 @@ def test_hygiene_f10_port_prompt_and_v0_constants():
     assert BRIEF_CARD_TURNS_MAX == 8
     assert BRIEF_CARD_TOOLS_MAX == 40
     assert EST_BRIEF_TURN_USD == 0.20
-    assert AH_RESEARCH_LOOKS_PER_WEEK == 2
+    assert AH_RESEARCH_LOOKS_PER_WEEK == 0
     assert RESEARCH_PROMPT_TOKENS_MAX == 200_000
+
+
+def test_research_prompt_token_fuse_still_skips_runaway_prompt(monkeypatch):
+    from abcxauto.thin_rth_kill_look import REASON_RESEARCH_PROMPT, research_prompt_ok
+
+    monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
+    assert research_prompt_ok(199_999) is True
+    assert research_prompt_ok(200_000) is False
+    assert skip_look_reason("premarket", prompt_tokens=200_000) == REASON_RESEARCH_PROMPT
+    assert skip_look_reason("premarket", prompt_tokens=1) == ""
 
 
 def test_self_tune_cannot_raise_brief_card_constants():

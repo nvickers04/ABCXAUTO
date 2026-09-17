@@ -291,6 +291,7 @@ def test_scorecard_session_is_not_inception(monkeypatch):
     assert sc["session"]["wins"] == 1
     assert sc["session"]["commissions_usd"] == 1.25
     assert sc["session"]["end_nl"] == 35100.0
+    assert sc["session"]["by_card"] == []
     assert "beating_model" not in sc["session"]
     assert sc["beating_model"] is False  # inception edge: -1538 - 2 < 0
     text = format_scorecard_block(equity=35100.0, journal=J(), sc=sc)
@@ -652,3 +653,45 @@ def test_scorecard_spy_is_blank_or_real_never_invented():
     text = format_scorecard_block(sc=real)
     assert "vsSPY=+2.00%" in text
     assert "1d:" in text and "spy=" in text
+
+
+def test_scorecard_session_attaches_by_card(monkeypatch):
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 8, 28, 16, 0, tzinfo=timezone.utc)
+    rows = [{"card": "hollow", "realized_pnl": 0.0, "fills": 2}]
+
+    class J:
+        def startup_cash(self):
+            return 35000.0
+
+        def first_snapshot(self):
+            return 35000.0, "2026-08-28T13:30:00Z"
+
+        def model_usage_totals(self):
+            return {"calls": 1, "cost_usd": 0.1, "input_tokens": 0, "output_tokens": 0}
+
+        def session_start_marker(self, _date):
+            return {"ts": "2026-08-28T13:30:00Z", "net_liquidation": 35000.0}
+
+        def model_usage_since(self, _ts):
+            return {"calls": 1, "cost_usd": 0.1, "input_tokens": 0, "output_tokens": 0}
+
+        def closed_fill_stats_since(self, _ts):
+            return {"n": 2, "wins": 0, "sum": 0.0}
+
+        def commissions_since(self, _ts):
+            return 0.0
+
+        def nav_path_since(self, _ts):
+            return []
+
+        def pnl_by_card(self, **_k):
+            return list(rows)
+
+    monkeypatch.setattr(
+        "abcxauto.config.get_config",
+        lambda: type("C", (), {"model": "grok-4.6"})(),
+    )
+    sc = compute_scorecard(equity=35000.0, journal=J(), now=now, spy={})
+    assert sc["session"]["by_card"] == rows

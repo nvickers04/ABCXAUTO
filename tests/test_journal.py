@@ -43,7 +43,6 @@ def test_schema_creation(journal, tmp_path):
         "snapshots",
         "fills",
         "decisions",
-        "working_thesis",
         "judgments",
         "model_usage",
         "session_markers",
@@ -53,7 +52,10 @@ def test_schema_creation(journal, tmp_path):
         "pcs_fill_events",
         "send_previews",
         "notes",
+        "cards",
+        "card_links",
     } <= tables
+    assert "working_thesis" not in tables
 
 
 def test_record_proposal_round_trip(journal, tmp_path):
@@ -744,12 +746,11 @@ def test_record_decision_and_recent(journal):
     assert rows[1].get("cycle") == 3
 
 
-def test_working_thesis_round_trip(journal):
+def test_working_thesis_is_dead(journal):
+    """Removed: no production writer. Cards replaced the decorative row."""
     assert journal.get_working_thesis() == ""
     journal.set_working_thesis("SPY mean-reversion while VIX calm")
-    assert "mean-reversion" in journal.get_working_thesis()
-    journal.set_working_thesis("updated thesis on QQQ")
-    assert journal.get_working_thesis() == "updated thesis on QQQ"
+    assert journal.get_working_thesis() == ""
 
 
 def test_model_usage_round_trip_and_since(journal, tmp_path):
@@ -1420,3 +1421,225 @@ def test_nav_path_since_and_commissions_since(journal):
         ]
     )
     assert journal.commissions_since("2026-08-28T13:30:00.000Z") == 1.25
+
+
+def test_old_journal_schema_opens_without_losing_rows(tmp_path, monkeypatch):
+    """Operator live journal.db predates cards. Opening it must not drop rows."""
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE notes (
+            id TEXT PRIMARY KEY,
+            ts TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            symbol TEXT,
+            tags_json TEXT,
+            body TEXT NOT NULL,
+            evidence TEXT,
+            invalidate TEXT,
+            expires_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            rev INTEGER NOT NULL DEFAULT 1,
+            invalidated_at TEXT,
+            reason_code TEXT
+        );
+        CREATE TABLE fills (
+            id INTEGER PRIMARY KEY,
+            ts TEXT NOT NULL,
+            exec_id TEXT UNIQUE,
+            order_id INTEGER,
+            symbol TEXT,
+            sec_type TEXT,
+            side TEXT,
+            quantity REAL,
+            price REAL,
+            commission REAL,
+            realized_pnl REAL
+        );
+        CREATE TABLE working_thesis (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            ts TEXT NOT NULL,
+            text TEXT NOT NULL
+        );
+        INSERT INTO notes (
+            id, ts, kind, symbol, tags_json, body, evidence, invalidate,
+            expires_at, source, rev, invalidated_at, reason_code
+        ) VALUES (
+            'legacy-note', '2026-09-01T12:00:00.000Z', 'fact', 'NVDA', '[]',
+            'legacy note must survive migration', NULL, NULL,
+            '2026-12-01T12:00:00.000Z', 'import', 1, NULL, NULL
+        );
+        INSERT INTO fills (
+            ts, exec_id, order_id, symbol, sec_type, side, quantity, price,
+            commission, realized_pnl
+        ) VALUES (
+            '2026-09-01T13:00:00.000Z', 'legacy-exec', 7, 'NVDA', 'STK', 'BOT',
+            10, 100.0, 1.0, 12.5
+        );
+        INSERT INTO working_thesis (id, ts, text)
+        VALUES (1, '2026-09-01T12:00:00.000Z', 'old leftover thesis');
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(db))
+    j = TradeJournal(path=str(db), enabled=True)
+    notes = j.get_notes(ids=["legacy-note"])
+    bodies = [r.get("body") for r in notes.get("notes") or []]
+    assert "legacy note must survive migration" in bodies
+    fills = j.listed_fills() if hasattr(j, "listed_fills") else []
+    execs = {str(r.get("exec_id") or "") for r in fills} if fills else set()
+    if not execs:
+        raw = sqlite3.connect(str(db))
+        try:
+            row = raw.execute(
+                "SELECT exec_id, realized_pnl FROM fills WHERE exec_id='legacy-exec'"
+            ).fetchone()
+        finally:
+            raw.close()
+        assert row is not None
+        assert row[0] == "legacy-exec"
+        assert row[1] == 12.5
+    else:
+        assert "legacy-exec" in execs
+    tables = {
+        r[0]
+        for r in sqlite3.connect(str(db)).execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    assert "cards" in tables
+    assert "card_links" in tables
+    assert "working_thesis" in tables
+    leftover = sqlite3.connect(str(db)).execute(
+        "SELECT text FROM working_thesis WHERE id=1"
+    ).fetchone()
+    assert leftover is not None
+    assert leftover[0] == "old leftover thesis"
+    assert j.get_working_thesis() == ""
+
+
+def test_card_round_trip_and_fill_attribution(journal):
+    wrote = journal.write_card(
+        label="nvda-gap",
+        screen="top_gainers",
+        scan_code="TOP_PERC_GAIN",
+        evidence=[{"tool": "scan", "facts": {"gap_pct": 4.2, "rank": 1}}],
+        direction="long",
+        expectation="gap holds RTH open",
+        invalidate="last < yest close",
+    )
+    assert wrote.get("ok") is True
+    card = wrote["card"]
+    assert card["label"] == "nvda-gap"
+    assert card["status"] == "live"
+    assert card["screen"] == "top_gainers"
+    assert card["evidence"][0]["tool"] == "scan"
+    got = journal.get_cards(ids=["nvda-gap"])
+    assert got["cards"][0]["scan_code"] == "TOP_PERC_GAIN"
+    pid = journal.record_proposal(
+        strategy="bracket",
+        symbol="NVDA",
+        direction="LONG",
+        quantity=1,
+        params={"card": "nvda-gap", "symbol": "NVDA"},
+        validation_ok=True,
+    )
+    journal.record_send_marks(
+        proposal_id=pid,
+        marks={"card": "nvda-gap", "symbol": "NVDA", "strategy": "bracket", "order_id": 88},
+        result={"order_id": 88},
+    )
+    n = journal.record_fills(
+        [
+            {
+                "ts": "2026-09-16T14:00:00.000Z",
+                "exec_id": "card-exec-1",
+                "order_id": 88,
+                "symbol": "NVDA",
+                "sec_type": "STK",
+                "side": "BOT",
+                "quantity": 1,
+                "price": 100.0,
+                "realized_pnl": 17.25,
+            }
+        ]
+    )
+    assert n == 1
+    rows = journal.pnl_by_card()
+    by = {r["card_label"]: r for r in rows}
+    assert "nvda-gap" in by
+    assert by["nvda-gap"]["n_fills"] == 1
+    assert by["nvda-gap"]["realized_pnl"] == 17.25
+    assert by["nvda-gap"]["status"] == "live"
+
+
+def test_invalidated_card_is_inert_and_still_attributable(journal):
+    journal.write_card(
+        label="dead-play",
+        screen="most_active",
+        scan_code="MOST_ACTIVE",
+        evidence=[{"tool": "quote", "facts": {"last": 10.0}}],
+        direction="short",
+        expectation="fade",
+        invalidate="last > 12",
+    )
+    gone = journal.invalidate_card("dead-play", evidence="last 12.5")
+    assert gone["card"]["status"] == "inert"
+    assert journal.list_cards()["n"] == 0
+    assert journal.cards_pointer() == ""
+    resolved = journal.resolve_card("dead-play")
+    assert resolved["status"] == "inert"
+    assert resolved["ok"] is False
+    assert resolved["invented"] is False
+    journal.record_proposal(
+        strategy="bracket",
+        symbol="AMD",
+        params={"card": "dead-play", "symbol": "AMD"},
+    )
+    journal.record_send_marks(
+        marks={"card": "dead-play", "symbol": "AMD", "order_id": 9},
+        result={"order_id": 9},
+    )
+    journal.record_fills(
+        [
+            {
+                "exec_id": "inert-exec",
+                "order_id": 9,
+                "symbol": "AMD",
+                "realized_pnl": -4.0,
+            }
+        ]
+    )
+    rows = journal.pnl_by_card()
+    by = {r["card_label"]: r for r in rows}
+    assert by["dead-play"]["realized_pnl"] == -4.0
+    assert by["dead-play"]["status"] == "inert"
+
+
+def test_card_caps_count_and_field_length(journal):
+    too = journal.write_card(
+        label="ok-lab",
+        expectation="x" * 81,
+        invalidate="y",
+    )
+    assert too.get("ok") is False
+    assert too.get("error") == "expectation_too_long"
+    for i in range(10):
+        out = journal.write_card(
+            label=f"cap{i}",
+            screen="most_active",
+            scan_code="MOST_ACTIVE",
+            evidence=[{"tool": "scan", "facts": {"rank": i}}],
+            direction="long",
+            expectation=f"play {i}",
+            invalidate="fade",
+        )
+        assert out.get("ok") is True
+    live = journal.list_cards()
+    assert live["n"] == 8
+    assert "cap0" not in live["ids"]
+    assert "cap9" in live["ids"]
+    old = journal.get_cards(ids=["cap0"])
+    assert old["cards"][0]["status"] == "inert"

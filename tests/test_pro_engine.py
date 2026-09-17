@@ -758,9 +758,6 @@ def _wire_stay_up_engine(monkeypatch, *, session: str, think, paper: bool = True
     async def fake_snap(_c):
         return _stay_up_snap(session)
 
-    async def _al(*_a, **_k):
-        return {"legal_symbols": [], "source": "test"}
-
     from abcxauto.park_clock import clear_interrupt
 
     clear_interrupt()
@@ -778,7 +775,6 @@ def _wire_stay_up_engine(monkeypatch, *, session: str, think, paper: bool = True
         "abcxauto.pro_engine.ProEngine._start_monitor",
         lambda self: setattr(self, "monitor", type("M", (), {"running": True})()),
     )
-    monkeypatch.setattr("abcxauto.universe.refresh_legal_set", _al)
     monkeypatch.setattr("abcxauto.pro_engine.ProEngine._host_think", think)
     # Every park is floored at min_look_s (30s, env-clamped at 5s), so a test
     # clock has to go under the floor directly or one look eats the deadline.
@@ -1245,12 +1241,11 @@ def test_rearm_synthesize_mill_reenters_same_chat():
     assert not getattr(eng, "_mill_wake", False)
 
 
-def test_rearm_gather_spin_die_tools_is_mill_on_kill_look(monkeypatch):
+def test_rearm_scan_without_send_is_not_a_mill(monkeypatch):
+    """Screen-and-stand-down is a finished look. Hunt without send is not a mill."""
     monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
-    from abcxauto.desk_mode import SYNTHESIZE_MILL_TRIES
     from abcxauto.pro_engine import ProEngine
 
-    assert SYNTHESIZE_MILL_TRIES == 2
     eng = ProEngine()
     wait = eng._rearm_after_think(
         {
@@ -1259,6 +1254,27 @@ def test_rearm_gather_spin_die_tools_is_mill_on_kill_look(monkeypatch):
             "sends": 0,
             "positions": [],
             "tool_trace": ["scan"],
+        },
+        session="regular",
+    )
+    assert wait == 0.0
+    assert eng._resume_think is False
+    assert not getattr(eng, "_mill_wake", False)
+    assert eng._mill_streak == 0
+
+
+def test_rearm_talk_without_tools_is_still_a_mill():
+    """Synthesize mill: model talks, calls nothing, sends nothing — same-chat prod."""
+    from abcxauto.pro_engine import ProEngine
+
+    eng = ProEngine()
+    wait = eng._rearm_after_think(
+        {
+            "_failed": False,
+            "rationale": _SOFT_SPIN_MILL_SAY,
+            "sends": 0,
+            "positions": [],
+            "tool_trace": [],
         },
         session="regular",
     )

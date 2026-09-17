@@ -48,6 +48,7 @@ from abcxauto.memory.journal_support import (  # noqa: F401 — facade re-export
     _utc_iso,
     _utc_now_iso,
 )
+from abcxauto.memory.cards import JournalCards
 from abcxauto.memory.notes import JournalNotes
 from abcxauto.memory.pcs import JournalPcs
 from abcxauto.memory.schema import JournalSchema, _FILL_MARK_COLS, _SCHEMA_SQL
@@ -56,7 +57,7 @@ from abcxauto.memory.trades import JournalTrades
 logger = logging.getLogger(__name__)
 
 
-class TradeJournal(JournalSchema, JournalTrades, JournalFills, JournalAnalytics, JournalPcs, JournalNotes):
+class TradeJournal(JournalSchema, JournalTrades, JournalFills, JournalAnalytics, JournalPcs, JournalNotes, JournalCards):
     """Thread-safe SQLite trade journal (one connection per call, WAL mode)."""
 
 

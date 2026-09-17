@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 from abcxauto.config import default_file_log_path, setup_file_logging
+from abcxauto.look_meter import look_meter_path
 from abcxauto.memory.journal import get_journal
 from abcxauto.memory.journal_support import _DEFAULT_DB_PATH
 from abcxauto.think_stream import (
@@ -34,10 +35,12 @@ from abcxauto.working_memory import (
 REPO = Path(__file__).resolve().parents[1]
 REPO_APP_LOG = (REPO / "logs" / "app.log").resolve()
 REPO_JOURNAL = (REPO / "journal.db").resolve()
+REPO_LOOK_METER = (REPO / "look_meter.db").resolve()
 REPO_UNIVERSE = (REPO / "universe_allowlist.json").resolve()
 
 _PATH_ENV = (
     "ABCXAUTO_JOURNAL_PATH",
+    "ABCXAUTO_LOOK_METER_PATH",
     "ABCXAUTO_LOG_PATH",
     "ABCXAUTO_WORKING_MEMORY_PATH",
     "ABCXAUTO_LAST_TURN_PATH",
@@ -86,6 +89,11 @@ def test_production_paths_unchanged_when_env_absent(monkeypatch):
     assert not hasattr(universe, "save_allowlist")
 
     assert Path(_DEFAULT_DB_PATH).resolve() == REPO_JOURNAL
+    monkeypatch.setattr(
+        "abcxauto.memory.get_journal",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no live journal")),
+    )
+    assert Path(look_meter_path()).resolve() == REPO_LOOK_METER
     assert default_file_log_path() == REPO_APP_LOG
 
 
@@ -93,6 +101,7 @@ def test_env_redirects_writes_away_from_live_paths(tmp_path, monkeypatch):
     before = {
         "log": _sha256(REPO_APP_LOG),
         "journal": _sha256(REPO_JOURNAL),
+        "look_meter": _sha256(REPO_LOOK_METER),
         "universe": _sha256(REPO_UNIVERSE),
         "wm": _sha256(REPO / "data" / "state" / "working_memory.json"),
         "last_turn": _sha256(REPO / "data" / "state" / "last_turn.json"),
@@ -100,10 +109,12 @@ def test_env_redirects_writes_away_from_live_paths(tmp_path, monkeypatch):
 
     wm = tmp_path / "working_memory.json"
     last = tmp_path / "last_turn.json"
+    meter = tmp_path / "look_meter.db"
     monkeypatch.setenv("ABCXAUTO_WORKING_MEMORY_PATH", str(wm))
     monkeypatch.setenv("ABCXAUTO_LAST_TURN_PATH", str(last))
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
     monkeypatch.setenv("ABCXAUTO_LOG_PATH", str(tmp_path / "app.log"))
+    monkeypatch.setenv("ABCXAUTO_LOOK_METER_PATH", str(meter))
 
     # Watchlist writer is gone: this test used to save_allowlist() here.
     # The live universe_allowlist.json hash below must stay byte-identical.
@@ -119,6 +130,10 @@ def test_env_redirects_writes_away_from_live_paths(tmp_path, monkeypatch):
         }
     )
     setup_file_logging()
+    from abcxauto.look_meter import look_meter_scope
+
+    with look_meter_scope(session="regular", model="iso"):
+        pass
     logging.getLogger("abcxauto.iso").critical("RISK GATE HALTED (halt): isolation")
     for handler in logging.getLogger("abcxauto").handlers:
         handler.flush()
@@ -128,15 +143,33 @@ def test_env_redirects_writes_away_from_live_paths(tmp_path, monkeypatch):
     assert last.is_file()
     assert "isolation probe" in last.read_text(encoding="utf-8")
     assert (tmp_path / "app.log").is_file()
+    assert meter.is_file()
+    assert meter.resolve() != REPO_LOOK_METER
 
     after = {
         "log": _sha256(REPO_APP_LOG),
         "journal": _sha256(REPO_JOURNAL),
+        "look_meter": _sha256(REPO_LOOK_METER),
         "universe": _sha256(REPO_UNIVERSE),
         "wm": _sha256(REPO / "data" / "state" / "working_memory.json"),
         "last_turn": _sha256(REPO / "data" / "state" / "last_turn.json"),
     }
     assert after == before
+
+
+def test_look_meter_path_is_isolated(tmp_path, monkeypatch):
+    dest = tmp_path / "redirected-look-meter.db"
+    monkeypatch.setenv("ABCXAUTO_LOOK_METER_PATH", str(dest))
+    monkeypatch.delenv("ABCXAUTO_JOURNAL_PATH", raising=False)
+    assert Path(look_meter_path()).resolve() == dest.resolve()
+    assert Path(look_meter_path()).resolve() != REPO_LOOK_METER
+    from abcxauto.look_meter import look_meter_scope
+
+    with look_meter_scope(session="regular", model="iso"):
+        pass
+    assert dest.is_file()
+    if REPO_LOOK_METER.is_file():
+        assert dest.resolve() != REPO_LOOK_METER
 
 
 def test_setup_file_logging_without_path_cannot_open_repo_app_log(tmp_path, monkeypatch):
