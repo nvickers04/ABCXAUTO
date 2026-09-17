@@ -33,11 +33,22 @@ RISK_FLOOR: dict[str, tuple[float, float]] = {
     "daily_loss_limit_pct": (0.5, 25.0),
     "max_position_pct": (5.0, 25.0),
     "max_risk_per_trade_pct": (0.25, 25.0),
-    "max_peak_drawdown_pct": (2.0, 25.0),
+    "max_peak_drawdown_pct": (2.0, 40.0),
     "max_option_premium_pct": (1.0, 25.0),
     "max_symbol_concentration_pct": (5.0, 25.0),
     "max_arena_concentration_pct": (5.0, 25.0),
 }
+# Paper peak-DD ceiling is RISK_FLOOR[1]=40. Live walk-away stays 25.
+_LIVE_PEAK_DRAWDOWN_CEILING = 25.0
+
+
+def risk_floor_bounds(key: str, cfg: Any = None) -> tuple[float, float]:
+    """Walk-away band. Peak-DD is 40 paper / 25 live; other keys are mode-blind."""
+    lo, hi = RISK_FLOOR[key]
+    if key == "max_peak_drawdown_pct" and live_desk(cfg):
+        return lo, _LIVE_PEAK_DRAWDOWN_CEILING
+    return lo, hi
+
 # 0 = off (no count refuse). A positive integer is a ceiling Grok/operator
 # chose. No baked 15. No invented 25. Same on paper and live.
 MAX_OPEN_POSITIONS_RANGE = (0,)
@@ -199,6 +210,7 @@ def clamp_risk_to_floor(
     """Clamp a risk knob so it cannot weaken the immutable floor.
 
     ``cfg`` remains for call-site compat. mop is not paper/live forked.
+    Peak-DD ceiling is paper 40 / live 25 via ``risk_floor_bounds``.
     For ``_ZERO_OFF_RISK_KEYS``, 0 = off: do not lift to the RISK_FLOOR min.
     """
     if key == "max_open_positions":
@@ -217,7 +229,7 @@ def clamp_risk_to_floor(
     # 0 = off. Do not clamp 0 up to 0.25 / 1 / 5. Positive still floor-clamps.
     if key in _ZERO_OFF_RISK_KEYS and raw == 0:
         return 0.0, None
-    lo, hi = RISK_FLOOR[key]
+    lo, hi = risk_floor_bounds(key, cfg)
     clamped = max(lo, min(hi, raw))
     note = {"raw": raw, "clamped": clamped} if clamped != raw else None
     return clamped, note
@@ -308,7 +320,7 @@ def apply_self_tune(
                 rejected[key] = "invalid value"
                 continue
             if key != "max_open_positions":
-                hi = RISK_FLOOR[key][1]
+                _, hi = risk_floor_bounds(key, cfg)
                 try:
                     as_f = float(new_v)
                 except (TypeError, ValueError):
@@ -320,6 +332,13 @@ def apply_self_tune(
                 if as_f > hi:
                     note = {"raw": value, "clamped": hi}
                     new_v = float(hi)
+                    as_f = float(hi)
+                if key == "max_peak_drawdown_pct":
+                    current = _f(before.get(key))
+                    raw_f = _f(value)
+                    if current is not None and raw_f is not None and raw_f > current:
+                        rejected[key] = "cannot weaken max_peak_drawdown_pct"
+                        continue
             if note:
                 clamped[key] = note
             if key == "max_open_positions":
@@ -575,7 +594,8 @@ def floor_clamp_config_fields(cfg: Any) -> dict[str, Any]:
         "max_position_pct": 20.0,
     }
     live = live_desk(cfg)
-    for key, (lo, hi) in RISK_FLOOR.items():
+    for key in RISK_FLOOR:
+        lo, hi = risk_floor_bounds(key, cfg)
         cur = _f(getattr(cfg, key, None))
         # 0 = off for risk/position/premium. Do not replace with 25.
         # Do not lift to the floor min. Missing/None/negative still repair.
@@ -707,7 +727,7 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
     c = cfg if cfg is not None else get_config()
 
     def _pct(key: str) -> dict[str, Any]:
-        lo, hi = RISK_FLOOR[key]
+        lo, hi = risk_floor_bounds(key, c)
         out: dict[str, Any] = {
             "now": getattr(c, key, None),
             "min": lo,

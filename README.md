@@ -123,7 +123,7 @@ Tickets must match `ORDER EXAMPLES` (`abcxauto/order_examples.py`). Stock entrie
 
 ## Configuration
 
-Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** max position, **25%** risk/trade, **25%** per name, defined-risk on, cash-only, `trading_budget_usd=0` (full NetLiq). Book width is Grok's; `max_open_positions` default **0** (off).
+Walk-away ceilings (agent cannot raise or disable): **25%** daily-loss, **25%** max position, **25%** risk/trade, **25%** per name, peak-DD **40%** paper / **25%** live, defined-risk on, cash-only, `trading_budget_usd=0` (full NetLiq). Book width is Grok's; `max_open_positions` default **0** (off).
 
 Precedence: Settings / `risk_settings.json` > env > default. `scan_fetch_cap` is self_tune / `agent_state.json`, not a Settings key.
 

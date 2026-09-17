@@ -817,11 +817,14 @@ def clamp_risk_knobs(
     values: dict[str, Any],
     *,
     posture: str | None = None,
+    cfg: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Clamp SET_RISK_KEYS to the walk-away floor. ``posture`` is ignored."""
     from abcxauto.self_tune import clamp_risk_to_floor
 
     _ = posture
+    if cfg is None:
+        cfg = get_config()
     applied: dict[str, Any] = {}
     notes: dict[str, Any] = {}
     for key, value in values.items():
@@ -831,7 +834,7 @@ def clamp_risk_knobs(
             coerced = _coerce_risk_value(key, value)
         except (TypeError, ValueError):
             continue
-        new_v, note = clamp_risk_to_floor(key, coerced)
+        new_v, note = clamp_risk_to_floor(key, coerced, cfg=cfg)
         if new_v is None:
             continue
         applied[key] = new_v
@@ -853,16 +856,17 @@ def set_risk_knobs(
 
 def risk_envelope_snapshot() -> dict[str, Any]:
     """Current knobs + walk-away floor. Facts for book/status — not a lecture."""
-    from abcxauto.self_tune import RISK_FLOOR
+    from abcxauto.self_tune import RISK_FLOOR, risk_floor_bounds
 
     cfg = get_config()
     eff = resolve_effective_posture(cfg.risk_posture, cfg.trading_mode)
     current = {k: getattr(cfg, k) for k in sorted(SET_RISK_KEYS)}
-    envelope = {
-        k: {"floor": lo, "ceil": hi}
-        for k, (lo, hi) in RISK_FLOOR.items()
-        if k in SET_RISK_KEYS
-    }
+    envelope = {}
+    for k in RISK_FLOOR:
+        if k not in SET_RISK_KEYS:
+            continue
+        lo, hi = risk_floor_bounds(k, cfg)
+        envelope[k] = {"floor": lo, "ceil": hi}
     return {
         "risk_posture": cfg.risk_posture or "",
         "effective_risk_posture": eff,

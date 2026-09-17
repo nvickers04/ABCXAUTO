@@ -118,8 +118,9 @@ def test_size_ceiling_is_25_pct_of_nl():
     assert v3 == 25.0
     v4, _ = clamp_risk_to_floor("daily_loss_limit_pct", 50)
     assert v4 == 25.0
-    v5, _ = clamp_risk_to_floor("max_peak_drawdown_pct", 50)
-    assert v5 == 25.0
+    v5, note5 = clamp_risk_to_floor("max_peak_drawdown_pct", 50)
+    assert v5 == 40.0
+    assert note5 is not None
 
 
 def test_levers_snapshot_shows_now_and_range():
