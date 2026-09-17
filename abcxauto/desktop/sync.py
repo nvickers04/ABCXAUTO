@@ -13,10 +13,12 @@ import flet as ft
 
 from abcxauto.desktop.bind import get_config, last_card_send_label
 from abcxauto.desktop.stream import (
+    format_token_count,
     grok_sub_color,
     grok_sub_state,
     session_cap_idle_line,
     stream_line_kind,
+    stream_scan_hits_n,
     stream_view_lines,
     think_tail_in_flight,
     think_tail_last_say,
@@ -442,45 +444,188 @@ class SyncMixin:
         self.col_fills.controls = controls
 
 
+    @staticmethod
+    def _scan_screen_name(hits: dict, rows: list[dict] | None = None) -> str:
+        for src in (hits, *((rows or [])[:1])):
+            if not isinstance(src, dict):
+                continue
+            for key in ("screen", "arena"):
+                val = str(src.get(key) or "").strip()
+                if val:
+                    return val
+        prov = hits.get("provenance") if isinstance(hits.get("provenance"), dict) else {}
+        return str(prov.get("screen") or "").strip()
+
+    @staticmethod
+    def _scan_code_name(hits: dict, rows: list[dict] | None = None) -> str:
+        for src in (hits, *((rows or [])[:1])):
+            if not isinstance(src, dict):
+                continue
+            val = str(src.get("scan_code") or "").strip()
+            if val:
+                return val
+        prov = hits.get("provenance") if isinstance(hits.get("provenance"), dict) else {}
+        return str(prov.get("scan_code") or "").strip()
+
+    @staticmethod
+    def _scan_ran(hits: dict, rows: list[dict]) -> bool:
+        if rows:
+            return True
+        if hits.get("empty") is True:
+            return True
+        if str(hits.get("source") or "").strip().lower() == "empty":
+            return True
+        if SyncMixin._scan_screen_name(hits, rows) or SyncMixin._scan_code_name(hits, rows):
+            return True
+        if isinstance(hits.get("provenance"), dict) and hits.get("provenance"):
+            return True
+        return False
+
+    @staticmethod
+    def _scan_is_empty(hits: dict, rows: list[dict]) -> bool:
+        if rows:
+            return False
+        if hits.get("empty") is True:
+            return True
+        if str(hits.get("source") or "").strip().lower() == "empty":
+            return True
+        meaning = str(hits.get("rank_meaning") or "").strip().lower()
+        if meaning == "empty screen":
+            return True
+        return SyncMixin._scan_ran(hits, rows)
+
+    @staticmethod
+    def _scan_metric_text(row: dict) -> str:
+        name = str(row.get("metric_name") or "").strip()
+        val = row.get("metric_value")
+        if val in (None, ""):
+            val = row.get("gap_pct")
+        if val in (None, ""):
+            val = row.get("gap%")
+        if val in (None, ""):
+            val = row.get("distance") or row.get("benchmark") or row.get("projection") or ""
+        if name and val not in (None, ""):
+            return f"{name} {val}"
+        if val not in (None, ""):
+            return str(val)
+        return ""
+
+    @staticmethod
+    def _scan_provenance_line(hits: dict) -> str:
+        prov = hits.get("provenance") if isinstance(hits.get("provenance"), dict) else {}
+        ibkr = prov.get("ibkr_rows")
+        if ibkr is None:
+            ibkr = hits.get("ibkr_rows")
+        kept = prov.get("kept")
+        if kept is None:
+            kept = hits.get("kept")
+        applied = prov.get("filters")
+        if not isinstance(applied, dict):
+            applied = hits.get("applied") if isinstance(hits.get("applied"), dict) else {}
+        bits: list[str] = []
+        if ibkr is not None or kept is not None:
+            try:
+                ibkr_s = str(int(ibkr)) if ibkr is not None else "?"
+            except (TypeError, ValueError):
+                ibkr_s = str(ibkr)
+            try:
+                kept_s = str(int(kept)) if kept is not None else "?"
+            except (TypeError, ValueError):
+                kept_s = str(kept)
+            bits.append(f"IBKR {ibkr_s} → kept {kept_s}")
+        filt = [f"{k}={v}" for k, v in list(applied.items())[:6] if v not in (None, "", False)]
+        if filt:
+            bits.append("filters " + " ".join(filt))
+        return " · ".join(bits)
+
     def _sync_scan_tape(self) -> None:
-        """The screen Grok pulled: IBKR rank order plus whatever got a live last."""
+        """The screen Grok pulled: name, scanCode, IBKR metric, skip_class, empty as empty."""
         hits = getattr(self.engine.state, "scan_hits", None) or {}
-        rows = [r for r in (hits.get("rows") or []) if isinstance(r, dict)]
-        key = json.dumps([hits.get("source"), hits.get("quoted"), rows], sort_keys=True, default=str)
+        if not isinstance(hits, dict):
+            hits = {}
+        rows = [r for r in (hits.get("rows") or hits.get("hits") or []) if isinstance(r, dict)]
+        key = json.dumps(
+            [
+                hits.get("source"),
+                hits.get("quoted"),
+                hits.get("empty"),
+                hits.get("screen"),
+                hits.get("scan_code"),
+                hits.get("provenance"),
+                rows,
+            ],
+            sort_keys=True,
+            default=str,
+        )
         if key == self._scan_key:
             return
         self._scan_key = key
-        if not rows:
+        ran = self._scan_ran(hits, rows)
+        if not ran:
             self.lbl_scan_head.value = "No screen this session — Grok runs the scanner."
             self.lbl_scan_head.color = MUTED
             self.col_scan.controls = []
             return
-        ranked = bool(hits.get("ranked"))
-        code = str(hits.get("scan_code") or hits.get("arena") or "").strip()
-        bits = [f"{len(rows)} hits", f"{int(hits.get('quoted') or 0)} quoted"]
-        if code:
-            bits.append(code)
-        bits.append(str(hits.get("source") or "?"))
-        bits.append(str(hits.get("rank_meaning") or ("ranked" if ranked else "not ranked")))
+        screen = self._scan_screen_name(hits, rows)
+        code = self._scan_code_name(hits, rows)
+        empty = self._scan_is_empty(hits, rows)
+        ranked = bool(hits.get("ranked")) and not empty
+        bits: list[str] = []
+        if screen:
+            bits.append(str(screen))
+        if code and code != screen:
+            bits.append(str(code))
+        if empty:
+            bits.append("empty")
+        else:
+            bits.append(f"{len(rows)} hits")
+            bits.append(f"{int(hits.get('quoted') or 0)} quoted")
+        bits.append(str(hits.get("source") or ("empty" if empty else "?")))
+        meaning = str(hits.get("rank_meaning") or "")
+        if empty and "empty" not in meaning.lower():
+            meaning = "empty screen"
+        if meaning:
+            bits.append(meaning)
         self.lbl_scan_head.value = " · ".join(bits)
-        self.lbl_scan_head.color = TEXT
+        self.lbl_scan_head.color = AMBER if empty else TEXT
+        if empty:
+            msg = "Empty — this screen returned no names."
+            prov = self._scan_provenance_line(hits)
+            body: list[ft.Control] = [
+                ft.Text(msg, size=12, color=AMBER, selectable=True),
+            ]
+            if prov:
+                body.append(ft.Text(prov, size=11, color=MUTED, selectable=True))
+            self.col_scan.controls = body
+            return
         controls: list[ft.Control] = [
-            self._head_row([("#", 30), ("symbol", 78), ("last", 84), ("metric", None)])
+            self._head_row([
+                ("#", 30),
+                ("symbol", 72),
+                ("flag", 58),
+                ("last", 72),
+                ("metric", None),
+            ])
         ]
+        prov = self._scan_provenance_line(hits)
+        if prov:
+            controls.append(ft.Text(prov, size=11, color=MUTED, selectable=True))
         for i, row in enumerate(rows[:12], start=1):
             rank = row.get("rank") if ranked else None
             last = row.get("last")
-            metric = (
-                row.get("gap%")
-                if row.get("gap%") is not None
-                else row.get("distance") or row.get("benchmark") or row.get("projection") or ""
-            )
+            metric = self._scan_metric_text(row)
+            skip = str(row.get("skip_class") or "").strip().lower()
             tags = []
+            if skip:
+                tags.append(skip)
             if row.get("on_book"):
                 tags.append("on book")
             if row.get("in_turn"):
                 tags.append("quoted this look")
-            note = " · ".join(str(x) for x in ([metric] if metric else []) + tags)
+            note = " · ".join(str(x) for x in ([metric] if metric else []) + [
+                t for t in tags if t not in ("levered", "micro")
+            ])
+            flag = skip if skip in ("levered", "micro") else ""
             controls.append(
                 self._blotter_row([
                     self._cell(
@@ -491,14 +636,20 @@ class SyncMixin:
                     ),
                     self._cell(
                         str(row.get("symbol") or "?"),
-                        width=78,
+                        width=72,
                         mono=True,
                         weight=ft.FontWeight.W_600,
                         color=GREEN if row.get("on_book") else TEXT,
                     ),
                     self._cell(
+                        flag or "—",
+                        width=58,
+                        color=AMBER if flag else MUTED,
+                        weight=ft.FontWeight.W_600 if flag else None,
+                    ),
+                    self._cell(
                         f"{last:,.2f}" if isinstance(last, (int, float)) else "—",
-                        width=84,
+                        width=72,
                         right=True,
                         color=TEXT if isinstance(last, (int, float)) else MUTED,
                         mono=True,
@@ -534,7 +685,7 @@ class SyncMixin:
     def _is_note(rec: dict) -> bool:
         """Lifecycle line from ProEngine._note — the message is the whole row.
 
-        Keyed on shape, not a kind whitelist: RETRY / PARK / UNIVERSE notes were
+        Keyed on shape, not a kind whitelist: RETRY / PARK / ERR notes were
         silently blanked when the list did not name them.
         """
         return bool(rec.get("msg")) and not rec.get("result") and not rec.get("action_obj")
@@ -812,6 +963,7 @@ class SyncMixin:
             self.lbl_sc_strats.color = MUTED
         self._paint_fill_quality()
         self._paint_model_spend()
+        self._sync_look_meter(force=True)
         self._schedule_desk_stats(force=force)
 
 
@@ -1008,6 +1160,7 @@ class SyncMixin:
         self.lbl_risk_halt_math.value = " · ".join(bits) or "connect IBKR for the halt math"
         self.lbl_risk_halt_math.color = MUTED
         self._paint_gate_rejections()
+        self._sync_concentration_fact()
         self._schedule_desk_stats(force=force)
 
 
@@ -1268,6 +1421,295 @@ class SyncMixin:
         self.lbl_sc_spend_sub.color = MUTED
 
 
+    @staticmethod
+    def _meter_usd(value: Any) -> str:
+        try:
+            return f"${float(value):,.2f}"
+        except (TypeError, ValueError):
+            return "—"
+
+    @staticmethod
+    def _meter_day(ts: Any) -> str:
+        text = str(ts or "").strip()
+        return text[:10] if len(text) >= 10 else ""
+
+    def _sync_look_meter(self, rows: list[dict] | None = None, *, force: bool = False) -> None:
+        """Last look $ first, session total next, re-bill curve under that."""
+        now = time.monotonic()
+        if rows is None and not force:
+            if now - float(getattr(self, "_look_meter_last", 0) or 0) < PAGE_REFRESH_S:
+                if getattr(self, "_look_meter_rows", None) is not None:
+                    self._paint_look_meter(self._look_meter_rows)
+                    return
+        if rows is None:
+            try:
+                from abcxauto.look_meter import look_meter_for_desk
+
+                rows = look_meter_for_desk(limit=64)
+            except Exception:
+                rows = []
+            self._look_meter_last = now
+        self._look_meter_rows = list(rows or [])
+        self._paint_look_meter(self._look_meter_rows)
+
+    def _paint_look_meter(self, rows: list[dict] | None) -> None:
+        clean = [r for r in (rows or []) if isinstance(r, dict)]
+        last = clean[0] if clean else None
+        if last is None:
+            self.lbl_look_cost.value = "—"
+            self.lbl_look_cost.color = MUTED
+            self.lbl_look_cost_sub.value = "no look cost yet"
+            self.lbl_look_cost_session.value = "session —"
+            self.lbl_look_cost_session.color = MUTED
+            self.lbl_look_cost_detail.value = ""
+            self.lbl_look_curve.value = ""
+            self.col_look_recent.controls = [
+                ft.Text("No metered looks yet.", size=12, color=MUTED)
+            ]
+            return
+        cost = last.get("cost_usd")
+        self.lbl_look_cost.value = self._meter_usd(cost)
+        self.lbl_look_cost.color = TEXT if isinstance(cost, (int, float)) else MUTED
+        try:
+            calls = int(last.get("calls") or 0)
+        except (TypeError, ValueError):
+            calls = 0
+        try:
+            dur = float(last.get("duration_s") or 0)
+        except (TypeError, ValueError):
+            dur = 0.0
+        if dur >= 90:
+            dur_s = f"{dur / 60:.1f}m"
+        else:
+            dur_s = f"{dur:.0f}s"
+        model = str(last.get("model") or "").strip()
+        self.lbl_look_cost_sub.value = (
+            f"{calls} call" + ("s" if calls != 1 else "") + f" · {dur_s}"
+            + (f" · {model}" if model else "")
+        )
+        day = self._meter_day(last.get("ts"))
+        day_rows = [r for r in clean if not day or self._meter_day(r.get("ts")) == day]
+        session_cost = 0.0
+        for r in day_rows:
+            try:
+                session_cost += float(r.get("cost_usd") or 0)
+            except (TypeError, ValueError):
+                pass
+        noun = "look" if len(day_rows) == 1 else "looks"
+        self.lbl_look_cost_session.value = (
+            f"{self._meter_usd(session_cost)} · {len(day_rows)} {noun}"
+        )
+        self.lbl_look_cost_session.color = TEXT
+        uncached = int(last.get("input_tokens") or 0)
+        cached = int(last.get("cached_tokens") or 0)
+        out = int(last.get("output_tokens") or 0)
+        reason = int(last.get("reasoning_tokens") or 0)
+        tools = last.get("tool_counts") if isinstance(last.get("tool_counts"), dict) else {}
+        tool_bit = " ".join(
+            f"{k}×{int(v)}" for k, v in list(tools.items())[:8] if int(v or 0)
+        )
+        chars = int(last.get("tool_result_chars") or 0)
+        detail = (
+            f"{format_token_count(uncached)} uncached + {format_token_count(cached)} cached"
+            f" · {format_token_count(out)} out"
+        )
+        if reason:
+            detail += f" · {format_token_count(reason)} reason"
+        if tool_bit:
+            detail += f" · {tool_bit}"
+        if chars:
+            detail += f" · {format_token_count(chars)} tool chars"
+        self.lbl_look_cost_detail.value = detail
+        self.lbl_look_cost_detail.color = TEXT
+        curve = last.get("call_inputs") if isinstance(last.get("call_inputs"), list) else []
+        nums: list[int] = []
+        for x in curve:
+            try:
+                nums.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        if nums:
+            self.lbl_look_curve.value = "re-bill " + " → ".join(
+                format_token_count(n) for n in nums
+            )
+            self.lbl_look_curve.color = TEXT
+        else:
+            self.lbl_look_curve.value = "re-bill — one call, no compounding"
+            self.lbl_look_curve.color = MUTED
+        recent: list[ft.Control] = [
+            self._head_row([("time", 60), ("$", 72), ("calls", 48), ("model", None)])
+        ]
+        for r in clean[:8]:
+            ts = str(r.get("ts") or "")
+            clock = ts[11:16] if "T" in ts and len(ts) >= 16 else ts[-8:]
+            try:
+                n = int(r.get("calls") or 0)
+            except (TypeError, ValueError):
+                n = 0
+            recent.append(
+                self._blotter_row([
+                    self._cell(clock or "—", width=60, color=MUTED, mono=True),
+                    self._cell(self._meter_usd(r.get("cost_usd")), width=72, right=True),
+                    self._cell(str(n), width=48, right=True, color=MUTED),
+                    self._cell(str(r.get("model") or "—"), expand=True, color=MUTED),
+                ])
+            )
+        self.col_look_recent.controls = recent
+
+    @staticmethod
+    def _concentration_fn():
+        """risk_gates.defined_risk_concentration(positions, net_liq) — positional."""
+        for mod, name in (
+            ("abcxauto.risk_gates", "defined_risk_concentration"),
+            ("abcxauto.world_state", "defined_risk_concentration"),
+            ("abcxauto.world_state", "concentration_fact"),
+        ):
+            try:
+                module = __import__(mod, fromlist=[name])
+            except Exception:
+                continue
+            fn = getattr(module, name, None)
+            if callable(fn):
+                return fn
+        return None
+
+    @staticmethod
+    def _conc_groups(blob: dict) -> tuple[list[dict], list[dict]]:
+        """Normalize the fact to two row lists. Worker shape is dict-of-dicts."""
+
+        def _from_map(raw: Any, name_key: str) -> list[dict]:
+            if isinstance(raw, dict):
+                out: list[dict] = []
+                for name, rec in raw.items():
+                    if not isinstance(rec, dict):
+                        rec = {"usd": rec}
+                    row = dict(rec)
+                    row.setdefault(name_key, name)
+                    usd = row.get("usd")
+                    if usd == "unknown" or row.get("unknown"):
+                        row["unknown"] = True
+                        if usd == "unknown":
+                            row["usd"] = None
+                    out.append(row)
+                return out
+            if isinstance(raw, list):
+                return [r for r in raw if isinstance(r, dict)]
+            return []
+
+        by_sym = _from_map(
+            blob.get("symbol") or blob.get("by_symbol") or blob.get("symbols"),
+            "symbol",
+        )
+        by_und = _from_map(
+            blob.get("underlying")
+            or blob.get("by_underlying")
+            or blob.get("underlyings"),
+            "underlying",
+        )
+        return by_sym, by_und
+
+    @staticmethod
+    def _conc_row_name(row: dict) -> str:
+        for key in ("symbol", "underlying", "name"):
+            val = str(row.get(key) or "").strip()
+            if val:
+                return val
+        return "?"
+
+    def _sync_concentration_fact(self) -> None:
+        """Paint the defined-risk concentration fact. Idle if the worker is not merged."""
+        fn = self._concentration_fn()
+        positions = list(getattr(self.engine.state, "positions", None) or [])
+        try:
+            nl = float(getattr(self.engine.state, "equity", 0) or 0) or None
+        except (TypeError, ValueError):
+            nl = None
+        if fn is None:
+            self.lbl_conc_head.value = (
+                "Waiting for defined_risk_concentration — not on this build yet."
+            )
+            self.lbl_conc_head.color = MUTED
+            self.col_conc.controls = [
+                ft.Text("No concentration fact to show.", size=12, color=MUTED)
+            ]
+            return
+        try:
+            blob = fn(positions, nl)
+        except TypeError:
+            try:
+                blob = fn(positions, net_liq=nl)
+            except Exception:
+                blob = None
+        except Exception:
+            logger.debug("concentration fact failed", exc_info=True)
+            self.lbl_conc_head.value = "Concentration fact failed."
+            self.lbl_conc_head.color = AMBER
+            self.col_conc.controls = [
+                ft.Text("Could not price the book this tick.", size=12, color=MUTED)
+            ]
+            return
+        if not isinstance(blob, dict) or not blob:
+            self.lbl_conc_head.value = "No priced lots."
+            self.lbl_conc_head.color = MUTED
+            self.col_conc.controls = [
+                ft.Text("Book is flat or unpriced.", size=12, color=MUTED)
+            ]
+            return
+        by_sym, by_und = self._conc_groups(blob)
+        unknown_n = sum(
+            1 for r in by_sym + by_und if r.get("unknown") or r.get("usd") in (None, "unknown")
+        )
+        bits = []
+        if nl:
+            bits.append(f"NL {self._meter_usd(nl)}")
+        if unknown_n:
+            bits.append(f"{unknown_n} unknown")
+        self.lbl_conc_head.value = " · ".join(bits) if bits else "priced"
+        self.lbl_conc_head.color = AMBER if unknown_n else TEXT
+        rows: list[ft.Control] = [
+            self._head_row([("group", 72), ("name", 78), ("$", 84), ("% NL", None)])
+        ]
+
+        def _add(label: str, rec: dict) -> None:
+            usd = rec.get("usd")
+            if usd is None:
+                usd = rec.get("dollars") or rec.get("risk_usd")
+            pct = rec.get("pct")
+            if pct is None:
+                pct = rec.get("pct_nl")
+            unknown = bool(rec.get("unknown") or usd == "unknown" or usd is None)
+            if unknown:
+                usd_s, pct_s, color = "unknown", "—", AMBER
+            else:
+                usd_s = self._meter_usd(usd)
+                pct_s = f"{float(pct):.1f}%" if isinstance(pct, (int, float)) else "—"
+                color = TEXT
+            rows.append(
+                self._blotter_row(
+                    [
+                        self._cell(label, width=72, color=MUTED),
+                        self._cell(
+                            self._conc_row_name(rec),
+                            width=78,
+                            mono=True,
+                            weight=ft.FontWeight.W_600,
+                        ),
+                        self._cell(usd_s, width=84, right=True, color=color),
+                        self._cell(pct_s, expand=True, color=color),
+                    ],
+                    alert=unknown,
+                )
+            )
+
+        for rec in by_sym[:8]:
+            _add("name", rec)
+        for rec in by_und[:8]:
+            _add("under", rec)
+        if len(rows) == 1:
+            rows.append(ft.Text("No grouped lots.", size=12, color=MUTED))
+        self.col_conc.controls = rows
+
+
     def _sync_settings_page(self, *, force: bool = False) -> None:
         _ = force
         from abcxauto.config import (
@@ -1512,15 +1954,20 @@ class SyncMixin:
         if key == self._stream_lines_key:
             return
         self._stream_lines_key = key
-        # Only attach the screen to a scan line whose own counts match it. A
-        # stale payload next to this look's hits= would be a quiet lie.
+        # Only attach the screen to a scan line whose own hits= matches it. A
+        # stale payload next to this look's trophy line would be a quiet lie.
         hits = getattr(self.engine.state, "scan_hits", None) or {}
-        n_rows = len([r for r in (hits.get("rows") or []) if isinstance(r, dict)])
-        want = f"hits={n_rows} quoted={hits.get('quoted')} " if n_rows else ""
+        if not isinstance(hits, dict):
+            hits = {}
+        rows = [r for r in (hits.get("rows") or hits.get("hits") or []) if isinstance(r, dict)]
+        n_rows = len(rows)
+        ran = self._scan_ran(hits, rows)
         scan_at = -1
-        if want:
+        if ran:
             for i, raw in enumerate(lines):
-                if stream_line_kind(raw) == "scan" and raw.strip().startswith(want):
+                if stream_line_kind(raw) != "scan":
+                    continue
+                if stream_scan_hits_n(raw) == n_rows:
                     scan_at = i
         controls: list[ft.Control] = []
         mode = "say"
@@ -1689,8 +2136,13 @@ class SyncMixin:
         else:
             self.lbl_hs_burn.value = ""
             self.lbl_hs_burn.color = MUTED
-        self.lbl_hs_look.value = f"this look: {tools} tool(s) · {sends} send(s)"
-        self.lbl_hs_look.color = TEXT if tools else MUTED
+        look_bit = f"this look: {tools} tool(s) · {sends} send(s)"
+        meter_rows = getattr(self, "_look_meter_rows", None) or []
+        last_meter = meter_rows[0] if meter_rows else None
+        if isinstance(last_meter, dict) and last_meter.get("cost_usd") is not None:
+            look_bit += f" · last {self._meter_usd(last_meter.get('cost_usd'))}"
+        self.lbl_hs_look.value = look_bit
+        self.lbl_hs_look.color = TEXT if tools or last_meter else MUTED
         # Only a burn gets a box — the strip is otherwise a plain status bar.
         self.health_box.border = ft.Border.all(1, RED) if burning else None
         pulse = getattr(s, "reality_pulse", None) or {}
@@ -1847,6 +2299,7 @@ class SyncMixin:
         self._sync_fills()
         self._sync_activity()
         self._sync_scan_tape()
+        self._sync_look_meter()
         self._sync_health_strip()
         self._sync_lessons_line()
         self._sync_tabs()
@@ -2098,8 +2551,8 @@ class SyncMixin:
         return order[:14]
 
 
-    def _news_rail_universe(self) -> list[dict]:
-        """Positions when the book is open; scan/think names when it is flat."""
+    def _news_rail_names(self) -> list[dict]:
+        """Positions when the book is open; last scan/think names when it is flat."""
         pos = [
             p
             for p in (self.engine.state.positions or [])
@@ -2217,14 +2670,14 @@ class SyncMixin:
         remember_headlines(think_items)
         try:
             unique = await fetch_agent_news(
-                self._news_rail_universe(), force=force, per_symbol=5
+                self._news_rail_names(), force=force, per_symbol=5
             )
         except Exception:
             unique = []
         remember_headlines(unique)
         names = [
             str((p or {}).get("symbol") or "").upper().strip()
-            for p in self._news_rail_universe()
+            for p in self._news_rail_names()
             if str((p or {}).get("symbol") or "").strip()
         ]
         painted = coalesce_news(unique, names)

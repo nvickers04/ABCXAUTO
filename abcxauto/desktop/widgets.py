@@ -143,6 +143,19 @@ class WidgetsMixin:
         )
         self.col_scan = ft.Column(spacing=3, tight=True)
         self._scan_key = ""
+        # ---- Look cost: last look $ first, session total next, curve below.
+        self.lbl_look_cost = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=MUTED)
+        self.lbl_look_cost_sub = ft.Text("no look cost yet", size=11, color=MUTED)
+        self.lbl_look_cost_session = ft.Text("session —", size=13, weight=ft.FontWeight.W_600, color=MUTED)
+        self.lbl_look_cost_detail = ft.Text("", size=12, color=MUTED, selectable=True, no_wrap=False)
+        self.lbl_look_curve = ft.Text("", size=12, color=MUTED, selectable=True, no_wrap=False)
+        self.col_look_recent = ft.Column(spacing=3, tight=True)
+        self._look_meter_rows: list[dict] = []
+        self._look_meter_last = 0.0
+        # ---- Defined-risk concentration fact (dollars / % NL). Missing import is idle.
+        self.lbl_conc_head = ft.Text("", size=12, color=MUTED, selectable=True, no_wrap=False)
+        self.col_conc = ft.Column(spacing=3, tight=True)
+        self._conc_key = ""
         # ---- Health strip: the three things that make the operator step in —
         # silence, burn, and a link that explains a quiet desk. Not risk numbers.
         self.lbl_hs_state = ft.Text("off", size=12, weight=ft.FontWeight.W_600, color=MUTED)

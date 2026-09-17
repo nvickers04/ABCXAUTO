@@ -508,6 +508,23 @@ def test_inline_scan_will_not_pair_a_stale_screen_with_this_look(pro):
     assert "hits=3 quoted=2 src=ibkr" in _texts(pro.col_stream)
 
 
+def test_empty_screen_mounts_inline_on_hits_zero(pro):
+    s = pro.engine.state
+    s.scan_hits = {
+        "source": "empty",
+        "screen": "MOST_ACTIVE",
+        "scan_code": "TOP_PERC_GAIN",
+        "empty": True,
+        "quoted": 0,
+        "rows": [],
+    }
+    s.think_live = "--- GROK ---\n[scan]\nhits=0 deepest=n/a src=empty\n"
+    pro._sync_scan_tape()
+    pro._sync_think_stream()
+    assert pro.col_scan in list(_walk(pro.col_stream))
+    assert "empty" in (pro.lbl_scan_head.value or "").lower()
+
+
 def test_scan_is_no_longer_a_dashboard_section(pro):
     from pathlib import Path
 

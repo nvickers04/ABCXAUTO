@@ -95,7 +95,7 @@ def test_every_note_kind_paints_its_message(pro):
     eng = pro.engine
     for kind, msg in (
         ("PARK", "Overnight park - Grok down"),
-        ("UNIVERSE", "sandbox refreshed n=40"),
+        ("UNIVERSE", "look parked overnight"),
         ("ERR", "TWS not listening"),
         ("CONNECT", "IBKR linked"),
     ):
@@ -104,13 +104,13 @@ def test_every_note_kind_paints_its_message(pro):
     blob = _activity_text(pro)
     for msg in (
         "Overnight park",
-        "sandbox refreshed n=40",
+        "look parked overnight",
         "TWS not listening",
         "IBKR linked",
     ):
         assert msg in blob
     text = pro._cycle_log_text(eng.state.records)
-    assert "sandbox refreshed n=40" in text
+    assert "look parked overnight" in text
 
 
 def test_cycle_rows_are_not_treated_as_notes(pro):
@@ -135,30 +135,37 @@ def test_scan_tape_paints_rank_and_live_last(pro):
     s = pro.engine.state
     s.scan_hits = {
         "source": "ibkr",
+        "screen": "MOST_ACTIVE",
         "scan_code": "TOP_PERC_GAIN",
         "ranked": True,
         "rank_meaning": "IBKR scanCode sort order",
         "quoted": 2,
+        "provenance": {"screen": "MOST_ACTIVE", "scan_code": "TOP_PERC_GAIN",
+                       "ibkr_rows": 50, "kept": 3, "filters": {"priceAbove": 5}},
         "rows": [
             {"symbol": "NVDA", "on_book": False, "rank": 1, "last": 182.5,
-             "quote_source": "ibkr_live", "distance": "12.4"},
-            {"symbol": "SPY", "on_book": True, "rank": 2, "last": 641.02,
-             "quote_source": "ibkr_live"},
-            {"symbol": "IWM", "on_book": False, "rank": 3},
+             "metric_name": "distance", "metric_value": 12.4, "skip_class": "",
+             "scan_code": "TOP_PERC_GAIN", "screen": "MOST_ACTIVE"},
+            {"symbol": "TQQQ", "on_book": False, "rank": 2, "last": 41.2,
+             "skip_class": "levered", "metric_name": "distance", "metric_value": 9.1},
+            {"symbol": "SPY", "on_book": True, "rank": 3, "last": 641.02,
+             "skip_class": ""},
         ],
     }
     pro._sync_scan_tape()
     head = pro.lbl_scan_head.value or ""
+    assert "MOST_ACTIVE" in head
+    assert "TOP_PERC_GAIN" in head
     assert "3 hits" in head
     assert "2 quoted" in head
-    assert "TOP_PERC_GAIN" in head
     assert "scanCode sort order" in head
     blob = " | ".join(_row_text(c) for c in pro.col_scan.controls)
     assert "NVDA" in blob and "182.50" in blob
-    assert "641.02" in blob
+    assert "distance 12.4" in blob
+    assert "levered" in blob
+    assert "TQQQ" in blob
     assert "on book" in blob
-    # No quote on the third hit — say so, do not invent a price.
-    assert "IWM" in blob
+    assert "IBKR 50" in blob and "kept 3" in blob
 
 
 def test_scan_tape_hides_rank_when_the_screen_is_not_ranked(pro):
@@ -181,6 +188,37 @@ def test_scan_tape_empty_says_grok_runs_the_scanner(pro):
     pro._sync_scan_tape()
     assert "Grok runs the scanner" in (pro.lbl_scan_head.value or "")
     assert pro.col_scan.controls == []
+
+
+def test_scan_tape_empty_screen_is_explicitly_empty(pro):
+    """A finished empty screen is not a blank / loading panel."""
+    s = pro.engine.state
+    s.scan_hits = {
+        "source": "empty",
+        "screen": "MOST_ACTIVE",
+        "scan_code": "TOP_PERC_GAIN",
+        "empty": True,
+        "ranked": False,
+        "rank_meaning": "empty screen",
+        "quoted": 0,
+        "rows": [],
+        "provenance": {
+            "screen": "MOST_ACTIVE",
+            "scan_code": "TOP_PERC_GAIN",
+            "ibkr_rows": 40,
+            "kept": 0,
+            "empty": True,
+        },
+    }
+    pro._sync_scan_tape()
+    head = pro.lbl_scan_head.value or ""
+    assert "empty" in head.lower()
+    assert "MOST_ACTIVE" in head
+    assert "TOP_PERC_GAIN" in head
+    assert "Grok runs the scanner" not in head
+    blob = " | ".join(_row_text(c) for c in pro.col_scan.controls)
+    assert "Empty" in blob
+    assert pro.col_scan.controls, "empty must be a stated row, not a blank column"
 
 
 def test_scan_hits_survive_the_engine_payload():

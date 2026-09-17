@@ -50,6 +50,18 @@ def stream_line_kind(line: str) -> str:
     return "prose"
 
 
+def stream_scan_hits_n(line: str) -> int | None:
+    """hits=N from a scan trophy line. Old quoted= and new deepest= both work."""
+    raw = (line or "").strip()
+    if not raw.startswith("hits="):
+        return None
+    token = raw[5:].split(None, 1)[0]
+    try:
+        return int(token)
+    except (TypeError, ValueError):
+        return None
+
+
 def stream_view_lines(body: str) -> list[str]:
     """What the think pane paints from think_session_text.
 

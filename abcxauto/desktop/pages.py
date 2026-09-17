@@ -221,6 +221,43 @@ class PagesMixin:
                     padding=ft.Padding.only(bottom=12),
                     content=ft.Column(
                         [
+                            self._section(
+                                "Look cost",
+                                ft.Text(
+                                    "What this look billed, then the session total. "
+                                    "A fat tool result is re-charged on every later call.",
+                                    size=11,
+                                    color=MUTED,
+                                ),
+                                ft.Row(
+                                    [
+                                        ft.Column(
+                                            [
+                                                ft.Text("Last look", size=12, color=MUTED),
+                                                self.lbl_look_cost,
+                                                self.lbl_look_cost_sub,
+                                            ],
+                                            spacing=2,
+                                            tight=True,
+                                        ),
+                                        ft.Container(width=28),
+                                        ft.Column(
+                                            [
+                                                ft.Text("Session", size=12, color=MUTED),
+                                                self.lbl_look_cost_session,
+                                            ],
+                                            spacing=2,
+                                            tight=True,
+                                        ),
+                                    ],
+                                    spacing=12,
+                                    wrap=True,
+                                    vertical_alignment=ft.CrossAxisAlignment.END,
+                                ),
+                                self.lbl_look_cost_detail,
+                                self.lbl_look_curve,
+                                self.col_look_recent,
+                            ),
                             self._section("Windows", self.col_sc_windows),
                             self._section(
                                 "Setup card scores",
@@ -296,6 +333,18 @@ class PagesMixin:
                                     color=MUTED,
                                 ),
                                 self.col_risk_knobs,
+                            ),
+                            self._section(
+                                "Concentration",
+                                ft.Text(
+                                    "Defined-risk dollars and percent of NetLiq, "
+                                    "by name and underlying. Unknown when a lot "
+                                    "cannot be priced.",
+                                    size=11,
+                                    color=MUTED,
+                                ),
+                                self.lbl_conc_head,
+                                self.col_conc,
                             ),
                             self._section(
                                 "Gate rejections",
