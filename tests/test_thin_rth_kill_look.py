@@ -1,6 +1,6 @@
 """pcs-skew Arm v0 kill-window LOOK contract — tests for thin-prompt spec §4.
 
-Look budget, STAY allowlist, mill/turns, dual-mode, F10 $, hygiene.
+Look budget, one tool surface, #165 mill, dual-mode, F10 $, hygiene.
 Does not start looking, TWS, or 7496.
 """
 
@@ -31,7 +31,7 @@ from abcxauto.session_caps import (
     usage,
 )
 from abcxauto.thin_rth_kill_look import (
-    DIE_TOOLS,
+    AH_RESEARCH_LOOKS_PER_WEEK,
     EST_THIS_LOOK_USD,
     F10_HARD_USD,
     F10_PREFERRED_USD,
@@ -41,17 +41,14 @@ from abcxauto.thin_rth_kill_look import (
     PCS_CARD,
     REASON_ALLOWLIST,
     REASON_NAMELESS,
-    REASON_DIE_TOOL,
     REASON_F10,
     REASON_MODEL_COST,
     REASON_PORT,
     REASON_RESEARCH_PROMPT,
     REASON_RESEARCH_WEEK,
     RESEARCH_PROMPT_TOKENS_MAX,
-    STAY_TOOLS,
     WINDOW_MODEL_USD,
     WINDOW_N,
-    die_tool_block,
     f10_gate,
     f10_hard_tripped,
     f10_open_look_halted,
@@ -64,14 +61,11 @@ from abcxauto.thin_rth_kill_look import (
     kill_look_rth,
     kill_look_send_block,
     kill_mode,
-    look_gather_spin_mill,
     look_kill_mill,
     pcs_send_ok,
     research_prompt_ok,
     rth_model_no_xhigh,
     skip_look_reason,
-    spoken_gather_spin,
-    tool_allowed,
 )
 from tests.test_brain_tools import _scripted_chat_client, _world
 from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
@@ -280,13 +274,32 @@ def test_manage_replaces_second_entry(monkeypatch):
     )
 
 
-def test_allowlist_stay_only_on_rth_kill_look(monkeypatch):
+def _catalog_names() -> set[str]:
+    from abcxauto.brain import AGENT_TOOLS
+
+    names = set()
+    for t in AGENT_TOOLS:
+        fn = getattr(t, "function", None)
+        names.add(str(getattr(fn, "name", None) or getattr(t, "name", "") or ""))
+    names.add("web")
+    return names
+
+
+def test_catalog_offered_in_rth_send_omitted_outside(monkeypatch):
+    """Every catalog tool on RTH; send absent and refused outside RTH."""
     _kill_on(monkeypatch)
+    catalog = _catalog_names()
     rth = _tool_names("regular")
-    assert STAY_TOOLS <= rth
+    assert catalog == rth
     assert "send" in rth
-    for dead in DIE_TOOLS:
-        assert dead not in rth, dead
+    assert "scan" in rth
+    assert "news" in rth
+    assert "candles" in rth
+    assert "odds" in rth
+    assert "web" in rth
+    assert "note" in rth
+    assert "self_tune" in rth
+    assert "option_facts" in rth
     enum = []
     for t in agent_tools(session="regular"):
         fn = getattr(t, "function", None)
@@ -302,23 +315,16 @@ def test_allowlist_stay_only_on_rth_kill_look(monkeypatch):
     assert "iron_condor" in enum
     assert "market_bracket" in enum
     assert "ratio_spread" not in enum
-    research = _tool_names("premarket")
-    assert "send" not in research
-    assert "web" in research
-    assert "news" in research
-    assert "scan" in research
+    for sess in ("premarket", "postmarket", "closed"):
+        research = _tool_names(sess)
+        assert research == catalog - {"send"}, sess
+        assert "send" not in research
+        assert "scan" in research
+        assert "web" in research
 
 
-def test_allowlist_tool_gate_and_die_block(monkeypatch):
+def test_named_card_and_defined_risk_send_gates(monkeypatch):
     _kill_on(monkeypatch)
-    assert tool_allowed("book", session="regular") is True
-    assert tool_allowed("send", session="regular") is True
-    assert tool_allowed("scan", session="regular") is False
-    assert tool_allowed("web", session="regular") is False
-    assert tool_allowed("self_tune", session="regular") is False
-    assert die_tool_block("scan", session="regular")["reason_code"] == REASON_DIE_TOOL
-    assert die_tool_block("book", session="regular") is None
-    assert die_tool_block("scan", session="premarket") is None
     ok, why = pcs_send_ok("vertical_spread", PCS_OPEN, PCS_CARD, mode=MODE_OPEN)
     assert ok is True
     ok, why = pcs_send_ok("market_bracket", {"symbol": "SPY", "card": "x"}, "x", mode=MODE_OPEN)
@@ -337,45 +343,50 @@ def test_allowlist_tool_gate_and_die_block(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_die_tools_rejected_in_run_tool(monkeypatch):
+async def test_send_refused_outside_rth(monkeypatch):
     _kill_on(monkeypatch)
     from abcxauto.brain import BrainTurn, _run_tool
+    from abcxauto.desk_mode import REASON_RESEARCH_NO_SEND
 
-    world = _world(session_status="regular", flat=True)
-    raw = await _run_tool(
-        "scan",
-        {},
-        connector=None,
-        world=world,
-        snap={},
-        turn=BrainTurn(),
-    )
-    data = json.loads(raw)
-    assert data.get("reason_code") == REASON_DIE_TOOL
-    web = await _run_tool(
-        "web",
-        {"url": "https://example.com"},
-        connector=None,
-        world=world,
-        snap={},
-        turn=BrainTurn(),
-    )
-    assert json.loads(web).get("reason_code") == REASON_DIE_TOOL
+    for sess in ("premarket", "postmarket", "closed"):
+        raw = await _run_tool(
+            "send",
+            {"strategy": "vertical_spread", "params": dict(PCS_OPEN), "card": PCS_CARD},
+            connector=None,
+            world=_world(session_status=sess, flat=True),
+            snap={"positions": []},
+            turn=BrainTurn(),
+        )
+        data = json.loads(raw)
+        assert data.get("reason_code") == REASON_RESEARCH_NO_SEND, sess
+        assert data.get("status") == "blocked", sess
 
 
-def test_mill_gather_spin_and_kill_mill(monkeypatch):
+def test_run_tool_has_no_die_tool_block():
+    from abcxauto import brain_tools, thin_rth_kill_look as kl
+
+    assert "die_tool_block" not in inspect.getsource(brain_tools._run_tool)
+    assert "kill_look_die_tool" not in inspect.getsource(brain_tools._run_tool)
+    assert not hasattr(kl, "STAY_TOOLS")
+    assert not hasattr(kl, "DIE_TOOLS")
+    assert not hasattr(kl, "die_tool_block")
+    assert not hasattr(kl, "look_gather_spin_mill")
+    assert not hasattr(kl, "filter_agent_tool_names")
+
+
+def test_kill_mill_is_synthesize_only_not_hunt(monkeypatch):
     _kill_on(monkeypatch)
-    assert spoken_gather_spin("Let me gather more tape color.")
     assert spoken_synthesize_mill("Let me gather the tape.", sends=0)
-    assert look_gather_spin_mill(
-        {"rationale": "gathering", "sends": 0, "tool_trace": ["scan"]}
-    )
     assert look_kill_mill(
         {"rationale": "Let me synthesize the picture.", "sends": 0, "tool_trace": []},
         session="regular",
     )
     assert not look_kill_mill(
         {"rationale": "Let me synthesize the picture.", "sends": 0, "tool_trace": ["book"]},
+        session="regular",
+    )
+    assert not look_kill_mill(
+        {"rationale": "Gathering more scan color.", "sends": 0, "tool_trace": ["scan"]},
         session="regular",
     )
     assert SYNTHESIZE_MILL_TRIES == 2
@@ -612,7 +623,7 @@ async def test_open_second_named_send_not_blocked_as_one_send(monkeypatch):
     assert len(turn.sends) == 2
 
 
-def test_dual_mode_rth_strips_xhigh_ah_one_shot_and_week_cap(monkeypatch):
+def test_dual_mode_rth_strips_xhigh_ah_no_week_quota(monkeypatch):
     _kill_on(monkeypatch)
     assert rth_model_no_xhigh("grok-4.6-xhigh") == "grok-4.6"
     assert rth_model_no_xhigh("grok-4.6-xhigh-fast") == "grok-4.6-fast"
@@ -621,15 +632,17 @@ def test_dual_mode_rth_strips_xhigh_ah_one_shot_and_week_cap(monkeypatch):
     assert session_model("premarket", cfg) == "grok-4.6-xhigh"
     assert research_keep_looking("premarket") is False
     assert research_keep_looking("regular") is False
+    assert AH_RESEARCH_LOOKS_PER_WEEK == 0
     reset_session_caps()
     assert research_week_looks() == 0
-    assert skip_look_reason("premarket", prompt_tokens=RESEARCH_PROMPT_TOKENS_MAX) == (
-        REASON_RESEARCH_PROMPT
-    )
-    note_research_look()
-    note_research_look()
-    assert research_week_looks() == 2
-    assert skip_look_reason("premarket") == REASON_RESEARCH_WEEK
+    assert skip_look_reason(
+        "premarket", prompt_tokens=RESEARCH_PROMPT_TOKENS_MAX, f10=_allow_f10()
+    ) == REASON_RESEARCH_PROMPT
+    for _ in range(8):
+        note_research_look()
+    assert research_week_looks() == 8
+    assert skip_look_reason("premarket", f10=_allow_f10()) == ""
+    assert skip_look_reason("premarket", f10=_allow_f10()) != REASON_RESEARCH_WEEK
     assert research_prompt_ok(199_999) is True
     assert research_prompt_ok(RESEARCH_PROMPT_TOKENS_MAX) is False
 
