@@ -3113,8 +3113,9 @@ async def test_research_keep_looking_after_brief_without_poke(monkeypatch, tmp_p
     assert load_alarm().wake_at is None
     assert peek_interrupt() is None
     brief = load_research_brief()
-    assert brief.get("expectancy")
     assert brief.get("mode") == "research"
+    assert "expectancy" not in brief
+    assert "tickets" not in brief
 
 
 @pytest.mark.asyncio

@@ -38,7 +38,7 @@ CloudAgent / Grok Bot launch. Grok is the only RTH process.
 
 - `send` is the only broker path. Premarket / after-hours / closed is
   **research mode**: stronger `model_research` when set, MDA/news/odds/web
-  for an expectancy brief under `data/state/research_brief.json`, and
+  for gathered color under `data/state/research_brief.json`, and
   `send` fail-closes (`research_no_send`). RTH is the thin defined-risk
   sender (`model_rth` or current `model`). RTH may use news/scan/web as
   COLOR; the brief remains prior-session color on wake. Missing/stale
@@ -94,18 +94,20 @@ See [`docs/LOOK.md`](docs/LOOK.md). Snap facts → Grok tools → `send` gates.
 
 ## Tools
 
-IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
+IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`,
+`scan` (one screen per call; bare `scan()` lists screens).
 
-MDA ~15m delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
+MDA ~15m delayed: `news` (pass `symbols[]` or scan first), `option_facts` (greeks on open legs).
+`candles` is IBKR hist or the live 5s stream (error if both miss).
 
-Other: `odds` (Polymarket, not send geometry), `web` (public page, COLOR not a
+Other: `odds` (Polymarket, query or symbols, not send geometry), `web` (public page, COLOR not a
 live trigger), `send`, `self_tune` (flat knobs), `note` (this-flight scratch),
-`recall` (durable notes and cards), `research_brief` (prior-session COLOR).
+`recall` (durable notes and cards), `research_brief` (this-look gathered color plus a prior-session stub).
 
 Universe is live IBKR screens; nothing about where to hunt persists.
 `self_tune` cannot restore a watchlist. `send` is not limited to a legal set.
 Code writes `journal.db`; there is no `journal` tool. RTH wake carries
-a research-brief pointer (counts/age), not the full expectancy; fetch via
+a prior-session research pointer (missing/stale/counts), not a thesis; fetch via
 `research_brief`. Missing/stale brief does not block RTH.
 
 ## Runtime

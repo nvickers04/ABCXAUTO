@@ -55,7 +55,7 @@ SCAN_S = 35.0
 # Ranked 30-row page is ~5,811 chars. Provenance ~300, envelope ~400.
 # with=news stays a short top-level list (no nested row.mda.news).
 # Slim headlines ≈ 1,600. with=metrics on 8 rows ≈ 1,600.
-# 28_000 leaves room for a 3-screen merge without evicting ranks.
+# 28_000 leaves room for a ranked page plus optional with=news/metrics.
 SCAN_CLIP_CHARS = 28_000
 _QUOTE_SCHEMA = {"type": "string", "description": "Ticker, e.g. AAPL"}
 _SYMBOLS_SCHEMA = {"type": "array", "items": {"type": "string"}}
@@ -171,7 +171,7 @@ def _news_symbols_this_look(
     snap: dict[str, Any] | None,
     asked: list[str] | None,
 ) -> list[str]:
-    """Bare news() reads this look's gap tape, not SPY, when the book is flat."""
+    """Names already on this look. Bare news() does not fetch them."""
     if asked:
         return list(asked)
     from abcxauto.prints import mda_worth_asking
@@ -255,7 +255,7 @@ def _canonical_scan_screen(arena: str = "", scan_code: str = "") -> tuple[str, s
 
 
 def _scan_look_key(args: dict[str, Any] | None) -> str:
-    """One look tape. Bare scan and the flush trio share a key. Not ``symbols[]``."""
+    """One key per asked screen. Bare scan() is the catalog, not a fetch."""
     bag = args if isinstance(args, dict) else {}
     arena, code = _canonical_scan_screen(
         str(bag.get("arena") or "").strip(),
@@ -263,13 +263,6 @@ def _scan_look_key(args: dict[str, Any] | None) -> str:
     )
     if not arena and not code:
         return _LOOK_SCAN_CACHE_KEY
-    try:
-        from abcxauto.universe import is_flush_default_screen
-
-        if is_flush_default_screen(arena, code):
-            return _LOOK_SCAN_CACHE_KEY
-    except Exception:
-        pass
     return json.dumps(
         {
             "arena": arena.strip().lower(),
@@ -338,6 +331,7 @@ def _scan_gate_facts(
 
 def _union_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
     """Merge this look's screens by symbol. No page cap — one tape."""
+    from abcxauto.opportunity_scan import scrub_aliased_gap_pct
     from abcxauto.think_stream import sort_scan_rows, _open_gap_mag
 
     old = prior if isinstance(prior, dict) else {}
@@ -351,7 +345,7 @@ def _union_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
             continue
         prev = by.get(sym)
         if prev is None:
-            by[sym] = _strip_hit_news(dict(row))
+            by[sym] = scrub_aliased_gap_pct(_strip_hit_news(dict(row)))
             continue
         keep = dict(prev)
         if _open_gap_mag(row) > _open_gap_mag(prev):
@@ -360,7 +354,7 @@ def _union_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
             for key, val in row.items():
                 if keep.get(key) in (None, "") and val not in (None, ""):
                     keep[key] = val
-        by[sym] = _strip_hit_news(keep)
+        by[sym] = scrub_aliased_gap_pct(_strip_hit_news(keep))
     rows = sort_scan_rows(list(by.values()))
     quoted = sum(1 for r in rows if r.get("last") is not None)
     meta = new if new.get("rows") else old
@@ -379,13 +373,9 @@ def _union_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
 
 
 def _scan_screen_on_look(snap: dict[str, Any], arena: str, code: str) -> bool:
-    """True when this selector is already on the look tape (or the flush ran)."""
-    from abcxauto.universe import is_flush_default_screen
-
+    """True when this selector was already fetched this look."""
     if not arena and not code:
-        return bool(snap.get("scan_flush"))
-    if snap.get("scan_flush") and is_flush_default_screen(arena, code):
-        return True
+        return False
     key = _scan_screen_key(arena, code)
     used = [str(x) for x in (snap.get("scan_screens") or [])]
     return bool(key and key in used)
@@ -397,9 +387,13 @@ def _scan_out_from_snap(
     *,
     last_ok: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    merged = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
-    rows = _scan_paint_rows(merged, quotes=qmap)
+    """Public page is THIS job. Snap may still union internally."""
     seed = last_ok if isinstance(last_ok, dict) else {}
+    job_rows = [
+        r for r in (seed.get("hits") or seed.get("rows") or []) if isinstance(r, dict)
+    ]
+    rows = _scan_paint_rows({"rows": job_rows}, quotes=qmap)
+    already = [str(x) for x in (snap.get("scan_screens") or []) if str(x).strip()]
     arenas = list(snap.get("scan_arenas") or [])
     symbols_job = _scan_is_symbols_job(seed)
     if symbols_job:
@@ -410,18 +404,17 @@ def _scan_out_from_snap(
         prov = seed.get("provenance") if isinstance(seed.get("provenance"), dict) else None
         source = str(seed.get("source") or "symbols")
     else:
-        ranked = bool(merged.get("ranked") if merged else seed.get("ranked"))
-        rank_meaning = (merged.get("rank_meaning") if merged else None) or seed.get(
-            "rank_meaning"
-        )
+        ranked = bool(seed.get("ranked"))
+        rank_meaning = seed.get("rank_meaning") or ""
         prov = seed.get("provenance")
         if not isinstance(prov, dict):
             stored = snap.get("scan_provenance")
             prov = stored if isinstance(stored, dict) else None
-        source = merged.get("source") or seed.get("source") or "ibkr"
+        source = seed.get("source") or "ibkr"
     applied = seed.get("applied") or {}
     if not applied and isinstance(prov, dict) and isinstance(prov.get("filters"), dict):
         applied = prov["filters"]
+    quoted = sum(1 for r in rows if r.get("last") is not None)
     out: dict[str, Any] = {
         "ok": True,
         "source": source,
@@ -432,18 +425,24 @@ def _scan_out_from_snap(
         "persisted": False,
         "ranked": ranked,
         "rank_meaning": rank_meaning,
-        "quoted": merged.get("quoted") or seed.get("quoted") or 0,
-        "arenas": arenas,
+        "quoted": quoted or seed.get("quoted") or 0,
+        "already": already,
     }
-    if not symbols_job and len(arenas) == 1:
-        out["arena"] = merged.get("arena") or seed.get("arena")
-        out["scan_code"] = merged.get("scan_code") or seed.get("scan_code")
+    if arenas:
+        out["arenas"] = arenas
+    if not symbols_job:
+        if seed.get("arena") not in (None, ""):
+            out["arena"] = seed.get("arena")
+        if seed.get("scan_code") not in (None, ""):
+            out["scan_code"] = seed.get("scan_code")
     if isinstance(prov, dict):
         out["provenance"] = prov
     if seed.get("empty") is not None:
         out["empty"] = bool(seed.get("empty"))
     elif isinstance(prov, dict) and prov.get("empty") is not None:
         out["empty"] = bool(prov.get("empty"))
+    else:
+        out["empty"] = not bool(rows)
     if symbols_job:
         screen = seed.get("screen")
     else:
@@ -465,6 +464,20 @@ def _scan_out_from_snap(
         out["sort"] = seed.get("sort")
     out.update(_scan_gate_facts(rows))
     return out
+
+
+def _scan_catalog_payload() -> dict[str, Any]:
+    from abcxauto.universe import scan_screen_catalog
+
+    return {
+        "ok": True,
+        "need": "arena | scan_code | symbols[]",
+        "screens": scan_screen_catalog(),
+        "with": list(_SCAN_WITH_ENUM),
+        "note": "one screen per call",
+        "fetched": False,
+        "send_geometry": False,
+    }
 
 
 _SCAN_NEWS_KEEP = (
@@ -532,13 +545,13 @@ def _scan_is_symbols_job(seed: dict[str, Any] | None) -> bool:
 
 
 def _scan_public_hit(row: dict[str, Any]) -> dict[str, Any]:
+    from abcxauto.opportunity_scan import scrub_aliased_gap_pct
+
     item = _strip_hit_news(row)
-    if "session" not in item:
-        return item
     if item is row:
         item = dict(item)
     item.pop("session", None)
-    return item
+    return scrub_aliased_gap_pct(item)
 
 
 def _scan_public_payload(out: dict[str, Any]) -> dict[str, Any]:
@@ -744,7 +757,11 @@ def _scan_paint_rows(
         rows = [r for r in (fallback or []) if isinstance(r, dict)][:24]
     painted: list[dict[str, Any]] = []
     qmap = quotes if isinstance(quotes, dict) else {}
-    from abcxauto.opportunity_scan import is_thin_ranked_row, thin_ranked_row
+    from abcxauto.opportunity_scan import (
+        is_thin_ranked_row,
+        scrub_aliased_gap_pct,
+        thin_ranked_row,
+    )
     from abcxauto.universe import scan_skip_class
 
     for row in sort_scan_rows(rows):
@@ -753,7 +770,7 @@ def _scan_paint_rows(
             if slim:
                 painted.append(slim)
             continue
-        item = _strip_hit_news(dict(row))
+        item = scrub_aliased_gap_pct(_strip_hit_news(dict(row)))
         sym = str(item.get("symbol") or "").upper().strip()
         px = _quote_last(qmap.get(sym))
         if px is not None:
@@ -1154,8 +1171,7 @@ def _web_tool() -> Any:
         name="web",
         description=(
             "Fetch one public http(s) URL (title + short text). "
-            "Color only, never a live trigger. Not send geometry. "
-            "Prefer news/scan first."
+            "Color only, never a live trigger. Not send geometry."
         ),
         parameters=_schema(
             {
@@ -1201,16 +1217,16 @@ AGENT_TOOLS = [
         name="news",
         description=(
             "MDA headlines (~15 min delayed). Color only, never a trigger. "
-            "Anything time-sensitive at +15 minutes is already in the price. "
-            "Bare news() uses this look's scan tape when present, not SPY."
+            "Pass symbols[]. Bare news() does not poll the scan tape or SPY."
         ),
         parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, []),
     ),
     tool(
         name="odds",
         description=(
-            "Prediction-market implied probs (Polymarket). Crowd odds for events, "
-            "not IBKR last."
+            "Prediction-market implied probs (Polymarket). "
+            "Pass query or symbols[]. Bare odds() does not search the book. "
+            "Not IBKR last."
         ),
         parameters=_schema(
             {
@@ -1223,15 +1239,15 @@ AGENT_TOOLS = [
     tool(
         name="scan",
         description=(
-            "IBKR scanner. arena and/or scan_code select a live screen. "
+            "One IBKR screen per call. Bare scan() lists arena/scan_code/metric. "
+            "arena and/or scan_code fetches that sort. symbols[] is a fat drill-down. "
             "Ranked hits stay thin: symbol, rank, screen, scan_code, "
-            "metric_name, metric_value, gap_pct, skip_class, source; "
+            "metric_name, metric_value, skip_class, source; "
             "last/volume/market_cap only when IBKR supplied them. "
             "skip_class is levered|micro|empty. "
-            "with=news is a short top-level headline list, not nested on hits. "
+            "with=news is a short top-level headline list. "
             "with=metrics nests delayed daily context on the top names. "
-            "symbols[] is a fat drill-down. "
-            "Bare scan() notes the flush defaults."
+            "Repeat of the same screen this look is a pointer."
         ),
         parameters=_schema(
             {
@@ -1484,7 +1500,7 @@ AGENT_TOOLS = [
     ),
     tool(
         name="research_brief",
-        description="Prior-session brief. Color only.",
+        description="This look's gathered color plus a prior-session stub. Color only.",
         parameters=_schema({}, []),
     ),
 ]
@@ -1917,20 +1933,19 @@ async def _run_tool(
     if name == "news":
         from abcxauto.news_feed import (
             coalesce_news,
-            fetch_agent_news,
             news_hard_miss,
+            news_need_symbols,
             remember_headlines,
             remember_look_news,
         )
 
         remember_look_news(world, snap)
         asked = normalize_tickers(args.get("symbols"))
-        tape = _news_symbols_this_look(world, snap, asked)
-        if tape:
-            items = await _hub()._mda_news(tape)
-        else:
-            items = await fetch_agent_news(world.positions or snap.get("positions") or [])
-        items = coalesce_news(items, tape or asked or None)
+        if not asked:
+            already = _news_symbols_this_look(world, snap, [])
+            return _hub()._clip(news_need_symbols(already))
+        items = await _hub()._mda_news(asked)
+        items = coalesce_news(items, asked)
         remember_headlines(items)
         world.news_items = list(items)
         snap["news_items"] = list(items)
@@ -1951,11 +1966,7 @@ async def _run_tool(
 
         asked = normalize_tickers(args.get("symbols"))
         q = str(args.get("query") or "").strip()
-        payload = await fetch_odds(
-            symbols=asked,
-            query=q,
-            positions=list(world.positions or snap.get("positions") or []),
-        )
+        payload = await fetch_odds(symbols=asked, query=q)
         payload["path"] = _hub()._path_block(world, get_config())
         if isinstance(snap, dict):
             snap["odds"] = dict(payload)
@@ -1982,9 +1993,6 @@ async def _run_tool(
             if su and su not in turn_syms:
                 turn_syms.append(su)
         from abcxauto.universe import (
-            flush_cap_filters,
-            flush_default_jobs,
-            is_flush_default_screen,
             parse_scan_filters,
             resolve_screen,
             verified_industry_tags,
@@ -2132,74 +2140,52 @@ async def _run_tool(
                 snap["scan_at"] = datetime.now(timezone.utc).isoformat()
                 return await _finish_look_bag(payload, emit_line=False)
 
-            if has_screen:
-                resolved = resolve_screen(
-                    arena=str(args.get("arena") or "").strip() or None,
-                    scan_code=str(args.get("scan_code") or "").strip() or None,
-                )
-                if not resolved.get("ok"):
-                    err = {
-                        "ok": False,
-                        "error": resolved.get("error") or "unknown screen",
-                        "arenas": resolved.get("arenas"),
-                    }
-                    _attach_scan_run(err, turn=turn, world=world)
-                    return _clip_scan(err)
+            if not has_screen:
+                out = _scan_catalog_payload()
+                _attach_scan_run(out, turn=turn, world=world)
+                return _clip_scan(out)
 
-            flush_done = bool(snap.get("scan_flush"))
-            if flush_done and _scan_screen_on_look(snap, c_arena, c_code):
+            resolved = resolve_screen(
+                arena=str(args.get("arena") or "").strip() or None,
+                scan_code=str(args.get("scan_code") or "").strip() or None,
+            )
+            if not resolved.get("ok"):
+                err = {
+                    "ok": False,
+                    "error": resolved.get("error") or "unknown screen",
+                    "arenas": resolved.get("arenas"),
+                }
+                _attach_scan_run(err, turn=turn, world=world)
+                return _clip_scan(err)
+
+            if _scan_screen_on_look(snap, c_arena, c_code):
                 return await _repeat_look_bag()
 
-            jobs: list[dict[str, Any]] = []
-            job_filters: list[dict[str, Any]] = []
-            ran_flush = False
-            if not flush_done:
-                jobs.extend(flush_default_jobs())
-                cap = flush_cap_filters(parsed)
-                job_filters.extend(cap for _ in jobs)
-                ran_flush = True
-                if has_screen and not is_flush_default_screen(c_arena, c_code):
-                    jobs.append({"arena": args.get("arena"), "scan_code": args.get("scan_code")})
-                    job_filters.append(parsed)
-            else:
-                jobs.append({"arena": args.get("arena"), "scan_code": args.get("scan_code")})
-                job_filters.append(parsed)
-
-            last_ok: dict[str, Any] | None = None
-            last_err: dict[str, Any] | None = None
-            for job, filt in zip(jobs, job_filters):
-                snap["scan_calls"] = int(snap.get("scan_calls") or 0) + 1
-                payload = await _hub().criteria_scan(
-                    arena=job.get("arena"),
-                    scan_code=job.get("scan_code"),
-                    positions=list(world.positions or snap.get("positions") or []),
-                    connector=connector,
-                    turn_symbols=turn_syms,
-                    filters=filt,
-                )
-                if not payload.get("ok"):
-                    last_err = payload
-                    continue
-                last_ok = payload
-                _ingest_scan_payload(
-                    world=world, snap=snap, payload=payload, job=job
-                )
-            if ran_flush and last_ok is not None:
-                snap["scan_flush"] = True
-            if last_ok is None:
-                err = last_err or {
-                    "ok": False,
-                    "error": "scan requires arena | scan_code | symbols[]",
-                }
-                if isinstance(err, dict):
-                    err = dict(err)
-                    err.setdefault("ok", False)
-                    _attach_scan_run(err, turn=turn, world=world)
-                return _clip_scan(err)
-            snap["scan_at"] = datetime.now(timezone.utc).isoformat()
-            return await _finish_look_bag(
-                last_ok, emit_line=True, silent=not has_screen
+            snap["scan_calls"] = int(snap.get("scan_calls") or 0) + 1
+            payload = await _hub().criteria_scan(
+                arena=args.get("arena"),
+                scan_code=args.get("scan_code"),
+                positions=list(world.positions or snap.get("positions") or []),
+                connector=connector,
+                turn_symbols=turn_syms,
+                filters=parsed,
             )
+            if not payload.get("ok"):
+                err = dict(payload) if isinstance(payload, dict) else {
+                    "ok": False,
+                    "error": "scan failed",
+                }
+                err.setdefault("ok", False)
+                _attach_scan_run(err, turn=turn, world=world)
+                return _clip_scan(err)
+            _ingest_scan_payload(
+                world=world,
+                snap=snap,
+                payload=payload,
+                job={"arena": args.get("arena"), "scan_code": args.get("scan_code")},
+            )
+            snap["scan_at"] = datetime.now(timezone.utc).isoformat()
+            return await _finish_look_bag(payload, emit_line=True)
     if name == "candles":
         from abcxauto.broker.bars import ibkr_bar_freshness
 
@@ -2647,7 +2633,13 @@ async def _run_tool(
     if name == "research_brief":
         from abcxauto.desk_mode import load_research_brief, research_brief_look_payload
 
-        return _hub()._clip(research_brief_look_payload(load_research_brief()))
+        return _hub()._clip(
+            research_brief_look_payload(
+                load_research_brief(),
+                snap=snap if isinstance(snap, dict) else None,
+                world=world,
+            )
+        )
     return json.dumps({"error": f"unknown tool {name}"})
 
 

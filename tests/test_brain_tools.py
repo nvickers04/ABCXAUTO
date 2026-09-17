@@ -297,7 +297,7 @@ async def test_bare_news_tool_asks_scan_names(monkeypatch):
 
     async def _news(syms, **_k):
         seen.extend(syms)
-        return [{"symbol": s, "headline": f"{s} head"} for s in syms]
+        raise AssertionError("bare news() must not call _mda_news")
 
     monkeypatch.setattr("abcxauto.brain._mda_news", _news)
     world = _world()
@@ -305,8 +305,15 @@ async def test_bare_news_tool_asks_scan_names(monkeypatch):
     data = json.loads(
         await _run_tool("news", {}, connector=None, world=world, snap={}, turn=BrainTurn())
     )
-    assert seen[:2] == ["ALB", "NKE"]
-    assert data["items"][0]["symbol"] == "ALB"
+    assert seen == []
+    assert data["ok"] is False
+    assert data["need"] == "symbols[]"
+    assert data["items"] == []
+    assert data.get("fetched") is False
+    already = data.get("already") or []
+    assert "ALB" in already
+    assert "NKE" in already
+    assert not any(it.get("headline") for it in data.get("items") or [])
 
 
 @pytest.mark.asyncio
@@ -429,9 +436,6 @@ async def test_news_is_labeled_delayed_but_candles_never_serves_mda(monkeypatch)
     2026-08-20: the bars mixin was off the connector MRO, candles fell through
     to MDA, and Grok read the prior session as today's intraday structure.
     """
-    async def fake_news(_pos=None, **_k):
-        return [{"symbol": "SPY", "headline": "Tape note"}]
-
     class MDA:
         is_configured = True
 
@@ -441,11 +445,17 @@ async def test_news_is_labeled_delayed_but_candles_never_serves_mda(monkeypatch)
         async def get_stock_news(self, symbol, countback=4):
             return [{"symbol": symbol, "headline": "Head"}]
 
-    monkeypatch.setattr("abcxauto.news_feed.fetch_agent_news", fake_news)
     monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
     world = _world()
     news = json.loads(
-        await _run_tool("news", {}, connector=None, world=world, snap={}, turn=BrainTurn())
+        await _run_tool(
+            "news",
+            {"symbols": ["SPY"]},
+            connector=None,
+            world=world,
+            snap={},
+            turn=BrainTurn(),
+        )
     )
     assert news["source"] == "mda"
     assert "delayed" in news["freshness"]
@@ -582,7 +592,7 @@ async def test_third_scan_this_look_reuses_merged_hits(monkeypatch):
             turn=turn,
         )
     )
-    assert n["calls"] == 5
+    assert n["calls"] == 3
     assert first.get("reused") is not True
     assert second.get("reused") is not True
     assert third.get("reused") is not True
@@ -597,7 +607,7 @@ async def test_third_scan_this_look_reuses_merged_hits(monkeypatch):
             turn=turn,
         )
     )
-    assert n["calls"] == 5
+    assert n["calls"] == 3
     assert same["reused"] is True
     assert "SNDK" in same["symbols"]
 
@@ -635,7 +645,7 @@ async def test_third_scan_reuses_an_empty_tape_instead_of_requiring_arena(monkey
     third = json.loads(
         await _run_tool("scan", {"scan_code": "LOW_OPEN_GAP"}, connector=None, world=world, snap=snap, turn=turn)
     )
-    assert n["calls"] == 5
+    assert n["calls"] == 3
     assert first.get("reused") is not True
     assert second.get("reused") is not True
     assert third.get("reused") is not True

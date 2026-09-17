@@ -192,6 +192,26 @@ def known_screen_keys() -> list[str]:
     return out
 
 
+def scan_screen_catalog() -> list[dict[str, Any]]:
+    """Bare scan() options. One row per live screen — not a fetch."""
+    rows: list[dict[str, Any]] = []
+    for screen_id, meta in ARENA_CATALOG.items():
+        ibkr = meta.get("ibkr") if isinstance(meta, dict) else {}
+        if not isinstance(ibkr, dict):
+            ibkr = {}
+        code = str(ibkr.get("scanCode") or "").strip().upper()
+        rows.append(
+            {
+                "arena": screen_id,
+                "scan_code": code,
+                "metric": scan_metric_name(code) or "",
+                "label": str((meta or {}).get("label") or screen_id),
+                "group": str((meta or {}).get("group") or ""),
+            }
+        )
+    return rows
+
+
 def _unknown_screen_error(key: str) -> dict[str, Any]:
     valid = known_screen_keys()
     return {
@@ -528,7 +548,7 @@ def resolve_screen(
     return _resolve_one_selector(raw_arena or raw_code)
 
 
-# One look tape: most_active plus top losers or gainers (the flush card text).
+# Three common sorts. Catalog lists them; scan() no longer auto-fetches the trio.
 FLUSH_DEFAULT_SCREENS: tuple[tuple[str, str], ...] = (
     ("most_active", "MOST_ACTIVE"),
     ("top_losers", "TOP_PERC_LOSE"),

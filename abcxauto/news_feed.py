@@ -45,6 +45,24 @@ def is_real_headline(item: Any) -> bool:
     return not hl.startswith("(unavailable")
 
 
+def news_need_symbols(already: list[str] | None = None) -> dict[str, Any]:
+    """Bare news() is a choice. Do not poll SPY or the scan tape."""
+    out: dict[str, Any] = {
+        "ok": False,
+        "need": "symbols[]",
+        "use": "color_not_trigger",
+        "freshness": "delayed_15m",
+        "source": "mda",
+        "items": [],
+        "note": "pass symbols[]",
+        "fetched": False,
+    }
+    names = [str(s).upper().strip() for s in (already or []) if str(s).strip()]
+    if names:
+        out["already"] = names[:12]
+    return out
+
+
 def remember_headlines(items: list[dict] | None) -> None:
     """Keep rail / think prints so news() can return them after a 2s miss."""
     now = time.monotonic()

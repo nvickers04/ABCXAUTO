@@ -89,7 +89,7 @@ def test_bare_quote_uses_scan_hits_not_spy():
     assert args["symbols"][:2] == ["SNDK", "MU"]
     news_name, news_args = normalize_tool_call("news", {}, fallback_symbols=fb)
     assert news_name == "news"
-    assert news_args["symbols"][:2] == ["SNDK", "MU"]
+    assert not news_args.get("symbols")
     candle_name, candle_args = normalize_tool_call("candles", {}, fallback_symbols=fb)
     assert candle_name == "candles"
     assert candle_args["symbols"][:2] == ["SNDK", "MU"]

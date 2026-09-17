@@ -11,6 +11,7 @@ import pytest
 from abcxauto.config import clear_runtime_overrides, get_config
 from abcxauto.desk_mode import (
     load_research_brief,
+    note_research_tool,
     research_brief_look_payload,
     research_brief_stale,
     rth_research_color,
@@ -75,8 +76,10 @@ def test_real_2026_09_09_brief_parses_without_regime(tmp_path, monkeypatch):
     assert "invalidate" in row
     color = rth_research_color(full=True)
     assert "prior_session_research" in color
+    assert "stale" in color
     assert "send" not in color.lower() or "trigger" in color
     assert "regime=" not in color
+    assert "gap_risk" not in color
     stale = research_brief_stale(brief, now=datetime.now(timezone.utc))
     assert stale is True
     wake = format_wake(
@@ -95,39 +98,49 @@ def test_real_2026_09_09_brief_parses_without_regime(tmp_path, monkeypatch):
     payload = research_brief_look_payload(brief, now=datetime.now(timezone.utc))
     assert payload["stale"] is True
     assert payload["send_geometry"] is False
-    assert "expectancy" not in (payload.get("brief") or {})
-    assert "facts" not in (payload.get("brief") or {})
-    assert "prove_window_id" not in (payload.get("brief") or {})
-    assert payload["brief"].get("as_of", "").startswith("2026-09-09")
-    assert payload["brief"].get("session") == "premarket"
+    prior = payload.get("prior_session") or {}
+    assert "expectancy" not in prior
+    assert "tickets" not in prior
+    assert "facts" not in prior
+    assert "prove_window_id" not in prior
+    assert "gate_verdict" not in prior
+    assert set(prior) <= {"as_of", "session"}
+    assert prior.get("as_of", "").startswith("2026-09-09")
+    assert prior.get("session") == "premarket"
 
 
 def test_write_research_brief_does_not_stamp_regime():
+    items = [
+        {
+            "symbol": "JPM",
+            "headline": "Fed September decision preview",
+            "publisher": "MDA",
+        }
+    ]
+    snap = {
+        "regime": {
+            "theme": "rate-sensitive",
+            "catalyst": "announcement",
+            "source": "odds/Fed September",
+            "arenas": ["financials"],
+            "invalidate": "FOMC holds",
+        },
+        "news_items": items,
+    }
+    note_research_tool(snap, "news", {"items": items})
     write_research_brief(
         session="premarket",
-        snap={
-            "regime": {
-                "theme": "rate-sensitive",
-                "catalyst": "announcement",
-                "source": "odds/Fed September",
-                "arenas": ["financials"],
-                "invalidate": "FOMC holds",
-            },
-            "news_items": [
-                {
-                    "symbol": "JPM",
-                    "headline": "Fed September decision preview",
-                    "publisher": "MDA",
-                }
-            ],
-        },
+        snap=snap,
         now=datetime.now(timezone.utc),
     )
     disk = load_research_brief()
     assert "regime" not in disk
+    assert "expectancy" not in disk
+    assert "tickets" not in disk
     color = rth_research_color(full=True)
     assert "regime=" not in color
-    assert "JPM" in color or "expectancy" in color
+    assert "JPM" in color
+    assert "expectancy=" not in color
 
 
 def test_scan_hits_are_not_send_geometry():

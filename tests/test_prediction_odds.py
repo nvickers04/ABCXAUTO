@@ -192,19 +192,31 @@ def test_related_search_set_index_can_include_macro():
 
 
 @pytest.mark.asyncio
-async def test_fetch_odds_no_query_does_not_invent_spy():
+async def test_fetch_odds_empty_is_a_choice_not_spy_fed():
     class Boom:
         async def get(self, *a, **k):
-            raise AssertionError("odds must not invent a SPY search")
+            raise AssertionError("odds must not invent a SPY/Fed search")
 
+    want = {
+        "ok": False,
+        "need": "query|symbols[]",
+        "use": "crowd_odds_not_send_geometry",
+        "source": "polymarket",
+        "events": [],
+    }
     out = await fetch_odds(client=Boom())
-    assert out["events"] == []
-    assert out["searched"] == []
-    assert out["related_queries"] == []
-    assert out["note"] == "no_query"
-    assert out["use"] == "crowd_odds_not_send_geometry"
+    assert out == want
     assert "SPY" not in str(out)
+    assert "Fed" not in str(out)
     assert "S&P" not in str(out)
+
+    blank = await fetch_odds(
+        symbols=[],
+        query="  ",
+        positions=[{"symbol": ""}, {}],
+        client=Boom(),
+    )
+    assert blank == want
 
 
 @pytest.mark.asyncio
@@ -224,19 +236,27 @@ async def test_fetch_odds_nvda_fans_earnings_not_index_tape():
 
 
 @pytest.mark.asyncio
-async def test_fetch_odds_positions_still_search():
-    seen: list[str] = []
+async def test_fetch_odds_positions_do_not_search():
+    class Boom:
+        async def get(self, *a, **k):
+            raise AssertionError("positions must not invent a Polymarket search")
+
+    want = {
+        "ok": False,
+        "need": "query|symbols[]",
+        "use": "crowd_odds_not_send_geometry",
+        "source": "polymarket",
+        "events": [],
+    }
     out = await fetch_odds(
         positions=[{"symbol": "QQQ", "quantity": 1}],
-        client=_client(seen),
+        client=Boom(),
     )
-    assert "Nasdaq" in seen
-    assert "Nasdaq" in out["searched"]
-    assert any("earnings" in q.lower() for q in out["searched"])
-    assert seen == out["searched"]
-    assert out["events"] == []
-    assert "SPY" not in out["searched"]
-    assert "S&P" not in str(out["searched"])
+    assert out == want
+    assert "Nasdaq" not in str(out)
+    assert "QQQ" not in str(out)
+    assert "SPY" not in str(out)
+    assert "Fed" not in str(out)
 
 
 @pytest.mark.asyncio

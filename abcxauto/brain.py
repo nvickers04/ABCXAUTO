@@ -1863,8 +1863,7 @@ def _parse_tool_call(
         n = max(1, len(normalize_tickers(args.get("symbols") or args.get("symbol"), cap=CANDLE_CAP)))
         timeout = min(CANDLE_S, max(28.0, 12.0 + 8.0 * n))
     if name == "scan":
-        # First look may pull the flush trio (3 IBKR subs) under one call.
-        timeout = SCAN_S * 3
+        timeout = SCAN_S
     return name, args, tc, timeout
 
 

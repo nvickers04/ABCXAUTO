@@ -246,6 +246,8 @@ def test_write_research_brief_stamps_lineage(tmp_path, monkeypatch):
     assert out["prove_window_id"] == WINDOW
     assert out["gate_verdict"] == GATE_INCONCLUSIVE
     assert parse_model_cost(out["model_cost_window_USD"]) == pytest.approx(0.20)
+    assert "tickets" not in out
+    assert "expectancy" not in out
     rth = write_research_brief(session="regular", snap={"news_items": []})
     assert rth == {}
 

@@ -336,6 +336,59 @@ def row_gap_pct(row: dict[str, Any] | None) -> float | None:
     return stored
 
 
+def scrub_aliased_gap_pct(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Pop leftover ``gap_pct`` that only copies scanner distance.
+
+    Mutates ``row`` in place and returns the same object.
+
+    Non-gap screens (option_volume, percent_change, volume, …): if
+    ``gap_pct`` equals ``metric_value`` or ``distance``, drop it. Real
+    ``open_gap_pct`` stays. Gap screens keep ``gap_pct`` even when it
+    matches the scanner metric.
+    """
+    if not isinstance(row, dict):
+        return row
+    if "gap_pct" not in row:
+        return row
+    if _row_is_gap_screen(row):
+        return row
+    stored = parse_scan_gap(row.get("gap_pct"))
+    if stored is None:
+        return row
+    metric_val = _first_gap(row, ("metric_value", "distance"))
+    if metric_val is None or stored != metric_val:
+        return row
+    row.pop("gap_pct", None)
+    return row
+
+
+def _drop_nested_mda_news(row: dict[str, Any]) -> dict[str, Any]:
+    """News is top-level only. Same nest keys as ``brain_tools._strip_hit_news``."""
+    mda = row.get("mda")
+    if not isinstance(mda, dict) or ("news" not in mda and "news_use" not in mda):
+        return row
+    nest = dict(mda)
+    nest.pop("news", None)
+    nest.pop("news_use", None)
+    if nest:
+        row["mda"] = nest
+    else:
+        row.pop("mda", None)
+    return row
+
+
+def public_scan_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Thin or fat public hit after scrub. No nested ``mda.news``.
+
+    Mutates fat rows in place (same object). Thin rows are scrubbed, not rebuilt.
+    """
+    if not isinstance(row, dict):
+        return row
+    if not is_thin_ranked_row(row):
+        _drop_nested_mda_news(row)
+    return scrub_aliased_gap_pct(row)
+
+
 def is_thin_ranked_row(row: Any) -> bool:
     """True when the row is the ranked-screen contract (no quote-heavy fat).
 
@@ -403,6 +456,8 @@ def thin_ranked_row(
         probe["scan_code"] = code
     if out.get("metric_name"):
         probe["metric_name"] = out["metric_name"]
+    # row_gap_pct ignores option_volume / percent_change / volume distance on
+    # non-gap screens. Keep a previously published real open gap.
     gap = row_gap_pct(probe)
     if gap is not None:
         out["gap_pct"] = gap
@@ -446,7 +501,7 @@ def thin_ranked_hits(
             else None
         )
         if item:
-            out.append(item)
+            out.append(scrub_aliased_gap_pct(item) or item)
     return out
 
 
@@ -651,6 +706,13 @@ async def criteria_scan(
     else:
         quoted = await attach_live_quotes(rows, connector=connector)
         empty = False
+    rows = [
+        item
+        for item in (
+            public_scan_row(r) if isinstance(r, dict) else None for r in rows
+        )
+        if isinstance(item, dict)
+    ]
     ranked = bool(scanner_rows) and source == "ibkr" and not empty
     out: dict[str, Any] = {
         "ok": True,

@@ -229,9 +229,9 @@ def _collect_symbols(*blobs: Any) -> list[str]:
 def fallback_quote_symbols(world: Any = None, snap: dict | None = None) -> list[str]:
     """Open STK, then this look's scan hits, then last look — SPY only if empty.
 
-    Bare quote/news/candles used to land on SPY while flat. The live card
+    Bare quote/candles used to land on SPY while flat. The live card
     forbids a same-session SPY scrape, so that fallback skipped the screen
-    Grok had just pulled.
+    Grok had just pulled. news/odds do not use this list.
     """
     out: list[str] = []
     rows = []
@@ -357,7 +357,7 @@ def normalize_tool_call(
             if got not in (None, ""):
                 out[dest] = got
 
-    if canon in ("quote", "news", "odds", "candles"):
+    if canon in ("quote", "candles"):
         if out.get("symbol") in (None, "") and out.get("symbols") in (None, "", []):
             cap = 4 if canon == "candles" else 8
             fb = [s for s in (fallback_symbols or []) if s][:cap]

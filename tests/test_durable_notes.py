@@ -13,6 +13,7 @@ from abcxauto.brain_tools import _run_tool
 from abcxauto.thin_rth_kill_look import F10_HARD_USD
 from abcxauto.desk_mode import (
     load_research_brief,
+    note_research_tool,
     research_brief_stale,
     rth_research_color,
     write_research_brief,
@@ -29,7 +30,7 @@ from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
 # Billed JSON schema of name+description+parameters. chars/4 ~ tokens.
 # Before trim: recall 1027/257, research_brief 237/60.
 RECALL_SCHEMA_MAX_CHARS = 700
-RESEARCH_BRIEF_SCHEMA_MAX_CHARS = 200
+RESEARCH_BRIEF_SCHEMA_MAX_CHARS = 220
 
 def _tool_schema_json(name: str) -> str:
     for t in AGENT_TOOLS:
@@ -393,17 +394,18 @@ async def test_recall_list_get_write_invalidate_separated_from_note():
 
 def test_first_rth_wake_is_brief_pointer_not_full_expectancy(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
+    items = [
+        {
+            "symbol": "AMD",
+            "headline": "AMD raises guidance after hours",
+            "publisher": "MDA",
+        }
+    ]
+    snap = {"news_items": items}
+    note_research_tool(snap, "news", {"items": items})
     write_research_brief(
         session="premarket",
-        snap={
-            "news_items": [
-                {
-                    "symbol": "AMD",
-                    "headline": "AMD raises guidance after hours",
-                    "publisher": "MDA",
-                }
-            ]
-        },
+        snap=snap,
         now=datetime.now(timezone.utc),
     )
     pointer = format_wake(
@@ -417,7 +419,9 @@ def test_first_rth_wake_is_brief_pointer_not_full_expectancy(tmp_path, monkeypat
     assert "desk_mode=rth" in pointer
     assert "send=allowed" in pointer
     assert "on_disk" in pointer
-    assert "expectancy=" in pointer
+    assert "facts=" in pointer
+    assert "symbols=" in pointer
+    assert "expectancy=" not in pointer
     assert "AMD raises guidance after hours" not in pointer
     color = rth_research_color(full=False)
     assert "on_disk" in color
@@ -595,7 +599,10 @@ async def test_fetch_notes_and_brief_during_rth_kill_look(tmp_path, monkeypatch)
         )
     )
     assert stale.get("stale") is True
-    assert "expectancy" not in (stale.get("brief") or {})
+    prior = stale.get("prior_session") or {}
+    assert "expectancy" not in prior
+    assert "tickets" not in prior
+    assert set(prior) <= {"as_of", "session"}
     wake = format_wake(
         cycle=1,
         session="regular",

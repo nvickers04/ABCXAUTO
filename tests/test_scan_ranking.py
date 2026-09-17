@@ -245,7 +245,7 @@ async def test_reused_scan_is_a_pointer_not_another_tape(monkeypatch):
     second = json.loads(
         await _run_tool(
             "scan",
-            {"arena": "top_losers"},
+            {"arena": "top_gainers"},
             connector=None,
             world=world,
             snap=snap,
@@ -259,7 +259,7 @@ async def test_reused_scan_is_a_pointer_not_another_tape(monkeypatch):
     assert second["hits_n"] >= 2
     assert "SNDK" in second["symbols"]
     assert second["note"].startswith("this look already has that screen")
-    assert second["asked"]["arena"] == "top_losers"
+    assert second["asked"]["arena"] == "top_gainers"
     assert "news" not in turn.tool_trace
 
 
@@ -371,7 +371,7 @@ async def test_identical_scan_args_this_look_hit_the_cache(monkeypatch):
             turn=turn,
         )
     )
-    assert n["calls"] == 3
+    assert n["calls"] == 1
     assert first.get("reused") is not True
     assert "screens_this_look" not in first
     assert first.get("repeat_of_this_think") is not True
@@ -394,13 +394,16 @@ async def test_identical_scan_args_this_look_hit_the_cache(monkeypatch):
             turn=turn,
         )
     )
-    assert n["calls"] == 3
+    assert n["calls"] == 1
     assert alias["reused"] is True
     assert _scan_look_key({"scan_code": "TOP_PERC_GAIN"}) == _scan_look_key(
         {"arena": "top_gainers"}
     )
     assert _scan_look_key({}) == "look"
-    assert _scan_look_key({"scan_code": "MOST_ACTIVE"}) == "look"
+    assert _scan_look_key({"scan_code": "MOST_ACTIVE"}) != "look"
+    assert _scan_look_key({"scan_code": "MOST_ACTIVE"}) == _scan_look_key(
+        {"arena": "most_active"}
+    )
 
 
 @pytest.mark.asyncio
@@ -457,7 +460,7 @@ async def test_stay_up_poke_does_not_refetch_the_same_scan(monkeypatch):
             turn=turn,
         )
     )
-    assert n["calls"] == 3
+    assert n["calls"] == 1
     assert first.get("reused") is not True
     turn.tool_cache["scan:{}"] = json.dumps({"ok": True})
     clear_interrupt()
@@ -481,7 +484,7 @@ async def test_stay_up_poke_does_not_refetch_the_same_scan(monkeypatch):
         )
     finally:
         clear_interrupt()
-    assert n["calls"] == 3
+    assert n["calls"] == 1
     assert again["reused"] is True
     assert again.get("repeat_of_this_think") is True
     assert "hits" not in again
@@ -502,7 +505,7 @@ def _gain_payload():
 
 @pytest.mark.asyncio
 async def test_parallel_identical_scan_args_fetch_once(monkeypatch):
-    """Four scan() in one round, same flush page — one trio, then repeats."""
+    """Four scan() in one round, same screen — one fetch, then repeats."""
     n = {"calls": 0}
 
     async def _fake_scan(**_kw):
@@ -537,7 +540,7 @@ async def test_parallel_identical_scan_args_fetch_once(monkeypatch):
         ]
     )
     rows = [json.loads(r) for r in raw]
-    assert n["calls"] == 3
+    assert n["calls"] == 1
     assert rows[0].get("reused") is not True
     assert rows[0].get("hits")
     assert "screens_this_look" not in rows[0]
@@ -593,12 +596,12 @@ async def test_parallel_different_scan_args_still_fetch(monkeypatch):
             turn=turn,
         ),
     )
-    assert n["calls"] == 3
+    assert n["calls"] == 2
 
 
 @pytest.mark.asyncio
 async def test_dispatch_one_round_same_scan_fetches_once(monkeypatch):
-    """Running path: gather of reads used to launch four IBKR screens."""
+    """Running path: gather of the same screen used to launch four IBKR pulls."""
     from abcxauto.brain import _dispatch_tool_calls
 
     n = {"calls": 0}
@@ -642,7 +645,7 @@ async def test_dispatch_one_round_same_scan_fetches_once(monkeypatch):
         snap={},
         turn=turn,
     )
-    assert n["calls"] == 3
+    assert n["calls"] == 1
     assert turn.tool_trace.count("scan") >= 1
 
 
@@ -667,7 +670,7 @@ def _flush_rows(code: str) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_bare_scan_runs_the_flush_trio(monkeypatch):
+async def test_bare_scan_returns_catalog_not_a_fetch(monkeypatch):
     seen: list[str] = []
 
     async def _fake_scan(**kw):
@@ -700,23 +703,19 @@ async def test_bare_scan_runs_the_flush_trio(monkeypatch):
         )
     )
     assert data["ok"] is True
-    assert seen == ["MOST_ACTIVE", "TOP_PERC_LOSE", "TOP_PERC_GAIN"]
-    assert "PSQL" in data["symbols"]
-    assert "MRVL" in data["symbols"]
-    assert data["deepest_symbol"] == "MRVL"
-    assert data["deepest_open_gap_pct"] == pytest.approx(-6.8)
-    assert "screens_this_look" not in data
-    note = str(data.get("note") or "").lower()
-    assert "arena" in note and "scan_code" in note
-    arenas = data.get("arenas") or []
-    assert "most_active" in arenas
-    assert "top_losers" in arenas
-    assert "top_gainers" in arenas
+    assert seen == []
+    assert data.get("fetched") is False
+    assert "arena" in str(data.get("need") or "")
+    screens = data.get("screens") or []
+    assert screens
+    assert all(
+        row.get("arena") and "scan_code" in row and "metric" in row for row in screens
+    )
 
 
 @pytest.mark.asyncio
-async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
-    """Four different arena calls collapse to one bag; same args skip IBKR."""
+async def test_four_arenas_keep_separate_pages_and_repeat_skips_ibkr(monkeypatch):
+    """Four arenas stay on their own public pages; a repeat of one skips IBKR."""
     from abcxauto.opportunity_scan import overlay_hits as _real_overlay
 
     ibkr = {"calls": 0}
@@ -799,31 +798,36 @@ async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
         reset_speaker()
 
     rows = [json.loads(r) for r in raw]
-    bag = rows[-1]
-    assert bag["ok"] is True
-    names = set(bag.get("symbols") or [])
-    for row in rows:
-        assert row["ok"] is True
-        assert row.get("deepest_symbol") == bag.get("deepest_symbol")
-    assert "PSQL" in names or any(
-        (r.get("symbol") == "PSQL") for r in (bag.get("hits") or [])
-    )
-    # Levered TQQQ still skips by name. gap_pct maps the on-row open_gap/distance.
-    assert bag["deepest_symbol"] != "TQQQ"
+    by_arena = {str(row.get("arena") or ""): row for row in rows}
+    assert by_arena["most_active"]["ok"] is True
+    assert set(by_arena["most_active"].get("symbols") or []) == {"MRVL", "AAPL"}
+    assert set(by_arena["top_losers"].get("symbols") or []) == {"PSQL", "SNDK"}
+    assert set(by_arena["top_gainers"].get("symbols") or []) == {"TQQQ"}
+    assert set(by_arena["hot_by_volume"].get("symbols") or []) == {"MU"}
+    assert "PSQL" not in (by_arena["most_active"].get("symbols") or [])
+    assert "TQQQ" not in (by_arena["most_active"].get("symbols") or [])
+    assert by_arena["most_active"]["deepest_symbol"] == "MRVL"
+    assert by_arena["top_losers"]["deepest_symbol"] == "SNDK"
+    assert by_arena["most_active"]["deepest_symbol"] != by_arena["top_losers"][
+        "deepest_symbol"
+    ]
     from abcxauto.opportunity_scan import RANKED_ROW_KEYS
 
-    for hit in bag.get("hits") or []:
-        if not isinstance(hit, dict):
-            continue
-        assert set(hit) <= RANKED_ROW_KEYS
-        assert "skip_class" in hit
-        assert hit.get("source") == "ibkr"
-        assert "on_book" not in hit
-        if hit.get("symbol") == "TQQQ":
-            assert hit["skip_class"] == "levered"
-        if hit.get("symbol") == "PSQL":
-            assert hit.get("gap_pct") == pytest.approx(73.4)
-            assert hit["skip_class"] == "micro"
+    for row in rows:
+        assert row["ok"] is True
+        for hit in row.get("hits") or []:
+            if not isinstance(hit, dict):
+                continue
+            assert set(hit) <= RANKED_ROW_KEYS
+            assert "skip_class" in hit
+            assert hit.get("source") == "ibkr"
+            assert "on_book" not in hit
+            if hit.get("symbol") == "TQQQ":
+                assert hit["skip_class"] == "levered"
+            if hit.get("symbol") == "PSQL":
+                assert hit.get("gap_pct") == pytest.approx(73.4)
+                assert hit["skip_class"] == "micro"
+    bag = by_arena["most_active"]
     prov = bag.get("provenance")
     assert isinstance(prov, dict)
     assert "ibkr_rows" in prov
@@ -834,7 +838,7 @@ async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
     assert len(hits_lines) == 1
     assert "screens=" not in hits_lines[0]
     first_ibkr = ibkr["calls"]
-    assert first_ibkr >= 3
+    assert first_ibkr == 4
     again = json.loads(
         await _run_tool(
             "scan",
@@ -849,5 +853,5 @@ async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
     assert again.get("repeat_of_this_think") is True
     assert again["reused"] is True
     assert "hits" not in again
-    assert again["hits_n"] == len(bag.get("symbols") or [])
-    assert again["deepest_symbol"] == bag["deepest_symbol"]
+    assert "MRVL" in (again.get("symbols") or [])
+    assert again["hits_n"] >= len(bag.get("symbols") or [])

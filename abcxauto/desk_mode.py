@@ -2,7 +2,7 @@
 
 Same session clock as the desk (``regular`` / ``premarket`` / ``postmarket`` /
 ``closed``). Research has no broker send path. RTH may use news/scan/web as
-COLOR; the research brief is prior-session COLOR on wake, never a trigger.
+COLOR; ``research_brief`` is this-look gathered color plus a prior-session stub, never a trigger.
 Do not grow SYSTEM_PROMPT from here.
 """
 
@@ -38,82 +38,38 @@ RESEARCH_TOOLS = frozenset({
 # Broker entry names. Research must not run these.
 BROKER_ENTRY_TOOLS = frozenset({"send"})
 
-EXPECTANCY_CAP = 10
 FACT_CAP = 24
 SYMBOL_CAP = 16
+COLOR_SYMBOL_CAP = 8
 BRIEF_STALE_S = 18 * 3600.0
 WEB_TIMEOUT_S = 8.0
 WEB_MAX_BYTES = 200_000
 WEB_TEXT_CAP = 2_000
+THIS_LOOK_NEED = (
+    "this look has no gathered color — scan|news|candles|web|odds|recall"
+)
+_NOTHING_GATHERED = "nothing was gathered this look"
 
 _REPO = Path(__file__).resolve().parents[1]
 _DEFAULT_BRIEF_PATH = _REPO / "data" / "state" / "research_brief.json"
 _SNAP_BAG = "_research_bag"
 _ET = ZoneInfo("America/New_York")
-
-_CATALYST_KINDS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (
-        "earnings",
-        (
-            "earnings",
-            "eps",
-            "guidance",
-            "outlook",
-            "quarterly",
-            "revenue",
-            "beat estimates",
-            "misses estimates",
-        ),
-    ),
-    (
-        "m_and_a",
-        ("acquire", "acquisition", "merger", "buyout", "takeover", "deal to buy"),
-    ),
-    (
-        "regulatory",
-        ("sec ", "doj", "ftc", "fda", "antitrust", "investigation", "probe"),
-    ),
-    (
-        "announcement",
-        ("announces", "announced", "press release", "launches", "launching"),
-    ),
-    (
-        "gap_risk",
-        (
-            "after hours",
-            "after-hours",
-            "premarket",
-            "pre-market",
-            "halt",
-            "gap up",
-            "gap down",
-        ),
-    ),
+_PRIOR_SESSION_KEYS = (
+    "as_of",
+    "session",
+    "mode",
+    "symbols",
+    "facts",
+    "uncertainties",
 )
-
-_UP_HINTS = (
-    "beat",
-    "beats",
-    "raise",
-    "raises",
-    "raised",
-    "surge",
-    "jumps",
-    "soars",
-    "upgrade",
-    "buyout",
-)
-_DOWN_HINTS = (
-    "miss",
-    "misses",
-    "cut",
-    "cuts",
-    "slashes",
-    "plunge",
-    "drops",
-    "downgrade",
-    "investigation",
-    "halt",
+# Capability leftovers only — not a trading lecture.
+_RESEARCH_OPEN: tuple[tuple[str, str], ...] = (
+    ("scan", "scan: arena|scan_code|symbols[]"),
+    ("news", "news: symbols[]"),
+    ("candles", "candles: symbol+resolution"),
+    ("web", "web: url"),
+    ("odds", "odds: query|symbols[]"),
+    ("recall", "recall: notes|cards"),
 )
 
 
@@ -769,33 +725,72 @@ def load_research_brief() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def this_look_research(
+    snap: dict[str, Any] | None,
+    world: Any = None,
+) -> dict[str, Any]:
+    """Color gathered on this look. Capability leftovers, not a lecture."""
+    del world
+    bag = _bag(snap)
+    facts = [row for row in (bag.get("facts") or []) if isinstance(row, dict)]
+    tools: list[str] = []
+    for row in facts:
+        src = str(row.get("source") or "").strip()
+        if src and src not in tools:
+            tools.append(src)
+    used = set(tools)
+    return {
+        "symbols": list(bag.get("symbols") or [])[:SYMBOL_CAP],
+        "facts": list(bag.get("facts") or [])[:FACT_CAP],
+        "uncertainties": list(bag.get("uncertainties") or [])[:12],
+        "tools": tools,
+        "open": [line for name, line in _RESEARCH_OPEN if name not in used],
+    }
+
+
+def _prior_session_stub(
+    brief: dict[str, Any],
+    *,
+    missing: bool,
+    stale: bool,
+) -> dict[str, Any]:
+    if missing:
+        return {}
+    if stale:
+        return {
+            key: brief[key]
+            for key in ("as_of", "session")
+            if brief.get(key) not in (None, "")
+        }
+    out: dict[str, Any] = {}
+    for key in _PRIOR_SESSION_KEYS:
+        if key in brief:
+            out[key] = brief[key]
+    return out
+
+
 def research_brief_look_payload(
     brief: dict[str, Any] | None,
     *,
+    snap: dict[str, Any] | None = None,
+    world: Any = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """What research_brief() returns. A stale file is a pointer, not last week's tape."""
+    """What research_brief() returns. This-look color plus a prior-session stub."""
     row = brief if isinstance(brief, dict) else {}
     missing = not bool(row)
     stale = True if missing else research_brief_stale(row, now=now)
+    this_look = this_look_research(snap, world)
     out: dict[str, Any] = {
-        "missing": missing,
-        "stale": stale,
         "use": "color, never a live trigger",
         "send_geometry": False,
+        "this_look": this_look,
+        "prior_session": _prior_session_stub(row, missing=missing, stale=stale),
+        "missing": missing,
+        "stale": stale,
     }
-    if missing:
-        out["brief"] = {}
-        return out
-    if stale:
-        out["brief"] = {
-            key: row[key]
-            for key in ("as_of", "session")
-            if row.get(key) not in (None, "")
-        }
-        out["note"] = "stale — not this session's tape"
-        return out
-    out["brief"] = row
+    if not this_look.get("tools") and not this_look.get("facts"):
+        out["need"] = THIS_LOOK_NEED
     return out
 
 
@@ -924,8 +919,6 @@ def _fact_line(source: str, payload: dict[str, Any], args: dict[str, Any] | None
                 gap = row.get("open_gap_pct")
                 if gap is None:
                     gap = row.get("gap%")
-                if gap is None:
-                    gap = row.get("gap_pct")
                 try:
                     mag = abs(float(gap))
                 except (TypeError, ValueError):
@@ -1014,204 +1007,6 @@ def note_research_tool(
             uns.append(note)
 
 
-def _blob_text(payload: dict[str, Any]) -> str:
-    bits = [
-        str(payload.get("headline") or ""),
-        str(payload.get("title") or ""),
-        str(payload.get("text") or ""),
-        str(payload.get("why") or ""),
-        str(payload.get("note") or ""),
-    ]
-    return " ".join(bits).lower()
-
-
-def _catalyst_kind(text: str) -> str:
-    blob = str(text or "").lower()
-    for kind, hints in _CATALYST_KINDS:
-        if any(h in blob for h in hints):
-            return kind
-    return ""
-
-
-def _direction_bias(text: str) -> str:
-    blob = str(text or "").lower()
-    up = any(h in blob for h in _UP_HINTS)
-    down = any(h in blob for h in _DOWN_HINTS)
-    if up and not down:
-        return "up"
-    if down and not up:
-        return "down"
-    return ""
-
-
-def _gap_of(row: dict[str, Any]) -> float | None:
-    for key in ("open_gap_pct", "gap%", "gap_pct"):
-        if row.get(key) is None:
-            continue
-        try:
-            return float(row[key])
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def _expectancy_from_news(items: list[Any]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        hl = str(it.get("headline") or it.get("title") or "").strip()
-        if not hl:
-            continue
-        kind = _catalyst_kind(hl) or "announcement"
-        sym = str(it.get("symbol") or "").upper().strip()
-        pub = str(it.get("publisher") or it.get("source") or "news").strip()
-        out.append(
-            {
-                "symbol": sym,
-                "catalyst": kind,
-                "why": hl[:180],
-                "source": f"news/{pub}" if pub else "news",
-                "direction": _direction_bias(hl),
-                "uncertainty": "MDA delayed ~15m",
-                "invalidate": "open prints inside prior range / headline reversed",
-            }
-        )
-    return out
-
-
-def _expectancy_from_scan(rows: list[Any]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    ranked: list[tuple[float, dict[str, Any]]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        gap = _gap_of(row)
-        if gap is None:
-            continue
-        mag = abs(gap)
-        if mag < 1.5:
-            continue
-        ranked.append((mag, row))
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    for mag, row in ranked[:EXPECTANCY_CAP]:
-        gap = _gap_of(row) or 0.0
-        sym = str(row.get("symbol") or "").upper().strip()
-        why = f"open_gap={gap:g}%"
-        out.append(
-            {
-                "symbol": sym,
-                "catalyst": "gap_risk",
-                "why": why,
-                "source": "scan",
-                "direction": "up" if gap > 0 else "down",
-                "uncertainty": "gap is tape color until RTH trade",
-                "invalidate": "gap fills on the open / no follow-through",
-            }
-        )
-    return out
-
-
-def _expectancy_from_web(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    title = str(payload.get("title") or "").strip()
-    text = str(payload.get("text") or "").strip()
-    blob = f"{title} {text}"
-    kind = _catalyst_kind(blob)
-    if not kind and not title:
-        return []
-    return [
-        {
-            "symbol": str(payload.get("symbol") or "").upper().strip(),
-            "catalyst": kind or "announcement",
-            "why": (title or text)[:180],
-            "source": "web",
-            "direction": _direction_bias(blob),
-            "uncertainty": "public page snippet, not a live trigger",
-            "invalidate": "source corrected / move already in the overnight print",
-        }
-    ]
-
-
-def _expectancy_from_odds(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    events = payload.get("events") or payload.get("markets") or payload.get("rows") or []
-    if not isinstance(events, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for ev in events[:6]:
-        if not isinstance(ev, dict):
-            continue
-        title = str(ev.get("title") or ev.get("question") or ev.get("name") or "").strip()
-        if not title:
-            continue
-        kind = _catalyst_kind(title) or "announcement"
-        out.append(
-            {
-                "symbol": str(ev.get("symbol") or "").upper().strip(),
-                "catalyst": kind,
-                "why": title[:180],
-                "source": "odds",
-                "direction": "",
-                "uncertainty": "implied prob, not send geometry",
-                "invalidate": "odds reprice / event resolves the other way",
-            }
-        )
-    return out
-
-
-def build_expectancy(
-    *,
-    snap: dict[str, Any] | None = None,
-    world: Any = None,
-) -> list[dict[str, Any]]:
-    """Short ranked AH/PM catalyst list. Mechanical COLOR, not a ranker product."""
-    blob = snap if isinstance(snap, dict) else {}
-    rows: list[dict[str, Any]] = []
-    news = blob.get("news_items")
-    if not isinstance(news, list):
-        news = getattr(world, "news_items", None) if world is not None else None
-    if isinstance(news, list):
-        rows.extend(_expectancy_from_news(news))
-    hits = blob.get("scan_hits") if isinstance(blob.get("scan_hits"), dict) else {}
-    scan_rows = hits.get("rows") or hits.get("hits") or []
-    if isinstance(scan_rows, list):
-        rows.extend(_expectancy_from_scan(scan_rows))
-    web = blob.get("research_web") if isinstance(blob.get("research_web"), dict) else {}
-    if web:
-        rows.extend(_expectancy_from_web(web))
-    odds = blob.get("odds") if isinstance(blob.get("odds"), dict) else {}
-    if odds:
-        rows.extend(_expectancy_from_odds(odds))
-
-    ranked: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-    catalyst_rank = {
-        "earnings": 0,
-        "m_and_a": 1,
-        "regulatory": 2,
-        "gap_risk": 3,
-        "announcement": 4,
-    }
-    rows.sort(
-        key=lambda r: (
-            catalyst_rank.get(str(r.get("catalyst") or ""), 9),
-            0 if r.get("symbol") else 1,
-        )
-    )
-    for row in rows:
-        key = (
-            str(row.get("symbol") or ""),
-            str(row.get("catalyst") or ""),
-            str(row.get("why") or "")[:80],
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        ranked.append(row)
-        if len(ranked) >= EXPECTANCY_CAP:
-            break
-    return ranked
-
-
 def write_research_brief(
     *,
     session: str = "",
@@ -1222,10 +1017,10 @@ def write_research_brief(
     research_card_id: str = "",
     prove_window_id: str = "",
 ) -> dict[str, Any]:
-    """Overwrite ``data/state/research_brief.json``. No order tickets.
+    """Overwrite ``data/state/research_brief.json``. Gathered color only.
 
     Premarket / AH / closed only. RTH web/news/scan are COLOR on the look;
-    they do not rebuild this brief.
+    they do not rebuild this brief. No expectancy, no tickets.
     """
     sess = desk_session(session)
     if sess == RTH_SESSION:
@@ -1245,22 +1040,18 @@ def write_research_brief(
                 _add_symbol(bag, row.get("symbol"))
         for raw in snap.get("scan_fetched") or []:
             _add_symbol(bag, raw)
-    expectancy = build_expectancy(snap=snap, world=world)
-    for row in expectancy:
-        _add_symbol(bag, row.get("symbol"))
+    facts = list(bag.get("facts") or [])[:FACT_CAP]
     uns = list(bag.get("uncertainties") or [])
-    if not expectancy:
-        note = "no AH/PM catalyst expectancy this look — news/scan/web returned none"
-        if note not in uns:
-            uns.append(note)
+    if not facts:
+        if _NOTHING_GATHERED not in uns:
+            uns.append(_NOTHING_GATHERED)
     payload = {
         "as_of": _iso(now),
         "session": sess,
         "mode": "research",
         "symbols": list(bag.get("symbols") or [])[:SYMBOL_CAP],
-        "facts": list(bag.get("facts") or [])[:FACT_CAP],
+        "facts": facts,
         "uncertainties": uns[:12],
-        "expectancy": expectancy,
         "tool_trace": list(getattr(turn, "tool_trace", None) or [])[:24],
     }
     try:
@@ -1302,8 +1093,13 @@ def rth_research_color(
             "prior_session_research=stale "
             f"as_of={as_of} (color, never a live trigger)."
         )
+    facts = [row for row in (brief.get("facts") or []) if isinstance(row, dict)]
+    symbols = [
+        str(s).strip()
+        for s in (brief.get("symbols") or [])
+        if str(s).strip()
+    ]
     if not full:
-        n = len(brief.get("expectancy") or [])
         age_bit = ""
         ts = _parse_iso(str(brief.get("as_of") or brief.get("ts") or ""))
         clock = now or _utc_now()
@@ -1314,7 +1110,8 @@ def rth_research_color(
             age_bit = f" age={age}d"
         return (
             "prior_session_research=on_disk "
-            f"expectancy={n}{age_bit} (color, never a live trigger)."
+            f"facts={len(facts)} symbols={len(symbols)}{age_bit} "
+            "(color, never a live trigger)."
         )
     bits = [
         "prior_session_research(color, not a live trigger):",
@@ -1323,23 +1120,10 @@ def rth_research_color(
     sess = str(brief.get("session") or "")
     if as_of or sess:
         bits.append(f"as_of={as_of} session={sess}.")
-    for row in (brief.get("expectancy") or [])[:EXPECTANCY_CAP]:
-        if not isinstance(row, dict):
-            continue
-        sym = str(row.get("symbol") or "?").strip() or "?"
-        why = str(row.get("why") or "").strip()
-        src = str(row.get("source") or "").strip()
-        cat = str(row.get("catalyst") or "").strip()
-        bias = str(row.get("direction") or "").strip()
-        inv = str(row.get("invalidate") or "").strip()
-        piece = f"{sym} {cat} {why} src={src}".strip()
-        if bias:
-            piece += f" bias={bias}"
-        if inv:
-            piece += f" invalidate={inv}"
-        bits.append(piece[:180] + ".")
-    if len(bits) == 1 or (len(bits) == 2 and bits[1].startswith("as_of=")):
-        bits.append("expectancy=none.")
+    named = symbols[:COLOR_SYMBOL_CAP]
+    if named:
+        bits.append(" ".join(named) + ".")
+    bits.append(f"facts={len(facts)}.")
     return " ".join(bits)
 
 

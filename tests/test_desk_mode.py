@@ -16,7 +16,6 @@ from abcxauto.config import (
 from abcxauto.desk_mode import (
     REASON_RESEARCH_NO_SEND,
     WEB_USE,
-    build_expectancy,
     desk_mode,
     desk_session,
     fetch_public_page,
@@ -435,48 +434,48 @@ async def test_7496_still_fail_closed_in_research_session(monkeypatch):
     assert get_config().ibkr_port == 7496
 
 
-def test_research_brief_writes_expectancy_and_overwrites(tmp_path, monkeypatch):
+def _news_snap(*rows: dict[str, str]) -> dict:
+    items = [
+        {
+            "symbol": row["symbol"],
+            "headline": row["headline"],
+            "publisher": row.get("publisher", "MDA"),
+        }
+        for row in rows
+    ]
+    snap: dict = {"news_items": items}
+    note_research_tool(snap, "news", {"items": items})
+    return snap
+
+
+def test_research_brief_writes_gathered_color_and_overwrites(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
-    snap = {
-        "news_items": [
-            {
-                "symbol": "NVDA",
-                "headline": "NVDA beats estimates and raises guidance",
-                "publisher": "MDA",
-            },
-            {
-                "symbol": "XYZ",
-                "headline": "XYZ announces acquisition of ABC",
-                "publisher": "MDA",
-            },
-        ],
-        "scan_hits": {
-            "rows": [
-                {"symbol": "AMD", "open_gap_pct": 4.2},
-                {"symbol": "FLAT", "open_gap_pct": 0.1},
-            ]
+    snap = _news_snap(
+        {
+            "symbol": "NVDA",
+            "headline": "NVDA beats estimates and raises guidance",
         },
+        {
+            "symbol": "XYZ",
+            "headline": "XYZ announces acquisition of ABC",
+        },
+    )
+    snap["scan_hits"] = {
+        "rows": [
+            {"symbol": "AMD", "open_gap_pct": 4.2},
+            {"symbol": "FLAT", "open_gap_pct": 0.1},
+        ]
     }
-    note_research_tool(snap, "news", {"items": snap["news_items"]})
     first = write_research_brief(session="premarket", snap=snap, now=datetime.now(timezone.utc))
     path = tmp_path / "research_brief.json"
     assert path.is_file()
     assert first["session"] == "premarket"
     assert first["mode"] == "research"
     assert "tickets" not in first
+    assert "expectancy" not in first
     assert "NVDA" in first["symbols"]
+    assert "AMD" in first["symbols"]
     assert first["facts"]
-    assert first["expectancy"]
-    assert len(first["expectancy"]) <= 10
-    kinds = {row["catalyst"] for row in first["expectancy"]}
-    assert "earnings" in kinds or "m_and_a" in kinds or "gap_risk" in kinds
-    for row in first["expectancy"]:
-        assert "source" in row
-        assert "why" in row
-        assert "uncertainty" in row
-        assert "invalidate" in row
-        assert "strategy" not in row
-        assert "quantity" not in row
     later = datetime.now(timezone.utc) + timedelta(minutes=5)
     snap["news_items"] = [
         {
@@ -485,30 +484,14 @@ def test_research_brief_writes_expectancy_and_overwrites(tmp_path, monkeypatch):
             "publisher": "MDA",
         }
     ]
+    note_research_tool(snap, "news", {"items": snap["news_items"]})
     second = write_research_brief(session="premarket", snap=snap, now=later)
     disk = load_research_brief()
     assert disk["as_of"] == second["as_of"]
     assert disk["as_of"] != first["as_of"]
     assert "TSLA" in disk["symbols"]
-
-
-def test_expectancy_prefers_catalysts_over_tiny_gaps():
-    rows = build_expectancy(
-        snap={
-            "news_items": [
-                {
-                    "symbol": "AAPL",
-                    "headline": "AAPL reports earnings and cuts outlook",
-                }
-            ],
-            "scan_hits": {"rows": [{"symbol": "NOISE", "open_gap_pct": 0.2}]},
-        }
-    )
-    assert rows
-    assert rows[0]["symbol"] == "AAPL"
-    assert rows[0]["catalyst"] == "earnings"
-    assert rows[0]["source"].startswith("news")
-    assert all(r["symbol"] != "NOISE" for r in rows)
+    assert "expectancy" not in disk
+    assert "tickets" not in disk
 
 
 def test_rth_color_missing_stale_and_present(tmp_path, monkeypatch):
@@ -518,27 +501,29 @@ def test_rth_color_missing_stale_and_present(tmp_path, monkeypatch):
     assert "never a live trigger" in missing or "not a live trigger" in missing
     write_research_brief(
         session="premarket",
-        snap={
-            "news_items": [
-                {
-                    "symbol": "NVDA",
-                    "headline": "NVDA beats estimates after hours",
-                    "publisher": "MDA",
-                }
-            ]
-        },
+        snap=_news_snap(
+            {
+                "symbol": "NVDA",
+                "headline": "NVDA beats estimates after hours",
+            }
+        ),
         now=datetime.now(timezone.utc),
     )
     full = rth_research_color(full=True)
     assert "prior_session_research" in full
     assert "not a live trigger" in full or "never a live trigger" in full
     assert "NVDA" in full
+    assert "facts=" in full
+    assert "expectancy=" not in full
     short = rth_research_color(full=False)
     assert "on_disk" in short
+    assert "facts=" in short
+    assert "symbols=" in short
+    assert "expectancy=" not in short
     old = datetime.now(timezone.utc) - timedelta(hours=30)
     write_research_brief(
         session="premarket",
-        snap={"news_items": [{"symbol": "OLD", "headline": "OLD announces merger"}]},
+        snap=_news_snap({"symbol": "OLD", "headline": "OLD announces merger"}),
         now=old,
     )
     brief = load_research_brief()
@@ -567,15 +552,12 @@ def test_rth_wake_loads_brief_and_runs_when_missing():
 
     write_research_brief(
         session="premarket",
-        snap={
-            "news_items": [
-                {
-                    "symbol": "AMD",
-                    "headline": "AMD raises guidance after hours",
-                    "publisher": "MDA",
-                }
-            ]
-        },
+        snap=_news_snap(
+            {
+                "symbol": "AMD",
+                "headline": "AMD raises guidance after hours",
+            }
+        ),
     )
     present = format_wake(
         cycle=1,

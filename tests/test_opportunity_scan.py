@@ -461,6 +461,103 @@ def test_hot_by_opt_volume_distance_is_not_gap_pct():
     assert row_gap_pct(thin_real) == pytest.approx(31.06)
 
 
+def test_scrub_pops_opt_volume_leftover_gap_pct():
+    from abcxauto.opportunity_scan import (
+        public_scan_row,
+        row_gap_pct,
+        scrub_aliased_gap_pct,
+        thin_ranked_row,
+    )
+
+    leftover = {
+        "symbol": "GNRC",
+        "rank": 0,
+        "screen": "hot_by_opt_volume",
+        "scan_code": "HOT_BY_OPT_VOLUME",
+        "metric_name": "option_volume",
+        "metric_value": 6.778,
+        "gap_pct": 6.778,
+        "last": 180.0,
+        "open": 179.0,
+        "close": 137.3,
+        "skip_class": "",
+        "source": "ibkr",
+        "mda": {
+            "news": [{"headline": "color only", "source": "mda"}],
+            "news_use": "color_not_trigger",
+            "sma20": 150.0,
+        },
+    }
+    assert row_gap_pct(leftover) is None
+    assert scrub_aliased_gap_pct(leftover) is leftover
+    assert "gap_pct" not in leftover
+    assert leftover["metric_value"] == pytest.approx(6.778)
+    assert row_gap_pct(leftover) is None
+
+    thin = thin_ranked_row(
+        {
+            "symbol": "GNRC",
+            "rank": 0,
+            "scan_code": "HOT_BY_OPT_VOLUME",
+            "metric_name": "option_volume",
+            "metric_value": 6.778,
+            "gap_pct": 6.778,
+        },
+        scan_code="HOT_BY_OPT_VOLUME",
+    )
+    assert thin["metric_value"] == pytest.approx(6.778)
+    assert "gap_pct" not in thin
+    assert row_gap_pct(thin) is None
+
+    inherited = {
+        "symbol": "GNRC",
+        "rank": 0,
+        "screen": "hot_by_opt_volume",
+        "scan_code": "HOT_BY_OPT_VOLUME",
+        "metric_name": "option_volume",
+        "metric_value": 6.778,
+        "gap_pct": 6.778,
+        "open_gap_pct": 31.06,
+        "last": 180.0,
+        "open": 179.0,
+        "close": 137.3,
+        "skip_class": "",
+        "source": "ibkr",
+        "mda": {
+            "news": [{"headline": "color only", "source": "mda"}],
+            "news_use": "color_not_trigger",
+            "sma20": 150.0,
+        },
+    }
+    assert row_gap_pct(inherited) == pytest.approx(31.06)
+    pub = public_scan_row(inherited)
+    assert pub is inherited
+    assert "gap_pct" not in inherited
+    assert inherited["open_gap_pct"] == pytest.approx(31.06)
+    assert row_gap_pct(inherited) == pytest.approx(31.06)
+    nest = inherited.get("mda") or {}
+    assert "news" not in nest
+    assert "news_use" not in nest
+    assert nest.get("sma20") == pytest.approx(150.0)
+
+    gap_screen = {
+        "symbol": "FOO",
+        "scan_code": "HIGH_OPEN_GAP",
+        "metric_name": "open_gap",
+        "metric_value": 8.2,
+        "distance": 8.2,
+        "gap_pct": 8.2,
+        "skip_class": "",
+        "source": "ibkr",
+    }
+    assert scrub_aliased_gap_pct(gap_screen) is gap_screen
+    assert gap_screen["gap_pct"] == pytest.approx(8.2)
+    assert row_gap_pct(gap_screen) == pytest.approx(8.2)
+    thin_gap = thin_ranked_row(gap_screen, scan_code="HIGH_OPEN_GAP")
+    assert thin_gap["gap_pct"] == pytest.approx(8.2)
+    assert thin_gap["metric_value"] == pytest.approx(8.2)
+
+
 def test_thin_ranked_row_labels_levered_etf():
     from abcxauto.opportunity_scan import thin_ranked_row
 

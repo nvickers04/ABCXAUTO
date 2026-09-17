@@ -310,15 +310,14 @@ def _merge_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _empty_odds(*, note: str = "no_query") -> dict[str, Any]:
+def _choose_odds() -> dict[str, Any]:
+    """Empty ask is a choice. Do not invent SPY/Fed searches."""
     return {
-        "source": "polymarket",
-        "freshness": "betting_book",
+        "ok": False,
+        "need": "query|symbols[]",
         "use": "crowd_odds_not_send_geometry",
-        "searched": [],
-        "related_queries": [],
+        "source": "polymarket",
         "events": [],
-        "note": note,
     }
 
 
@@ -331,16 +330,13 @@ async def fetch_odds(
 ) -> dict[str, Any]:
     """Crowd implied probs from Polymarket. Not IBKR last. Not a ticket."""
     syms = [str(s).upper() for s in (symbols or []) if str(s).strip()]
-    if not syms and not (query or "").strip():
-        for p in positions or []:
-            s = str((p or {}).get("symbol") or "").upper().strip()
-            if s and s not in syms:
-                syms.append(s)
-            if len(syms) >= SEARCH_CAP:
-                break
-    searches, related = _queries(syms, query)
+    q = (query or "").strip()
+    del positions
+    if not syms and not q:
+        return _choose_odds()
+    searches, related = _queries(syms, q)
     if not searches:
-        return _empty_odds()
+        return _choose_odds()
     events: list[dict[str, Any]] = []
     own = client is None
     http = client or httpx.AsyncClient(timeout=_TIMEOUT_S)

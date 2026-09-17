@@ -15,6 +15,7 @@ from abcxauto.news_feed import (
     fetch_symbols_news,
     format_news_for_prompt,
     news_hard_miss,
+    news_need_symbols,
     remember_headlines,
     reset_news_cache,
 )
@@ -78,6 +79,23 @@ def test_universe_does_not_pad_spy_on_empty_book():
     assert _universe([{"symbol": "DECK"}]) == ["DECK"]
     assert _universe([]) == []
     assert "QQQ" not in _universe([])
+
+
+def test_news_need_symbols_is_a_choice_not_a_spy_timeout():
+    out = news_need_symbols()
+    assert out == {
+        "ok": False,
+        "need": "symbols[]",
+        "use": "color_not_trigger",
+        "freshness": "delayed_15m",
+        "source": "mda",
+        "items": [],
+        "note": "pass symbols[]",
+        "fetched": False,
+    }
+    assert "SPY" not in str(out)
+    assert "(unavailable" not in str(out)
+    assert "timed out" not in str(out)
 
 
 class _MDA:
