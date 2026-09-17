@@ -1433,7 +1433,10 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         from abcxauto.risk_gates import defined_risk_concentration
 
         max_loss = defined_risk_concentration(
-            getattr(world, "positions", None),
+            attach_covering_last_stops(
+                getattr(world, "positions", None),
+                getattr(world, "open_orders", None),
+            ),
             nl,
         )
         if isinstance(max_loss, dict):
@@ -1477,6 +1480,64 @@ def _order_stop_px(order: dict[str, Any]) -> float | None:
     return None
 
 
+def _covering_last_stop_px(
+    position: dict[str, Any],
+    orders: list[dict[str, Any]] | None,
+) -> float | None:
+    """Working last-stop that covers this lot. Same join as ``_wake_lot_alarms``."""
+    try:
+        from abcxauto.broker.order_types import is_stop_order
+        from abcxauto.monitor import covering_exits
+    except Exception:
+        return None
+    exits = covering_exits(position, orders)
+    stops = [
+        o
+        for o in exits
+        if is_stop_order(str(o.get("order_type") or o.get("orderType") or ""))
+    ]
+    for o in stops or exits:
+        stop_px = _order_stop_px(o)
+        if stop_px is not None:
+            return stop_px
+    return None
+
+
+def attach_covering_last_stops(
+    positions: Any,
+    open_orders: Any = None,
+) -> list[Any]:
+    """Copy lots and paint covering last-stop (and entry/avg if present).
+
+    A filled market_bracket leaves the IBKR position row without
+    stop/entry; the working STP lives on ``open_orders``. Display only —
+    does not mutate the live book.
+    """
+    orders = [o for o in (open_orders or []) if isinstance(o, dict)]
+    out: list[Any] = []
+    for p in positions or []:
+        if not isinstance(p, dict):
+            out.append(p)
+            continue
+        row = dict(p)
+        stop_px = _covering_last_stop_px(row, orders)
+        if stop_px is not None:
+            if row.get("stop") in (None, "", 0, 0.0, "0"):
+                row["stop"] = stop_px
+            if row.get("stop_price") in (None, "", 0, 0.0, "0"):
+                row["stop_price"] = stop_px
+        if row.get("entry_price") in (None, ""):
+            avg = position_avg_facts(row).get("avg")
+            if avg is not None:
+                row["entry_price"] = avg
+        if row.get("avg") in (None, ""):
+            avg = position_avg_facts(row).get("avg")
+            if avg is not None:
+                row["avg"] = avg
+        out.append(row)
+    return out
+
+
 def _lot_last_px(pos: dict[str, Any], quotes: dict[str, Any]) -> float | None:
     row = compact_position(pos, extra=True)
     for raw in (row.get("mkt"), pos.get("market_price"), pos.get("marketPrice"), pos.get("last")):
@@ -1507,7 +1568,6 @@ def _wake_lot_alarms(world: Any) -> dict[str, Any]:
     if not isinstance(quotes, dict):
         quotes = {}
     try:
-        from abcxauto.broker.order_types import is_stop_order
         from abcxauto.monitor import covering_exits
     except Exception:
         return {"stop_dist": None, "working_order_missing": []}
@@ -1521,19 +1581,10 @@ def _wake_lot_alarms(world: Any) -> dict[str, Any]:
             continue
         ident = lot_ident(p)
         exits = covering_exits(p, orders)
-        stops = [
-            o
-            for o in exits
-            if is_stop_order(str(o.get("order_type") or o.get("orderType") or ""))
-        ]
         if not exits:
             missing.append(ident)
         last = _lot_last_px(p, quotes)
-        stop_px = None
-        for o in stops or exits:
-            stop_px = _order_stop_px(o)
-            if stop_px is not None:
-                break
+        stop_px = _covering_last_stop_px(p, orders)
         if last is None or stop_px is None:
             continue
         dist = abs(float(last) - float(stop_px))

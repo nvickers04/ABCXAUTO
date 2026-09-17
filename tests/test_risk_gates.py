@@ -502,6 +502,52 @@ def test_defined_risk_concentration_stock_vertical_covered_call_and_unknown():
     assert "unknown" not in split["underlying"]["SPY"]
 
 
+def test_defined_risk_concentration_joins_working_last_stop():
+    """Filled market_bracket lot has no stop/entry; covering STP prices the fact."""
+    from abcxauto.portfolio_loss import defined_max_loss_usd
+    from abcxauto.world_state import attach_covering_last_stops, day_facts
+
+    pos = {
+        "symbol": "NVDA",
+        "secType": "STK",
+        "quantity": 11,
+        "avgCost": 219.13,
+    }
+    stp = {
+        "symbol": "NVDA",
+        "sec_type": "STK",
+        "action": "SELL",
+        "quantity": 11,
+        "order_type": "STP",
+        "aux_price": 216.9,
+    }
+    assert defined_max_loss_usd(pos) is None
+    bare = defined_risk_concentration([pos], BOOK_NL)
+    assert bare["symbol"]["NVDA"] == {"usd": "unknown"}
+
+    lots = attach_covering_last_stops([pos], [stp])
+    assert pos.get("stop") in (None, "", 0, 0.0, "0")
+    assert lots[0]["stop_price"] == pytest.approx(216.9)
+    assert lots[0]["entry_price"] == pytest.approx(219.13)
+    assert defined_max_loss_usd(lots[0]) == pytest.approx(24.53)
+
+    fact = defined_risk_concentration(lots, BOOK_NL)
+    assert fact["symbol"]["NVDA"]["usd"] == pytest.approx(24.53)
+    assert fact["underlying"]["NVDA"]["usd"] == pytest.approx(24.53)
+    assert "unknown" not in fact["symbol"]["NVDA"]
+
+    world = type("W", (), {})()
+    world.positions = [pos]
+    world.open_orders = [stp]
+    world.net_liquidation = BOOK_NL
+    world.daily_pnl = 0.0
+    day = day_facts(world)
+    painted = day["defined_risk_concentration"]["symbol"]["NVDA"]
+    assert painted["usd"] == pytest.approx(24.53)
+    assert "unknown" not in painted
+    assert pos.get("stop_price") in (None, "", 0, 0.0, "0")
+
+
 @pytest.mark.asyncio
 async def test_cash_only_alone_refuses_100_share_spy_on_this_book(monkeypatch):
     """cash_only, not the deleted arena gate, blocks 100 SPY @ 760 on this NL."""

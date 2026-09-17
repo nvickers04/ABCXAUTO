@@ -64,6 +64,39 @@ def test_scan_gate_facts_reads_gap_pct_field():
     assert gate["deepest_open_gap_pct"] == pytest.approx(-6.5)
 
 
+def test_opt_volume_distance_is_not_deepest_open_gap():
+    from abcxauto.opportunity_scan import thin_ranked_row
+
+    rows = [
+        thin_ranked_row(
+            {
+                "symbol": "INIO",
+                "rank": 0,
+                "distance": 135.5,
+                "scan_code": "HOT_BY_OPT_VOLUME",
+            },
+            scan_code="HOT_BY_OPT_VOLUME",
+        ),
+        thin_ranked_row(
+            {
+                "symbol": "REAL",
+                "rank": 1,
+                "distance": 20.0,
+                "open_gap_pct": 31.06,
+                "scan_code": "HOT_BY_OPT_VOLUME",
+            },
+            scan_code="HOT_BY_OPT_VOLUME",
+        ),
+    ]
+    gate = _scan_gate_facts(rows)
+    assert rows[0]["metric_name"] == "option_volume"
+    assert rows[0]["metric_value"] == pytest.approx(135.5)
+    assert "gap_pct" not in rows[0]
+    assert rows[1]["gap_pct"] == pytest.approx(31.06)
+    assert gate["deepest_symbol"] == "REAL"
+    assert gate["deepest_open_gap_pct"] == pytest.approx(31.06)
+
+
 def test_scan_paint_does_not_fatten_thin_ranked_rows():
     from abcxauto.brain import _scan_paint_rows
 

@@ -401,28 +401,41 @@ def _scan_out_from_snap(
     rows = _scan_paint_rows(merged, quotes=qmap)
     seed = last_ok if isinstance(last_ok, dict) else {}
     arenas = list(snap.get("scan_arenas") or [])
-    prov = seed.get("provenance")
-    if not isinstance(prov, dict):
-        stored = snap.get("scan_provenance")
-        prov = stored if isinstance(stored, dict) else None
+    symbols_job = _scan_is_symbols_job(seed)
+    if symbols_job:
+        ranked = bool(seed.get("ranked"))
+        rank_meaning = seed.get("rank_meaning") or "not ranked"
+        if str(rank_meaning) == "not ranked":
+            ranked = False
+        prov = seed.get("provenance") if isinstance(seed.get("provenance"), dict) else None
+        source = str(seed.get("source") or "symbols")
+    else:
+        ranked = bool(merged.get("ranked") if merged else seed.get("ranked"))
+        rank_meaning = (merged.get("rank_meaning") if merged else None) or seed.get(
+            "rank_meaning"
+        )
+        prov = seed.get("provenance")
+        if not isinstance(prov, dict):
+            stored = snap.get("scan_provenance")
+            prov = stored if isinstance(stored, dict) else None
+        source = merged.get("source") or seed.get("source") or "ibkr"
     applied = seed.get("applied") or {}
     if not applied and isinstance(prov, dict) and isinstance(prov.get("filters"), dict):
         applied = prov["filters"]
     out: dict[str, Any] = {
         "ok": True,
-        "source": merged.get("source") or seed.get("source") or "ibkr",
+        "source": source,
         "symbols": [r.get("symbol") for r in rows if r.get("symbol")],
         "hits": rows,
         "rows": rows,
         "applied": applied,
         "persisted": False,
-        "ranked": bool(merged.get("ranked") if merged else seed.get("ranked")),
-        "rank_meaning": (merged.get("rank_meaning") if merged else None)
-        or seed.get("rank_meaning"),
+        "ranked": ranked,
+        "rank_meaning": rank_meaning,
         "quoted": merged.get("quoted") or seed.get("quoted") or 0,
         "arenas": arenas,
     }
-    if len(arenas) == 1:
+    if not symbols_job and len(arenas) == 1:
         out["arena"] = merged.get("arena") or seed.get("arena")
         out["scan_code"] = merged.get("scan_code") or seed.get("scan_code")
     if isinstance(prov, dict):
@@ -431,7 +444,12 @@ def _scan_out_from_snap(
         out["empty"] = bool(seed.get("empty"))
     elif isinstance(prov, dict) and prov.get("empty") is not None:
         out["empty"] = bool(prov.get("empty"))
-    screen = seed.get("screen") or (prov.get("screen") if isinstance(prov, dict) else None)
+    if symbols_job:
+        screen = seed.get("screen")
+    else:
+        screen = seed.get("screen") or (
+            prov.get("screen") if isinstance(prov, dict) else None
+        )
     if screen not in (None, ""):
         out["screen"] = screen
     if seed.get("thin") is not None:
@@ -493,21 +511,61 @@ def _strip_hit_news(row: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+def _scan_is_symbols_job(seed: dict[str, Any] | None) -> bool:
+    """True when this call is symbols[] drill-down, not a ranked screen."""
+    if not isinstance(seed, dict) or not seed:
+        return False
+    if str(seed.get("source") or "") == "symbols":
+        return True
+    criteria = seed.get("criteria")
+    if isinstance(criteria, dict) and criteria.get("symbols") is not None:
+        if not criteria.get("arena") and not criteria.get("scan_code"):
+            return True
+    if seed.get("provenance") is not None:
+        return False
+    if seed.get("screen") not in (None, "") or seed.get("arena") not in (
+        None,
+        "",
+    ) or seed.get("scan_code") not in (None, ""):
+        return False
+    return str(seed.get("rank_meaning") or "") == "not ranked"
+
+
+def _scan_public_hit(row: dict[str, Any]) -> dict[str, Any]:
+    item = _strip_hit_news(row)
+    if "session" not in item:
+        return item
+    if item is row:
+        item = dict(item)
+    item.pop("session", None)
+    return item
+
+
 def _scan_public_payload(out: dict[str, Any]) -> dict[str, Any]:
     """One hit list, headlines once at the top. Snap may still keep rows."""
     slim = dict(out) if isinstance(out, dict) else {}
+    slim.pop("sessions", None)
     if slim.get("rows") == slim.get("hits"):
         slim.pop("rows", None)
     hits = slim.get("hits")
     if isinstance(hits, list):
         slim["hits"] = [
-            _strip_hit_news(row) if isinstance(row, dict) else row for row in hits
+            _scan_public_hit(row) if isinstance(row, dict) else row for row in hits
         ]
     news = slim.get("news")
     if isinstance(news, list):
         slim["news"] = _slim_scan_news(news)
         if not slim["news"]:
             slim.pop("news", None)
+    if str(slim.get("rank_meaning") or "") == "not ranked":
+        slim["ranked"] = False
+    if _scan_is_symbols_job(slim):
+        slim.pop("screen", None)
+        slim.pop("arena", None)
+        slim.pop("scan_code", None)
+        prov = slim.get("provenance")
+        if isinstance(prov, dict) and prov.get("screen") not in (None, ""):
+            slim.pop("provenance", None)
     return slim
 
 

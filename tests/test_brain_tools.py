@@ -338,7 +338,10 @@ async def test_one_stalled_news_symbol_does_not_sink_the_tool(monkeypatch):
     heads = [it for it in data["items"] if not it.get("error")]
     miss = [it for it in data["items"] if it.get("error")]
     assert [it["symbol"] for it in heads] == ["SPY", "QQQ"]
-    assert miss and miss[0]["symbol"] == "HANG" and miss[0]["error"] == "timed out"
+    assert not miss
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "") for it in data["items"]
+    )
     assert "error" not in data
 
 
@@ -375,12 +378,10 @@ async def test_news_tool_slow_source_is_fast_hard_miss(monkeypatch):
     assert elapsed < 12.0
     assert elapsed < NEWS_SYMBOL_S + 2.0
     assert "timed out" in str(data.get("error") or "")
-    assert data["items"]
-    assert all(it.get("error") == "timed out" for it in data["items"])
+    assert not data.get("items")
     assert not any(
-        str(it.get("headline") or "").strip()
-        and not it.get("error")
-        for it in data["items"]
+        "(unavailable" in str(it.get("headline") or "")
+        for it in data.get("items") or []
     )
 
 
@@ -2009,6 +2010,16 @@ def test_scan_public_payload_drops_duplicate_rows():
         {"ok": True, "hits": hits, "rows": other, "source": "ibkr"}
     )
     assert kept["rows"] == other
+    public = _scan_public_payload(
+        {
+            "ok": True,
+            "hits": hits,
+            "rows": hits,
+            "sessions": {"NVDA": {"size": {"qty": 3307}}},
+        }
+    )
+    assert "sessions" not in public
+    assert all("session" not in row for row in public["hits"] if isinstance(row, dict))
 
 
 def test_book_lists_full_capacity(monkeypatch):
@@ -5639,11 +5650,13 @@ def test_scan_clip_keeps_ranked_page_plus_news():
     raw_len = len(json.dumps(payload, default=str))
     assert raw_len > CLIP_CHARS
     public = _scan_public_payload(payload)
+    assert "sessions" not in public
     assert all(
         "news" not in (row.get("mda") or {})
         for row in public["hits"]
         if isinstance(row, dict)
     )
+    assert all("session" not in row for row in public["hits"] if isinstance(row, dict))
     assert all("publisher" not in item for item in public["news"])
     defaulted = json.loads(_clip(payload))
     assert defaulted.get("_dropped") or defaulted.get("_clipped")
@@ -5695,4 +5708,199 @@ def test_scan_clip_drops_news_before_hits():
     assert "news" not in again
     assert again["note"] == _SCAN_REUSE_NOTE
     assert again["deepest_symbol"] == "S29"
+
+
+def test_scan_public_payload_drops_sessions_so_hits_survive():
+    from abcxauto.brain_tools import _clip_scan, _scan_public_payload
+
+    hits = [_ranked_hit(i) for i in range(30)]
+    sessions = {
+        "NVDA": {"last": 177.0, "low": 176.0, "size": {"qty": 3307}},
+        "GNRC": {"last": 180.0, "low": 179.0, "size": {"qty": 15398}},
+    }
+    for i in range(120):
+        sessions[f"X{i:03d}"] = {
+            "last": 100.0 + i,
+            "low": 99.0,
+            "size": {"qty": 3307 + i * 80},
+        }
+    payload = {
+        "ok": True,
+        "source": "ibkr",
+        "hits": [
+            dict(row) | {"session": sessions.get("NVDA")} for row in hits
+        ],
+        "rows": hits,
+        "ranked": True,
+        "rank_meaning": "metric_name/metric_value are IBKR distance",
+        "sessions": sessions,
+        "provenance": {
+            "screen": "hot_by_opt_volume",
+            "scan_code": "HOT_BY_OPT_VOLUME",
+            "filters": {},
+            "ibkr_rows": 30,
+            "kept": 30,
+            "empty": False,
+        },
+    }
+    public = _scan_public_payload(payload)
+    assert "sessions" not in public
+    assert "sessions" in payload
+    assert all("session" not in row for row in public["hits"] if isinstance(row, dict))
+    kept = json.loads(_clip_scan(payload))
+    assert "sessions" not in kept
+    assert kept.get("_clipped") != "hits"
+    assert "_dropped" not in kept
+    assert len(kept["hits"]) == 30
+
+
+def test_scan_out_from_snap_symbols_job_does_not_keep_prior_screen():
+    from abcxauto.brain_tools import _scan_out_from_snap, _scan_public_payload
+
+    snap = {
+        "scan_arenas": ["hot_by_opt_volume"],
+        "scan_provenance": {
+            "screen": "hot_by_opt_volume",
+            "scan_code": "HOT_BY_OPT_VOLUME",
+            "filters": {},
+            "ibkr_rows": 30,
+            "kept": 30,
+            "empty": False,
+        },
+        "scan_hits": {
+            "source": "ibkr",
+            "arena": "hot_by_opt_volume",
+            "scan_code": "HOT_BY_OPT_VOLUME",
+            "ranked": True,
+            "rank_meaning": "metric_name/metric_value are IBKR distance",
+            "quoted": 0,
+            "rows": [_ranked_hit(0) | {"symbol": "INTC"}],
+        },
+    }
+    last_ok = {
+        "ok": True,
+        "source": "symbols",
+        "arena": None,
+        "screen": None,
+        "scan_code": None,
+        "symbols": ["NVDA", "GNRC"],
+        "hits": [
+            {"symbol": "NVDA", "last": 177.0, "on_book": False},
+            {"symbol": "GNRC", "last": 180.0, "on_book": False},
+        ],
+        "ranked": False,
+        "rank_meaning": "not ranked",
+        "criteria": {"symbols": ["NVDA", "GNRC"]},
+        "quoted": 2,
+        "thin": False,
+        "empty": False,
+    }
+    out = _scan_out_from_snap(snap, {}, last_ok=last_ok)
+    out["sessions"] = {
+        "NVDA": {"size": {"qty": 3307}},
+        "GNRC": {"size": {"qty": 15398}},
+    }
+    public = _scan_public_payload(out)
+    assert "sessions" not in public
+    assert public.get("screen") != "hot_by_opt_volume"
+    assert (public.get("provenance") or {}).get("screen") != "hot_by_opt_volume"
+    assert public.get("rank_meaning") == "not ranked"
+    assert public.get("ranked") is not True
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("stub_agent_loop_import")
+async def test_scan_symbols_header_is_this_job_not_prior_screen(monkeypatch):
+    async def _fake_scan(**kw):
+        asked = [str(s).upper() for s in (kw.get("symbols") or []) if s]
+        if asked:
+            return {
+                "ok": True,
+                "source": "symbols",
+                "arena": None,
+                "screen": None,
+                "scan_code": None,
+                "symbols": asked,
+                "hits": [
+                    {
+                        "symbol": s,
+                        "last": 177.0,
+                        "open": 176.5,
+                        "open_gap_pct": 0.3,
+                        "on_book": False,
+                    }
+                    for s in asked
+                ],
+                "applied": {},
+                "ranked": False,
+                "quoted": len(asked),
+                "thin": False,
+                "empty": False,
+                "criteria": {"symbols": asked},
+                "rank_meaning": "not ranked",
+            }
+        return {
+            "ok": True,
+            "source": "ibkr",
+            "arena": "hot_by_opt_volume",
+            "screen": "hot_by_opt_volume",
+            "scan_code": "HOT_BY_OPT_VOLUME",
+            "symbols": ["INTC"],
+            "hits": [_ranked_hit(0) | {"symbol": "INTC", "skip_class": ""}],
+            "ranked": True,
+            "quoted": 0,
+            "thin": True,
+            "empty": False,
+            "provenance": {
+                "screen": "hot_by_opt_volume",
+                "scan_code": "HOT_BY_OPT_VOLUME",
+                "filters": {},
+                "ibkr_rows": 1,
+                "kept": 1,
+                "empty": False,
+            },
+            "rank_meaning": "metric_name/metric_value are IBKR distance",
+        }
+
+    async def _no_tags(_conn):
+        return frozenset()
+
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.universe.verified_industry_tags", _no_tags)
+    world = _world()
+    snap = {"scan_flush": True, "session": {"status": "regular"}}
+    turn = BrainTurn()
+    first = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "hot_by_opt_volume"},
+            connector=None,
+            world=world,
+            snap=snap,
+            turn=turn,
+        )
+    )
+    assert first["ranked"] is True
+    assert first["provenance"]["screen"] == "hot_by_opt_volume"
+    assert "sessions" not in first
+    second = json.loads(
+        await _run_tool(
+            "scan",
+            {"symbols": ["NVDA", "GNRC"]},
+            connector=None,
+            world=world,
+            snap=snap,
+            turn=turn,
+        )
+    )
+    assert "sessions" not in second
+    assert second.get("screen") != "hot_by_opt_volume"
+    assert (second.get("provenance") or {}).get("screen") != "hot_by_opt_volume"
+    assert second.get("rank_meaning") == "not ranked"
+    assert second.get("ranked") is not True
+    for row in second.get("hits") or []:
+        if isinstance(row, dict):
+            assert "session" not in row
+            assert "news" not in (row.get("mda") or {})
 

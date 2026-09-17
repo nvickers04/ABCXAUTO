@@ -352,12 +352,45 @@ async def test_criteria_scan_deleted_screen_does_not_quote(monkeypatch):
 def test_row_gap_pct_maps_distance_change_open_gap():
     from abcxauto.opportunity_scan import row_gap_pct
 
-    assert row_gap_pct({"distance": "8.2%"}) == pytest.approx(8.2)
-    assert row_gap_pct({"change_pct": -3.5}) == pytest.approx(-3.5)
+    assert row_gap_pct(
+        {
+            "distance": "135.5",
+            "metric_name": "option_volume",
+            "scan_code": "HOT_BY_OPT_VOLUME",
+        }
+    ) is None
+    assert row_gap_pct(
+        {
+            "metric_name": "option_volume",
+            "metric_value": 135.5,
+            "gap_pct": 135.5,
+            "scan_code": "HOT_BY_OPT_VOLUME",
+        }
+    ) is None
+    assert row_gap_pct({"distance": "8.2%"}) is None
+    assert row_gap_pct({"change_pct": -3.5}) is None
+    assert row_gap_pct({"change": 4.25}) is None
     assert row_gap_pct({"open_gap_pct": -6.5}) == pytest.approx(-6.5)
     assert row_gap_pct({"gap%": 1.0, "distance": "9"}) == pytest.approx(1.0)
-    assert row_gap_pct({"change": 4.25}) == pytest.approx(4.25)
-    assert row_gap_pct({"distance": "n/a"}) is None
+    assert row_gap_pct(
+        {
+            "metric_name": "option_volume",
+            "metric_value": 135.5,
+            "open_gap_pct": 31.06,
+            "scan_code": "HOT_BY_OPT_VOLUME",
+        }
+    ) == pytest.approx(31.06)
+    assert row_gap_pct({"ibkr": {"open_gap_pct": -7.1}}) == pytest.approx(-7.1)
+    assert row_gap_pct({"quote": {"gap%": 2.5}}) == pytest.approx(2.5)
+    assert row_gap_pct(
+        {"distance": "8.2%", "scan_code": "HIGH_OPEN_GAP"}
+    ) == pytest.approx(8.2)
+    assert row_gap_pct(
+        {"distance": "n/a", "scan_code": "HIGH_OPEN_GAP"}
+    ) is None
+    assert row_gap_pct(
+        {"distance": "-4.1", "scan_code": "TOP_OPEN_PERC_LOSE"}
+    ) == pytest.approx(-4.1)
 
 
 def test_thin_ranked_row_carries_skip_class_and_named_metric():
@@ -391,6 +424,41 @@ def test_thin_ranked_row_carries_skip_class_and_named_metric():
     assert "bid" not in row
     assert "gap%" not in row
     assert set(row) <= RANKED_ROW_KEYS
+
+
+def test_hot_by_opt_volume_distance_is_not_gap_pct():
+    from abcxauto.opportunity_scan import row_gap_pct, thin_ranked_row
+
+    noisy = {
+        "symbol": "INIO",
+        "rank": 0,
+        "distance": "135.5",
+        "metric_name": "option_volume",
+        "metric_value": 135.5,
+        "scan_code": "HOT_BY_OPT_VOLUME",
+    }
+    real = {
+        "symbol": "ABCD",
+        "rank": 1,
+        "distance": "80.0",
+        "open_gap_pct": 31.06,
+        "metric_name": "option_volume",
+        "metric_value": 80.0,
+        "scan_code": "HOT_BY_OPT_VOLUME",
+    }
+    assert row_gap_pct(noisy) is None
+    assert row_gap_pct(real) == pytest.approx(31.06)
+
+    thin_noisy = thin_ranked_row(noisy, scan_code="HOT_BY_OPT_VOLUME")
+    thin_real = thin_ranked_row(real, scan_code="HOT_BY_OPT_VOLUME")
+    assert thin_noisy["metric_name"] == "option_volume"
+    assert thin_noisy["metric_value"] == pytest.approx(135.5)
+    assert "gap_pct" not in thin_noisy
+    assert thin_real["metric_name"] == "option_volume"
+    assert thin_real["metric_value"] == pytest.approx(80.0)
+    assert thin_real["gap_pct"] == pytest.approx(31.06)
+    assert row_gap_pct(thin_noisy) is None
+    assert row_gap_pct(thin_real) == pytest.approx(31.06)
 
 
 def test_thin_ranked_row_labels_levered_etf():
@@ -497,7 +565,7 @@ async def test_criteria_scan_arena_emits_thin_gap_rows(monkeypatch):
         assert "distance" not in row
         assert "open_gap_pct" not in row
     assert out["hits"][0]["symbol"] == "NVDA"
-    assert out["hits"][0]["gap_pct"] == pytest.approx(12.4)
+    assert "gap_pct" not in out["hits"][0]
     assert out["hits"][0]["metric_name"] == "percent_change"
     assert out["hits"][0]["metric_value"] == pytest.approx(12.4)
     assert out["hits"][0]["rank"] == 0

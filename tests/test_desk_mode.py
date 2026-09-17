@@ -250,6 +250,46 @@ def test_spoken_ticket_without_send_works_flat_and_does_not_mill_color():
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
+def test_spoken_ticket_without_send_hold_lot_is_not_unpaid():
+    """Describing an open lot is not an unpaid ticket; a new named ticket still is."""
+    from abcxauto.desk_mode import (
+        look_spoken_ticket_without_send,
+        look_unpaid_ticket,
+        spoken_ticket_without_send,
+    )
+
+    hold = "NVDA long 11 still protected. no second name."
+    nvda = [{"symbol": "NVDA"}]
+    assert not spoken_ticket_without_send(
+        hold, positions=nvda, sends=0, tool_trace=["book", "quote"]
+    )
+    payload = {
+        "rationale": hold,
+        "sends": 0,
+        "positions": nvda,
+        "tool_trace": ["book", "quote"],
+    }
+    assert not look_spoken_ticket_without_send(payload)
+    assert not look_unpaid_ticket(payload)
+
+    ticket = "INTC market_bracket LONG 10 stop 35 target 42"
+    assert spoken_ticket_without_send(ticket, sends=0)
+    assert spoken_ticket_without_send(ticket, positions=nvda, sends=0)
+    assert spoken_ticket_without_send(
+        ticket, positions=_ibit_xlf_positions(), sends=0
+    )
+    assert look_spoken_ticket_without_send(
+        {"rationale": ticket, "sends": 0, "positions": nvda}
+    )
+    assert look_unpaid_ticket({"rationale": ticket, "sends": 0, "positions": []})
+    assert look_unpaid_ticket(
+        {"rationale": ticket, "sends": 0, "positions": _ibit_xlf_positions()}
+    )
+    assert spoken_ticket_without_send("buy AMZN", positions=nvda, sends=0)
+    assert spoken_ticket_without_send("AMZN long", positions=nvda, sends=0)
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
 # Live desk oracle (last ~200KB): stream silent=14, synthesize=13, send=0.
 # Tip: [think] Let me synthesize a trading plan/the picture → prose → often
 # names a ticket → [stream silent] with zero send. Soft-spin: keep alive,

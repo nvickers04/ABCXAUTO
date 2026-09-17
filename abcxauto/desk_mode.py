@@ -260,8 +260,10 @@ def rth_flat_keep_looking(
 
 # Spoken CLOSE/EXIT on an open lot is not a finished RTH look when send never
 # ran. A named ORDER EXAMPLES ticket with zero send is the same class even
-# when the book is flat. Detection is code (say + sends==0 + tool_trace),
-# not a prompt sermon. Close/exit+lots stays its own path; ticket names widen it.
+# when the book is flat. Hold speech that only names open lots is not a
+# ticket — those names need a real ORDER EXAMPLES structure to re-enter.
+# Detection is code (say + positions + sends==0 + tool_trace), not a prompt
+# sermon. Close/exit+lots stays its own path; ticket names widen it.
 _CLOSE_OR_EXIT_RE = re.compile(
     r"\b(?:close|closing|closed|exit|exiting|exited)\b",
     re.IGNORECASE,
@@ -564,17 +566,41 @@ def _captured_ticker(match: re.Match[str]) -> str:
     return ""
 
 
+def _book_ticker_set(
+    positions: list[Any] | None,
+    open_lots: list[Any] | None,
+) -> set[str]:
+    """Tickers already on the book (position symbols + open-lot labels)."""
+    held: set[str] = set()
+    for row in positions or []:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("symbol") or "").strip().upper()
+        if _is_spoken_ticker(key):
+            held.add(key)
+    for tok in _lot_name_tokens(positions, open_lots):
+        key = str(tok or "").strip().upper()
+        if _is_spoken_ticker(key):
+            held.add(key)
+    return held
+
+
 def spoken_ticket_without_send(
     text: str = "",
     *,
+    positions: list[Any] | None = None,
+    open_lots: list[Any] | None = None,
     sends: int = 0,
     tool_trace: list[Any] | None = None,
 ) -> bool:
     """True when the say names a concrete ORDER EXAMPLES ticket and send never ran.
 
-    Flat book is enough — open lots are not required. CLOSE/EXIT+lots stays
-    on ``spoken_close_without_send``. A send tool call — filled or
-    clerk-blocked — is a send. Illegal STK still has to attempt send.
+    Flat book is enough — open lots are not required. Describing existing
+    lots is not an unpaid ticket: if every spoken intent ticker is already
+    on the book, only a real ORDER EXAMPLES structure re-enters.
+    CLOSE/EXIT+lots stays on ``spoken_close_without_send``. A send tool
+    call — filled or clerk-blocked — is a send. Illegal STK still has to
+    attempt send.
     """
     if _had_send_tool(sends, tool_trace):
         return False
@@ -585,19 +611,28 @@ def spoken_ticket_without_send(
         return False
     if _ticket_structure_pattern().search(blob):
         return True
+    held = _book_ticker_set(positions, open_lots)
     for m in _SYM_INTENT_RE.finditer(blob):
-        if _captured_ticker(m):
+        tok = _captured_ticker(m)
+        if tok and tok not in held:
             return True
     for m in _SYM_OPTION_RE.finditer(blob):
-        if _captured_ticker(m):
+        tok = _captured_ticker(m)
+        if tok and tok not in held:
             return True
     return False
 
 
 def look_spoken_ticket_without_send(payload: dict[str, Any] | None) -> bool:
-    """``_rearm_after_think`` payload: rationale/say + sends + tool_trace."""
-    text, sends, _positions, _lots, trace = _look_payload_parts(payload)
-    return spoken_ticket_without_send(text, sends=sends, tool_trace=trace)
+    """``_rearm_after_think`` payload: rationale/say + positions + sends + tool_trace."""
+    text, sends, positions, lots, trace = _look_payload_parts(payload)
+    return spoken_ticket_without_send(
+        text,
+        positions=positions,
+        open_lots=lots,
+        sends=sends,
+        tool_trace=trace,
+    )
 
 
 def look_unpaid_ticket(payload: dict[str, Any] | None) -> bool:

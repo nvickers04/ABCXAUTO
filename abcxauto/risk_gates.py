@@ -687,10 +687,11 @@ def defined_risk_concentration(
     """Defined max-loss of the open book, by symbol and by underlying.
 
     Reuses ``portfolio_loss.defined_max_loss_usd`` — width−credit for
-    spreads, stop distance for brackets, premium×100 for long option /
-    covered-call geometry that function already prices. Notional is not
-    used. A lot that cannot be priced is ``unknown``; that is never a
-    refuse.
+    spreads, stop distance for brackets / STK last-stop, premium×100 for
+    long option / covered-call geometry that function already prices.
+    Notional is not used. A lot that cannot be priced is ``unknown``;
+    that is never a refuse. Callers paint covering last-stop onto the
+    position copies first (``world_state.attach_covering_last_stops``).
 
     Compact payload for ``day_facts`` (re-billed every later tool call)::
 

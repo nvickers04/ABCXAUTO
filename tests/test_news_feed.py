@@ -126,13 +126,12 @@ async def test_timeout_is_not_empty_success(monkeypatch):
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["NKE"])
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_agent_news([{"symbol": "NKE"}])
-    assert items
-    assert items[0].get("error") == "timed out"
-    assert "unavailable" in str(items[0].get("headline"))
+    assert items == []
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "") for it in items
+    )
+    assert news_hard_miss(items) == "timed out"
     assert client.calls == ["NKE"]
-    text = format_news_for_prompt(items)
-    assert "no headlines" not in text
-    assert "timed out" in text
     assert not _CACHE["items"]
 
 
@@ -152,7 +151,11 @@ async def test_timeout_does_not_retry_into_the_stall(monkeypatch):
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["AG"])
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_agent_news([{"symbol": "AG"}])
-    assert items[0].get("error") == "timed out"
+    assert items == []
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "") for it in items
+    )
+    assert news_hard_miss(items) == "timed out"
     assert client.calls == ["AG"]
     assert hits["n"] == 1
     assert not _CACHE["items"]
@@ -173,8 +176,13 @@ async def test_timeout_does_not_cache_so_next_look_refetches(monkeypatch):
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     first = await fetch_agent_news([{"symbol": "BE"}])
     second = await fetch_agent_news([{"symbol": "BE"}])
-    assert first[0].get("error") == "timed out"
-    assert second[0].get("error") == "timed out"
+    assert first == []
+    assert second == []
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "")
+        for it in first + second
+    )
+    assert news_hard_miss(second) == "timed out"
     assert n["hits"] == 2
 
 
@@ -193,9 +201,10 @@ async def test_slow_source_does_not_eat_a_12s_look(monkeypatch):
     elapsed = time.monotonic() - t0
     assert elapsed < 12.0
     assert elapsed < NEWS_SYMBOL_S + 2.0
-    assert items
-    assert {it.get("error") for it in items} == {"timed out"}
-    assert [it.get("symbol") for it in items] == ["HEI", "WDAY", "GDDY", "SJM", "ROST"]
+    assert items == []
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "") for it in items
+    )
     assert news_hard_miss(items) == "timed out"
     assert client.calls == ["HEI", "WDAY", "GDDY", "SJM", "ROST"]
 
@@ -260,3 +269,107 @@ def test_coalesce_news_replaces_timeout_with_rail_print():
     )
     assert out[0]["headline"] == "HPQ Q3 earnings miss"
     assert not any(it.get("error") for it in out)
+
+
+def test_coalesce_news_timeout_only_is_not_a_headline():
+    out = coalesce_news(
+        [
+            {
+                "symbol": "NVDA",
+                "headline": "(unavailable - timed out)",
+                "error": "timed out",
+            }
+        ],
+        ["NVDA"],
+    )
+    assert out == []
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "") for it in out
+    )
+
+
+def test_coalesce_news_drops_cross_ticker_and_empty_symbol():
+    out = coalesce_news(
+        [
+            {"symbol": "EXXON", "headline": "Exxon posts profit"},
+            {"symbol": "", "headline": "oil patch note"},
+            {"symbol": "NVDA", "headline": "NVDA chip demand"},
+        ],
+        ["NVDA"],
+    )
+    assert [it.get("symbol") for it in out] == ["NVDA"]
+    assert [it.get("headline") for it in out] == ["NVDA chip demand"]
+
+
+def test_coalesce_news_fills_nvda_timeout_from_remembered():
+    remember_headlines([{"symbol": "NVDA", "headline": "NVDA printed"}])
+    out = coalesce_news(
+        [
+            {
+                "symbol": "NVDA",
+                "headline": "(unavailable - timed out)",
+                "error": "timed out",
+            }
+        ],
+        ["NVDA"],
+    )
+    assert [it.get("headline") for it in out] == ["NVDA printed"]
+    assert not any(it.get("error") for it in out)
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "") for it in out
+    )
+
+
+@pytest.mark.asyncio
+async def test_timeout_only_fetch_has_no_unavailable_items(monkeypatch):
+    async def hang(_symbol, _countback):
+        await asyncio.sleep(30)
+        return [{"symbol": "NVDA", "headline": "should not land"}]
+
+    client = _MDA(hang)
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["NVDA"])
+    assert items == []
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "") for it in items
+    )
+    assert news_hard_miss(items) == "timed out"
+
+
+@pytest.mark.asyncio
+async def test_asked_nvda_drops_exxon_and_empty_symbol(monkeypatch):
+    async def junk(_symbol, _countback):
+        return [
+            {"symbol": "EXXON", "headline": "Exxon posts profit"},
+            {"symbol": "", "headline": "oil patch note"},
+            {"symbol": "NVDA", "headline": "NVDA chip demand"},
+        ]
+
+    client = _MDA(junk)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["NVDA"])
+    assert [it.get("symbol") for it in items] == ["NVDA"]
+    assert [it.get("headline") for it in items] == ["NVDA chip demand"]
+    assert not any(
+        str(it.get("symbol") or "").upper() == "EXXON" for it in items
+    )
+    assert not any(not str(it.get("symbol") or "").strip() for it in items)
+
+
+@pytest.mark.asyncio
+async def test_remembered_nvda_fills_timeout_fetch(monkeypatch):
+    async def hang(_symbol, _countback):
+        await asyncio.sleep(30)
+        return [{"symbol": "NVDA", "headline": "should not land"}]
+
+    remember_headlines([{"symbol": "NVDA", "headline": "NVDA printed"}])
+    client = _MDA(hang)
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["NVDA"])
+    assert [it.get("headline") for it in items] == ["NVDA printed"]
+    assert not any(it.get("error") for it in items)
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "") for it in items
+    )

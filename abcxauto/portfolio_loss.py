@@ -293,16 +293,78 @@ def _explicit_max_loss_usd(row: Any) -> float | None:
     return None
 
 
-def defined_max_loss_usd(row: Any) -> float | None:
-    """Prefer structure (width − credit). Else explicit defined max-loss.
+def _sec_of(row: Any) -> str:
+    if not isinstance(row, dict):
+        return "STK"
+    return str(
+        row.get("secType") or row.get("sec_type") or row.get("sec") or "STK"
+    ).upper()
 
-    Mid / marketValue / last are never evidence. None = unreadable.
+
+def _first_positive(src: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        n = _finite(src.get(key))
+        if n is not None and n > 0:
+            return n
+    return None
+
+
+def _stk_stop_max_loss_usd(row: Any) -> float | None:
+    """STK / ETF last-stop dollars: qty × |avg_or_last − stop|.
+
+    Mid / mark / marketValue are not evidence. last is only the entry
+    proxy when avg/entry is missing. None when no covering stop (or no
+    qty / no avg-or-last) — a fact, never a refuse.
+    """
+    if not isinstance(row, dict):
+        return None
+    sec = _sec_of(row)
+    if not (sec.startswith("STK") or sec in ("ETF", "")):
+        return None
+    params = _params_of(row)
+    stop = _first_positive(
+        row, ("stop", "stop_price", "aux_price", "auxPrice", "stopPrice")
+    )
+    if stop is None:
+        stop = _first_positive(
+            params, ("stop", "stop_price", "aux_price", "auxPrice", "stopPrice")
+        )
+    if stop is None:
+        return None
+    qty = _qty_of(params)
+    if qty is None or qty == 0:
+        return 0.0 if qty == 0 else None
+    entry = _first_positive(
+        row, ("entry_price", "avg", "avgCost", "avg_cost", "averageCost")
+    )
+    if entry is None:
+        entry = _first_positive(
+            params, ("entry_price", "avg", "avgCost", "avg_cost", "averageCost")
+        )
+    if entry is None:
+        entry = _first_positive(row, ("last", "market_price", "marketPrice"))
+    if entry is None:
+        entry = _first_positive(params, ("last", "market_price", "marketPrice"))
+    if entry is None:
+        return None
+    return abs(float(entry) - float(stop)) * qty
+
+
+def defined_max_loss_usd(row: Any) -> float | None:
+    """Prefer structure (width − credit). Else STK last-stop distance.
+
+    Else explicit defined max-loss. Mid / marketValue are never evidence.
+    last is only the STK entry proxy versus a covering stop. None =
+    unreadable (unknown fact, not a refuse).
     """
     if not isinstance(row, dict):
         return None
     structured = _structure_max_loss_usd(row)
     if structured is not None:
         return structured
+    stk = _stk_stop_max_loss_usd(row)
+    if stk is not None:
+        return stk
     return _explicit_max_loss_usd(row)
 
 
@@ -438,7 +500,15 @@ def book_rows_from_context(
         or getattr(world, "open_orders", None)
         or []
     )
-    return _dict_rows(lots), _dict_rows(working)
+    lots = _dict_rows(lots)
+    working = _dict_rows(working)
+    try:
+        from abcxauto.world_state import attach_covering_last_stops
+
+        lots = attach_covering_last_stops(lots, working)
+    except Exception:
+        logger.debug("covering last-stop attach failed", exc_info=True)
+    return lots, working
 
 
 def portfolio_usd_check(

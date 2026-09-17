@@ -209,14 +209,18 @@ _FAT_SCAN_KEYS = frozenset(
         "quote_source",
     }
 )
-# Prefer a true open-gap when already on the row; else change; else IBKR distance.
-_GAP_SOURCE_KEYS = (
-    "gap%",
-    "open_gap_pct",
-    "gap_pct",
-    "change_pct",
-    "change",
-    "distance",
+# Real open-gap fields only. Scanner distance / generic gap_pct / change are
+# not an open gap unless universe.scan_metric_name says this screen is a gap.
+_OPEN_GAP_KEYS = ("gap%", "open_gap_pct")
+_GAP_SCREEN_DISTANCE_KEYS = ("gap_pct", "distance", "metric_value")
+_GAP_METRIC_NAMES = frozenset({"open_gap", "open_percent_change"})
+_GAP_SCAN_CODES = frozenset(
+    {
+        "HIGH_OPEN_GAP",
+        "LOW_OPEN_GAP",
+        "TOP_OPEN_PERC_GAIN",
+        "TOP_OPEN_PERC_LOSE",
+    }
 )
 THIN_RANK_MEANING = (
     "metric_name/metric_value are IBKR distance|benchmark for this scanCode; "
@@ -249,23 +253,87 @@ def parse_scan_gap(raw: Any) -> float | None:
     return val if val == val else None
 
 
-def row_gap_pct(row: dict[str, Any] | None) -> float | None:
-    """Map already-on-row distance / change / open_gap into one number."""
-    if not isinstance(row, dict):
-        return None
-    for key in _GAP_SOURCE_KEYS:
-        val = parse_scan_gap(row.get(key))
+def _first_gap(src: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        val = parse_scan_gap(src.get(key))
         if val is not None:
             return val
+    return None
+
+
+def _scan_row_metric_name(row: dict[str, Any]) -> str:
+    code = str(row.get("scan_code") or row.get("scanCode") or "").strip().upper()
+    try:
+        from abcxauto.universe import scan_metric_name
+
+        named = scan_metric_name(code)
+        if named:
+            return str(named).strip()
+    except Exception:
+        pass
+    return str(row.get("metric_name") or "").strip()
+
+
+def _is_open_gap_metric(name: str | None) -> bool:
+    n = str(name or "").strip().lower().replace("-", "_")
+    if not n:
+        return False
+    if n in _GAP_METRIC_NAMES:
+        return True
+    return "gap" in n
+
+
+def _row_is_gap_screen(row: dict[str, Any]) -> bool:
+    """HIGH/LOW_OPEN_GAP, TOP_OPEN_PERC_GAIN/LOSE, or scan_metric_name is a gap."""
+    code = str(row.get("scan_code") or row.get("scanCode") or "").strip().upper()
+    if code in _GAP_SCAN_CODES:
+        return True
+    return _is_open_gap_metric(_scan_row_metric_name(row))
+
+
+def row_gap_pct(row: dict[str, Any] | None) -> float | None:
+    """Return a real open gap, or None.
+
+    Always: ``gap%``, ``open_gap_pct``, or nested ibkr/quote open_gap.
+    Gap screens (HIGH_OPEN_GAP, LOW_OPEN_GAP, TOP_OPEN_PERC_GAIN,
+    TOP_OPEN_PERC_LOSE, or ``universe.scan_metric_name`` in
+    {open_gap, open_percent_change} / name contains ``gap``): IBKR
+    ``distance`` / ``metric_value`` / ``gap_pct`` may be the gap.
+    Non-gap metrics (option_volume, percent_change, volume, …): do not
+    fall through to ``distance``, ``metric_value``, ``change``, or a
+    generic ``gap_pct`` that merely copies that scanner distance.
+    """
+    if not isinstance(row, dict):
+        return None
+    gap = _first_gap(row, _OPEN_GAP_KEYS)
+    if gap is not None:
+        return gap
     for nest_key in ("ibkr", "quote"):
         nest = row.get(nest_key)
-        if not isinstance(nest, dict):
-            continue
-        for key in ("open_gap_pct", "gap_pct", "change_pct", "distance"):
-            val = parse_scan_gap(nest.get(key))
-            if val is not None:
-                return val
-    return None
+        if isinstance(nest, dict):
+            gap = _first_gap(nest, _OPEN_GAP_KEYS)
+            if gap is not None:
+                return gap
+    if _row_is_gap_screen(row):
+        gap = _first_gap(row, _GAP_SCREEN_DISTANCE_KEYS)
+        if gap is not None:
+            return gap
+        for nest_key in ("ibkr", "quote"):
+            nest = row.get(nest_key)
+            if isinstance(nest, dict):
+                gap = _first_gap(nest, ("gap_pct", "distance"))
+                if gap is not None:
+                    return gap
+        return None
+    stored = parse_scan_gap(row.get("gap_pct"))
+    if stored is None:
+        return None
+    # Thin-row slot after a real open_gap was copied. Ignore the lie where
+    # thin_ranked_row used to write the non-gap scanner distance into gap_pct.
+    metric_val = _first_gap(row, ("metric_value", "distance"))
+    if metric_val is not None and stored == metric_val:
+        return None
+    return stored
 
 
 def is_thin_ranked_row(row: Any) -> bool:
@@ -330,7 +398,12 @@ def thin_ranked_row(
         if name:
             out["metric_name"] = name
         out["metric_value"] = metric_val
-    gap = row_gap_pct(row)
+    probe = dict(row)
+    if code:
+        probe["scan_code"] = code
+    if out.get("metric_name"):
+        probe["metric_name"] = out["metric_name"]
+    gap = row_gap_pct(probe)
     if gap is not None:
         out["gap_pct"] = gap
     last = row.get("last")

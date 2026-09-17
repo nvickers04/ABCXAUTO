@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 _CACHE: dict[str, Any] = {"ts": 0.0, "items": [], "symbols": []}
 _CACHE_TTL_S = 90.0
 _UNIVERSE_CAP = 14
+# Last fetch's timeout/error reason. Public lists stay real headlines;
+# news() may copy this onto a sibling error/note.
+_LAST_FETCH_MISS: str | None = None
 
 # Per-symbol prints the What's-happening rail already painted. A 2s MDA
 # stall is not "no headline" when this memory still has the print.
@@ -26,8 +29,10 @@ NEWS_TRIES = 1
 
 
 def reset_news_cache() -> None:
+    global _LAST_FETCH_MISS
     _CACHE.update(ts=0.0, items=[], symbols=[])
     _HEADLINES.clear()
+    _LAST_FETCH_MISS = None
 
 
 def is_real_headline(item: Any) -> bool:
@@ -114,32 +119,31 @@ def coalesce_news(
     items: list[dict] | None,
     symbols: list[str] | None = None,
 ) -> list[dict]:
-    """Keep real prints. A timeout is not no-print when memory has that name."""
+    """Real headlines only. Memory fills a timeout miss; leftovers are not items."""
+    want: set[str] | None = None
+    if symbols is not None:
+        want = {
+            str(s or "").strip().casefold()
+            for s in symbols
+            if str(s or "").strip()
+        }
     real: list[dict] = []
-    misses: list[dict] = []
     have: set[str] = set()
     for it in items or []:
-        if not isinstance(it, dict):
+        if not isinstance(it, dict) or not is_real_headline(it):
             continue
         su = str(it.get("symbol") or "").upper().strip()
-        if is_real_headline(it):
-            real.append(it)
-            if su:
-                have.add(su)
+        if want is not None and su.casefold() not in want:
             continue
-        if it.get("error"):
-            misses.append(it)
+        real.append(it)
+        if su:
+            have.add(su)
     for it in remembered_headlines(symbols):
         su = str(it.get("symbol") or "").upper().strip()
         if su and su not in have:
             real.append(it)
             have.add(su)
-    leftover = [
-        m
-        for m in misses
-        if str(m.get("symbol") or "").upper().strip() not in have
-    ]
-    return _dedupe_headlines(real) + leftover
+    return _dedupe_headlines(real)
 
 
 def _universe(positions: list[dict] | None) -> list[str]:
@@ -189,7 +193,11 @@ def news_hard_miss(items: list[dict] | None) -> str | None:
             continue
         if str(it.get("headline") or "").strip():
             return None
-    return why
+    if why:
+        return why
+    if not items:
+        return _LAST_FETCH_MISS
+    return None
 
 
 def _dedupe_headlines(items: list[dict]) -> list[dict]:
@@ -248,10 +256,13 @@ async def fetch_symbols_news(
     *,
     per_symbol: int = 4,
 ) -> list[dict]:
-    """Headlines for an explicit tape. Timeout/error is a miss item, not empty.
+    """Headlines for an explicit tape. Public list is real prints only.
 
     Parallel, one try, per-symbol cap. A slow MDA must not eat a 12s look.
+    A timeout is a sibling miss, not a headline item.
     """
+    global _LAST_FETCH_MISS
+    _LAST_FETCH_MISS = None
     out: list[str] = []
     for raw in symbols or []:
         su = str(raw or "").upper().strip()
@@ -282,11 +293,14 @@ async def fetch_symbols_news(
     except Exception:
         logger.exception("fetch_symbols_news failed")
         cached = remembered_headlines(out)
-        return cached or [_miss(s, "error") for s in out]
+        combined = list(cached) if cached else [_miss(s, "error") for s in out]
+        _LAST_FETCH_MISS = news_hard_miss(combined)
+        return coalesce_news(combined, out)
 
     remember_headlines(items)
-    unique = coalesce_news(_dedupe_headlines(items) + misses, out)
-    return unique
+    combined = _dedupe_headlines(items) + misses
+    _LAST_FETCH_MISS = news_hard_miss(combined)
+    return coalesce_news(combined, out)
 
 
 async def fetch_agent_news(
@@ -297,8 +311,8 @@ async def fetch_agent_news(
 ) -> list[dict]:
     """Fetch / cache headlines for open-book underlyings.
 
-    A timeout or transport miss is returned as an ``error`` item and is not
-    cached. Empty headlines from a completed fetch stay empty.
+    A timeout or transport miss is not cached and is not a headline item.
+    Empty headlines from a completed fetch stay empty.
     """
     now = time.monotonic()
     symbols = _universe(positions)
@@ -317,7 +331,9 @@ async def fetch_agent_news(
     unique = await fetch_symbols_news(symbols, per_symbol=per_symbol)
     remember_headlines(unique)
     unique = coalesce_news(unique, symbols)
-    if any(isinstance(it, dict) and it.get("error") for it in unique):
+    if _LAST_FETCH_MISS or any(
+        isinstance(it, dict) and it.get("error") for it in unique
+    ):
         return unique
 
     _CACHE.update(ts=now, items=unique, symbols=symbols)
