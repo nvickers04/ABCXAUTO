@@ -125,7 +125,6 @@ def test_slim_positions_follows_open_lots_not_tape_names(monkeypatch):
         raise AssertionError("book must not seed tape / universe names")
 
     monkeypatch.setattr("abcxauto.opportunity_scan.tape_seed_symbols", boom)
-    monkeypatch.setattr("abcxauto.universe.legal_symbols", boom)
 
     mixed = [
         {"symbol": "SPY"},

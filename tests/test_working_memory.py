@@ -148,7 +148,6 @@ async def test_note_tool_read_and_write(tmp_path, monkeypatch):
 
 def test_book_root_shard_not_world_facts(tmp_path, monkeypatch):
     _wm(tmp_path, monkeypatch)
-    monkeypatch.setattr("abcxauto.universe.legal_symbols", lambda **_k: ["SPY"])
     empty = _book_payload(_world())
     assert "working_memory" not in empty.get("world", {})
     assert "working_thesis" not in empty.get("world", {})
