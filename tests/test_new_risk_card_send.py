@@ -122,7 +122,6 @@ def _paper_no_risk_gates(monkeypatch) -> None:
             "risk_gates_enabled": False,
             "defined_risk_only": False,
             "risk_posture": "balanced",
-            "max_arena_concentration_pct": 0,
             "cash_only": False,
             "daily_loss_limit_pct": 0,
         }

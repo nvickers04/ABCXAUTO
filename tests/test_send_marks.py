@@ -258,7 +258,6 @@ async def test_execute_proposal_journals_nbbo_vs_paper_mid_fill(monkeypatch):
             **{
                 **base.__dict__,
                 "risk_gates_enabled": False,
-                "max_arena_concentration_pct": 0,
                 "defined_risk_only": False,
                 "cash_only": False,
                 "daily_loss_limit_pct": 0,
