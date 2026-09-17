@@ -188,7 +188,6 @@ async def test_execute_ticket_refuses_thin_idea(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     # A promoted naked entry becomes new risk; the card gate has its own suite.
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
@@ -250,7 +249,6 @@ def _stub_thin_send(monkeypatch) -> list[dict]:
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -492,7 +490,6 @@ async def test_execute_ticket_does_not_fill_omitted_fields_from_hunt_sketch(monk
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -676,7 +673,6 @@ async def test_opening_market_bracket_needs_a_real_card_then_reaches_geometry(mo
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -781,7 +777,6 @@ async def test_close_and_cancel_without_card_still_send(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = _flat_world(
         net_liquidation=37000.0,
         flat=False,
@@ -863,7 +858,6 @@ async def test_execute_ticket_without_session_does_not_invent_a_candles_gate(mon
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -944,7 +938,6 @@ async def test_non_session_card_may_send_in_rth(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1006,7 +999,6 @@ async def test_research_session_execute_ticket_blocks_send(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = WorldState(
         cycle=1,
         session_status="premarket",
@@ -1068,7 +1060,6 @@ async def test_execute_ticket_does_not_invent_a_hold_above_open_gate(monkeypatch
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1142,7 +1133,6 @@ async def test_execute_ticket_does_not_invent_a_gap_floor_gate(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1216,7 +1206,6 @@ async def test_execute_ticket_does_not_invent_a_card_price_floor_gate(monkeypatc
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1288,7 +1277,6 @@ async def test_execute_ticket_does_not_invent_a_tight_spread_gate(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1422,7 +1410,6 @@ async def test_execute_ticket_refuses_mda_scan_last_for_geometry(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -1515,7 +1502,6 @@ async def test_execute_ticket_does_not_invent_a_no_add_gate(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1587,7 +1573,6 @@ async def test_execute_ticket_blocks_new_risk_on_a_price_hint(monkeypatch):
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     world = WorldState(
         cycle=1,
         session_status="regular",
@@ -1652,7 +1637,6 @@ async def test_execute_ticket_blocks_when_one_share_blows_card_risk(monkeypatch)
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(
@@ -1724,7 +1708,6 @@ async def test_execute_ticket_size_pct_nl_is_not_a_card_one_pct_refuse(monkeypat
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     monkeypatch.setattr(
         "abcxauto.agent_loop.get_config",
         lambda: SimpleNamespace(

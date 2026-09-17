@@ -70,7 +70,6 @@ async def test_snapshot_positions_returns_broker_rows_only(monkeypatch):
     connector = MagicMock()
     connector.get_positions = AsyncMock(return_value=list(broker))
     monkeypatch.setattr("abcxauto.opportunity_scan.tape_seed_symbols", _tape_seed_boom)
-    monkeypatch.setattr("abcxauto.universe.legal_symbols", _tape_seed_boom)
 
     rows = await snapshot_positions(connector)
     assert rows == broker
@@ -84,7 +83,6 @@ async def test_snapshot_positions_empty_broker_stays_empty(monkeypatch):
     connector = MagicMock()
     connector.get_positions = AsyncMock(return_value=[])
     monkeypatch.setattr("abcxauto.opportunity_scan.tape_seed_symbols", _tape_seed_boom)
-    monkeypatch.setattr("abcxauto.universe.legal_symbols", _tape_seed_boom)
 
     rows = await snapshot_positions(connector)
     assert rows == []

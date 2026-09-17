@@ -274,7 +274,6 @@ def _stub_overlay_send(monkeypatch) -> list[dict]:
         return {"status": "ok"}
 
     monkeypatch.setattr("abcxauto.agent_loop.send_action", capture)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
     monkeypatch.setattr(
         "abcxauto.thin_rth_kill_look.kill_look_send_block",
         lambda *_a, **_k: None,

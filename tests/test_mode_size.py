@@ -149,8 +149,6 @@ async def test_execute_ticket_explore_clamps_12pct_when_paper_gates_off(monkeypa
     monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.send.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-
     sent: list[dict] = []
 
     async def capture(action, _conn):
@@ -480,8 +478,6 @@ async def test_execute_ticket_named_vertical_not_blocked_by_size_pct_nl_shadow(
     from abcxauto.look_snapshot import begin_look, record_look_tool
 
     _arm_shadow_cap_max_risk_off()
-    monkeypatch.setattr("abcxauto.universe.is_legal_symbol", lambda _s: True)
-
     sent: list[dict] = []
 
     async def capture(action, _conn):
