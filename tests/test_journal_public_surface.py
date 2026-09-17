@@ -122,6 +122,15 @@ _JOURNAL_METHODS = frozenset(
         "invalidate_note",
         "record_code_note",
         "notes_pointer",
+        "write_card",
+        "invalidate_card",
+        "get_card",
+        "get_cards",
+        "list_cards",
+        "cards_pointer",
+        "resolve_card",
+        "link_card",
+        "pnl_by_card",
     }
 )
 
