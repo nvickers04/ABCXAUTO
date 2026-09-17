@@ -1760,10 +1760,6 @@ async def test_option_quote_batches_contracts(monkeypatch):
             return {"delta": 0.2, "bid": 9.9, "ask": 10.1}
 
     monkeypatch.setattr("abcxauto.marketdata.client.get_marketdata_client", lambda: MDA())
-    monkeypatch.setattr(
-        "abcxauto.universe.legal_symbols",
-        lambda **_k: ["SPY", "QQQ"],
-    )
     out = json.loads(
         await _run_tool(
             "option_quote",
@@ -1946,7 +1942,6 @@ async def test_quote_batch_stashes_each_symbol():
 def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
     from abcxauto.brain import _book_payload
 
-    monkeypatch.setattr("abcxauto.universe.legal_symbols", lambda **_k: ["SPY", "QQQ"])
     blob = _book_payload(_world(ibkr_live_quotes={"SPY": 501.0}))
     assert isinstance(blob["world"], dict)
     assert blob["world"]["session"] == "regular"
@@ -1989,7 +1984,6 @@ def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
 def test_book_payload_drops_day_aliases_and_empty_score_windows(monkeypatch):
     from abcxauto.brain import _book_payload
 
-    monkeypatch.setattr("abcxauto.universe.legal_symbols", lambda **_k: ["SPY"])
     blob = _book_payload(_world())
     day = blob["day"]
     assert "ibkr_daily_pnl" in day
@@ -2020,7 +2014,6 @@ def test_scan_public_payload_drops_duplicate_rows():
 def test_book_lists_full_capacity(monkeypatch):
     from abcxauto.brain import _book_payload
 
-    monkeypatch.setattr("abcxauto.universe.legal_symbols", lambda **_k: ["SPY"])
     positions = [
         {
             "symbol": "SPY",
@@ -3026,7 +3019,10 @@ def test_self_tune_tool_is_flat():
     assert "session_look_cap" in props
     assert "size_pct_nl" in props
     assert "max_peak_drawdown_pct" in props
-    assert "enabled_arenas" in props
+    assert "enabled_arenas" not in props
+    assert "custom_symbols" not in props
+    assert "exclude_symbols" not in props
+    assert "regime" not in props
     assert "controls" not in props
     assert "params" not in props
     desc = str(getattr(_tool_fn("self_tune"), "description", "") or "")
@@ -3050,7 +3046,6 @@ async def test_self_tune_tool_applies_flat_knobs(monkeypatch):
         "self_tune",
         {
             "size_pct_nl": 3.0,
-            "enabled_arenas": ["index_etfs"],
             "rationale": "cut size",
         },
         connector=None,
@@ -3061,7 +3056,7 @@ async def test_self_tune_tool_applies_flat_knobs(monkeypatch):
     data = json.loads(raw)
     assert data["status"] == "ok"
     assert seen["params"]["size_pct_nl"] == 3.0
-    assert seen["params"]["enabled_arenas"] == ["index_etfs"]
+    assert "enabled_arenas" not in seen["params"]
     assert "controls" not in seen["params"]
     assert seen["rationale"] == "cut size"
     assert turn.last_strat == "self_tune"
@@ -5297,4 +5292,303 @@ async def test_silent_grok_tip_wall_clock_aborts_without_stop_empty(monkeypatch)
     assert turn.trailing_empty_grok is False
     assert g.chat is live
     assert live.n == 1
+
+
+def test_scan_and_candle_and_right_are_real_enums():
+    from abcxauto.universe import known_scan_codes, known_screen_keys
+
+    scan = _tool_props("scan")
+    assert scan["arena"]["enum"] == known_screen_keys()
+    assert scan["scan_code"]["enum"] == known_scan_codes()
+    assert "most_active" in scan["arena"]["enum"]
+    assert "MOST_ACTIVE" in scan["scan_code"]["enum"]
+    candles = _tool_props("candles")
+    assert candles["resolution"]["enum"] == ["D", "15", "5", "60"]
+    right = _tool_props("option_quote")["right"]
+    assert right["enum"] == ["C", "P"]
+    assert "stock_type" in scan
+    assert scan["stock_type"]["enum"] == ["CORP", "ETF", "both"]
+
+
+def test_recall_description_matches_write_ops():
+    fn = _tool_fn("recall")
+    desc = str(getattr(fn, "description") or "").lower()
+    assert "fetch only" not in desc
+    assert "write" in desc
+    assert "invalidate" in desc
+
+
+def test_owned_files_have_no_watchlist_prose():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for rel in (
+        "abcxauto/brain_tools.py",
+        "abcxauto/tool_args.py",
+        "abcxauto/think_stream.py",
+    ):
+        text = (root / rel).read_text(encoding="utf-8").lower()
+        assert "watchlist" not in text, rel
+        assert "legal_symbols" not in text, rel
+        assert "enabled_arenas" not in text, rel
+
+
+def _ranked_hit(i: int) -> dict:
+    return {
+        "symbol": f"S{i:02d}",
+        "rank": i,
+        "screen": "most_active",
+        "scan_code": "MOST_ACTIVE",
+        "metric_name": "volume",
+        "metric_value": 1_000_000 + i * 1000,
+        "gap_pct": round(-1.25 - i * 0.03, 3),
+        "skip_class": "" if i % 8 else "levered",
+        "source": "ibkr",
+    }
+
+
+def _news_item(i: int) -> dict:
+    sym = f"S{i % 8:02d}"
+    return {
+        "symbol": sym,
+        "headline": (
+            f"{sym} prints a catalyst headline {i:02d} with enough text "
+            "to look like a delayed MDA row the model would actually see."
+        ),
+        "source": "mda",
+        "freshness": "delayed_15m",
+        "published": "2026-09-17T12:00:00Z",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("stub_agent_loop_import")
+async def test_scan_payload_keeps_ranked_keys_and_provenance(monkeypatch):
+    from abcxauto.opportunity_scan import RANKED_ROW_KEYS
+
+    ranked = _ranked_hit(0)
+    ranked["symbol"] = "NVDA"
+    ranked["skip_class"] = ""
+    prov = {
+        "screen": "top_gainers",
+        "scan_code": "TOP_PERC_GAIN",
+        "filters": {"above_price": 5.0},
+        "ibkr_rows": 30,
+        "kept": 1,
+        "empty": False,
+    }
+
+    async def _fake_scan(**_kw):
+        return {
+            "ok": True,
+            "source": "ibkr",
+            "arena": "top_gainers",
+            "screen": "top_gainers",
+            "scan_code": "TOP_PERC_GAIN",
+            "symbols": ["NVDA"],
+            "hits": [dict(ranked)],
+            "applied": {"above_price": 5.0},
+            "ranked": True,
+            "quoted": 0,
+            "thin": True,
+            "empty": False,
+            "provenance": prov,
+            "rank_meaning": "metric_name/metric_value are IBKR distance",
+        }
+
+    async def _no_tags(_conn):
+        return frozenset()
+
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.universe.verified_industry_tags", _no_tags)
+    data = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "top_gainers", "scan_code": "TOP_PERC_GAIN"},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["ok"] is True
+    hit = data["hits"][0]
+    for key in RANKED_ROW_KEYS:
+        if key in ("last", "volume", "market_cap", "stock_type"):
+            continue
+        assert key in hit, key
+    assert hit["skip_class"] == ""
+    assert hit["source"] == "ibkr"
+    assert hit["metric_name"] == "volume"
+    assert data["provenance"] == prov
+    assert data["empty"] is False
+    assert data["applied"]["above_price"] == 5.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("stub_agent_loop_import")
+async def test_scan_with_news_attaches_to_ranked_page(monkeypatch):
+    async def _fake_scan(**_kw):
+        return {
+            "ok": True,
+            "source": "ibkr",
+            "arena": "top_gainers",
+            "scan_code": "TOP_PERC_GAIN",
+            "symbols": ["NVDA"],
+            "hits": [_ranked_hit(0) | {"symbol": "NVDA", "skip_class": ""}],
+            "ranked": True,
+            "quoted": 0,
+            "thin": True,
+            "empty": False,
+            "provenance": {
+                "screen": "top_gainers",
+                "scan_code": "TOP_PERC_GAIN",
+                "filters": {},
+                "ibkr_rows": 1,
+                "kept": 1,
+                "empty": False,
+            },
+        }
+
+    async def _no_tags(_conn):
+        return frozenset()
+
+    async def _news(syms, **_k):
+        return [{"symbol": "NVDA", "headline": "chip demand", "source": "mda"}]
+
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.universe.verified_industry_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.brain._mda_news", _news)
+    data = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "top_gainers", "with": ["news"]},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data["news"][0]["headline"] == "chip demand"
+    hit = data["hits"][0]
+    assert hit["symbol"] == "NVDA"
+    assert (hit.get("mda") or {}).get("news")
+    assert hit["mda"]["news"][0]["headline"] == "chip demand"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("stub_agent_loop_import")
+async def test_scan_accepts_tagvalue_and_rejects_unverified_pe(monkeypatch):
+    seen: dict = {}
+
+    async def _fake_scan(**kw):
+        seen["filters"] = kw.get("filters")
+        return {
+            "ok": True,
+            "source": "ibkr",
+            "arena": "hot_by_price",
+            "scan_code": "HOT_BY_PRICE",
+            "symbols": ["AAPL"],
+            "hits": [_ranked_hit(1) | {"symbol": "AAPL", "skip_class": ""}],
+            "ranked": True,
+            "quoted": 0,
+            "applied": (kw.get("filters") or {}).get("applied") or {},
+            "provenance": {
+                "screen": "hot_by_price",
+                "scan_code": "HOT_BY_PRICE",
+                "filters": (kw.get("filters") or {}).get("applied") or {},
+                "ibkr_rows": 1,
+                "kept": 1,
+                "empty": False,
+            },
+        }
+
+    async def _no_tags(_conn):
+        return frozenset()
+
+    async def _boom(*_a, **_k):
+        raise AssertionError("unverified P/E must not pull a screen")
+
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.universe.verified_industry_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    ok = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "hot_by_price", "usdMarketCapAbove": "10000"},
+            connector=None,
+            world=_world(),
+            snap={"scan_flush": True},
+            turn=BrainTurn(),
+        )
+    )
+    assert ok["ok"] is True
+    assert seen["filters"]["tags"]["usdMarketCapAbove"] == "10000"
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _boom)
+    bad = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "hot_by_price", "peRatioAbove": "15"},
+            connector=None,
+            world=_world(),
+            snap={"scan_flush": True},
+            turn=BrainTurn(),
+        )
+    )
+    assert bad.get("ok") is False
+    err = str(bad.get("error") or "")
+    assert "xml-verified" in err.lower()
+    assert "peRatioAbove" in err
+    assert "available=" in err
+    assert "usdMarketCapAbove" in err
+
+
+def test_scan_clip_keeps_ranked_page_plus_news():
+    from abcxauto.brain import CLIP_CHARS, _clip
+    from abcxauto.brain_tools import SCAN_CLIP_CHARS
+    from abcxauto.prints import attach_mda_news
+
+    hits = [_ranked_hit(i) for i in range(30)]
+    news = [_news_item(i) for i in range(32)]
+    attach_mda_news(hits[:8], news)
+    payload = {
+        "ok": True,
+        "source": "ibkr",
+        "arena": "most_active",
+        "scan_code": "MOST_ACTIVE",
+        "symbols": [h["symbol"] for h in hits],
+        "hits": hits,
+        "applied": {},
+        "persisted": False,
+        "ranked": True,
+        "rank_meaning": "metric_name/metric_value are IBKR distance",
+        "quoted": 0,
+        "arenas": ["most_active"],
+        "provenance": {
+            "screen": "most_active",
+            "scan_code": "MOST_ACTIVE",
+            "filters": {},
+            "ibkr_rows": 30,
+            "kept": 30,
+            "empty": False,
+        },
+        "empty": False,
+        "news": news,
+        "news_freshness": "delayed_15m",
+        "news_use": "color_not_trigger",
+        "deepest_open_gap_pct": -2.12,
+        "deepest_symbol": "S29",
+    }
+    raw_len = len(json.dumps(payload, default=str))
+    assert raw_len > CLIP_CHARS
+    assert raw_len <= SCAN_CLIP_CHARS
+    defaulted = json.loads(_clip(payload))
+    assert defaulted.get("_dropped") or defaulted.get("_clipped")
+    kept = json.loads(_clip(payload, max_chars=SCAN_CLIP_CHARS))
+    assert "_dropped" not in kept
+    assert len(kept["hits"]) == 30
+    assert len(kept["news"]) == 32
+    assert kept["provenance"]["ibkr_rows"] == 30
 

@@ -645,6 +645,12 @@ async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
         if hit.get("symbol") == "PSQL":
             assert hit.get("gap_pct") == pytest.approx(73.4)
             assert hit["skip_class"] == "micro"
+    prov = bag.get("provenance")
+    assert isinstance(prov, dict)
+    assert "ibkr_rows" in prov
+    assert "kept" in prov
+    assert "empty" in prov
+    assert prov.get("scan_code") or prov.get("screen")
     hits_lines = [t for k, t in painted if k == "tool" and "hits=" in t]
     assert len(hits_lines) == 1
     assert "screens=" not in hits_lines[0]

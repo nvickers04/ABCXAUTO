@@ -192,10 +192,11 @@ def test_both_selectors_compose_universe_and_sort():
     assert only_arena.get("arena") == "most_active"
 
 
-def test_scan_tool_schema_has_no_pe_and_no_tag_catalog():
+def test_scan_tool_schema_advertises_filters_and_keeps_system_clean():
+    """Filters live in the tool schema. SYSTEM stays free of a tag catalog."""
     from abcxauto.brain import AGENT_TOOLS
     from abcxauto.llm import SYSTEM_PROMPT
-    from abcxauto.universe import known_scan_codes
+    from abcxauto.universe import known_scan_codes, known_screen_keys
 
     scan = None
     for t in AGENT_TOOLS:
@@ -211,35 +212,30 @@ def test_scan_tool_schema_has_no_pe_and_no_tag_catalog():
         params = json.loads(raw_params)
     else:
         params = dict(raw_params)
+        if hasattr(raw_params, "model_dump"):
+            params = raw_params.model_dump()
     props = params.get("properties") or {}
-    blob = json.dumps(props).lower()
     desc = str(getattr(fn, "description", "") or "")
-    assert "peratio" not in blob
-    assert "pe_ratio" not in blob
     assert "market_cap_above" in props
     assert "above_price" in props
     assert "above_volume" in props
     assert "average_option_volume_above" in props
-    # TagValue trio: clerk may still accept; not advertised in tool JSON.
-    assert "usdMarketCapAbove" not in props
-    assert "optVolumeAbove" not in props
-    assert "avgVolumeAbove" not in props
-    assert "tagvalue" not in blob
-    assert "tagvalue" not in desc.lower()
-    assert "sort=" not in desc.lower()
-    assert "thin" in desc.lower()
-    assert "gap%" in desc
-    assert "criteria" in desc.lower()
+    assert "usdMarketCapAbove" in props
+    assert "optVolumeAbove" in props
+    assert "avgVolumeAbove" in props
+    assert "peRatioAbove" in props
+    assert "peRatioBelow" in props
+    assert "industry" in props
+    assert "sector" in props
+    assert "stock_type" in props
+    assert "xml" in str((props.get("peRatioAbove") or {}).get("description") or "").lower()
+    arena = props.get("arena") or {}
+    code = props.get("scan_code") or {}
+    assert arena.get("enum") == known_screen_keys()
+    assert code.get("enum") == known_scan_codes()
+    assert "skip_class" in desc.lower()
+    assert "ranked" in desc.lower()
     assert "symbols[]" in desc.lower() or "symbols" in desc.lower()
-    # Expanded documented scanCodes listed for Grok.
-    codes = known_scan_codes()
-    assert "MOST_ACTIVE" in codes
-    assert "HOT_BY_VOLUME" in codes
-    assert "TOP_TRADE_COUNT" in codes
-    assert "HOT_BY_PRICE" in codes
-    scan_code_desc = str((props.get("scan_code") or {}).get("description") or "")
-    for code in ("MOST_ACTIVE", "HOT_BY_VOLUME", "TOP_TRADE_COUNT", "HOT_BY_PRICE"):
-        assert code in scan_code_desc
     # Kill: no SYSTEM catalog of IBKR tags / guessed P/E / XML dump.
     assert "usdMarketCapAbove" not in SYSTEM_PROMPT
     assert "peRatio" not in SYSTEM_PROMPT
@@ -510,6 +506,23 @@ async def test_tool_args_hoists_camel_filter_aliases():
     assert args["usdMarketCapAbove"] == "10000"
     assert "abovePrice" not in args
     assert "usd_market_cap_above" not in args
+
+
+def test_tool_args_hoists_stock_type_and_industry():
+    from abcxauto.tool_args import normalize_tool_call
+
+    name, args = normalize_tool_call(
+        "scan",
+        {
+            "arena": "most_active",
+            "stockType": "ETF",
+            "industry": "Technology",
+        },
+    )
+    assert name == "scan"
+    assert args["stock_type"] == "ETF"
+    assert args["industry"] == "Technology"
+    assert "stockType" not in args
 
 
 def test_flush_default_is_the_card_trio_with_large_mega_tags():
