@@ -85,26 +85,14 @@ def normalize_tickers(raw: Any, *, cap: int | None = None) -> list[str]:
 
 
 def _universe(positions: list[dict] | None, *, cap: int = TAPE_SEED_CAP) -> list[str]:
-    """Book symbols (manage) + Universe sandbox legal set (unranked)."""
+    """Book symbols only. No watchlist, no invented SPY/QQQ/IWM."""
     out: list[str] = []
     for p in positions or []:
         sym = str((p or {}).get("symbol") or "").upper().strip()
         if sym and _TICKER_RE.match(sym) and sym not in out:
             out.append(sym)
-    try:
-        from abcxauto.universe import legal_symbols
-
-        for sym in legal_symbols():
-            if sym not in out:
-                out.append(sym)
-            if len(out) >= max(1, int(cap)):
-                break
-    except Exception:
-        logger.exception("legal universe load failed")
-        for sym in ("SPY", "QQQ", "IWM"):
-            if sym not in out:
-                out.append(sym)
-    # Book first, then legal-set order — never alphabetize (A* tape bias).
+        if len(out) >= max(1, int(cap)):
+            break
     return out[: max(1, int(cap))]
 
 
@@ -113,7 +101,7 @@ def tape_seed_symbols(
     *,
     cap: int = TAPE_SEED_CAP,
 ) -> list[str]:
-    """Unranked day tape seed: open book first, then legal watchlist. Not a rank.
+    """Unranked day tape seed: open book only. Not a rank.
 
     Kept for internal/cache callers. format_wake must not print these names;
     empty scan() must not seed from this list.
@@ -162,7 +150,23 @@ def overlay_hits(
             continue
         row: dict[str, Any] = {"symbol": s, "on_book": s in on_book}
         extra = facts.get(s) or {}
-        for key in ("rank", "distance", "benchmark", "projection", "legs"):
+        for key in (
+            "rank",
+            "distance",
+            "benchmark",
+            "projection",
+            "legs",
+            "last",
+            "volume",
+            "market_cap",
+            "stock_type",
+            "long_name",
+            "scan_code",
+            "screen",
+            "metric_name",
+            "metric_value",
+            "skip_class",
+        ):
             if extra.get(key) not in (None, ""):
                 row[key] = extra[key]
         if in_turn:
@@ -171,12 +175,28 @@ def overlay_hits(
     return rows
 
 
-# Thin ranked default: symbol · gap% · at most one optional triage field.
-# gap% is the on-row IBKR/scanner metric (not a new quote). #186 decorate-clip is dead.
-THIN_RANKED_KEYS = frozenset({"symbol", "gap%", "rank", "arena"})
+# Ranked screen row. last/volume/market_cap only when the scanner supplied them.
+RANKED_ROW_KEYS = frozenset(
+    {
+        "symbol",
+        "rank",
+        "screen",
+        "scan_code",
+        "metric_name",
+        "metric_value",
+        "gap_pct",
+        "last",
+        "volume",
+        "market_cap",
+        "stock_type",
+        "skip_class",
+        "source",
+    }
+)
+# Compat alias — old tests / painters still import this name.
+THIN_RANKED_KEYS = RANKED_ROW_KEYS
 _FAT_SCAN_KEYS = frozenset(
     {
-        "last",
         "bid",
         "ask",
         "open",
@@ -187,12 +207,6 @@ _FAT_SCAN_KEYS = frozenset(
         "spread",
         "spread_pct",
         "quote_source",
-        "change_pct",
-        "open_gap_pct",
-        "distance",
-        "benchmark",
-        "projection",
-        "legs",
     }
 )
 # Prefer a true open-gap when already on the row; else change; else IBKR distance.
@@ -205,8 +219,8 @@ _GAP_SOURCE_KEYS = (
     "distance",
 )
 THIN_RANK_MEANING = (
-    "gap% is the on-row scanner metric (open_gap_pct / change_pct / distance); "
-    "order is the IBKR scanCode"
+    "metric_name/metric_value are IBKR distance|benchmark for this scanCode; "
+    "skip_class is levered|micro|empty; last only if the scanner supplied it"
 )
 SILENT_SCAN_NOTE = (
     "flush default screens (MOST_ACTIVE, TOP_PERC_LOSE, TOP_PERC_GAIN); "
@@ -258,48 +272,106 @@ def is_thin_ranked_row(row: Any) -> bool:
     """True when the row is the ranked-screen contract (no quote-heavy fat).
 
     ``symbols[]`` drill-down always carries ``on_book`` from overlay and is
-    not thin even when quotes missed. A screen row is ``symbol`` plus
-    ``gap%`` and/or ``rank``.
+    not thin even when quotes missed.
     """
     if not isinstance(row, dict):
         return False
     keys = set(row)
     if keys & _FAT_SCAN_KEYS:
         return False
-    if not keys <= (THIN_RANKED_KEYS | {"on_book"}):
+    # Incoming scanner facts may still carry distance/benchmark before thin.
+    if not keys <= (RANKED_ROW_KEYS | {"on_book", "gap%", "arena", "distance", "benchmark"}):
         return False
-    if "gap%" in keys or "rank" in keys:
+    if "skip_class" in keys or "source" in keys:
         return True
-    return keys <= {"symbol", "arena"}
+    if "gap_pct" in keys or "gap%" in keys or "rank" in keys:
+        return True
+    return keys <= {"symbol", "screen", "arena", "scan_code"}
 
 
-def thin_ranked_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Emit ``symbol`` · ``gap%`` · optional ``rank`` (≤3 fields)."""
+def thin_ranked_row(
+    row: dict[str, Any] | None,
+    *,
+    screen: str | None = None,
+    scan_code: str | None = None,
+) -> dict[str, Any] | None:
+    """Emit the ranked-row contract. ``skip_class`` is always present."""
     if not isinstance(row, dict):
         return None
     sym = str(row.get("symbol") or "").upper().strip()
     if not sym:
         return None
-    out: dict[str, Any] = {"symbol": sym}
-    arena = str(row.get("arena") or "").strip()
-    if arena:
-        out["arena"] = arena
-    gap = row_gap_pct(row)
-    if gap is not None:
-        out["gap%"] = gap
+    from abcxauto.universe import scan_metric_name, scan_skip_class
+
+    out: dict[str, Any] = {
+        "symbol": sym,
+        "skip_class": scan_skip_class(row),
+        "source": "ibkr",
+    }
+    screen_id = str(row.get("screen") or row.get("arena") or screen or "").strip()
+    if screen_id:
+        out["screen"] = screen_id
+    code = str(row.get("scan_code") or scan_code or "").strip().upper()
+    if code:
+        out["scan_code"] = code
     rank = row.get("rank")
     if rank not in (None, ""):
         try:
             out["rank"] = int(rank)
         except (TypeError, ValueError):
             out["rank"] = rank
+    metric_val = None
+    for key in ("metric_value", "distance", "benchmark"):
+        metric_val = parse_scan_gap(row.get(key))
+        if metric_val is not None:
+            break
+    if metric_val is not None:
+        name = scan_metric_name(code) or str(row.get("metric_name") or "").strip()
+        if name:
+            out["metric_name"] = name
+        out["metric_value"] = metric_val
+    gap = row_gap_pct(row)
+    if gap is not None:
+        out["gap_pct"] = gap
+    last = row.get("last")
+    try:
+        if last is not None and float(last) > 0:
+            out["last"] = float(last)
+    except (TypeError, ValueError):
+        pass
+    volume = row.get("volume")
+    try:
+        if volume is not None and float(volume) > 0:
+            out["volume"] = int(float(volume))
+    except (TypeError, ValueError):
+        pass
+    cap = row.get("market_cap")
+    if cap is None:
+        cap = row.get("marketCap")
+    try:
+        if cap is not None and float(cap) > 0:
+            out["market_cap"] = float(cap)
+    except (TypeError, ValueError):
+        pass
+    stock_type = str(row.get("stock_type") or row.get("stockType") or "").strip()
+    if stock_type:
+        out["stock_type"] = stock_type
     return out
 
 
-def thin_ranked_hits(rows: list[Any] | None) -> list[dict[str, Any]]:
+def thin_ranked_hits(
+    rows: list[Any] | None,
+    *,
+    screen: str | None = None,
+    scan_code: str | None = None,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows or []:
-        item = thin_ranked_row(row) if isinstance(row, dict) else None
+        item = (
+            thin_ranked_row(row, screen=screen, scan_code=scan_code)
+            if isinstance(row, dict)
+            else None
+        )
         if item:
             out.append(item)
     return out
@@ -423,9 +495,6 @@ async def criteria_scan(
     filters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One screen this look: arena | scan_code | symbols[]. No persist, no MDA daily-120."""
-    from abcxauto.universe import maybe_refresh_pending_universe, membership_watch_line
-
-    await maybe_refresh_pending_universe(connector)
     asked = normalize_tickers(symbols or [], cap=cap)
     has_arena = bool(str(arena or "").strip())
     has_code = bool(str(scan_code or "").strip())
@@ -441,6 +510,9 @@ async def criteria_scan(
     source = "symbols"
     arena_id = None
     code_out = None
+    ibkr_rows = 0
+    kept = 0
+    empty = False
     applied: dict[str, Any] = dict((filt or {}).get("applied") or {})
     if has_arena or has_code:
         from abcxauto.universe import pull_one_screen
@@ -455,7 +527,8 @@ async def criteria_scan(
             err: dict[str, Any] = {
                 "ok": False,
                 "error": pulled.get("error") or "unknown screen",
-                "arenas": pulled.get("arenas"),
+                "arenas": pulled.get("arenas") or pulled.get("screens"),
+                "screens": pulled.get("screens") or pulled.get("arenas"),
             }
             if pulled.get("applied") is not None:
                 err["applied"] = pulled.get("applied")
@@ -466,16 +539,9 @@ async def criteria_scan(
         arena_id = pulled.get("arena_id")
         code_out = pulled.get("scan_code")
         applied = dict(pulled.get("applied") or applied)
-        # Catalog / MDA seed lists are not a screen. Empty IBKR already stays
-        # empty; a no-scanner arena must not dump SPY/QQQ/AAPL as hits.
-        if source == "mda_seed":
-            return {
-                "ok": False,
-                "error": "scan requires an IBKR arena | scan_code (catalog seed is not a screen)",
-                "arena": arena_id,
-                "scan_code": code_out,
-                "applied": applied,
-            }
+        ibkr_rows = int(pulled.get("ibkr_rows") or len(scanner_rows) or 0)
+        kept = int(pulled.get("kept") or len(hits_syms))
+        empty = bool(pulled.get("empty") if pulled.get("empty") is not None else kept == 0)
     elif filt and (filt.get("applied") or filt.get("native") or filt.get("tags")):
         return {
             "ok": False,
@@ -495,19 +561,29 @@ async def criteria_scan(
         label = str(arena_id)
         for row in rows:
             if isinstance(row, dict) and row.get("symbol"):
+                row.setdefault("screen", label)
                 row.setdefault("arena", label)
+            if code_out and isinstance(row, dict) and row.get("symbol"):
+                row.setdefault("scan_code", str(code_out).upper())
     screen = bool(has_arena or has_code)
     if screen:
-        # Arena / scan_code: thin at the tool. No quote sweep. #186 clip-rescue is dead.
         quoted = 0
-        rows = thin_ranked_hits(rows)
+        rows = thin_ranked_hits(
+            rows,
+            screen=str(arena_id or "").strip() or None,
+            scan_code=str(code_out or "").strip() or None,
+        )
+        empty = bool(empty or not rows)
+        kept = len(rows)
     else:
         quoted = await attach_live_quotes(rows, connector=connector)
-    ranked = bool(scanner_rows) and source == "ibkr"
+        empty = False
+    ranked = bool(scanner_rows) and source == "ibkr" and not empty
     out: dict[str, Any] = {
         "ok": True,
         "source": source,
         "arena": arena_id,
+        "screen": arena_id,
         "scan_code": code_out,
         "symbols": [r["symbol"] for r in rows],
         "hits": rows,
@@ -516,6 +592,7 @@ async def criteria_scan(
         "ranked": ranked,
         "quoted": quoted,
         "thin": screen,
+        "empty": empty if screen else False,
         "criteria": (
             {"arena": arena_id, "scan_code": code_out}
             if screen
@@ -524,11 +601,22 @@ async def criteria_scan(
         "sort": code_out if screen else None,
     }
     if screen:
-        out["rank_meaning"] = THIN_RANK_MEANING if ranked else "not ranked"
+        out["provenance"] = {
+            "screen": arena_id,
+            "scan_code": code_out,
+            "filters": applied,
+            "ibkr_rows": ibkr_rows,
+            "kept": kept,
+            "empty": empty,
+        }
+        if empty:
+            out["rank_meaning"] = "empty screen"
+            out["source"] = "empty"
+        else:
+            out["rank_meaning"] = THIN_RANK_MEANING if ranked else "not ranked"
     else:
         out["rank_meaning"] = "not ranked"
         out["note"] = "fat drill-down; ranked arena/scan_code screens stay thin"
-    out["watch"] = membership_watch_line()
     return out
 
 
@@ -883,7 +971,7 @@ def structure_from_bars(
 def merge_tape(
     base: list[dict[str, Any]], extra: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Dedupe by symbol; keep first-seen order (book seed before legal set)."""
+    """Dedupe by symbol; keep first-seen order (book seed first)."""
     by_sym: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for row in list(base or []) + list(extra or []):
@@ -944,7 +1032,7 @@ async def scan_opportunities(
     force: bool = False,
     cap: int = TAPE_SEED_CAP,
 ) -> list[dict[str, Any]]:
-    """Seed SCAN TAPE: book + Universe sandbox legal set, unranked (cached)."""
+    """Seed SCAN TAPE: book symbols only, unranked (cached)."""
     symbols = _universe(positions, cap=cap)
     key = ",".join(symbols)
     now = time.monotonic()
