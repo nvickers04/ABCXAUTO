@@ -51,17 +51,34 @@ SEND_S = 45.0
 CHAIN_S = 60.0
 CANDLE_S = 35.0
 SCAN_S = 35.0
+# Ranked 30-row page is ~5,811 chars. Provenance ~300, envelope ~400.
+# with=news: 8 symbols × 4 headlines × ~220 chars ≈ 7,040 top-level, plus
+# nested row.mda.news ≈ 7,840. with=metrics on 8 rows ≈ 1,600.
+# Total ≈ 23,000. 28_000 leaves ~5k for long headlines.
+# 28_000 / 4 ≈ 7_000 tok; grok-4.6 input ≈ $2/MTok → $0.014 per later call
+# in the look (8_000 default is $0.004 and would drop rows).
+SCAN_CLIP_CHARS = 28_000
 _QUOTE_SCHEMA = {"type": "string", "description": "Ticker, e.g. AAPL"}
 _SYMBOLS_SCHEMA = {"type": "array", "items": {"type": "string"}}
-
-
-def _catalog_arena_ids() -> list[str]:
-    try:
-        from abcxauto.universe import catalog_arena_ids
-
-        return catalog_arena_ids()
-    except Exception:
-        return []
+_CANDLE_RESOLUTION_ENUM = ["D", "15", "5", "60"]
+_OPTION_RIGHT_ENUM = ["C", "P"]
+_STOCK_TYPE_ENUM = ["CORP", "ETF", "both"]
+_SCAN_WITH_ENUM = ["news", "metrics"]
+_XML_VERIFIED_FILTER_KEYS = frozenset(
+    {"peRatioAbove", "peRatioBelow", "industry", "sector"}
+)
+_SCAN_ALWAYS_FILTERS = (
+    "market_cap_above",
+    "market_cap_below",
+    "above_price",
+    "below_price",
+    "above_volume",
+    "average_option_volume_above",
+    "usdMarketCapAbove",
+    "optVolumeAbove",
+    "avgVolumeAbove",
+    "stock_type",
+)
 
 
 def _scan_arena_keys() -> list[str]:
@@ -94,6 +111,36 @@ def _scan_code_keys() -> list[str]:
             "TOP_PERC_LOSE",
             "HOT_BY_VOLUME",
         ]
+
+
+def _clip_scan(data: Any) -> str:
+    """Scan page + news must survive. Default 8k clip drops ranked rows."""
+    return _hub()._clip(data, max_chars=SCAN_CLIP_CHARS)
+
+
+def _scan_filter_error(
+    args: dict[str, Any],
+    parsed: dict[str, Any],
+    *,
+    pe_tags: frozenset[str] | None = None,
+    industry_tags: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Unknown key stays unknown. Unverified XML filters name what is live."""
+    err = str(parsed.get("error") or "bad scan filters")
+    verified = set(pe_tags or ()) | set(industry_tags or ())
+    asked = [
+        key
+        for key in _XML_VERIFIED_FILTER_KEYS
+        if (args or {}).get(key) not in (None, "")
+    ]
+    unverified = [key for key in asked if key not in verified]
+    if unverified and any(key in err for key in unverified):
+        available = list(_SCAN_ALWAYS_FILTERS) + sorted(verified)
+        err = (
+            f"scan filter not XML-verified: {', '.join(unverified)}; "
+            f"available={','.join(available)}"
+        )
+    return {"ok": False, "error": err}
 
 
 def _news_symbols_for_scan(
@@ -156,6 +203,7 @@ _SCAN_LOOK_SNAP_KEYS = (
     "scan_arenas",
     "scan_flush",
     "scan_streamed",
+    "scan_provenance",
 )
 
 
@@ -353,13 +401,20 @@ def _scan_out_from_snap(
     rows = _scan_paint_rows(merged, quotes=qmap)
     seed = last_ok if isinstance(last_ok, dict) else {}
     arenas = list(snap.get("scan_arenas") or [])
+    prov = seed.get("provenance")
+    if not isinstance(prov, dict):
+        stored = snap.get("scan_provenance")
+        prov = stored if isinstance(stored, dict) else None
+    applied = seed.get("applied") or {}
+    if not applied and isinstance(prov, dict) and isinstance(prov.get("filters"), dict):
+        applied = prov["filters"]
     out: dict[str, Any] = {
         "ok": True,
         "source": merged.get("source") or seed.get("source") or "ibkr",
         "symbols": [r.get("symbol") for r in rows if r.get("symbol")],
         "hits": rows,
         "rows": rows,
-        "applied": seed.get("applied") or {},
+        "applied": applied,
         "persisted": False,
         "ranked": bool(merged.get("ranked") if merged else seed.get("ranked")),
         "rank_meaning": (merged.get("rank_meaning") if merged else None)
@@ -370,6 +425,15 @@ def _scan_out_from_snap(
     if len(arenas) == 1:
         out["arena"] = merged.get("arena") or seed.get("arena")
         out["scan_code"] = merged.get("scan_code") or seed.get("scan_code")
+    if isinstance(prov, dict):
+        out["provenance"] = prov
+    if seed.get("empty") is not None:
+        out["empty"] = bool(seed.get("empty"))
+    elif isinstance(prov, dict) and prov.get("empty") is not None:
+        out["empty"] = bool(prov.get("empty"))
+    screen = seed.get("screen") or (prov.get("screen") if isinstance(prov, dict) else None)
+    if screen not in (None, ""):
+        out["screen"] = screen
     if seed.get("thin") is not None:
         out["thin"] = bool(seed.get("thin"))
     else:
@@ -459,6 +523,8 @@ def _ingest_scan_payload(
     }
     prior = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else None
     snap["scan_hits"] = _union_scan_hits(prior, incoming)
+    if isinstance(payload.get("provenance"), dict):
+        snap["scan_provenance"] = payload["provenance"]
     rec_arena, rec_code = _canonical_scan_screen(
         str(job.get("arena") or payload.get("arena") or ""),
         str(job.get("scan_code") or payload.get("scan_code") or ""),
@@ -496,6 +562,7 @@ def _scan_paint_rows(
     painted: list[dict[str, Any]] = []
     qmap = quotes if isinstance(quotes, dict) else {}
     from abcxauto.opportunity_scan import is_thin_ranked_row, thin_ranked_row
+    from abcxauto.universe import scan_skip_class
 
     for row in sort_scan_rows(rows):
         if is_thin_ranked_row(row):
@@ -515,6 +582,10 @@ def _scan_paint_rows(
                 prior = 0.0
             if prior > 0:
                 item["change_pct"] = round((px / prior - 1.0) * 100.0, 3)
+        if "skip_class" not in item:
+            item["skip_class"] = scan_skip_class(item)
+        if not item.get("source"):
+            item["source"] = "ibkr"
         painted.append(item)
     return painted
 
@@ -976,28 +1047,33 @@ AGENT_TOOLS = [
     tool(
         name="scan",
         description=(
-            "IBKR scanner. State criteria (arena and/or scan_code) and the "
-            "scanCode order. Ranked arena/code hits are thin: symbol, gap% "
-            "(on-row distance / change_pct / open_gap_pct), optional rank. "
-            "Fat quote rows only on symbols[] drill-down. Bare scan() notes "
-            "the flush defaults — not a fat dump."
+            "IBKR scanner. arena and/or scan_code select a live screen. "
+            "Ranked hits stay thin: symbol, rank, screen, scan_code, "
+            "metric_name, metric_value, gap_pct, skip_class, source; "
+            "last/volume/market_cap only when IBKR supplied them. "
+            "skip_class is levered|micro|empty. "
+            "with=news|metrics attaches to ranked pages. "
+            "symbols[] is a fat drill-down. "
+            "Bare scan() notes the flush defaults."
         ),
         parameters=_schema(
             {
                 "arena": {
                     "type": "string",
-                    "description": (
-                        "criteria screen; arenas=" + ",".join(_scan_arena_keys())
-                    ),
+                    "enum": _scan_arena_keys(),
+                    "description": "Live IBKR screen id or standing scanCode.",
                 },
                 "scan_code": {
                     "type": "string",
-                    "description": (
-                        "criteria + order (IBKR scanCode): "
-                        + "|".join(_scan_code_keys())
-                    ),
+                    "enum": _scan_code_keys(),
+                    "description": "IBKR scanCode sort order.",
                 },
                 "symbols": _SYMBOLS_SCHEMA,
+                "stock_type": {
+                    "type": "string",
+                    "enum": _STOCK_TYPE_ENUM,
+                    "description": "ScannerSubscription.stockTypeFilter.",
+                },
                 "market_cap_above": {
                     "type": "number",
                     "description": "ScannerSubscription.marketCapAbove (raw USD)",
@@ -1022,12 +1098,52 @@ AGENT_TOOLS = [
                     "type": "integer",
                     "description": "ScannerSubscription.averageOptionVolumeAbove",
                 },
+                "usdMarketCapAbove": {
+                    "type": "string",
+                    "description": "IBKR TagValue. Always accepted this look.",
+                },
+                "optVolumeAbove": {
+                    "type": "string",
+                    "description": "IBKR TagValue. Always accepted this look.",
+                },
+                "avgVolumeAbove": {
+                    "type": "string",
+                    "description": "IBKR TagValue. Always accepted this look.",
+                },
+                "peRatioAbove": {
+                    "type": "string",
+                    "description": (
+                        "IBKR TagValue. Accepted only when live "
+                        "reqScannerParameters XML lists peRatioAbove."
+                    ),
+                },
+                "peRatioBelow": {
+                    "type": "string",
+                    "description": (
+                        "IBKR TagValue. Accepted only when live "
+                        "reqScannerParameters XML lists peRatioBelow."
+                    ),
+                },
+                "industry": {
+                    "type": "string",
+                    "description": (
+                        "Industry TagValue. Accepted only when live "
+                        "reqScannerParameters XML lists the industry code."
+                    ),
+                },
+                "sector": {
+                    "type": "string",
+                    "description": (
+                        "Sector TagValue. Accepted only when live "
+                        "reqScannerParameters XML lists the sector code."
+                    ),
+                },
                 "with": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {"type": "string", "enum": _SCAN_WITH_ENUM},
                     "description": (
-                        "Optional: news and/or metrics. MDA delayed color, "
-                        "never a trigger, not send geometry."
+                        "Attach MDA delayed news and/or metrics to this "
+                        "ranked page. Color only, never a trigger."
                     ),
                 },
             },
@@ -1045,7 +1161,14 @@ AGENT_TOOLS = [
             {
                 "symbol": _QUOTE_SCHEMA,
                 "symbols": _SYMBOLS_SCHEMA,
-                "resolution": {"type": "string"},
+                "resolution": {
+                    "type": "string",
+                    "enum": _CANDLE_RESOLUTION_ENUM,
+                    "description": (
+                        "D = daily hist; 15/5/60 = hist size. "
+                        "Live stream is always 5s."
+                    ),
+                },
                 "countback": {"type": "integer"},
             },
             [],
@@ -1079,7 +1202,11 @@ AGENT_TOOLS = [
                 "symbol": _QUOTE_SCHEMA,
                 "expiration": {"type": "string", "description": "YYYYMMDD"},
                 "strike": {"type": "number"},
-                "right": {"type": "string", "description": "C or P"},
+                "right": {
+                    "type": "string",
+                    "enum": _OPTION_RIGHT_ENUM,
+                    "description": "C or P",
+                },
                 "long_strike": {
                     "type": "number",
                     "description": "Vertical long (BUY) strike. With short_strike: live BAG net.",
@@ -1096,7 +1223,10 @@ AGENT_TOOLS = [
                             "symbol": _QUOTE_SCHEMA,
                             "expiration": {"type": "string"},
                             "strike": {"type": "number"},
-                            "right": {"type": "string"},
+                            "right": {
+                                "type": "string",
+                                "enum": _OPTION_RIGHT_ENUM,
+                            },
                         },
                     },
                 },
@@ -1131,25 +1261,6 @@ AGENT_TOOLS = [
                     ),
                 },
                 "session_look_cap": {"type": "integer"},
-                "enabled_arenas": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": _catalog_arena_ids()},
-                },
-                "custom_symbols": _SYMBOLS_SCHEMA,
-                "exclude_symbols": _SYMBOLS_SCHEMA,
-                "regime": {
-                    "type": "object",
-                    "properties": {
-                        "theme": {"type": "string"},
-                        "catalyst": {"type": "string"},
-                        "source": {"type": "string"},
-                        "arenas": {
-                            "type": "array",
-                            "items": {"type": "string", "enum": _catalog_arena_ids()},
-                        },
-                        "invalidate": {"type": "string"},
-                    },
-                },
                 "rationale": {"type": "string"},
             },
             [],
@@ -1173,7 +1284,7 @@ AGENT_TOOLS = [
     ),
     tool(
         name="recall",
-        description="Durable notes. Fetch only.",
+        description="Durable notes. list/get fetch; write stores; invalidate retires.",
         parameters=_schema(
             {
                 "op": {
@@ -1700,13 +1811,24 @@ async def _run_tool(
             is_flush_default_screen,
             parse_scan_filters,
             resolve_screen,
+            verified_industry_tags,
             verified_pe_tags,
         )
 
         pe_tags = await verified_pe_tags(connector)
-        parsed = parse_scan_filters(args, pe_tags=pe_tags)
+        industry_tags = await verified_industry_tags(connector)
+        parsed = parse_scan_filters(
+            args, pe_tags=pe_tags, industry_tags=industry_tags
+        )
         if not parsed.get("ok"):
-            return _hub()._clip({"ok": False, "error": parsed.get("error") or "bad scan filters"})
+            return _clip_scan(
+                _scan_filter_error(
+                    args,
+                    parsed,
+                    pe_tags=pe_tags,
+                    industry_tags=industry_tags,
+                )
+            )
         asked_symbols = normalize_tickers(args.get("symbols") or [])
         c_arena, c_code = _canonical_scan_screen(
             str(args.get("arena") or "").strip(),
@@ -1733,13 +1855,11 @@ async def _run_tool(
             out["news"] = await _hub()._mda_news(news_syms)
             out["news_freshness"] = "delayed_15m"
             out["news_use"] = "color_not_trigger"
-            from abcxauto.opportunity_scan import is_thin_ranked_row
-
             attach_mda_news(
                 [
                     r
                     for r in (out.get("hits") or out.get("rows") or [])
-                    if isinstance(r, dict) and not is_thin_ranked_row(r)
+                    if isinstance(r, dict)
                 ],
                 out["news"],
             )
@@ -1761,20 +1881,6 @@ async def _run_tool(
             )
 
             out = _scan_out_from_snap(snap, qmap, last_ok=last_ok)
-            fat_hits = [
-                r
-                for r in (out.get("hits") or [])
-                if isinstance(r, dict) and not is_thin_ranked_row(r)
-            ]
-            if want_metrics and fat_hits:
-                from abcxauto.opportunity_scan import attach_mda_metrics
-
-                await attach_mda_metrics(fat_hits)
-            await _attach_optional_news(out)
-            painted = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
-            snap["scan_hits"] = _union_scan_hits(
-                painted, {**painted, "rows": out["rows"]}
-            )
             if _snap_is_rth(snap):
                 sessions: dict[str, Any] = {}
                 for row in out.get("rows") or []:
@@ -1798,6 +1904,16 @@ async def _run_tool(
                     sessions[name] = row["session"]
                 if sessions:
                     out["sessions"] = sessions
+            hits = [r for r in (out.get("hits") or []) if isinstance(r, dict)]
+            if want_metrics and hits:
+                from abcxauto.opportunity_scan import attach_mda_metrics
+
+                await attach_mda_metrics(hits)
+            await _attach_optional_news(out)
+            painted = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
+            snap["scan_hits"] = _union_scan_hits(
+                painted, {**painted, "rows": out["rows"]}
+            )
             if silent:
                 out["note"] = SILENT_SCAN_NOTE
             _note_scan_news(turn, out)
@@ -1805,7 +1921,7 @@ async def _run_tool(
             if emit_line:
                 _emit_scan_look_line(snap, out)
             turn.scan_cache[_LOOK_SCAN_CACHE_KEY] = deepcopy(out)
-            return _hub()._clip(_scan_public_payload(out))
+            return _clip_scan(_scan_public_payload(out))
 
         async def _repeat_look_bag() -> str:
             reused = _scan_out_from_snap(snap, qmap)
@@ -1816,7 +1932,7 @@ async def _run_tool(
             _attach_scan_run(reused, turn=turn, world=world)
             think_emit("tool", "\n[scan = already have it]\n")
             turn.scan_cache[_LOOK_SCAN_CACHE_KEY] = deepcopy(reused)
-            return _hub()._clip(_scan_public_payload(reused))
+            return _clip_scan(_scan_public_payload(reused))
 
         async with lock:
             if asked_symbols:
@@ -1834,7 +1950,7 @@ async def _run_tool(
                     }
                     err.setdefault("ok", False)
                     _attach_scan_run(err, turn=turn, world=world)
-                    return _hub()._clip(err)
+                    return _clip_scan(err)
                 _ingest_scan_payload(
                     world=world,
                     snap=snap,
@@ -1856,7 +1972,7 @@ async def _run_tool(
                         "arenas": resolved.get("arenas"),
                     }
                     _attach_scan_run(err, turn=turn, world=world)
-                    return _hub()._clip(err)
+                    return _clip_scan(err)
 
             flush_done = bool(snap.get("scan_flush"))
             if flush_done and _scan_screen_on_look(snap, c_arena, c_code):
@@ -1907,7 +2023,7 @@ async def _run_tool(
                     err = dict(err)
                     err.setdefault("ok", False)
                     _attach_scan_run(err, turn=turn, world=world)
-                return _hub()._clip(err)
+                return _clip_scan(err)
             snap["scan_at"] = datetime.now(timezone.utc).isoformat()
             return await _finish_look_bag(
                 last_ok, emit_line=True, silent=not has_screen
@@ -2383,6 +2499,7 @@ __all__ = [
     'CHAIN_S',
     'CANDLE_S',
     'SCAN_S',
+    'SCAN_CLIP_CHARS',
     '_QUOTE_SCHEMA',
     '_SYMBOLS_SCHEMA',
     '_scan_arena_keys',

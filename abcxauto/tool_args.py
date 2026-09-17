@@ -62,9 +62,12 @@ _ARG_KEYS = {
     "usdMarketCapAbove": ("usdMarketCapAbove", "usd_market_cap_above"),
     "optVolumeAbove": ("optVolumeAbove", "opt_volume_above"),
     "avgVolumeAbove": ("avgVolumeAbove", "avg_volume_above"),
-    # P/E only accepted at runtime after XML verify (not in tool schema).
+    # P/E and industry/sector: in schema; accepted only after XML verify.
     "peRatioAbove": ("peRatioAbove", "pe_ratio_above"),
     "peRatioBelow": ("peRatioBelow", "pe_ratio_below"),
+    "stock_type": ("stock_type", "stockType", "stockTypeFilter"),
+    "industry": ("industry",),
+    "sector": ("sector",),
     "expiration": ("expiration", "expiry", "exp", "expiration_date", "lastTradeDateOrContractMonth"),
     "strike": ("strike", "strike_price"),
     "right": ("right", "cp", "call_put", "put_call"),
@@ -369,7 +372,7 @@ def normalize_tool_call(
             out["symbols"] = _as_symbols(out.get("symbol"))
 
     if canon == "scan":
-        # Empty scan must stay empty — do not seed legal_symbols / canned tape.
+        # Empty scan stays empty — do not invent a symbol list.
         if out.get("symbols") in (None, ""):
             if out.get("symbol"):
                 out["symbols"] = _as_symbols(out.get("symbol"))
@@ -390,6 +393,8 @@ def normalize_tool_call(
             "avg_volume_above",
             "pe_ratio_above",
             "pe_ratio_below",
+            "stockType",
+            "stockTypeFilter",
             "screen",
             "scan_arena",
             "scanCode",
@@ -400,7 +405,7 @@ def normalize_tool_call(
             "ticker",
         ):
             out.pop(alias, None)
-        # Both selectors compose: arena is the universe, scan_code is the sort.
+        # Both selectors compose: arena is the screen, scan_code is the sort.
         # Dropping the sort made mega_cap+TOP_PERC_LOSE run HOT_BY_VOLUME.
 
     if canon in ("candles", "option_chain"):

@@ -628,9 +628,27 @@ def _compact_scan_hits(raw: Any) -> dict[str, Any]:
         if not sym:
             continue
         item: dict[str, Any] = {"symbol": sym}
+        if "skip_class" in r:
+            item["skip_class"] = r.get("skip_class") or ""
+        else:
+            try:
+                from abcxauto.universe import scan_skip_class
+
+                item["skip_class"] = scan_skip_class(r)
+            except Exception:
+                item["skip_class"] = ""
         for key in (
             "rank",
+            "screen",
+            "scan_code",
+            "metric_name",
+            "metric_value",
+            "gap_pct",
             "last",
+            "volume",
+            "market_cap",
+            "stock_type",
+            "source",
             "open",
             "close",
             "change_pct",
