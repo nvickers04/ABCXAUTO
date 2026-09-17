@@ -64,7 +64,7 @@ CloudAgent / Grok Bot launch. Grok is the only RTH process.
   kept; no sit clock. Grok may tighten via `self_tune`, not raise.
 
 Walk-away ceilings: **25%** daily-loss, **25%** max position, **25%** risk/trade,
-**25%** per name, defined-risk on, cash-only, full NetLiq (`trading_budget_usd=0`).
+**25%** per name, peak-DD **40%** paper / **25%** live, defined-risk on, cash-only, full NetLiq (`trading_budget_usd=0`).
 Paper operator may turn % floors off (`sizing_floors`); live cannot (forced ON); 25% walk-away is the live ceiling. `% of NL` review facts live on `day_facts` / `book` / wake / `compact_position`, not `brain.py`.
 
 ## Look
