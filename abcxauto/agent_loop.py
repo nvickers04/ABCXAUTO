@@ -467,6 +467,33 @@ def _wake_grok_for_session(
     return sess in ("regular", "premarket")
 
 
+def _link_ticket_card(act: dict, result: dict | None = None) -> None:
+    """Persist card= on a new-risk send. Missing record is missing, never invented."""
+    try:
+        from abcxauto.memory.cards import card_label_of
+        from abcxauto.memory.journal_support import _order_ids_from_result_json
+
+        params = act.get("params") if isinstance(act.get("params"), dict) else {}
+        if not is_new_risk(str(act.get("strategy") or act.get("action") or ""), params):
+            return
+        label = card_label_of(params, extra=act.get("card"))
+        if not label:
+            return
+        oid = None
+        if isinstance(result, dict):
+            oids = _order_ids_from_result_json(result)
+            if oids:
+                oid = sorted(oids)[0]
+        get_journal().link_card(
+            card_label=label,
+            order_id=oid,
+            symbol=str(params.get("symbol") or ""),
+            strategy=str(act.get("strategy") or act.get("action") or ""),
+        )
+    except Exception:
+        logger.debug("ticket card link failed", exc_info=True)
+
+
 def _book_unreliable(world: WorldState | None = None, snap: dict | None = None) -> bool:
     if isinstance(snap, dict) and snap.get("book_unreliable"):
         return True
@@ -911,6 +938,7 @@ async def execute_ticket(
             bind_place_token(act, source="execute_ticket")
         result = await send_action(act, connector)
         result = stamp_place_result(result, act)
+        _link_ticket_card(act, result)
         rc = str((result or {}).get("reason_code") or "")
         st = str((result or {}).get("status") or "").lower()
         if rc:

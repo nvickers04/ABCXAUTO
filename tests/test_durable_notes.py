@@ -617,3 +617,113 @@ def test_recall_and_brief_schema_stay_under_budget():
     assert "e.g." not in brief
     assert "Never" not in recall
     assert "law" not in recall.lower()
+
+
+def test_cards_wake_pointer_stays_inside_budget():
+    from abcxauto.memory.cards import MAX_POINTER_CHARS, MAX_POINTER_TOKENS
+
+    j = get_journal()
+    now = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+    for i in range(8):
+        out = j.write_card(
+            label=f"longlabelplay{i:02d}",
+            screen="top_gainers",
+            scan_code="TOP_PERC_GAIN",
+            evidence=[{"tool": "scan", "facts": {"rank": i}}],
+            direction="long",
+            expectation="unique_card_expectancy_xyz",
+            invalidate="fade",
+            now=now,
+        )
+        assert out.get("ok") is True
+    ptr = j.cards_pointer(now=now)
+    assert ptr.startswith("cards=8")
+    assert "longlabelplay" in ptr
+    assert len(ptr) <= MAX_POINTER_CHARS
+    assert (len(ptr) + 3) // 4 <= MAX_POINTER_TOKENS
+    wake = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={"research_brief_full": False},
+    )
+    assert "cards=8" in wake
+    assert "longlabelplay" in wake
+    assert "unique_card_expectancy_xyz" not in wake
+    notes_ptr = j.notes_pointer(now=now)
+    if notes_ptr:
+        assert notes_ptr in wake
+
+
+@pytest.mark.asyncio
+async def test_recall_list_advertises_cards_and_store_cards_round_trips():
+    raw = await _run_tool(
+        "recall",
+        {
+            "op": "write",
+            "store": "cards",
+            "label": "amd-iv",
+            "screen": "hot_by_option_volume",
+            "scan_code": "HOT_BY_OPT_VOLUME",
+            "evidence": [{"tool": "option_quote", "facts": {"iv": 0.42}}],
+            "direction": "long",
+            "expectation": "iv crush fades",
+            "invalidate": "iv > 0.6",
+        },
+        connector=None,
+        world=_world(),
+        snap={},
+        turn=BrainTurn(),
+    )
+    wrote = json.loads(raw)
+    assert wrote.get("ok") is True
+    assert wrote.get("store") == "cards"
+    listed = json.loads(
+        await _run_tool(
+            "recall",
+            {"op": "list"},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert listed.get("cards_n") == 1
+    assert "amd-iv" in (listed.get("cards_ids") or [])
+    assert "cards=" in (listed.get("cards_pointer") or "")
+    got = json.loads(
+        await _run_tool(
+            "recall",
+            {"op": "get", "store": "cards", "ids": ["amd-iv"]},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert got["cards"][0]["label"] == "amd-iv"
+    assert got["cards"][0]["evidence"][0]["tool"] == "option_quote"
+    inv = json.loads(
+        await _run_tool(
+            "recall",
+            {"op": "invalidate", "store": "cards", "id": "amd-iv", "evidence": "iv 0.7"},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert inv["card"]["status"] == "inert"
+    listed2 = json.loads(
+        await _run_tool(
+            "recall",
+            {"op": "list", "store": "cards"},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert listed2.get("n") == 0

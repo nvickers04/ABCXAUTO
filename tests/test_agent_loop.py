@@ -332,6 +332,12 @@ def test_vertical_spread_close_is_not_new_risk_when_unprotected():
     assert is_new_risk("iron_condor", {"closing_position": True}) is False
     assert is_new_risk("calendar_spread", {"closing_position": True}) is False
     assert is_new_risk("straddle", {"closing_position": True}) is False
+    assert is_new_risk("covered_call") is True
+    assert is_new_risk("collar") is True
+    assert is_new_risk("protective_put") is True
+    assert is_new_risk("covered_call", {"closing_position": True}) is False
+    assert is_new_risk("collar", {"closing_position": True}) is False
+    assert is_new_risk("protective_put", {"closing_position": True}) is False
     strat, forced = gate_ticket(
         {
             "action": "vertical_spread",
@@ -361,6 +367,40 @@ def test_vertical_spread_close_is_not_new_risk_when_unprotected():
     )
     assert blocked == "blocked"
     assert "combo" in str((note or {}).get("note") or "").lower() or "BAG" in str((note or {}).get("note") or "")
+
+
+def test_named_card_without_record_is_not_a_refuse():
+    """Nameless still refuses. A label with no card row still passes the clerk."""
+    world = _world()
+    nameless, forced_none = gate_ticket(
+        {
+            "action": "bracket",
+            "strategy": "bracket",
+            "params": {
+                "symbol": "NVDA",
+                "quantity": 1,
+                "direction": "LONG",
+            },
+        },
+        world,
+    )
+    assert nameless == "blocked"
+    assert "params.card" in str((forced_none or {}).get("note") or "")
+    strat, forced = gate_ticket(
+        {
+            "action": "bracket",
+            "strategy": "bracket",
+            "params": {
+                "symbol": "NVDA",
+                "quantity": 1,
+                "direction": "LONG",
+                "card": "ghost-play",
+            },
+        },
+        world,
+    )
+    assert strat == "bracket"
+    assert forced is None
 
 
 def test_paper_may_not_send_hold_when_flat_rth():
