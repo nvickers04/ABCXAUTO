@@ -68,9 +68,8 @@ def test_day_facts_carry_tape_and_minutes():
     day = day_facts(world, {})
     assert "session_prep" not in day
     assert day["minutes_to_open"] == 45
-    assert day["tape_seed"] == ["AAPL"]
-    assert "ZZZZ" not in day["tape_seed"]
-    assert "SPY" not in day["tape_seed"]
+    assert "tape_seed" not in day
+    assert "watch" not in day
 
 
 def test_day_facts_flat_book_does_not_invent_a_tape():
@@ -100,9 +99,50 @@ def test_day_facts_flat_book_does_not_invent_a_tape():
         trade_plan=None,
     )
     day = day_facts(world, {})
-    assert day["tape_seed"] == []
-    assert "ZZZZ" not in day["tape_seed"]
-    assert "SPY" not in day["tape_seed"]
+    assert "tape_seed" not in day
+    assert "watch" not in day
+
+
+def test_wake_contains_no_watch_or_tape():
+    from abcxauto.park_clock import note_wake
+    from abcxauto.world_state import WorldState
+
+    note_wake(None)
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=True,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=100_000.0,
+        daily_pnl=12.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    day = day_facts(world, {})
+    assert "watch" not in day
+    assert "tape_seed" not in day
+    text = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day=day,
+    )
+    assert "watch=" not in text
+    assert "tape=" not in text
 
 
 def test_format_wake_no_tape_keeps_lots_and_minutes():

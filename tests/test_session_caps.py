@@ -495,9 +495,6 @@ async def test_premarket_cap_does_not_sit_the_open(monkeypatch, tmp_path):
             "sends": 0,
         }
 
-    async def _al(*_a, **_k):
-        return {"legal_symbols": [], "source": "test"}
-
     monkeypatch.setattr(
         "abcxauto.config.Config.is_paper",
         property(lambda self: True),
@@ -512,7 +509,6 @@ async def test_premarket_cap_does_not_sit_the_open(monkeypatch, tmp_path):
         "abcxauto.pro_engine.ProEngine._start_monitor",
         lambda self: setattr(self, "monitor", type("M", (), {"running": True})()),
     )
-    monkeypatch.setattr("abcxauto.universe.refresh_legal_set", _al)
     monkeypatch.setattr("abcxauto.pro_engine.ProEngine._host_think", think)
     monkeypatch.setattr("abcxauto.park_clock.min_look_s", lambda: 0.01)
 

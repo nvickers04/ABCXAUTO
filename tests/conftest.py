@@ -96,6 +96,8 @@ def _isolated_journal(tmp_path, monkeypatch):
 
     path = tmp_path / "journal.db"
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(path))
+    # Cards / card_links live in journal.db — same seam. Meter is a sidecar.
+    monkeypatch.setenv("ABCXAUTO_LOOK_METER_PATH", str(tmp_path / "look_meter.db"))
     reset_journal(path=str(path))
     yield
     reset_journal(path=str(path))
@@ -113,6 +115,7 @@ def pytest_configure(config):
     tmp.mkdir(parents=True, exist_ok=True)
     os.environ["ABCXAUTO_RISK_SETTINGS_PATH"] = str(tmp / "no-settings.json")
     os.environ["ABCXAUTO_JOURNAL_PATH"] = str(tmp / "journal.db")
+    os.environ["ABCXAUTO_LOOK_METER_PATH"] = str(tmp / "look_meter.db")
     os.environ["ABCXAUTO_LOG_PATH"] = str(tmp / "app.log")
 
 
