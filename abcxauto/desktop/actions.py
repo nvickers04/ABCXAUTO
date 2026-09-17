@@ -17,6 +17,7 @@ from abcxauto.desktop.tokens import (
     GREEN,
     MUTED,
     RED,
+    RISK_FIELD_KEYS,
     SURFACE,
     TEXT,
 )
@@ -362,6 +363,10 @@ class ActionsMixin:
         """Tighten-only: the writers clamp to the floor and we report what stuck."""
         from abcxauto.config import update_capacity_config, update_risk_config
 
+        if key not in RISK_FIELD_KEYS:
+            self._note_setting(f"{key} is not a floor knob", color=AMBER)
+            self._safe_update()
+            return
         raw = str((self.fields.get(key) or ft.TextField()).value or "").strip()
         try:
             typed = float(raw)
