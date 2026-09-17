@@ -442,6 +442,13 @@ def _tape_payload(data: Any) -> bool:
     return isinstance(data, dict) and bool(data.get("bars") or data.get("series"))
 
 
+def _scan_payload(data: Any) -> bool:
+    """A ranked screen page. Gets SCAN_CLIP_CHARS so rows survive a re-read."""
+    if not isinstance(data, dict) or "hits" not in data:
+        return False
+    return bool(data.get("ranked") or data.get("provenance"))
+
+
 def _drop_key(row: dict[str, Any], key: str) -> dict[str, Any]:
     if key not in row:
         return row
@@ -2005,6 +2012,8 @@ def _cached_read(turn: BrainTurn, name: str, args: dict[str, Any]) -> str | None
         data["repeat_of_this_think"] = True
         if _tape_payload(data):
             return _clip(data, max_chars=CANDLES_CLIP_CHARS)
+        if _scan_payload(data):
+            return _clip(data, max_chars=SCAN_CLIP_CHARS)
         return _clip(data)
     return hit
 
