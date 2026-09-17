@@ -42,7 +42,6 @@ def _disable_risk_gates(monkeypatch):
         lambda: Config(**{
             **base.__dict__,
             "risk_gates_enabled": False,
-            "max_arena_concentration_pct": 0,
             "defined_risk_only": False,
             "cash_only": False,
             "daily_loss_limit_pct": 0,

@@ -236,14 +236,13 @@ def test_peak_dd_tune_does_not_arm_sizing_floors():
             **_GROK_TUNE,
             "max_peak_drawdown_pct": 12.0,
             "max_symbol_concentration_pct": 8.0,
-            "max_arena_concentration_pct": 10.0,
         },
         persist=True,
     )
     assert out["status"] == "ok"
     assert out["applied"]["max_peak_drawdown_pct"] == 12.0
     assert out["applied"]["max_symbol_concentration_pct"] == 8.0
-    assert out["applied"]["max_arena_concentration_pct"] == 10.0
+    assert "max_arena_concentration_pct" not in (out.get("applied") or {})
     for key in _GROK_TUNE:
         assert key not in (out.get("applied") or {})
     cfg = get_config()

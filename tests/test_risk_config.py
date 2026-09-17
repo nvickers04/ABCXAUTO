@@ -102,6 +102,30 @@ def test_unknown_key_rejected():
         assert "Unknown" in str(e)
 
 
+def test_stale_arena_concentration_knob_does_not_crash_load(tmp_path, monkeypatch):
+    """Operator JSON leftover must skip, not raise. update_risk_config still rejects."""
+    path = tmp_path / "legacy_arena.json"
+    path.write_text(
+        '{\n  "max_arena_concentration_pct": 20.0,\n  "max_open_positions": 4\n}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ABCXAUTO_RISK_SETTINGS_PATH", str(path))
+    from abcxauto import config as cfg_mod
+
+    cfg_mod._file_overrides = {}
+    cfg_mod._runtime_overrides.clear()
+    loaded = load_risk_settings(path)
+    assert "max_arena_concentration_pct" not in loaded
+    cfg = get_config()
+    assert not hasattr(cfg, "max_arena_concentration_pct")
+    assert cfg.max_open_positions == 4
+    try:
+        update_risk_config(max_arena_concentration_pct=10.0, persist=False)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert "Unknown" in str(e)
+
+
 def test_stale_control_dials_are_ignored(tmp_path, monkeypatch):
     path = tmp_path / "legacy_controls.json"
     path.write_text(
@@ -126,6 +150,8 @@ def test_capacity_not_in_set_risk_keys():
     assert CAPACITY_KEYS.isdisjoint(SET_RISK_KEYS)
     assert CAPACITY_KEYS == frozenset({"max_open_positions"})
     assert "risk_posture" not in SET_RISK_KEYS
+    assert "max_arena_concentration_pct" not in SET_RISK_KEYS
+    assert "max_arena_concentration_pct" not in RISK_CONFIG_KEYS
 
 
 def test_set_trading_mode_paper_live_roundtrip():

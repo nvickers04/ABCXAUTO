@@ -11,10 +11,8 @@ from abcxauto.config import Config, get_config
 from abcxauto.proposals import validate_proposal
 from abcxauto.risk_gates import (
     LIVE_IBKR_PORTS,
-    arena_concentration_error,
-    arena_exposure_usd,
-    check_arena_concentration,
     check_defined_risk_only,
+    defined_risk_concentration,
     estimate_bracket_risk_dollars,
     estimate_notional,
     estimate_option_risk_dollars,
@@ -338,12 +336,6 @@ def test_symbol_exposure_usd_fail_closed_on_nan_mark():
     assert symbol_exposure_usd([occ], "SPY") == 9_000.0
 
 
-_TECH_MEMBERSHIP = [
-    {"symbol": s, "arena": "technology", "source": "test"}
-    for s in ("NVDA", "SMCI", "ARM", "AVGO", "AMD")
-]
-
-
 def test_symbol_concentration_helper_does_not_sum_same_arena_names():
     """The hole: four names in one arena. Per-name exposure never sees the stack."""
     from abcxauto.world_state import concentration
@@ -362,81 +354,91 @@ def test_symbol_concentration_helper_does_not_sum_same_arena_names():
     assert conc["cloned"] == []
 
 
-def test_arena_concentration_refuses_same_arena_multi_name_book():
-    from abcxauto.llm import SYSTEM_PROMPT
-
-    assert "max_arena_concentration" not in SYSTEM_PROMPT
-    lots = [
-        _lot("NVDA", mv=8_000.0),
-        _lot("SMCI", mv=8_000.0),
-        _lot("ARM", mv=8_000.0),
-        _lot("AVGO", mv=8_000.0),
-    ]
-    held = arena_exposure_usd(
-        lots, "technology", membership=_TECH_MEMBERSHIP
-    )
-    assert held == 32_000.0
-    err = arena_concentration_error(
-        _bracket(qty=80, entry=100.0, symbol="AMD"),
-        lots,
-        100_000.0,
-        membership=_TECH_MEMBERSHIP,
-        cap_pct=25.0,
-    )
-    assert err
-    assert "size_arena_concentration" in err
-    assert "technology" in err
-    # Under the cap: two names at 8% + ticket 8% = 24%.
-    light = lots[:2]
-    ok = arena_concentration_error(
-        _bracket(qty=80, entry=100.0, symbol="AMD"),
-        light,
-        100_000.0,
-        membership=_TECH_MEMBERSHIP,
-        cap_pct=25.0,
-    )
-    assert ok == ""
+BOOK_NL = 32_285.0
 
 
-def test_most_active_scan_is_not_an_arena_bucket():
-    membership = [
-        {"symbol": s, "arena": "most_active", "source": "scan"}
-        for s in ("ZZAA", "ZZBB", "ZZCC", "ZZDD")
-    ]
-    lots = [
-        _lot("ZZAA", mv=8_000.0),
-        _lot("ZZBB", mv=8_000.0),
-        _lot("ZZCC", mv=8_000.0),
-        _lot("ZZDD", mv=8_000.0),
-    ]
-    err = arena_concentration_error(
-        _bracket(qty=80, entry=100.0, symbol="ZZAA"),
-        lots,
-        100_000.0,
-        membership=membership,
-        cap_pct=25.0,
-    )
-    assert err == ""
+def _stock_lot_defined(*, symbol="SPY", qty=10, entry=100.0, stop=95.0):
+    """Bracket geometry — defined max-loss is qty × |entry − stop|."""
+    return {
+        "symbol": symbol,
+        "secType": "STK",
+        "quantity": qty,
+        "strategy": "bracket",
+        "entry_price": entry,
+        "stop_price": stop,
+    }
+
+
+def _vertical_lot_defined(
+    *,
+    symbol="SPY",
+    occ=None,
+    qty=1,
+    long_strike=500.0,
+    short_strike=505.0,
+    limit=2.0,
+):
+    """5-wide debit 2.00 → (5 − 2) × 100 × qty."""
+    row = {
+        "symbol": occ or symbol,
+        "secType": "OPT",
+        "underlying": symbol,
+        "quantity": qty,
+        "strategy": "vertical_spread",
+        "long_strike": long_strike,
+        "short_strike": short_strike,
+        "limit_price": limit,
+    }
+    return row
+
+
+def _covered_call_lot_defined(*, symbol="SPY", qty=1, limit=1.50):
+    """portfolio_loss: covered_call max-loss is limit × 100 × qty."""
+    return {
+        "symbol": symbol,
+        "secType": "OPT",
+        "underlying": symbol,
+        "quantity": qty,
+        "strategy": "covered_call",
+        "limit_price": limit,
+    }
 
 
 @pytest.mark.asyncio
-async def test_arena_cap_fires_when_paper_gates_are_off(monkeypatch):
-    """mode_size class: execute_proposal still refuses. pre_trade_check skips."""
+async def test_send_path_never_refuses_arena_concentration(monkeypatch):
+    """Deleted refuse. The old 4-name tech book + AMD ticket is not a block."""
+    import inspect
+
+    import abcxauto.executor as ex
+    import abcxauto.risk_gates as gates
     from abcxauto.executor import execute_proposal
+    from abcxauto.llm import SYSTEM_PROMPT
+
+    assert "max_arena_concentration" not in SYSTEM_PROMPT
+    assert not hasattr(gates, "check_arena_concentration")
+    assert not hasattr(gates, "arena_concentration_error")
+    assert not hasattr(gates, "arena_exposure_usd")
+    assert not hasattr(ex, "_verify_arena_concentration")
+    send_src = inspect.getsource(ex.execute_proposal)
+    pre_src = inspect.getsource(gates.RiskGate.pre_trade_check)
+    assert "arena_concentration" not in send_src
+    assert "arena_concentration" not in pre_src
+    assert "size_arena_concentration" not in send_src
+    assert "size_arena_concentration" not in pre_src
 
     cfg = _cfg(
         risk_gates_enabled=False,
         sizing_floors=False,
-        max_symbol_concentration_pct=25.0,
-        max_arena_concentration_pct=25.0,
-        max_position_pct=25.0,
+        defined_risk_only=False,
+        cash_only=False,
+        daily_loss_limit_pct=0,
+        max_position_pct=0,
+        max_symbol_concentration_pct=0,
+        max_open_positions=0,
     )
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
-    monkeypatch.setattr(
-        "abcxauto.universe.membership_rows", lambda **_k: _TECH_MEMBERSHIP
-    )
 
     lots = [
         _lot("NVDA", mv=8_000.0),
@@ -444,56 +446,146 @@ async def test_arena_cap_fires_when_paper_gates_are_off(monkeypatch):
         _lot("ARM", mv=8_000.0),
         _lot("AVGO", mv=8_000.0),
     ]
-    conn = FakeConnector(positions=lots)
     order = _bracket(qty=80, entry=100.0, symbol="AMD")
 
-    gate = reset_risk_gate()
-    ok, reason = await gate.pre_trade_check(order, conn)
-    assert ok is True
-    assert "disabled" in reason
-
-    result = await execute_proposal(order, conn)
-    assert result.get("status") == "rejected"
-    assert "size_arena_concentration" in str(result.get("error") or "")
-
-
-@pytest.mark.asyncio
-async def test_arena_cap_zero_on_executor_skips_risk_gates_default(monkeypatch):
-    """Isolation patches executor.get_config. Cap 0 must not fail-closed."""
-    from abcxauto.executor import execute_proposal
-
-    off = _cfg(
-        risk_gates_enabled=False,
-        max_arena_concentration_pct=0,
-        daily_loss_limit_pct=0,
-        cash_only=False,
-    )
-    on = _cfg(risk_gates_enabled=False, max_arena_concentration_pct=25.0)
-    monkeypatch.setattr("abcxauto.executor.get_config", lambda: off)
-    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: on)
-    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: off)
-
-    class Bare:
+    class Place(FakeConnector):
         async def place_bracket_order(self, **kwargs):
             return {"success": True, "order_id": 1}
 
-    result = await execute_proposal(_bracket(), Bare())
+    conn = Place(positions=lots)
+    gate = reset_risk_gate()
+    ok, reason = await gate.pre_trade_check(order, conn)
+    assert ok is True, reason
+    assert "arena" not in reason.lower()
+    result = await execute_proposal(order, conn)
     assert result.get("success") is True
+    assert "arena" not in str(result.get("error") or "").lower()
+    assert "size_arena_concentration" not in str(result)
+
+
+def test_defined_risk_concentration_stock_vertical_covered_call_and_unknown():
+    from abcxauto.portfolio_loss import defined_max_loss_usd
+    from abcxauto.world_state import pct_of_nl
+
+    stock = _stock_lot_defined(qty=10, entry=100.0, stop=95.0)
+    vertical = _vertical_lot_defined()
+    covered = _covered_call_lot_defined(limit=1.50)
+    mystery = {"symbol": "AAPL", "secType": "STK", "quantity": 10}
+
+    assert defined_max_loss_usd(stock) == pytest.approx(50.0)
+    assert defined_max_loss_usd(vertical) == pytest.approx(300.0)
+    assert defined_max_loss_usd(covered) == pytest.approx(150.0)
+    assert defined_max_loss_usd(mystery) is None
+
+    fact = defined_risk_concentration(
+        [stock, vertical, covered, mystery], BOOK_NL
+    )
+    spy_usd = 50.0 + 300.0 + 150.0
+    assert fact["symbol"]["SPY"]["usd"] == pytest.approx(spy_usd)
+    assert fact["symbol"]["SPY"]["pct"] == pct_of_nl(spy_usd, BOOK_NL)
+    assert fact["symbol"]["AAPL"] == {"usd": "unknown"}
+    assert fact["underlying"]["SPY"]["usd"] == pytest.approx(spy_usd)
+    assert fact["underlying"]["SPY"]["pct"] == pct_of_nl(spy_usd, BOOK_NL)
+    assert fact["underlying"]["AAPL"] == {"usd": "unknown"}
+
+    occ = "SPY   260918C00500000"
+    split = defined_risk_concentration(
+        [
+            _stock_lot_defined(),
+            _vertical_lot_defined(occ=occ),
+        ],
+        BOOK_NL,
+    )
+    assert split["symbol"]["SPY"]["usd"] == pytest.approx(50.0)
+    assert split["symbol"][occ]["usd"] == pytest.approx(300.0)
+    assert split["underlying"]["SPY"]["usd"] == pytest.approx(350.0)
+    assert "unknown" not in split["underlying"]["SPY"]
 
 
 @pytest.mark.asyncio
-async def test_arena_concentration_never_blocks_an_exit(monkeypatch):
-    cfg = _cfg(max_arena_concentration_pct=5.0)
-    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
-    lots = [
-        _lot("NVDA", mv=90_000.0),
-        _lot("SMCI", mv=90_000.0),
-    ]
-    ok, reason = await check_arena_concentration(
-        _market_order_exit(), FakeConnector(positions=lots)
+async def test_cash_only_alone_refuses_100_share_spy_on_this_book(monkeypatch):
+    """cash_only, not the deleted arena gate, blocks 100 SPY @ 760 on this NL."""
+    cfg = _cfg(
+        cash_only=True,
+        defined_risk_only=False,
+        risk_gates_enabled=False,
+        sizing_floors=False,
+        daily_loss_limit_pct=0,
+        max_position_pct=0,
+        max_symbol_concentration_pct=0,
+        max_risk_per_trade_pct=0,
+        max_option_premium_pct=0,
+        max_open_positions=0,
     )
-    assert ok is True
-    assert reason == "exit"
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: cfg)
+    gate = reset_risk_gate()
+    conn = FakeConnector(
+        account={
+            "netliquidation": BOOK_NL,
+            "dailypnl": 0.0,
+            "TotalCashValue": BOOK_NL,
+        }
+    )
+    ok, reason = await gate.pre_trade_check(
+        _bracket(qty=100, entry=760.0, symbol="SPY"), conn
+    )
+    assert ok is False
+    assert "cash" in reason.lower()
+    assert "arena" not in reason.lower()
+    assert estimate_notional(_bracket(qty=100, entry=760.0, symbol="SPY")) == pytest.approx(
+        76_000.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_option_premium_cap_still_refuses(monkeypatch):
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_config",
+        lambda: _cfg(
+            sizing_floors=True,
+            max_option_premium_pct=1.0,
+            max_position_pct=0,
+            max_risk_per_trade_pct=0,
+            max_symbol_concentration_pct=0,
+            daily_loss_limit_pct=0,
+            cash_only=False,
+            defined_risk_only=False,
+            max_open_positions=0,
+        ),
+    )
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
+    gate = reset_risk_gate()
+    opt = validate_proposal(
+        "buy_option",
+        {
+            "symbol": "SPY",
+            "expiration": "20260718",
+            "strike": 500.0,
+            "right": "C",
+            "quantity": 10,
+            "limit_price": 15.0,
+        },
+        RATIONALE,
+    )
+    ok, reason = await gate.pre_trade_check(opt, FakeConnector())
+    assert ok is False
+    assert "option_premium" in reason.lower() or "premium" in reason.lower()
+
+
+def test_stale_or_invented_number_still_refuses_new_risk():
+    from abcxauto.look_snapshot import REASON_CODE, begin_look, check_ticket_numbers
+
+    snap: dict = {}
+    begin_look(snap)
+    ok, code, msg = check_ticket_numbers(
+        "market_bracket",
+        {"symbol": "SPY", "price_hint": 999.99, "stop_price": 495.0, "target_price": 510.0},
+        snap,
+    )
+    assert ok is False
+    assert code == REASON_CODE == "stale_or_invented_number"
+    assert "999.99" in msg
 
 
 @pytest.mark.asyncio
@@ -847,7 +939,6 @@ async def test_mop_zero_does_not_refuse_sixteen_names_paper_or_live(monkeypatch)
                 max_position_pct=0,
                 daily_loss_limit_pct=0,
                 max_symbol_concentration_pct=0,
-                max_arena_concentration_pct=0,
                 sizing_floors=False,
             ),
         )
@@ -873,7 +964,6 @@ async def test_grok_set_mop_four_refuses_the_fifth_paper_and_live(monkeypatch):
                 max_position_pct=0,
                 daily_loss_limit_pct=0,
                 max_symbol_concentration_pct=0,
-                max_arena_concentration_pct=0,
                 sizing_floors=False,
             ),
         )
@@ -972,46 +1062,6 @@ async def test_null_or_zero_net_liq_fails_closed_for_new_risk(gate):
         ok, reason = await gate.pre_trade_check(exit_order, conn)
         assert ok is True
         assert "bypass" in reason
-
-
-def test_arena_concentration_fails_closed_on_null_or_zero_nl():
-    """The old helper returned 0.0 on book<=0, so 0% never exceeded the cap."""
-    from abcxauto.world_state import pct_of_nl
-
-    import abcxauto.risk_gates as gates
-
-    assert not hasattr(gates, "_pct_of_nl")
-    assert pct_of_nl(50.0, 0.0) is None
-    assert pct_of_nl(50.0, None) is None
-
-    lots = [_lot("NVDA", mv=1_000.0)]
-    ticket = _bracket(qty=1, entry=100.0, symbol="AMD")
-    for nl in (None, 0, 0.0):
-        err = arena_concentration_error(
-            ticket,
-            lots,
-            nl,
-            membership=_TECH_MEMBERSHIP,
-            cap_pct=25.0,
-        )
-        assert err, f"null/zero NL must refuse, got {err!r} for {nl!r}"
-        assert "size_arena_concentration" in err
-
-
-@pytest.mark.asyncio
-async def test_check_arena_concentration_fails_closed_on_zero_nl(monkeypatch):
-    cfg = _cfg(max_arena_concentration_pct=25.0)
-    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
-    monkeypatch.setattr(
-        "abcxauto.universe.membership_rows", lambda **_k: _TECH_MEMBERSHIP
-    )
-    conn = FakeConnector(
-        account={"netliquidation": 0.0, "dailypnl": 0.0},
-        positions=[_lot("NVDA", mv=1_000.0)],
-    )
-    ok, reason = await check_arena_concentration(_bracket(symbol="AMD"), conn)
-    assert ok is False
-    assert "fail-closed" in reason.lower()
 
 
 @pytest.mark.asyncio
@@ -1514,7 +1564,6 @@ async def test_zero_off_pct_ceilings_skip_size_gates(monkeypatch):
             max_position_pct=0,
             max_option_premium_pct=0,
             max_symbol_concentration_pct=0,
-            max_arena_concentration_pct=0,
             daily_loss_limit_pct=0,
             max_open_positions=0,
             cash_only=False,
@@ -2083,7 +2132,6 @@ async def test_ibkr_data_stale_blocks_when_paper_gates_are_off(monkeypatch):
     cfg = _cfg(
         risk_gates_enabled=False,
         defined_risk_only=False,
-        max_arena_concentration_pct=0,
     )
     monkeypatch.setattr("abcxauto.executor.get_config", lambda: cfg)
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
@@ -2142,7 +2190,6 @@ async def test_gates_off_still_halts_daily_loss(monkeypatch):
         daily_loss_limit_pct=25.0,
         cash_only=False,
         defined_risk_only=False,
-        max_arena_concentration_pct=0,
         max_open_positions=0,
     )
     monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
@@ -2274,7 +2321,6 @@ async def test_cash_only_fires_when_paper_gates_off(monkeypatch):
             sizing_floors=False,
             daily_loss_limit_pct=0,
             defined_risk_only=False,
-            max_arena_concentration_pct=0,
         ),
     )
     monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
