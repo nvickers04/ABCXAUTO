@@ -17,6 +17,8 @@ from abcxauto.tool_args import (
 )
 from abcxauto.world_state import WorldState
 
+pytestmark = pytest.mark.usefixtures("stub_agent_loop_import")
+
 
 def _world(**kwargs) -> WorldState:
     base = dict(
@@ -208,3 +210,22 @@ async def test_run_tool_positions_alias_is_book():
     )
     data = json.loads(raw)
     assert "world" in data
+
+
+def test_scan_filter_aliases_include_stock_type_and_pe():
+    from abcxauto.tool_args import normalize_tool_call
+
+    _n, args = normalize_tool_call(
+        "scan",
+        {
+            "arena": "most_active",
+            "stockTypeFilter": "both",
+            "pe_ratio_above": "18",
+            "usd_market_cap_above": "5000",
+        },
+    )
+    assert args["stock_type"] == "both"
+    assert args["peRatioAbove"] == "18"
+    assert args["usdMarketCapAbove"] == "5000"
+    assert "stockTypeFilter" not in args
+    assert "pe_ratio_above" not in args

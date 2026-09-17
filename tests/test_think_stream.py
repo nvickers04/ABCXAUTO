@@ -1412,3 +1412,42 @@ async def test_grok_uses_client_max_tokens_not_2048_cap():
     out = await grok(g, "prompt", stage="judge")
     assert out == '{"stance":"idle"}'
     assert created.get("max_tokens") == 8192
+
+
+def test_compact_scan_hits_keeps_ranked_identity():
+    from abcxauto.think_stream import _compact_scan_hits
+
+    raw = {
+        "source": "ibkr",
+        "arena": "top_gainers",
+        "scan_code": "TOP_PERC_GAIN",
+        "ranked": True,
+        "rows": [
+            {
+                "symbol": "TQQQ",
+                "rank": 0,
+                "screen": "top_gainers",
+                "scan_code": "TOP_PERC_GAIN",
+                "metric_name": "percent_change",
+                "metric_value": 12.0,
+                "gap_pct": 12.0,
+                "skip_class": "levered",
+                "source": "ibkr",
+            },
+            {
+                "symbol": "AAPL",
+                "rank": 1,
+                "screen": "top_gainers",
+                "scan_code": "TOP_PERC_GAIN",
+                "gap_pct": 1.2,
+                "skip_class": "",
+                "source": "ibkr",
+            },
+        ],
+    }
+    kept = _compact_scan_hits(raw)
+    assert kept["rows"][0]["skip_class"] == "levered"
+    assert kept["rows"][1]["skip_class"] == ""
+    assert kept["rows"][0]["metric_name"] == "percent_change"
+    assert kept["rows"][0]["screen"] == "top_gainers"
+    assert kept["rows"][0]["source"] == "ibkr"
