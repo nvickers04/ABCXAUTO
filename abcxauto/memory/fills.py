@@ -89,6 +89,7 @@ class JournalFills:
             self._ensure_schema()
             inserted = 0
             new_fills: list = []
+            pending_links: list[dict] = []
             with self._connect() as conn:
                 anchors: dict = {}
                 for row in conn.execute(
@@ -192,6 +193,31 @@ class JournalFills:
                         inserted += int(cur.rowcount or 0)
                         if int(cur.rowcount or 0):
                             new_fills.append(fill)
+                            card_label = ""
+                            if isinstance(raw_mark, dict):
+                                card_label = str(raw_mark.get("card") or "")
+                            if not card_label:
+                                card_label = str(fill.get("card") or "")
+                            if card_label:
+                                pending_links.append(
+                                    {
+                                        "card_label": card_label,
+                                        "exec_id": str(exec_id),
+                                        "fill_id": int(cur.lastrowid),
+                                        "order_id": oid,
+                                        "symbol": fill.get("symbol") or (
+                                            raw_mark.get("symbol")
+                                            if isinstance(raw_mark, dict)
+                                            else ""
+                                        ),
+                                        "strategy": (
+                                            raw_mark.get("strategy")
+                                            if isinstance(raw_mark, dict)
+                                            else ""
+                                        ),
+                                        "ts": fill_ts,
+                                    }
+                                )
                         if (
                             int(cur.rowcount or 0)
                             and isinstance(raw_mark, dict)
@@ -218,6 +244,12 @@ class JournalFills:
                     record_fill_note(fill)
                 except Exception:
                     logger.debug("fill note failed", exc_info=True)
+            if pending_links and hasattr(self, "link_card"):
+                for link in pending_links:
+                    try:
+                        self.link_card(**link)
+                    except Exception:
+                        logger.debug("fill card link failed", exc_info=True)
             return inserted
         except Exception:
             logger.exception("journal.record_fills failed")

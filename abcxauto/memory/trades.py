@@ -68,7 +68,22 @@ class JournalTrades:
                     ),
                 )
                 conn.commit()
-                return int(cur.lastrowid)
+                pid = int(cur.lastrowid)
+            try:
+                from abcxauto.memory.cards import card_label_of
+
+                label = card_label_of(params)
+                if label and hasattr(self, "link_card"):
+                    self.link_card(
+                        card_label=label,
+                        proposal_id=pid,
+                        symbol=symbol,
+                        strategy=strategy,
+                        ts=ts,
+                    )
+            except Exception:
+                logger.debug("proposal card link failed", exc_info=True)
+            return pid
         except Exception:
             logger.exception("journal.record_proposal failed")
             return None
@@ -358,7 +373,23 @@ class JournalTrades:
                     )
                 _patch_dispatch_send_marks(conn, dispatch_id, marks)
                 conn.commit()
-                return mark_id
+            try:
+                from abcxauto.memory.cards import card_label_of
+
+                label = card_label_of(marks, extra=marks.get("card") if isinstance(marks, dict) else None)
+                if label and hasattr(self, "link_card"):
+                    self.link_card(
+                        card_label=label,
+                        proposal_id=proposal_id,
+                        dispatch_id=dispatch_id,
+                        order_id=primary,
+                        symbol=str(marks.get("symbol") or "") if isinstance(marks, dict) else "",
+                        strategy=str(marks.get("strategy") or "") if isinstance(marks, dict) else "",
+                        ts=ts,
+                    )
+            except Exception:
+                logger.debug("send_marks card link failed", exc_info=True)
+            return mark_id
         except Exception:
             logger.exception("journal.record_send_marks failed")
             return None
@@ -494,26 +525,8 @@ class JournalTrades:
             return None
 
     def set_working_thesis(self, text: str, *, ts: Optional[str] = None) -> None:
-        """Upsert the single working thesis row (id=1)."""
-        if not self.enabled:
-            return
-        try:
-            self._ensure_schema()
-            body = (text or "").strip()
-            if not body:
-                return
-            with self._connect() as conn:
-                conn.execute(
-                    """
-                    INSERT INTO working_thesis (id, ts, text)
-                    VALUES (1, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET ts = excluded.ts, text = excluded.text
-                    """,
-                    (_row_ts(ts), body[:2000]),
-                )
-                conn.commit()
-        except Exception:
-            logger.exception("journal.set_working_thesis failed")
+        """Dead. Cards are the thesis. Leftover callers cannot write."""
+        return
 
     def record_judgment(
         self,
@@ -659,18 +672,8 @@ class JournalTrades:
         }
 
     def get_working_thesis(self) -> str:
-        try:
-            self._ensure_schema()
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT text FROM working_thesis WHERE id = 1"
-                ).fetchone()
-            if not row:
-                return ""
-            return str(row["text"] or "")
-        except Exception:
-            logger.exception("journal.get_working_thesis failed")
-            return ""
+        """Dead. Always empty so world_state/book cannot inject leftover prose."""
+        return ""
 
     def recent_dispatches(self, limit: int = 50) -> List[dict]:
         try:

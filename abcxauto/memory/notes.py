@@ -72,14 +72,23 @@ _SNAKE_RE = re.compile(r"\b([a-z][a-z0-9_]{2,40})\b")
 
 
 def notes_wake_bit(*, now: datetime | None = None) -> str:
-    """Counts/tags/ages only. Empty when nothing live. Never a body."""
+    """Notes counts/tags/ages plus live cards. Empty when nothing live. Never a body."""
     try:
         from abcxauto.memory import get_journal
 
-        return get_journal().notes_pointer(now=now)
+        journal = get_journal()
+        notes = journal.notes_pointer(now=now)
     except Exception:
         logger.debug("notes wake pointer failed", exc_info=True)
         return ""
+    try:
+        from abcxauto.memory.cards import cards_wake_bit
+
+        cards = cards_wake_bit(now=now)
+    except Exception:
+        logger.debug("cards wake pointer failed", exc_info=True)
+        cards = ""
+    return " ".join(x for x in (notes, cards) if x)
 
 
 def lecture_error(body: str) -> str:
@@ -541,18 +550,75 @@ class JournalNotes:
             )
 
 
+def _recall_cards(journal: Any, op: str, blob: dict[str, Any]) -> dict[str, Any]:
+    if op in ("", "list"):
+        out = journal.list_cards()
+        out["op"] = "list"
+        out["store"] = "cards"
+        out["send_geometry"] = False
+        return out
+    if op == "get":
+        ids = blob.get("ids") or blob.get("id") or blob.get("label")
+        if isinstance(ids, str):
+            ids = [ids]
+        labels = blob.get("labels") or blob.get("label")
+        if isinstance(labels, str):
+            labels = [labels]
+        out = journal.get_cards(ids=list(ids or []), labels=list(labels or []) if labels else None)
+        out["op"] = "get"
+        out["store"] = "cards"
+        out["send_geometry"] = False
+        return out
+    if op == "write":
+        out = journal.write_card(
+            label=str(blob.get("label") or blob.get("id") or ""),
+            id=str(blob.get("id") or ""),
+            screen=str(blob.get("screen") or ""),
+            scan_code=str(blob.get("scan_code") or ""),
+            evidence=blob.get("evidence"),
+            direction=str(blob.get("direction") or ""),
+            expectation=str(blob.get("expectation") or blob.get("body") or ""),
+            invalidate=str(blob.get("invalidate") or ""),
+            source=SOURCE_GROK,
+        )
+        out["op"] = "write"
+        out["store"] = "cards"
+        out["send_geometry"] = False
+        return out
+    if op == "invalidate":
+        out = journal.invalidate_card(
+            str(blob.get("id") or blob.get("label") or ""),
+            evidence=str(blob.get("evidence") or blob.get("body") or ""),
+        )
+        out["op"] = "invalidate"
+        out["store"] = "cards"
+        out["send_geometry"] = False
+        return out
+    return {"ok": False, "error": f"unknown_op:{op}", "store": "cards"}
+
+
 def recall_tool(args: dict[str, Any] | None) -> dict[str, Any]:
     """Grok tool surface. Never attaches to book/status/wake/prompt."""
     from abcxauto.memory import get_journal
 
     blob = args if isinstance(args, dict) else {}
     op = str(blob.get("op") or blob.get("action") or "list").strip().lower()
+    store = str(blob.get("store") or "").strip().lower()
     journal = get_journal()
+    if store == "cards":
+        return _recall_cards(journal, op, blob)
     if op in ("", "list"):
         out = journal.list_notes()
+        try:
+            cards = journal.list_cards()
+        except Exception:
+            cards = {"pointer": "", "ids": [], "n": 0}
         out["op"] = "list"
         out["store"] = "notes"
         out["send_geometry"] = False
+        out["cards_pointer"] = cards.get("pointer") or ""
+        out["cards_n"] = int(cards.get("n") or 0)
+        out["cards_ids"] = list(cards.get("ids") or [])
         return out
     if op == "get":
         ids = blob.get("ids") or blob.get("id")
