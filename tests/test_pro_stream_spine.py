@@ -16,6 +16,7 @@ from abcxauto.pro_desktop import (
     RED,
     TEXT,
     NAV,
+    NAV_SUBTITLES,
     NAV_TITLES,
     ProTerminal,
     format_token_count,
@@ -644,7 +645,6 @@ LIVE_LOOK = "\n".join(
         "Book is stale and the book is flat.",
         "[book]",
         "[status]",
-        "[playbook]",
         "[scan]",
         "",
     ]
@@ -701,7 +701,7 @@ def test_strip_looking_when_think_tail_moves_while_status_lags(pro):
     # Open [think] is in flight even when length did not grow this tick.
     assert think_tail_in_flight(s.think_live)
     assert pro.lbl_hs_state.value == "looking"
-    s.think_live += "[book]\n[status]\n[playbook]\n[scan]\n"
+    s.think_live += "[book]\n[status]\n[scan]\n"
     pro._sync_health_strip()
     assert pro.lbl_hs_state.value == "looking"
     assert pro.lbl_desk_sub.value == "looking"
@@ -984,7 +984,7 @@ def test_strip_last_line_is_last_say_or_real_card_send(pro, monkeypatch):
 
 
 def test_strip_this_look_tools_come_from_think_tail_chips(pro):
-    """Paint 3: this look N tools from [book][status][playbook][scan], not empty last_turn.tool_trace."""
+    """Paint 3: this look N tools from [book][status][scan], not empty last_turn.tool_trace."""
     s = pro.engine.state
     s.running = True
     s.autonomous = True
@@ -995,8 +995,9 @@ def test_strip_this_look_tools_come_from_think_tail_chips(pro):
     pro.engine._fail_streak = 1
     pro._sync_health_strip()
     chips = think_tail_tool_chips(LIVE_LOOK)
-    assert chips == ["book", "status", "playbook", "scan"]
-    assert "4 tool(s)" in (pro.lbl_hs_look.value or "")
+    assert chips == ["book", "status", "scan"]
+    assert "playbook" not in chips
+    assert "3 tool(s)" in (pro.lbl_hs_look.value or "")
     assert "0 send(s)" in (pro.lbl_hs_look.value or "")
     assert pro.lbl_hs_look.color == TEXT
 
@@ -1102,58 +1103,87 @@ def test_dashboard_is_the_stream_not_a_card_wall(pro):
     assert pro.lbl_mix not in painted
 
 
-# -------------------------------------------------------------------- playbook
+# -------------------------------------------------------------------- cards
 
 
-def test_playbook_label_replaces_notebook_jargon(pro):
+def test_notebook_nav_is_cards_not_a_playbook_catalog(pro):
     labels = {k: label for k, label, _o, _f in NAV}
-    assert labels["notebook"] == "Playbook"
-    assert NAV_TITLES["notebook"] == "Playbook"
-    # The nav key and the internal identifiers stay put.
+    assert labels["notebook"] == "Cards"
+    assert NAV_TITLES["notebook"] == "Cards"
+    assert "Playbook" not in labels["notebook"]
+    assert "playbook" not in (NAV_SUBTITLES.get("notebook") or "").lower()
     assert hasattr(pro, "_page_notebook")
     assert hasattr(pro, "_sync_notebook_page")
+    assert not hasattr(pro, "_sync_sc_ledger")
 
 
-def test_playbook_card_with_no_sends_reads_no_sends_yet(pro):
-    card = {"name": "shelf reclaim", "status": "testing", "ticket": "stock_with_stop"}
-    blob = " | ".join(_texts(pro._notebook_card(card, {})))
-    assert "no sends yet" in blob
-    assert "0.00" not in blob
-
-
-def test_playbook_card_with_sends_but_no_fills_says_so(pro):
-    card = {"name": "shelf reclaim", "status": "working"}
-    attrib = {
-        "shelf reclaim": {
-            "card": "shelf reclaim",
-            "sends": 2,
-            "attributed_fills": 0,
-            "realized_pnl": 0.0,
-        }
+def test_notebook_card_shows_journal_slug_not_persist_fields(pro):
+    card = {
+        "id": "c1",
+        "label": "shelf reclaim",
+        "status": "live",
+        "n": 1,
+        "when_on": "mega/large gap",
+        "scan": "MOST_ACTIVE",
+        "shape": "bracket",
+        "fill_assumption": "touch the bid",
     }
-    blob = " | ".join(_texts(pro._notebook_card(card, attrib)))
-    assert "no fills yet" in blob
-    assert "$+0.00" not in blob
+    blob = " | ".join(_texts(pro._notebook_card(card)))
+    assert "shelf reclaim" in blob
+    assert "c1" in blob
+    assert "n=1" in blob
+    assert "live" in blob
+    assert "mega/large gap" not in blob
+    assert "MOST_ACTIVE" not in blob
+    assert "bracket" not in blob
+    assert "touch the bid" not in blob
 
 
-def test_playbook_card_with_fills_shows_realized(pro):
-    card = {"name": "shelf reclaim", "status": "working"}
-    attrib = {
-        "shelf reclaim": {
-            "card": "shelf reclaim",
-            "sends": 2,
-            "attributed_fills": 2,
-            "realized_pnl": 41.5,
-        }
-    }
-    blob = " | ".join(_texts(pro._notebook_card(card, attrib)))
-    assert "$+41.50" in blob
-
+def test_notebook_page_lists_journal_cards(pro, monkeypatch):
+    monkeypatch.setattr(
+        pro,
+        "_journal_card_list",
+        lambda: {
+            "pointer": "cards=2 shelf,gap age=0d",
+            "ids": ["c1", "c2"],
+            "labels": ["shelf reclaim", "gap hold"],
+            "n": 2,
+        },
+    )
+    pro._sync_notebook_page(force=True)
+    names = " | ".join(_texts(pro.col_notebook_cards))
+    assert "shelf reclaim" in names
+    assert "gap hold" in names
+    assert "No setup cards yet" not in names
+    assert "when_on" not in names
+    assert (pro.lbl_notebook_head.value or "") == "cards=2 shelf,gap age=0d"
+    assert (pro.lbl_notebook_meta.value or "") == "2 card(s)"
+    assert pro.notebook_raw_panel.visible is False
 
 
 def test_card_scores_table_empty_state_is_honest(pro, monkeypatch):
     pro._sync_sc_cards()
     assert "No card-attributed sends yet" in " | ".join(_texts(pro.col_sc_cards))
+    pro._sync_sc_cards({"by_card": []})
+    assert "No card-attributed sends yet" in " | ".join(_texts(pro.col_sc_cards))
+
+
+def test_card_scores_table_paints_by_card(pro):
+    pro._sync_sc_cards(
+        {
+            "by_card": [
+                {"card_label": "hollow", "realized_pnl": 12.5, "sends": 2, "n_fills": 1},
+                {"card": "gap", "realized_pnl": -4.0},
+            ]
+        }
+    )
+    blob = " | ".join(_texts(pro.col_sc_cards))
+    assert "hollow" in blob
+    assert "$+12.50" in blob
+    assert "2 send(s)" in blob
+    assert "gap" in blob
+    assert "$-4.00" in blob
+    assert "No card-attributed sends yet" not in blob
 
 
 def test_scorecard_windows_paint_vs_spy_blank_not_invented(pro):

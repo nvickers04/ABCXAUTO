@@ -25,7 +25,7 @@ __all__ = (
     "overlay_types_to_hide",
 )
 
-# Virgin overlay trunks Grok still sees in playbook() / book() after #128
+# Virgin overlay trunks Grok still sees in book() after #128
 # refuses the send. Hide these on a last-stop-covered long; keep other
 # defined-risk trunks.
 OVERLAY_PLAYBOOK_TYPES = frozenset(_OVERLAY_STRATS)
@@ -165,7 +165,7 @@ def overlay_types_to_hide(
     positions: list[dict] | None,
     orders: list[dict] | None = None,
 ) -> frozenset[str]:
-    """Overlay trunks to strip from the Grok-facing playbook view.
+    """Overlay trunks to hide from Grok when last-stop already covers the long.
 
     When every long STK lot already has a covering last-stop, virgin
     protective_put / covered_call / collar / cash_secured_put starters must

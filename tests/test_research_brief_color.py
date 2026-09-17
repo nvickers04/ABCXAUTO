@@ -11,6 +11,7 @@ import pytest
 from abcxauto.config import clear_runtime_overrides, get_config
 from abcxauto.desk_mode import (
     load_research_brief,
+    research_brief_look_payload,
     research_brief_stale,
     rth_research_color,
     write_research_brief,
@@ -91,6 +92,14 @@ def test_real_2026_09_09_brief_parses_without_regime(tmp_path, monkeypatch):
     assert "stale" in wake
     assert "watch=" not in wake
     assert "tape=" not in wake
+    payload = research_brief_look_payload(brief, now=datetime.now(timezone.utc))
+    assert payload["stale"] is True
+    assert payload["send_geometry"] is False
+    assert "expectancy" not in (payload.get("brief") or {})
+    assert "facts" not in (payload.get("brief") or {})
+    assert "prove_window_id" not in (payload.get("brief") or {})
+    assert payload["brief"].get("as_of", "").startswith("2026-09-09")
+    assert payload["brief"].get("session") == "premarket"
 
 
 def test_write_research_brief_does_not_stamp_regime():

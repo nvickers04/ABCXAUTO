@@ -595,6 +595,7 @@ async def test_fetch_notes_and_brief_during_rth_kill_look(tmp_path, monkeypatch)
         )
     )
     assert stale.get("stale") is True
+    assert "expectancy" not in (stale.get("brief") or {})
     wake = format_wake(
         cycle=1,
         session="regular",
@@ -617,6 +618,16 @@ def test_recall_and_brief_schema_stay_under_budget():
     assert "e.g." not in brief
     assert "Never" not in recall
     assert "law" not in recall.lower()
+    blob = json.loads(recall)
+    params = (blob.get("function") or {}).get("parameters")
+    if isinstance(params, str):
+        params = json.loads(params)
+    props = (params or {}).get("properties") or {}
+    assert props.get("store", {}).get("enum") == ["notes", "cards"]
+    for key in ("label", "screen", "scan_code", "direction", "expectation"):
+        assert key in props
+    desc = str((blob.get("function") or {}).get("description") or "").lower()
+    assert "notes" in desc and "cards" in desc
 
 
 def test_cards_wake_pointer_stays_inside_budget():

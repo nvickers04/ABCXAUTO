@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from xai_sdk.chat import tool
 
+from abcxauto.news_feed import is_real_headline
 from abcxauto.opportunity_scan import normalize_tickers
 from abcxauto.order_examples import ticket_strategy_names
 from abcxauto.think_stream import emit as think_emit
@@ -52,11 +53,9 @@ CHAIN_S = 60.0
 CANDLE_S = 35.0
 SCAN_S = 35.0
 # Ranked 30-row page is ~5,811 chars. Provenance ~300, envelope ~400.
-# with=news: 8 symbols × 4 headlines × ~220 chars ≈ 7,040 top-level, plus
-# nested row.mda.news ≈ 7,840. with=metrics on 8 rows ≈ 1,600.
-# Total ≈ 23,000. 28_000 leaves ~5k for long headlines.
-# 28_000 / 4 ≈ 7_000 tok; grok-4.6 input ≈ $2/MTok → $0.014 per later call
-# in the look (8_000 default is $0.004 and would drop rows).
+# with=news stays a short top-level list (no nested row.mda.news).
+# Slim headlines ≈ 1,600. with=metrics on 8 rows ≈ 1,600.
+# 28_000 leaves room for a 3-screen merge without evicting ranks.
 SCAN_CLIP_CHARS = 28_000
 _QUOTE_SCHEMA = {"type": "string", "description": "Ticker, e.g. AAPL"}
 _SYMBOLS_SCHEMA = {"type": "array", "items": {"type": "string"}}
@@ -115,6 +114,8 @@ def _scan_code_keys() -> list[str]:
 
 def _clip_scan(data: Any) -> str:
     """Scan page + news must survive. Default 8k clip drops ranked rows."""
+    if isinstance(data, dict):
+        data = _scan_public_payload(data)
     return _hub()._clip(data, max_chars=SCAN_CLIP_CHARS)
 
 
@@ -297,8 +298,7 @@ def _scan_gate_facts(
 ) -> dict[str, Any]:
     """Deepest |open_gap| on this tape after ``scan_skip_class``.
 
-    Playbook when_on is not a floor. Levered / micro never occupy
-    ``deepest``; those hits stay on the tape.
+    Levered / micro never occupy ``deepest``; those hits stay on the tape.
     """
     _ = book
     try:
@@ -351,7 +351,7 @@ def _union_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
             continue
         prev = by.get(sym)
         if prev is None:
-            by[sym] = dict(row)
+            by[sym] = _strip_hit_news(dict(row))
             continue
         keep = dict(prev)
         if _open_gap_mag(row) > _open_gap_mag(prev):
@@ -360,7 +360,7 @@ def _union_scan_hits(prior: Any, incoming: Any) -> dict[str, Any]:
             for key, val in row.items():
                 if keep.get(key) in (None, "") and val not in (None, ""):
                     keep[key] = val
-        by[sym] = keep
+        by[sym] = _strip_hit_news(keep)
     rows = sort_scan_rows(list(by.values()))
     quoted = sum(1 for r in rows if r.get("last") is not None)
     meta = new if new.get("rows") else old
@@ -449,11 +449,65 @@ def _scan_out_from_snap(
     return out
 
 
+_SCAN_NEWS_KEEP = (
+    "symbol",
+    "headline",
+    "asof_iso",
+    "use",
+    "freshness",
+    "source",
+    "error",
+)
+
+
+def _slim_scan_news(items: Any) -> list[dict[str, Any]]:
+    """Headline color only. Timeouts and error rows are not headlines."""
+    out: list[dict[str, Any]] = []
+    for it in items or []:
+        if not is_real_headline(it):
+            continue
+        slim = {
+            key: it[key]
+            for key in _SCAN_NEWS_KEEP
+            if it.get(key) not in (None, "")
+        }
+        slim.pop("error", None)
+        if slim.get("headline"):
+            out.append(slim)
+    return out
+
+
+def _strip_hit_news(row: dict[str, Any]) -> dict[str, Any]:
+    """Ranked rows keep metrics, not a second copy of headlines."""
+    mda = row.get("mda")
+    if not isinstance(mda, dict) or ("news" not in mda and "news_use" not in mda):
+        return row
+    item = dict(row)
+    nest = dict(mda)
+    nest.pop("news", None)
+    nest.pop("news_use", None)
+    if nest:
+        item["mda"] = nest
+    else:
+        item.pop("mda", None)
+    return item
+
+
 def _scan_public_payload(out: dict[str, Any]) -> dict[str, Any]:
-    """Drop the duplicate rows=hits copy before clip. Snap still keeps rows."""
+    """One hit list, headlines once at the top. Snap may still keep rows."""
     slim = dict(out) if isinstance(out, dict) else {}
     if slim.get("rows") == slim.get("hits"):
         slim.pop("rows", None)
+    hits = slim.get("hits")
+    if isinstance(hits, list):
+        slim["hits"] = [
+            _strip_hit_news(row) if isinstance(row, dict) else row for row in hits
+        ]
+    news = slim.get("news")
+    if isinstance(news, list):
+        slim["news"] = _slim_scan_news(news)
+        if not slim["news"]:
+            slim.pop("news", None)
     return slim
 
 
@@ -641,7 +695,7 @@ def _scan_paint_rows(
             if slim:
                 painted.append(slim)
             continue
-        item = dict(row)
+        item = _strip_hit_news(dict(row))
         sym = str(item.get("symbol") or "").upper().strip()
         px = _quote_last(qmap.get(sym))
         if px is not None:
@@ -922,37 +976,30 @@ def _apply_candle_session(
 
 
 def _scan_carries_news(raw: Any) -> bool:
-    """True when a scan already nested MDA headlines on the same hits."""
-    if raw is True:
-        return True
+    """True only when real headlines are present. Timeouts do not count."""
     if isinstance(raw, list):
-        return any(
-            isinstance(item, dict)
-            and (item.get("headline") or item.get("title") or item.get("summary"))
-            for item in raw
-        )
+        return any(is_real_headline(item) for item in raw)
     if not isinstance(raw, dict):
         return False
     items = raw.get("news")
-    if isinstance(items, list) and items:
+    if isinstance(items, list) and any(is_real_headline(it) for it in items):
         return True
     for row in list(raw.get("hits") or []) + list(raw.get("rows") or []):
         if not isinstance(row, dict):
             continue
-        if row.get("news"):
+        nest = row.get("news")
+        if isinstance(nest, list) and any(is_real_headline(it) for it in nest):
+            return True
+        if is_real_headline(row):
             return True
         mda = row.get("mda")
-        if isinstance(mda, dict) and mda.get("news"):
-            return True
+        if isinstance(mda, dict):
+            mda_news = mda.get("news")
+            if isinstance(mda_news, list) and any(
+                is_real_headline(it) for it in mda_news
+            ):
+                return True
     return False
-
-
-def _note_scan_news(turn: BrainTurn, payload: dict[str, Any]) -> None:
-    """Headlines already on the screen are this look's news step."""
-    if not _scan_carries_news(payload):
-        return
-    if "news" not in turn.tool_trace:
-        turn.tool_trace.append("news")
 
 
 def _attach_run_sheet(
@@ -1123,7 +1170,8 @@ AGENT_TOOLS = [
             "metric_name, metric_value, gap_pct, skip_class, source; "
             "last/volume/market_cap only when IBKR supplied them. "
             "skip_class is levered|micro|empty. "
-            "with=news|metrics attaches to ranked pages. "
+            "with=news is a short top-level headline list, not nested on hits. "
+            "with=metrics nests delayed daily context on the top names. "
             "symbols[] is a fat drill-down. "
             "Bare scan() notes the flush defaults."
         ),
@@ -1322,7 +1370,6 @@ AGENT_TOOLS = [
             {
                 "max_peak_drawdown_pct": {"type": "number"},
                 "max_symbol_concentration_pct": {"type": "number"},
-                "max_arena_concentration_pct": {"type": "number"},
                 "size_pct_nl": {
                     "type": "number",
                     "description": (
@@ -1341,7 +1388,7 @@ AGENT_TOOLS = [
         name="note",
         description=(
             "This-flight one-sentence conclusion. Grok-owned. "
-            "Empty reads the list. Not a fact. Not the playbook."
+            "Empty reads the list. Not a fact."
         ),
         parameters=_schema(
             {
@@ -1355,24 +1402,24 @@ AGENT_TOOLS = [
     ),
     tool(
         name="recall",
-        description="Durable notes. list/get fetch; write stores; invalidate retires.",
+        description="Durable notes and cards. list/get fetch; write stores; invalidate retires.",
         parameters=_schema(
             {
-                "op": {
-                    "type": "string",
-                    "enum": ["list", "get", "write", "invalidate"],
-                },
+                "op": {"enum": ["list", "get", "write", "invalidate"]},
+                "store": {"enum": ["notes", "cards"]},
                 "ids": {"type": "array", "items": {"type": "string"}},
-                "id": {"type": "string"},
+                "id": {},
                 "tags": {"type": "array", "items": {"type": "string"}},
-                "kind": {
-                    "type": "string",
-                    "enum": ["fact", "event", "invalidate"],
-                },
-                "symbol": {"type": "string"},
-                "body": {"type": "string"},
-                "evidence": {"type": "string"},
-                "invalidate": {"type": "string"},
+                "kind": {"enum": ["fact", "event", "invalidate"]},
+                "symbol": {},
+                "body": {},
+                "evidence": {},
+                "invalidate": {},
+                "label": {},
+                "screen": {},
+                "scan_code": {},
+                "direction": {},
+                "expectation": {},
             },
             [],
         ),
@@ -1915,30 +1962,30 @@ async def _run_tool(
                 pass
 
         async def _attach_optional_news(out: dict[str, Any]) -> None:
-            if not want_news or out.get("news"):
+            if not want_news:
                 return
-            from abcxauto.prints import attach_mda_news
+            existing = out.get("news")
+            if existing:
+                real = _slim_scan_news(existing)
+                if real:
+                    out["news"] = real
+                    return
+                out.pop("news", None)
 
             news_syms = _news_symbols_for_scan(
                 snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {},
                 [str(s) for s in (out.get("symbols") or []) if s],
             )
-            out["news"] = await _hub()._mda_news(news_syms)
+            news = _slim_scan_news(await _hub()._mda_news(news_syms))
+            if not news:
+                return
+            out["news"] = news
             out["news_freshness"] = "delayed_15m"
             out["news_use"] = "color_not_trigger"
-            attach_mda_news(
-                [
-                    r
-                    for r in (out.get("hits") or out.get("rows") or [])
-                    if isinstance(r, dict)
-                ],
-                out["news"],
-            )
-            if out["news"]:
-                snap["scan_news_attached"] = True
-                if not world.news_items:
-                    world.news_items = list(out["news"])
-                    snap["news_items"] = list(out["news"])
+            snap["scan_news_attached"] = True
+            if not world.news_items:
+                world.news_items = list(news)
+                snap["news_items"] = list(news)
 
         async def _finish_look_bag(
             last_ok: dict[str, Any] | None,
@@ -1987,7 +2034,6 @@ async def _run_tool(
             )
             if silent:
                 out["note"] = SILENT_SCAN_NOTE
-            _note_scan_news(turn, out)
             _attach_scan_run(out, turn=turn, world=world)
             if emit_line:
                 _emit_scan_look_line(snap, out)
@@ -2541,20 +2587,9 @@ async def _run_tool(
 
         return _hub()._clip(recall_tool(args if isinstance(args, dict) else {}))
     if name == "research_brief":
-        from abcxauto.desk_mode import load_research_brief, research_brief_stale
+        from abcxauto.desk_mode import load_research_brief, research_brief_look_payload
 
-        brief = load_research_brief()
-        missing = not bool(brief)
-        stale = True if missing else research_brief_stale(brief)
-        return _hub()._clip(
-            {
-                "brief": brief or {},
-                "missing": missing,
-                "stale": stale,
-                "use": "color, never a live trigger",
-                "send_geometry": False,
-            }
-        )
+        return _hub()._clip(research_brief_look_payload(load_research_brief()))
     return json.dumps({"error": f"unknown tool {name}"})
 
 
@@ -2568,6 +2603,7 @@ __all__ = [
     'CANDLE_S',
     'SCAN_S',
     'SCAN_CLIP_CHARS',
+    '_clip_scan',
     '_QUOTE_SCHEMA',
     '_SYMBOLS_SCHEMA',
     '_scan_arena_keys',
@@ -2586,6 +2622,8 @@ __all__ = [
     '_scan_screen_on_look',
     '_scan_out_from_snap',
     '_scan_public_payload',
+    '_slim_scan_news',
+    '_strip_hit_news',
     '_SCAN_REUSE_NOTE',
     '_scan_reuse_stub',
     '_emit_scan_look_line',
@@ -2604,7 +2642,7 @@ __all__ = [
     '_refresh_session_last',
     '_remember_session',
     '_apply_candle_session',
-    '_note_scan_news',
+    '_scan_carries_news',
     '_attach_run_sheet',
     '_attach_scan_run',
     '_schema',

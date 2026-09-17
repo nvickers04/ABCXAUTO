@@ -91,11 +91,21 @@ def test_join_mda_metrics_and_news_on_ibkr_hit():
     rows = [{"symbol": "NVDA", "last": 181.5, "quote_source": "ibkr_live"}]
     n = merge_mda_metrics(
         rows,
-        [{"symbol": "NVDA", "mda_last": 180.0, "sma20": 175.0, "last": 999.0, "source": "mda"}],
+        [
+            {
+                "symbol": "NVDA",
+                "mda_last": 180.0,
+                "sma20": 175.0,
+                "last": 999.0,
+                "source": "mda",
+                "news": [{"headline": "do not nest from metrics"}],
+            }
+        ],
     )
     assert n == 1
     assert rows[0]["last"] == 181.5
     assert "last" not in rows[0]["mda"]
+    assert "news" not in rows[0]["mda"]
     assert rows[0]["mda"]["mda_last"] == 180.0
     attach_mda_news(rows, [{"symbol": "NVDA", "headline": "Chip note", "source": "mda"}])
     assert rows[0]["mda"]["news"][0]["headline"] == "Chip note"

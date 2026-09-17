@@ -3022,6 +3022,7 @@ def test_self_tune_tool_is_flat():
     assert "enabled_arenas" not in props
     assert "custom_symbols" not in props
     assert "exclude_symbols" not in props
+    assert "max_arena_concentration_pct" not in props
     assert "regime" not in props
     assert "controls" not in props
     assert "params" not in props
@@ -5316,6 +5317,9 @@ def test_recall_description_matches_write_ops():
     assert "fetch only" not in desc
     assert "write" in desc
     assert "invalidate" in desc
+    assert "cards" in desc
+    store = (_tool_props("recall") or {}).get("store") or {}
+    assert store.get("enum") == ["notes", "cards"]
 
 
 def test_owned_files_have_no_watchlist_prose():
@@ -5355,9 +5359,12 @@ def _news_item(i: int) -> dict:
             f"{sym} prints a catalyst headline {i:02d} with enough text "
             "to look like a delayed MDA row the model would actually see."
         ),
+        "publisher": f"https://finance.yahoo.com/markets/stocks/articles/{sym}-{i:02d}.html",
         "source": "mda",
         "freshness": "delayed_15m",
+        "use": "color_not_trigger",
         "published": "2026-09-17T12:00:00Z",
+        "asof_iso": "2026-09-17T04:00:00Z",
     }
 
 
@@ -5461,6 +5468,7 @@ async def test_scan_with_news_attaches_to_ranked_page(monkeypatch):
     monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
     monkeypatch.setattr("abcxauto.universe.verified_industry_tags", _no_tags)
     monkeypatch.setattr("abcxauto.brain._mda_news", _news)
+    turn = BrainTurn()
     data = json.loads(
         await _run_tool(
             "scan",
@@ -5468,14 +5476,63 @@ async def test_scan_with_news_attaches_to_ranked_page(monkeypatch):
             connector=None,
             world=_world(),
             snap={},
-            turn=BrainTurn(),
+            turn=turn,
         )
     )
     assert data["news"][0]["headline"] == "chip demand"
     hit = data["hits"][0]
     assert hit["symbol"] == "NVDA"
-    assert (hit.get("mda") or {}).get("news")
-    assert hit["mda"]["news"][0]["headline"] == "chip demand"
+    assert "news" not in (hit.get("mda") or {})
+    assert "publisher" not in data["news"][0]
+    assert "news" not in turn.tool_trace
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("stub_agent_loop_import")
+async def test_timeout_scan_news_does_not_mark_tool_trace(monkeypatch):
+    async def _fake_scan(**_kw):
+        return {
+            "ok": True,
+            "source": "ibkr",
+            "arena": "most_active",
+            "scan_code": "MOST_ACTIVE",
+            "symbols": ["HEI"],
+            "hits": [_ranked_hit(0) | {"symbol": "HEI", "skip_class": ""}],
+            "ranked": True,
+            "quoted": 0,
+        }
+
+    async def _no_tags(_conn):
+        return frozenset()
+
+    async def _news(_syms, **_k):
+        return [
+            {
+                "symbol": "HEI",
+                "headline": "(unavailable - timed out)",
+                "error": "timed out",
+            }
+        ]
+
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.universe.verified_industry_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.brain._mda_news", _news)
+    turn = BrainTurn()
+    data = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "most_active", "with": ["news"]},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=turn,
+        )
+    )
+    assert "news" not in turn.tool_trace
+    assert not data.get("news")
+    hit = data["hits"][0]
+    assert "news" not in (hit.get("mda") or {})
 
 
 @pytest.mark.asyncio
@@ -5547,12 +5604,10 @@ async def test_scan_accepts_tagvalue_and_rejects_unverified_pe(monkeypatch):
 
 def test_scan_clip_keeps_ranked_page_plus_news():
     from abcxauto.brain import CLIP_CHARS, _clip
-    from abcxauto.brain_tools import SCAN_CLIP_CHARS
-    from abcxauto.prints import attach_mda_news
+    from abcxauto.brain_tools import SCAN_CLIP_CHARS, _clip_scan, _scan_public_payload
 
     hits = [_ranked_hit(i) for i in range(30)]
     news = [_news_item(i) for i in range(32)]
-    attach_mda_news(hits[:8], news)
     payload = {
         "ok": True,
         "source": "ibkr",
@@ -5583,14 +5638,44 @@ def test_scan_clip_keeps_ranked_page_plus_news():
     }
     raw_len = len(json.dumps(payload, default=str))
     assert raw_len > CLIP_CHARS
-    assert raw_len <= SCAN_CLIP_CHARS
+    public = _scan_public_payload(payload)
+    assert all(
+        "news" not in (row.get("mda") or {})
+        for row in public["hits"]
+        if isinstance(row, dict)
+    )
+    assert all("publisher" not in item for item in public["news"])
     defaulted = json.loads(_clip(payload))
     assert defaulted.get("_dropped") or defaulted.get("_clipped")
-    kept = json.loads(_clip(payload, max_chars=SCAN_CLIP_CHARS))
+    kept = json.loads(_clip_scan(payload))
     assert "_dropped" not in kept
     assert len(kept["hits"]) == 30
     assert len(kept["news"]) == 32
     assert kept["provenance"]["ibkr_rows"] == 30
+    assert all(
+        "news" not in (row.get("mda") or {})
+        for row in kept["hits"]
+        if isinstance(row, dict)
+    )
+
+
+def test_scan_clip_drops_news_before_hits():
+    from abcxauto.brain import _clip
+
+    hits = [_ranked_hit(i) for i in range(30)]
+    news = [_news_item(i) | {"headline": "n" * 400} for i in range(40)]
+    payload = {
+        "ok": True,
+        "source": "ibkr",
+        "hits": hits,
+        "news": news,
+        "news_use": "color_not_trigger",
+    }
+    data = json.loads(_clip(payload, max_chars=8_000))
+    assert len(data.get("hits") or []) == 30
+    assert data.get("_clipped") == "news"
+    assert int(data.get("_dropped") or 0) >= 1
+    assert len(data.get("news") or []) < 40
 
     # Same screen asked twice: pointer, not another 28k copy of the page.
     from types import SimpleNamespace

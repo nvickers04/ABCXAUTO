@@ -57,8 +57,13 @@ class ActionsMixin:
 
 
     def _lab_notebook(self) -> tuple[str, str]:
-        """Empty notebook surface. Persist is gone."""
-        return "Lab notebook", "(empty)"
+        """Journal card slugs. Persist catalog is gone."""
+        listed = self._journal_card_list()
+        n = int(listed.get("n") or 0)
+        labels = [str(x) for x in (listed.get("labels") or []) if str(x).strip()]
+        if n:
+            return f"{n} card(s)", ", ".join(labels)[:240] or str(listed.get("pointer") or "")
+        return "Cards", "(empty)"
 
 
     def _open_disconnect_confirm_dialog(self) -> None:

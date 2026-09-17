@@ -106,7 +106,7 @@ _SEND_HOIST = (
     # Grok's size as % of current NL. Hoist only here — send derives
     # quantity from this % and live NL when quantity is missing.
     "size_pct_nl",
-    # Playbook card this ticket comes from. Hoisted so the new-risk gate and
+    # Scorecard card label this ticket comes from. Hoisted so the new-risk gate and
     # the attribution log read the same key wherever Grok put it.
     "card",
 )

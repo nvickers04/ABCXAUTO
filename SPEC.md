@@ -79,8 +79,9 @@ Overnight / after-close / park drop the chat. Paper RTH / premarket stay up
 (no sit clock). Closed/postmarket does not call Grok (unprotected still does);
 park_clock until premarket. Session cap idles; chat is kept. Durable notes
 live in `journal.db` (14d or until `invalidate`). Wake carries a pointer
-(counts/tags/ages, no bodies). `recall` fetches; never auto-injected into
-`book` / `status` / `day_facts` / the system prompt. Not send geometry.
+(counts/tags/ages, no bodies). `recall` lists, gets, writes, and retires
+notes and cards; never auto-injected into `book` / `status` / `day_facts` /
+the system prompt. Not send geometry.
 
 See [`docs/LOOK.md`](docs/LOOK.md). Snap facts → Grok tools → `send` gates.
 
@@ -99,10 +100,11 @@ MDA ~15m delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR his
 
 Other: `odds` (Polymarket, not send geometry), `web` (public page, COLOR not a
 live trigger), `send`, `self_tune` (flat knobs), `note` (this-flight scratch),
-`recall` (durable notes, fetch only), `research_brief` (prior-session COLOR).
+`recall` (durable notes and cards), `research_brief` (prior-session COLOR).
 
-Universe is a watchlist Grok can change via `self_tune`; `send` is not limited
-to it. Code writes `journal.db`; there is no `journal` tool. RTH wake carries
+Universe is live IBKR screens; nothing about where to hunt persists.
+`self_tune` cannot restore a watchlist. `send` is not limited to a legal set.
+Code writes `journal.db`; there is no `journal` tool. RTH wake carries
 a research-brief pointer (counts/age), not the full expectancy; fetch via
 `research_brief`. Missing/stale brief does not block RTH.
 

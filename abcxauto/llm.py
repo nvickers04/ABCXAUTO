@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You own an Interactive Brokers {mode} book. Strategy is yours.
-Live only follows a promoted playbook. Risk is code.
+Risk is code.
 send tickets that match ORDER EXAMPLES.
 Size vs max_risk_per_trade_pct of NetLiq.
 """

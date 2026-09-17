@@ -58,4 +58,4 @@ After a think:
 - `candles`: IBKR hist, else live 5s stream; error if both miss (not MDA)
 - Two books = two processes, two client ids
 
-Universe is a watchlist. `send` is not a legal-set sandbox.
+Universe is live IBKR screens; nothing about where to hunt persists. `self_tune` cannot restore a watchlist. `send` is not limited to a legal set.

@@ -605,7 +605,10 @@ def _note_clip(container: dict[str, Any], key: str, dropped: int = 0) -> None:
 
 def _pop_fat_key(container: dict[str, Any]) -> str | None:
     """Drop the next fat key. Clip marker stays on this container."""
-    for key in _FAT_CLIP_KEYS:
+    keys = _FAT_CLIP_KEYS
+    if "hits" in container and "news" in container:
+        keys = ("news",) + tuple(k for k in _FAT_CLIP_KEYS if k != "news")
+    for key in keys:
         if key not in container:
             continue
         val = container.pop(key)
@@ -749,6 +752,23 @@ def _trim_one_row_list(data: dict[str, Any]) -> int:
                     _note_clip(data, key, n)
                 dropped += n
         return dropped
+    # Scan page: cut headlines before ranked rows so clip cannot evict the tape.
+    if (
+        isinstance(data.get("hits"), list)
+        and isinstance(data.get("news"), list)
+        and len(data["news"]) > 1
+    ):
+        news_lists = [item for item in lists if item[1] == "news"]
+        if news_lists:
+            owner, key, rows = max(news_lists, key=lambda item: len(item[2]))
+            if len(rows) > 1:
+                keep = max(1, len(rows) // 2)
+                dropped = len(rows) - keep
+                owner[key] = rows[:keep]
+                _note_clip(owner, key, dropped)
+                if owner is not data:
+                    _note_clip(data, key, dropped)
+                return dropped
     owner, key, rows = max(lists, key=lambda item: len(item[2]))
     if len(rows) <= 1:
         return 0

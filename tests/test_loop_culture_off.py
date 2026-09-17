@@ -155,7 +155,7 @@ def test_system_prompt_is_unchanged():
 
     assert SYSTEM_PROMPT == (
         "You own an Interactive Brokers {mode} book. Strategy is yours.\n"
-        "Live only follows a promoted playbook. Risk is code.\n"
+        "Risk is code.\n"
         "send tickets that match ORDER EXAMPLES.\n"
         "Size vs max_risk_per_trade_pct of NetLiq.\n"
     )

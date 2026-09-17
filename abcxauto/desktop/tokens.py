@@ -39,7 +39,7 @@ NAV = [
         ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED,
         ft.Icons.ACCOUNT_BALANCE_WALLET,
     ),
-    ("notebook", "Playbook", ft.Icons.MENU_BOOK_OUTLINED, ft.Icons.MENU_BOOK),
+    ("notebook", "Cards", ft.Icons.MENU_BOOK_OUTLINED, ft.Icons.MENU_BOOK),
     ("scorecard", "Scorecard", ft.Icons.BAR_CHART_OUTLINED, ft.Icons.BAR_CHART),
     ("risk", "Risk", ft.Icons.SHIELD_OUTLINED, ft.Icons.SHIELD),
     ("settings", "Settings", ft.Icons.TUNE_OUTLINED, ft.Icons.TUNE),
@@ -47,7 +47,7 @@ NAV = [
 NAV_TITLES = {
     "overview": "Dashboard",
     "positions": "Positions",
-    "notebook": "Playbook",
+    "notebook": "Cards",
     "scorecard": "Scorecard",
     "risk": "Risk",
     "settings": "Settings",
@@ -55,12 +55,12 @@ NAV_TITLES = {
 NAV_SUBTITLES = {
     "overview": "Grok thinking, live. Looks, tools, tickets as they happen.",
     "positions": "Broker book — lots, working orders, fills, activity.",
-    "notebook": "Grok's setup cards. Playbook, not law.",
+    "notebook": "Journal cards — labels, not a catalog.",
     "scorecard": "Are the setups beating the model bill?",
     "risk": "The walk-away floor. Grok self_tunes inside it.",
     "settings": "Brain, pacing and link. Applies without a restart.",
 }
-CARD_STATUS_COLOR = {"working": GREEN, "testing": AMBER, "retired": MUTED}
+CARD_STATUS_COLOR = {"live": GREEN, "inert": MUTED, "missing": MUTED}
 # Settings fields, grouped the way the page shows them. label, hint.
 BRAIN_FIELDS = (
     ("model", "Model", "beats ABCXAUTO_MODEL — next look rebuilds"),

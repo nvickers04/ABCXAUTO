@@ -369,15 +369,15 @@ def test_notebook_page_survives_a_cleared_book(pro):
     pro._sync_notebook_page(force=True)
     assert (pro.lbl_notebook_head.value or "") == "—"
     assert "UNSENDABLE" not in (pro.lbl_notebook_meta.value or "")
-    assert "lots at write: none" in (pro.lbl_notebook_lots.value or "")
+    assert "lots at write" not in (pro.lbl_notebook_lots.value or "")
     names = " | ".join(_row_text(c) for c in pro.col_notebook_cards.controls)
     assert "No setup cards yet" in names
-    assert pro.notebook_raw_panel.visible is True
+    assert pro.notebook_raw_panel.visible is False
     pro._sync_scorecard_page(force=True)
     cards = " | ".join(_row_text(c) for c in pro.col_sc_cards.controls)
-    ledger = " | ".join(_row_text(c) for c in pro.col_sc_ledger.controls)
     assert "No card-attributed sends yet" in cards
-    assert "No notebook revisions yet" in ledger
+    assert not hasattr(pro, "col_sc_ledger")
+    assert not hasattr(pro, "_sync_sc_ledger")
 
 
 

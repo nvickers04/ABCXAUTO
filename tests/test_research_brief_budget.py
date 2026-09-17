@@ -1,7 +1,7 @@
-"""Rank 2: named-card research-brief budget + lineage promote gate.
+"""Rank 2: named-card research-brief budget + lineage.
 
-Fake card → stub turns → ledger increments; trip → no further turns;
-promote missing / ≠PASS ⇒ refuse. No BA / options chain.
+Fake card → stub turns → ledger increments; trip → no further turns.
+No BA / options chain.
 Hygiene: F10 $15 hard, port≠7496, SYSTEM_PROMPT lock.
 """
 
@@ -13,7 +13,6 @@ import pytest
 
 from abcxauto.config import get_config
 from abcxauto.desk_mode import (
-    promote_lab,
     research_keep_looking,
     write_research_brief,
 )
@@ -29,13 +28,11 @@ from abcxauto.research_budget import (
     GATE_PASS,
     REASON_BRIEF_COST,
     REASON_BRIEF_LOOP,
-    REASON_LAB_PROMOTE,
     allow_brief_turn,
+    DEFAULT_RESEARCH_CARD_ID,
     brief_budget_gate,
     brief_loop_halted,
     card_row,
-    lab_promote,
-    lab_promote_ok,
     note_brief_turn,
     open_research_card,
     parse_model_cost,
@@ -184,7 +181,7 @@ def test_tools_trip_stops_further_billed_turns():
     assert (card_row("other-card", WINDOW) or {}).get("turns", 0) == 0
 
 
-def test_unreadable_and_nonfinite_cost_fail_closes_and_is_missing_for_promote():
+def test_unreadable_and_nonfinite_cost_fail_closes():
     reset_research_budget()
     open_research_card(CARD, WINDOW)
     unread = brief_budget_gate(None, 0, 0)
@@ -202,37 +199,36 @@ def test_unreadable_and_nonfinite_cost_fail_closes_and_is_missing_for_promote():
     assert halted["brief_loop_halted"] is True
     assert halted["model_cost_window_USD"] is None
     assert brief_loop_halted(CARD, WINDOW) is True
-    set_gate_verdict(CARD, WINDOW, GATE_PASS)
-    refused = lab_promote(CARD, WINDOW)
-    assert refused["ok"] is False
-    assert refused["reason_code"] == REASON_LAB_PROMOTE
-    assert "missing" in refused["note"]
-    assert lab_promote_ok(card_row(CARD, WINDOW)) is False
 
 
-def test_promote_refuses_missing_and_non_pass():
+def test_prior_iso_week_halt_does_not_skip_this_week(tmp_path, monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from abcxauto.research_budget import (
+        default_prove_window_id,
+        mark_brief_loop_halt,
+        resolve_research_card,
+    )
+
     reset_research_budget()
-    missing = lab_promote(CARD, WINDOW)
-    assert missing["ok"] is False
-    assert missing["status"] == "refused"
-    open_research_card(CARD, WINDOW)
-    note_brief_turn(CARD, WINDOW, cost_usd=0.20)
-    assert card_row(CARD, WINDOW)["gate_verdict"] == GATE_INCONCLUSIVE
-    for verdict in (GATE_FAIL, GATE_INCONCLUSIVE, GATE_KILL):
-        set_gate_verdict(CARD, WINDOW, verdict)
-        refused = lab_promote(CARD, WINDOW)
-        assert refused["ok"] is False
-        assert refused["allowed"] is False
-        assert refused["reason_code"] == REASON_LAB_PROMOTE
-        desk = promote_lab(research_card_id=CARD, prove_window_id=WINDOW)
-        assert desk["ok"] is False
-    set_gate_verdict(CARD, WINDOW, GATE_PASS)
-    ok = lab_promote(CARD, WINDOW)
-    assert ok["ok"] is True
-    assert ok["allowed"] is True
-    assert ok["gate_verdict"] == GATE_PASS
-    assert parse_model_cost(ok["model_cost_window_USD"]) == pytest.approx(0.20)
-    assert promote_lab(research_card_id=CARD, prove_window_id=WINDOW)["ok"] is True
+    now = datetime(2026, 9, 17, 8, 0, tzinfo=ZoneInfo("America/New_York"))
+    today = default_prove_window_id(now=now)
+    assert today == "2026-W38"
+    mark_brief_loop_halt(DEFAULT_RESEARCH_CARD_ID, "2026-W37")
+    write_research_brief(
+        session="premarket",
+        snap={"news_items": []},
+        research_card_id=DEFAULT_RESEARCH_CARD_ID,
+        prove_window_id="2026-W37",
+        now=now,
+    )
+    card, window = resolve_research_card(now=now)
+    assert card == DEFAULT_RESEARCH_CARD_ID
+    assert window == today
+    assert skip_look_reason("premarket", now=now) == ""
+    pinned = resolve_research_card(prove_window_id="2026-W37", now=now)
+    assert pinned == (DEFAULT_RESEARCH_CARD_ID, "2026-W37")
 
 
 def test_write_research_brief_stamps_lineage(tmp_path, monkeypatch):

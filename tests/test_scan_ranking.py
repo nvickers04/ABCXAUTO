@@ -114,7 +114,7 @@ def test_skip_class_micro_is_not_deepest_when_skip_cards_exist():
 
 
 def test_skip_class_never_occupies_deepest_even_without_skip_cards():
-    """Levered / micro never headline. Playbook when_on is not a floor."""
+    """Levered / micro never headline."""
     gate = _scan_gate_facts(_tape())
     assert gate["deepest_symbol"] == "SNDK"
     assert gate["deepest_open_gap_pct"] == pytest.approx(-6.5)
@@ -204,6 +204,11 @@ async def test_reused_scan_is_a_pointer_not_another_tape(monkeypatch):
     )
     assert first.get("hits")
     assert first.get("reused") is not True
+    assert first.get("news")
+    for row in first["hits"]:
+        nest = row.get("mda") if isinstance(row, dict) else None
+        if isinstance(nest, dict):
+            assert "news" not in nest
     second = json.loads(
         await _run_tool(
             "scan",
@@ -222,6 +227,71 @@ async def test_reused_scan_is_a_pointer_not_another_tape(monkeypatch):
     assert "SNDK" in second["symbols"]
     assert second["note"].startswith("this look already has that screen")
     assert second["asked"]["arena"] == "top_losers"
+    assert "news" not in turn.tool_trace
+
+
+def test_slim_scan_news_keeps_real_headlines_only():
+    from abcxauto.brain_tools import _scan_carries_news, _slim_scan_news
+
+    timeout = {
+        "symbol": "HEI",
+        "headline": "(unavailable - timed out)",
+        "error": "timed out",
+    }
+    real = {"symbol": "NVDA", "headline": "chip demand", "source": "mda"}
+    assert _slim_scan_news([timeout, real]) == [
+        {"symbol": "NVDA", "headline": "chip demand", "source": "mda"}
+    ]
+    assert _scan_carries_news({"news": [timeout]}) is False
+    assert _scan_carries_news({"news": [real]}) is True
+
+
+@pytest.mark.asyncio
+async def test_timeout_scan_news_does_not_mark_tool_trace(monkeypatch):
+    async def _fake_scan(**_kw):
+        return {
+            "ok": True,
+            "source": "ibkr",
+            "arena": "top_gainers",
+            "scan_code": "TOP_PERC_GAIN",
+            "symbols": ["HEI"],
+            "hits": [{"symbol": "HEI", "open_gap_pct": -1.2, "last": 240.0}],
+            "quoted": 1,
+            "ranked": True,
+        }
+
+    async def _no_tags(_conn):
+        return {}
+
+    async def _news(_syms):
+        return [
+            {
+                "symbol": "HEI",
+                "headline": "(unavailable - timed out)",
+                "error": "timed out",
+            }
+        ]
+
+    monkeypatch.setattr("abcxauto.brain.criteria_scan", _fake_scan)
+    monkeypatch.setattr("abcxauto.universe.verified_pe_tags", _no_tags)
+    monkeypatch.setattr("abcxauto.brain._mda_news", _news)
+    turn = BrainTurn()
+    data = json.loads(
+        await _run_tool(
+            "scan",
+            {"arena": "top_gainers", "with": ["news"]},
+            connector=None,
+            world=_world(),
+            snap={},
+            turn=turn,
+        )
+    )
+    assert "news" not in turn.tool_trace
+    assert not data.get("news")
+    for row in data.get("hits") or []:
+        nest = row.get("mda") if isinstance(row, dict) else None
+        if isinstance(nest, dict):
+            assert "news" not in nest
 
 
 @pytest.mark.asyncio

@@ -1,10 +1,8 @@
-"""Named-card research-brief budget + lineage promote gate (Rank 2).
+"""Named-card research-brief budget + lineage (Rank 2).
 
 research_card_id → prove_window_id → gate_verdict + model_cost_window_USD.
 Hard $ / turns / tool-call budget per named card. Trip ⇒ brief_loop_halted.
-Promote/lab refuses unless gate_verdict=PASS and model_cost_window present
-(finite ≥ 0). Unreadable / non-finite cost fail-closes the loop and is
-missing for promote.
+Unreadable / non-finite cost fail-closes the loop.
 
 V0 constants are code constants — not self_tune-raiseable.
 AH_RESEARCH_LOOKS_PER_WEEK is 0 (off). After-hours cost is the F10 dollar
@@ -18,6 +16,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -39,9 +38,8 @@ GATE_VERDICTS = frozenset({GATE_PASS, GATE_FAIL, GATE_INCONCLUSIVE, GATE_KILL})
 
 REASON_BRIEF_LOOP = "brief_loop_halted"
 REASON_BRIEF_COST = "brief_model_cost_missing"
-REASON_LAB_PROMOTE = "lab_promote_refused"
 
-# Clerk name for the existing AH brief pipeline. Not a new strategy card.
+# Named card for the AH brief pipeline. Not a new strategy card.
 DEFAULT_RESEARCH_CARD_ID = "research-brief"
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -78,10 +76,23 @@ def _et_now(now: datetime | None = None) -> datetime:
     return clock
 
 
+_ISO_WEEK_RE = re.compile(r"^\d{4}-W\d{2}$")
+
+
 def default_prove_window_id(*, now: datetime | None = None) -> str:
     """ISO week prove window (ET). Separate from the weekly look-count key."""
     iso = _et_now(now).isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
+
+
+def _usable_prove_window(raw: Any, today: str) -> str:
+    """Keep test ids. Drop a leftover ISO week that is not this week."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if _ISO_WEEK_RE.match(text) and text != today:
+        return ""
+    return text
 
 
 def card_key(research_card_id: str, prove_window_id: str) -> str:
@@ -152,7 +163,7 @@ def _row_of(raw: Any, research_card_id: str = "", prove_window_id: str = "") -> 
     window = str(blob.get("prove_window_id") or prove_window_id or "").strip()
     cost_raw = blob.get("model_cost_window_USD", blob.get("model_cost_window_usd"))
     # Distinguish "key missing / unreadable" from billed 0. New writes always
-    # store a float. A corrupt / NaN / null value stays None so promote fails.
+    # store a float. A corrupt / NaN / null value stays None.
     if "model_cost_window_USD" not in blob and "model_cost_window_usd" not in blob:
         stored: float | None = 0.0
     else:
@@ -312,7 +323,11 @@ def resolve_research_card(
     brief: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> tuple[str, str]:
-    """Named card + prove window. Brief / snap win over the clerk default."""
+    """Named card + prove window.
+
+    An explicit prove_window_id argument wins. Snap / leftover disk briefs
+    may pin a test id, but a prior ISO week must not halt this week's loop.
+    """
     bag = snap if isinstance(snap, dict) else {}
     disk = brief if isinstance(brief, dict) else None
     if disk is None:
@@ -329,11 +344,12 @@ def resolve_research_card(
         or str(disk.get("research_card_id") or "").strip()
         or DEFAULT_RESEARCH_CARD_ID
     )
+    today = default_prove_window_id(now=now)
     window = (
         str(prove_window_id or "").strip()
-        or str(bag.get("prove_window_id") or "").strip()
-        or str(disk.get("prove_window_id") or "").strip()
-        or default_prove_window_id(now=now)
+        or _usable_prove_window(bag.get("prove_window_id"), today)
+        or _usable_prove_window(disk.get("prove_window_id"), today)
+        or today
     )
     return card, window
 
@@ -615,64 +631,6 @@ def set_model_cost_window(
         table[key] = row
         _save_table(table)
         return dict(row)
-
-
-def lab_promote_ok(row: dict[str, Any] | None) -> bool:
-    """True only when gate_verdict=PASS and model_cost_window is finite ≥ 0."""
-    blob = row if isinstance(row, dict) else {}
-    if _verdict_of(blob.get("gate_verdict")) != GATE_PASS:
-        return False
-    return model_cost_present(blob.get("model_cost_window_USD"))
-
-
-def lab_promote(
-    research_card_id: str,
-    prove_window_id: str,
-) -> dict[str, Any]:
-    """Promote/lab path. Refuse unless PASS + finite model_cost_window_USD."""
-    card = str(research_card_id or "").strip()
-    window = str(prove_window_id or "").strip()
-    row = card_row(card, window)
-    lineage = lineage_fields(row)
-    if row is None:
-        return {
-            "status": "refused",
-            "ok": False,
-            "allowed": False,
-            "reason_code": REASON_LAB_PROMOTE,
-            "note": "promote/lab refused — missing lineage",
-            **lineage,
-            "research_card_id": card,
-            "prove_window_id": window,
-        }
-    if not lab_promote_ok(row):
-        verdict = str(row.get("gate_verdict") or "")
-        cost = row.get("model_cost_window_USD")
-        if not model_cost_present(cost):
-            note = "promote/lab refused — model_cost_window missing"
-        elif verdict != GATE_PASS:
-            note = f"promote/lab refused — gate_verdict={verdict or 'missing'}"
-        else:
-            note = "promote/lab refused"
-        return {
-            "status": "refused",
-            "ok": False,
-            "allowed": False,
-            "reason_code": REASON_LAB_PROMOTE,
-            "note": note,
-            **lineage,
-        }
-    return {
-        "status": "ok",
-        "ok": True,
-        "allowed": True,
-        "reason_code": "",
-        "note": "lab promote allowed",
-        **lineage,
-    }
-
-
-promote_lab = lab_promote
 
 
 def is_brief_look_halt(reason: str = "") -> bool:

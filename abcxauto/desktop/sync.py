@@ -867,23 +867,72 @@ class SyncMixin:
 
     # ------------------------------------------------------------- notebook
 
+    def _journal_card_list(self) -> dict:
+        """Cheap journal pointer: ids / labels / n. No persist catalog."""
+        try:
+            from abcxauto.memory import get_journal
+
+            listed = get_journal().list_cards() or {}
+        except Exception:
+            listed = {}
+        if not isinstance(listed, dict):
+            listed = {}
+        ids = [str(x).strip() for x in (listed.get("ids") or []) if str(x).strip()]
+        labels = [str(x).strip() for x in (listed.get("labels") or []) if str(x).strip()]
+        try:
+            n = int(listed.get("n") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n <= 0:
+            n = max(len(ids), len(labels))
+        return {
+            "pointer": str(listed.get("pointer") or ""),
+            "ids": ids,
+            "labels": labels,
+            "n": n,
+        }
+
+
     def _sync_notebook_page(self, *, force: bool = False) -> None:
-        """Empty notebook surface. Persist is gone."""
+        """Journal card slugs. Persist catalog is gone."""
         _ = force
-        self.lbl_notebook_head.value = "—"
-        self.lbl_notebook_head.color = MUTED
-        self.lbl_notebook_meta.value = "—"
-        self.lbl_notebook_meta.color = MUTED
-        self.lbl_notebook_lots.value = "lots at write: none"
-        self.col_notebook_cards.controls = [
+        listed = self._journal_card_list()
+        n = int(listed.get("n") or 0)
+        labels = listed.get("labels") or []
+        ids = listed.get("ids") or []
+        pointer = str(listed.get("pointer") or "")
+        if n <= 0:
+            self.lbl_notebook_head.value = "—"
+            self.lbl_notebook_head.color = MUTED
+            self.lbl_notebook_meta.value = "—"
+            self.lbl_notebook_meta.color = MUTED
+            self.lbl_notebook_lots.value = ""
+            self.col_notebook_cards.controls = [
+                ft.Text("No setup cards yet.", size=12, color=MUTED)
+            ]
+            self.lbl_notebook_body.value = "(empty)"
+            self.notebook_raw_panel.visible = False
+            self._sync_notebook_types({})
+            return
+        self.lbl_notebook_head.value = pointer or f"{n} card(s)"
+        self.lbl_notebook_head.color = TEXT
+        self.lbl_notebook_meta.value = f"{n} card(s)"
+        self.lbl_notebook_meta.color = TEXT
+        self.lbl_notebook_lots.value = ""
+        count = max(n, len(labels), len(ids))
+        cards: list = []
+        for i in range(count):
+            lab = labels[i] if i < len(labels) else ""
+            cid = ids[i] if i < len(ids) else ""
+            if not lab and not cid:
+                continue
+            cards.append(self._notebook_card({"id": cid, "label": lab or cid}))
+        self.col_notebook_cards.controls = cards or [
             ft.Text("No setup cards yet.", size=12, color=MUTED)
         ]
-        self.lbl_notebook_body.value = "(empty)"
-        self.notebook_raw_panel.visible = True
+        self.lbl_notebook_body.value = pointer or f"{n} card(s)"
+        self.notebook_raw_panel.visible = False
         self._sync_notebook_types({})
-        self.lbl_nb_playbook.value = self.lbl_playbook.value
-        self.lbl_nb_playbook.color = self.lbl_playbook.color
-        self.lbl_nb_playbook.tooltip = self.lbl_playbook.tooltip
 
 
     def _sync_notebook_types(self, lab: dict) -> None:
@@ -895,7 +944,7 @@ class SyncMixin:
     # ------------------------------------------------------------ scorecard
 
     def _sync_scorecard_page(self, *, force: bool = False) -> None:
-        """Windows, per-card scores, revision ledger. The strategy tracker.
+        """Windows and per-card scores. The strategy tracker.
 
         Throttled by ``_sync_active_page`` — ``force`` is accepted so the page
         builder and the refresh control can paint immediately.
@@ -947,7 +996,6 @@ class SyncMixin:
         self.lbl_sc_score.color = TEXT if sess else MUTED
         self._sync_sc_windows(sc)
         self._sync_sc_cards(sc)
-        self._sync_sc_ledger(sc)
         try:
             from abcxauto.memory import get_journal
 
@@ -1027,21 +1075,69 @@ class SyncMixin:
 
 
     def _sync_sc_cards(self, sc: dict | None = None) -> None:
-        _ = sc
-        self.col_sc_cards.controls = [
-            ft.Text(
-                "No card-attributed sends yet. A send records the card that called it.",
-                size=12,
-                color=MUTED,
+        blob = sc if isinstance(sc, dict) else {}
+        rows = blob.get("by_card")
+        if not isinstance(rows, list):
+            sess = blob.get("session")
+            rows = sess.get("by_card") if isinstance(sess, dict) else None
+        if not isinstance(rows, list):
+            rows = []
+        items = [r for r in rows if isinstance(r, dict)]
+        if not items:
+            self.col_sc_cards.controls = [
+                ft.Text(
+                    "No card-attributed sends yet. A send records the card that called it.",
+                    size=12,
+                    color=MUTED,
+                )
+            ]
+            return
+        out: list[ft.Control] = [
+            self._head_row([
+                ("card", 140),
+                ("pnl", 90),
+                ("sends", None),
+            ])
+        ]
+        for row in items:
+            label = str(
+                row.get("card_label")
+                or row.get("card")
+                or row.get("label")
+                or row.get("name")
+                or "?"
+            ).strip() or "?"
+            pnl = row.get("realized_pnl")
+            sends = row.get("sends")
+            if sends is None:
+                sends = row.get("n_links")
+            n_fills = row.get("n_fills")
+            if n_fills is None:
+                n_fills = row.get("fills")
+            if isinstance(pnl, (int, float)):
+                pnl_s = f"${pnl:+,.2f}"
+                if pnl > 0:
+                    pnl_color = GREEN
+                elif pnl < 0:
+                    pnl_color = RED
+                else:
+                    pnl_color = MUTED
+            else:
+                pnl_s = "—"
+                pnl_color = MUTED
+            bits: list[str] = []
+            if isinstance(sends, (int, float)):
+                bits.append(f"{int(sends)} send(s)")
+            if isinstance(n_fills, (int, float)):
+                bits.append(f"{int(n_fills)} fill(s)")
+            out.append(
+                self._blotter_row([
+                    self._cell(label, width=140, weight=ft.FontWeight.W_600),
+                    self._cell(pnl_s, width=90, right=True, color=pnl_color),
+                    self._cell(" · ".join(bits) if bits else "—", expand=True, color=MUTED),
+                ])
             )
-        ]
-
-
-    def _sync_sc_ledger(self, sc: dict) -> None:
-        _ = sc
-        self.col_sc_ledger.controls = [
-            ft.Text("No notebook revisions yet.", size=12, color=MUTED)
-        ]
+        self.col_sc_cards.controls = out
 
 
     def _risk_settings_lines(self) -> list[str]:
@@ -2303,9 +2399,6 @@ class SyncMixin:
         self._sync_health_strip()
         self._sync_lessons_line()
         self._sync_tabs()
-        self.lbl_playbook.value = "Playbook: —"
-        self.lbl_playbook.tooltip = None
-        self.lbl_playbook.color = MUTED
         self.page.title = "ABCXAUTO"
         self.lbl_working_orders.value = self._format_working_orders(
             s.open_orders or [], positions=getattr(s, "positions", None)

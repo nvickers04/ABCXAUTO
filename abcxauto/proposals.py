@@ -116,7 +116,7 @@ class StopLimitParams(BaseModel):
 # ---------------------------------------------------------------------------
 
 class TicketCard(BaseModel):
-    """Playbook card name for scorecard/journal. Never a gateway kwarg."""
+    """Scorecard card label for scorecard/journal. Never a gateway kwarg."""
 
     card: Optional[str] = Field(default=None, exclude=True)
 

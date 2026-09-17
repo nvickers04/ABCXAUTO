@@ -15,11 +15,9 @@ from abcxauto.proposals import STRATEGIES
 ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
     "set_risk": {
         "size_pct_nl": 3.0,
-        "enabled_arenas": ["index_etfs", "most_active"],
     },
     "self_tune": {
         "size_pct_nl": 3.0,
-        "enabled_arenas": ["index_etfs", "most_active"],
     },
     "market_bracket": {
         "symbol": "NVDA",

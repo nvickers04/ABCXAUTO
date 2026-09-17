@@ -178,7 +178,7 @@ def research_keep_looking(session: str = "") -> bool:
     try:
         from abcxauto.thin_rth_kill_look import kill_look_enabled
 
-        # Kill-window AH is one-shot (≤2/week), not a keep-looking mill.
+        # Kill-window AH is one-shot, not a keep-looking mill.
         if kill_look_enabled():
             return False
     except Exception:
@@ -734,6 +734,36 @@ def load_research_brief() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def research_brief_look_payload(
+    brief: dict[str, Any] | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """What research_brief() returns. A stale file is a pointer, not last week's tape."""
+    row = brief if isinstance(brief, dict) else {}
+    missing = not bool(row)
+    stale = True if missing else research_brief_stale(row, now=now)
+    out: dict[str, Any] = {
+        "missing": missing,
+        "stale": stale,
+        "use": "color, never a live trigger",
+        "send_geometry": False,
+    }
+    if missing:
+        out["brief"] = {}
+        return out
+    if stale:
+        out["brief"] = {
+            key: row[key]
+            for key in ("as_of", "session")
+            if row.get(key) not in (None, "")
+        }
+        out["note"] = "stale — not this session's tape"
+        return out
+    out["brief"] = row
+    return out
+
+
 def research_brief_stale(
     brief: dict[str, Any] | None,
     *,
@@ -1110,9 +1140,6 @@ def build_expectancy(
     scan_rows = hits.get("rows") or hits.get("hits") or []
     if isinstance(scan_rows, list):
         rows.extend(_expectancy_from_scan(scan_rows))
-    nested_news = hits.get("news") if isinstance(hits.get("news"), list) else []
-    if nested_news:
-        rows.extend(_expectancy_from_news(nested_news))
     web = blob.get("research_web") if isinstance(blob.get("research_web"), dict) else {}
     if web:
         rows.extend(_expectancy_from_web(web))
@@ -1199,7 +1226,6 @@ def write_research_brief(
         "facts": list(bag.get("facts") or [])[:FACT_CAP],
         "uncertainties": uns[:12],
         "expectancy": expectancy,
-        "tickets": [],
         "tool_trace": list(getattr(turn, "tool_trace", None) or [])[:24],
     }
     try:
@@ -1221,25 +1247,6 @@ def write_research_brief(
     except OSError:
         logger.debug("research_brief write failed", exc_info=True)
     return payload
-
-
-def promote_lab(
-    *,
-    research_card_id: str = "",
-    prove_window_id: str = "",
-    snap: dict[str, Any] | None = None,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Promote/lab path. Refuses unless gate_verdict=PASS and cost is present."""
-    from abcxauto.research_budget import lab_promote, resolve_research_card
-
-    card, window = resolve_research_card(
-        research_card_id=research_card_id,
-        prove_window_id=prove_window_id,
-        snap=snap,
-        now=now,
-    )
-    return lab_promote(card, window)
 
 
 def rth_research_color(

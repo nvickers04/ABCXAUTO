@@ -10,7 +10,7 @@ Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of
 
 | Owner | Job |
 |-------|-----|
-| **Grok** | Tickets (`send`), risk/watchlist knobs (`self_tune`) |
+| **Grok** | Tickets (`send`), risk knobs (`self_tune`) |
 | **Code** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, overnight / after-close park |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No approval step. |
 
@@ -82,10 +82,10 @@ IBKR live: `book`, `status`, `quote`, `fills`, `option_chain`, `option_quote`.
 MDA delayed: `scan`, `news`, `option_facts` (greeks). `candles` is IBKR hist or the live 5s stream (error if both miss).
 
 Other: `odds` (Polymarket), `send`, `self_tune` (flat knobs; `send self_tune` still works),
-`note` (this-flight scratch), `recall` (durable `journal.db` notes, fetch only),
+`note` (this-flight scratch), `recall` (durable `journal.db` notes and cards),
 `research_brief` (prior-session COLOR; never a live trigger).
 
-Universe is a **watchlist** Grok can change via `self_tune`; `send` is not limited to it. Code still writes `journal.db`; there is no `journal` tool. Durable notes (14d or `invalidate`) sit in that DB. Wake pointer only; `recall` fetches. Never auto-injected; never send geometry.
+Universe is live IBKR screens; nothing about where to hunt persists. `self_tune` cannot restore a watchlist. `send` is not limited to a legal set. Code still writes `journal.db`; there is no `journal` tool. Durable notes (14d or `invalidate`) and cards sit in that DB. Wake pointer only; `recall` fetches or writes. Never auto-injected; never send geometry.
 
 ## 3. Operator surfaces
 
@@ -166,7 +166,7 @@ abcxauto/
   order_examples.py     Sendable ticket shapes
   executor.py / send.py Validate → gate → IBKR
   risk_gates.py         Hard pre-trade gates + halt latch
-  universe.py           Watchlist for scan seed; not a send sandbox
+  universe.py           Live IBKR screens; not a send sandbox
   self_tune.py          Floor-clamped knobs
   scorecard.py          Book return vs model cost
   prediction_odds.py    Polymarket implied probs

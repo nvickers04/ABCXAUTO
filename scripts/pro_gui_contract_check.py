@@ -35,7 +35,6 @@ REQUIRED = (
     "Copy stream",
     "lbl_link",
     "lbl_tools",
-    "lbl_playbook",
     "lbl_score",
 )
 

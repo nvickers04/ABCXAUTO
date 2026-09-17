@@ -1,4 +1,4 @@
-"""This-flight working memory — Grok-owned one-liners, not facts or playbook.
+"""This-flight working memory — Grok-owned one-liners, not facts.
 
 Cap is a short list. Clerk does not invent conclusions. Hard reset /
 overnight park / research↔RTH chat drop clear the shard (same as

@@ -60,7 +60,6 @@ class WidgetsMixin:
         self.lbl_link = ft.Text("", size=11, color=MUTED, selectable=True)
         self.lbl_banner = ft.Text("", size=12, color=AMBER, selectable=True, visible=False)
         self.lbl_tools = ft.Text("Tools: —", size=12, color=MUTED, selectable=True)
-        self.lbl_playbook = ft.Text("Playbook: —", size=12, color=MUTED, selectable=True)
         self.lbl_score = ft.Text("Score: —", size=13, color=MUTED, selectable=True)
         self.lbl_session_score = ft.Text("sess —", size=12, color=MUTED, selectable=True)
         self._score_last = 0.0
@@ -252,7 +251,6 @@ class WidgetsMixin:
             self.lbl_score,
             self.lbl_path,
             self.lbl_pace,
-            self.lbl_playbook,
             self.lbl_risk,
             self.lbl_tools,
             self.lbl_last_send,
@@ -301,7 +299,6 @@ class WidgetsMixin:
         self.lbl_sc_strats = ft.Text("", size=12, color=MUTED, selectable=True)
         self.col_sc_windows = ft.Column(spacing=3, tight=True)
         self.col_sc_cards = ft.Column(spacing=3, tight=True)
-        self.col_sc_ledger = ft.Column(spacing=3, tight=True)
         self.lbl_sc_slip = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=MUTED)
         self.lbl_sc_slip_sub = ft.Text("no fills this session", size=11, color=MUTED)
         self.lbl_sc_spend = ft.Text("—", size=22, weight=ft.FontWeight.BOLD, color=MUTED)
@@ -406,13 +403,11 @@ class WidgetsMixin:
         self.lbl_settings_brain = ft.Text("", size=11, color=MUTED, selectable=True)
         self.lbl_settings_path = ft.Text("", size=11, color=MUTED, selectable=True)
         self.lbl_dash_tools = ft.Text("Tools: —", size=12, color=MUTED, selectable=True)
-        self.lbl_nb_playbook = ft.Text("Playbook: —", size=12, color=MUTED, selectable=True)
-        for lbl in (self.lbl_dash_tools, self.lbl_nb_playbook):
-            lbl.max_lines = 1
-            lbl.overflow = ft.TextOverflow.ELLIPSIS
+        self.lbl_dash_tools.max_lines = 1
+        self.lbl_dash_tools.overflow = ft.TextOverflow.ELLIPSIS
         # Facts the Cockpit computes; the Dashboard stays a live look, not a report.
         # Mode repeats the rail's Paper/Live pill. tools / focus / pace live in
-        # the stream, the playbook and the next-look line. Open MTM is on the
+        # the stream and the next-look line. Open MTM is on the
         # Account card next to Today — not hidden.
         self._hidden_metrics = ft.Column(
             [
@@ -420,7 +415,6 @@ class WidgetsMixin:
                 self.lbl_path,
                 self.lbl_mix,
                 self.lbl_why,
-                self.lbl_playbook,
                 self.lbl_tools,
                 self.lbl_status,
                 self.lbl_focus,
@@ -1148,66 +1142,36 @@ class WidgetsMixin:
 
 
     def _notebook_card(self, card: dict, attrib: dict | None = None) -> ft.Control:
-        status = str(card.get("status") or "testing").strip().lower()
+        """Journal slug only — id / label / n. Persist catalog fields stay off."""
+        _ = attrib
+        label = str(
+            card.get("label") or card.get("name") or card.get("id") or "?"
+        ).strip() or "?"
+        cid = str(card.get("id") or "").strip()
+        status = str(card.get("status") or "").strip().lower()
         color = CARD_STATUS_COLOR.get(status, MUTED)
         head: list[ft.Control] = [
             ft.Text(
-                str(card.get("name") or "?"),
+                label,
                 size=13,
                 weight=ft.FontWeight.BOLD,
                 color=TEXT,
                 expand=True,
             ),
-            self._chip(status, color),
         ]
-        ticket = str(card.get("ticket") or "").strip()
-        if ticket:
-            head.append(self._chip(ticket, BLUE))
-        score = (attrib or {}).get(str(card.get("name") or "").lower()) or {}
-        sends = int(score.get("sends") or 0)
-        fills = int(score.get("attributed_fills") or 0)
-        pnl = score.get("realized_pnl")
-        if not sends:
-            head.append(self._chip("no sends yet", MUTED))
-        elif not fills or not isinstance(pnl, (int, float)):
-            head.append(self._chip(f"{sends} send(s) · no fills yet", MUTED))
-        else:
-            head.append(
-                self._chip(
-                    f"{sends} send(s) · ${pnl:+,.2f}", GREEN if pnl > 0 else RED if pnl else MUTED
-                )
-            )
-        rows: list[ft.Control] = [ft.Row(head, spacing=6)]
-        for field, label in (
-            ("when_on", "when"),
-            ("scan", "scan"),
-            ("shape", "shape"),
-            ("invalidation", "invalid"),
-            ("fill_assumption", "fill"),
-            ("note", "note"),
-        ):
-            val = str(card.get(field) or "").strip()
-            if not val:
-                continue
-            rows.append(
-                ft.Row(
-                    [
-                        ft.Container(
-                            width=56,
-                            content=ft.Text(label, size=11, color=MUTED),
-                        ),
-                        ft.Text(val, size=12, color=TEXT, expand=True, selectable=True),
-                    ],
-                    spacing=6,
-                    vertical_alignment=ft.CrossAxisAlignment.START,
-                )
-            )
+        if cid and cid != label:
+            head.append(self._chip(cid, MUTED))
+        if status:
+            head.append(self._chip(status, color))
+        n = card.get("n")
+        if isinstance(n, (int, float)):
+            head.append(self._chip(f"n={int(n)}", MUTED))
         return ft.Container(
             bgcolor=SURFACE,
-            border=ft.Border.all(1, color if status == "working" else BORDER),
+            border=ft.Border.all(1, color if status == "live" else BORDER),
             border_radius=10,
             padding=12,
-            content=ft.Column(rows, spacing=6, tight=True),
+            content=ft.Column([ft.Row(head, spacing=6)], spacing=6, tight=True),
         )
 
 

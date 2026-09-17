@@ -298,7 +298,7 @@ def merge_mda_metrics(rows: list[dict[str, Any]], ideas: list[dict[str, Any]] | 
             continue
         mda = dict(row.get("mda") or {})
         for key, val in idea.items():
-            if key in ("symbol", "last"):
+            if key in ("symbol", "last", "news"):
                 continue
             mda[key] = val
         mda.setdefault("source", "mda")

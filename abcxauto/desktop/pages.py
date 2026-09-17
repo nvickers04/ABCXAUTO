@@ -114,24 +114,14 @@ class PagesMixin:
 
 
     def _page_notebook(self) -> ft.Control:
-        self.notebook_raw_panel = ft.Container(
-            visible=False,
-            bgcolor=SURFACE,
-            border=ft.Border.all(1, BORDER),
-            border_radius=8,
-            padding=10,
-            content=self.lbl_notebook_body,
-        )
         self._sync_notebook_page(force=True)
         return ft.Column(
             [
                 self._section_refresh(
-                    "Lab playbook",
+                    "Cards",
                     self._refresh_notebook_tab,
                     self.lbl_notebook_head,
                     self.lbl_notebook_meta,
-                    self.lbl_notebook_lots,
-                    self.lbl_nb_playbook,
                 ),
                 ft.Container(
                     expand=True,
@@ -139,18 +129,9 @@ class PagesMixin:
                     content=ft.Column(
                         [
                             ft.Text(
-                                "Setup cards", size=15, weight=ft.FontWeight.BOLD, color=TEXT
+                                "Journal cards", size=15, weight=ft.FontWeight.BOLD, color=TEXT
                             ),
                             self.col_notebook_cards,
-                            self.notebook_raw_panel,
-                            ft.Text(
-                                "Order-type coverage",
-                                size=15,
-                                weight=ft.FontWeight.BOLD,
-                                color=TEXT,
-                            ),
-                            self.lbl_notebook_types,
-                            self.col_notebook_types,
                         ],
                         spacing=10,
                         scroll=ft.ScrollMode.AUTO,
@@ -268,16 +249,6 @@ class PagesMixin:
                                     color=MUTED,
                                 ),
                                 self.col_sc_cards,
-                            ),
-                            self._section(
-                                "Playbook revisions",
-                                ft.Text(
-                                    "Edge stamped when the card was written → edge when "
-                                    "it was replaced.",
-                                    size=11,
-                                    color=MUTED,
-                                ),
-                                self.col_sc_ledger,
                             ),
                             self.lbl_sc_strats,
                         ],
@@ -411,7 +382,7 @@ class PagesMixin:
                     self._refresh_settings_tab,
                     ft.Text(
                         "Which Grok takes the look. Strategy stays Grok's — this does "
-                        "not touch the prompt or the playbook.",
+                        "not touch the prompt.",
                         size=11,
                         color=MUTED,
                     ),

@@ -219,7 +219,7 @@ def _abort_send_reason(abort_fuse: str = "") -> str:
 
 
 def normalize_kill_look_card(card: Any = None) -> str:
-    """Exact playbook card label. Lower/strip. Empty / whitespace is nameless."""
+    """Exact scorecard card label. Lower/strip. Empty / whitespace is nameless."""
     return str(card or "").strip().lower()
 
 

@@ -423,7 +423,7 @@ def test_research_brief_writes_expectancy_and_overwrites(tmp_path, monkeypatch):
     assert path.is_file()
     assert first["session"] == "premarket"
     assert first["mode"] == "research"
-    assert first["tickets"] == []
+    assert "tickets" not in first
     assert "NVDA" in first["symbols"]
     assert first["facts"]
     assert first["expectancy"]

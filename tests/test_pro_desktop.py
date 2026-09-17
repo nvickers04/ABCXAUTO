@@ -176,18 +176,6 @@ def test_run_btn_uses_text_not_content(headless_pro):
     assert headless_pro.btn_run.text == "Start"
 
 
-def test_playbook_line_paints_run_next(headless_pro):
-
-    headless_pro.engine.state.flat = True
-    headless_pro._sync_widgets()
-    line = headless_pro.lbl_playbook.value or ""
-    assert line == "Playbook: —"
-    assert "next=" not in line
-    assert "send SYM" not in line
-    assert "Nlooks" not in line
-    assert "unused=" not in line
-
-
 def test_book_strip_sync(headless_pro):
     s = headless_pro.engine.state
     s.equity = 100_000.0
@@ -215,7 +203,7 @@ def test_book_strip_sync(headless_pro):
 
     assert_no_cycle_counter(headless_pro.page.title or "")
     assert (headless_pro.page.title or "") == "ABCXAUTO"
-    assert (headless_pro.lbl_playbook.value or "") == "Playbook: —"
+    assert not hasattr(headless_pro, "lbl_playbook")
     assert len(headless_pro.col_lots.controls) == 1
     assert headless_pro.lbl_lot_count.value == "1"
     assert "stk:1" in (headless_pro.lbl_mix.value or "")
@@ -678,9 +666,10 @@ async def test_run_cycle_real_path_with_tool_boundary_only(monkeypatch):
 
 def test_notebook_viewer_reads_lab_not_think(headless_pro):
     head, body = headless_pro._lab_notebook()
-    assert head == "Lab notebook"
+    assert head == "Cards"
     assert body == "(empty)"
     assert "notebook" in dict((k, v) for k, v, _o, _f in _nav())
+    assert dict((k, v) for k, v, _o, _f in _nav())["notebook"] == "Cards"
     assert headless_pro._hidden_metrics.visible is False
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
@@ -727,7 +716,6 @@ def test_risk_settings_surface_hidden_metrics_stay_hidden(headless_pro, monkeypa
     assert "risk" in dict((k, v) for k, v, _o, _f in _nav())
     assert headless_pro._hidden_metrics.visible is False
     assert headless_pro.lbl_path in headless_pro._hidden_metrics.controls
-    assert headless_pro.lbl_playbook in headless_pro._hidden_metrics.controls
     assert headless_pro.lbl_tools in headless_pro._hidden_metrics.controls
     headless_pro._set_risk_posture("balanced")
     assert calls and calls[0].get("risk_posture") == "balanced"
