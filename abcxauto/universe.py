@@ -1,37 +1,24 @@
-"""Universe watchlist — Grok sets arenas/custom via self_tune.
-
-Scan may seed from this list. send is not limited to it.
-"""
+"""Live IBKR screens. Nothing about where to hunt persists between looks."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_DEFAULT_PATH = _REPO_ROOT / "universe_allowlist.json"
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,7}$")
 # Units / warrants / rights often pollute scanners (AACOU, DMAAR…).
 # 5+ char suffix only — keep SHORT names (LOW, AIR, MU) and 4-char CORP/ETF.
 _JUNK_SUFFIX_RE = re.compile(r"^[A-Z]{4,}[UWRX]$")
-_CACHE: dict[str, Any] = {
-    "ts": 0.0,
-    "legal": [],
-    "source": "",
-    "arenas": [],
-    "membership": [],
-}
-_CACHE_TTL_S = 300.0
+_XML_CODE_RE = re.compile(r"<code>([^<]+)</code>|code=[\"']([^\"']+)[\"']")
+_INDUSTRY_CODE_RE = re.compile(r"(?i)industry|sector")
 
-def _stk_scan_arena(
+
+def _stk_scan_screen(
     label: str,
     scan_code: str,
     *,
@@ -50,7 +37,6 @@ def _stk_scan_arena(
             "aboveVolume": above_volume,
             "rows": rows,
         },
-        "mda_fallback": [],
     }
 
 
@@ -80,8 +66,7 @@ _SCAN_ARENA_SPECS: list[tuple[str, str, str, dict[str, int]]] = [
     ("top_opt_imp_volat_lose", "Top option IV losers (IBKR)", "TOP_OPT_IMP_VOLAT_LOSE", {}),
 ]
 
-# Arena catalog: IBKR scanner params and/or seed symbols for qualify / MDA fallback.
-# Membership is refreshed dynamically — not a frozen mega prison.
+# Screens backed by a real IBKR ScannerSubscription spec only. No seed lists.
 ARENA_CATALOG: dict[str, dict[str, Any]] = {
     "mega_cap": {
         "label": "Mega cap (IBKR)",
@@ -95,9 +80,6 @@ ARENA_CATALOG: dict[str, dict[str, Any]] = {
             "aboveVolume": 500_000,
             "rows": 25,
         },
-        "mda_fallback": [
-            "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "BRK.B", "AVGO", "JPM",
-        ],
     },
     "large_cap": {
         "label": "Large cap (IBKR)",
@@ -112,10 +94,6 @@ ARENA_CATALOG: dict[str, dict[str, Any]] = {
             "aboveVolume": 250_000,
             "rows": 30,
         },
-        "mda_fallback": [
-            "AMD", "CRM", "COST", "NFLX", "ORCL", "ADBE", "PEP", "KO", "XOM", "CVX",
-            "WMT", "V", "MA", "BAC", "UNH",
-        ],
     },
     "mid_cap": {
         "label": "Mid cap (IBKR)",
@@ -130,111 +108,48 @@ ARENA_CATALOG: dict[str, dict[str, Any]] = {
             "aboveVolume": 250_000,
             "rows": 30,
         },
-        "mda_fallback": [
-            "DECK", "FIX", "CASY", "WSM", "TOL", "RCL", "DKNG", "ROKU", "AFRM", "SOFI",
-        ],
     },
     **{
-        arena_id: _stk_scan_arena(label, code, **kw)
-        for arena_id, label, code, kw in _SCAN_ARENA_SPECS
-    },
-    "index_etfs": {
-        "label": "Index ETFs",
-        "group": "etfs",
-        "ibkr": None,
-        "mda_fallback": ["SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "XLK", "XLF", "XLE"],
-    },
-    "commodities": {
-        "label": "Commodities / macro ETFs",
-        "group": "commodities",
-        "ibkr": None,
-        "mda_fallback": ["GLD", "SLV", "USO", "UNG", "TLT", "HYG", "UUP", "DBC"],
-    },
-    # Industry arenas: no honest IBKR industry code in our scanner path yet —
-    # MDA seed lists only (avoid re-pulling generic HOT_BY_VOLUME junk).
-    "technology": {
-        "label": "Technology",
-        "group": "industries",
-        "ibkr": None,
-        "mda_fallback": [
-            "AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "AMD", "ADBE", "CSCO", "INTC",
-            "QCOM", "TXN", "AMAT", "NOW", "PANW",
-        ],
-    },
-    "healthcare": {
-        "label": "Healthcare",
-        "group": "industries",
-        "ibkr": None,
-        "mda_fallback": [
-            "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "PFE", "AMGN", "ISRG",
-        ],
-    },
-    "energy": {
-        "label": "Energy",
-        "group": "industries",
-        "ibkr": None,
-        "mda_fallback": [
-            "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "WMB",
-        ],
-    },
-    "financials": {
-        "label": "Financials",
-        "group": "industries",
-        "ibkr": None,
-        "mda_fallback": [
-            "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "SCHW", "AXP", "SPGI",
-        ],
+        screen_id: _stk_scan_screen(label, code, **kw)
+        for screen_id, label, code, kw in _SCAN_ARENA_SPECS
     },
 }
 
-_DEFAULT_ENABLED = ("most_active", "index_etfs", "mega_cap")
-# Sector / theme / cap screens. Scan sorts (most_active, top_losers, …) are not
-# a concentration bucket — every active name would clump.
-_BUCKET_GROUPS = frozenset({"industries", "caps", "etfs", "commodities"})
+# Documented meaning of each standing scanCode. Value still comes from IBKR.
+_SCAN_METRIC_NAMES: dict[str, str] = {
+    "MOST_ACTIVE": "volume",
+    "TOP_PERC_GAIN": "percent_change",
+    "TOP_PERC_LOSE": "percent_change",
+    "HOT_BY_VOLUME": "volume",
+    "HOT_BY_PRICE": "price",
+    "HOT_BY_PRICE_RANGE": "price_range",
+    "HOT_BY_OPT_VOLUME": "option_volume",
+    "TOP_TRADE_COUNT": "trade_count",
+    "TOP_TRADE_RATE": "trade_rate",
+    "TOP_VOLUME_RATE": "volume_rate",
+    "TOP_PRICE_RANGE": "price_range",
+    "TOP_OPEN_PERC_GAIN": "open_percent_change",
+    "TOP_OPEN_PERC_LOSE": "open_percent_change",
+    "HIGH_OPEN_GAP": "open_gap",
+    "LOW_OPEN_GAP": "open_gap",
+    "MOST_ACTIVE_USD": "usd_volume",
+    "MOST_ACTIVE_AVG_USD": "avg_usd_volume",
+    "OPT_VOLUME_MOST_ACTIVE": "option_volume",
+    "HIGH_OPT_IMP_VOLAT": "option_iv",
+    "LOW_OPT_IMP_VOLAT": "option_iv",
+    "TOP_OPT_IMP_VOLAT_GAIN": "option_iv_change",
+    "TOP_OPT_IMP_VOLAT_LOSE": "option_iv_change",
+}
 
 
-def catalog_arena_ids() -> list[str]:
-    """Watchlist arena ids Grok may set via self_tune.enabled_arenas."""
-    return list(ARENA_CATALOG.keys())
-
-
-# Sort screens rotate intra-day. 2h is one RTH chapter (open / mid / close).
-# Bucket arenas (caps / ETFs / commodities / industries) have no time horizon.
-SORT_MEMBERSHIP_STALE_S = 2 * 3600
-BUCKET_MEMBERSHIP_STALE_S = None
-# Compact wake add: " watch=4h old=top_gainers." ~25 chars / ~7 tokens.
-WAKE_WATCH_MAX_CHARS = 100
-
-
-def validate_enabled_arenas(raw: Any) -> tuple[list[str] | None, str]:
-    """Normalize catalog ids. Unknown names are an error, never dropped."""
-    if not isinstance(raw, list):
-        return None, (
-            "enabled_arenas must be a list; valid="
-            + ",".join(catalog_arena_ids())
-        )
-    out: list[str] = []
-    unknown: list[str] = []
-    for item in raw:
-        name = str(item or "").strip()
-        if not name:
-            continue
-        canon = name.lower()
-        if canon in ARENA_CATALOG:
-            if canon not in out:
-                out.append(canon)
-            continue
-        unknown.append(name)
-    if unknown:
-        return None, (
-            "unknown arena(s): " + ", ".join(unknown) + "; valid="
-            + ",".join(catalog_arena_ids())
-        )
-    return out, ""
+def scan_metric_name(scan_code: str | None) -> str | None:
+    """What this scanCode ranked by. None if the code is unknown."""
+    code = str(scan_code or "").strip().upper()
+    return _SCAN_METRIC_NAMES.get(code)
 
 
 def _build_known_scan_codes() -> dict[str, dict[str, Any]]:
-    """Standing IBKR scanCodes from group=scans arenas (documented TWS ids only)."""
+    """Standing IBKR scanCodes from group=scans screens (documented TWS ids only)."""
     out: dict[str, dict[str, Any]] = {}
     for meta in ARENA_CATALOG.values():
         if meta.get("group") != "scans":
@@ -243,34 +158,48 @@ def _build_known_scan_codes() -> dict[str, dict[str, Any]]:
         code = str(ibkr.get("scanCode") or "").strip().upper()
         if not code:
             continue
-        # First catalog row for a code wins (friendly defaults).
         out.setdefault(code, dict(ibkr))
     return out
 
 
-def _build_scan_code_to_arena() -> dict[str, str]:
+def _build_scan_code_to_screen() -> dict[str, str]:
     out: dict[str, str] = {}
-    for arena_id, meta in ARENA_CATALOG.items():
+    for screen_id, meta in ARENA_CATALOG.items():
         if meta.get("group") != "scans":
             continue
         ibkr = meta.get("ibkr") or {}
         code = str(ibkr.get("scanCode") or "").strip().upper()
         if code and code not in out:
-            out[code] = arena_id
+            out[code] = screen_id
     return out
 
 
-# Bare IBKR scanCodes accepted by scan(arena=…) / scan(scan_code=…).
-# Sourced from ARENA_CATALOG group=scans — same class as MOST_ACTIVE / TOP_PERC_*.
 KNOWN_SCAN_CODES: dict[str, dict[str, Any]] = _build_known_scan_codes()
-
-# Arena catalog id aliases for the same standing screens.
-_SCAN_CODE_TO_ARENA: dict[str, str] = _build_scan_code_to_arena()
+_SCAN_CODE_TO_SCREEN: dict[str, str] = _build_scan_code_to_screen()
 
 
 def known_scan_codes() -> list[str]:
     """Documented IBKR scanCodes the clerk will run (tool JSON scan_code=)."""
     return list(KNOWN_SCAN_CODES.keys())
+
+
+def known_screen_keys() -> list[str]:
+    """Tool JSON arena= keys: catalog screen ids + standing IBKR scanCodes."""
+    out = list(ARENA_CATALOG.keys())
+    for code in KNOWN_SCAN_CODES:
+        if code not in out:
+            out.append(code)
+    return out
+
+
+def _unknown_screen_error(key: str) -> dict[str, Any]:
+    valid = known_screen_keys()
+    return {
+        "ok": False,
+        "error": f"unknown screen: {key}; valid=" + ",".join(valid),
+        "arenas": valid,
+        "screens": valid,
+    }
 
 
 # Optional clerk filters this look only — native ScannerSubscription fields.
@@ -284,6 +213,14 @@ _SCAN_NATIVE_FILTERS: dict[str, tuple[str, type]] = {
     "average_option_volume_above": ("averageOptionVolumeAbove", int),
 }
 
+_STOCK_TYPE_VALUES: dict[str, str] = {
+    "corp": "CORP",
+    "etf": "ETF",
+    "both": "CORP,ETF",
+    "corp,etf": "CORP,ETF",
+    "etf,corp": "CORP,ETF",
+}
+
 # Bounded TagValue allowlist (clerk, not SYSTEM). Exact IBKR tag names.
 _SCAN_TAG_FILTERS: frozenset[str] = frozenset(
     {"usdMarketCapAbove", "optVolumeAbove", "avgVolumeAbove"}
@@ -294,54 +231,68 @@ _PE_TAG_CANDIDATES: frozenset[str] = frozenset({"peRatioAbove", "peRatioBelow"})
 
 # Non-filter keys allowed on scan() after tool_args normalize.
 _SCAN_BASE_KEYS: frozenset[str] = frozenset(
-    {"arena", "scan_code", "symbols", "symbol", "with", "include"}
+    {"arena", "scan_code", "symbols", "symbol", "with", "include", "stock_type"}
 )
 
+_SCANNER_XML_CACHE: dict[str, Any] = {"ts": 0.0, "xml": ""}
 _PE_TAG_CACHE: dict[str, Any] = {"ts": 0.0, "tags": frozenset()}
-_PE_TAG_CACHE_TTL_S = 3600.0
-
-
-def known_screen_keys() -> list[str]:
-    """Tool JSON arenas= keys: catalog ids + standing IBKR scanCodes."""
-    out = list(ARENA_CATALOG.keys())
-    for code in KNOWN_SCAN_CODES:
-        if code not in out:
-            out.append(code)
-    return out
+_INDUSTRY_TAG_CACHE: dict[str, Any] = {"ts": 0.0, "tags": frozenset()}
+_SCANNER_XML_TTL_S = 3600.0
 
 
 def _xml_has_scanner_code(xml: str, code: str) -> bool:
     """True when reqScannerParameters XML lists this filter code (not a guess)."""
     if not xml or not code:
         return False
-    # IBKR XML uses <code>tagName</code> on AbstractField / RangeFilter rows.
     needle = f"<code>{code}</code>"
     if needle in xml:
         return True
-    # Some dumps quote the code attribute.
     return f'code="{code}"' in xml or f"code='{code}'" in xml
+
+
+def _scanner_codes_from_xml(xml: str) -> frozenset[str]:
+    found: set[str] = set()
+    for match in _XML_CODE_RE.finditer(str(xml or "")):
+        code = (match.group(1) or match.group(2) or "").strip()
+        if code:
+            found.add(code)
+    return frozenset(found)
 
 
 def _pe_tags_from_xml(xml: str) -> frozenset[str]:
     return frozenset(t for t in _PE_TAG_CANDIDATES if _xml_has_scanner_code(xml, t))
 
 
+def _industry_tags_from_xml(xml: str) -> frozenset[str]:
+    """Codes whose names are industry/sector. Empty unless XML listed them."""
+    return frozenset(
+        code for code in _scanner_codes_from_xml(xml) if _INDUSTRY_CODE_RE.search(code)
+    )
+
+
 def reset_pe_tag_cache() -> None:
-    """Tests."""
+    """Tests — also clears the shared scanner-XML and industry caches."""
     _PE_TAG_CACHE.update(ts=0.0, tags=frozenset())
+    _INDUSTRY_TAG_CACHE.update(ts=0.0, tags=frozenset())
+    _SCANNER_XML_CACHE.update(ts=0.0, xml="")
 
 
-async def verified_pe_tags(connector: Any = None) -> frozenset[str]:
-    """P/E TagValues present in live reqScannerParameters XML. Empty if unverified."""
+def reset_industry_tag_cache() -> None:
+    """Tests."""
+    reset_pe_tag_cache()
+
+
+async def _scanner_parameters_xml(connector: Any = None) -> str:
     now = time.monotonic()
-    cached = _PE_TAG_CACHE.get("tags") or frozenset()
-    if cached and (now - float(_PE_TAG_CACHE.get("ts") or 0)) < _PE_TAG_CACHE_TTL_S:
-        return frozenset(cached)
+    cached = str(_SCANNER_XML_CACHE.get("xml") or "")
+    ts = float(_SCANNER_XML_CACHE.get("ts") or 0)
+    if cached and (now - ts) < _SCANNER_XML_TTL_S:
+        return cached
     if connector is None or not getattr(connector, "connected", False):
-        return frozenset()
+        return ""
     ib = getattr(connector, "ib", None)
     if ib is None or not hasattr(ib, "reqScannerParametersAsync"):
-        return frozenset()
+        return ""
     try:
         lock = getattr(connector, "async_lock", None)
         if lock is not None:
@@ -351,25 +302,76 @@ async def verified_pe_tags(connector: Any = None) -> frozenset[str]:
             xml = await ib.reqScannerParametersAsync()
     except Exception:
         logger.exception("reqScannerParameters failed")
+        return ""
+    text = str(xml or "")
+    if text:
+        _SCANNER_XML_CACHE.update(ts=now, xml=text)
+    return text
+
+
+async def verified_pe_tags(connector: Any = None) -> frozenset[str]:
+    """P/E TagValues present in live reqScannerParameters XML. Empty if unverified."""
+    now = time.monotonic()
+    cached = _PE_TAG_CACHE.get("tags") or frozenset()
+    if cached and (now - float(_PE_TAG_CACHE.get("ts") or 0)) < _SCANNER_XML_TTL_S:
+        return frozenset(cached)
+    xml = await _scanner_parameters_xml(connector)
+    if not xml:
         return frozenset()
-    found = _pe_tags_from_xml(str(xml or ""))
+    found = _pe_tags_from_xml(xml)
     _PE_TAG_CACHE.update(ts=now, tags=found)
     return found
+
+
+async def verified_industry_tags(connector: Any = None) -> frozenset[str]:
+    """Industry/sector TagValues present in live scanner XML. Empty if unverified.
+
+    Does not invent a field name. Codes are taken from the XML and kept only
+    when the code itself names industry or sector.
+    """
+    now = time.monotonic()
+    cached = _INDUSTRY_TAG_CACHE.get("tags") or frozenset()
+    if cached and (now - float(_INDUSTRY_TAG_CACHE.get("ts") or 0)) < _SCANNER_XML_TTL_S:
+        return frozenset(cached)
+    xml = await _scanner_parameters_xml(connector)
+    if not xml:
+        return frozenset()
+    found = _industry_tags_from_xml(xml)
+    _INDUSTRY_TAG_CACHE.update(ts=now, tags=found)
+    return found
+
+
+def _normalize_stock_type(raw: Any) -> str | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    mapped = _STOCK_TYPE_VALUES.get(text.lower())
+    if mapped:
+        return mapped
+    parts = [p.strip().upper() for p in text.split(",") if p.strip()]
+    if parts and all(p in ("CORP", "ETF") for p in parts):
+        if set(parts) == {"CORP", "ETF"}:
+            return "CORP,ETF"
+        return parts[0]
+    return None
 
 
 def parse_scan_filters(
     args: dict[str, Any] | None,
     *,
     pe_tags: frozenset[str] | None = None,
+    industry_tags: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Clerk allowlist for optional IBKR filters this look. Unknown keys → error.
 
-    P/E tags are accepted only when ``pe_tags`` contains the verified XML code.
+    P/E and industry/sector tags are accepted only when the matching verified
+    XML set contains the code. stock_type is native (CORP / ETF / both).
     No persist. Does not invent TagValue names.
     """
     src = dict(args) if isinstance(args, dict) else {}
     allowed_pe = frozenset(pe_tags or ())
-    allowed_tags = set(_SCAN_TAG_FILTERS) | set(allowed_pe)
+    allowed_industry = frozenset(industry_tags or ())
+    allowed_tags = set(_SCAN_TAG_FILTERS) | set(allowed_pe) | set(allowed_industry)
     allowed_keys = set(_SCAN_BASE_KEYS) | set(_SCAN_NATIVE_FILTERS) | allowed_tags
 
     unknown = sorted(
@@ -386,6 +388,13 @@ def parse_scan_filters(
     native: dict[str, Any] = {}
     tags: dict[str, str] = {}
     applied: dict[str, Any] = {}
+
+    if src.get("stock_type") not in (None, ""):
+        stock_type = _normalize_stock_type(src.get("stock_type"))
+        if stock_type is None:
+            return {"ok": False, "error": "invalid stock_type (CORP | ETF | both)"}
+        native["stockTypeFilter"] = stock_type
+        applied["stock_type"] = stock_type
 
     for snake, (ib_name, caster) in _SCAN_NATIVE_FILTERS.items():
         if src.get(snake) in (None, ""):
@@ -445,7 +454,7 @@ def _with_spec_cap_applied(
     spec: dict[str, Any] | None,
     applied: dict[str, Any],
 ) -> dict[str, Any]:
-    """Echo the arena's cap so an empty mega/large screen is not a silent miss."""
+    """Echo the screen's cap so an empty mega/large screen is not a silent miss."""
     out = dict(applied or {})
     if not spec:
         return out
@@ -453,63 +462,53 @@ def _with_spec_cap_applied(
         out["market_cap_above"] = spec["marketCapAbove"]
     if spec.get("marketCapBelow") is not None and "market_cap_below" not in out:
         out["market_cap_below"] = spec["marketCapBelow"]
+    if spec.get("stockTypeFilter") is not None and "stock_type" not in out:
+        out["stock_type"] = spec["stockTypeFilter"]
     return out
 
 
 def _resolve_one_selector(key: str) -> dict[str, Any]:
-    """One catalog id or standing IBKR scanCode."""
+    """One catalog screen id or standing IBKR scanCode."""
     if not key:
         return {"ok": False, "error": "arena or scan_code required"}
     lower = key.lower()
     if lower in ARENA_CATALOG:
         meta = ARENA_CATALOG[lower]
+        ibkr = dict(meta["ibkr"]) if meta.get("ibkr") else None
+        if not ibkr:
+            return _unknown_screen_error(key)
         return {
             "ok": True,
             "arena_id": lower,
-            "scan_code": str((meta.get("ibkr") or {}).get("scanCode") or "") or None,
-            "ibkr": dict(meta["ibkr"]) if meta.get("ibkr") else None,
-            "mda_fallback": list(meta.get("mda_fallback") or []),
+            "scan_code": str(ibkr.get("scanCode") or "") or None,
+            "ibkr": ibkr,
         }
     code = key.upper()
     if code in KNOWN_SCAN_CODES:
-        arena_id = _SCAN_CODE_TO_ARENA.get(code)
+        screen_id = _SCAN_CODE_TO_SCREEN.get(code)
         return {
             "ok": True,
-            "arena_id": arena_id,
+            "arena_id": screen_id,
             "scan_code": code,
             "ibkr": dict(KNOWN_SCAN_CODES[code]),
-            "mda_fallback": list(
-                (ARENA_CATALOG.get(arena_id) or {}).get("mda_fallback") or []
-            )
-            if arena_id
-            else [],
         }
-    return {
-        "ok": False,
-        "error": f"unknown arena/scan_code: {key}",
-        "arenas": known_screen_keys(),
-    }
+    return _unknown_screen_error(key)
 
 
 def resolve_screen(
     arena: str | None = None,
     scan_code: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve one screen. arena is the universe; scan_code is the sort.
+    """Resolve one screen. arena is the screen id; scan_code is the sort.
 
     Both together is a compose, not an error: mega_cap + TOP_PERC_LOSE keeps the
-    cap filter and ranks losers. Dropping the sort was why that call came back
-    as HOT_BY_VOLUME and the model spent the look retrying.
+    cap filter and ranks losers.
     """
     raw_arena = str(arena or "").strip()
     raw_code = str(scan_code or "").strip().upper()
     if raw_arena and raw_code:
         if raw_code not in KNOWN_SCAN_CODES:
-            return {
-                "ok": False,
-                "error": f"unknown arena/scan_code: {raw_code}",
-                "arenas": known_screen_keys(),
-            }
+            return _unknown_screen_error(raw_code)
         base = _resolve_one_selector(raw_arena)
         if not base.get("ok"):
             return base
@@ -517,7 +516,7 @@ def resolve_screen(
         if not ibkr:
             return {
                 "ok": False,
-                "error": "scan filters require an IBKR arena|scan_code",
+                "error": "scan filters require an IBKR screen|scan_code",
             }
         ibkr["scanCode"] = raw_code
         return {
@@ -525,14 +524,11 @@ def resolve_screen(
             "arena_id": base.get("arena_id"),
             "scan_code": raw_code,
             "ibkr": ibkr,
-            "mda_fallback": list(base.get("mda_fallback") or []),
         }
     return _resolve_one_selector(raw_arena or raw_code)
 
 
 # One look tape: most_active plus top losers or gainers (the flush card text).
-# Cap overlay is large_cap's floor so mega and large both pass; mega's $200B
-# native USD used to empty the tape before millions conversion.
 FLUSH_DEFAULT_SCREENS: tuple[tuple[str, str], ...] = (
     ("most_active", "MOST_ACTIVE"),
     ("top_losers", "TOP_PERC_LOSE"),
@@ -547,7 +543,7 @@ def flush_default_jobs() -> list[dict[str, str]]:
 def is_flush_default_screen(arena: str = "", scan_code: str = "") -> bool:
     """True for a bare look or one of the three flush sort pages.
 
-    Cap-universe composes (mega_cap + TOP_PERC_LOSE) are extra screens.
+    Cap-screen composes (mega_cap + TOP_PERC_LOSE) are extra screens.
     """
     raw_arena = str(arena or "").strip()
     raw_code = str(scan_code or "").strip()
@@ -601,7 +597,7 @@ async def pull_one_screen(
     scan_code: str | None = None,
     filters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One IBKR screen (or MDA industry seed if no IBKR) this look. No persist."""
+    """One IBKR screen this look. Empty IBKR result stays empty. No persist."""
     resolved = resolve_screen(arena=arena, scan_code=scan_code)
     if not resolved.get("ok"):
         return resolved
@@ -610,149 +606,52 @@ async def pull_one_screen(
     if (filters or {}).get("applied") and ibkr_spec is None:
         return {
             "ok": False,
-            "error": "scan filters require an IBKR arena|scan_code",
+            "error": "scan filters require an IBKR screen|scan_code",
             "applied": dict((filters or {}).get("applied") or {}),
         }
-    pulled: list[str] = []
-    rows: list[dict[str, Any]] = []
-    source = ""
-    # MDA industry seed only when there is no IBKR connector (or no IBKR spec).
-    # If _ibkr_scan ran and returned empty — stay empty; do not dump catalog names.
-    if ibkr_spec and connector is not None:
-        scan_out = await _ibkr_scan(connector, ibkr_spec)
-        if isinstance(scan_out, dict) and not scan_out.get("ok", True):
-            return {
-                "ok": False,
-                "error": scan_out.get("error") or "IBKR scanner error",
-                "arena_id": resolved.get("arena_id"),
-                "scan_code": resolved.get("scan_code"),
-                "applied": applied,
-                "persisted": False,
-            }
-        if isinstance(scan_out, dict):
-            pulled = list(scan_out.get("symbols") or [])
-            rows = list(scan_out.get("rows") or [])
-        else:
-            pulled = list(scan_out or [])
-        source = "ibkr" if pulled else "empty"
+    if ibkr_spec is None:
+        return _unknown_screen_error(str(arena or scan_code or ""))
+    if connector is None:
+        return {
+            "ok": False,
+            "error": "IBKR required for live screen",
+            "arena_id": resolved.get("arena_id"),
+            "scan_code": resolved.get("scan_code"),
+            "applied": applied,
+        }
+    scan_out = await _ibkr_scan(connector, ibkr_spec)
+    if isinstance(scan_out, dict) and not scan_out.get("ok", True):
+        return {
+            "ok": False,
+            "error": scan_out.get("error") or "IBKR scanner error",
+            "arena_id": resolved.get("arena_id"),
+            "scan_code": resolved.get("scan_code"),
+            "applied": applied,
+            "empty": False,
+        }
+    if isinstance(scan_out, dict):
+        pulled = list(scan_out.get("symbols") or [])
+        rows = list(scan_out.get("rows") or [])
+        ibkr_rows = int(scan_out.get("ibkr_rows") or len(rows) or len(pulled))
+        kept = int(scan_out.get("kept") or len(pulled))
     else:
-        pulled = normalize_symbols(resolved.get("mda_fallback") or [])
-        if pulled:
-            source = "mda_seed"
+        pulled = list(scan_out or [])
+        rows = []
+        ibkr_rows = len(pulled)
+        kept = len(pulled)
+    empty = kept == 0
     return {
         "ok": True,
         "arena_id": resolved.get("arena_id"),
         "scan_code": resolved.get("scan_code"),
-        "source": source or "empty",
+        "source": "empty" if empty else "ibkr",
+        "empty": empty,
         "symbols": list(pulled),
         "rows": rows,
         "applied": applied,
-        "persisted": False,
+        "ibkr_rows": ibkr_rows,
+        "kept": kept,
     }
-
-
-def _path() -> Path:
-    import os
-
-    raw = (os.environ.get("ABCXAUTO_UNIVERSE_PATH") or "").strip()
-    return Path(raw) if raw else _DEFAULT_PATH
-
-
-def default_allowlist() -> dict[str, Any]:
-    return {
-        "enabled_arenas": list(_DEFAULT_ENABLED),
-        "custom_symbols": [],
-        "exclude_symbols": [],
-        "legal_symbols": [],
-        "membership": [],  # [{symbol, arena, source}] scan/arena order
-        "source": "",
-        "refreshed_at": "",
-        "refresh_pending": False,
-    }
-
-
-def _normalize_membership(raw: Any) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
-    if not isinstance(raw, list):
-        return out
-    seen: set[str] = set()
-    for row in raw:
-        if not isinstance(row, dict):
-            continue
-        sym = str(row.get("symbol") or "").upper().strip()
-        if not is_common_equity_symbol(sym) or sym in seen:
-            continue
-        seen.add(sym)
-        out.append(
-            {
-                "symbol": sym,
-                "arena": str(row.get("arena") or "").strip() or "?",
-                "source": str(row.get("source") or "").strip() or "?",
-            }
-        )
-    return out
-
-
-def load_allowlist(path: Path | None = None) -> dict[str, Any]:
-    p = path or _path()
-    base = default_allowlist()
-    if not p.is_file():
-        return base
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            return base
-        out = dict(base)
-        arenas = raw.get("enabled_arenas")
-        if isinstance(arenas, list):
-            out["enabled_arenas"] = [
-                str(a) for a in arenas if str(a) in ARENA_CATALOG
-            ]
-        for key in ("custom_symbols", "exclude_symbols", "legal_symbols"):
-            vals = raw.get(key)
-            if isinstance(vals, list):
-                out[key] = normalize_symbols(vals)
-        out["membership"] = _normalize_membership(raw.get("membership"))
-        # Rebuild membership stubs from legal list if missing (legacy files).
-        if not out["membership"] and out["legal_symbols"]:
-            out["membership"] = [
-                {"symbol": s, "arena": "?", "source": "persisted"}
-                for s in out["legal_symbols"]
-            ]
-        out["source"] = str(raw.get("source") or "")
-        out["refreshed_at"] = str(raw.get("refreshed_at") or "")
-        out["refresh_pending"] = bool(raw.get("refresh_pending"))
-        # Explicit empty list means none. Only a missing file uses defaults.
-        if "enabled_arenas" not in raw and not out["custom_symbols"]:
-            if not out["enabled_arenas"]:
-                out["enabled_arenas"] = list(_DEFAULT_ENABLED)
-        return out
-    except Exception:
-        logger.exception("load universe allowlist failed")
-        return base
-
-
-def save_allowlist(data: dict[str, Any], path: Path | None = None) -> Path:
-    p = path or _path()
-    cur = load_allowlist(p)
-    if "enabled_arenas" in data and isinstance(data["enabled_arenas"], list):
-        cur["enabled_arenas"] = [
-            str(a) for a in data["enabled_arenas"] if str(a) in ARENA_CATALOG
-        ]
-    for key in ("custom_symbols", "exclude_symbols", "legal_symbols"):
-        if key in data and isinstance(data[key], list):
-            cur[key] = normalize_symbols(data[key])
-    if "membership" in data:
-        cur["membership"] = _normalize_membership(data.get("membership"))
-    if "source" in data:
-        cur["source"] = str(data.get("source") or "")
-    if "refreshed_at" in data:
-        cur["refreshed_at"] = str(data.get("refreshed_at") or "")
-    if "refresh_pending" in data:
-        cur["refresh_pending"] = bool(data.get("refresh_pending"))
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cur, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return p
 
 
 def is_common_equity_symbol(symbol: str) -> bool:
@@ -836,12 +735,6 @@ def normalize_symbols(raw: Any) -> list[str]:
     return out
 
 
-def _utc_now() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _stock_type_ok(stock_type: str, allowed: set[str]) -> bool:
     st = str(stock_type or "").strip().upper()
     if not st:
@@ -849,13 +742,46 @@ def _stock_type_ok(stock_type: str, allowed: set[str]) -> bool:
     return st in allowed
 
 
+def _optional_num(raw: Any) -> float | None:
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        text = str(raw).strip().replace(",", "")
+        if text.endswith("%"):
+            text = text[:-1].strip()
+        try:
+            val = float(text)
+        except (TypeError, ValueError):
+            return None
+    if val != val:
+        return None
+    return val
+
+
+def _first_attr(obj: Any, names: tuple[str, ...]) -> Any:
+    if obj is None:
+        return None
+    for name in names:
+        if isinstance(obj, dict):
+            val = obj.get(name)
+        else:
+            val = getattr(obj, name, None)
+        if val not in (None, ""):
+            return val
+    return None
+
+
 def _scan_row_facts(row: Any, symbol: str, *, rank_fallback: int) -> dict[str, Any]:
-    """Keep what the scanner already told us. ``distance``/``benchmark`` are the
-    scanCode's own metric (e.g. % gain for TOP_PERC_GAIN) — free triage data.
-    """
+    """Keep what the scanner already told us. Never invent a last."""
     out: dict[str, Any] = {"symbol": symbol}
     try:
         rank = getattr(row, "rank", None)
+        if rank is None and isinstance(row, dict):
+            rank = row.get("rank")
         out["rank"] = int(rank) if rank is not None else int(rank_fallback)
     except (TypeError, ValueError):
         out["rank"] = int(rank_fallback)
@@ -866,30 +792,62 @@ def _scan_row_facts(row: Any, symbol: str, *, rank_fallback: int) -> dict[str, A
         ("legsStr", "legs"),
     ):
         val = getattr(row, src, None)
+        if val in (None, "") and isinstance(row, dict):
+            val = row.get(src) if src != "legsStr" else row.get("legs")
         if val not in (None, ""):
             out[dst] = str(val)
     cd = getattr(row, "contractDetails", None)
+    if cd is None and isinstance(row, dict):
+        cd = row.get("contractDetails")
     if cd is not None:
         st = str(getattr(cd, "stockType", "") or "").strip()
+        if not st and isinstance(cd, dict):
+            st = str(cd.get("stockType") or cd.get("stock_type") or "").strip()
         if st:
             out["stock_type"] = st
         long_name = str(getattr(cd, "longName", "") or "").strip()
+        if not long_name and isinstance(cd, dict):
+            long_name = str(cd.get("longName") or cd.get("long_name") or "").strip()
         if long_name:
             out["long_name"] = long_name
+        cap = _optional_num(_first_attr(cd, ("marketCap", "market_cap")))
+        if cap is not None and cap > 0:
+            out["market_cap"] = cap
+    last = _optional_num(_first_attr(row, ("last", "lastPrice", "last_price")))
+    if last is None and isinstance(row, dict):
+        last = _optional_num(row.get("last"))
+    if last is not None and last > 0:
+        out["last"] = last
+    volume = _optional_num(_first_attr(row, ("volume", "avgVolume")))
+    if volume is None and isinstance(row, dict):
+        volume = _optional_num(row.get("volume"))
+    if volume is not None and volume > 0:
+        out["volume"] = int(volume) if volume >= 1 else volume
+    if "market_cap" not in out:
+        cap = _optional_num(_first_attr(row, ("marketCap", "market_cap")))
+        if cap is None and isinstance(row, dict):
+            cap = _optional_num(row.get("market_cap") or row.get("marketCap"))
+        if cap is not None and cap > 0:
+            out["market_cap"] = cap
+    if "stock_type" not in out and isinstance(row, dict):
+        st = str(row.get("stock_type") or row.get("stockType") or "").strip()
+        if st:
+            out["stock_type"] = st
     return out
 
 
 async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
     """Run one IBKR market scanner subscription.
 
-    Returns ``{"ok": True, "symbols": [...]}`` or ``{"ok": False, "error": ...}``.
-    Empty successful pull → ok with symbols=[] (caller must not MDA-fallback).
+    Returns ``{"ok": True, "symbols": [...], "rows": [...]}`` or
+    ``{"ok": False, "error": ...}``. Empty successful pull → ok with
+    symbols=[] (caller must not substitute catalog names).
     """
     if connector is None or not getattr(connector, "connected", False):
-        return {"ok": True, "symbols": []}
+        return {"ok": False, "error": "IBKR required for live screen", "symbols": [], "rows": []}
     ib = getattr(connector, "ib", None)
     if ib is None:
-        return {"ok": True, "symbols": []}
+        return {"ok": False, "error": "IBKR required for live screen", "symbols": [], "rows": []}
     try:
         from ib_insync import ScannerSubscription, TagValue
     except Exception:
@@ -948,7 +906,7 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
                     ib.cancelScannerSubscription(sub)
                 except Exception:
                     pass
-                # Brief settle so the next arena scan is not cancelled by TWS.
+                # Brief settle so the next screen is not cancelled by TWS.
                 await asyncio.sleep(0.35)
     except Exception as exc:
         msg = str(exc).lower()
@@ -958,12 +916,14 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
                 spec.get("scanCode"),
                 exc,
             )
-            return {"ok": True, "symbols": []}
+            return {"ok": True, "symbols": [], "rows": [], "ibkr_rows": 0, "kept": 0}
         logger.exception("IBKR scanner failed scanCode=%s", spec.get("scanCode"))
         return {"ok": False, "error": str(exc), "symbols": []}
     try:
+        raw_n = len(data or [])
         syms: list[str] = []
         rows: list[dict[str, Any]] = []
+        scan_code = str(spec.get("scanCode") or "").strip().upper()
         for row in data or []:
             cd = getattr(row, "contractDetails", None)
             contract = None
@@ -983,302 +943,17 @@ async def _ibkr_scan(connector: Any, spec: dict[str, Any]) -> dict[str, Any]:
             if not _stock_type_ok(st, allowed_types):
                 continue
             syms.append(sym)
-            rows.append(_scan_row_facts(row, sym, rank_fallback=len(rows)))
-        return {"ok": True, "symbols": syms, "rows": rows}
+            facts = _scan_row_facts(row, sym, rank_fallback=len(rows))
+            if scan_code:
+                facts["scan_code"] = scan_code
+            rows.append(facts)
+        return {
+            "ok": True,
+            "symbols": syms,
+            "rows": rows,
+            "ibkr_rows": raw_n,
+            "kept": len(syms),
+        }
     except Exception as exc:
         logger.exception("IBKR scanner parse failed scanCode=%s", spec.get("scanCode"))
         return {"ok": False, "error": str(exc), "symbols": [], "rows": []}
-
-
-async def refresh_legal_set(
-    connector: Any = None,
-    *,
-    allowlist: dict[str, Any] | None = None,
-    persist: bool = True,
-) -> dict[str, Any]:
-    """Pull IBKR (preferred) / MDA-seed symbols for enabled arenas.
-
-    Same empty rule as ``pull_one_screen``: if IBKR ran, stay empty — do not
-    dump ARENA_CATALOG names. Never invent SPY/QQQ/IWM.
-    """
-    al = dict(allowlist if allowlist is not None else load_allowlist())
-    raw_enabled = al.get("enabled_arenas")
-    if isinstance(raw_enabled, list):
-        enabled = [str(a) for a in raw_enabled if str(a) in ARENA_CATALOG]
-    else:
-        enabled = list(_DEFAULT_ENABLED)
-    custom = normalize_symbols(al.get("custom_symbols") or [])
-    exclude_list = normalize_symbols(al.get("exclude_symbols") or [])
-    exclude = set(exclude_list)
-
-    legal: list[str] = []
-    membership: list[dict[str, str]] = []
-    sources: list[str] = []
-
-    for arena_id in enabled:
-        meta = ARENA_CATALOG.get(arena_id) or {}
-        pulled: list[str] = []
-        pull_src = ""
-        ibkr_spec = meta.get("ibkr")
-        # MDA seed only when there is no IBKR connector (or no IBKR spec).
-        # If _ibkr_scan ran and returned empty — stay empty; do not dump catalog names.
-        if ibkr_spec and connector is not None:
-            scan_out = await _ibkr_scan(connector, ibkr_spec)
-            if isinstance(scan_out, dict):
-                pulled = list(scan_out.get("symbols") or []) if scan_out.get("ok", True) else []
-            else:
-                pulled = list(scan_out or [])
-            if pulled:
-                pull_src = "ibkr"
-                sources.append(f"{arena_id}:ibkr")
-        else:
-            pulled = normalize_symbols(meta.get("mda_fallback") or [])
-            if pulled:
-                pull_src = "mda_fallback"
-                sources.append(f"{arena_id}:mda_fallback")
-        for sym in pulled:
-            if sym not in legal and sym not in exclude:
-                legal.append(sym)
-                membership.append(
-                    {"symbol": sym, "arena": str(arena_id), "source": pull_src or "?"}
-                )
-
-    for sym in custom:
-        if sym not in legal and sym not in exclude:
-            legal.append(sym)
-            membership.append({"symbol": sym, "arena": "custom", "source": "custom"})
-
-    # Keep arena / scanner order — do not alphabetize (that biases SCAN TAPE to A*).
-    source = "+".join(sources) if sources else "empty"
-    al["legal_symbols"] = legal
-    al["membership"] = membership
-    al["custom_symbols"] = custom
-    al["exclude_symbols"] = exclude_list
-    al["source"] = source
-    al["refreshed_at"] = _utc_now()
-    al["refresh_pending"] = False
-    if persist:
-        save_allowlist(al)
-    _CACHE.update(
-        ts=time.monotonic(),
-        legal=list(legal),
-        source=source,
-        arenas=enabled,
-        membership=list(membership),
-    )
-    return al
-
-
-def legal_symbols(*, use_cache: bool = True) -> list[str]:
-    """Current legal set (from cache or last persisted refresh). Empty stays empty."""
-    now = time.monotonic()
-    ts = float(_CACHE.get("ts") or 0)
-    # Empty list is a hit — do not treat [] as a miss and dump catalog / SPY/QQQ.
-    if use_cache and ts and (now - ts) < _CACHE_TTL_S:
-        return list(_CACHE.get("legal") or [])
-    al = load_allowlist()
-    legal = normalize_symbols(al.get("legal_symbols") or [])
-    _CACHE.update(
-        ts=now,
-        legal=list(legal),
-        source=str(al.get("source") or "persisted"),
-        arenas=list(al.get("enabled_arenas") or []),
-    )
-    return list(legal)
-
-
-def is_legal_symbol(symbol: str) -> bool:
-    sym = str(symbol or "").upper().strip()
-    if not sym:
-        return False
-    return sym in set(legal_symbols())
-
-
-def filter_to_legal(symbols: list[str] | None) -> list[str]:
-    """Normalize asked tickers. Not a sandbox — Grok may quote any name."""
-    out: list[str] = []
-    for s in normalize_symbols(symbols or []):
-        if s not in out:
-            out.append(s)
-    return out
-
-
-def membership_rows(*, query: str = "") -> list[dict[str, str]]:
-    """Legal-set rows in arena/scan order (never ranked). Optional substring filter."""
-    al = load_allowlist()
-    rows = _normalize_membership(al.get("membership"))
-    if not rows:
-        rows = [
-            {"symbol": s, "arena": "?", "source": "persisted"}
-            for s in normalize_symbols(al.get("legal_symbols") or [])
-        ]
-    q = str(query or "").upper().strip()
-    if not q:
-        return rows
-    return [
-        r
-        for r in rows
-        if q in r["symbol"] or q in r["arena"].upper() or q in r["source"].upper()
-    ]
-
-
-def universe_glance_line() -> str:
-    """One-line Fact for Dashboard Agent World."""
-    al = load_allowlist()
-    n = len(legal_symbols())
-    arenas = ", ".join(al.get("enabled_arenas") or []) or "(none)"
-    ts = al.get("refreshed_at") or "never"
-    src = al.get("source") or "n/a"
-    short_src = src if len(src) <= 72 else src[:69] + "…"
-    return f"Universe: {n} legal · arenas={arenas} · {short_src} · {ts}"
-
-
-def is_sort_arena(arena_id: str) -> bool:
-    meta = ARENA_CATALOG.get(str(arena_id or "").strip()) or {}
-    return meta.get("group") == "scans"
-
-
-def is_bucket_arena(arena_id: str) -> bool:
-    meta = ARENA_CATALOG.get(str(arena_id or "").strip()) or {}
-    return meta.get("group") in _BUCKET_GROUPS
-
-
-def _parse_refreshed_at(raw: str) -> datetime | None:
-    text = str(raw or "").strip()
-    if not text:
-        return None
-    try:
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
-def membership_age_s(
-    allowlist: dict[str, Any] | None = None,
-    *,
-    now: datetime | None = None,
-) -> float | None:
-    al = allowlist if isinstance(allowlist, dict) else load_allowlist()
-    ts = _parse_refreshed_at(str(al.get("refreshed_at") or ""))
-    if ts is None:
-        return None
-    clock = now or datetime.now(timezone.utc)
-    if clock.tzinfo is None:
-        clock = clock.replace(tzinfo=timezone.utc)
-    return max(0.0, (clock - ts).total_seconds())
-
-
-def _age_token(seconds: float | None) -> str:
-    if seconds is None:
-        return "never"
-    if seconds < 90:
-        return f"{int(seconds)}s"
-    if seconds < 3600:
-        return f"{int(seconds // 60)}m"
-    hours = seconds / 3600.0
-    if abs(hours - round(hours)) < 0.05:
-        return f"{int(round(hours))}h"
-    return f"{hours:.1f}h"
-
-
-def membership_watch_line(
-    allowlist: dict[str, Any] | None = None,
-    *,
-    now: datetime | None = None,
-) -> str:
-    """Terse membership age + sort/bucket marks. Not send geometry."""
-    al = allowlist if isinstance(allowlist, dict) else load_allowlist()
-    age = membership_age_s(al, now=now)
-    parts = [f"age={_age_token(age)}"]
-    if al.get("refresh_pending"):
-        parts.append("pending")
-    for aid in al.get("enabled_arenas") or []:
-        name = str(aid or "").strip()
-        if not name:
-            continue
-        if is_sort_arena(name):
-            stale = age is not None and age > SORT_MEMBERSHIP_STALE_S
-            parts.append(f"{name}:sort:stale" if stale else f"{name}:sort")
-        elif is_bucket_arena(name):
-            parts.append(f"{name}:bucket")
-        else:
-            parts.append(name)
-    return " ".join(parts)
-
-
-def membership_wake_bit(
-    allowlist: dict[str, Any] | None = None,
-    *,
-    now: datetime | None = None,
-) -> str:
-    """Wake-sized watch: age plus stale sorts only. Not the long scan line."""
-    al = allowlist if isinstance(allowlist, dict) else load_allowlist()
-    age = membership_age_s(al, now=now)
-    # Wake tokens avoid playbook leak keys age= / stale= (test_world_state_pja).
-    bits = [_age_token(age)]
-    if al.get("refresh_pending"):
-        bits.append("pending")
-    stale = [
-        str(a)
-        for a in (al.get("enabled_arenas") or [])
-        if is_sort_arena(str(a))
-        and age is not None
-        and age > SORT_MEMBERSHIP_STALE_S
-    ]
-    if stale:
-        shown = stale[:3]
-        extra = len(stale) - len(shown)
-        tail = ",".join(shown)
-        if extra > 0:
-            tail += f"+{extra}"
-        bits.append(f"old={tail}")
-    line = " ".join(bits)
-    budget = max(8, WAKE_WATCH_MAX_CHARS - len(" watch=."))
-    if len(line) > budget:
-        line = line[: budget - 1].rstrip(", ") + "+"
-    return line
-
-
-async def maybe_refresh_pending_universe(connector: Any = None) -> dict[str, Any] | None:
-    """One refresh after self_tune changed arenas. No timer. No every-look cost."""
-    al = load_allowlist()
-    if not al.get("refresh_pending"):
-        return None
-    return await refresh_legal_set(connector, persist=True)
-
-
-def arenas_for_symbol(
-    symbol: str,
-    *,
-    membership: list[dict[str, str]] | None = None,
-) -> set[str]:
-    """Sector/theme/cap arenas this name belongs to. Scan sorts are omitted."""
-    sym = str(symbol or "").strip().upper()
-    if not sym:
-        return set()
-    out: set[str] = set()
-    rows = membership if membership is not None else membership_rows()
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("symbol") or "").strip().upper() != sym:
-            continue
-        arena = str(row.get("arena") or "").strip()
-        if is_bucket_arena(arena):
-            out.add(arena)
-    for arena_id, meta in ARENA_CATALOG.items():
-        if meta.get("group") not in _BUCKET_GROUPS:
-            continue
-        seeds = {
-            str(s).strip().upper() for s in (meta.get("mda_fallback") or [])
-        }
-        if sym in seeds:
-            out.add(str(arena_id))
-    return out
-
-
-def reset_universe_cache() -> None:
-    _CACHE.update(ts=0.0, legal=[], source="", arenas=[], membership=[])
