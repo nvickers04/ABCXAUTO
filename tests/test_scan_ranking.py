@@ -7,6 +7,8 @@ import json
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("stub_agent_loop_import")
+
 from abcxauto.brain import BrainTurn, _run_tool, _scan_gate_facts, _scan_look_key
 from abcxauto.universe import scan_skip_class
 from abcxauto.world_state import WorldState
@@ -66,10 +68,29 @@ def test_scan_paint_does_not_fatten_thin_ranked_rows():
     from abcxauto.brain import _scan_paint_rows
 
     painted = _scan_paint_rows(
-        {"rows": [{"symbol": "NVDA", "gap%": 12.4, "rank": 0}]},
+        {
+            "rows": [
+                {
+                    "symbol": "NVDA",
+                    "gap_pct": 12.4,
+                    "rank": 0,
+                    "screen": "top_gainers",
+                    "scan_code": "TOP_PERC_GAIN",
+                    "skip_class": "",
+                    "source": "ibkr",
+                }
+            ]
+        },
         quotes={"NVDA": {"last": 181.5, "open_gap_pct": -5.0}},
     )
-    assert painted == [{"symbol": "NVDA", "gap%": 12.4, "rank": 0}]
+    assert painted
+    assert painted[0]["symbol"] == "NVDA"
+    assert painted[0]["rank"] == 0
+    assert painted[0].get("gap_pct") == pytest.approx(12.4)
+    assert painted[0]["skip_class"] == ""
+    assert painted[0]["source"] == "ibkr"
+    assert painted[0].get("last") != 181.5
+    assert "bid" not in painted[0]
 
 
 def test_scan_skip_class_is_levered_or_micro_not_a_send_gate():
@@ -608,17 +629,22 @@ async def test_four_arenas_one_merged_tape_and_repeat_skips_ibkr(monkeypatch):
     assert "PSQL" in names or any(
         (r.get("symbol") == "PSQL") for r in (bag.get("hits") or [])
     )
-    # Thin ranked default has no last, so micro-by-price does not pin PSQL.
-    # Levered TQQQ still skips by name. gap% maps the on-row open_gap/distance.
+    # Levered TQQQ still skips by name. gap_pct maps the on-row open_gap/distance.
     assert bag["deepest_symbol"] != "TQQQ"
+    from abcxauto.opportunity_scan import RANKED_ROW_KEYS
+
     for hit in bag.get("hits") or []:
         if not isinstance(hit, dict):
             continue
-        assert set(hit) <= {"symbol", "gap%", "rank", "arena"}
-        assert len(hit) <= 4
+        assert set(hit) <= RANKED_ROW_KEYS
+        assert "skip_class" in hit
+        assert hit.get("source") == "ibkr"
         assert "on_book" not in hit
+        if hit.get("symbol") == "TQQQ":
+            assert hit["skip_class"] == "levered"
         if hit.get("symbol") == "PSQL":
-            assert hit.get("gap%") == pytest.approx(73.4)
+            assert hit.get("gap_pct") == pytest.approx(73.4)
+            assert hit["skip_class"] == "micro"
     hits_lines = [t for k, t in painted if k == "tool" and "hits=" in t]
     assert len(hits_lines) == 1
     assert "screens=" not in hits_lines[0]

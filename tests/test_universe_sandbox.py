@@ -1,122 +1,70 @@
-"""Universe watchlist — scan seed, not a send sandbox."""
+"""Live IBKR screens — no persisted watchlist, no seed dump."""
 
 from __future__ import annotations
 
+import inspect
+import json
+from pathlib import Path
+
 import pytest
 
-from abcxauto.world_state import WorldState
 from abcxauto.universe import (
-    filter_to_legal,
+    ARENA_CATALOG,
     is_common_equity_symbol,
-    is_legal_symbol,
-    legal_symbols,
-    load_allowlist,
-    refresh_legal_set,
-    reset_universe_cache,
-    save_allowlist,
+    known_screen_keys,
+    pull_one_screen,
+    resolve_screen,
+    scan_skip_class,
 )
 
 
-@pytest.fixture(autouse=True)
-def _iso_universe(tmp_path, monkeypatch):
-    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(tmp_path / "universe.json"))
-    reset_universe_cache()
-    yield
-    reset_universe_cache()
+_DELETED_SCREENS = (
+    "index_etfs",
+    "commodities",
+    "technology",
+    "healthcare",
+    "energy",
+    "financials",
+)
+_CANNED = ("SPY", "QQQ", "IWM", "DIA", "AAPL", "MSFT", "NVDA")
 
 
-@pytest.mark.asyncio
-async def test_refresh_legal_offline_fallback():
-    from abcxauto.universe import membership_rows, universe_glance_line
-
-    save_allowlist(
-        {
-            "enabled_arenas": ["index_etfs", "commodities"],
-            "custom_symbols": ["ROKU"],
-            "exclude_symbols": ["USO"],
-        }
-    )
-    al = await refresh_legal_set(connector=None, persist=True)
-    legal = set(al["legal_symbols"])
-    assert "SPY" in legal
-    assert "GLD" in legal
-    assert "ROKU" in legal
-    assert "USO" not in legal
-    assert is_legal_symbol("SPY")
-    assert not is_legal_symbol("USO")
-    assert filter_to_legal(["SPY", "ZZZZ", "GLD"]) == ["SPY", "ZZZZ", "GLD"]
-    mem = {r["symbol"]: r for r in al.get("membership") or []}
-    assert mem["SPY"]["source"] == "mda_fallback"
-    assert mem["ROKU"]["arena"] == "custom"
-    assert membership_rows(query="spy")[0]["symbol"] == "SPY"
-    assert "legal" in universe_glance_line().lower()
+def test_catalog_is_ibkr_screens_only():
+    assert "index_etfs" not in ARENA_CATALOG
+    assert "financials" not in ARENA_CATALOG
+    assert "technology" not in ARENA_CATALOG
+    for screen_id, meta in ARENA_CATALOG.items():
+        assert meta.get("ibkr"), screen_id
+        assert "mda_fallback" not in meta
+        assert (meta.get("ibkr") or {}).get("scanCode")
+    assert "mega_cap" in ARENA_CATALOG
+    assert "large_cap" in ARENA_CATALOG
+    assert "mid_cap" in ARENA_CATALOG
+    assert "most_active" in ARENA_CATALOG
 
 
-def test_new_entry_is_not_limited_to_watchlist(tmp_path, monkeypatch):
-    from abcxauto.agent_loop import gate_ticket
+def test_universe_module_cannot_write_a_watchlist():
+    import abcxauto.universe as universe
 
-    monkeypatch.setenv("ABCXAUTO_FLAT_STREAK_PATH", str(tmp_path / "flat.json"))
-    save_allowlist(
-        {
-            "enabled_arenas": ["index_etfs"],
-            "custom_symbols": [],
-            "exclude_symbols": [],
-            "legal_symbols": ["SPY", "QQQ", "IWM"],
-        }
-    )
-    reset_universe_cache()
-    world = WorldState(
-        cycle=1,
-        session_status="regular",
-        flat=True,
-        needs_protection=False,
-        unprotected=[],
-        net_liquidation=37000.0,
-        daily_pnl=0.0,
-        positions=[],
-        open_orders=[],
-        opportunities=[{"symbol": "ZZZZ", "source": "mda"}],
-        news_items=[],
-        risk_posture="aggressive",
-        effective_posture="aggressive",
-        gates={},
-        envelope={},
-        regime={},
-        portfolio_risk={},
-        working_thesis="",
-        recent_decisions=[],
-        trade_plan=None,
-        capacity={
-            "open_count": 0,
-            "max_open_positions": 6,
-            "slots_left": 6,
-            "allows_new_risk": True,
-        },
-    )
-    strat, forced = gate_ticket(
-        {
-            "action": "market_bracket",
-            "strategy": "market_bracket",
-            "params": {
-                "symbol": "ZZZZ",
-                "quantity": 1,
-                "direction": "LONG",
-                "card": "off-watchlist breakout",
-            },
-            "rationale": "edge",
-        },
-        world,
-    )
-    note = str((forced or {}).get("note") or "").lower()
-    assert "sandbox" not in note
-    assert "universe" not in note
-    assert strat == "market_bracket"
-    assert forced is None
+    src = inspect.getsource(universe)
+    assert "universe_allowlist" not in src
+    assert "ABCXAUTO_UNIVERSE_PATH" not in src
+    assert "save_allowlist" not in src
+    assert "load_allowlist" not in src
+    assert "mda_fallback" not in src
+    assert "legal_symbols" not in src
+    assert "write_text" not in src
+    assert not hasattr(universe, "save_allowlist")
+    assert not hasattr(universe, "load_allowlist")
+    assert not hasattr(universe, "legal_symbols")
 
 
-def test_load_default_arenas():
-    al = load_allowlist()
-    assert al["enabled_arenas"]
+def test_new_entry_is_not_limited_to_a_watchlist():
+    import abcxauto.universe as universe
+
+    assert not hasattr(universe, "is_legal_symbol")
+    assert not hasattr(universe, "filter_to_legal")
+    assert not hasattr(universe, "legal_symbols")
 
 
 def test_rejects_unit_warrant_junk_tickers():
@@ -131,39 +79,38 @@ def test_rejects_unit_warrant_junk_tickers():
     assert not is_common_equity_symbol("IACOU")
 
 
-def test_tape_seed_not_alphabetized(monkeypatch):
+def test_tape_seed_is_book_only_never_alphabetized_or_invented():
     from abcxauto.opportunity_scan import _universe
 
-    save_allowlist(
-        {
-            "enabled_arenas": ["index_etfs"],
-            "custom_symbols": [],
-            "exclude_symbols": [],
-            "legal_symbols": ["ZZZZ", "AAPL", "MSFT"],
-        }
-    )
-    reset_universe_cache()
-    monkeypatch.setattr(
-        "abcxauto.universe.legal_symbols",
-        lambda use_cache=True: ["ZZZZ", "AAPL", "MSFT"],
-    )
-    seed = _universe([{"symbol": "NVDA"}], cap=10)
+    seed = _universe([{"symbol": "NVDA"}, {"symbol": "ZZZZ"}, {"symbol": "AAPL"}], cap=10)
     assert seed[0] == "NVDA"
-    assert seed[1:] == ["ZZZZ", "AAPL", "MSFT"]
+    assert seed == ["NVDA", "ZZZZ", "AAPL"]
     assert seed != sorted(seed)
+    assert _universe([]) == []
+    for name in ("SPY", "QQQ", "IWM"):
+        assert name not in _universe([])
+
+
+def test_deleted_screens_rejected_and_error_names_valid():
+    for dead in _DELETED_SCREENS:
+        out = resolve_screen(arena=dead)
+        assert out["ok"] is False
+        err = str(out.get("error") or "")
+        assert "unknown screen" in err
+        assert dead in err
+        assert "valid=" in err
+        for name in ("mega_cap", "most_active", "top_gainers"):
+            assert name in err
+        assert "financials" not in (out.get("screens") or [])
+        assert "mega_cap" in (out.get("screens") or known_screen_keys())
 
 
 @pytest.mark.asyncio
-async def test_pull_one_screen_ibkr_empty_no_mda_fallback(monkeypatch):
-    """IBKR connected + empty scanner → empty. Do not dump ARENA_CATALOG names."""
-    from abcxauto.universe import ARENA_CATALOG, pull_one_screen
-
+async def test_pull_one_screen_ibkr_empty_stays_empty_and_labeled(monkeypatch):
     async def empty_scan(_connector, _spec):
-        return []
+        return {"ok": True, "symbols": [], "rows": [], "ibkr_rows": 0, "kept": 0}
 
     monkeypatch.setattr("abcxauto.universe._ibkr_scan", empty_scan)
-    catalog = list(ARENA_CATALOG["mega_cap"]["mda_fallback"] or [])
-    assert catalog  # fixture: arena has catalog names we must not return
 
     class Conn:
         connected = True
@@ -171,106 +118,61 @@ async def test_pull_one_screen_ibkr_empty_no_mda_fallback(monkeypatch):
     out = await pull_one_screen(Conn(), arena="mega_cap")
     assert out["ok"] is True
     assert out["source"] == "empty"
+    assert out["empty"] is True
     assert out["symbols"] == []
-    assert out["persisted"] is False
-    for name in catalog:
+    assert out["rows"] == []
+    assert out["kept"] == 0
+    for name in _CANNED:
         assert name not in out["symbols"]
+        assert name not in json.dumps(out)
 
 
 @pytest.mark.asyncio
-async def test_pull_one_screen_no_ibkr_may_use_mda_seed():
-    """No IBKR connector → MDA industry seed still allowed this look."""
-    from abcxauto.universe import ARENA_CATALOG, pull_one_screen
-
-    out = await pull_one_screen(None, arena="technology")
-    seed = list(ARENA_CATALOG["technology"]["mda_fallback"] or [])
-    assert out["ok"] is True
-    assert out["source"] == "mda_seed"
-    assert out["symbols"]
-    assert out["symbols"][0] == seed[0]
-    assert "AAPL" in out["symbols"]
-    assert out["persisted"] is False
-
-
-_CANNED_TAPE = ("SPY", "QQQ", "IWM", "DIA")
-
-
-def test_legal_symbols_empty_persist_does_not_dump_canned_tape():
-    """Empty persist stays empty — no catalog dump, no SPY/QQQ/IWM invent."""
-    from abcxauto.universe import ARENA_CATALOG
-
-    al = load_allowlist()
-    assert al["legal_symbols"] == []
-    got = legal_symbols()
-    assert got == []
-    for name in _CANNED_TAPE:
-        assert name not in got
-    for arena_id in ("index_etfs", "mega_cap"):
-        for name in ARENA_CATALOG[arena_id]["mda_fallback"] or []:
-            assert name not in got
-    assert not is_legal_symbol("SPY")
-    assert not is_legal_symbol("QQQ")
-
-
-def test_legal_symbols_caches_empty_without_dump():
-    """[] is a cache hit. A later persist write must not leak through until miss."""
-    assert legal_symbols() == []
-    save_allowlist(
-        {
-            "enabled_arenas": ["index_etfs"],
-            "legal_symbols": ["SPY", "QQQ", "IWM"],
-        }
-    )
-    assert legal_symbols() == []
-    assert legal_symbols(use_cache=False) == ["SPY", "QQQ", "IWM"]
+async def test_pull_one_screen_without_ibkr_does_not_dump_catalog():
+    out = await pull_one_screen(None, arena="mega_cap")
+    assert out["ok"] is False
+    assert "IBKR" in str(out.get("error") or "")
+    blob = json.dumps(out)
+    for name in _CANNED:
+        assert name not in blob
 
 
 @pytest.mark.asyncio
-async def test_refresh_empty_does_not_invent_index_defaults():
-    """most_active has no MDA seed. Empty must not persist SPY/QQQ/IWM."""
-    save_allowlist(
-        {
-            "enabled_arenas": ["most_active"],
-            "custom_symbols": [],
-            "exclude_symbols": [],
-        }
-    )
-    al = await refresh_legal_set(connector=None, persist=True)
-    assert al["legal_symbols"] == []
-    assert al["membership"] == []
-    assert al["source"] == "empty"
-    for name in _CANNED_TAPE:
-        assert name not in al["legal_symbols"]
-    assert legal_symbols() == []
-    persisted = load_allowlist()
-    assert persisted["legal_symbols"] == []
+async def test_deleted_screen_pull_is_rejected(monkeypatch):
+    async def boom(*_a, **_k):
+        raise AssertionError("deleted screen must not hit IBKR")
+
+    monkeypatch.setattr("abcxauto.universe._ibkr_scan", boom)
+    out = await pull_one_screen(object(), arena="financials")
+    assert out["ok"] is False
+    assert "unknown screen" in str(out.get("error") or "")
+    assert "most_active" in str(out.get("error") or "")
 
 
 @pytest.mark.asyncio
-async def test_refresh_ibkr_empty_no_mda_catalog_dump(monkeypatch):
-    """Connected IBKR + empty mega_cap screen → persist empty, not catalog names."""
-    from abcxauto.universe import ARENA_CATALOG
+async def test_pull_one_screen_does_not_write_watchlist(tmp_path, monkeypatch):
+    repo_root = Path(__file__).resolve().parents[1]
+    before = {
+        p: (p.stat().st_mtime_ns if p.is_file() else None)
+        for p in (repo_root / "universe_allowlist.json", tmp_path / "universe_allowlist.json")
+    }
 
     async def empty_scan(_connector, _spec):
-        return {"ok": True, "symbols": []}
+        return {"ok": True, "symbols": [], "rows": [], "ibkr_rows": 0, "kept": 0}
 
     monkeypatch.setattr("abcxauto.universe._ibkr_scan", empty_scan)
-    catalog = list(ARENA_CATALOG["mega_cap"]["mda_fallback"] or [])
-    assert catalog
-    save_allowlist(
-        {
-            "enabled_arenas": ["mega_cap"],
-            "custom_symbols": [],
-            "exclude_symbols": [],
-        }
-    )
 
     class Conn:
         connected = True
 
-    al = await refresh_legal_set(Conn(), persist=True)
-    assert al["legal_symbols"] == []
-    assert al["source"] == "empty"
-    for name in catalog:
-        assert name not in al["legal_symbols"]
-    assert legal_symbols() == []
+    await pull_one_screen(Conn(), arena="most_active")
+    assert not (tmp_path / "universe_allowlist.json").is_file()
+    live = repo_root / "universe_allowlist.json"
+    after = live.stat().st_mtime_ns if live.is_file() else None
+    assert after == before[live]
+
+
+def test_scan_skip_class_labels_levered_and_clean():
+    assert scan_skip_class({"symbol": "TQQQ"}) == "levered"
+    assert scan_skip_class({"symbol": "AAPL", "last": 230.0}) == ""
+    assert scan_skip_class({"symbol": "PSQL", "last": 4.2}) == "micro"

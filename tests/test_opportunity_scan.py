@@ -289,27 +289,28 @@ def test_metrics_intraday_last_is_labeled():
 
 
 @pytest.mark.asyncio
-async def test_criteria_scan_index_etfs_is_not_catalog_dump():
-    """index_etfs has no IBKR spec — must not dump SPY/QQQ/IWM as a screen."""
+async def test_criteria_scan_deleted_screen_is_rejected_not_a_seed_dump():
     out = await criteria_scan(arena="index_etfs", connector=None)
     assert out.get("ok") is False
     assert out.get("symbols") in (None, [])
     assert out.get("hits") in (None, [])
+    err = str(out.get("error") or "")
+    assert "unknown screen" in err
+    assert "valid=" in err
+    assert "most_active" in err
     for name in ("SPY", "QQQ", "IWM", "DIA"):
         assert name not in (out.get("symbols") or [])
         assert name not in str(out.get("hits") or [])
-    assert "catalog" in str(out.get("error") or "").lower() or "ibkr" in str(
-        out.get("error") or ""
-    ).lower()
 
 
 @pytest.mark.asyncio
-async def test_criteria_scan_industry_arena_not_catalog_even_with_connector():
+async def test_criteria_scan_deleted_industry_screen_not_catalog_even_with_connector():
     class Conn:
         connected = True
 
     out = await criteria_scan(arena="technology", connector=Conn())
     assert out.get("ok") is False
+    assert "unknown screen" in str(out.get("error") or "")
     assert "AAPL" not in (out.get("symbols") or [])
     assert "MSFT" not in (out.get("symbols") or [])
     assert out.get("hits") in (None, [])
@@ -319,8 +320,10 @@ async def test_criteria_scan_industry_arena_not_catalog_even_with_connector():
 async def test_criteria_scan_mega_cap_without_ibkr_does_not_dump_catalog():
     out = await criteria_scan(arena="mega_cap", connector=None)
     assert out.get("ok") is False
+    assert "IBKR" in str(out.get("error") or "")
     for name in ("AAPL", "MSFT", "NVDA", "AMZN"):
         assert name not in (out.get("symbols") or [])
+        assert name not in str(out)
 
 
 @pytest.mark.asyncio
@@ -330,13 +333,15 @@ async def test_criteria_scan_symbols_still_returns_asked_names():
     assert out["symbols"] == ["NVDA", "XLE"]
     assert out["source"] == "symbols"
     assert out.get("thin") is False
+    assert out.get("empty") is False
     assert "on_book" in out["hits"][0]
+    assert "watch" not in out
 
 
 @pytest.mark.asyncio
-async def test_criteria_scan_catalog_seed_does_not_quote(monkeypatch):
+async def test_criteria_scan_deleted_screen_does_not_quote(monkeypatch):
     async def boom(*_a, **_k):
-        raise AssertionError("catalog seed must not start a quote sweep")
+        raise AssertionError("deleted screen must not start a quote sweep")
 
     monkeypatch.setattr("abcxauto.opportunity_scan.attach_live_quotes", boom)
     out = await criteria_scan(arena="index_etfs", connector=object())
@@ -355,8 +360,8 @@ def test_row_gap_pct_maps_distance_change_open_gap():
     assert row_gap_pct({"distance": "n/a"}) is None
 
 
-def test_thin_ranked_row_is_symbol_gap_and_optional_rank():
-    from abcxauto.opportunity_scan import thin_ranked_row
+def test_thin_ranked_row_carries_skip_class_and_named_metric():
+    from abcxauto.opportunity_scan import RANKED_ROW_KEYS, thin_ranked_row
 
     row = thin_ranked_row(
         {
@@ -367,10 +372,85 @@ def test_thin_ranked_row_is_symbol_gap_and_optional_rank():
             "last": 181.5,
             "bid": 181.4,
             "open_gap_pct": -5.0,
-        }
+            "stock_type": "CORP",
+        },
+        screen="top_gainers",
+        scan_code="TOP_PERC_GAIN",
     )
-    assert row == {"symbol": "NVDA", "gap%": -5.0, "rank": 0}
-    assert len(row) <= 3
+    assert row["symbol"] == "NVDA"
+    assert row["rank"] == 0
+    assert row["screen"] == "top_gainers"
+    assert row["scan_code"] == "TOP_PERC_GAIN"
+    assert row["metric_name"] == "percent_change"
+    assert row["metric_value"] == pytest.approx(12.4)
+    assert row["gap_pct"] == pytest.approx(-5.0)
+    assert row["last"] == pytest.approx(181.5)
+    assert row["stock_type"] == "CORP"
+    assert row["skip_class"] == ""
+    assert row["source"] == "ibkr"
+    assert "bid" not in row
+    assert "gap%" not in row
+    assert set(row) <= RANKED_ROW_KEYS
+
+
+def test_thin_ranked_row_labels_levered_etf():
+    from abcxauto.opportunity_scan import thin_ranked_row
+
+    row = thin_ranked_row(
+        {"symbol": "TQQQ", "rank": 1, "distance": "12.0"},
+        screen="top_gainers",
+        scan_code="TOP_PERC_GAIN",
+    )
+    assert row["skip_class"] == "levered"
+    assert row["source"] == "ibkr"
+
+
+def test_thin_ranked_row_omits_metric_when_ibkr_did_not_return_one():
+    from abcxauto.opportunity_scan import thin_ranked_row
+
+    row = thin_ranked_row(
+        {"symbol": "AAPL", "rank": 2},
+        screen="most_active",
+        scan_code="MOST_ACTIVE",
+    )
+    assert "metric_name" not in row
+    assert "metric_value" not in row
+    assert row["skip_class"] == ""
+    assert "last" not in row
+
+
+def test_ranked_page_character_cost_is_measured():
+    """Document the billed 30-row page size. Not a budget gate."""
+    from abcxauto.opportunity_scan import thin_ranked_row
+
+    old = [
+        {"symbol": f"S{i:02d}", "gap%": 1.2 + i / 10, "rank": i, "arena": "top_gainers"}
+        for i in range(30)
+    ]
+    new = [
+        thin_ranked_row(
+            {
+                "symbol": f"S{i:02d}",
+                "rank": i,
+                "distance": str(1.2 + i / 10),
+                "stock_type": "CORP",
+            },
+            screen="top_gainers",
+            scan_code="TOP_PERC_GAIN",
+        )
+        for i in range(30)
+    ]
+    import json
+
+    before = len(json.dumps(old, separators=(",", ":")))
+    after = len(json.dumps(new, separators=(",", ":")))
+    # New contract is richer (skip_class + named metric) and must stay compact.
+    assert before > 0
+    assert after > before
+    assert after < 12_000
+    # Stash for the worker report.
+    test_ranked_page_character_cost_is_measured.before = before
+    test_ranked_page_character_cost_is_measured.after = after
 
 
 @pytest.mark.asyncio
@@ -401,16 +481,60 @@ async def test_criteria_scan_arena_emits_thin_gap_rows(monkeypatch):
     assert out["criteria"]["scan_code"] == "TOP_PERC_GAIN"
     assert out["quoted"] == 0
     assert out["ranked"] is True
-    assert "gap%" in str(out.get("rank_meaning") or "")
+    assert out["empty"] is False
+    assert "watch" not in out
+    assert out["provenance"]["screen"] == "top_gainers"
+    assert out["provenance"]["scan_code"] == "TOP_PERC_GAIN"
+    assert out["provenance"]["empty"] is False
+    assert "metric" in str(out.get("rank_meaning") or "")
+    from abcxauto.opportunity_scan import RANKED_ROW_KEYS
+
     for row in out["hits"]:
-        assert set(row) <= {"symbol", "gap%", "rank", "arena"}
-        assert len(row) <= 4
-        assert "last" not in row
+        assert set(row) <= RANKED_ROW_KEYS
+        assert row["source"] == "ibkr"
+        assert "skip_class" in row
+        assert "bid" not in row
         assert "distance" not in row
         assert "open_gap_pct" not in row
     assert out["hits"][0]["symbol"] == "NVDA"
-    assert out["hits"][0]["gap%"] == pytest.approx(12.4)
+    assert out["hits"][0]["gap_pct"] == pytest.approx(12.4)
+    assert out["hits"][0]["metric_name"] == "percent_change"
+    assert out["hits"][0]["metric_value"] == pytest.approx(12.4)
     assert out["hits"][0]["rank"] == 0
+    assert out["hits"][0]["skip_class"] == ""
+
+
+@pytest.mark.asyncio
+async def test_criteria_scan_empty_ibkr_is_labeled_empty(monkeypatch):
+    async def fake_pull(_connector=None, **_k):
+        return {
+            "ok": True,
+            "arena_id": "mega_cap",
+            "scan_code": "HOT_BY_VOLUME",
+            "source": "empty",
+            "empty": True,
+            "symbols": [],
+            "rows": [],
+            "applied": {"market_cap_above": 200_000_000_000},
+            "ibkr_rows": 0,
+            "kept": 0,
+        }
+
+    monkeypatch.setattr("abcxauto.universe.pull_one_screen", fake_pull)
+    out = await criteria_scan(arena="mega_cap", connector=object())
+    assert out["ok"] is True
+    assert out["empty"] is True
+    assert out["source"] == "empty"
+    assert out["symbols"] == []
+    assert out["hits"] == []
+    assert out["provenance"]["empty"] is True
+    assert out["provenance"]["ibkr_rows"] == 0
+    assert out["provenance"]["kept"] == 0
+    assert out["provenance"]["filters"]["market_cap_above"] == 200_000_000_000
+    assert out["rank_meaning"] == "empty screen"
+    assert "watch" not in out
+    for name in ("SPY", "QQQ", "IWM", "AAPL"):
+        assert name not in str(out)
 
 
 @pytest.mark.asyncio

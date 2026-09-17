@@ -56,56 +56,28 @@ def test_format_news_for_prompt_timeout_is_unavailable_not_empty():
     assert "no headlines" not in text
 
 
-def test_universe_is_book_not_sandbox_or_index(tmp_path, monkeypatch):
-    from abcxauto.universe import reset_universe_cache, save_allowlist
-
-    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(tmp_path / "universe.json"))
-    save_allowlist(
-        {
-            "enabled_arenas": ["index_etfs"],
-            "custom_symbols": ["NVDA"],
-            "exclude_symbols": [],
-            "legal_symbols": ["SNXX", "AAOX", "NVDA"],
-        }
-    )
-    reset_universe_cache()
+def test_universe_is_book_not_sandbox_or_index():
     syms = _universe([{"symbol": "CRM"}, {"symbol": "crm"}])
     assert syms == ["CRM"]
     assert "SPY" not in syms
     assert "SNXX" not in syms
-    assert "AAOX" not in syms
     assert "NVDA" not in syms
     assert len(syms) <= 14
     flat = _universe([])
     assert flat == []
     assert "SPY" not in flat
-    assert "SNXX" not in flat
 
 
-def test_universe_does_not_spy_seed(tmp_path, monkeypatch):
-    from abcxauto.universe import reset_universe_cache, save_allowlist
-
-    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(tmp_path / "universe.json"))
-    save_allowlist(
-        {
-            "enabled_arenas": ["index_etfs"],
-            "custom_symbols": [],
-            "exclude_symbols": [],
-            "legal_symbols": ["NKE", "AG", "BE"],
-        }
-    )
-    reset_universe_cache()
+def test_universe_does_not_spy_seed():
     assert _universe([]) == []
     assert _universe([{"symbol": "MRVL"}]) == ["MRVL"]
+    assert "SPY" not in _universe([{"symbol": "MRVL"}])
 
 
-def test_universe_legal_miss_does_not_pad_spy(monkeypatch):
-    def boom():
-        raise RuntimeError("sandbox down")
-
-    monkeypatch.setattr("abcxauto.universe.legal_symbols", boom)
+def test_universe_does_not_pad_spy_on_empty_book():
     assert _universe([{"symbol": "DECK"}]) == ["DECK"]
     assert _universe([]) == []
+    assert "QQQ" not in _universe([])
 
 
 class _MDA:

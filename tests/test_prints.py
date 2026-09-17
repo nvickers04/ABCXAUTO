@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("stub_agent_loop_import")
+
 from abcxauto.prints import (
     attach_mda_news,
     asof_fields,

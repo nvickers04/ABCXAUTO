@@ -25,9 +25,6 @@ from abcxauto.think_stream import (
     think_tail_path,
     write_last_turn,
 )
-from abcxauto.universe import _DEFAULT_PATH as UNIVERSE_DEFAULT
-from abcxauto.universe import _path as universe_path
-from abcxauto.universe import save_allowlist
 from abcxauto.working_memory import (
     WORKING_MEMORY_PATH,
     clear_working_memory,
@@ -43,7 +40,6 @@ _PATH_ENV = (
     "ABCXAUTO_JOURNAL_PATH",
     "ABCXAUTO_LOG_PATH",
     "ABCXAUTO_WORKING_MEMORY_PATH",
-    "ABCXAUTO_UNIVERSE_PATH",
     "ABCXAUTO_LAST_TURN_PATH",
     "ABCXAUTO_THINK_TAIL_PATH",
     "ABCXAUTO_THINK_PREV_PATH",
@@ -82,8 +78,12 @@ def test_production_paths_unchanged_when_env_absent(monkeypatch):
     assert WORKING_MEMORY_PATH == state / "working_memory.json"
     assert working_memory_path() == WORKING_MEMORY_PATH
 
-    assert UNIVERSE_DEFAULT == REPO / "universe_allowlist.json"
-    assert universe_path() == UNIVERSE_DEFAULT
+    # Watchlist is gone. No env seam, no default path helper.
+    import abcxauto.universe as universe
+
+    assert not hasattr(universe, "_DEFAULT_PATH")
+    assert not hasattr(universe, "_path")
+    assert not hasattr(universe, "save_allowlist")
 
     assert Path(_DEFAULT_DB_PATH).resolve() == REPO_JOURNAL
     assert default_file_log_path() == REPO_APP_LOG
@@ -98,16 +98,15 @@ def test_env_redirects_writes_away_from_live_paths(tmp_path, monkeypatch):
         "last_turn": _sha256(REPO / "data" / "state" / "last_turn.json"),
     }
 
-    uni = tmp_path / "universe_allowlist.json"
     wm = tmp_path / "working_memory.json"
     last = tmp_path / "last_turn.json"
-    monkeypatch.setenv("ABCXAUTO_UNIVERSE_PATH", str(uni))
     monkeypatch.setenv("ABCXAUTO_WORKING_MEMORY_PATH", str(wm))
     monkeypatch.setenv("ABCXAUTO_LAST_TURN_PATH", str(last))
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
     monkeypatch.setenv("ABCXAUTO_LOG_PATH", str(tmp_path / "app.log"))
 
-    save_allowlist({"custom_symbols": ["MSFT"], "enabled_arenas": ["index_etfs"]})
+    # Watchlist writer is gone: this test used to save_allowlist() here.
+    # The live universe_allowlist.json hash below must stay byte-identical.
     wm.write_text(json.dumps({"lines": ["parked"]}) + "\n", encoding="utf-8")
     clear_working_memory()
     write_last_turn(
@@ -124,8 +123,7 @@ def test_env_redirects_writes_away_from_live_paths(tmp_path, monkeypatch):
     for handler in logging.getLogger("abcxauto").handlers:
         handler.flush()
 
-    assert uni.is_file()
-    assert "MSFT" in uni.read_text(encoding="utf-8")
+    assert not (tmp_path / "universe_allowlist.json").is_file()
     assert not wm.is_file()
     assert last.is_file()
     assert "isolation probe" in last.read_text(encoding="utf-8")

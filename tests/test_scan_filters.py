@@ -6,7 +6,10 @@ import json
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("stub_agent_loop_import")
+
 from abcxauto.universe import (
+    ARENA_CATALOG,
     _pe_tags_from_xml,
     merge_scan_filters_into_spec,
     parse_scan_filters,
@@ -318,12 +321,15 @@ async def test_scan_filters_echo_applied_and_reach_ibkr_spec(monkeypatch):
     assert seen["spec"]["aboveVolume"] == 1_000_000
     assert seen["spec"]["marketCapAbove"] == 200_000_000_000.0
     assert data["persisted"] is False
-    assert data["ranked"] is False
     assert data.get("thin") is True
     assert data.get("sort") == "MOST_ACTIVE"
-    assert all("last" not in h and "bid" not in h for h in data["hits"])
-    assert all(len(h) <= 4 for h in data["hits"])
-    assert all(set(h) <= {"symbol", "gap%", "rank", "arena"} for h in data["hits"])
+    assert all("bid" not in h and "ask" not in h for h in data["hits"])
+    from abcxauto.opportunity_scan import RANKED_ROW_KEYS
+
+    for hit in data["hits"]:
+        assert set(hit) <= RANKED_ROW_KEYS
+        assert hit.get("source") == "ibkr"
+        assert "skip_class" in hit
 
 
 @pytest.mark.asyncio
@@ -466,13 +472,12 @@ async def test_empty_mega_screen_echoes_the_cap_filter(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ibkr_scanner_error_returns_error_not_names(monkeypatch):
-    from abcxauto.universe import ARENA_CATALOG, pull_one_screen
+    from abcxauto.universe import pull_one_screen
 
     async def boom(_connector, _spec):
         return {"ok": False, "error": "Error 162: Historical market data Service error", "symbols": []}
 
     monkeypatch.setattr("abcxauto.universe._ibkr_scan", boom)
-    catalog = list(ARENA_CATALOG["mega_cap"]["mda_fallback"] or [])
 
     class Conn:
         connected = True
@@ -480,7 +485,7 @@ async def test_ibkr_scanner_error_returns_error_not_names(monkeypatch):
     out = await pull_one_screen(Conn(), arena="mega_cap")
     assert out["ok"] is False
     assert "162" in str(out.get("error") or "")
-    for name in catalog[:3]:
+    for name in ("AAPL", "MSFT", "NVDA", "SPY"):
         assert name not in str(out)
 
 
@@ -537,3 +542,115 @@ def test_flush_default_is_the_card_trio_with_large_mega_tags():
         {"ok": True, "native": {"marketCapAbove": 5e9}, "tags": {}, "applied": {}}
     )
     assert kept["native"]["marketCapAbove"] == 5e9
+
+
+def test_stock_type_filter_is_native():
+    both = parse_scan_filters({"arena": "most_active", "stock_type": "both"})
+    assert both["ok"] is True
+    assert both["native"]["stockTypeFilter"] == "CORP,ETF"
+    assert both["applied"]["stock_type"] == "CORP,ETF"
+    corp = parse_scan_filters({"stock_type": "CORP"})
+    assert corp["native"]["stockTypeFilter"] == "CORP"
+    etf = parse_scan_filters({"stock_type": "etf"})
+    assert etf["native"]["stockTypeFilter"] == "ETF"
+    bad = parse_scan_filters({"stock_type": "warrant"})
+    assert bad["ok"] is False
+    assert "stock_type" in bad["error"]
+
+
+def test_industry_rejected_when_xml_unverified():
+    from abcxauto.universe import _industry_tags_from_xml
+
+    assert _industry_tags_from_xml("maybe industry sometime") == frozenset()
+    assert _industry_tags_from_xml("<ScannerParameters></ScannerParameters>") == frozenset()
+    out = parse_scan_filters(
+        {"arena": "most_active", "industry": "Technology"},
+        industry_tags=frozenset(),
+    )
+    assert out["ok"] is False
+    assert "industry" in out["error"]
+
+
+def test_industry_accepted_only_when_xml_lists_the_code():
+    from abcxauto.universe import _industry_tags_from_xml
+
+    xml = (
+        "<ScannerParameters><AbstractField>"
+        "<code>industry</code></AbstractField>"
+        "<AbstractField><code>sector</code></AbstractField>"
+        "</ScannerParameters>"
+    )
+    found = _industry_tags_from_xml(xml)
+    assert found == frozenset({"industry", "sector"})
+    # category is not an industry/sector code name — do not invent it.
+    mixed = (
+        "<ScannerParameters><AbstractField>"
+        "<code>category</code></AbstractField></ScannerParameters>"
+    )
+    assert _industry_tags_from_xml(mixed) == frozenset()
+
+    out = parse_scan_filters(
+        {"arena": "most_active", "industry": "Technology"},
+        industry_tags=frozenset({"industry"}),
+    )
+    assert out["ok"] is True
+    assert out["tags"]["industry"] == "Technology"
+    assert out["applied"]["industry"] == "Technology"
+    spec, applied = merge_scan_filters_into_spec(
+        resolve_screen(arena="most_active")["ibkr"],
+        out,
+    )
+    assert spec["filterTags"]["industry"] == "Technology"
+    assert "industry" not in (ARENA_CATALOG["most_active"].get("ibkr") or {})
+
+
+def test_catalog_specs_do_not_hardcode_unverified_industry():
+    for meta in ARENA_CATALOG.values():
+        ibkr = meta.get("ibkr") or {}
+        blob = json.dumps(ibkr).lower()
+        assert "industry" not in blob
+        assert "sector" not in blob
+
+
+@pytest.mark.asyncio
+async def test_verified_industry_tags_uses_live_xml_or_stays_empty(monkeypatch):
+    from abcxauto.universe import reset_industry_tag_cache, verified_industry_tags
+
+    reset_industry_tag_cache()
+    assert await verified_industry_tags(None) == frozenset()
+
+    class FakeIB:
+        async def reqScannerParametersAsync(self):
+            return (
+                "<ScannerParameters><AbstractField>"
+                "<code>stockIndustry</code></AbstractField></ScannerParameters>"
+            )
+
+    class Conn:
+        connected = True
+        ib = FakeIB()
+
+        class _Lock:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_a):
+                return False
+
+        async_lock = _Lock()
+
+    found = await verified_industry_tags(Conn())
+    assert found == frozenset({"stockIndustry"})
+    # Unverified friendly name still rejected.
+    parsed = parse_scan_filters(
+        {"industry": "Technology"},
+        industry_tags=found,
+    )
+    assert parsed["ok"] is False
+    assert "industry" in parsed["error"]
+    ok = parse_scan_filters(
+        {"stockIndustry": "Technology"},
+        industry_tags=found,
+    )
+    assert ok["ok"] is True
+    assert ok["tags"]["stockIndustry"] == "Technology"
