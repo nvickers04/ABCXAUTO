@@ -1,8 +1,8 @@
-"""pcs-skew Arm v0 kill-window LOOK contract (thin prompt, not SYSTEM_PROMPT).
+"""Kill-window LOOK contract (thin prompt, not SYSTEM_PROMPT).
 
-Hard clerk: STAY-tool allowlist, mill widen, RTH no-xhigh / AH-rare,
-F10 $15 hard / $10 preferred. No one-look RTH entry budget. Paper 7497.
-Not looking.
+Hard clerk: F10 $15 hard / $10 preferred, paper 7497, named-card
+defined-risk send, RTH no-xhigh. All tools every session; send stays
+blocked outside RTH. No weekly AH look quota. Not looking.
 """
 
 from __future__ import annotations
@@ -23,37 +23,15 @@ MODE_RESEARCH = "research"
 PCS_CARD = "pcs-skew"
 PCS_STRATEGY = "vertical_spread"
 
-STAY_TOOLS = frozenset({
-    "book",
-    "status",
-    "quote",
-    "option_chain",
-    "option_quote",
-    "fills",
-    "send",
-    "recall",
-    "research_brief",
-})
-DIE_TOOLS = frozenset({
-    "scan",
-    "news",
-    "candles",
-    "odds",
-    "self_tune",
-    "web",
-    "option_facts",
-    "write_research_brief",
-    "note",
-})
-
 # F10 dollars. Not raiseable Settings knobs. Preferred is an ops tripwire.
 F10_HARD_USD = 15.0
 F10_PREFERRED_USD = 10.0
 WINDOW_MODEL_USD = 40.0
 WINDOW_N = 20
-AH_RESEARCH_LOOKS_PER_WEEK = 2
+# 0 = no weekly AH look quota. Hunt schemas are ~0.2¢; F10 + metering own cost.
+AH_RESEARCH_LOOKS_PER_WEEK = 0
 RESEARCH_PROMPT_TOKENS_MAX = 200_000
-# Conservative thin STAY look. Used as est_this_look in the F10 sum.
+# Conservative look estimate. Used as est_this_look in the F10 sum.
 EST_THIS_LOOK_USD = 0.35
 
 REASON_F10 = "NO_SEND:f10"
@@ -66,20 +44,11 @@ REASON_RESEARCH_WEEK = "kill_look_research_week"
 REASON_RESEARCH_PROMPT = "kill_look_research_prompt"
 REASON_BRIEF_LOOP = "brief_loop_halted"
 REASON_BRIEF_COST = "brief_model_cost_missing"
-REASON_DIE_TOOL = "kill_look_die_tool"
 REASON_PORT = "kill_look_live_port"
 
 LIVE_PORTS = frozenset({7496, 4001})
 
 _XHIGH_RE = re.compile(r"-xhigh\b", re.IGNORECASE)
-_GATHER_SPIN_RE = re.compile(
-    r"\bgather(?:ing)?\b"
-    r"|\b(?:keep\s+)?(?:scanning|browsing)\b"
-    r"|\bspin(?:ning)?\b"
-    r"|\bone\s+more\s+(?:scan|pass)\b"
-    r"|\bdecide(?:d)?\s+without\s+(?:a\s+)?send\b",
-    re.IGNORECASE,
-)
 
 
 def kill_look_enabled(cfg: Any = None) -> bool:
@@ -201,93 +170,20 @@ def has_open_pcs_skew_lot(
     return False
 
 
-def spoken_gather_spin(text: str = "") -> bool:
-    blob = str(text or "")
-    if not blob.strip():
-        return False
-    return bool(_GATHER_SPIN_RE.search(blob))
-
-
-def _die_tools_in_trace(tool_trace: list[Any] | None) -> bool:
-    for raw in tool_trace or []:
-        name = str(raw or "").strip().split()[0].lower()
-        if name in DIE_TOOLS:
-            return True
-    return False
-
-
-def look_gather_spin_mill(payload: dict[str, Any] | None) -> bool:
-    """DIE-tool or spoken gather-spin with zero send. Keep #165 zero-tool mill separate."""
-    row = payload if isinstance(payload, dict) else {}
-    try:
-        sends = int(row.get("sends") or 0)
-    except (TypeError, ValueError):
-        sends = 0
-    if sends > 0:
-        return False
-    trace = list(row.get("tool_trace") or [])
-    for raw in trace:
-        name = str(raw or "").strip().split()[0].lower()
-        if name == "send":
-            return False
-    if _die_tools_in_trace(trace):
-        return True
-    text = str(row.get("rationale") or row.get("text") or "")
-    if spoken_gather_spin(text) and _die_tools_in_trace(trace):
-        return True
-    if spoken_gather_spin(text) and not any(str(x or "").strip() for x in trace):
-        return True
-    return False
-
-
 def look_kill_mill(payload: dict[str, Any] | None, *, session: str = "") -> bool:
-    """#165 synthesize mill, plus gather-spin / DIE mill on RTH kill looks."""
+    """#165 synthesize mill only. Hunt-without-send is not a mill.
+
+    ``session`` is unused; pro_engine still passes it and still RTH-gates
+    the call. Same-chat TOOL-OR-SEND re-arm stays on zero-tool mill language.
+    """
+    _ = session
     try:
         from abcxauto.desk_mode import look_synthesize_mill
 
-        if look_synthesize_mill(payload):
-            return True
+        return bool(look_synthesize_mill(payload))
     except Exception:
         logger.debug("look_synthesize_mill failed", exc_info=True)
-    if not kill_look_rth(session):
         return False
-    return look_gather_spin_mill(payload)
-
-
-def tool_allowed(name: str, *, session: str = "", mode: str = "") -> bool:
-    """STAY only on RTH kill looks. Research keeps its own send omit."""
-    key = str(name or "").strip().lower()
-    if not key:
-        return False
-    if mode == MODE_RESEARCH or not kill_look_rth(session):
-        return True
-    return key in STAY_TOOLS
-
-
-def die_tool_block(name: str, *, session: str = "") -> dict[str, Any] | None:
-    key = str(name or "").strip().lower()
-    if not kill_look_rth(session):
-        return None
-    if key in STAY_TOOLS:
-        return None
-    if key in DIE_TOOLS or key not in STAY_TOOLS:
-        return {
-            "error": REASON_DIE_TOOL,
-            "tool": key,
-            "note": "RTH kill look STAY tools only",
-            "reason_code": REASON_DIE_TOOL,
-        }
-    return None
-
-
-def filter_agent_tool_names(
-    names: list[str],
-    *,
-    session: str = "",
-) -> list[str]:
-    if not kill_look_rth(session):
-        return list(names)
-    return [n for n in names if str(n or "").strip().lower() in STAY_TOOLS]
 
 
 def send_strategy_names(*, session: str = "") -> list[str] | None:
@@ -919,10 +815,11 @@ def skip_look_reason(
             return REASON_PORT
         return ""
     if mode == MODE_RESEARCH:
-        from abcxauto.session_caps import research_week_looks
+        if AH_RESEARCH_LOOKS_PER_WEEK > 0:
+            from abcxauto.session_caps import research_week_looks
 
-        if int(research_week_looks(now=now) or 0) >= AH_RESEARCH_LOOKS_PER_WEEK:
-            return REASON_RESEARCH_WEEK
+            if int(research_week_looks(now=now) or 0) >= AH_RESEARCH_LOOKS_PER_WEEK:
+                return REASON_RESEARCH_WEEK
         if not research_prompt_ok(prompt_tokens):
             return REASON_RESEARCH_PROMPT
         try:

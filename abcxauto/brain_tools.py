@@ -1220,37 +1220,23 @@ def agent_tools(*, session: str = "") -> list:
     """Tools this look. Overnight park is code, not a Grok clock.
 
     Research (premarket / AH / closed) omits ``send``. RTH keeps ``send``.
-    ``web`` is COLOR on both (not a live trigger) unless the RTH kill look
-    STAY allowlist is on (then DIE tools including web are omitted).
+    ``web`` is COLOR on both (not a live trigger).
     """
     from abcxauto.desk_mode import is_research_session
 
     research = is_research_session(session)
     names = _send_strategy_names_for_look(session=session)
-    stay: set[str] | None = None
-    try:
-        from abcxauto.thin_rth_kill_look import STAY_TOOLS, kill_look_rth
-
-        if kill_look_rth(session):
-            stay = set(STAY_TOOLS)
-    except Exception:
-        stay = None
     out: list = []
     for t in AGENT_TOOLS:
         fn = getattr(t, "function", None)
         name = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
-        if stay is not None and name not in stay:
-            continue
         if name == "send":
             if research:
                 continue
             out.append(_send_tool(names))
         else:
             out.append(t)
-    if stay is None:
-        out.append(_web_tool())
-    elif "web" in stay:
-        out.append(_web_tool())
+    out.append(_web_tool())
     return out
 
 def _stash_live(
@@ -1524,16 +1510,6 @@ async def _run_tool(
         args if isinstance(args, dict) else {},
         fallback_symbols=fallback_quote_symbols(world, snap),
     )
-
-    try:
-        from abcxauto.thin_rth_kill_look import die_tool_block
-
-        sess = str(getattr(world, "session_status", "") or "")
-        blocked = die_tool_block(name, session=sess)
-        if blocked is not None:
-            return _hub()._clip(blocked)
-    except Exception:
-        logger.debug("kill-look die-tool gate failed", exc_info=True)
 
     if name == "book":
         payload = _hub()._book_payload(world, tool_trace=turn.tool_trace, snap=snap)

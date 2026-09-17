@@ -25,7 +25,7 @@ from abcxauto.config import get_config
 from abcxauto.llm import SYSTEM_PROMPT
 from abcxauto.pro_engine import ProEngine
 from abcxauto.risk_gates import new_risk_card_error
-from abcxauto.thin_rth_kill_look import DIE_TOOLS, F10_HARD_USD, STAY_TOOLS
+from abcxauto.thin_rth_kill_look import F10_HARD_USD
 from abcxauto.think_stream import last_look_facts, write_last_turn
 from abcxauto.working_memory import (
     MAX_LINE_CHARS,
@@ -59,13 +59,11 @@ def test_hygiene_soften_fail_f10_nameless_7496_prompt():
 
 
 def test_note_is_grok_owned_not_stay_or_playbook(monkeypatch):
+    monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
     names = _names_of(agent_tools(session="regular"))
     assert "note" in names
-    assert "note" not in STAY_TOOLS
-    assert "note" in DIE_TOOLS
     assert "write_lab_playbook" not in names
-    monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
-    assert "note" not in _names_of(agent_tools(session="regular"))
+    assert "scan" in names
 
 
 def test_shape_is_one_sentence_not_a_think_dump():
@@ -239,5 +237,8 @@ def test_thin_scan_stays_thin_and_note_is_not_a_fact_tool():
             break
     assert scan
     assert "thin" in scan.lower()
-    assert "note" in DIE_TOOLS
-    assert "scan" in DIE_TOOLS
+    names = _names_of(agent_tools(session="regular"))
+    assert "note" in names
+    assert "scan" in names
+    assert material_beat(["note"]) is False
+    assert material_beat(["scan"]) is True
