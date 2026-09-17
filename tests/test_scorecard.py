@@ -23,6 +23,19 @@ def test_estimate_tokens_and_cost():
     assert abs(long - 16.0) < 1e-9
 
 
+def test_estimate_cost_usd_known_token_counts_unchanged():
+    """Lock the published grok-4.6 rates. Do not silently retune the formula."""
+    assert abs(estimate_cost_usd(1_000, 1_000) - 0.008) < 1e-9
+    assert abs(estimate_cost_usd(1_000_000, 1_000_000) - 16.0) < 1e-9
+    assert abs(estimate_cost_usd(0, 0) - 0.0) < 1e-9
+    assert abs(estimate_cost_usd(2_000_000, 0) - 8.0) < 1e-9
+    assert abs(estimate_cost_usd(0, 0, cached_tokens=1_000) - 0.0005) < 1e-9
+    assert (
+        abs(estimate_cost_usd(1_000_000, 1_000_000, in_rate=3.0, out_rate=15.0) - 18.0)
+        < 1e-9
+    )
+
+
 def test_usage_from_response_reads_sdk_and_falls_back():
     class Usage:
         prompt_tokens = 1200
@@ -34,13 +47,29 @@ def test_usage_from_response_reads_sdk_and_falls_back():
         usage = Usage()
 
     used = usage_from_response(Resp())
-    assert used["input_tokens"] == 1200
+    # prompt_tokens includes cached; input_tokens is the uncached remainder
+    # so estimate_cost_usd does not bill cached tokens at the uncached rate.
+    assert used["input_tokens"] == 1100
     assert used["cached_tokens"] == 100
     assert used["output_tokens"] == 80
     assert used["reasoning_tokens"] == 400
     fallback = usage_from_response(None, think_text="abcd" * 20, say_text="efgh" * 10)
     assert fallback["input_tokens"] == 0
     assert fallback["output_tokens"] > 0
+    class XaiUsage:
+        prompt_tokens = 2000
+        completion_tokens = 10
+        reasoning_tokens = 5
+        cached_prompt_text_tokens = 400
+
+    class XaiResp:
+        usage = XaiUsage()
+
+    xai = usage_from_response(XaiResp())
+    assert xai["input_tokens"] == 1600
+    assert xai["cached_tokens"] == 400
+    assert xai["output_tokens"] == 10
+    assert xai["reasoning_tokens"] == 5
     j = get_journal()
     j.record_model_usage(
         stage="grok",

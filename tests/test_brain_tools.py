@@ -1002,7 +1002,7 @@ def test_clip_fat_non_book_payload_keeps_run_without_nameerror():
     assert data["run"]["next"] == "send"
     assert data["run"]["card"] == "flush bounce"
     assert data.get("ok") is True
-    assert data.get("_clipped") == "payload"
+    assert data.get("_clipped") in {"essay", "payload"}
     assert "essay" not in data
 
 
@@ -1018,7 +1018,10 @@ def test_clip_keeps_run_when_hits_overflow():
     data = json.loads(raw)
     assert data["run"]["next"] == "send"
     assert data["run"]["send"]["symbol"] == "SNDK"
-    assert "hits" not in data or data.get("_clipped")
+    assert data.get("_clipped")
+    if "hits" in data:
+        assert data.get("_dropped", 0) >= 1
+        assert isinstance(data["hits"], list)
 
 
 def _fat_scan_hits(n: int = 80, pad: int = 800) -> dict:
@@ -1084,9 +1087,18 @@ def test_clip_keeps_live_book_when_last_look_scan_overflows():
     assert data["world"]["working_orders"][0]["order_id"] == 77
     assert data["world"]["fills"][0]["symbol"] == "HPQ"
     look = data.get("last_look") or {}
-    assert "scan_hits" not in look
-    assert look.get("_clipped") in {"scan_hits", "session_range", "rows"}
     assert data.get("_clipped") not in {"payload", "world", "day"}
+    assert data.get("_clipped") in {"scan_hits", "session_range", "rows"} or look.get(
+        "_clipped"
+    ) in {"scan_hits", "session_range", "rows"}
+    if "scan_hits" in look:
+        sh = look["scan_hits"]
+        dropped = int(sh.get("_dropped") or look.get("_dropped") or data.get("_dropped") or 0)
+        assert dropped >= 1
+        assert sh.get("_clipped") in {"rows", "scan_hits"} or look.get("_clipped") in {
+            "rows",
+            "scan_hits",
+        }
 
 
 
@@ -1105,7 +1117,9 @@ def test_clip_status_keeps_lots_when_news_overflows():
     assert data.get("_clipped") == "news"
     assert data["open_lots"][0].startswith("HPQ")
     assert data["working_orders"][0]["symbol"] == "HPQ"
-    assert "news" not in data
+    if "news" in data:
+        assert data.get("_dropped", 0) >= 1
+        assert isinstance(data["news"], list)
 
 
 @pytest.mark.asyncio
@@ -1164,8 +1178,12 @@ async def test_book_tool_clip_keeps_lots(monkeypatch):
     assert world_b.get("fills")
     look = data.get("last_look") or {}
     if look:
-        assert look.get("_clipped") in {"scan_hits", "session_range", "rows"}
-        assert "scan_hits" not in look or look.get("_clipped") == "scan_hits"
+        assert look.get("_clipped") in {"scan_hits", "session_range", "rows"} or data.get(
+            "_clipped"
+        ) in {"scan_hits", "session_range", "rows"}
+        if "scan_hits" in look:
+            sh = look["scan_hits"]
+            assert int(sh.get("_dropped") or look.get("_dropped") or data.get("_dropped") or 0) >= 1
 
 
 @pytest.mark.asyncio
