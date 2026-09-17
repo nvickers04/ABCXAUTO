@@ -5592,3 +5592,19 @@ def test_scan_clip_keeps_ranked_page_plus_news():
     assert len(kept["news"]) == 32
     assert kept["provenance"]["ibkr_rows"] == 30
 
+    # Same screen asked twice in one look: the cached hand-back must not
+    # re-clip at the 8k default and quietly drop the tail of the page.
+    from types import SimpleNamespace
+
+    from abcxauto.brain import _cached_read, _tool_key
+
+    args = {"arena": "most_active"}
+    turn = SimpleNamespace(
+        tool_cache={_tool_key("scan", args): json.dumps(payload, default=str)},
+    )
+    again = json.loads(_cached_read(turn, "scan", args))
+    assert again["repeat_of_this_think"] is True
+    assert "_dropped" not in again
+    assert len(again["hits"]) == 30
+    assert again["provenance"]["ibkr_rows"] == 30
+

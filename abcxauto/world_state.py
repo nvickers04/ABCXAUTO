@@ -1431,13 +1431,8 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "countdown_human": sess_block.get("countdown_human"),
         "tradable_now": pulse.get("tradable_now"),
     }
-    # Assumed sibling (risk-gate worker, not in this base):
-    #   defined_risk_concentration(positions, net_liq) -> {
-    #     by_symbol: {sym: {usd, pct_nl}},
-    #     by_underlying: {sym: {usd, pct_nl}},
-    #     unknown: [unpriced lot labels],
-    #     usd: float, pct_nl: float|None,
-    #   }
+    # Book fact, never a refuse. Unpriceable lots come back "unknown".
+    #   {"symbol": {SYM: {"usd", "pct"} | {"usd": "unknown"}}, "underlying": {...}}
     try:
         from abcxauto.risk_gates import defined_risk_concentration
 
