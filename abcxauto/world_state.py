@@ -9,10 +9,6 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from abcxauto.config import get_config, resolve_effective_posture, risk_envelope_snapshot
-from abcxauto.structure_grade import (
-    recent_structure_lessons,
-    structure_cooldown_symbols,
-)
 from abcxauto.trade_plan import capacity_fact, load_trade_plans
 
 logger = logging.getLogger(__name__)
@@ -2430,8 +2426,6 @@ def build_world_state(
         net_liq=net,
         cap_armed=armed,
     )
-    lessons = recent_structure_lessons(5)
-    cool = structure_cooldown_symbols(lessons)
     option_facts = list(snap.get("option_facts") or [])
     stop_fact = None
     try:
@@ -2477,8 +2471,8 @@ def build_world_state(
         trade_plan=plan_dict,
         trade_plans=plans_dicts,
         capacity=cap,
-        structure_lessons=lessons,
-        structure_cooldown=cool,
+        structure_lessons=[],
+        structure_cooldown={},
         book=book if isinstance(book, dict) else {},
         pulse=pulse if isinstance(pulse, dict) else {},
         taken_at=str(snap.get("taken_at") or ""),

@@ -1551,19 +1551,6 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         ],
         "trade_plan": world.trade_plan,
         "book_unreliable": bool((world.gates or {}).get("book_unreliable")),
-        "structure_cooldown": dict(getattr(world, "structure_cooldown", None) or {}),
-        # Why the last tickets were rejected — a cooldown without its reason
-        # teaches nothing, so the same geometry gets rebuilt next session.
-        "structure_lessons": [
-            {
-                "strategy": ev.get("strategy"),
-                "symbol": ev.get("symbol"),
-                "reason_code": ev.get("reason_code") or ev.get("outcome"),
-                "message": str(ev.get("message") or "")[:200],
-            }
-            for ev in (getattr(world, "structure_lessons", None) or [])[:5]
-            if isinstance(ev, dict)
-        ],
     }
 
 

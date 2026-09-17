@@ -27,16 +27,6 @@ SCRAPE_SUSPECT = "scrape_suspect"
 GEOMETRY_REJECTED = "geometry_rejected"
 STRUCTURE_OK = "ok"
 
-# Invented % codes — leftover lessons only. Never a send or cooldown gate.
-_INVENTED_PCT_REASON_CODES = frozenset(
-    {
-        GEOMETRY_STOP_TOO_TIGHT,
-        GEOMETRY_STOP_TOO_WIDE,
-        GEOMETRY_ENTRY_STALE,
-    }
-)
-
-
 def _path_events() -> Path:
     import os
 
@@ -251,33 +241,9 @@ def recent_structure_lessons(limit: int = 5) -> list[dict[str, Any]]:
 
 
 def structure_cooldown_symbols(lessons: list[dict] | None = None) -> dict[str, str]:
-    """Symbols with soft new-entry cooldown from scrape/illegal geometry."""
-    cool: dict[str, str] = {}
-    for ev in lessons or recent_structure_lessons(8):
-        reason = str(ev.get("reason_code") or "")
-        if reason in _INVENTED_PCT_REASON_CODES:
-            continue
-        code = reason or str(ev.get("outcome") or "")
-        if code in _INVENTED_PCT_REASON_CODES:
-            continue
-        if code not in (
-            SCRAPE_SUSPECT,
-            GEOMETRY_REJECTED,
-            GEOMETRY_STOP_WRONG_SIDE,
-            GEOMETRY_TARGET_WRONG_SIDE,
-            GEOMETRY_QUOTE_REQUIRED,
-        ):
-            # also accept outcome field
-            if str(ev.get("outcome") or "") not in (
-                SCRAPE_SUSPECT,
-                GEOMETRY_REJECTED,
-                "geometry_rejected",
-            ):
-                continue
-        sym = str(ev.get("symbol") or "").upper()
-        if sym and sym not in cool:
-            cool[sym] = code or str(ev.get("outcome") or "cooldown")
-    return cool
+    """Empty. A prior refused ticket is not a name ban."""
+    _ = lessons
+    return {}
 
 
 def _fill_sec(fill: dict) -> str:

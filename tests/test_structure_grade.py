@@ -235,7 +235,7 @@ def test_validate_proposal_does_not_invent_stop_pct_gate():
     assert prop.strategy == "market_bracket"
 
 
-def test_invented_pct_lessons_do_not_cooldown():
+def test_leftover_lessons_do_not_cooldown():
     cool = structure_cooldown_symbols(
         [
             {
@@ -258,12 +258,14 @@ def test_invented_pct_lessons_do_not_cooldown():
                 "reason_code": GEOMETRY_STOP_WRONG_SIDE,
                 "outcome": "geometry_rejected",
             },
+            {
+                "symbol": "INTC",
+                "reason_code": GEOMETRY_QUOTE_REQUIRED,
+                "outcome": "geometry_rejected",
+            },
         ]
     )
-    assert "QQQ" not in cool
-    assert "SPY" not in cool
-    assert "IWM" not in cool
-    assert cool.get("AAPL") == GEOMETRY_STOP_WRONG_SIDE
+    assert cool == {}
 
 
 def test_structure_lessons_round_trip(tmp_path, monkeypatch):

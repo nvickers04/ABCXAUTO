@@ -600,13 +600,6 @@ def gate_ticket(act: dict, world: WorldState) -> tuple[str, dict | None]:
                 "status": "blocked",
                 "note": "new risk requires params.symbol",
             }
-        cool = getattr(world, "structure_cooldown", None) or {}
-        if isinstance(cool, dict) and sym in cool:
-            why = cool.get(sym) or "scrape/geometry"
-            return BLOCKED_STRAT, {
-                "status": "blocked",
-                "note": f"structure cooldown {sym}: {why}",
-            }
         from abcxauto.risk_gates import new_risk_card_error
 
         # Label only: journal/scorecard need a play name. Not a catalog lookup.

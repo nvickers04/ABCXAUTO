@@ -220,13 +220,13 @@ def test_new_entry_allowed_when_book_open_and_capacity(monkeypatch):
     assert strat == "market_bracket"
 
 
-def test_new_entry_rejected_on_structure_cooldown(monkeypatch):
+def test_new_entry_not_rejected_on_leftover_structure_cooldown(monkeypatch):
     from abcxauto.agent_loop import gate_ticket
 
     strat, forced = gate_ticket(
         _new_entry_act("QQQ"),
         _judgment_world(
-            structure_cooldown={"QQQ": "scrape_suspect"},
+            structure_cooldown={"QQQ": "geometry_quote_required"},
             capacity={
                 "open_count": 1,
                 "max_open_positions": 6,
@@ -235,8 +235,8 @@ def test_new_entry_rejected_on_structure_cooldown(monkeypatch):
             },
         ),
     )
-    assert strat == "blocked"
-    assert "cooldown" in str((forced or {}).get("note") or "").lower()
+    assert forced is None, forced
+    assert strat == "market_bracket"
 
 
 def test_new_entry_rejected_when_capacity_full(monkeypatch):
