@@ -1287,3 +1287,187 @@ async def test_news_rail_timeout_keeps_the_print_already_on_the_rail(
     assert "No headlines yet" not in text
     reset_news_cache()
 
+
+def _desktop_row_text(control) -> str:
+    bits: list[str] = []
+    val = getattr(control, "value", None)
+    if isinstance(val, str) and val:
+        bits.append(val)
+    content = getattr(control, "content", None)
+    if content is not None:
+        bits.append(_desktop_row_text(content))
+    for child in getattr(control, "controls", None) or []:
+        bits.append(_desktop_row_text(child))
+    return " ".join(b for b in bits if b)
+
+
+def test_desktop_has_no_dead_watchlist_copy():
+    """The persisted watchlist is gone — the cockpit must not still name it."""
+    text = _cockpit_text().lower()
+    for banned in (
+        "watchlist",
+        "legal_symbols",
+        "legal symbols",
+        "universe_allowlist",
+        "enabled_arenas",
+        "max_arena_concentration",
+        "max per arena",
+        "load_allowlist",
+        "persisted arena",
+    ):
+        assert banned not in text, banned
+
+
+def test_risk_page_renders_without_arena_field(real_cfg_pro):
+    from abcxauto.pro_desktop import RISK_FIELDS
+
+    keys = [k for k, _l, _h in RISK_FIELDS]
+    assert "max_arena_concentration_pct" not in keys
+    assert "max_arena_concentration_pct" not in real_cfg_pro.fields
+    real_cfg_pro._sync_risk_page(force=True)
+    page = real_cfg_pro._page_risk()
+    blob = _desktop_row_text(page)
+    assert "Max per arena" not in blob
+    assert "max_arena_concentration_pct" not in blob
+    assert "Floor" in blob
+    assert "Concentration" in blob
+
+
+def test_stale_arena_knob_on_disk_does_not_crash_risk_page(real_cfg_pro):
+    from abcxauto.config import load_risk_settings, risk_settings_path
+
+    path = risk_settings_path()
+    path.write_text(
+        json.dumps({"max_arena_concentration_pct": 12.0, "daily_loss_limit_pct": 8.0}),
+        encoding="utf-8",
+    )
+    load_risk_settings(path)
+    real_cfg_pro._dirty.clear()
+    real_cfg_pro._sync_risk_page(force=True)
+    page = real_cfg_pro._page_risk()
+    blob = _desktop_row_text(page)
+    assert "Max per arena" not in blob
+    assert "max_arena_concentration_pct" not in real_cfg_pro.fields
+    assert "Floor" in blob
+
+
+def test_stale_arena_attr_missing_from_config_does_not_crash(headless_pro, monkeypatch):
+    """Config after the knob is deleted must not KeyError the Risk page."""
+    cfg = type(
+        "C",
+        (),
+        {
+            "risk_posture": "balanced",
+            "trading_mode": "paper",
+            "is_paper": True,
+            "max_risk_per_trade_pct": 5.0,
+            "daily_loss_limit_pct": 8.0,
+            "max_position_pct": 15.0,
+            "max_symbol_concentration_pct": 15.0,
+            "max_peak_drawdown_pct": 25.0,
+            "max_option_premium_pct": 10.0,
+            "max_open_positions": 0,
+            "portfolio_cap_usd": 800.0,
+            "defined_risk_only": True,
+            "cash_only": True,
+            "risk_gates_enabled": True,
+            "auto_panic_on_breach": True,
+            "sizing_floors": False,
+        },
+    )()
+    monkeypatch.setattr("abcxauto.pro_desktop.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.config.load_risk_settings", lambda: {})
+    monkeypatch.setattr("abcxauto.config.resolve_effective_posture", lambda p, m="paper": p)
+    headless_pro._sync_risk_page(force=True)
+    page = headless_pro._page_risk()
+    assert page is not None
+    assert "max_arena_concentration_pct" not in headless_pro.fields
+
+
+def test_risk_apply_does_not_send_removed_arena_key(headless_pro, monkeypatch):
+    calls: list[dict] = []
+
+    def _fake_update(**kwargs):
+        calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr("abcxauto.config.update_risk_config", _fake_update)
+    monkeypatch.setattr("abcxauto.config.update_capacity_config", _fake_update)
+    headless_pro._apply_risk_field("max_arena_concentration_pct")
+    assert calls == []
+    headless_pro.fields["max_risk_per_trade_pct"].value = "6"
+    headless_pro._apply_risk_field("max_risk_per_trade_pct")
+    assert calls
+    assert all("max_arena_concentration_pct" not in c for c in calls)
+
+
+def test_look_meter_view_renders_rebill_curve(headless_pro, monkeypatch):
+    row = {
+        "ts": "2026-09-17T14:05:00.000Z",
+        "look_id": "look-1",
+        "cycle": 4,
+        "session": "regular",
+        "model": "grok-4.6",
+        "calls": 3,
+        "input_tokens": 12000,
+        "cached_tokens": 4000,
+        "output_tokens": 800,
+        "reasoning_tokens": 200,
+        "cost_usd": 0.42,
+        "duration_s": 18.5,
+        "tool_counts": {"book": 1, "scan": 1, "quote": 2},
+        "tool_result_chars": 48000,
+        "call_inputs": [2100, 8400, 18200],
+    }
+    cheaper = dict(row)
+    cheaper["ts"] = "2026-09-17T13:01:00.000Z"
+    cheaper["cost_usd"] = 0.11
+    cheaper["calls"] = 1
+    cheaper["call_inputs"] = [1800]
+    monkeypatch.setattr(
+        "abcxauto.look_meter.look_meter_for_desk",
+        lambda limit=32: [row, cheaper],
+    )
+    page = headless_pro._page_scorecard()
+    blob = _desktop_row_text(page)
+    assert "$0.42" in (headless_pro.lbl_look_cost.value or "")
+    assert "0.53" in (headless_pro.lbl_look_cost_session.value or "")
+    assert "3 call" in (headless_pro.lbl_look_cost_sub.value or "")
+    assert "12k uncached" in (headless_pro.lbl_look_cost_detail.value or "")
+    assert "4k cached" in (headless_pro.lbl_look_cost_detail.value or "")
+    assert "scan×1" in (headless_pro.lbl_look_cost_detail.value or "")
+    curve = headless_pro.lbl_look_curve.value or ""
+    assert "re-bill" in curve
+    assert "2.1k" in curve and "8.4k" in curve and "18.2k" in curve
+    assert "Look cost" in blob
+
+
+def test_concentration_fact_paints_when_importable(headless_pro, monkeypatch):
+    def _fake(positions, net_liq=None):
+        return {
+            "symbol": {"NVDA": {"usd": 1200.0, "pct": 3.2}},
+            "underlying": {
+                "NVDA": {"usd": 1800.0, "pct": 4.8},
+                "XYZ": {"usd": "unknown"},
+            },
+        }
+
+    monkeypatch.setattr(headless_pro, "_concentration_fn", lambda: _fake)
+    headless_pro.engine.state.equity = 37000.0
+    headless_pro.engine.state.positions = [{"symbol": "NVDA", "quantity": 1}]
+    headless_pro._sync_concentration_fact()
+    blob = " | ".join(_desktop_row_text(c) for c in headless_pro.col_conc.controls)
+    assert "NVDA" in blob
+    assert "$1,200.00" in blob
+    assert "3.2%" in blob
+    assert "unknown" in blob.lower()
+    assert "1 unknown" in (headless_pro.lbl_conc_head.value or "")
+
+
+def test_concentration_fact_degrades_when_missing(headless_pro, monkeypatch):
+    monkeypatch.setattr(headless_pro, "_concentration_fn", lambda: None)
+    headless_pro._sync_concentration_fact()
+    assert "not on this build" in (headless_pro.lbl_conc_head.value or "")
+    blob = " | ".join(_desktop_row_text(c) for c in headless_pro.col_conc.controls)
+    assert "No concentration fact" in blob
+
