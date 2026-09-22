@@ -459,7 +459,37 @@ def pcs_send_ok(
 
 
 def session_model_cost_usd(*, since_iso: str = "") -> float | None:
-    """Billed model $ this scored session. None = unreadable (fail-closed)."""
+    """Billed model $ this scored session. None = unreadable (fail-closed).
+
+    Prefers ``look_ledger.session_spend`` for today's ET date when that
+    function exists. Ledger ``unknown`` fail-closes. Missing module keeps
+    the scorecard sum.
+    """
+    try:
+        from abcxauto.look_ledger import session_spend
+    except ImportError:
+        session_spend = None  # type: ignore[assignment]
+    if session_spend is not None:
+        try:
+            from datetime import datetime, timezone
+            from zoneinfo import ZoneInfo
+
+            et = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York"))
+            spend = session_spend(et.date().isoformat())
+            if not isinstance(spend, dict):
+                return None
+            if spend.get("unknown") is True:
+                return None
+            cost = spend.get("usd")
+            if cost is None:
+                return None
+            val = float(cost)
+            if val != val or val < 0:
+                return None
+            return val
+        except Exception:
+            logger.debug("look ledger session spend unreadable", exc_info=True)
+            return None
     try:
         from abcxauto.memory import get_journal
 
@@ -628,7 +658,11 @@ def f10_hard_tripped(gate: dict[str, Any] | None = None) -> bool:
 
 
 def f10_open_look_halted(f10: dict[str, Any] | None = None) -> bool:
-    """True when subsequent OPEN / new-risk looks must not call the model."""
+    """True when the dollar / unreadable F10 fuse is tripped.
+
+    New-risk sends stay refused. Looks still call the model; manage /
+    exits are not this predicate.
+    """
     try:
         from abcxauto.session_caps import f10_loop_halted
 
@@ -642,8 +676,28 @@ def f10_open_look_halted(f10: dict[str, Any] | None = None) -> bool:
 
 
 def is_f10_look_halt(reason: str = "") -> bool:
-    """True when skip/send reason must stop billed new-risk looks."""
+    """True when skip/send reason is the dollar / unreadable F10 fuse.
+
+    Used for glass lines and send blocks. Does not mean skip the look.
+    """
     return str(reason or "") in (REASON_F10, REASON_MODEL_COST)
+
+
+def skip_glass_line(reason: str = "") -> str:
+    """One stream line when a look is skipped before the model is called."""
+    why = str(reason or "").strip()
+    if not why:
+        return ""
+    if is_f10_look_halt(why):
+        return "[F10 loop halt — no new-risk looks]"
+    try:
+        from abcxauto.research_budget import is_brief_look_halt
+
+        if is_brief_look_halt(why):
+            return "[brief loop halt — no billed research turns]"
+    except Exception:
+        logger.debug("brief halt glass line failed", exc_info=True)
+    return f"[{why}]"
 
 
 def mark_f10_hard_trip(gate: dict[str, Any] | None = None) -> bool:
@@ -721,11 +775,15 @@ def kill_mode(
 
     No one-look RTH entry budget. Named scorecard abort fuses stop new-risk
     looks even in-flight. Open pcs-skew or STK lots stay MANAGE so exits are
-    not blocked. ``in_flight`` retained for callers; unused for entry-budget
-    gates.
+    not blocked — including premarket/postmarket (research label must not
+    hide an open stock). ``in_flight`` retained for callers; unused for
+    entry-budget gates.
     """
     if not kill_look_enabled():
         return ""
+    # Manage first: open STK / pcs-skew still manage under a research session.
+    if has_open_manage_lot(positions, open_lots):
+        return MODE_MANAGE
     try:
         from abcxauto.desk_mode import is_research_session, is_rth_session
 
@@ -738,8 +796,6 @@ def kill_mode(
             return MODE_RESEARCH
     if not rth:
         return MODE_RESEARCH
-    if has_open_manage_lot(positions, open_lots):
-        return MODE_MANAGE
     if not kill_look_port_ok():
         return MODE_ABORT
     try:
@@ -760,8 +816,16 @@ def kill_mode(
         return MODE_ABORT
     gate = f10 if isinstance(f10, dict) else live_f10_gate()
     if not gate.get("allow_new_risk", False):
-        if str(gate.get("reason_code") or "") == REASON_F10:
+        why = str(gate.get("reason_code") or "")
+        if why == REASON_F10:
             mark_f10_hard_trip(gate)
+        elif why == REASON_MODEL_COST:
+            try:
+                from abcxauto.session_caps import mark_f10_loop_halt
+
+                mark_f10_loop_halt()
+            except Exception:
+                logger.debug("f10 model_cost latch write failed", exc_info=True)
         return MODE_ABORT
     return MODE_OPEN
 
@@ -866,23 +930,25 @@ def skip_look_reason(
     )
     if mode == MODE_MANAGE:
         return ""
-    # New-risk / OPEN / research-as-entry. MANAGE + unprotected still look.
+    # Dollar / unreadable F10: latch accounting, refuse new risk at send.
+    # Do not skip the look — the model still runs (research + flat RTH).
     if f10_open_look_halted(f10):
-        try:
-            from abcxauto.session_caps import mark_f10_loop_halt
-
-            mark_f10_loop_halt()
-        except Exception:
-            logger.debug("f10 latch write failed", exc_info=True)
         gate = f10 if isinstance(f10, dict) else live_f10_gate()
         why = str(gate.get("reason_code") or "")
-        if why == REASON_MODEL_COST:
-            return REASON_MODEL_COST
-        return REASON_F10
+        if why == REASON_F10:
+            mark_f10_hard_trip(gate)
+        elif why == REASON_MODEL_COST:
+            try:
+                from abcxauto.session_caps import mark_f10_loop_halt
+
+                mark_f10_loop_halt()
+            except Exception:
+                logger.debug("f10 model_cost latch write failed", exc_info=True)
     if mode == MODE_OPEN:
         return ""
     if mode == MODE_ABORT:
         # Named scorecard fuses alone own fuse codes. Port ≠ F10.
+        # Session dollar latch (f10_loop_halted) is ABORT for new risk only.
         if fuse == "DD30":
             return REASON_DD
         if fuse == "QTY0_STREAK":

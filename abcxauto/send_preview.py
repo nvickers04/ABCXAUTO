@@ -401,6 +401,76 @@ def _preview_ibkr_last(
     return None
 
 
+def _preview_position_rows(snap_d: dict[str, Any], world: Any) -> list[Any]:
+    """Positions the preview can see — snap first, else world."""
+    rows = snap_d.get("positions") if isinstance(snap_d, dict) else None
+    if not rows and world is not None:
+        rows = getattr(world, "positions", None)
+    return list(rows or [])
+
+
+def _largest_long_stk_open_frag(
+    snap_d: dict[str, Any],
+    world: Any,
+) -> str | None:
+    """Largest long STK lot fact for size_cash refuse. No sell/rotate wording."""
+    best: tuple[float, str, int, float] | None = None
+    for pos in _preview_position_rows(snap_d, world):
+        if not isinstance(pos, dict):
+            continue
+        sec = str(
+            pos.get("secType") or pos.get("sec_type") or pos.get("sec") or "STK"
+        ).upper()
+        if sec and not sec.startswith("STK"):
+            continue
+        qty_f = _finite(
+            pos.get("quantity")
+            if pos.get("quantity") is not None
+            else (
+                pos.get("position")
+                if pos.get("position") is not None
+                else pos.get("qty")
+            )
+        )
+        if qty_f is None or qty_f <= 0:
+            continue
+        sym = str(pos.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        px = _preview_ibkr_last(sym, snap_d, world)
+        if px is None or px <= 0:
+            for key in (
+                "market_price",
+                "marketPrice",
+                "mkt",
+                "last",
+                "avg_cost",
+                "avgCost",
+                "averageCost",
+                "avg",
+            ):
+                px = _finite(pos.get(key))
+                if px is not None and px > 0:
+                    break
+                px = None
+        if px is None or px <= 0:
+            continue
+        qty_i = int(qty_f) if abs(qty_f - int(qty_f)) < 1e-9 else int(qty_f)
+        if qty_i < 1:
+            continue
+        mv = float(qty_i) * float(px)
+        if best is None or mv > best[0]:
+            best = (mv, sym, qty_i, mv)
+    if best is None:
+        return None
+    _mv, sym, qty_i, mv = best
+    if abs(mv - round(mv)) < 0.005:
+        mv_txt = f"${int(round(mv))}"
+    else:
+        mv_txt = f"${mv:.2f}"
+    return f"open {sym} qty={qty_i} mv={mv_txt}"
+
+
 def _size_cash_refuse_note(
     *,
     notional: float,
@@ -447,8 +517,12 @@ def _size_cash_refuse_note(
             mark, mult = live, 1.0
         if mark is not None and mark > 0 and mult > 0:
             fit = int(float(cash) / (float(mark) * float(mult)))
-    if fit is not None and fit >= 1:
+    # Keep fit_qty=0 when cash cannot cover one unit — never invent shares.
+    if fit is not None and fit >= 0:
         note = f"{note} fit_qty={fit}"
+    open_frag = _largest_long_stk_open_frag(snap_d, world)
+    if open_frag:
+        note = f"{note} {open_frag}"
     return note
 
 
@@ -493,6 +567,15 @@ def _always_armed_refuses(
             reasons.append(str(why_dr))
     except Exception:
         logger.debug("preview defined-risk check failed", exc_info=True)
+
+    try:
+        from abcxauto.risk_gates import check_alloc_gates
+
+        ok_alloc, why_alloc = check_alloc_gates(proposal, snap_d)
+        if not ok_alloc:
+            reasons.append(str(why_alloc))
+    except Exception:
+        logger.debug("preview alloc-size check failed", exc_info=True)
 
     try:
         from abcxauto.risk_gates import get_risk_gate
@@ -548,47 +631,53 @@ def _always_armed_refuses(
                 book = risk_base_usd(net_liq, cfg)
 
             if cash_on:
-                direction = getattr(proposal.params, "direction", None)
-                if (
-                    proposal.strategy in ("bracket", "market_bracket")
-                    and str(direction or "").upper() == "SHORT"
-                ):
-                    reasons.append(
-                        "Cash-only mode: SHORT stock brackets are rejected "
-                        "(no short selling). Set ABCXAUTO_CASH_ONLY=false to allow."
-                    )
-                # Spend cap is TotalCashValue only — same as risk_gates.
-                # AvailableFunds is margin buying power, never the cash_only cap.
-                cash = _account_float(
-                    account,
-                    "TotalCashValue",
-                    "totalcashvalue",
-                    "total_cash",
-                    "TotalCash",
-                )
-                if cash is None:
-                    reasons.append(
-                        "Risk gate fail-closed: cash-only mode requires "
-                        "TotalCashValue in account summary"
-                    )
+                from abcxauto.risk_gates import is_exit_or_management
+
+                # Exits / management free cash; never size_cash a reducing SELL.
+                if is_exit_or_management(proposal):
+                    pass
                 else:
-                    try:
-                        notional = estimate_notional(proposal)
-                    except Exception:
-                        notional = None
-                    if notional is None:
-                        reasons.append("size_unknown_notional")
-                    elif notional > cash:
+                    direction = getattr(proposal.params, "direction", None)
+                    if (
+                        proposal.strategy in ("bracket", "market_bracket")
+                        and str(direction or "").upper() == "SHORT"
+                    ):
                         reasons.append(
-                            _size_cash_refuse_note(
-                                notional=float(notional),
-                                cash=float(cash),
-                                book=book,
-                                work=work,
-                                snap_d=snap_d,
-                                world=world,
-                            )
+                            "Cash-only mode: SHORT stock brackets are rejected "
+                            "(no short selling). Set ABCXAUTO_CASH_ONLY=false to allow."
                         )
+                    # Spend cap is TotalCashValue only — same as risk_gates.
+                    # AvailableFunds is margin buying power, never the cash_only cap.
+                    cash = _account_float(
+                        account,
+                        "TotalCashValue",
+                        "totalcashvalue",
+                        "total_cash",
+                        "TotalCash",
+                    )
+                    if cash is None:
+                        reasons.append(
+                            "Risk gate fail-closed: cash-only mode requires "
+                            "TotalCashValue in account summary"
+                        )
+                    else:
+                        try:
+                            notional = estimate_notional(proposal)
+                        except Exception:
+                            notional = None
+                        if notional is None:
+                            reasons.append("size_unknown_notional")
+                        elif notional > cash:
+                            reasons.append(
+                                _size_cash_refuse_note(
+                                    notional=float(notional),
+                                    cash=float(cash),
+                                    book=book,
+                                    work=work,
+                                    snap_d=snap_d,
+                                    world=world,
+                                )
+                            )
     except Exception:
         logger.debug("preview daily-loss/cash-only check failed", exc_info=True)
 
@@ -632,13 +721,8 @@ def collect_would_refuse(
     sess = sess.strip().lower()
     if sess == "unknown":
         sess = ""
-    try:
-        from abcxauto.desk_mode import RESEARCH_SESSIONS, is_research_session
-
-        if is_research_session(sess) or sess in RESEARCH_SESSIONS:
-            reasons.append(f"research_no_send session={sess}")
-    except Exception:
-        logger.debug("preview research check failed", exc_info=True)
+    # Research sessions are not a blanket preview refuse — cash / defined-risk /
+    # daily-loss / research_thin still append below.
 
     try:
         from abcxauto.thin_rth_kill_look import kill_look_send_block

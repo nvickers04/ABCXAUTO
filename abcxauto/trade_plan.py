@@ -456,6 +456,25 @@ def _per_order_stop_qty(
     return max(qtys), False
 
 
+def _ephemeral_plans_from_positions(
+    positions: list[dict] | None,
+) -> list[ActiveTradePlan]:
+    """STK lots as plans so stop_qty facts work without a plan file."""
+    out: list[ActiveTradePlan] = []
+    for row in _stk_rows(positions):
+        qty = float(row["quantity"])
+        if abs(qty) < 1e-9:
+            continue
+        out.append(
+            ActiveTradePlan(
+                symbol=str(row["symbol"]),
+                direction="LONG" if qty > 0 else "SHORT",
+                quantity=abs(qty),
+            )
+        )
+    return out
+
+
 def stop_qty_mismatch_fact(
     positions: list[dict] | None,
     open_orders: list[dict] | None,
@@ -465,10 +484,15 @@ def stop_qty_mismatch_fact(
 
     Per order — same 0.51 slack as ``stacked_stop_cancel_ids``. Stacked crumbs
     that sum to held are not a match. ``match`` is the wake-line key.
+
+    When no durable plan exists, open STK lots still get a fact so post-trim
+    resize can run from the live book alone.
     """
     plans = [plan] if plan is not None else load_trade_plans()
     if plan is not None and not plans:
         plans = [plan]
+    if not plans:
+        plans = _ephemeral_plans_from_positions(positions)
     if not plans:
         return None
     checked: list[dict[str, Any]] = []
@@ -479,8 +503,11 @@ def stop_qty_mismatch_fact(
         held = abs(stk_qty_for_symbol(positions, p.symbol))
         if held < 1e-9:
             continue
+        direction = p.direction or (
+            "LONG" if stk_qty_for_symbol(positions, p.symbol) > 0 else "SHORT"
+        )
         stop_q, covers = _per_order_stop_qty(
-            open_orders, p.symbol, p.direction, held
+            open_orders, p.symbol, direction, held
         )
         if stop_q is None:
             row = {
@@ -523,6 +550,88 @@ def stop_qty_mismatch_fact(
     out = dict(first_bad)
     out["all"] = checked
     return out
+
+
+def exit_resize_ticket(
+    positions: list[dict] | None,
+    open_orders: list[dict] | None,
+    *,
+    symbol: str = "",
+) -> dict[str, Any] | None:
+    """Send ticket to resize oversized exit protection down to held STK qty.
+
+    Only when a working stop qty exceeds held (post-trim). Prefer ``oca`` when
+    a resting take-profit price exists; else ``stop_order``. Never invents
+    prices. None when no resize-down is needed.
+    """
+    want = str(symbol or "").strip().upper()
+    fact = stop_qty_mismatch_fact(positions, open_orders, None)
+    if not isinstance(fact, dict):
+        return None
+    rows = fact.get("all") if isinstance(fact.get("all"), list) else [fact]
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("mismatch"):
+            continue
+        sym = str(row.get("symbol") or "").upper()
+        if not sym or (want and sym != want):
+            continue
+        held = float(row.get("held_qty") or 0)
+        stop_q = row.get("stop_order_qty")
+        if held < 1e-9 or stop_q is None:
+            continue
+        try:
+            stop_qty = float(stop_q)
+        except (TypeError, ValueError):
+            continue
+        # Resize-down only — undersized cover is a different path.
+        if stop_qty <= held + 0.51:
+            continue
+        held_signed = stk_qty_for_symbol(positions, sym)
+        direction = "LONG" if held_signed > 0 else "SHORT"
+        stop_px, target_px = _exits_from_orders(open_orders, sym, direction)
+        if stop_px is None or stop_px <= 0:
+            continue
+        qty = int(round(held))
+        if qty < 1:
+            continue
+        hint = None
+        if target_px is not None and target_px > 0:
+            hint = (float(stop_px) + float(target_px)) / 2.0
+            return {
+                "strategy": "oca",
+                "params": {
+                    "symbol": sym,
+                    "quantity": qty,
+                    "direction": direction,
+                    "stop_price": float(stop_px),
+                    "target_price": float(target_px),
+                    "price_hint": hint,
+                },
+                "rationale": (
+                    f"resize exits after trim: stop/target qty {int(stop_qty)} "
+                    f"→ held {qty} {sym}"
+                ),
+                "held_qty": held,
+                "stop_order_qty": stop_qty,
+            }
+        action = "SELL" if direction == "LONG" else "BUY"
+        return {
+            "strategy": "stop_order",
+            "params": {
+                "symbol": sym,
+                "action": action,
+                "quantity": qty,
+                "stop_price": float(stop_px),
+                "closing_position": True,
+            },
+            "rationale": (
+                f"resize stop after trim: stop qty {int(stop_qty)} "
+                f"→ held {qty} {sym}"
+            ),
+            "held_qty": held,
+            "stop_order_qty": stop_qty,
+        }
+    return None
 
 
 def book_has_risk(positions: list[dict] | None) -> bool:

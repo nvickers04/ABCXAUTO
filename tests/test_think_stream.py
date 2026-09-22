@@ -146,7 +146,7 @@ def test_bind_engine_appends_think_live():
 
 
 def test_tool_facts_are_not_a_clerk_speaker():
-    """hits= / [scan] are tool results. [think]/[say] stay Grok. No clerk banner."""
+    """hits= / [scan] are tool results. [say] stays Grok. No clerk banner."""
     from abcxauto.think_stream import reset_speaker
 
     reset_speaker()
@@ -170,9 +170,99 @@ def test_tool_facts_are_not_a_clerk_speaker():
     assert "card_gap=" not in live
     assert "--- GROK ---" in live
     assert "[think]" in live
+    assert "weigh tape" in live
     assert "[say]" in live
     assert "watching the gap" in live
 
+
+def test_think_body_omitted_from_glass_listeners_still_hear(tmp_path, monkeypatch):
+    """Reasoning never paints the glass/day file; listeners still get the tokens."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 0.0)
+    monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+    ts.reset_speaker()
+    st = SimpleNamespace(think_live="")
+    ts.bind_engine(SimpleNamespace(state=st))
+    heard: list[tuple[str, str, str]] = []
+
+    def cap(kind: str, text: str, piece: str = "") -> None:
+        heard.append((kind, text, piece))
+
+    essay = (
+        "The user is giving me a trading context. "
+        "The user wants me to continue managing the IBKR paper trading book. "
+        "If the harness expects a different ticket type.\n"
+    )
+    spoken = "Flat. Watching IWM.\n"
+    ts.subscribe(cap)
+    try:
+        ts.emit("stage", "grok")
+        ts.emit("say", "\n[think]\n")
+        ts.emit("think", essay)
+        ts.emit("say", "\n[say]\n")
+        ts.emit("say", spoken)
+    finally:
+        ts.unsubscribe(cap)
+        ts.bind_engine(None)
+        ts.reset_speaker()
+
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    assert "The user is giving me" in session
+    assert essay.strip() in session
+    assert "[think]" in session
+    assert spoken.strip() in session
+    assert "[say]" in session
+    assert "The user is giving me" in st.think_live
+    assert "[think]" in st.think_live
+    assert spoken.strip() in st.think_live
+    assert any(k == "think" and essay in t and essay in p for k, t, p in heard)
+    assert any(k == "say" and spoken in t for k, t, _p in heard)
+
+
+def test_reasoning_roleplay_stays_off_operator_glass(tmp_path, monkeypatch):
+    """Regression: think roleplay never paints; say + tool desk lines still do."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 0.0)
+    monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+    ts.reset_speaker()
+    st = SimpleNamespace(think_live="")
+    ts.bind_engine(SimpleNamespace(state=st))
+    heard: list[tuple[str, str, str]] = []
+
+    def cap(kind: str, text: str, piece: str = "") -> None:
+        heard.append((kind, text, piece))
+
+    roleplay = "The user wants me to hold\n"
+    spoken = "Holding IWM. No ticket.\n"
+    tool_chip = "[book]\n"
+    ts.subscribe(cap)
+    try:
+        ts.emit("stage", "grok")
+        ts.emit("say", "\n[think]\n")
+        ts.emit("think", roleplay)
+        ts.emit("tool", tool_chip)
+        ts.emit("say", "\n[say]\n")
+        ts.emit("say", spoken)
+    finally:
+        ts.unsubscribe(cap)
+        ts.bind_engine(None)
+        ts.reset_speaker()
+
+    glass = st.think_live
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    for buf in (glass, session):
+        assert "The user wants me to hold" in buf
+        assert "[think]" in buf
+        assert spoken.strip() in buf
+        assert "[book]" in buf
+        assert "[say]" in buf
+    assert any(k == "think" and roleplay in t and roleplay in p for k, t, p in heard)
+    assert any(k == "say" and spoken in t for k, t, _p in heard)
+    assert any(k == "tool" and tool_chip in t for k, t, _p in heard)
 
 def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     from abcxauto import think_stream as ts
@@ -264,7 +354,10 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
 
 
 def test_say_think_force_think_tail_inside_throttle(tmp_path, monkeypatch):
-    """Spoken say/think must land in think_tail even inside the 2s write throttle."""
+    """Spoken say must land in think_tail even inside the 2s write throttle.
+
+    Reasoning tokens are not painted on the glass — only say forces the tail.
+    """
     from abcxauto import think_stream as ts
 
     monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
@@ -289,13 +382,15 @@ def test_say_think_force_think_tail_inside_throttle(tmp_path, monkeypatch):
         assert "[think]" in tail_after_think
         assert "weigh rotation before the close" in tail_after_think
         assert "AVGO is nearly the whole book" in tail_after_think
+        assert "[think]" in st.think_live
+        assert "weigh rotation before the close" in st.think_live
     finally:
         ts.bind_engine(None)
         monkeypatch.setattr(ts, "_last_tail_write", 0.0)
 
 
 def test_tool_emit_stays_throttled_inside_window(tmp_path, monkeypatch):
-    """Noisy tool JSON still respects the tail throttle; only say/think force."""
+    """Noisy tool JSON still respects the tail throttle; only say forces."""
     from abcxauto import think_stream as ts
 
     monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
@@ -307,14 +402,165 @@ def test_tool_emit_stays_throttled_inside_window(tmp_path, monkeypatch):
         ts.emit("tool", "[book]\n")
         first = (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
         assert "[book]" in first
-        ts.emit("tool", '{"fat_tool_json": true, "rows": [1, 2, 3]}\n')
+        fat = json.dumps({
+            "fat_tool_json": True,
+            "rows": [{"symbol": f"S{i}", "pad": "x" * 40} for i in range(20)],
+        }) + "\n"
+        assert len(fat) > ts._TOOL_GLASS_KEEP
+        ts.emit("tool", fat)
         second = (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
         assert second == first
-        assert "fat_tool_json" not in second
-        assert "fat_tool_json" in st.think_live
+        assert fat.strip() not in second
+        # Glass RAM gets a capped desk line (symbol list), not the paid blob.
+        assert fat.strip() not in st.think_live
+        assert '"pad"' not in st.think_live
+        assert "S0" in st.think_live
+        desk = st.think_live[len("[book]\n") :]
+        assert len(desk.strip()) <= ts._TOOL_GLASS_MAX + 5
+        assert len(st.think_live) < len("[book]\n") + len(fat)
     finally:
         ts.bind_engine(None)
         monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+
+
+def test_large_tool_json_becomes_one_desk_line(tmp_path, monkeypatch):
+    """Day file + think_live get a short fact; listeners still see the paid blob."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "_et_session_day", lambda: "2026-08-28")
+    monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 0.0)
+    monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+    ts.reset_speaker()
+    st = SimpleNamespace(think_live="")
+    ts.bind_engine(SimpleNamespace(state=st))
+    painted: list[tuple[str, str, str]] = []
+
+    def cap(kind: str, text: str, piece: str = "") -> None:
+        painted.append((kind, text, piece))
+
+    grpc_err = (
+        "book failed: <StatusCode.UNAVAILABLE> Connection refused, "
+        'debug_error_string: "UNKNOWN:Error received from peer '
+        '{grpc_message:"Connection refused", grpc_status:14}"'
+    )
+    err_blob = json.dumps({"error": grpc_err, "detail": "x" * 80}) + "\n"
+    alloc = (
+        "leftover $12.4k (35% NL) deployed 65%  "
+        "IWM1 40% 244.1 uPnL=12 stp=240 tgt=250  " + ("pad " * 30)
+    )
+    book_blob = json.dumps({
+        "flat": False,
+        "net_liquidation": 35000,
+        "allocation_line": alloc,
+        "positions": [{"symbol": "IWM", "qty": 1, "pad": "y" * 100}],
+    }) + "\n"
+    quote_blob = json.dumps({
+        "symbol": "IWM",
+        "last": 244.15,
+        "bid": 244.1,
+        "ask": 244.2,
+        "pad": "z" * 200,
+    }) + "\n"
+    bars = [
+        {"t": f"2026-08-{i:02d}", "o": 1, "h": 2, "l": 0.5, "c": 10.0 + i, "v": 100}
+        for i in range(1, 31)
+    ]
+    candles_blob = json.dumps({
+        "symbol": "AAPL",
+        "resolution": "1d",
+        "bars": bars,
+    }) + "\n"
+    hits = [
+        {
+            "symbol": sym,
+            "open_gap_pct": -6.5,
+            "rank": i,
+            "ibkr": {"last": 10 + i, "asof_iso": "2026-08-28T14:00:00Z"},
+            "mda": {"news": [{"headline": "x" * 40}]},
+        }
+        for i, sym in enumerate(["SNDK", "MRVL", "PYPL", "AMD", "NVDA"])
+    ]
+    scan_blob = json.dumps({
+        "ok": True,
+        "arena": "mega_cap",
+        "scan_code": "TOP_PERC_LOSE",
+        "symbols": [h["symbol"] for h in hits],
+        "hits": hits,
+        "rows": hits,
+    }) + "\n"
+    note_blob = json.dumps({
+        "ok": True,
+        "store": "notes",
+        "note": {
+            "id": "n_abc123",
+            "body": "long durable note body " + ("w" * 200),
+            "tags": ["gap", "SNDK"],
+        },
+    }) + "\n"
+    short_hits = "hits=3 screens=2 deepest=-6.5% SNDK src=ibkr\n"
+    short_args = json.dumps({"arena": "mega_cap", "scan_code": "TOP_PERC_LOSE"}) + "\n"
+    say_text = "watching the gap after the screen\n"
+
+    ts.subscribe(cap)
+    try:
+        ts.emit("tool", "\n[book]\n")
+        ts.emit("tool", err_blob)
+        ts.emit("tool", book_blob)
+        ts.emit("tool", quote_blob)
+        ts.emit("tool", candles_blob)
+        ts.emit("tool", scan_blob)
+        ts.emit("tool", note_blob)
+        ts.emit("tool", short_hits)
+        ts.emit("tool", short_args)
+        ts.emit("say", say_text)
+    finally:
+        ts.unsubscribe(cap)
+        ts.bind_engine(None)
+        ts.reset_speaker()
+
+    session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
+    live = st.think_live
+
+    # Paid blobs stay on the listener (model path is chat.append; glass uses piece).
+    assert any(err_blob.strip() in t for _k, t, _p in painted)
+    assert any(scan_blob.strip() in t for _k, t, _p in painted)
+
+    for blob in (err_blob, book_blob, quote_blob, candles_blob, scan_blob, note_blob):
+        assert blob.strip() not in session
+        assert blob.strip() not in live
+        assert "debug_error_string" not in session
+        assert "open_gap_pct" not in session
+        assert "durable note body" not in session
+
+    assert "error:" in session or "Connection refused" in session
+    assert "debug_error_string" not in live
+    assert "leftover $12.4k" in session
+    assert "IWM last=244.15 bid=244.1/244.2" in session
+    assert "AAPL 1d bars=30" in session
+    assert "close=40" in session or "close=40.0" in session
+    assert "mega_cap/TOP_PERC_LOSE" in session
+    assert "SNDK" in session and "NVDA" in session
+    assert "ok notes id=n_abc123" in session or (
+        "ok" in session and "id=n_abc123" in session
+    )
+    # Small lines + say unchanged.
+    assert short_hits.strip() in session
+    assert short_args.strip() in session
+    assert say_text.strip() in session
+    assert "[book]" in session
+    # Large JSON pieces are desk lines; short args JSON may stay verbatim.
+    for _k, text, piece in painted:
+        if _k != "tool":
+            continue
+        if len(text.strip()) <= ts._TOOL_GLASS_KEEP:
+            continue
+        assert text.strip() not in piece
+        assert len(piece.strip()) <= ts._TOOL_GLASS_MAX + 5
+        assert not piece.strip().startswith('{"ok": true, "arena"')
+        assert "open_gap_pct" not in piece
+        assert "debug_error_string" not in piece
+        assert "durable note body" not in piece
+
 
 
 def test_think_session_keeps_looks_the_tail_window_drops(tmp_path, monkeypatch):

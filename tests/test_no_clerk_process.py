@@ -14,7 +14,7 @@ from abcxauto.think_stream import emit, reset_speaker
 SYSTEM_PROMPT_LOCK = (
     "You own an Interactive Brokers {mode} book. Strategy is yours.\n"
     "Risk is code.\n"
-    "Keep researching after a fill. A full book is only for a name you will not cut. Otherwise rotate into the better name.\n"
+    "Performance is the point. Research widely. Capital works in stock or options, or it moves.\n"
     "A refuse for price or size is resent at the live print and a quantity that fits, or you take a better name.\n"
     "send tickets that match ORDER EXAMPLES.\n"
     "Size vs max_risk_per_trade_pct of NetLiq.\n"
@@ -117,7 +117,7 @@ def test_real_say_keeps_chat_empty_question_idles():
     )
     assert getattr(g, "chat", None) is chat
     _finish_look_chat(g, BrainTurn(parked=True, text="gate off"), session="regular")
-    assert getattr(g, "chat", None) is None
+    assert getattr(g, "chat", None) is chat
 
 
 def test_spoken_look_is_not_a_failed_persist():

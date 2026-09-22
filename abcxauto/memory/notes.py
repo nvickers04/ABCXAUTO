@@ -1,6 +1,6 @@
 """Durable notes in journal.db. Fetch-only; never wake/book/status/prompt bodies.
 
-Park / chat-reset clear this-flight working_memory, not this table.
+Park / chat-reset leave this table alone.
 """
 
 from __future__ import annotations
@@ -339,8 +339,10 @@ class JournalNotes:
                 "error": why,
                 "note": "observation with evidence, not a law",
             }
+        clipped = False
         if len(text) > MAX_BODY:
-            return {"ok": False, "error": "body_too_long", "max": MAX_BODY}
+            text = text[:MAX_BODY]
+            clipped = True
         kind_s = str(kind or KIND_FACT).strip().lower()
         if kind_s == "rule":
             return {"ok": False, "error": "kind_rule_forbidden"}
@@ -423,7 +425,10 @@ class JournalNotes:
             return {"ok": False, "error": "write_failed"}
         if not row:
             return {"ok": False, "error": "write_failed"}
-        return {"ok": True, "note": _public(row, clock, body=True)}
+        out: dict[str, Any] = {"ok": True, "note": _public(row, clock, body=True)}
+        if clipped:
+            out["clipped"] = True
+        return out
 
     def invalidate_note(
         self,

@@ -97,6 +97,9 @@ def test_default_desk_create_kwargs_omit_effort():
     assert kw["temperature"] == 0.3
     assert kw["max_tokens"] == 8192
     assert kw["include"] == ["verbose_streaming"]
+    assert kw["store_messages"] is True
+    assert kw["use_encrypted_content"] is True
+    assert "previous_response_id" not in kw
     assert "reasoning_effort" not in kw
     assert "effort" not in kw
     assert "thinking" not in kw
@@ -225,9 +228,30 @@ def test_chat_create_passes_future_params():
     assert "thinking" not in kw
     assert "effort" not in kw
     assert kw["include"] == ["verbose_streaming"]
+    assert kw["store_messages"] is True
     create_chat(SimpleNamespace(chat=_Chat()), **kw)
     assert created["reasoning_effort"] == "high"
     assert created["model"] == "grok-4.7"
+    assert created["store_messages"] is True
+
+
+def test_chat_create_kwargs_previous_response_id_omits_messages():
+    g = SimpleNamespace(
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=8192,
+        model_params={},
+    )
+    kw = chat_create_kwargs(
+        g,
+        messages=["should-not-send"],
+        tools=["book"],
+        previous_response_id="resp_xyz",
+    )
+    assert kw["previous_response_id"] == "resp_xyz"
+    assert kw["store_messages"] is True
+    assert "messages" not in kw
+    assert kw["tools"] == ["book"]
 
 
 def test_effort_alias_reaches_sdk_and_unknown_key_does_not_strip_it():

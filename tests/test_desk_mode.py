@@ -1,4 +1,4 @@
-"""Dual-mode desk: RTH thin sender vs premarket/AH research (no send)."""
+"""Dual-mode desk: RTH thin sender; paper stay-up may send outside RTH."""
 
 from __future__ import annotations
 
@@ -244,8 +244,8 @@ def test_spoken_ticket_without_send_works_flat_and_does_not_mill_color():
         {"rationale": "CLOSE IBIT. EXIT XLF.", "sends": 0, "positions": pos}
     )
     assert ticket_wake_fact() == TICKET_WAKE_FACT
-    assert "SEND-THE-TICKET" in ticket_wake_fact()
-    assert "unpaid" in ticket_wake_fact()
+    assert "SEND-THE-TICKET" not in ticket_wake_fact()
+    assert "send did not run" in ticket_wake_fact().lower()
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
@@ -286,6 +286,80 @@ def test_spoken_ticket_without_send_hold_lot_is_not_unpaid():
     )
     assert spoken_ticket_without_send("buy AMZN", positions=nvda, sends=0)
     assert spoken_ticket_without_send("AMZN long", positions=nvda, sends=0)
+    assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
+
+
+def test_spoken_ticket_without_send_hold_bracket_stop_is_not_unpaid():
+    """Live 2026-09-22: Hold AVGO + bracket stop/target prose must not arm wake.
+
+    ``_ticket_structure_pattern`` matches the word ``bracket`` in protection
+    speech. Hold / pass / no-trade stands the open down; buy NVDA or NVDA
+    bracket with zero send still arms. A hold essay that only compares other
+    names is not unpaid either.
+    """
+    from abcxauto.desk_mode import (
+        _ticket_structure_pattern,
+        look_spoken_ticket_without_send,
+        look_unpaid_ticket,
+        spoken_ticket_without_send,
+    )
+
+    say = (
+        "Hold AVGO. 89 shares already protected — bracket stop 356.35 / "
+        "target 360.87. NVDA AMD MSFT SHOP are not better; I will not cut "
+        "or rotate into those names. No ticket."
+    )
+    avgo = [{"symbol": "AVGO", "quantity": 89}]
+    # Diagnose: structure would have fired on ``bracket`` alone.
+    assert _ticket_structure_pattern().search(say).group(0).lower() == "bracket"
+    assert not spoken_ticket_without_send(
+        say, positions=avgo, sends=0, tool_trace=["book", "quote", "news"]
+    )
+    assert not look_spoken_ticket_without_send(
+        {
+            "rationale": say,
+            "sends": 0,
+            "positions": avgo,
+            "tool_trace": ["book", "quote", "news"],
+        }
+    )
+    # Hold essay naming AVGO + peers + stop/target/bracket — not an unpaid ticket.
+    essay = (
+        "Compared NVDA, GOOGL, AMD, ORCL, MSFT, and SHOP against AVGO. "
+        "Stop 356.35 / target 360.87 bracket already working on the lot. "
+        "Conclusion: Hold."
+    )
+    assert _ticket_structure_pattern().search(essay).group(0).lower() == "bracket"
+    assert not spoken_ticket_without_send(
+        essay, positions=avgo, sends=0, tool_trace=["book", "quote"]
+    )
+    assert not look_unpaid_ticket(
+        {
+            "rationale": essay,
+            "sends": 0,
+            "positions": avgo,
+            "tool_trace": ["book", "quote"],
+        }
+    )
+    assert not spoken_ticket_without_send(
+        "AVGO vs NVDA GOOGL AMD. Pass on rotating. Stop/target/bracket stay.",
+        positions=avgo,
+        sends=0,
+    )
+    assert not spoken_ticket_without_send(
+        "No-trade. AVGO stop 356.35 target 369.85 bracket. Watching NVDA MSFT.",
+        positions=avgo,
+        sends=0,
+    )
+    # Real spoken buy / structure still unpaid when no send.
+    assert spoken_ticket_without_send("buy NVDA", positions=avgo, sends=0)
+    assert spoken_ticket_without_send("NVDA bracket", positions=avgo, sends=0)
+    assert spoken_ticket_without_send(
+        "Hold AVGO. buy NVDA 10.", positions=avgo, sends=0
+    )
+    assert spoken_ticket_without_send(
+        "INTC market_bracket LONG 10 stop 35 target 42.", sends=0
+    )
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
@@ -406,15 +480,24 @@ async def test_rth_send_reaches_executor(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sess", ["premarket", "postmarket", "closed"])
-async def test_research_send_is_blocked(monkeypatch, sess):
-    monkeypatch.setattr("abcxauto.send.safe_execute", _safe_execute_must_not_run)
+async def test_research_session_send_reaches_executor(monkeypatch, sess):
+    """Paper stay-up: session label alone is not research_no_send."""
+    dispatched = []
+
+    async def _record(action, connector):
+        dispatched.append((action, connector))
+        return {"status": "ok", "note": "dispatched"}
+
+    monkeypatch.setattr("abcxauto.send.safe_execute", _record)
     from abcxauto.send import send_action
+    from abcxauto.send_preview import bind_place_token
 
     ticket = {**_placeable_ticket(), "_desk_session": sess}
+    bind_place_token(ticket)
     result = await send_action(ticket, _connector())
-    assert result["status"] == "blocked"
-    assert result.get("reason_code") == REASON_RESEARCH_NO_SEND
-    assert "research" in str(result.get("note") or "").lower()
+    assert result["status"] == "ok"
+    assert result.get("reason_code") != REASON_RESEARCH_NO_SEND
+    assert len(dispatched) == 1
 
 
 @pytest.mark.asyncio
@@ -578,8 +661,10 @@ def test_rth_wake_loads_brief_and_runs_when_missing():
         day={},
     )
     assert "desk_mode=research" in research
-    assert "send=blocked" in research
-    assert REASON_RESEARCH_NO_SEND in research
+    assert "send=allowed(existing gates)" in research
+    assert "session=premarket" in research
+    assert "send=blocked" not in research
+    assert REASON_RESEARCH_NO_SEND not in research
 
 
 def test_self_tune_cannot_set_session_models():
@@ -674,28 +759,32 @@ async def test_search_public_quotes_web_and_x(monkeypatch):
 
     seen: dict = {}
 
+    # xai-sdk 1.19 WebCitation / XCitation are url-only (no title/username fields).
     class _X:
         url = "https://x.com/example/status/1"
-        title = "AVGO guide raised"
-        username = "example"
 
     class _Web:
         url = "https://example.com/avgo"
-        title = "Broadcom filing"
 
     class _CiteX:
         x_citation = _X()
         web_citation = None
 
+        def HasField(self, name: str) -> bool:
+            return name == "x_citation"
+
     class _CiteWeb:
         x_citation = None
         web_citation = _Web()
 
-    async def _sample(query, sources):
+        def HasField(self, name: str) -> bool:
+            return name == "web_citation"
+
+    async def _sample(query, tools):
         seen["query"] = query
-        seen["n"] = len(sources)
+        seen["tools"] = list(tools)
         return SimpleNamespace(
-            content="Guide raised.",
+            content="Guide raised.[[1]](https://x.com/example/status/1)",
             inline_citations=[_CiteX(), _CiteWeb()],
             citations=[],
         )
@@ -711,10 +800,14 @@ async def test_search_public_quotes_web_and_x(monkeypatch):
     assert results[0]["handle"] == "example"
     assert results[1]["source"] == "web"
     assert seen["query"] == "AVGO guidance"
-    assert seen["n"] == 2
+    assert len(seen["tools"]) == 2
+    assert seen["tools"][0].WhichOneof("tool") == "web_search"
+    assert seen["tools"][0].web_search.user_location.country == "US"
+    assert seen["tools"][1].WhichOneof("tool") == "x_search"
+    assert list(seen["tools"][1].x_search.allowed_x_handles) == ["example", "other"]
 
-    async def _x_only(query, sources):
-        seen["x_n"] = len(sources)
+    async def _x_only(query, tools):
+        seen["x_n"] = len(tools)
         return SimpleNamespace(content="post", inline_citations=[], citations=["https://x.com/a/status/2"])
 
     monkeypatch.setattr("abcxauto.desk_mode._xai_search_sample", _x_only)
@@ -722,6 +815,59 @@ async def test_search_public_quotes_web_and_x(monkeypatch):
     assert xpage.get("where") == "x"
     assert seen["x_n"] == 1
     assert (xpage.get("results") or [])[0]["source"] == "x"
+    assert (xpage.get("results") or [])[0]["handle"] == "a"
+
+
+def test_cite_rows_matches_xai_sdk_inline_citation_shape():
+    """Installed xai-sdk InlineCitation oneof is url-only; HasField selects the arm."""
+    from types import SimpleNamespace
+
+    from xai_sdk.proto import chat_pb2
+
+    from abcxauto.desk_mode import _cite_rows
+
+    x = chat_pb2.InlineCitation(
+        id="1",
+        start_index=0,
+        end_index=10,
+        x_citation=chat_pb2.XCitation(url="https://x.com/example/status/1"),
+    )
+    w = chat_pb2.InlineCitation(
+        id="2",
+        start_index=11,
+        end_index=20,
+        web_citation=chat_pb2.WebCitation(url="https://example.com/avgo"),
+    )
+    rows = _cite_rows(
+        SimpleNamespace(
+            content="x[[1]](https://x.com/example/status/1) w[[2]](https://example.com/avgo)",
+            inline_citations=[x, w],
+            citations=["https://www.x.com/other/status/9"],
+        )
+    )
+    assert [r["source"] for r in rows] == ["x", "web", "x"]
+    assert rows[0]["handle"] == "example"
+    assert rows[2]["handle"] == "other"
+    assert rows[1]["url"] == "https://example.com/avgo"
+
+
+@pytest.mark.asyncio
+async def test_search_public_unavailable_is_short(monkeypatch):
+    from abcxauto.desk_mode import search_public
+
+    async def _boom(query, tools):
+        raise RuntimeError(
+            "Live search is deprecated. Please switch to the Agent Tools API "
+            "status = StatusCode.UNIMPLEMENTED"
+        )
+
+    monkeypatch.setattr("abcxauto.desk_mode._xai_search_sample", _boom)
+    page = await search_public("AVGO Broadcom stock news", where="web")
+    assert page.get("error") == "web search unavailable"
+    assert "UNIMPLEMENTED" not in str(page.get("error") or "")
+    assert "traceback" not in str(page).lower()
+    assert page.get("use") == WEB_USE
+    assert page.get("send_geometry") is not True
 
 
 def _world(session: str):
@@ -770,7 +916,7 @@ def test_agent_tools_web_on_rth_and_research():
     for sess in ("premarket", "postmarket", "closed"):
         research = _tool_names(sess)
         assert "web" in research, sess
-        assert "send" not in research, sess
+        assert "send" in research, sess
         assert "news" in research, sess
         assert "scan" in research, sess
 
@@ -875,15 +1021,24 @@ async def test_web_tool_fetches_in_rth_and_research(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_send_tool_hard_blocks_in_research():
+async def test_send_tool_not_session_banned_in_research(monkeypatch):
+    """Session label alone must not return research_no_send from the send tool."""
     import json
 
     from abcxauto.brain import BrainTurn, _run_tool
     from abcxauto.world_state import WorldState
 
+    async def _fake_execute(act, connector, world, snap):
+        return {
+            "status": "ok",
+            "note": "execute_ticket reached",
+            "strategy": str(act.get("strategy") or ""),
+        }
+
+    monkeypatch.setattr("abcxauto.agent_loop.execute_ticket", _fake_execute)
     world = WorldState(
         cycle=1,
-        session_status="after-hours" if False else "postmarket",
+        session_status="postmarket",
         flat=True,
         needs_protection=False,
         unprotected=[],
@@ -906,12 +1061,23 @@ async def test_send_tool_hard_blocks_in_research():
     turn = BrainTurn()
     raw = await _run_tool(
         "send",
-        {"strategy": "market_bracket", "symbol": "SPY"},
+        {
+            "strategy": "market_bracket",
+            "params": {
+                "symbol": "SPY",
+                "direction": "LONG",
+                "quantity": 1,
+                "stop_price": 400.0,
+                "target_price": 420.0,
+                "card": "stay-up",
+            },
+        },
         connector=MagicMock(),
         world=world,
         snap={},
         turn=turn,
     )
     data = json.loads(raw)
-    assert data.get("reason_code") == REASON_RESEARCH_NO_SEND
-    assert data.get("status") == "blocked"
+    assert data.get("reason_code") != REASON_RESEARCH_NO_SEND
+    assert data.get("status") == "ok"
+    assert turn.sends

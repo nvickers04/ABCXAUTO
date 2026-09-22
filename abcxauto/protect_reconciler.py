@@ -454,6 +454,7 @@ class ProtectionReconciler:
             uncovered = uncovered_stk_symbols(positions, open_orders)
             if not uncovered:
                 self.last_unprotected = []
+                await self._resize_held_exits(positions)
                 return left
             live_orders = list(open_orders)
             still: list[str] = []
@@ -619,8 +620,84 @@ class ProtectionReconciler:
                 "orphan-protection: cancelled %s on flat %s after fill",
                 cancelled, symbol,
             )
+        await self._resize_oversized_exits(symbol)
         await self._note_uncovered_lots(symbol)
         return list(cancelled or [])
+
+    async def _resize_held_exits(self, positions: Any) -> None:
+        """Startup: shrink stop/target qty that still matches the pre-trim lot."""
+        seen: set[str] = set()
+        for pos in positions or []:
+            if not isinstance(pos, dict):
+                continue
+            sym = str(pos.get("symbol") or "").strip().upper()
+            sec = str(pos.get("secType") or pos.get("sec_type") or "STK").upper()
+            if not sym or sym in seen or not sec.startswith("STK"):
+                continue
+            seen.add(sym)
+            await self._resize_oversized_exits(sym)
+
+    async def _resize_oversized_exits(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """After a partial exit, shrink working stop/target to held qty.
+
+        Place the replacement via ``execute_proposal`` (oca / stop_order) so
+        replace-on-place cancels the old legs only after the new ones are
+        accepted. Never market-sells; never flattens the remainder.
+        """
+        symbol = str(symbol or "").strip().upper()
+        if not symbol:
+            return None
+        try:
+            positions = await self.connector.get_positions()
+            open_orders = await self.connector.get_open_orders()
+        except Exception:
+            logger.debug(
+                "reconciler resize book read failed for %s", symbol, exc_info=True
+            )
+            return None
+        if positions is None or open_orders is None:
+            return None
+        from abcxauto.trade_plan import exit_resize_ticket
+
+        ticket = exit_resize_ticket(positions, open_orders, symbol=symbol)
+        if not ticket:
+            return None
+        try:
+            from abcxauto.executor import execute_proposal
+            from abcxauto.proposals import validate_proposal
+
+            proposal = validate_proposal(
+                str(ticket["strategy"]),
+                dict(ticket["params"]),
+                str(ticket["rationale"]),
+                quote_last=ticket["params"].get("price_hint"),
+            )
+            result = await execute_proposal(
+                proposal, self.connector, source="protect_resize"
+            )
+        except Exception:
+            logger.exception("protect resize failed for %s", symbol)
+            return None
+        if isinstance(result, dict) and (
+            result.get("success")
+            or result.get("stop_order_id")
+            or result.get("order_id")
+        ):
+            logger.warning(
+                "resized exits on %s after trim: stop_qty %s → held %s via %s",
+                symbol,
+                ticket.get("stop_order_qty"),
+                ticket.get("held_qty"),
+                ticket.get("strategy"),
+            )
+            return result
+        if isinstance(result, dict) and result.get("error"):
+            logger.warning(
+                "protect resize rejected for %s: %s",
+                symbol,
+                result.get("error"),
+            )
+        return result if isinstance(result, dict) else None
 
     async def _note_uncovered_lots(self, symbol: str) -> None:
         """A leftover lot is unprotected unless its last-stop covers held qty."""

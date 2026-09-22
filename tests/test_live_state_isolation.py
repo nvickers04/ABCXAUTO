@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import os
 from pathlib import Path
 
 from abcxauto.config import default_file_log_path, setup_file_logging
@@ -26,11 +24,6 @@ from abcxauto.think_stream import (
     think_tail_path,
     write_last_turn,
 )
-from abcxauto.working_memory import (
-    WORKING_MEMORY_PATH,
-    clear_working_memory,
-    working_memory_path,
-)
 
 REPO = Path(__file__).resolve().parents[1]
 REPO_APP_LOG = (REPO / "logs" / "app.log").resolve()
@@ -42,7 +35,6 @@ _PATH_ENV = (
     "ABCXAUTO_JOURNAL_PATH",
     "ABCXAUTO_LOOK_METER_PATH",
     "ABCXAUTO_LOG_PATH",
-    "ABCXAUTO_WORKING_MEMORY_PATH",
     "ABCXAUTO_LAST_TURN_PATH",
     "ABCXAUTO_THINK_TAIL_PATH",
     "ABCXAUTO_THINK_PREV_PATH",
@@ -78,9 +70,6 @@ def test_production_paths_unchanged_when_env_absent(monkeypatch):
     assert think_session_dir() == THINK_SESSION_DIR
     assert run_path() == RUN_PATH
 
-    assert WORKING_MEMORY_PATH == state / "working_memory.json"
-    assert working_memory_path() == WORKING_MEMORY_PATH
-
     # Watchlist is gone. No env seam, no default path helper.
     import abcxauto.universe as universe
 
@@ -103,14 +92,11 @@ def test_env_redirects_writes_away_from_live_paths(tmp_path, monkeypatch):
         "journal": _sha256(REPO_JOURNAL),
         "look_meter": _sha256(REPO_LOOK_METER),
         "universe": _sha256(REPO_UNIVERSE),
-        "wm": _sha256(REPO / "data" / "state" / "working_memory.json"),
         "last_turn": _sha256(REPO / "data" / "state" / "last_turn.json"),
     }
 
-    wm = tmp_path / "working_memory.json"
     last = tmp_path / "last_turn.json"
     meter = tmp_path / "look_meter.db"
-    monkeypatch.setenv("ABCXAUTO_WORKING_MEMORY_PATH", str(wm))
     monkeypatch.setenv("ABCXAUTO_LAST_TURN_PATH", str(last))
     monkeypatch.setenv("ABCXAUTO_DESK_BRIEF_PATH", str(tmp_path / "desk_brief.json"))
     monkeypatch.setenv("ABCXAUTO_LOG_PATH", str(tmp_path / "app.log"))
@@ -118,8 +104,6 @@ def test_env_redirects_writes_away_from_live_paths(tmp_path, monkeypatch):
 
     # Watchlist writer is gone: this test used to save_allowlist() here.
     # The live universe_allowlist.json hash below must stay byte-identical.
-    wm.write_text(json.dumps({"lines": ["parked"]}) + "\n", encoding="utf-8")
-    clear_working_memory()
     write_last_turn(
         {
             "strat": "",
@@ -139,7 +123,6 @@ def test_env_redirects_writes_away_from_live_paths(tmp_path, monkeypatch):
         handler.flush()
 
     assert not (tmp_path / "universe_allowlist.json").is_file()
-    assert not wm.is_file()
     assert last.is_file()
     assert "isolation probe" in last.read_text(encoding="utf-8")
     assert (tmp_path / "app.log").is_file()
@@ -151,7 +134,6 @@ def test_env_redirects_writes_away_from_live_paths(tmp_path, monkeypatch):
         "journal": _sha256(REPO_JOURNAL),
         "look_meter": _sha256(REPO_LOOK_METER),
         "universe": _sha256(REPO_UNIVERSE),
-        "wm": _sha256(REPO / "data" / "state" / "working_memory.json"),
         "last_turn": _sha256(REPO / "data" / "state" / "last_turn.json"),
     }
     assert after == before
@@ -199,17 +181,3 @@ def test_get_journal_after_singleton_clear_opens_redirected_path(tmp_path, monke
     assert Path(journal.path).resolve() == dest.resolve()
     assert Path(journal.path).resolve() != REPO_JOURNAL
     assert Path(journal.path).resolve() != Path(_DEFAULT_DB_PATH).resolve() or dest.resolve() == Path(journal.path).resolve()
-
-
-def test_clear_working_memory_cannot_unlink_live_file(tmp_path, monkeypatch):
-    decoy = tmp_path / "decoy-live" / "working_memory.json"
-    decoy.parent.mkdir()
-    decoy.write_text(json.dumps({"lines": ["keep-me"]}) + "\n", encoding="utf-8")
-    redirected = tmp_path / "wm.json"
-    redirected.write_text(json.dumps({"lines": ["tmp"]}) + "\n", encoding="utf-8")
-    monkeypatch.setattr("abcxauto.working_memory.WORKING_MEMORY_PATH", decoy)
-    monkeypatch.setenv("ABCXAUTO_WORKING_MEMORY_PATH", str(redirected))
-    clear_working_memory()
-    assert decoy.is_file()
-    assert json.loads(decoy.read_text(encoding="utf-8"))["lines"] == ["keep-me"]
-    assert not redirected.is_file()

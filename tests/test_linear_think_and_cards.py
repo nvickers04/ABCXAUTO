@@ -410,7 +410,7 @@ def test_fill_poke_does_not_repeat_identical_fact_line(monkeypatch):
 
 
 def test_every_wake_is_a_new_chat():
-    """A live chat stays one messages list. Drop, then a new one."""
+    """A live chat stays one messages list. Drop does not start another."""
     from types import SimpleNamespace
 
     from abcxauto.brain import _open_wake, drop_live_chat
@@ -440,8 +440,8 @@ def test_every_wake_is_a_new_chat():
     assert len(created) == 1
     drop_live_chat(g)
     c = _open_wake(g, "wake three")
-    assert c is not a
-    assert len(created) == 2
+    assert c is a
+    assert len(created) == 1
 
 
 def test_stay_up_resume_reuses_live_chat():

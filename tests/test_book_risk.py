@@ -253,3 +253,230 @@ def test_allocation_line_leftover_vs_lots_to_target():
     assert "tgt=256" in line
     assert "to_tgt=" in line
     assert "AMZN" in line
+
+
+def test_allocation_liquidity_cut_and_risk_to_stop_full_book():
+    """Near-full STK book: dollars freed by cut + risk-to-stop, not advice."""
+    from abcxauto.world_state import allocation_facts, allocation_line
+
+    # Live-shaped 2026-09-22: 89 AVGO ~99% NL, ~$214 cash, stop close.
+    nl = 32_343.0
+    last = 361.0
+    stop = 356.35
+    qty = 89
+    facts = allocation_facts(
+        [
+            {
+                "symbol": "AVGO",
+                "quantity": qty,
+                "secType": "STK",
+                "mkt": last,
+            },
+            {
+                "symbol": "GHOST",
+                "quantity": 0,
+                "secType": "STK",
+                "mkt": 100.0,
+            },
+        ],
+        net_liq=nl,
+        total_cash=214.0,
+        quotes={"AVGO": last},
+        orders=[{"symbol": "AVGO", "type": "STP", "stop": stop}],
+    )
+    assert [lot["symbol"] for lot in facts["lots"]] == ["AVGO"]
+    lot = facts["lots"][0]
+    assert lot["qty"] == 89
+    assert lot["last"] == last
+    assert lot["stop"] == stop
+    assert lot["cut_all_usd"] == pytest.approx(89 * last)
+    assert lot["cut_half_usd"] == pytest.approx(44 * last)
+    assert lot["risk_pct_nl"] == pytest.approx(
+        round(abs(last - stop) * qty / nl * 100, 2)
+    )
+    assert facts["leftover_usd"] == 214.0
+    assert facts["liquidity"]["cut_all_usd"] == pytest.approx(89 * last)
+    assert facts["liquidity"]["cut_half_usd"] == pytest.approx(44 * last)
+    assert facts["risk_to_stop_usd"] == pytest.approx(abs(last - stop) * qty)
+    line = allocation_line(facts)
+    assert "leftover $214" in line
+    assert "cut-half $" in line
+    assert "cut-all $" in line
+    assert "risk-to-stop $" in line
+    assert "AVGO89" in line
+    assert f"risk={lot['risk_pct_nl']}%" in line
+    lower = line.lower()
+    assert "sell" not in lower
+    assert "should" not in lower
+    assert "must" not in lower
+    assert "you " not in lower
+
+
+def test_format_wake_full_avgo_book_includes_cut_half_and_risk_to_stop():
+    """Continuation wake must carry liquidity dollars — book tool rows are omitted."""
+    from abcxauto.world_state import allocation_facts, format_wake
+
+    nl = 32_343.0
+    last = 362.77
+    stop = 356.35
+    qty = 89
+    cash = 214.23
+    alloc = allocation_facts(
+        [
+            {
+                "symbol": "AVGO",
+                "quantity": qty,
+                "secType": "STK",
+                "mkt": last,
+            }
+        ],
+        net_liq=nl,
+        total_cash=cash,
+        quotes={"AVGO": last},
+        orders=[
+            {"symbol": "AVGO", "type": "STP", "stop": stop},
+            {"symbol": "AVGO", "type": "LMT", "lmt": 369.85, "role": "exit"},
+        ],
+    )
+    wake = format_wake(
+        cycle=1,
+        session="regular",
+        flat=False,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "names": 1,
+            "lots": 1,
+            "nl": nl,
+            "daily_pnl": 0.0,
+            "allocation": alloc,
+            "capital_liquidity": {
+                "total_cash": cash,
+                "cash_pct_nl": alloc.get("cash_pct_nl"),
+                "deployed_long_pct_nl": alloc.get("deployed_pct_nl"),
+            },
+            "exposure": {
+                "top_symbol": "AVGO",
+                "top_concentration_pct": alloc["lots"][0]["pct_nl"],
+            },
+            "capacity": {"open_count": 1, "max_open_positions": 0},
+            "open_lots": ["AVGO STK long 89"],
+            "buying_power_usd": 21854.01,
+            "cash_only": False,
+            "stop_dist": {
+                "ident": "AVGO STK long 89",
+                "dist": 6.42,
+                "stop": stop,
+                "last": last,
+            },
+        },
+    )
+    assert "cut-half $" in wake
+    assert "cut-all $" in wake
+    assert "risk-to-stop $" in wake
+    assert "leftover $214.23" in wake or "leftover $214" in wake
+    assert "AVGO89" in wake
+    assert "stp=356.35" in wake
+    assert "tgt=369.85" in wake
+    assert "to_tgt=" in wake
+    assert "%NL" in wake
+    assert "buying_power=$21854.01" in wake
+    assert "cash_only=off" in wake
+    assert wake.splitlines()[0].startswith("fact: closest_stop AVGO")
+    assert "to_tgt=" in wake.splitlines()[0]
+    assert "eff=0.0195" in wake
+    assert "alloc AVGO cap=" in wake
+    lower = wake.lower()
+    assert "sell" not in lower
+    assert "rotate" not in lower
+    assert "should" not in lower
+
+
+def test_format_wake_day_lines_alloc_research_spend():
+    """Preformatted day lines ride the wake as fact sentences."""
+    from abcxauto.world_state import format_wake
+
+    wake = format_wake(
+        cycle=1,
+        session="regular",
+        flat=True,
+        unprotected=[],
+        ibkr_up=True,
+        day={
+            "names": 0,
+            "lots": 0,
+            "capacity": {"open_count": 0, "max_open_positions": 0},
+            "alloc_line": "alloc fact FOO=1",
+            "research_line": "research budget left=2",
+            "session_spend_usd": 12.5,
+        },
+    )
+    assert "alloc fact FOO=1" in wake
+    assert "research budget left=2" in wake
+    assert "spend session=$12.50" in wake
+    lower = wake.lower()
+    assert "sell" not in lower
+    assert "rotate" not in lower
+
+
+def test_allocation_zero_cash_stays_zero_and_bid_feeds_cut():
+    from abcxauto.world_state import allocation_facts, allocation_line
+
+    facts = allocation_facts(
+        [
+            {
+                "symbol": "MSFT",
+                "quantity": 10,
+                "secType": "STK",
+                "bid": 400.0,
+            }
+        ],
+        net_liq=10_000.0,
+        total_cash=0.0,
+    )
+    assert facts["leftover_usd"] == 0.0
+    assert facts["cash_pct_nl"] == 0.0
+    lot = facts["lots"][0]
+    assert lot["last"] == 400.0
+    assert lot["cut_all_usd"] == 4000.0
+    assert lot["cut_half_usd"] == 2000.0
+    assert "risk_to_stop_usd" not in facts
+    assert "stop" not in lot
+    line = allocation_line(facts)
+    assert "leftover $0" in line
+    assert "cash=0" in line
+    assert "cut-half $2000" in line
+    assert "cut-all $4000" in line
+    assert "risk-to-stop" not in line
+
+
+def test_allocation_opt_and_short_skip_cut_liquidity():
+    from abcxauto.world_state import allocation_facts
+
+    facts = allocation_facts(
+        [
+            {
+                "symbol": "QQQ",
+                "quantity": 1,
+                "secType": "OPT",
+                "mkt": 5.0,
+            },
+            {
+                "symbol": "SPY",
+                "quantity": -10,
+                "secType": "STK",
+                "mkt": 500.0,
+                "stop": 510.0,
+            },
+        ],
+        net_liq=100_000.0,
+        total_cash=50_000.0,
+    )
+    by_sym = {lot["symbol"]: lot for lot in facts["lots"]}
+    assert "cut_all_usd" not in by_sym["QQQ"]
+    assert "cut_half_usd" not in by_sym["QQQ"]
+    assert "cut_all_usd" not in by_sym["SPY"]
+    assert "liquidity" not in facts
+    # Short has risk_pct_nl but does not add to long-only risk_to_stop_usd.
+    assert by_sym["SPY"].get("risk_pct_nl") is not None
+    assert "risk_to_stop_usd" not in facts

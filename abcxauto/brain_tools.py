@@ -980,21 +980,10 @@ def _candle_res_from_tape(snap: dict[str, Any] | None) -> str:
 
 
 def _stamp_session_size(session: dict[str, Any], world: WorldState) -> None:
-    """Knob-sized shares if stop is this session low. Not a ticket."""
-    if not isinstance(session, dict) or session.get("size"):
-        return
-    try:
-        from abcxauto.protect import size_if_stop
-
-        sized = size_if_stop(
-            last=session.get("last"),
-            stop=session.get("low"),
-            equity=getattr(world, "net_liquidation", None),
-        )
-    except Exception:
-        sized = {}
-    if sized:
-        session["size"] = sized
+    """Drop invented size. Candles report range facts, not a proposed qty."""
+    _ = world
+    if isinstance(session, dict):
+        session.pop("size", None)
 
 
 def _stamp_session_ticket(session: dict[str, Any]) -> None:
@@ -1673,22 +1662,6 @@ AGENT_TOOLS = [
         ),
     ),
     tool(
-        name="note",
-        description=(
-            "This-flight one-sentence conclusion. Grok-owned. "
-            "Empty reads the list. Not a fact."
-        ),
-        parameters=_schema(
-            {
-                "line": {
-                    "type": "string",
-                    "description": "One sentence. Omitted reads the list.",
-                },
-            },
-            [],
-        ),
-    ),
-    tool(
         name="recall",
         description="Durable notes and cards. list/get fetch; write stores; invalidate retires.",
         parameters=_schema(
@@ -1700,7 +1673,7 @@ AGENT_TOOLS = [
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "kind": {"enum": ["fact", "event", "invalidate"]},
                 "symbol": {},
-                "body": {},
+                "body": {"description": "max 160"},
                 "evidence": {
                     "description": (
                         "store=cards: list of objects with optional tool (string) "
@@ -1741,20 +1714,16 @@ def _send_strategy_names_for_look(*, session: str = "") -> list[str]:
 def agent_tools(*, session: str = "") -> list:
     """Tools this look. Overnight park is code. Stay-up has no sit clock.
 
-    Research (premarket / postmarket / closed) omits ``send``. RTH keeps ``send``.
-    ``web`` is COLOR on both (not a live trigger).
+    ``send`` is offered in every session (paper stay-up). Cash / defined-risk /
+    daily-loss / research_thin still gate place. ``web`` is COLOR (not a live
+    trigger).
     """
-    from abcxauto.desk_mode import is_research_session
-
-    research = is_research_session(session)
     names = _send_strategy_names_for_look(session=session)
     out: list = []
     for t in AGENT_TOOLS:
         fn = getattr(t, "function", None)
         name = str(getattr(fn, "name", None) or getattr(t, "name", "") or "")
         if name == "send":
-            if research:
-                continue
             out.append(_send_tool(names))
         else:
             out.append(t)
@@ -2057,7 +2026,7 @@ async def _run_tool(
             st["session"] = {"session": world.session_status}
         st["sends_this_turn"] = len(turn.sends)
         try:
-            from abcxauto.desk_mode import desk_mode, is_research_session
+            from abcxauto.desk_mode import desk_mode
 
             sess = str(
                 (st.get("session") or {}).get("session")
@@ -2065,7 +2034,8 @@ async def _run_tool(
                 or ""
             )
             st["desk_mode"] = desk_mode(sess)
-            st["send_allowed"] = not is_research_session(sess)
+            # Session label is not a send ban — hard gates still refuse.
+            st["send_allowed"] = True
         except Exception:
             st["desk_mode"] = ""
             st["send_allowed"] = True
@@ -2807,23 +2777,6 @@ async def _run_tool(
             "facts": facts,
         })
     if name == "send":
-        from abcxauto.desk_mode import is_research_session, research_send_block
-
-        sess = str(getattr(world, "session_status", "") or "")
-        if is_research_session(sess):
-            blocked = research_send_block(session=sess)
-            turn.last_act = {
-                "action": "blocked",
-                "strategy": "blocked",
-                "params": {},
-                "rationale": blocked.get("note") or "",
-            }
-            turn.last_result = blocked
-            turn.last_strat = "blocked"
-            turn.sends.append(
-                {"act": dict(turn.last_act), "result": blocked, "strat": "blocked"}
-            )
-            return _hub()._clip(blocked)
         params = args.get("params") if isinstance(args.get("params"), dict) else {}
         act = {
             "action": str(args.get("strategy") or args.get("action") or "").strip(),
@@ -2917,25 +2870,6 @@ async def _run_tool(
         if isinstance(snap, dict):
             snap["research_web"] = dict(page)
         return _clip_web(page)
-    if name == "note":
-        from abcxauto.working_memory import MAX_LINES, remember, working_memory_lines
-
-        line = str(args.get("line") or args.get("text") or "")
-        if not line.strip():
-            lines = working_memory_lines()
-            return _hub()._clip({
-                "working_memory": lines,
-                "n": len(lines),
-                "max": MAX_LINES,
-                "reason": "read",
-            })
-        return _hub()._clip(
-            remember(
-                line,
-                tool_trace=getattr(turn, "tool_trace", None),
-                text=str(getattr(turn, "text", "") or ""),
-            )
-        )
     if name == "recall":
         from abcxauto.memory.notes import recall_tool
 

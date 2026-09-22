@@ -143,3 +143,26 @@ async def test_stream_ordinary_error_does_not_retry(capacity_sleeps):
             pass
     assert chat.stream_calls == 1
     assert capacity_sleeps == []
+
+
+def test_chat_create_kwargs_store_messages_and_previous_response_id():
+    from abcxauto.llm import chat_create_kwargs
+
+    g = SimpleNamespace(
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=8192,
+        model_params={},
+    )
+    cold = chat_create_kwargs(g, messages=["sys"], tools=["book"])
+    assert cold["store_messages"] is True
+    assert cold["use_encrypted_content"] is True
+    assert cold["messages"] == ["sys"]
+    assert "previous_response_id" not in cold
+
+    cont = chat_create_kwargs(
+        g, messages=["sys"], tools=["book"], previous_response_id="resp_1"
+    )
+    assert cont["previous_response_id"] == "resp_1"
+    assert cont["store_messages"] is True
+    assert "messages" not in cont

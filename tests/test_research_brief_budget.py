@@ -1,7 +1,7 @@
-"""Rank 2: named-card research-brief budget + lineage.
+"""Rank 2: named-card research-brief lineage (no look latch).
 
-Fake card → stub turns → ledger increments; trip → no further turns.
-No BA / options chain.
+Week card is not a trading document. note_brief_turn / mark_brief_loop_halt
+are no-ops; allow_brief_turn always allows. Looks are not skipped for halt.
 Hygiene: F10 $15 hard, port≠7496, SYSTEM_PROMPT lock.
 """
 
@@ -27,7 +27,6 @@ from abcxauto.research_budget import (
     GATE_KILL,
     GATE_PASS,
     REASON_BRIEF_COST,
-    REASON_BRIEF_LOOP,
     allow_brief_turn,
     DEFAULT_RESEARCH_CARD_ID,
     brief_budget_gate,
@@ -99,7 +98,7 @@ def test_self_tune_cannot_raise_brief_card_constants():
     assert F10_HARD_USD == 15.0
 
 
-def test_fake_card_stub_turns_increment_ledger():
+def test_note_brief_turn_is_noop_no_increment_no_latch():
     reset_research_budget()
     row = open_research_card(CARD, WINDOW)
     assert row["research_card_id"] == CARD
@@ -108,80 +107,71 @@ def test_fake_card_stub_turns_increment_ledger():
     assert row["gate_verdict"] in {GATE_PASS, GATE_FAIL, GATE_INCONCLUSIVE, GATE_KILL}
     assert parse_model_cost(row["model_cost_window_USD"]) == 0.0
     first = note_brief_turn(CARD, WINDOW, cost_usd=0.10, tool_calls=3)
-    assert first["billed"] is True
-    assert first["turns"] == 1
-    assert first["tool_calls"] == 3
-    assert first["model_cost_window_USD"] == pytest.approx(0.10)
+    assert first["billed"] is False
+    assert first["turns"] == 0
+    assert first["tool_calls"] == 0
+    assert first["brief_loop_halted"] is False
+    assert parse_model_cost(first["model_cost_window_USD"]) == 0.0
     second = note_brief_turn(CARD, WINDOW, cost_usd=0.10, tool_calls=2)
-    assert second["turns"] == 2
-    assert second["tool_calls"] == 5
-    assert second["model_cost_window_USD"] == pytest.approx(0.20)
+    assert second["turns"] == 0
+    assert second["tool_calls"] == 0
     assert brief_loop_halted(CARD, WINDOW) is False
     snap = card_row(CARD, WINDOW)
-    assert snap["turns"] == 2
-    assert snap["tool_calls"] == 5
+    assert snap["turns"] == 0
+    assert snap["tool_calls"] == 0
+    assert snap["brief_loop_halted"] is False
 
 
-def test_usd_trip_stops_further_billed_turns():
+def test_usd_estimate_does_not_latch_or_skip_looks():
     reset_research_budget()
     open_research_card(CARD, WINDOW)
-    # 7 * 0.20 = 1.40; 8th projected 1.60 > 1.50.
-    for _ in range(7):
+    for _ in range(8):
         out = note_brief_turn(CARD, WINDOW)
-        assert out["billed"] is True
+        assert out["billed"] is False
+        assert out["brief_loop_halted"] is False
     row = card_row(CARD, WINDOW)
-    assert row["turns"] == 7
-    assert row["model_cost_window_USD"] == pytest.approx(1.40)
-    eighth = note_brief_turn(CARD, WINDOW)
-    assert eighth["billed"] is False
-    assert eighth["brief_loop_halted"] is True
-    assert brief_loop_halted(CARD, WINDOW) is True
-    assert card_row(CARD, WINDOW)["turns"] == 7
-    ninth = note_brief_turn(CARD, WINDOW)
-    assert ninth["billed"] is False
-    assert card_row(CARD, WINDOW)["turns"] == 7
+    assert row["turns"] == 0
+    assert row["brief_loop_halted"] is False
+    assert brief_loop_halted(CARD, WINDOW) is False
+    assert allow_brief_turn(CARD, WINDOW)["allow"] is True
     write_research_brief(
         session="premarket",
         snap={"news_items": []},
         research_card_id=CARD,
         prove_window_id=WINDOW,
     )
-    assert skip_look_reason("premarket") == REASON_BRIEF_LOOP
+    assert skip_look_reason("premarket") == ""
     assert research_keep_looking("premarket") is False
 
 
-def test_turns_trip_stops_further_billed_turns():
+def test_turns_cap_does_not_latch_via_note():
     reset_research_budget()
     open_research_card(CARD, WINDOW)
-    for i in range(BRIEF_CARD_TURNS_MAX):
+    for _ in range(BRIEF_CARD_TURNS_MAX + 2):
         out = note_brief_turn(CARD, WINDOW, cost_usd=0.01)
-        assert out["billed"] is True
-        assert out["turns"] == i + 1
+        assert out["billed"] is False
+        assert out["brief_loop_halted"] is False
     row = card_row(CARD, WINDOW)
-    assert row["turns"] == 8
-    assert row["brief_loop_halted"] is True
-    extra = note_brief_turn(CARD, WINDOW, cost_usd=0.01)
-    assert extra["billed"] is False
-    assert card_row(CARD, WINDOW)["turns"] == 8
-    assert allow_brief_turn(CARD, WINDOW, est=0.01)["allow"] is False
+    assert row["turns"] == 0
+    assert row["brief_loop_halted"] is False
+    assert allow_brief_turn(CARD, WINDOW, est=0.01)["allow"] is True
 
 
-def test_tools_trip_stops_further_billed_turns():
+def test_tools_cap_does_not_latch_via_note():
     reset_research_budget()
     open_research_card(CARD, WINDOW)
     out = note_brief_turn(CARD, WINDOW, cost_usd=0.01, tool_calls=40)
-    assert out["billed"] is True
-    assert out["tool_calls"] == 40
-    assert out["brief_loop_halted"] is True
-    extra = note_brief_turn(CARD, WINDOW, cost_usd=0.01, tool_calls=1)
-    assert extra["billed"] is False
-    assert card_row(CARD, WINDOW)["tool_calls"] == 40
+    assert out["billed"] is False
+    assert out["tool_calls"] == 0
+    assert out["brief_loop_halted"] is False
     over = note_brief_turn("other-card", WINDOW, cost_usd=0.01, tool_calls=41)
     assert over["billed"] is False
-    assert (card_row("other-card", WINDOW) or {}).get("turns", 0) == 0
+    assert over["brief_loop_halted"] is False
+    assert card_row("other-card", WINDOW) is None
+    assert allow_brief_turn(CARD, WINDOW, est=0.01, add_tools=1)["allow"] is True
 
 
-def test_unreadable_and_nonfinite_cost_fail_closes():
+def test_unreadable_and_nonfinite_cost_gate_still_fail_closes():
     reset_research_budget()
     open_research_card(CARD, WINDOW)
     unread = brief_budget_gate(None, 0, 0)
@@ -195,10 +185,12 @@ def test_unreadable_and_nonfinite_cost_fail_closes():
     assert parse_model_cost(float("nan")) is None
     assert parse_model_cost(float("inf")) is None
     assert parse_model_cost(-0.1) is None
+    # mark_brief_loop_halt is a no-op — unreadable cost does not latch looks.
     halted = set_model_cost_window(CARD, WINDOW, float("nan"))
-    assert halted["brief_loop_halted"] is True
-    assert halted["model_cost_window_USD"] is None
-    assert brief_loop_halted(CARD, WINDOW) is True
+    assert halted["brief_loop_halted"] is False
+    assert brief_loop_halted(CARD, WINDOW) is False
+    assert allow_brief_turn(CARD, WINDOW)["allow"] is True
+    assert skip_look_reason("premarket") == ""
 
 
 def test_prior_iso_week_halt_does_not_skip_this_week(tmp_path, monkeypatch):
@@ -215,7 +207,9 @@ def test_prior_iso_week_halt_does_not_skip_this_week(tmp_path, monkeypatch):
     now = datetime(2026, 9, 17, 8, 0, tzinfo=ZoneInfo("America/New_York"))
     today = default_prove_window_id(now=now)
     assert today == "2026-W38"
-    mark_brief_loop_halt(DEFAULT_RESEARCH_CARD_ID, "2026-W37")
+    # No-op mark — still must not skip this week's look.
+    marked = mark_brief_loop_halt(DEFAULT_RESEARCH_CARD_ID, "2026-W37")
+    assert marked["brief_loop_halted"] is False
     write_research_brief(
         session="premarket",
         snap={"news_items": []},
@@ -231,7 +225,7 @@ def test_prior_iso_week_halt_does_not_skip_this_week(tmp_path, monkeypatch):
     assert pinned == (DEFAULT_RESEARCH_CARD_ID, "2026-W37")
 
 
-def test_write_research_brief_stamps_lineage(tmp_path, monkeypatch):
+def test_write_research_brief_stamps_lineage_without_verdict(tmp_path, monkeypatch):
     reset_research_budget()
     open_research_card(CARD, WINDOW)
     note_brief_turn(CARD, WINDOW, cost_usd=0.20)
@@ -244,32 +238,35 @@ def test_write_research_brief_stamps_lineage(tmp_path, monkeypatch):
     )
     assert out["research_card_id"] == CARD
     assert out["prove_window_id"] == WINDOW
-    assert out["gate_verdict"] == GATE_INCONCLUSIVE
-    assert parse_model_cost(out["model_cost_window_USD"]) == pytest.approx(0.20)
+    assert "gate_verdict" not in out
+    assert out.get("gate_verdict") not in {
+        GATE_PASS,
+        GATE_FAIL,
+        GATE_INCONCLUSIVE,
+        GATE_KILL,
+    }
+    assert parse_model_cost(out["model_cost_window_USD"]) == pytest.approx(0.0)
     assert "tickets" not in out
     assert "expectancy" not in out
     rth = write_research_brief(session="regular", snap={"news_items": []})
     assert rth.get("session") == "regular"
     assert rth.get("mode") == "research"
+    assert "gate_verdict" not in rth
 
 
 @pytest.mark.asyncio
-async def test_grok_turn_does_not_bill_after_brief_halt(monkeypatch):
+async def test_grok_turn_looks_and_does_not_latch_via_note(monkeypatch):
+    """note_brief_turn is a no-op. Premarket still calls the model."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+    from tests.test_brain_tools import _scripted_chat_client
+
     reset_research_budget()
     open_research_card(CARD, WINDOW)
-    for _ in range(7):
-        note_brief_turn(CARD, WINDOW)
-    assert note_brief_turn(CARD, WINDOW)["billed"] is False
-    from abcxauto.brain import grok_turn
-
-    calls = {"n": 0}
-
-    async def boom(*_a, **_k):
-        calls["n"] += 1
-        raise AssertionError("stream_round must not run after brief_loop_halted")
-
-    monkeypatch.setattr("abcxauto.brain.stream_round", boom)
-    g = SimpleNamespace(chat=None, model="grok-4.6")
+    for _ in range(8):
+        assert note_brief_turn(CARD, WINDOW)["brief_loop_halted"] is False
+    clear_interrupt()
+    g, created = _scripted_chat_client(rounds=["watching the book"])
     turn = await grok_turn(
         g,
         connector=None,
@@ -277,11 +274,13 @@ async def test_grok_turn_does_not_bill_after_brief_halt(monkeypatch):
         snap={"positions": [], "protection": {}, "research_card_id": CARD, "prove_window_id": WINDOW},
         wake="look",
     )
-    assert calls["n"] == 0
-    assert turn.brief_loop_halted is True
-    assert turn.loop_halted is True
-    assert (turn.last_result or {}).get("reason_code") == REASON_BRIEF_LOOP
-    assert card_row(CARD, WINDOW)["turns"] == 7
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
+    assert turn.loop_halted is False
+    assert turn.brief_billed is False
+    assert turn.brief_loop_halted is False
+    assert card_row(CARD, WINDOW)["turns"] == 0
+    assert card_row(CARD, WINDOW)["brief_loop_halted"] is False
+    assert skip_look_reason("premarket") == ""
 
 
 def test_budget_reloads_when_operator_edits_file(tmp_path, monkeypatch):
@@ -292,8 +291,8 @@ def test_budget_reloads_when_operator_edits_file(tmp_path, monkeypatch):
     monkeypatch.setenv("ABCXAUTO_RESEARCH_BUDGET_PATH", str(path))
     reset_research_budget()
     open_research_card(CARD, WINDOW)
-    note_brief_turn(CARD, WINDOW, cost_usd=0.10)
-    assert card_row(CARD, WINDOW)["turns"] == 1
+    # note_brief_turn does not write; operator edit is the reload path.
+    assert card_row(CARD, WINDOW)["turns"] == 0
     raw = json.loads(path.read_text(encoding="utf-8"))
     key = f"{CARD}::{WINDOW}"
     raw["cards"][key]["turns"] = 4
@@ -301,6 +300,9 @@ def test_budget_reloads_when_operator_edits_file(tmp_path, monkeypatch):
     path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
     assert card_row(CARD, WINDOW)["turns"] == 4
     assert not (tmp_path / "research_budget.json.tmp").exists()
+    # Still no new latch from note / allow.
+    assert note_brief_turn(CARD, WINDOW)["brief_loop_halted"] is False
+    assert allow_brief_turn(CARD, WINDOW)["allow"] is True
 
 
 def test_empty_or_failed_research_round_is_not_billed():
@@ -331,18 +333,20 @@ def test_empty_or_failed_research_round_is_not_billed():
     tools_only = BrainTurn(text="")
     assert _should_bill_research_round(tools_only, tool_calls=2) is True
     assert _bill_research_brief_round(spoken, session="premarket", snap=snap) is False
-    assert spoken.brief_billed is True
-    assert card_row(CARD, WINDOW)["turns"] == 1
+    # note_brief_turn no-op: bill path runs but does not latch or increment.
+    assert spoken.brief_billed is False
+    assert card_row(CARD, WINDOW)["turns"] == 0
+    assert card_row(CARD, WINDOW)["brief_loop_halted"] is False
     assert _bill_research_brief_round(spoken, session="premarket", snap=snap) is False
-    assert card_row(CARD, WINDOW)["turns"] == 1
+    assert card_row(CARD, WINDOW)["turns"] == 0
     rth = BrainTurn(text="watching the open")
     assert _bill_research_brief_round(rth, session="regular", snap=snap) is False
     assert rth.brief_billed is False
-    assert card_row(CARD, WINDOW)["turns"] == 1
+    assert card_row(CARD, WINDOW)["turns"] == 0
 
 
 @pytest.mark.asyncio
-async def test_one_research_look_bills_one_turn_for_two_inner_rounds(monkeypatch):
+async def test_one_research_look_calls_note_once_without_latch(monkeypatch):
     import json
 
     from abcxauto.brain import grok_turn
@@ -386,10 +390,13 @@ async def test_one_research_look_bills_one_turn_for_two_inner_rounds(monkeypatch
     )
     assert turn.failed is False
     assert turn.parked is False
-    assert turn.brief_billed is True
+    assert turn.brief_billed is False
+    assert turn.brief_loop_halted is False
     assert int(getattr(created[0], "rounds", 0) or 0) == 2
     assert len(billed) == 1
-    assert card_row(CARD, WINDOW)["turns"] == 1
+    assert card_row(CARD, WINDOW)["turns"] == 0
+    assert card_row(CARD, WINDOW)["brief_loop_halted"] is False
+    assert skip_look_reason("premarket") == ""
 
 
 @pytest.mark.asyncio
@@ -430,3 +437,4 @@ async def test_rth_look_writes_brief_without_billing_ah_card(monkeypatch):
     brief = load_research_brief()
     assert brief.get("session") == "regular"
     assert brief.get("mode") == "research"
+    assert "gate_verdict" not in brief

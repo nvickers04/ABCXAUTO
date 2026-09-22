@@ -1544,6 +1544,47 @@ async def test_cash_only_rejects_notional_over_cash(gate, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cash_only_partial_long_sell_bypasses_size_cash(gate, monkeypatch):
+    """Reducing a long STK must not be size_cash refused against leftover cash."""
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_config",
+        lambda: _cfg(
+            cash_only=True,
+            max_position_pct=0,
+            daily_loss_limit_pct=0,
+            max_open_positions=0,
+            sizing_floors=False,
+            risk_gates_enabled=False,
+        ),
+    )
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
+    # Partial SELL notional ~15.9k >> $214 leftover.
+    payload = {
+        **VALID_PAYLOADS["limit_order"],
+        "symbol": "AVGO",
+        "action": "SELL",
+        "quantity": 44,
+        "limit_price": 362.77,
+        "closing_position": True,
+    }
+    exit_prop = validate_proposal("limit_order", payload, RATIONALE)
+    assert is_exit_or_management(exit_prop) is True
+    conn = FakeConnector(
+        account={
+            "netliquidation": 32_343.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 214.23,
+            "AvailableFunds": 80_000.0,
+        }
+    )
+    ok, reason = await gate.pre_trade_check(exit_prop, conn)
+    assert ok is True
+    assert "bypass" in reason.lower()
+    assert "size_cash" not in reason.lower()
+    assert "notional_usd" not in reason.lower()
+
+
+@pytest.mark.asyncio
 async def test_peak_drawdown_rejects_and_self_clears(gate, monkeypatch):
     monkeypatch.setattr(
         "abcxauto.risk_gates.get_config",
@@ -1824,7 +1865,7 @@ def test_defined_risk_only_rejects_market_bracket_stk(monkeypatch):
     assert SYSTEM_PROMPT == (
         "You own an Interactive Brokers {mode} book. Strategy is yours.\n"
         "Risk is code.\n"
-        "Keep researching after a fill. A full book is only for a name you will not cut. Otherwise rotate into the better name.\n"
+        "Performance is the point. Research widely. Capital works in stock or options, or it moves.\n"
         "A refuse for price or size is resent at the live print and a quantity that fits, or you take a better name.\n"
         "send tickets that match ORDER EXAMPLES.\n"
         "Size vs max_risk_per_trade_pct of NetLiq.\n"

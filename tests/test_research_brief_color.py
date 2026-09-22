@@ -158,3 +158,79 @@ def test_scan_hits_are_not_send_geometry():
     )
     assert ok is False
     assert code == REASON_CODE
+
+
+def test_mid_look_brief_sees_candles_on_snap_not_as_prior():
+    """Candles stamped session_range this look — need clears; disk is not prior."""
+    now = datetime.now(timezone.utc)
+    snap = {
+        "session_range": {
+            "AVGO": {
+                "open": 360.0,
+                "high": 362.0,
+                "low": 359.0,
+                "last": 361.3,
+                "n": 12,
+                "today": True,
+            }
+        },
+        "candle_source": "ibkr",
+    }
+    brief = {
+        "as_of": now.isoformat(),
+        "session": "premarket",
+        "mode": "research",
+        "symbols": ["AVGO"],
+        "facts": [
+            {"source": "marks", "text": "leftover $214"},
+            {"source": "candles", "text": "AVGO 361.3 vs_open=0.1 src=ibkr"},
+        ],
+        "uncertainties": [],
+    }
+    payload = research_brief_look_payload(brief, snap=snap, now=now)
+    assert "need" not in payload
+    assert "candles" in (payload["this_look"].get("tools") or [])
+    prior = payload.get("prior_session") or {}
+    assert "facts" not in prior
+    assert prior.get("as_of") == brief["as_of"]
+    assert prior.get("session") == "premarket"
+    # Prior brief must not satisfy new-risk research_thin.
+    from abcxauto.desk_mode import new_risk_research_error
+
+    assert new_risk_research_error("AVGO", {}, strat="bracket")
+
+
+def test_candle_session_only_notes_a_fact():
+    snap: dict = {}
+    note_research_tool(
+        snap,
+        "candles",
+        {
+            "source": "ibkr",
+            "symbol": "AVGO",
+            "bars": [],
+            "session": {"last": 361.3, "vs_open": -0.4, "open": 362.0},
+        },
+    )
+    facts = snap["_research_bag"]["facts"]
+    assert facts
+    assert "AVGO 361.3" in facts[0]["text"]
+    payload = research_brief_look_payload({}, snap=snap)
+    assert "need" not in payload
+    assert "candles" in payload["this_look"]["tools"]
+
+
+def test_empty_snap_still_needs_color_despite_prior_scan():
+    now = datetime.now(timezone.utc)
+    brief = {
+        "as_of": now.isoformat(),
+        "session": "premarket",
+        "symbols": ["NVDA"],
+        "facts": [{"source": "scan", "text": "hits=10 src=ibkr"}],
+    }
+    payload = research_brief_look_payload(brief, snap={}, now=now)
+    assert payload["need"]
+    assert "scan|news|candles" in payload["need"]
+    assert payload["this_look"]["tools"] == []
+    # True prior keeps research facts when this look is empty.
+    assert (payload.get("prior_session") or {}).get("facts") == brief["facts"]

@@ -651,7 +651,6 @@ async def execute_ticket(
     snap: dict,
 ) -> dict:
     """Normalize, gate, geometry, then send_action. Never bypass the clerk."""
-    from abcxauto.desk_mode import is_research_session, research_send_block
     from abcxauto.send_preview import (
         bind_place_token,
         extract_place_token,
@@ -665,14 +664,8 @@ async def execute_ticket(
         return preview_ticket(act, world=world, snap=snap, source="execute_ticket")
 
     sess = str(getattr(world, "session_status", "") or "")
-    if is_research_session(sess):
-        _record_clerk_block(
-            act,
-            str(act.get("strategy") or act.get("action") or ""),
-            f"research_no_send session={sess}",
-            stage="research_mode",
-        )
-        return research_send_block(session=sess)
+    # Research sessions may send (paper stay-up). Cash / defined-risk /
+    # daily-loss / research_thin stay as hard gates below.
     try:
         from abcxauto.thin_rth_kill_look import kill_look_send_block
 

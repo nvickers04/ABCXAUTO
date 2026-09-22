@@ -1,13 +1,14 @@
 """Grok owns the book via tools. The shell is facts + send gates.
 
-One look stays open: one kept chat. Call the model. If tool_calls: run
-tools, append results, call the model again on that same chat. Repeat
-until there are no tool_calls. Words only: stop calling the model.
-Chat kept. Do not call the model again because it spoke. Next call is
-fill / order_change / unprotected / operator poke, with the full chat
-plus a fresh snap. A poke does not start a new messages list. Overnight
-/ after-close / park drop the chat. Session cap idles; chat is kept.
-Durable notes live in journal.db; wake carries a pointer; recall fetches. Tickets go through
+One look: create a chat, call the model. If tool_calls: run tools,
+append results, call the model again on that same chat. Repeat until
+there are no tool_calls. Words only: stop. After a successful stream,
+append the response and persist ``response.id`` (xAI ``store_messages``).
+The next look — same process or a later start — continues with
+``previous_response_id`` and only the new wake/developer line. The chat
+is never dropped: park, research↔RTH, empty looks, and ``drop_live_chat``
+keep the same server conversation. Durable notes live in journal.db;
+wake carries a pointer; recall fetches. Tickets go through
 ``execute_ticket`` → ``send_action``. IBKR tools are live. scan() is one
 tape this look (merged hits + on_book); candles are IBKR hist or the
 live 5s stream (error if both miss); news is ~15 min delayed.
@@ -505,6 +506,60 @@ def _trim_payload_bars(data: dict[str, Any], keep: int) -> tuple[dict[str, Any],
     return out, trimmed
 
 
+def _last_think_bar(bars: Any) -> dict[str, Any] | None:
+    if not isinstance(bars, list) or not bars:
+        return None
+    for bar in reversed(bars):
+        row = _think_bar(bar)
+        if row:
+            return row
+    return None
+
+
+def _candles_residue(data: dict[str, Any]) -> dict[str, Any]:
+    """Symbol / resolution / count / last print — never error=clipped."""
+    bars = data.get("bars") if isinstance(data.get("bars"), list) else []
+    series = data.get("series") if isinstance(data.get("series"), list) else []
+    count = len(bars)
+    last = _last_think_bar(bars)
+    if series:
+        for row in series:
+            if not isinstance(row, dict):
+                continue
+            sb = row.get("bars")
+            if isinstance(sb, list):
+                count += len(sb)
+                edge = _last_think_bar(sb)
+                if edge:
+                    last = edge
+    out: dict[str, Any] = {}
+    for key in (
+        "ok",
+        "symbol",
+        "source",
+        "freshness",
+        "resolution",
+        "requested_resolution",
+        "use",
+        "error",
+        "hist_error",
+        "rt_error",
+    ):
+        if key in data and data[key] not in (None, ""):
+            out[key] = data[key]
+    out["bar_count"] = int(count)
+    if isinstance(last, dict):
+        edge: dict[str, Any] = {}
+        if last.get("t") not in (None, ""):
+            edge["t"] = last["t"]
+        if last.get("c") is not None:
+            edge["c"] = last["c"]
+        if edge:
+            out["last_bar"] = edge
+    out["_clipped"] = "payload"
+    return out
+
+
 def _clip_candles(data: dict[str, Any], max_chars: int = CANDLES_CLIP_CHARS) -> str:
     """Bars are the payload. Never drop the series to save the run sheet."""
     payload = _candles_lead(_with_think_bars(dict(data)))
@@ -565,13 +620,227 @@ def _clip_candles(data: dict[str, Any], max_chars: int = CANDLES_CLIP_CHARS) -> 
     if len(text) <= max_chars:
         return text
     kept, _ = _trim_payload_bars(kept, 1)
-    return json.dumps(_candles_lead(kept), default=str)
+    text = json.dumps(_candles_lead(kept), default=str)
+    if len(text) <= max_chars:
+        return text
+    return json.dumps(_candles_residue(payload), default=str)
+
+
+_NEWS_HEADLINE_KEYS = ("symbol", "headline", "publisher")
+_NEWS_LEAD_KEYS = (
+    "ok",
+    "source",
+    "freshness",
+    "use",
+    "error",
+    "note",
+    "need",
+    "fetched",
+    "already",
+)
+
+
+def _news_tool_payload(data: Any) -> bool:
+    """news() page: top-level items[] of headlines (not a ranked scan)."""
+    if not isinstance(data, dict) or "hits" in data:
+        return False
+    return isinstance(data.get("items"), list)
+
+
+def _slim_headline(row: Any) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    out: dict[str, Any] = {}
+    for key in _NEWS_HEADLINE_KEYS:
+        val = row.get(key)
+        if val not in (None, ""):
+            out[key] = val
+    return out if out.get("headline") else None
+
+
+def _clip_news(data: dict[str, Any], max_chars: int = CLIP_CHARS) -> str:
+    """Keep as many symbol/headline/publisher rows as fit. Never error=clipped."""
+    text = json.dumps(data, default=str)
+    if len(text) <= max_chars:
+        return text
+    slim = dict(data)
+    _pop_scalar_fat(slim)
+    text = json.dumps(slim, default=str)
+    if len(text) <= max_chars:
+        return text
+    raw_items = slim.get("items") if isinstance(slim.get("items"), list) else []
+    headlines: list[dict[str, Any]] = []
+    for row in raw_items:
+        keep = _slim_headline(row)
+        if keep:
+            headlines.append(keep)
+    base = {k: slim[k] for k in _NEWS_LEAD_KEYS if k in slim}
+    if "ok" in slim and "ok" not in base:
+        base["ok"] = slim["ok"]
+    best: dict[str, Any] = dict(base)
+    best["items"] = []
+    if raw_items:
+        _note_clip(best, "items", len(raw_items))
+    text = json.dumps(best, default=str)
+    if len(text) > max_chars:
+        best = {"items": [], "_clipped": "items"}
+        if "ok" in slim:
+            best["ok"] = slim["ok"]
+        return json.dumps(best, default=str)
+    for n in range(1, len(headlines) + 1):
+        trial = dict(base)
+        trial["items"] = headlines[:n]
+        dropped = len(headlines) - n
+        if dropped > 0 or len(raw_items) > len(headlines):
+            trial["_clipped"] = "items"
+            trial["_dropped"] = dropped + max(0, len(raw_items) - len(headlines))
+        elif any(
+            not isinstance(row, dict) or set(row) - set(_NEWS_HEADLINE_KEYS)
+            for row in raw_items
+        ):
+            trial["_clipped"] = "items"
+        packed = json.dumps(trial, default=str)
+        if len(packed) > max_chars:
+            break
+        best = trial
+        text = packed
+    if best.get("items"):
+        return text
+    if not headlines:
+        return text
+    # One headline still too fat — truncate the print, keep the name.
+    one = dict(headlines[0])
+    hl = str(one.get("headline") or "")
+    while hl:
+        one["headline"] = hl
+        trial = dict(base)
+        trial["items"] = [one]
+        trial["_clipped"] = "items"
+        trial["_dropped"] = max(0, len(headlines) - 1)
+        packed = json.dumps(trial, default=str)
+        if len(packed) <= max_chars:
+            return packed
+        nxt = hl[: max(0, len(hl) // 2)].rstrip()
+        if nxt == hl:
+            break
+        hl = nxt
+    syms: list[str] = []
+    for row in headlines:
+        sym = str(row.get("symbol") or "").strip().upper()
+        if sym and sym not in syms:
+            syms.append(sym)
+    residue = dict(base)
+    residue["items"] = []
+    if syms:
+        residue["symbols"] = syms
+    _note_clip(residue, "items", len(raw_items) or len(headlines))
+    return json.dumps(residue, default=str)
+
+
+def _scan_residue(data: dict[str, Any]) -> dict[str, Any]:
+    """Arena + symbol list when the ranked page cannot fit."""
+    out: dict[str, Any] = {}
+    for key in ("ok", "arena", "scan_code", "source", "freshness", "error"):
+        if key in data and data[key] not in (None, ""):
+            out[key] = data[key]
+    syms = data.get("symbols")
+    names: list[str] = []
+    if isinstance(syms, list):
+        for raw in syms:
+            sym = str(raw or "").strip().upper()
+            if sym and sym not in names:
+                names.append(sym)
+    if not names:
+        for row in data.get("hits") or []:
+            if not isinstance(row, dict):
+                continue
+            sym = str(row.get("symbol") or "").strip().upper()
+            if sym and sym not in names:
+                names.append(sym)
+    out["symbols"] = names
+    out["_clipped"] = data.get("_clipped") or "payload"
+    if data.get("_dropped"):
+        out["_dropped"] = data["_dropped"]
+    return out
+
+
+def _clip_residue(data: dict[str, Any], max_chars: int) -> str:
+    """Last resort factual stub. Chat must never see error=clipped alone."""
+    if _news_tool_payload(data):
+        return _clip_news(data, max_chars=max_chars)
+    if _tape_payload(data):
+        text = json.dumps(_candles_residue(data), default=str)
+        if len(text) <= max_chars:
+            return text
+    if _scan_payload(data) or ("arena" in data and ("hits" in data or "symbols" in data)):
+        res = _scan_residue(data)
+        text = json.dumps(res, default=str)
+        if len(text) <= max_chars:
+            return text
+        # Cap the symbol list until it fits.
+        names = list(res.get("symbols") or [])
+        full_n = len(names)
+        while True:
+            trial = dict(res)
+            trial["symbols"] = list(names)
+            if len(names) < full_n:
+                trial["_clipped"] = "symbols"
+            packed = json.dumps(trial, default=str)
+            if len(packed) <= max_chars:
+                return packed
+            if not names:
+                trial["symbols"] = []
+                trial["_clipped"] = "payload"
+                return json.dumps(trial, default=str)
+            if len(names) == 1:
+                names = []
+            else:
+                names = names[: max(1, len(names) // 2)]
+    # Prefer news/items lists embedded on non-news pages (status, etc.).
+    for key in ("items", "news"):
+        rows = data.get(key)
+        if not isinstance(rows, list) or not rows:
+            continue
+        headlines = [h for h in (_slim_headline(r) for r in rows) if h]
+        if not headlines:
+            continue
+        base = {k: data[k] for k in ("ok", "source", "freshness", "use", "ibkr_connected", "trading_mode") if k in data}
+        best = dict(base)
+        best[key] = []
+        _note_clip(best, key, len(rows))
+        for n in range(1, len(headlines) + 1):
+            trial = dict(base)
+            trial[key] = headlines[:n]
+            if n < len(headlines):
+                trial["_clipped"] = key
+                trial["_dropped"] = len(headlines) - n
+            packed = json.dumps(trial, default=str)
+            if len(packed) > max_chars:
+                break
+            best = trial
+        return json.dumps(best, default=str)
+    kept: dict[str, Any] = {}
+    if data.get("run") is not None:
+        kept["run"] = data["run"]
+    if "ok" in data:
+        kept["ok"] = data["ok"]
+    err = data.get("error")
+    if err not in (None, "", "clipped"):
+        kept["error"] = err
+    _note_clip(kept, str(data.get("_clipped") or "payload"))
+    if data.get("_dropped"):
+        kept["_dropped"] = data["_dropped"]
+    text = json.dumps(kept, default=str)
+    if len(text) <= max_chars:
+        return text
+    return json.dumps({"_clipped": "payload"}, default=str)
 
 
 # Fat scan / sessions / news / playbook essay — never the live book.
 _FAT_CLIP_KEYS = (
     "hits",
     "news",
+    "items",
     "symbols",
     "rows",
     "scan_hits",
@@ -679,6 +948,7 @@ def _keep_live_book(data: dict[str, Any]) -> dict[str, Any]:
 _ROW_LIST_KEYS = (
     "hits",
     "news",
+    "items",
     "rows",
     "symbols",
     "sessions",
@@ -793,6 +1063,8 @@ def _clip(data: Any, max_chars: int | None = None) -> str:
         cap = CANDLES_CLIP_CHARS if max_chars is None else int(max_chars)
         return _clip_candles(data, max_chars=cap)
     cap = CLIP_CHARS if max_chars is None else int(max_chars)
+    if _news_tool_payload(data):
+        return _clip_news(data, max_chars=cap)
     text = json.dumps(data, default=str)
     if len(text) <= cap:
         return text
@@ -828,15 +1100,9 @@ def _clip(data: Any, max_chars: int | None = None) -> str:
             out = json.dumps(kept, default=str)
             if len(out) <= cap:
                 return out
-        stub = {
-            "ok": slim.get("ok"),
-            "error": "clipped",
-            "_clipped": slim.get("_clipped") or "payload",
-        }
-        if slim.get("_dropped"):
-            stub["_dropped"] = slim["_dropped"]
-        return json.dumps(stub, default=str)
-    return json.dumps({"_clipped": "payload", "error": "clipped"}, default=str)
+        # Prefer residue from the pre-fat-pop body so headlines/symbols survive.
+        return _clip_residue(dict(data), max_chars=cap)
+    return json.dumps({"_clipped": "payload"}, default=str)
 
 
 _CADENCE_LOOP = re.compile(
@@ -1119,6 +1385,52 @@ async def stream_round(
             logger.warning("usage journal still running — look continues")
     except Exception:
         logger.exception("model usage journal failed")
+    try:
+        from abcxauto.look_ledger import append_call
+
+        from abcxauto.config import get_config
+
+        inn = int(used.get("input_tokens") or 0)
+        out = int(used.get("output_tokens") or 0)
+        model_id = str(getattr(get_config(), "model", "") or "")
+        sess = ""
+        try:
+            from abcxauto.marketdata.market_hours import get_session_info
+
+            sess = str((get_session_info() or {}).get("session") or "")
+        except Exception:
+            sess = ""
+        usd: Any = "unknown"
+        for blob in (used, getattr(last_resp, "usage", None), last_resp):
+            if not isinstance(blob, dict):
+                continue
+            raw = blob.get("cost_usd")
+            if raw is None:
+                raw = blob.get("usd")
+            if raw is None:
+                raw = blob.get("total_cost")
+            if raw is None:
+                continue
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if val == val and val not in (float("inf"), float("-inf")) and val >= 0:
+                usd = val
+                break
+        asof = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        append_call(
+            asof=asof,
+            model=model_id,
+            input_tokens=inn,
+            output_tokens=out,
+            usd=usd,
+            session=sess,
+        )
+    except ImportError:
+        pass
+    except Exception:
+        logger.debug("look_ledger append_call failed", exc_info=True)
     return o, last_resp, reason
 
 
@@ -1171,25 +1483,13 @@ async def grok(g: GrokClient, p: str, *, stage: str = "grok") -> str:
 
 
 def _reset_chat(g: GrokClient) -> None:
-    g.chat = None
-    g._wake_n = 0
-    g._wake_appended = False
-    g._last_desk_fact = ""
-    g._chat_had_work = False
-    _clear_look_tool_stash(g)
-    try:
-        from abcxauto.working_memory import clear_working_memory
-
-        clear_working_memory(reason="chat_reset")
-    except Exception:
-        logger.debug("working_memory clear on chat reset failed", exc_info=True)
+    """Kept for callers. The conversation is not dropped."""
+    _ = g
 
 
 def drop_live_chat(g: Any | None) -> None:
-    """Overnight / park / empty/? / dead stream: the next think is a new conversation."""
-    if g is None:
-        return
-    _reset_chat(g)
+    """Kept for callers. The conversation is not dropped."""
+    _ = g
 
 
 def drop_refused_send_targets(turn: BrainTurn) -> None:
@@ -1233,31 +1533,24 @@ def _chat_last_desk_fact(g: Any, chat: Any = None) -> str:
     return ""
 
 
-def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
-    """Keep the live chat on paper stay-up, including a spoken no-tool say.
-
-    Park and overnight drop it so the next think is a cold start. A
-    ``failed`` / dead-stream stamp on a real say or send/fill is not a
-    drop. An ended look (duplicate lead fact) keeps the chat — a look
-    may end with no send. Spoken words without tool_calls do not wipe
-    the chat. A poke does not start a new messages list.
-    """
-    if turn.ended:
+def _persist_response_id(response: Any) -> None:
+    """Save ``response.id`` so the next create can pass ``previous_response_id``."""
+    if response is None:
         return
-    if turn.parked:
-        _reset_chat(g)
+    rid = getattr(response, "id", None)
+    if not rid:
         return
     try:
-        from abcxauto.park_clock import paper_stay_up
+        from abcxauto.chat_cursor import save_previous_response_id
 
-        if paper_stay_up(_stay_up_session_label(session)):
-            return
+        save_previous_response_id(str(rid))
     except Exception:
-        logger.debug("stay-up chat keep check failed", exc_info=True)
-    if _look_is_empty_or_question(turn):
-        _reset_chat(g)
-        return
-    _reset_chat(g)
+        logger.debug("chat_cursor persist failed", exc_info=True)
+
+
+def _finish_look_chat(g: GrokClient, turn: BrainTurn, *, session: str) -> None:
+    """Keep the live chat. Park, overnight, and an empty say do not start a new one."""
+    _ = g, turn, session
 
 
 def _new_chat(g: GrokClient, *, session: str = "") -> Any:
@@ -1267,11 +1560,26 @@ def _new_chat(g: GrokClient, *, session: str = "") -> Any:
             apply(session)
         except Exception:
             logger.debug("session knobs apply failed", exc_info=True)
-    create_kw = chat_create_kwargs(
-        g,
-        messages=[system(brain_system_prompt())],
-        tools=agent_tools(session=session),
-    )
+    prev = ""
+    try:
+        from abcxauto.chat_cursor import load_previous_response_id
+
+        prev = load_previous_response_id()
+    except Exception:
+        logger.debug("chat_cursor load failed", exc_info=True)
+        prev = ""
+    if prev:
+        create_kw = chat_create_kwargs(
+            g,
+            tools=agent_tools(session=session),
+            previous_response_id=prev,
+        )
+    else:
+        create_kw = chat_create_kwargs(
+            g,
+            messages=[system(brain_system_prompt())],
+            tools=agent_tools(session=session),
+        )
     chat = create_chat(g.client, **create_kw)
     g.chat = chat
     g._wake_n = 1
@@ -1293,23 +1601,16 @@ def _open_wake(
     resume: bool = False,
     snap: dict[str, Any] | None = None,
 ) -> Any:
-    """Start this look, or continue the live stay-up chat.
+    """Start this look, or continue the live chat.
 
-    A live chat is this look. Do not start a new messages list while it
-    exists — including when ``resume`` is false (older callers / a poke).
-    ``reset=True`` and overnight / park drop are the only new-chat paths.
-    A pending live poke owns the next developer turn.
+    A live chat stays one conversation — including when ``resume`` is false
+    or ``reset`` is true. A pending live poke owns the next developer turn.
+    When there is no local chat (new process), ``_new_chat`` continues via
+    ``previous_response_id``.
     """
-    _ = resume
-    if reset:
-        try:
-            from abcxauto.working_memory import clear_working_memory
-
-            clear_working_memory(reason="hard_reset")
-        except Exception:
-            logger.debug("working_memory clear on hard reset failed", exc_info=True)
+    _ = resume, reset
     g._wake_appended = False
-    live = None if reset else getattr(g, "chat", None)
+    live = getattr(g, "chat", None)
     if live is not None:
         pending = False
         try:
@@ -1420,6 +1721,564 @@ def _begin_look_for_turn(
         return
     begin_look(snap)
     _clear_look_tool_stash(holder)
+
+
+def _et_today() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _look_scan_symbols(snap: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: Any) -> None:
+        sym = str(raw or "").strip().upper()
+        if sym and sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+
+    for raw in snap.get("scan_fetched") or []:
+        add(raw)
+    hits = snap.get("scan_hits")
+    if isinstance(hits, dict):
+        for row in hits.get("rows") or []:
+            if isinstance(row, dict):
+                add(row.get("symbol"))
+        for raw in hits.get("symbols") or []:
+            add(raw)
+    return out
+
+
+def _look_scan_rows(snap: dict[str, Any]) -> list[dict[str, Any]]:
+    hits = snap.get("scan_hits")
+    if not isinstance(hits, dict):
+        return []
+    return [r for r in (hits.get("rows") or []) if isinstance(r, dict)]
+
+
+def _closes_from_bars(bars: Any) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for bar in bars or []:
+        if not isinstance(bar, dict):
+            continue
+        day = str(bar.get("date") or "").strip()[:10]
+        try:
+            close = float(bar.get("close"))
+        except (TypeError, ValueError):
+            continue
+        if day and close == close and close > 0:
+            out[day] = close
+    return out
+
+
+def _daily_returns(closes_by_date: dict[str, float]) -> list[float]:
+    dates = sorted(closes_by_date)
+    out: list[float] = []
+    for i in range(1, len(dates)):
+        prev = closes_by_date[dates[i - 1]]
+        cur = closes_by_date[dates[i]]
+        if prev and prev == prev and prev != 0:
+            out.append(cur / prev - 1.0)
+    return out
+
+
+def _short_alloc_wake(
+    sized: dict[str, Any] | None, ranked: list[dict[str, Any]] | None
+) -> str:
+    bits: list[str] = []
+    if isinstance(sized, dict):
+        for sym, panel in sized.items():
+            if not isinstance(panel, dict) or panel.get("sized") is None:
+                continue
+            try:
+                excess = int(panel.get("excess") or 0)
+            except (TypeError, ValueError):
+                excess = 0
+            if excess <= 0:
+                continue
+            bits.append(
+                f"{sym} sized={panel.get('sized')} held={panel.get('held')} excess={excess}"
+            )
+            if len(bits) >= 4:
+                break
+    if bits:
+        return "alloc " + "; ".join(bits)
+    if isinstance(ranked, list) and ranked:
+        top = ranked[0]
+        if isinstance(top, dict) and top.get("symbol"):
+            vs = top.get("vs_spy")
+            try:
+                vs_s = f"{float(vs):+.3f}" if vs is not None else ""
+            except (TypeError, ValueError):
+                vs_s = ""
+            return f"alloc rank1={top.get('symbol')}{(' ' + vs_s) if vs_s else ''}".strip()
+    return ""
+
+
+def _short_research_wake(dossiers: Any) -> str:
+    if not isinstance(dossiers, dict) or not dossiers:
+        return ""
+    n = len(dossiers)
+    unknown = 0
+    for bag in dossiers.values():
+        if not isinstance(bag, dict):
+            continue
+        if bag.get("earnings") in (None, "", "unknown"):
+            unknown += 1
+    if unknown:
+        return f"research dossiers={n} earnings_unknown={unknown}"
+    return f"research dossiers={n}"
+
+
+def _stk_con_id(positions: list[Any], symbol: str) -> str:
+    """Live stock conId for ``symbol``. Empty when the lot is not on the book."""
+    want = str(symbol or "").strip().upper()
+    for pos in positions or []:
+        if not isinstance(pos, dict):
+            continue
+        if str(pos.get("symbol") or "").strip().upper() != want:
+            continue
+        sec = str(pos.get("secType") or pos.get("sec_type") or "STK").upper()
+        if not sec.startswith("STK"):
+            continue
+        con = str(pos.get("conId") or pos.get("con_id") or "").strip()
+        if con and con not in ("0", "?"):
+            return con
+    return ""
+
+
+def _order_limit_px(order: dict[str, Any]) -> float | None:
+    for key in ("lmt", "lmtPrice", "limit", "limit_price", "price"):
+        raw = order.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            px = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if px > 0:
+            return px
+    return None
+
+
+def _working_limit_sell_qty(
+    orders: list[Any],
+    symbol: str,
+    *,
+    at_or_below: float | None = None,
+) -> int:
+    """Open limit sells at or under ``at_or_below``. A far target is not a trim.
+
+    Stops and trails never count. A profit target sitting well above the bid
+    must not block the excess sell.
+    """
+    want = str(symbol or "").strip().upper()
+    ceiling = None
+    if at_or_below is not None:
+        try:
+            ceiling = float(at_or_below)
+        except (TypeError, ValueError):
+            ceiling = None
+        if ceiling is not None and ceiling <= 0:
+            ceiling = None
+    total = 0
+    for order in orders or []:
+        if not isinstance(order, dict):
+            continue
+        if str(order.get("symbol") or "").strip().upper() != want:
+            continue
+        action = str(order.get("action") or order.get("side") or "").upper()
+        if action not in ("SELL", "S"):
+            continue
+        typ = str(
+            order.get("order_type") or order.get("orderType") or order.get("type") or ""
+        ).upper()
+        if "STP" in typ or "STOP" in typ or "TRAIL" in typ:
+            continue
+        if typ and "LMT" not in typ and "LIMIT" not in typ:
+            continue
+        limit_px = _order_limit_px(order)
+        if ceiling is not None and (limit_px is None or limit_px > ceiling + 0.05):
+            continue
+        try:
+            qty = int(float(order.get("quantity") or order.get("qty") or 0))
+        except (TypeError, ValueError):
+            qty = 0
+        if qty > 0:
+            total += qty
+    return total
+
+
+# Process-lifetime: one alloc excess sell per symbol. Survives look snaps.
+_ALLOC_TRIM_SENT: dict[str, int] = {}
+
+
+def _alloc_trim_sent_bag(snap: dict[str, Any]) -> dict[str, int]:
+    """Mirror process trim memory onto ``snap['alloc_trim_sent']``."""
+    bag = dict(_ALLOC_TRIM_SENT)
+    existing = snap.get("alloc_trim_sent")
+    if isinstance(existing, dict):
+        for key, raw in existing.items():
+            sym = str(key or "").strip().upper()
+            if not sym:
+                continue
+            try:
+                qty = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if qty > 0:
+                bag[sym] = qty
+    snap["alloc_trim_sent"] = bag
+    _ALLOC_TRIM_SENT.clear()
+    _ALLOC_TRIM_SENT.update(bag)
+    return bag
+
+
+def _record_alloc_trim_sent(snap: dict[str, Any], symbol: str, qty: int) -> None:
+    sym = str(symbol or "").strip().upper()
+    if not sym or qty <= 0:
+        return
+    bag = _alloc_trim_sent_bag(snap)
+    bag[sym] = int(qty)
+    _ALLOC_TRIM_SENT[sym] = int(qty)
+    snap["alloc_trim_sent"] = bag
+
+
+def _sell_exec_count(connector: Any, symbol: str) -> int:
+    """Count SLD/SELL rows already captured on the connector for ``symbol``."""
+    want = str(symbol or "").strip().upper()
+    if not want or connector is None:
+        return 0
+    store = getattr(connector, "_executions", None)
+    if not isinstance(store, dict):
+        return 0
+    rows = store.get(want) or store.get(symbol) or []
+    n = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        side = str(row.get("side") or "").upper()
+        if side in ("SLD", "SELL"):
+            n += 1
+    return n
+
+
+def _stk_held_qty(positions: list[Any], symbol: str) -> int:
+    want = str(symbol or "").strip().upper()
+    total = 0
+    for pos in positions or []:
+        if not isinstance(pos, dict):
+            continue
+        if str(pos.get("symbol") or "").strip().upper() != want:
+            continue
+        sec = str(pos.get("secType") or pos.get("sec_type") or "STK").upper()
+        if not sec.startswith("STK"):
+            continue
+        try:
+            qty = int(
+                float(
+                    pos.get("quantity")
+                    if pos.get("quantity") is not None
+                    else (
+                        pos.get("position")
+                        if pos.get("position") is not None
+                        else pos.get("qty") or 0
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            qty = 0
+        total += qty
+    return abs(total)
+
+
+async def apply_pre_model_look_systems(
+    *,
+    connector: Any,
+    world: Any,
+    snap: dict[str, Any],
+    day: dict[str, Any] | None,
+) -> None:
+    """Allocation → size/trim → dossiers after world/snap, before model research.
+
+    Missing sibling modules are ImportError-guarded so a partial tree does not
+    crash the desk. Does not call note_brief_turn or set brief_loop_halted.
+    """
+    if not isinstance(snap, dict):
+        return
+    day_bag = day if isinstance(day, dict) else {}
+    today = _et_today()
+    scan_symbols = _look_scan_symbols(snap)
+    scan_rows = _look_scan_rows(snap)
+    positions = list(snap.get("positions") or getattr(world, "positions", None) or [])
+    orders = list(snap.get("open_orders") or getattr(world, "open_orders", None) or [])
+    account = snap.get("account") if isinstance(snap.get("account"), dict) else {}
+
+    allocation: dict[str, Any] | None = None
+    try:
+        from abcxauto.alloc_snapshot import build_allocation_snapshot
+
+        allocation = await build_allocation_snapshot(
+            connector,
+            positions=positions,
+            orders=orders,
+            account=account,
+            scan_symbols=scan_symbols,
+            today=today,
+        )
+        if isinstance(allocation, dict):
+            snap["allocation_snapshot"] = allocation
+    except ImportError:
+        logger.debug("alloc_snapshot not installed")
+    except Exception:
+        logger.debug("build_allocation_snapshot failed", exc_info=True)
+
+    sized: dict[str, Any] | None = None
+    ranked: list[dict[str, Any]] = []
+    scores: dict[str, dict] = {}
+    if isinstance(allocation, dict):
+        try:
+            from abcxauto.alloc_rank import heat_groups, rank_board, score_name
+            from abcxauto.alloc_size import sized_book
+
+            names = (
+                allocation.get("names")
+                if isinstance(allocation.get("names"), dict)
+                else {}
+            )
+            spy_panel = names.get("SPY") if isinstance(names.get("SPY"), dict) else {}
+            spy_by = _closes_from_bars(spy_panel.get("bars"))
+            returns_by: dict[str, list[float]] = {}
+            asof = str(allocation.get("asof") or "")
+            bar_date = str(allocation.get("bar_date") or "")
+            for sym, panel in names.items():
+                if not isinstance(panel, dict):
+                    continue
+                closes = _closes_from_bars(panel.get("bars"))
+                panel["asof"] = asof
+                panel["price_asof"] = asof
+                if bar_date:
+                    panel["bar_date"] = bar_date
+                if str(sym).upper() != "SPY":
+                    scores[str(sym)] = score_name(closes, spy_by)
+                    panel["vs_spy"] = scores[str(sym)].get("vs_spy")
+                rets = _daily_returns(closes)
+                if rets:
+                    returns_by[str(sym)] = rets
+            ranked = rank_board(scores)
+            snap["alloc_rank"] = ranked
+            groups = heat_groups(returns_by)
+            sized = sized_book(allocation, scores, groups)
+            snap["sized"] = sized
+        except ImportError:
+            logger.debug("alloc_rank/alloc_size not installed")
+        except Exception:
+            logger.debug("alloc score/size failed", exc_info=True)
+
+    if isinstance(sized, dict):
+        try:
+            from abcxauto.alloc_trim import trim_tickets
+
+            bids: dict[str, float] = {}
+            names = (
+                allocation.get("names")
+                if isinstance(allocation, dict)
+                and isinstance(allocation.get("names"), dict)
+                else {}
+            )
+            for sym, panel in names.items():
+                if not isinstance(panel, dict):
+                    continue
+                try:
+                    bid = float(panel.get("bid") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if bid > 0:
+                    bids[str(sym)] = bid
+            tickets = trim_tickets(sized, bids=bids)
+            snap["trim_tickets"] = list(tickets or [])
+            try:
+                from abcxauto.agent_loop import execute_ticket
+
+                sent_bag = _alloc_trim_sent_bag(snap)
+                refresh_positions = False
+                for ticket in tickets or []:
+                    if not isinstance(ticket, dict):
+                        continue
+                    sym = str(ticket.get("symbol") or "").strip().upper()
+                    try:
+                        excess = int(ticket.get("quantity") or 0)
+                    except (TypeError, ValueError):
+                        excess = 0
+                    try:
+                        trim_px = float(ticket.get("limit_price") or 0)
+                    except (TypeError, ValueError):
+                        trim_px = 0.0
+                    if not sym or excess <= 0:
+                        continue
+                    if sym in sent_bag:
+                        logger.info(
+                            "alloc trim skip %s — already sent qty=%s this process",
+                            sym,
+                            sent_bag.get(sym),
+                        )
+                        continue
+                    if _working_limit_sell_qty(
+                        orders, sym, at_or_below=trim_px
+                    ) >= excess:
+                        logger.info(
+                            "alloc trim skip %s excess=%s — limit sell already at the bid",
+                            sym,
+                            excess,
+                        )
+                        continue
+                    panel = sized.get(sym) if isinstance(sized.get(sym), dict) else {}
+                    try:
+                        sized_qty = int(panel.get("sized") or 0)
+                    except (TypeError, ValueError):
+                        sized_qty = 0
+                    if refresh_positions and connector is not None:
+                        get_pos = getattr(connector, "get_positions", None)
+                        if callable(get_pos):
+                            try:
+                                live = await get_pos()
+                            except Exception:
+                                live = None
+                                logger.debug(
+                                    "alloc trim position refresh failed",
+                                    exc_info=True,
+                                )
+                            if isinstance(live, list):
+                                positions = live
+                                snap["positions"] = list(live)
+                        refresh_positions = False
+                    held = _stk_held_qty(positions, sym)
+                    if held <= sized_qty:
+                        logger.info(
+                            "alloc trim skip %s — held=%s already at/under sized=%s",
+                            sym,
+                            held,
+                            sized_qty,
+                        )
+                        continue
+                    con_id = _stk_con_id(positions, sym)
+                    if not con_id:
+                        logger.info("alloc trim skip %s — no position conId", sym)
+                        continue
+                    logger.info(
+                        "alloc trim %s qty=%s limit=%s conId=%s",
+                        sym,
+                        excess,
+                        trim_px,
+                        con_id,
+                    )
+                    act = {
+                        "action": "limit_order",
+                        "strategy": "limit_order",
+                        "target_conId": con_id,
+                        "params": {
+                            "symbol": sym,
+                            "action": "SELL",
+                            "quantity": ticket.get("quantity"),
+                            "limit_price": ticket.get("limit_price"),
+                            "closing_position": True,
+                            "conId": con_id,
+                            "target_conId": con_id,
+                        },
+                        "rationale": str(ticket.get("reason") or "alloc_excess"),
+                    }
+                    exec_before = _sell_exec_count(connector, sym)
+                    result = await execute_ticket(act, connector, world, snap)
+                    executed = _send_succeeded(
+                        result if isinstance(result, dict) else None
+                    )
+                    if not executed and _sell_exec_count(connector, sym) > exec_before:
+                        executed = True
+                    if executed:
+                        _record_alloc_trim_sent(snap, sym, excess)
+                        sent_bag = snap["alloc_trim_sent"]
+                        refresh_positions = True
+            except ImportError:
+                logger.debug(
+                    "execute_ticket not importable; trim_tickets left on snap"
+                )
+        except ImportError:
+            logger.debug("alloc_trim not installed")
+        except Exception:
+            logger.debug("alloc trim failed", exc_info=True)
+
+    spend: dict[str, Any] | None = None
+    try:
+        from abcxauto.look_ledger import session_spend
+
+        spend = session_spend(today)
+    except ImportError:
+        logger.debug("look_ledger not installed")
+    except Exception:
+        logger.debug("session_spend failed", exc_info=True)
+
+    try:
+        from abcxauto.research_dossier import assemble_dossiers
+
+        if isinstance(allocation, dict):
+            bag = (
+                snap.get("_research_bag")
+                if isinstance(snap.get("_research_bag"), dict)
+                else {}
+            )
+            research_web = (
+                snap.get("research_web")
+                if isinstance(snap.get("research_web"), dict)
+                else {}
+            )
+            calendar = bag.get("calendar") if isinstance(bag.get("calendar"), dict) else {}
+            odds = bag.get("odds") if isinstance(bag.get("odds"), dict) else {}
+            web = research_web or (
+                bag.get("web") if isinstance(bag.get("web"), dict) else {}
+            )
+            news: dict[str, Any] = {"items": list(snap.get("news_items") or [])}
+            if isinstance(bag.get("news"), dict):
+                news = bag["news"]
+            dossiers = assemble_dossiers(
+                allocation,
+                scan_rows=scan_rows,
+                calendar=calendar if isinstance(calendar, dict) else {},
+                news=news,
+                web=web if isinstance(web, dict) else {},
+                odds=odds if isinstance(odds, dict) else {},
+                spend=spend,
+            )
+            snap["dossiers"] = dossiers
+    except ImportError:
+        logger.debug("research_dossier not installed")
+    except Exception:
+        logger.debug("assemble_dossiers failed", exc_info=True)
+
+    alloc_line = _short_alloc_wake(sized, ranked)
+    research_line = _short_research_wake(snap.get("dossiers"))
+    if alloc_line:
+        snap["alloc_line"] = alloc_line
+        day_bag["alloc_line"] = alloc_line
+    if research_line:
+        snap["research_line"] = research_line
+        day_bag["research_line"] = research_line
+    if isinstance(spend, dict):
+        if spend.get("unknown"):
+            snap["session_spend_unknown"] = True
+            day_bag["session_spend_unknown"] = True
+        elif spend.get("usd") is not None:
+            try:
+                usd = float(spend["usd"])
+            except (TypeError, ValueError):
+                usd = None
+            if usd is not None and usd == usd:
+                snap["session_spend_usd"] = usd
+                day_bag["session_spend_usd"] = usd
 
 
 async def _inject_live_poke(
@@ -1830,12 +2689,11 @@ def _bill_research_brief_round(
             return False
         card, window = resolve_research_card(snap=snap)
         out = note_brief_turn(card, window, tool_calls=tool_calls)
-        turn.brief_billed = True
+        turn.brief_billed = bool(out.get("billed"))
         if out.get("brief_loop_halted"):
+            # Card is full. The look already ran; do not sit the next one.
             turn.brief_loop_halted = True
-            turn.loop_halted = True
-            think_emit("tool", "\n[brief loop halt — no billed research turns]\n")
-            return True
+            return bool(out.get("billed"))
     except Exception:
         logger.debug("research brief bill failed", exc_info=True)
     return False
@@ -2065,168 +2923,126 @@ def _emit_paid_look(tc: Any, result: str) -> None:
         think_emit("tool", paid if paid.endswith("\n") else f"{paid}\n")
 
 
-# Stay-up re-bills every prior tool blob on each later call. Keep the last
-# N full; rewrite older ROLE_TOOL content in place on the SDK messages list.
-KEEP_TOOL_RESULTS = 6
-_OMITTED_TOOL_RESULT = "[earlier tool result omitted]"
-# Same chat: old assistant says + reasoning also re-bill. Keep a small tail;
-# stub older ROLE_ASSISTANT bodies in place (tool_calls stay).
-KEEP_ASSISTANT_TURNS = 4
-_OMITTED_ASSISTANT = "[earlier assistant turn omitted]"
-_OMITTED_REASONING = "[earlier reasoning omitted]"
+# Fat candles/scan/web *error* blobs on chat.append can void the next
+# sample (input=0 stop=void). Glass already slims for the window; bound
+# what the model chat pays for while keeping a usable fact line.
+TOOL_ERROR_CHAT_CHARS = 1_500
+_BOUND_ERROR_TOOLS = frozenset({"candles", "scan", "web"})
 
 
-def _is_tool_result_message(msg: Any) -> bool:
-    """True for a client tool-result row (ROLE_TOOL), not an assistant tool_call."""
-    role = getattr(msg, "role", None)
-    if role is None:
-        return False
-    name = str(getattr(role, "name", "") or "").upper()
-    if name in ("ROLE_TOOL", "TOOL"):
-        return True
+def _bound_tool_chat_result(name: str, result: str) -> str:
+    """Trim candles/scan/web errors for chat.append. Success paths unchanged."""
+    tool = str(name or "").strip()
+    raw = str(result or "")
+    if tool not in _BOUND_ERROR_TOOLS:
+        return raw
+    data: Any = None
     try:
-        return role == tool_result("").role
-    except Exception:
-        return False
-
-
-def _is_assistant_message(msg: Any) -> bool:
-    """True for ROLE_ASSISTANT rows (says / reasoning / tool_calls)."""
-    role = getattr(msg, "role", None)
-    if role is None:
-        return False
-    name = str(getattr(role, "name", "") or "").upper()
-    if name in ("ROLE_ASSISTANT", "ASSISTANT"):
-        return True
-    try:
-        from xai_sdk.chat import assistant as _assistant
-
-        return role == _assistant("").role
-    except Exception:
-        return False
-
-
-def _set_tool_result_text(msg: Any, stub: str) -> bool:
-    """Rewrite one tool-result message's content in place. True when changed."""
-    content = getattr(msg, "content", None)
-    if content is None:
-        return False
-    try:
-        if len(content) >= 1 and hasattr(content[0], "text"):
-            if str(content[0].text or "") == stub and len(content) == 1:
-                return False
-            content[0].text = stub
-            while len(content) > 1:
-                del content[-1]
-            return True
-    except Exception:
-        return False
-    return False
-
-
-def _set_assistant_turn_bodies(msg: Any) -> bool:
-    """Stub say + reasoning on one assistant row. Keeps tool_calls. True when changed."""
-    changed = False
-    content = getattr(msg, "content", None)
-    if content is not None:
-        try:
-            if len(content) >= 1 and hasattr(content[0], "text"):
-                cur = str(content[0].text or "")
-                if cur and (
-                    cur != _OMITTED_ASSISTANT or len(content) > 1
+        data = json.loads(raw) if raw.strip() else None
+    except (TypeError, json.JSONDecodeError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        is_err = bool(data.get("error")) or data.get("ok") is False
+        if not is_err:
+            return raw
+        slim: dict[str, Any] = {"_clipped": "error"}
+        for key in (
+            "symbol",
+            "symbols",
+            "resolution",
+            "requested_resolution",
+            "source",
+            "ok",
+            "last",
+            "query",
+            "url",
+            "arena",
+            "scan_code",
+            "freshness",
+        ):
+            if key in data and data[key] is not None:
+                slim[key] = data[key]
+        err = (
+            data.get("error")
+            or data.get("hist_error")
+            or data.get("rt_error")
+            or "error"
+        )
+        slim["error"] = str(err).split("\n", 1)[0].strip()[:400] or "error"
+        bars = data.get("bars")
+        if isinstance(bars, list) and bars:
+            last_bar = bars[-1]
+            if isinstance(last_bar, dict):
+                kept = _think_bar(last_bar)
+                slim["last_bar"] = kept if kept is not None else {
+                    k: last_bar[k]
+                    for k in ("t", "o", "h", "l", "c", "v")
+                    if k in last_bar
+                }
+        series = data.get("series")
+        if "last_bar" not in slim and isinstance(series, list):
+            for row in reversed(series):
+                if not isinstance(row, dict):
+                    continue
+                row_bars = row.get("bars")
+                if isinstance(row_bars, list) and row_bars and isinstance(
+                    row_bars[-1], dict
                 ):
-                    content[0].text = _OMITTED_ASSISTANT
-                    while len(content) > 1:
-                        del content[-1]
-                    changed = True
-        except Exception:
-            pass
-    try:
-        rc = str(getattr(msg, "reasoning_content", None) or "")
-        if rc and rc != _OMITTED_REASONING:
-            msg.reasoning_content = _OMITTED_REASONING
-            changed = True
-    except Exception:
-        pass
-    try:
-        ec = getattr(msg, "encrypted_content", None)
-        if ec:
-            msg.encrypted_content = ""
-            changed = True
-    except Exception:
-        pass
-    return changed
-
-
-def _omit_older_tool_results(
-    chat: Any, *, keep: int = KEEP_TOOL_RESULTS
-) -> None:
-    """Stub tool-result contents older than the most recent ``keep``.
-
-    Uses the xAI chat ``messages`` list (mutable protobuf). Does not start a
-    second chat, does not drop system / wake, does not touch streaming.
-    """
-    msgs = getattr(chat, "messages", None)
-    if msgs is None:
-        return
-    try:
-        tool_idxs = [i for i, msg in enumerate(msgs) if _is_tool_result_message(msg)]
-    except Exception:
-        logger.debug("omit older tool results: messages not iterable", exc_info=True)
-        return
-    if len(tool_idxs) <= keep:
-        return
-    for i in tool_idxs[:-keep] if keep > 0 else tool_idxs:
-        try:
-            _set_tool_result_text(msgs[i], _OMITTED_TOOL_RESULT)
-        except Exception:
-            logger.debug("omit older tool results: row not editable", exc_info=True)
-            return
-
-
-def _omit_older_assistant_turns(
-    chat: Any, *, keep: int = KEEP_ASSISTANT_TURNS
-) -> None:
-    """Stub assistant say/reasoning older than the most recent ``keep``.
-
-    Same ``chat.messages`` in-place edit as tool-result omit. Does not drop
-    the latest say, system / wake, or tool_calls. Latest tool results are
-    owned by ``_omit_older_tool_results``.
-    """
-    msgs = getattr(chat, "messages", None)
-    if msgs is None:
-        return
-    try:
-        asst_idxs = [i for i, msg in enumerate(msgs) if _is_assistant_message(msg)]
-    except Exception:
-        logger.debug("omit older assistant turns: messages not iterable", exc_info=True)
-        return
-    if len(asst_idxs) <= keep:
-        return
-    for i in asst_idxs[:-keep] if keep > 0 else asst_idxs:
-        try:
-            _set_assistant_turn_bodies(msgs[i])
-        except Exception:
-            logger.debug("omit older assistant turns: row not editable", exc_info=True)
-            return
+                    kept = _think_bar(row_bars[-1])
+                    if kept is not None:
+                        slim["last_bar"] = kept
+                    if row.get("symbol") and "symbol" not in slim:
+                        slim["symbol"] = row.get("symbol")
+                    if row.get("resolution") and "resolution" not in slim:
+                        slim["resolution"] = row.get("resolution")
+                    break
+                if row.get("error") and slim.get("error") == "error":
+                    slim["error"] = str(row.get("error")).split("\n", 1)[0][:400]
+                    if row.get("symbol"):
+                        slim["symbol"] = row.get("symbol")
+                    break
+        out = json.dumps(slim, default=str)
+        if len(out) <= TOOL_ERROR_CHAT_CHARS:
+            return out
+        tiny = {
+            "error": slim.get("error") or "error",
+            "tool": tool,
+            "_clipped": "error",
+        }
+        if slim.get("symbol") is not None:
+            tiny["symbol"] = slim["symbol"]
+        if slim.get("resolution") is not None:
+            tiny["resolution"] = slim["resolution"]
+        if slim.get("last_bar") is not None:
+            tiny["last_bar"] = slim["last_bar"]
+        elif slim.get("last") is not None:
+            tiny["last"] = slim["last"]
+        return json.dumps(tiny, default=str)
+    if len(raw) <= TOOL_ERROR_CHAT_CHARS:
+        return raw
+    return json.dumps(
+        {
+            "error": raw.split("\n", 1)[0].strip()[:400] or "error",
+            "tool": tool,
+            "_clipped": "error",
+        },
+        default=str,
+    )
 
 
 def _append_tool_result(chat: Any, tc: Any, result: str) -> None:
+    fn = getattr(tc, "function", None)
+    name = str(getattr(fn, "name", None) or getattr(tc, "name", "") or "")
+    paid = _bound_tool_chat_result(name, str(result or ""))
     try:
-        chat.append(tool_result(result, tool_call_id=getattr(tc, "id", None)))
+        chat.append(tool_result(paid, tool_call_id=getattr(tc, "id", None)))
     except TypeError:
-        chat.append(tool_result(result))
-    # SDK chat.messages is a mutable protobuf list — stub older ROLE_TOOL
-    # contents in place. If that list were not editable we would leave a
-    # note here and skip (no second chat; streaming stays intact).
-    _omit_older_tool_results(chat)
-    _emit_paid_look(tc, result)
+        chat.append(tool_result(paid))
+    _emit_paid_look(tc, paid)
     try:
         from abcxauto.look_meter import note_tool_result
 
-        fn = getattr(tc, "function", None)
-        name = str(getattr(fn, "name", None) or getattr(tc, "name", "") or "")
-        note_tool_result(name, result)
+        note_tool_result(name, paid)
     except Exception:
         logger.exception("look_meter note_tool_result failed")
 
@@ -2476,125 +3292,8 @@ async def _grok_turn_impl(
     except Exception:
         logger.debug("kill-look mode stamp failed", exc_info=True)
     live_before = getattr(g, "chat", None)
-    try:
-        from abcxauto.thin_rth_kill_look import (
-            REASON_F10,
-            is_f10_look_halt,
-            record_f10_loop_halt,
-            skip_look_reason,
-        )
-
-        prot = snap.get("protection") if isinstance(snap.get("protection"), dict) else {}
-        unprotected = bool(
-            prot.get("unprotected_symbols")
-            or getattr(world, "unprotected", None)
-            or getattr(world, "needs_protection", False)
-        )
-        halt = skip_look_reason(
-            session,
-            positions=list(
-                getattr(world, "positions", None) or snap.get("positions") or []
-            ),
-            open_lots=list(getattr(world, "open_lots", None) or []),
-            same_look=bool(in_flight or live_before is not None),
-            unprotected=unprotected,
-            in_flight=in_flight,
-            snap=snap,
-        )
-        if is_f10_look_halt(halt):
-            turn.f10_tripped = True
-            turn.loop_halted = True
-            turn.last_strat = "skipped"
-            turn.last_act = {
-                "action": "skipped",
-                "strategy": "skipped",
-                "rationale": REASON_F10,
-            }
-            turn.last_result = {
-                "status": "skipped",
-                "reason_code": REASON_F10,
-                "note": REASON_F10,
-                "f10_tripped": True,
-                "loop_halted": True,
-            }
-            record_f10_loop_halt(session=session, snap=snap)
-            think_emit("tool", "\n[F10 loop halt — no new-risk looks]\n")
-            if live_before is not None:
-                _finish_look_chat(g, turn, session=session)
-            return turn
-    except Exception:
-        logger.debug("f10 loop halt pre-check failed", exc_info=True)
-        try:
-            from abcxauto.thin_rth_kill_look import REASON_F10, f10_open_look_halted
-
-            if f10_open_look_halted():
-                turn.f10_tripped = True
-                turn.loop_halted = True
-                turn.last_strat = "skipped"
-                turn.last_act = {
-                    "action": "skipped",
-                    "strategy": "skipped",
-                    "rationale": REASON_F10,
-                }
-                turn.last_result = {
-                    "status": "skipped",
-                    "reason_code": REASON_F10,
-                    "note": REASON_F10,
-                    "f10_tripped": True,
-                    "loop_halted": True,
-                }
-                think_emit("tool", "\n[F10 loop halt — no new-risk looks]\n")
-                if live_before is not None:
-                    _finish_look_chat(g, turn, session=session)
-                return turn
-        except Exception:
-            logger.debug("f10 loop halt fail-closed fallback failed", exc_info=True)
-    try:
-        from abcxauto.desk_mode import is_research_session, is_rth_session
-        from abcxauto.research_budget import (
-            allow_brief_turn,
-            resolve_research_card,
-        )
-
-        if is_research_session(session) and not is_rth_session(session):
-            card, window = resolve_research_card(snap=snap)
-            gate = allow_brief_turn(card, window)
-            if not gate.get("allow"):
-                why = str(gate.get("reason_code") or "")
-                turn.brief_loop_halted = True
-                turn.loop_halted = True
-                turn.last_strat = "skipped"
-                turn.last_act = {
-                    "action": "skipped",
-                    "strategy": "skipped",
-                    "rationale": why,
-                }
-                turn.last_result = {
-                    "status": "skipped",
-                    "reason_code": why,
-                    "note": why,
-                    "brief_loop_halted": True,
-                    "loop_halted": True,
-                }
-                think_emit("tool", "\n[brief loop halt — no billed research turns]\n")
-                try:
-                    from abcxauto.desk_mode import write_research_brief
-
-                    write_research_brief(
-                        session=session,
-                        snap=snap,
-                        turn=turn,
-                        world=world,
-                        research_card_id=card,
-                        prove_window_id=window,
-                    )
-                except Exception:
-                    logger.debug("research brief halt stamp failed", exc_info=True)
-                if live_before is not None:
-                    _finish_look_chat(g, turn, session=session)
-                return turn
-    except Exception:
-        logger.debug("research brief halt pre-check failed", exc_info=True)
+    # Dollar F10 / model-cost fuse refuses new-risk sends; it must not skip
+    # the look or set turn.loop_halted. Latch stays in session_caps.
     # A live chat is this look. A poke does not start a new messages list.
     resume = bool(resume) or live_before is not None
     recover = bool(recover) and live_before is not None
@@ -2648,19 +3347,10 @@ async def _grok_turn_impl(
                 except Exception:
                     logger.debug("chat work stamp failed", exc_info=True)
             elif work_resume:
-                # Work-streak resume: lot still on, prior look had no tools.
-                # Same lead — still call the model on the kept chat (cap 2).
-                # The chat already ends on the say. A new turn is required
-                # or the next sample has nothing to answer.
+                # Same lead, kept chat — call the model with no extra
+                # developer text. A harness sentence becomes permanent
+                # history under store_messages and the model mocks it.
                 logger.info("work resume, same lead, calling the model")
-                try:
-                    chat.append(
-                        developer(
-                            "Same lead. No tool this look. Call book, quote, or scan."
-                        )
-                    )
-                except Exception:
-                    logger.debug("work resume append failed", exc_info=True)
             else:
                 # Duplicate lead-fact identity. Do not start a fresh go-do-desk.
                 turn.ended = True
@@ -2671,48 +3361,6 @@ async def _grok_turn_impl(
     abort_tries = 0
     empty_tries = 0
     while turn.steps < turn_cap:
-        try:
-            from abcxauto.thin_rth_kill_look import is_f10_look_halt, skip_look_reason
-
-            prot = snap.get("protection") if isinstance(snap.get("protection"), dict) else {}
-            mid_halt = skip_look_reason(
-                session,
-                positions=list(
-                    getattr(world, "positions", None) or snap.get("positions") or []
-                ),
-                open_lots=list(getattr(world, "open_lots", None) or []),
-                same_look=True,
-                unprotected=bool(
-                    prot.get("unprotected_symbols")
-                    or getattr(world, "unprotected", None)
-                    or getattr(world, "needs_protection", False)
-                ),
-                in_flight=True,
-                snap=snap,
-            )
-            if is_f10_look_halt(mid_halt):
-                turn.f10_tripped = True
-                turn.loop_halted = True
-                think_emit("tool", "\n[F10 loop halt — no new-risk looks]\n")
-                ran_out = False
-                break
-        except Exception:
-            logger.debug("f10 mid-look halt check failed", exc_info=True)
-        try:
-            from abcxauto.desk_mode import is_research_session, is_rth_session
-            from abcxauto.research_budget import allow_brief_turn, resolve_research_card
-
-            if is_research_session(session) and not is_rth_session(session):
-                card, window = resolve_research_card(snap=snap)
-                mid_brief = allow_brief_turn(card, window)
-                if not mid_brief.get("allow"):
-                    turn.brief_loop_halted = True
-                    turn.loop_halted = True
-                    think_emit("tool", "\n[brief loop halt — no billed research turns]\n")
-                    ran_out = False
-                    break
-        except Exception:
-            logger.debug("research brief mid-look halt check failed", exc_info=True)
         turn.steps += 1
         try:
             from abcxauto.park_clock import peek_interrupt
@@ -2777,8 +3425,7 @@ async def _grok_turn_impl(
             except Exception:
                 logger.debug("chat.append(response) failed", exc_info=True)
             else:
-                # Stay-up: stub old assistant/reasoning bodies in place.
-                _omit_older_assistant_turns(chat)
+                _persist_response_id(response)
         calls = list(getattr(response, "tool_calls", None) or []) if response is not None else []
         # Paint the names before any tool work. A hang inside dispatch
         # used to leave the window on the say.
@@ -2814,12 +3461,30 @@ async def _grok_turn_impl(
                 live_chat=live_before is not None,
                 poked=bool(getattr(turn, "poked", False)),
             )
-            turn.trailing_empty_grok = empty_after_work
-            if empty_after_work:
-                turn.skip_identical_retry = True
+            # Zero-token void sample: stream returned no chunks (response is
+            # None, finish_reason=-). After tools/send/poke, never stamp
+            # skip_identical_retry — that sets _recover_gave_up and drops
+            # the chat cold, wiping the paid tool trace. Spoken look: keep
+            # the say and sit (no trailing_empty_grok). Tools-only empty:
+            # trailing_empty_grok so pro_engine same-chat recovers once
+            # (EMPTY_GROK_RECOVER_TRIES), then may sit/drop.
+            look_spoke = not _look_text_is_junk(turn.text)
+            void_stream = response is None and stop == "empty"
+            if empty_after_work and look_spoke:
+                turn.trailing_empty_grok = False
+                turn.skip_identical_retry = False
+                if void_stream:
+                    logger.warning(
+                        "void GROK after tools — keep spoken look, no chat wipe"
+                    )
+            elif empty_after_work:
+                turn.trailing_empty_grok = True
+                turn.skip_identical_retry = False
                 logger.warning(
-                    "empty GROK after tools/send/poke — skip identical retry"
+                    "empty GROK after tools/send/poke — same-chat recover, keep paid tools"
                 )
+            else:
+                turn.trailing_empty_grok = False
             # Words (or empty) and no tools: stop calling the model. Chat
             # stays. Next call is fill / order_change / unprotected / poke
             # with this chat plus a fresh snap. Do not call again because it spoke.

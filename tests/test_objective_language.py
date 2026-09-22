@@ -202,8 +202,9 @@ def test_format_wake_includes_portfolio_pct_nl():
             "open_lots": ["QQQ STK long 10"],
         },
     )
-    assert "cash=80.0% NL" in text
-    assert "deployed=20.0% NL" in text
+    # Leftover / deployed share allocation_line wording (no "% NL" suffix).
+    assert "cash=80.0%" in text
+    assert "deployed=20.0%" in text
     assert "top QQQ=20.0% NL" in text
 
 

@@ -788,7 +788,11 @@ class MarketDataClient:
             return []
 
     async def get_stock_news(
-        self, symbol: str, countback: int = 8
+        self,
+        symbol: str,
+        countback: int = 8,
+        *,
+        timeout: float = 2.0,
     ) -> list[dict]:
         """Fetch recent headlines for ``symbol`` via MDA /stocks/news/{symbol}/.
 
@@ -797,8 +801,10 @@ class MarketDataClient:
 
         Bare path (no countback/to). MDA's beta news docs serve recent prints
         on GET /stocks/news/{symbol}/; countback without ``to`` stalls some
-        names past the 2s budget. Slice client-side. One try — options retry
-        storms must not eat the news wait_for.
+        names past the budget. Slice client-side. One try — options retry
+        storms must not eat the news wait. ``timeout`` is the remaining
+        shared batch budget from news_feed (default 2s), not a fresh 2s
+        per symbol after the batch clock has already run.
         """
         if not self.is_configured or self._is_credits_exhausted():
             return []
@@ -806,11 +812,14 @@ class MarketDataClient:
         if not sym:
             return []
         limit = max(1, int(countback or 8))
+        budget = max(0.0, float(timeout))
+        if budget <= 0:
+            raise TimeoutError(f"news {sym} exceeded {timeout}s")
         try:
             resp = await self._get_with_retries(
                 f"/stocks/news/{sym}/",
                 label=f"news {sym}",
-                timeout=2.0,
+                timeout=budget,
                 attempts=1,
             )
             if resp is None:

@@ -818,25 +818,13 @@ def test_desk_mode_brain_keeps_stub_chat_on_same_session():
     assert g.chat is chat
 
 
-def test_desk_mode_brain_rebuilds_on_research_to_rth_roll(monkeypatch):
+def test_desk_mode_brain_keeps_chat_on_research_to_rth_roll(monkeypatch):
     eng = ProEngine()
     chat = object()
     g = SimpleNamespace(chat=chat, model="grok-4.6")
-    dropped = {"n": 0}
-
-    def boom(client):
-        dropped["n"] += 1
-        client.chat = None
-
-    monkeypatch.setattr("abcxauto.brain.drop_live_chat", boom)
-    monkeypatch.setattr(
-        ProEngine,
-        "_new_grok",
-        lambda self, **_k: SimpleNamespace(chat=object(), model="grok-4.6"),
-    )
     out = eng._apply_desk_mode_brain(g, "premarket", "regular")
-    assert dropped["n"] == 1
-    assert out is not g
+    assert out is g
+    assert g.chat is chat
     assert getattr(eng, "_research_color_injected", True) is False
 
 
@@ -1050,13 +1038,14 @@ def test_rearm_spoken_close_without_send_reenters_same_chat():
     assert eng._resume_think is False
     assert eng._cold_next is False
     assert not getattr(eng, "_inventory_wake", False)
-    # Spoken-no-tool that is not close/exit still sits, even with lots.
+    # Tooled hold on open lots sits for a book event (not inventory wake).
     eng = ProEngine()
     wait = eng._rearm_after_think(
         {
             "_failed": False,
             "rationale": "Standing down. Watching IBIT and XLF. No ticket.",
             "sends": 0,
+            "tool_trace": ["book", "quote"],
             "positions": pos,
         },
         session="regular",
@@ -1952,7 +1941,7 @@ async def test_host_think_inventory_wake_leads_with_open_lots(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_host_think_ticket_wake_leads_with_send_the_ticket(monkeypatch):
-    """Named-ticket re-enter puts SEND-THE-TICKET on the wake, not a poke."""
+    """Named-ticket re-enter puts the unpaid-ticket desk fact on the wake, not a poke."""
     from abcxauto.brain import BrainTurn
     from abcxauto.desk_mode import TICKET_WAKE_FACT
     from abcxauto.park_clock import peek_interrupt
@@ -1975,7 +1964,8 @@ async def test_host_think_ticket_wake_leads_with_send_the_ticket(monkeypatch):
     assert got.get("resume") is True
     assert got.get("recover") is False
     assert wake.startswith(TICKET_WAKE_FACT)
-    assert "SEND-THE-TICKET" in wake
+    assert "SEND-THE-TICKET" not in wake
+    assert "send did not run" in wake.lower()
     assert eng._ticket_wake is False
     assert peek_interrupt() is None
 
@@ -2183,18 +2173,21 @@ async def test_mid_rth_start_no_entry_budget_block(monkeypatch, tmp_path):
 
 @pytest.mark.pcs_kill_look
 @pytest.mark.asyncio
-async def test_mid_rth_start_f10_halt_still_skips(monkeypatch, tmp_path):
-    """F10 halt still hard-skips the Start first look. Soften=FAIL."""
+async def test_mid_rth_start_f10_halt_still_looks(monkeypatch, tmp_path):
+    """F10 halt still runs the Start first look; new risk stays blocked at send."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_PCS_KILL_LOOK", "1")
     from abcxauto.session_caps import mark_f10_loop_halt
-    from abcxauto.thin_rth_kill_look import REASON_F10
+    from abcxauto.think_stream import begin_run, emit
 
     mark_f10_loop_halt()
+    begin_run()
     calls = {"n": 0}
 
     async def think(self, n, g, s, *, resume=False):
         calls["n"] += 1
+        emit("stage", "GROK")
+        emit("say", "\n[say]\nf10 still looks\n")
         return {
             "cycle": n,
             "pnl": 0,
@@ -2211,13 +2204,15 @@ async def test_mid_rth_start_f10_halt_still_skips(monkeypatch, tmp_path):
     )
     eng = ProEngine()
     assert eng.start() is None
-    deadline = time.time() + 2
-    while time.time() < deadline:
+    deadline = time.time() + 4
+    while time.time() < deadline and calls["n"] < 1:
         eng.drain_apply()
         await asyncio.sleep(0.05)
-    assert calls["n"] == 0
-    assert eng.state.skip_reason == REASON_F10
-    assert "--- GROK ---" not in str(eng.state.think_live or "")
+    assert calls["n"] == 1
+    assert eng.state.skip_reason in ("", None)
+    live = str(eng.state.think_live or "")
+    assert "--- GROK ---" in live
+    assert "f10 still looks" in live
     eng.stop_engine()
     eng.drain_apply()
 
@@ -2543,7 +2538,7 @@ async def test_premarket_stay_up_rolls_to_rth_without_poke(monkeypatch, tmp_path
     eng.stop_engine()
     eng.drain_apply()
     assert looks == ["premarket", "regular"]
-    assert dropped["n"] == 1
+    assert dropped["n"] == 0
     assert peek_interrupt() is None
     from abcxauto.park_clock import load_alarm
 
@@ -3902,7 +3897,7 @@ def test_rearm_scan_only_leftover_streak_caps_at_two():
 
 
 def test_rearm_deployed_book_keeps_researching_then_caps():
-    """A fill does not end the work. Two more looks, then a book event."""
+    """Send or tooled look on an open lot sits; no immediate work-resume."""
     eng = ProEngine()
     g = SimpleNamespace()
     deployed = {
@@ -3921,27 +3916,28 @@ def test_rearm_deployed_book_keeps_researching_then_caps():
         },
     }
     eng._rearm_after_think(deployed, session="regular", g=g)
-    assert eng._work_streak == 1
-    assert eng._resume_think is True
-    assert getattr(g, "_work_resume", False) is True
+    assert eng._work_streak == 0
+    assert eng._resume_think is False
+    assert getattr(g, "_work_resume", False) is False
 
-    g._work_resume = False
-    eng._rearm_after_think(deployed, session="regular", g=g)
-    assert eng._work_streak == 2
-    assert eng._resume_think is True
-    assert getattr(g, "_work_resume", False) is True
-
-    g._work_resume = False
-    eng._rearm_after_think(deployed, session="regular", g=g)
-    assert eng._work_streak == 3
+    tooled = {
+        "_failed": False,
+        "rationale": "Hold AVGO. No ticket.",
+        "sends": 0,
+        "tool_trace": ["book", "quote", "scan"],
+        "positions": [{"symbol": "AVGO", "quantity": 89}],
+        "world_state": deployed["world_state"],
+    }
+    eng._rearm_after_think(tooled, session="regular", g=g)
+    assert eng._work_streak == 0
     assert eng._resume_think is False
     assert getattr(g, "_work_resume", False) is False
 
 
-def test_rearm_words_only_open_lot_sets_work_resume_then_caps():
-    """Say with zero tools on an open lot must arm work-resume (cap 2)."""
+def test_rearm_words_only_open_lot_does_not_set_work_resume():
+    """Say with zero tools on an open lot sits — no same-lead work-resume."""
     eng = ProEngine()
-    g = SimpleNamespace()
+    g = SimpleNamespace(_work_resume=True)
     words_only = {
         "_failed": False,
         "rationale": "Holding AVGO. Watching for a better name.",
@@ -3959,22 +3955,15 @@ def test_rearm_words_only_open_lot_sets_work_resume_then_caps():
         },
     }
     eng._rearm_after_think(words_only, session="regular", g=g)
-    assert eng._work_streak == 1
-    assert eng._resume_think is True
-    assert getattr(g, "_work_resume", False) is True
+    assert eng._work_streak == 0
+    assert eng._resume_think is False
+    assert getattr(g, "_work_resume", True) is False
     assert not getattr(eng, "_mill_wake", False)
 
-    g._work_resume = False
     eng._rearm_after_think(words_only, session="regular", g=g)
-    assert eng._work_streak == 2
-    assert eng._resume_think is True
-    assert getattr(g, "_work_resume", False) is True
-
-    g._work_resume = False
-    eng._rearm_after_think(words_only, session="regular", g=g)
-    assert eng._work_streak == 3
+    assert eng._work_streak == 0
     assert eng._resume_think is False
-    assert getattr(g, "_work_resume", False) is False
+    assert getattr(g, "_work_resume", True) is False
 
 
 def test_rearm_leftover_correctable_refuse_resumes_then_caps():
@@ -4600,3 +4589,31 @@ def test_same_chat_recover_caps_streak_no_infinite_loop():
     cfg = get_config()
     assert cfg.defined_risk_only is True
     assert cfg.ibkr_port != 7496
+
+
+def test_skip_identical_after_paid_tools_does_not_drop_immediately():
+    """2026-09-22 09:07: skip_identical after fat tools must not cold-drop.
+
+    First empty-after-tools recovers on the same chat; EMPTY_GROK_RECOVER_TRIES
+    still caps the loop.
+    """
+    from abcxauto.brain import EMPTY_GROK_RECOVER_TRIES
+
+    eng = ProEngine()
+    g = SimpleNamespace(chat=object())
+    out = {
+        "rationale": "",
+        "tool_trace": ["book", "quote", "candles", "news", "scan"],
+        "sends": 0,
+        "_empty_grok": True,
+        "_skip_identical_retry": True,
+    }
+    assert eng._same_chat_recover_needed(out, g) is True
+    assert eng._recover_gave_up is False
+    assert g.chat is not None
+    for _ in range(EMPTY_GROK_RECOVER_TRIES):
+        eng._arm_same_chat_recover()
+    assert eng._same_chat_recover_needed(out, g) is False
+    assert eng._recover_gave_up is True
+    assert eng._drop_empty_junk_keep_looking(out, g) is True
+    assert g.chat is None

@@ -22,14 +22,14 @@ from abcxauto.llm import SYSTEM_PROMPT
 from abcxauto.look_snapshot import REASON_CODE, begin_look, check_ticket_numbers, record_look_tool
 from abcxauto.memory import get_journal
 from abcxauto.memory.notes import MAX_BODY, lecture_error
-from abcxauto.working_memory import remember, working_memory_lines
 from abcxauto.world_state import WorldState, day_facts, format_wake
 from tests.test_no_clerk_process import SYSTEM_PROMPT_LOCK
 
 
 # Billed JSON schema of name+description+parameters. chars/4 ~ tokens.
-# Before trim: recall 1027/257, research_brief 237/60.
-RECALL_SCHEMA_MAX_CHARS = 700
+# Before trim: recall 1027/257, research_brief 237/60. Body max-160 hint
+# sits on properties.body; spaced params JSON is ~840.
+RECALL_SCHEMA_MAX_CHARS = 900
 RESEARCH_BRIEF_SCHEMA_MAX_CHARS = 220
 
 def _tool_schema_json(name: str) -> str:
@@ -96,7 +96,7 @@ def test_recall_exists_write_desk_lessons_does_not():
     names = _names_of(AGENT_TOOLS)
     assert "recall" in names
     assert "research_brief" in names
-    assert "note" in names
+    assert "note" not in names
     assert "write_desk_lessons" not in names
     assert "desk_lessons" not in names
 
@@ -134,13 +134,8 @@ def test_note_survives_park_and_chat_reset():
     body = "halt disconnect cleared on reconnect this morning"
     out = _write(body, id="park-survives", tags=["halt"], evidence="halts.kind=disconnect")
     assert out.get("ok") is True
-    remember("this-flight scratch dies on park", tool_trace=["scan"])
-    assert working_memory_lines()
     _reset_chat(SimpleNamespace())
-    assert working_memory_lines() == []
-    remember("scratch again", tool_trace=["scan"])
     drop_live_chat(SimpleNamespace(chat=object()))
-    assert working_memory_lines() == []
     got = get_journal().get_notes(ids=["park-survives"])
     rows = got.get("notes") or []
     assert rows and rows[0]["body"] == body
@@ -323,7 +318,6 @@ def test_note_number_is_not_send_geometry():
 
 @pytest.mark.asyncio
 async def test_recall_list_get_write_invalidate_separated_from_note():
-    remember("this-flight only", tool_trace=["scan"])
     raw = await _run_tool(
         "recall",
         {
@@ -355,7 +349,6 @@ async def test_recall_list_get_write_invalidate_separated_from_note():
     )
     assert "sep-1" in listed.get("ids") or []
     assert "body" not in listed
-    assert "this-flight only" not in json.dumps(listed)
     got = json.loads(
         await _run_tool(
             "recall",
@@ -367,18 +360,18 @@ async def test_recall_list_get_write_invalidate_separated_from_note():
         )
     )
     assert got["notes"][0]["body"].startswith("scan overflow")
-    note_read = json.loads(
+    note_gone = json.loads(
         await _run_tool(
             "note",
-            {},
+            {"line": "should not land"},
             connector=None,
             world=_world(),
             snap={},
             turn=BrainTurn(),
         )
     )
-    assert "this-flight only" in (note_read.get("working_memory") or [])
-    assert "scan overflow" not in json.dumps(note_read)
+    assert "unknown tool" in str(note_gone.get("error") or "").lower()
+    assert "working_memory" not in note_gone
     inv = json.loads(
         await _run_tool(
             "recall",
@@ -502,7 +495,10 @@ async def test_research_brief_tool_is_fetch_only_not_geometry(tmp_path, monkeypa
 
 
 def test_body_cap_and_fifo_eviction():
-    assert _write("x" * (MAX_BODY + 1), id="too-long").get("error") == "body_too_long"
+    long_out = _write("x" * (MAX_BODY + 1), id="too-long")
+    assert long_out.get("ok") is True
+    assert long_out.get("clipped") is True
+    assert len((long_out.get("note") or {}).get("body") or "") == MAX_BODY
     j = get_journal()
     for i in range(40):
         out = j.write_note(id=f"fifo-{i:02d}", body=f"observation {i} with evidence on the tape")
@@ -534,7 +530,7 @@ def test_recall_and_brief_are_on_rth_with_hunt_tools(monkeypatch):
     rth = _names_of(agent_tools(session="regular"))
     assert "recall" in rth
     assert "research_brief" in rth
-    assert "note" in rth
+    assert "note" not in rth
     assert "scan" in rth
     assert "news" in rth
     assert "send" in rth
@@ -635,6 +631,8 @@ def test_recall_and_brief_schema_stay_under_budget():
         assert key in props
     desc = str((blob.get("function") or {}).get("description") or "").lower()
     assert "notes" in desc and "cards" in desc
+    body = props.get("body") or {}
+    assert "160" in str(body.get("description") or "")
 
 
 def test_cards_wake_pointer_stays_inside_budget():

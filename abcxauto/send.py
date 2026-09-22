@@ -193,8 +193,8 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
 
     A paper desk pointed at 7496/4001 returns ``blocked`` and does not call
     ``safe_execute``. Live mode is left to the existing live blockers.
-    Research mode (premarket / AH / closed) fail-closes with
-    ``research_no_send`` and never reaches ``safe_execute``.
+    Premarket / AH / closed may reach ``safe_execute`` (paper stay-up);
+    cash, defined-risk, daily-loss, and research_thin stay upstream.
     A presented dry-run / approval / place token that is expired, used,
     or unreadable fail-closes here (KEEP-4) before KEEP-3 authorize.
     New-risk place then requires a single-use preview token bound to the
@@ -214,15 +214,6 @@ async def send_action(action: dict, connector: Any) -> Dict[str, Any]:
             "reason_code": "live_port_paper",
             "strategy": strategy or "blocked",
         }
-    from abcxauto.desk_mode import RESEARCH_SESSIONS, research_send_block
-
-    sess = ""
-    if isinstance(action, dict):
-        sess = str(action.get("_desk_session") or "").strip().lower()
-    if sess == "unknown":
-        sess = ""
-    if sess in RESEARCH_SESSIONS:
-        return research_send_block(session=sess)
     from abcxauto.token_ttl import place_token_block
     from abcxauto.send_preview import authorize_place, stamp_place_result
 

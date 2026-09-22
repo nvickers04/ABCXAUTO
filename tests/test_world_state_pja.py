@@ -1284,6 +1284,102 @@ def test_compact_rows_keep_trail_order_and_avg_cost(tmp_path, monkeypatch):
     assert lot["avg"] == 19.535
 
 
+def test_compact_working_orders_omits_ibkr_unset_trail():
+    """Plain STP/LMT carry IBKR DBL_MAX trail fields — not real trails."""
+    import sys
+
+    from abcxauto.world_state import compact_working_orders
+
+    unset = sys.float_info.max  # ~1.797e308
+    pos = {
+        "symbol": "AVGO",
+        "secType": "STK",
+        "quantity": 89,
+        "conId": 76792991,
+    }
+    rows = compact_working_orders(
+        [
+            {
+                "order_id": 23210,
+                "symbol": "AVGO",
+                "sec_type": "STK",
+                "order_type": "STP",
+                "action": "SELL",
+                "quantity": 89,
+                "aux_price": 356.35,
+                "trail_percent": unset,
+                "conId": 76792991,
+            },
+            {
+                "order_id": 23211,
+                "symbol": "AVGO",
+                "sec_type": "STK",
+                "order_type": "LMT",
+                "action": "SELL",
+                "quantity": 89,
+                "lmt_price": 369.85,
+                "trail_amount": unset,
+                "conId": 76792991,
+            },
+            {
+                "order_id": 23212,
+                "symbol": "AVGO",
+                "sec_type": "STK",
+                "order_type": "TRAIL",
+                "action": "SELL",
+                "quantity": 89,
+                "trail_percent": 1.5,
+                "conId": 76792991,
+            },
+        ],
+        positions=[pos],
+    )
+    by_oid = {r["order_id"]: r for r in rows}
+    assert "trail" not in by_oid[23210]
+    assert "trail" not in by_oid[23211]
+    assert by_oid[23210]["stop"] == 356.35
+    assert by_oid[23211]["lmt"] == 369.85
+    assert by_oid[23212]["trail"] == 1.5
+
+
+def test_book_reconciled_false_when_stops_match_without_fill_lag():
+    """book_reconciled tracks fill-lag application, not stop qty match."""
+    from abcxauto.world_state import reconcile_book_with_fills
+
+    pos = [
+        {
+            "symbol": "AVGO",
+            "conId": 76792991,
+            "secType": "STK",
+            "quantity": 89,
+        }
+    ]
+    orders = [
+        {
+            "order_id": 23210,
+            "symbol": "AVGO",
+            "order_type": "STP",
+            "action": "SELL",
+            "quantity": 89,
+            "aux_price": 356.35,
+            "conId": 76792991,
+        },
+        {
+            "order_id": 23211,
+            "symbol": "AVGO",
+            "order_type": "LMT",
+            "action": "SELL",
+            "quantity": 89,
+            "lmt_price": 369.85,
+            "conId": 76792991,
+        },
+    ]
+    kept_pos, kept_ord, rec = reconcile_book_with_fills(pos, orders, [])
+    assert rec is False
+    assert len(kept_pos) == 1
+    assert {o["order_id"] for o in kept_ord} == {23210, 23211}
+
+
 def test_compact_working_orders_keeps_option_identity():
     from abcxauto.world_state import compact_working_orders
 

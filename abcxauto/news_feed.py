@@ -16,23 +16,44 @@ _UNIVERSE_CAP = 14
 # Last fetch's timeout/error reason. Public lists stay real headlines;
 # news() may copy this onto a sibling error/note.
 _LAST_FETCH_MISS: str | None = None
+# Names that exhausted the shared batch budget on the last fetch.
+_LAST_TIMED_OUT: list[str] = []
 
 # Per-symbol prints the What's-happening rail already painted. A stall is
 # not "no headline" when this memory still has the print.
 _HEADLINES: dict[str, dict[str, Any]] = {}
 _HEADLINE_TTL_S = 15 * 60.0
-# Parallel per-symbol cap. Fetch is asyncio.gather, so wait is the slowest
-# symbol. One try. 8s still timed out on the same names; 2s is the miss.
+# One shared budget for the whole symbols[] batch — not 2s × N. One try.
 # A later look refetches. A stall is a hard miss, not a fake headline.
 NEWS_SYMBOL_S = 2.0
 NEWS_TRIES = 1
 
 
+class NewsFetch(list):
+    """Headline rows plus names that missed the shared batch deadline."""
+
+    __slots__ = ("timed_out",)
+
+    def __init__(self, items=(), *, timed_out: list[str] | None = None):
+        super().__init__(items)
+        self.timed_out = [
+            str(s).upper().strip()
+            for s in (timed_out or [])
+            if str(s or "").strip()
+        ]
+
+
 def reset_news_cache() -> None:
-    global _LAST_FETCH_MISS
+    global _LAST_FETCH_MISS, _LAST_TIMED_OUT
     _CACHE.update(ts=0.0, items=[], symbols=[])
     _HEADLINES.clear()
     _LAST_FETCH_MISS = None
+    _LAST_TIMED_OUT = []
+
+
+def news_timed_out() -> list[str]:
+    """Symbols that hit the shared batch deadline on the last fetch."""
+    return list(_LAST_TIMED_OUT)
 
 
 def is_real_headline(item: Any) -> bool:
@@ -296,10 +317,32 @@ def _dedupe_headlines(items: list[dict]) -> list[dict]:
     return unique
 
 
+async def _call_stock_news(
+    client: Any, sym: str, *, per_symbol: int, timeout: float
+) -> list[dict]:
+    """Call get_stock_news with remaining batch budget; tolerate older mocks."""
+    import inspect
+
+    fn = client.get_stock_news
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "timeout" in params:
+        rows = await fn(sym, countback=per_symbol, timeout=timeout)
+    else:
+        rows = await asyncio.wait_for(fn(sym, countback=per_symbol), timeout=timeout)
+    return list(rows or [])
+
+
 async def _fetch_symbol_news(
-    client: Any, sym: str, *, per_symbol: int
+    client: Any,
+    sym: str,
+    *,
+    per_symbol: int,
+    deadline: float,
 ) -> tuple[list[dict], str | None]:
-    """One symbol: bounded wait. Miss is not empty."""
+    """One symbol against the shared batch deadline. Miss is not empty."""
     try:
         from abcxauto.prints import mda_worth_asking
 
@@ -310,25 +353,34 @@ async def _fetch_symbol_news(
 
     reason: str | None = None
     tries = max(1, int(NEWS_TRIES))
-    timeout_s = float(NEWS_SYMBOL_S)
+    loop = asyncio.get_running_loop()
     for _attempt in range(tries):
-        try:
-            rows = await asyncio.wait_for(
-                client.get_stock_news(sym, countback=per_symbol),
-                timeout=timeout_s,
+        remaining = float(deadline) - loop.time()
+        if remaining <= 0:
+            reason = "timed out"
+            logger.warning(
+                "news %s timed out after %.0fs", sym, float(NEWS_SYMBOL_S)
             )
-            landed = list(rows or [])
+            break
+        try:
+            landed = await _call_stock_news(
+                client, sym, per_symbol=per_symbol, timeout=remaining
+            )
             remember_headlines(landed)
             if landed:
                 return landed, None
             cached = remembered_headlines([sym])
             return (cached, None) if cached else ([], None)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             reason = "timed out"
-            logger.warning("news %s timed out after %.0fs", sym, timeout_s)
+            logger.warning(
+                "news %s timed out after %.0fs", sym, float(NEWS_SYMBOL_S)
+            )
+            break
         except Exception:
             reason = "error"
             logger.exception("news fetch failed for %s", sym)
+            break
     cached = remembered_headlines([sym])
     if cached:
         return cached, None
@@ -342,49 +394,121 @@ async def fetch_symbols_news(
 ) -> list[dict]:
     """Headlines for an explicit tape. Public list is real prints only.
 
-    Parallel, one try, per-symbol cap. A slow MDA must not eat a 12s look.
-    A timeout is a sibling miss, not a headline item.
+    One shared ~2s deadline for the whole batch. Whatever finished lands;
+    the rest are timed_out — not a fresh 2s wait per leftover name.
+    A total miss stays a hard miss (news_hard_miss), not a fake empty ok.
     """
-    global _LAST_FETCH_MISS
+    global _LAST_FETCH_MISS, _LAST_TIMED_OUT
     _LAST_FETCH_MISS = None
+    _LAST_TIMED_OUT = []
     out: list[str] = []
     for raw in symbols or []:
         su = str(raw or "").upper().strip()
         if su and su not in out:
             out.append(su)
     if not out:
-        return []
+        return NewsFetch([])
 
     client = _get_client()
     if not _configured(client):
-        return []
+        return NewsFetch([])
 
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + float(NEWS_SYMBOL_S)
     items: list[dict] = []
     misses: list[dict] = []
-    try:
-        batches = await asyncio.gather(
-            *[_fetch_symbol_news(client, s, per_symbol=per_symbol) for s in out]
+    timed_out: list[str] = []
+
+    async def _one(sym: str) -> tuple[str, list[dict], str | None]:
+        batch, err = await _fetch_symbol_news(
+            client, sym, per_symbol=per_symbol, deadline=deadline
         )
-        for sym, (batch, err) in zip(out, batches):
-            if err:
-                cached = remembered_headlines([sym])
-                if cached:
-                    items.extend(cached)
+        return sym, batch, err
+
+    tasks = {
+        asyncio.create_task(_one(s), name=f"news:{s}"): s for s in out
+    }
+    pending: set[asyncio.Task] = set(tasks)
+    try:
+        while pending:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=remaining,
+                return_when=asyncio.ALL_COMPLETED,
+            )
+            for task in done:
+                sym, batch, err = task.result()
+                if err:
+                    cached = remembered_headlines([sym])
+                    if cached:
+                        items.extend(cached)
+                    else:
+                        timed_out.append(sym)
+                        misses.append(_miss(sym, err))
                 else:
-                    misses.append(_miss(sym, err))
+                    items.extend(batch)
+        # Budget gone: do not start a new 2s wait for leftovers.
+        for task in list(pending):
+            sym = tasks[task]
+            if task.done() and not task.cancelled():
+                try:
+                    sym, batch, err = task.result()
+                except Exception:
+                    timed_out.append(sym)
+                    misses.append(_miss(sym, "timed out"))
+                    logger.warning(
+                        "news %s timed out after %.0fs",
+                        sym,
+                        float(NEWS_SYMBOL_S),
+                    )
+                    continue
+                if err:
+                    cached = remembered_headlines([sym])
+                    if cached:
+                        items.extend(cached)
+                    else:
+                        timed_out.append(sym)
+                        misses.append(_miss(sym, err))
+                else:
+                    items.extend(batch)
+                continue
+            task.cancel()
+            timed_out.append(sym)
+            cached = remembered_headlines([sym])
+            if cached:
+                items.extend(cached)
             else:
-                items.extend(batch)
+                misses.append(_miss(sym, "timed out"))
+                logger.warning(
+                    "news %s timed out after %.0fs", sym, float(NEWS_SYMBOL_S)
+                )
+        if pending:
+            await asyncio.wait(pending, timeout=0.05)
     except Exception:
         logger.exception("fetch_symbols_news failed")
+        for task in pending:
+            task.cancel()
         cached = remembered_headlines(out)
         combined = list(cached) if cached else [_miss(s, "error") for s in out]
         _LAST_FETCH_MISS = news_hard_miss(combined)
-        return coalesce_news(combined, out)
+        _LAST_TIMED_OUT = list(out)
+        return NewsFetch(coalesce_news(combined, out), timed_out=list(out))
 
     remember_headlines(items)
     combined = _dedupe_headlines(items) + misses
+    # Dedupe timed_out while preserving ask order.
+    seen_to: set[str] = set()
+    ordered_to: list[str] = []
+    for sym in out:
+        if sym in timed_out and sym not in seen_to:
+            seen_to.add(sym)
+            ordered_to.append(sym)
+    _LAST_TIMED_OUT = ordered_to
     _LAST_FETCH_MISS = news_hard_miss(combined)
-    return coalesce_news(combined, out)
+    return NewsFetch(coalesce_news(combined, out), timed_out=ordered_to)
 
 
 async def fetch_agent_news(
@@ -407,21 +531,22 @@ async def fetch_agent_news(
         and _CACHE.get("symbols") == symbols
     ):
         remember_headlines(_CACHE["items"])
-        return list(_CACHE["items"])
+        return NewsFetch(list(_CACHE["items"]))
 
     if not symbols:
-        return []
+        return NewsFetch([])
 
     unique = await fetch_symbols_news(symbols, per_symbol=per_symbol)
+    timed_out = list(getattr(unique, "timed_out", None) or _LAST_TIMED_OUT)
     remember_headlines(unique)
     unique = coalesce_news(unique, symbols)
     if _LAST_FETCH_MISS or any(
         isinstance(it, dict) and it.get("error") for it in unique
     ):
-        return unique
+        return NewsFetch(unique, timed_out=timed_out)
 
     _CACHE.update(ts=now, items=unique, symbols=symbols)
-    return list(unique)
+    return NewsFetch(list(unique), timed_out=timed_out)
 
 
 def format_news_for_prompt(items: list[dict], *, limit: int = 18) -> str:

@@ -41,11 +41,12 @@ def _order(oid: int, symbol: str, action: str, qty: int, otype: str, **extra) ->
 class BookGateway:
     connected = True
 
-    def __init__(self, positions=None, open_orders=None):
+    def __init__(self, positions=None, open_orders=None, next_id: int = 900):
         self.positions = list(positions or [])
         self.open_orders = list(open_orders or [])
         self.calls: list[tuple[str, dict]] = []
         self.listeners: list = []
+        self._next_id = int(next_id)
 
     async def get_positions(self):
         return [dict(p) for p in self.positions]
@@ -63,6 +64,10 @@ class BookGateway:
         if cb in self.listeners:
             self.listeners.remove(cb)
 
+    def _new_id(self) -> int:
+        self._next_id += 1
+        return self._next_id
+
     async def cancel_order(self, order_id: int):
         self.calls.append(("cancel_order", {"order_id": int(order_id)}))
         self.open_orders = [
@@ -70,9 +75,83 @@ class BookGateway:
         ]
         return {"success": True, "order_id": int(order_id)}
 
+    async def place_oca(self, **kwargs):
+        self.calls.append(("place_oca", kwargs))
+        symbol = str(kwargs["symbol"]).upper()
+        qty = int(kwargs["quantity"])
+        direction = str(kwargs.get("direction") or "LONG").upper()
+        exit_action = "SELL" if direction == "LONG" else "BUY"
+        group = f"OCA_{symbol}_{self._next_id}"
+        stop_id, target_id = self._new_id(), self._new_id()
+        self.open_orders.append(
+            _order(
+                stop_id,
+                symbol,
+                exit_action,
+                qty,
+                "STP",
+                oca_group=group,
+                aux_price=float(kwargs["stop_price"]),
+            )
+        )
+        self.open_orders.append(
+            _order(
+                target_id,
+                symbol,
+                exit_action,
+                qty,
+                "LMT",
+                oca_group=group,
+                lmt_price=float(kwargs["target_price"]),
+            )
+        )
+        return {
+            "success": True,
+            "stop_order_id": stop_id,
+            "target_order_id": target_id,
+            "oca_group": group,
+        }
+
+    async def place_stop_order(self, symbol, action, quantity, stop_price):
+        self.calls.append(
+            (
+                "place_stop_order",
+                {
+                    "symbol": symbol,
+                    "action": action,
+                    "quantity": quantity,
+                    "stop_price": stop_price,
+                },
+            )
+        )
+        oid = self._new_id()
+        self.open_orders.append(
+            _order(
+                oid,
+                str(symbol).upper(),
+                str(action).upper(),
+                int(quantity),
+                "STP",
+                aux_price=float(stop_price),
+            )
+        )
+        return {"success": True, "order_id": oid}
+
+    async def place_market_order(self, **kwargs):
+        self.calls.append(("place_market_order", kwargs))
+        return {"success": True, "order_id": self._new_id(), "filled": True}
+
+    async def place_limit_order(self, **kwargs):
+        self.calls.append(("place_limit_order", kwargs))
+        return {"success": True, "order_id": self._new_id()}
+
 
 def _cancel_ids(gateway: BookGateway) -> list[int]:
     return [kw["order_id"] for name, kw in gateway.calls if name == "cancel_order"]
+
+
+def _call_names(gateway: BookGateway) -> list[str]:
+    return [name for name, _kw in gateway.calls]
 
 
 async def _drain(reconciler: ProtectionReconciler) -> None:
@@ -203,3 +282,90 @@ class TestFillSideAliases:
         await _drain(reconciler)
         assert sorted(_cancel_ids(gateway)) == [4279, 4280]
         reconciler.stop()
+
+
+class TestResizeOversizedExitsAfterTrim:
+    """Partial long sale must shrink working stop/target to remaining shares."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_risk_gates(self, monkeypatch):
+        from abcxauto.config import Config, get_config
+
+        base = get_config()
+        monkeypatch.setattr(
+            "abcxauto.executor.get_config",
+            lambda: Config(
+                **{
+                    **base.__dict__,
+                    "risk_gates_enabled": False,
+                    "defined_risk_only": False,
+                    "cash_only": False,
+                    "daily_loss_limit_pct": 0,
+                }
+            ),
+        )
+        monkeypatch.setattr(
+            "abcxauto.proposals.get_config",
+            lambda: Config(
+                **{
+                    **base.__dict__,
+                    "defined_risk_only": False,
+                    "risk_posture": "balanced",
+                }
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_long_22_with_stop_target_89_resizes_down_not_a_second_sell(self):
+        """AVGO-shaped book: held 22, working SELL 89 STP + SELL 89 LMT."""
+        gateway = BookGateway(
+            positions=[_stk("AVGO", 22, conId=313130367)],
+            open_orders=[
+                _order(
+                    100,
+                    "AVGO",
+                    "SELL",
+                    89,
+                    "STP",
+                    oca_group="OCA_AVGO_1",
+                    aux_price=350.0,
+                ),
+                _order(
+                    101,
+                    "AVGO",
+                    "SELL",
+                    89,
+                    "LMT",
+                    oca_group="OCA_AVGO_1",
+                    lmt_price=380.0,
+                ),
+            ],
+            next_id=200,
+        )
+        reconciler = ProtectionReconciler(gateway, settle_s=0.0, retry_s=0.0)
+        await reconciler.sweep_now("AVGO")
+
+        oca_calls = [kw for name, kw in gateway.calls if name == "place_oca"]
+        assert len(oca_calls) == 1
+        assert oca_calls[0]["quantity"] == 22
+        assert oca_calls[0]["direction"] == "LONG"
+        assert oca_calls[0]["stop_price"] == 350.0
+        assert oca_calls[0]["target_price"] == 380.0
+
+        # Replace-on-place: old 89 legs cancelled only after the new oca landed.
+        assert sorted(_cancel_ids(gateway)) == [100, 101]
+        assert "place_market_order" not in _call_names(gateway)
+        assert "place_limit_order" not in _call_names(gateway)
+
+        working = [
+            o
+            for o in gateway.open_orders
+            if str(o.get("symbol")).upper() == "AVGO"
+        ]
+        assert len(working) == 2
+        assert {o["order_type"] for o in working} == {"STP", "LMT"}
+        assert all(int(o["quantity"]) == 22 for o in working)
+        assert all(o["action"] == "SELL" for o in working)
+        # Remainder still long — never flattened.
+        assert gateway.positions == [_stk("AVGO", 22, conId=313130367)]
+        assert reconciler.last_unprotected == []

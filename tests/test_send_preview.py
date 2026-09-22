@@ -503,7 +503,7 @@ def test_collect_would_refuse_kill_look_exception_fail_closes(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_h_ttl_expired_same_hash_cannot_place(monkeypatch):
-    """H-TTL: issue → past TTL → same-hash place is blocked expired."""
+    """H-TTL: issue â†’ past TTL â†’ same-hash place is blocked expired."""
     monkeypatch.setattr("abcxauto.send.safe_execute", _safe_execute_must_not_run)
     from abcxauto.send import send_action
     import abcxauto.send_preview as sp
@@ -622,7 +622,7 @@ def test_market_bracket_no_entry_is_not_a_notional_refuse(monkeypatch):
 
     nl = 32_361.08
     last = 359.40
-    # qty 88 ≈ 98% of NL. Notional percent does not refuse it.
+    # qty 88 â‰ˆ 98% of NL. Notional percent does not refuse it.
     ticket = _bracket(
         symbol="AVGO",
         quantity=88,
@@ -649,7 +649,7 @@ def test_market_bracket_no_entry_is_not_a_notional_refuse(monkeypatch):
 
 
 def test_preview_hash_stable_when_quantity_not_rewritten():
-    """Preview path must not rewrite qty — hash stays bound to the ticket."""
+    """Preview path must not rewrite qty â€” hash stays bound to the ticket."""
     ticket = _bracket(
         symbol="AVGO",
         quantity=88,
@@ -830,3 +830,152 @@ def test_preview_cash_gate_is_total_cash_not_available_funds(monkeypatch):
     assert "TotalCashValue" in miss_joined, missing
     assert "AvailableFunds" not in miss_joined, missing
     assert "size_cash" not in miss_joined, missing
+
+
+def test_size_cash_refuse_names_open_long_stk_lot(monkeypatch):
+    """Cash refuse names fit_qty and the largest open STK lot; margin is not cash."""
+    from dataclasses import replace
+
+    cfg = replace(
+        get_config(),
+        risk_gates_enabled=False,
+        sizing_floors=False,
+        cash_only=True,
+        trading_mode="paper",
+        ibkr_port=7497,
+    )
+    monkeypatch.setattr("abcxauto.config.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.kill_look_send_block",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "abcxauto.look_snapshot.check_ticket_numbers",
+        lambda *_a, **_k: (True, "", ""),
+    )
+    monkeypatch.setattr(
+        "abcxauto.desk_mode.new_risk_research_error",
+        lambda *_a, **_k: None,
+    )
+
+    # notional = 10 * 320 = 3200; cash 214 -> fit_qty=0 (unit 320 > cash).
+    ticket = _bracket(
+        symbol="NVDA",
+        quantity=10,
+        entry_price=300.0,
+        stop_price=290.0,
+        target_price=320.0,
+        card="cash open lot",
+    )
+    world = _world(net_liquidation=16_234.0, session_status="regular")
+    snap = {
+        "account": {
+            "netliquidation": 16_234.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 214.0,
+            "AvailableFunds": 80_000.0,
+        },
+        "positions": [
+            {
+                "symbol": "AVGO",
+                "sec_type": "STK",
+                "quantity": 89,
+                "avg_cost": 170.0,
+            }
+        ],
+        "open_lots": [],
+        "ibkr_live_quotes": {"AVGO": 180.0, "NVDA": 300.0},
+    }
+    reasons = collect_would_refuse(ticket, world=world, snap=snap)
+    joined = " ".join(str(r) for r in reasons)
+    assert "size_cash" in joined, reasons
+    assert "fit_qty=0" in joined, reasons
+    assert "open AVGO qty=89 mv=$16020" in joined, reasons
+    assert "sell" not in joined.lower(), reasons
+    assert "rotate" not in joined.lower(), reasons
+    assert "AvailableFunds" not in joined, reasons
+    assert "80000" not in joined, reasons
+
+
+def test_partial_long_sell_is_not_size_cash_refuse(monkeypatch):
+    """Partial STK SELL (closing) must not hit size_cash vs leftover cash."""
+    from dataclasses import replace
+
+    from abcxauto.risk_gates import is_exit_or_management
+    from abcxauto.send_preview import _ticket_proposal
+
+    cfg = replace(
+        get_config(),
+        risk_gates_enabled=False,
+        sizing_floors=False,
+        cash_only=True,
+        trading_mode="paper",
+        ibkr_port=7497,
+    )
+    monkeypatch.setattr("abcxauto.config.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.kill_look_send_block",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "abcxauto.look_snapshot.check_ticket_numbers",
+        lambda *_a, **_k: (True, "", ""),
+    )
+    monkeypatch.setattr(
+        "abcxauto.desk_mode.new_risk_research_error",
+        lambda *_a, **_k: None,
+    )
+
+    # Half of 89 @ ~362 — notional >> $214 leftover; exit must still pass.
+    ticket = {
+        "strategy": "limit_order",
+        "params": {
+            "symbol": "AVGO",
+            "action": "SELL",
+            "quantity": 44,
+            "limit_price": 362.77,
+            "closing_position": True,
+        },
+        "rationale": "partial reduce",
+        "_desk_session": "regular",
+    }
+    assert is_exit_or_management(_ticket_proposal(ticket)) is True
+
+    world = _world(
+        net_liquidation=32_343.0,
+        session_status="regular",
+        flat=False,
+        positions=[
+            {
+                "symbol": "AVGO",
+                "secType": "STK",
+                "quantity": 89,
+                "avg_cost": 360.0,
+            }
+        ],
+    )
+    snap = {
+        "account": {
+            "netliquidation": 32_343.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 214.23,
+            "AvailableFunds": 80_000.0,
+        },
+        "positions": [
+            {
+                "symbol": "AVGO",
+                "secType": "STK",
+                "quantity": 89,
+                "avg_cost": 360.0,
+            }
+        ],
+        "open_lots": [],
+        "ibkr_live_quotes": {"AVGO": 362.77},
+    }
+    reasons = collect_would_refuse(ticket, world=world, snap=snap)
+    joined = " ".join(str(r) for r in reasons).lower()
+    assert "size_cash" not in joined, reasons
+    assert "leftover cash" not in joined, reasons
+    assert "rotate" not in joined, reasons

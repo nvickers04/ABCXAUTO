@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """\
 You own an Interactive Brokers {mode} book. Strategy is yours.
 Risk is code.
-Keep researching after a fill. A full book is only for a name you will not cut. Otherwise rotate into the better name.
+Performance is the point. Research widely. Capital works in stock or options, or it moves.
 A refuse for price or size is resent at the live print and a quantity that fits, or you take a better name.
 send tickets that match ORDER EXAMPLES.
 Size vs max_risk_per_trade_pct of NetLiq.
@@ -133,24 +133,35 @@ def normalize_chat_extras(extras: Any) -> dict[str, Any]:
 def chat_create_kwargs(
     g: Any,
     *,
-    messages: Any,
+    messages: Any = None,
     tools: Any | None = None,
+    previous_response_id: str | None = None,
 ) -> dict[str, Any]:
     """Core chat.create kwargs plus operator ``model_params``.
 
     Dedicated knobs (model / temperature / max_tokens / include / tools /
-    messages) win. ``effort`` is sent as ``reasoning_effort``.
+    messages / store_messages / previous_response_id) win. ``effort`` is
+    sent as ``reasoning_effort``.
+
+    When ``previous_response_id`` is set, omit ``messages`` so the server
+    continues the stored thread and the caller only appends the new wake.
     """
     kw: dict[str, Any] = {
         "model": g.model,
-        "messages": messages,
         "temperature": g.temperature,
         "max_tokens": int(g.max_tokens or 8192),
         "include": ["verbose_streaming"],
         # grok-4.7: pass encrypted reasoning back on append so the next
         # turn keeps the trace and the prompt prefix can cache.
         "use_encrypted_content": True,
+        # Server-side history; next create uses previous_response_id.
+        "store_messages": True,
     }
+    prev = str(previous_response_id or "").strip()
+    if prev:
+        kw["previous_response_id"] = prev
+    elif messages is not None:
+        kw["messages"] = messages
     if tools is not None:
         kw["tools"] = list(tools)
     extras = normalize_chat_extras(getattr(g, "model_params", None) or {})
@@ -182,7 +193,15 @@ def _create_kw_for_log(kwargs: Any) -> dict[str, Any]:
             continue
         if any(p in lk for p in ("api_key", "secret", "password", "authorization")):
             continue
-        if lk in ("model", "temperature", "max_tokens", "include") or "reason" in lk or lk == "effort":
+        if lk in (
+            "model",
+            "temperature",
+            "max_tokens",
+            "include",
+            "store_messages",
+            "previous_response_id",
+            "use_encrypted_content",
+        ) or "reason" in lk or lk == "effort":
             out[str(key)] = value
     return out
 

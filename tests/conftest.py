@@ -390,7 +390,6 @@ def _isolate_desk_state(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "ABCXAUTO_RESEARCH_BUDGET_PATH", str(tmp_path / "research_budget.json")
     )
-    monkeypatch.setenv("ABCXAUTO_WORKING_MEMORY_PATH", str(tmp_path / "working_memory.json"))
     monkeypatch.setenv("ABCXAUTO_LAST_TURN_PATH", str(tmp_path / "last_turn.json"))
     monkeypatch.setenv("ABCXAUTO_THINK_TAIL_PATH", str(tmp_path / "think_tail.txt"))
     monkeypatch.setenv("ABCXAUTO_THINK_PREV_PATH", str(tmp_path / "think_prev.txt"))

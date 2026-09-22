@@ -10,6 +10,7 @@ import pytest
 from abcxauto.brain import (
     AGENT_TOOLS,
     BrainTurn,
+    CLIP_CHARS,
     _apply_candle_session,
     _candle_res_from_tape,
     _clip,
@@ -86,7 +87,7 @@ def test_agent_tools_cover_ibkr_and_mda():
     assert "journal" not in names
     assert "universe" not in names
     assert "strategies" not in names
-    assert "note" in names
+    assert "note" not in names
 
 
 def test_quote_from_ticker_skips_nan():
@@ -947,6 +948,61 @@ def test_stamp_session_ticket_does_not_paint_a_playbook_card():
     assert "ticket" not in half
 
 
+def test_candle_session_does_not_invent_qty(monkeypatch):
+    """risk$/|last-low| is not an order. Candle session must not propose qty."""
+    from abcxauto.brain import _stamp_session_size
+
+    monkeypatch.setattr(
+        "abcxauto.opportunity_scan._et_calendar_day",
+        lambda now=None: "2026-09-22",
+    )
+    out = {
+        "bars": [
+            {"t": "2026-09-22T09:35:00", "o": 360.0, "h": 362.0, "l": 353.5, "c": 361.0},
+            {"t": "2026-09-22T09:40:00", "o": 361.0, "h": 362.5, "l": 360.0, "c": 361.23},
+        ]
+    }
+    world = _world(net_liquidation=100_000.0)
+    _apply_candle_session(
+        out, sym="AVGO", snap={"session": {"status": "regular"}}, world=world, last=361.23
+    )
+    session = out["session"]
+    assert "size" not in session
+    assert session.get("low") == 353.5
+    assert session.get("last") == 361.23
+    # Defensive strip if a prior look left fiction on the remembered range.
+    tainted = {
+        "today": True,
+        "low": 353.5,
+        "last": 361.23,
+        "size": {"qty": 852, "stop": 353.5, "risk_per_share": 7.73, "risk_usd": 6477},
+    }
+    _stamp_session_size(tainted, world)
+    assert "size" not in tainted
+
+
+def test_candle_prior_rth_bars_in_premarket_are_not_today(monkeypatch):
+    """15m hist ending prior RTH must read today:false — do not invent premarket bars."""
+    monkeypatch.setattr(
+        "abcxauto.opportunity_scan._et_calendar_day",
+        lambda now=None: "2026-09-22",
+    )
+    out = {
+        "bars": [
+            {"t": "2026-09-21T15:30:00", "o": 360.0, "h": 361.0, "l": 359.0, "c": 360.5},
+            {"t": "2026-09-21T15:45:00", "o": 360.5, "h": 361.5, "l": 360.0, "c": 361.0},
+        ],
+        "freshness": "ibkr_rth",
+        "resolution": "15",
+    }
+    snap = {"session": {"status": "premarket"}, "reality_pulse": {"session": {"status": "premarket"}}}
+    _apply_candle_session(out, sym="AVGO", snap=snap, world=_world(), last=361.0)
+    session = out.get("session") or {}
+    assert session.get("today") is False
+    assert "size" not in session
+    assert session.get("date") == "2026-09-21"
+
+
 def test_scan_gap_pct_reads_live_quote_when_scan_row_omits_it():
     from abcxauto.brain import _scan_gap_pct
 
@@ -961,6 +1017,54 @@ def test_scan_gap_pct_reads_live_quote_when_scan_row_omits_it():
         }
     }
     assert _scan_gap_pct(nested, "SNDK") == -7.1
+
+
+def test_clip_fat_news_items_keeps_headlines_not_error_clipped():
+    """news() uses items[]; overflow must keep symbol/headline/publisher, not error=clipped."""
+    items = []
+    for sym in ("NVDA", "MU", "AMD", "ORCL", "MSFT", "SHOP"):
+        for i in range(4):
+            items.append(
+                {
+                    "symbol": sym,
+                    "headline": (
+                        f"{sym} chip demand and cloud spend outlook {i} "
+                        + ("extra context words " * 40)
+                    ),
+                    "publisher": "Reuters",
+                    "published": "2026-09-22T14:00:00Z",
+                    "url": "https://finance.yahoo.com/news/" + ("a" * 120),
+                    "source": "mda",
+                    "freshness": "delayed_15m",
+                    "use": "color_not_trigger",
+                }
+            )
+    payload = {
+        "source": "mda",
+        "freshness": "delayed_15m",
+        "use": "color_not_trigger",
+        "items": items,
+    }
+    assert len(json.dumps(payload)) > CLIP_CHARS
+    raw = _clip(payload)
+    data = json.loads(raw)
+    assert data.get("error") != "clipped"
+    kept = data.get("items") or []
+    assert isinstance(kept, list)
+    assert kept, "expected at least one headline residue"
+    assert len(raw) <= CLIP_CHARS
+    for row in kept:
+        assert set(row) <= {"symbol", "headline", "publisher"}
+        assert row.get("headline")
+    assert {row.get("symbol") for row in kept} <= {
+        "NVDA",
+        "MU",
+        "AMD",
+        "ORCL",
+        "MSFT",
+        "SHOP",
+    }
+    assert data.get("_clipped")
 
 
 def test_clip_does_not_decorate_top_n_scan_rescue():
@@ -2285,14 +2389,14 @@ def test_every_wake_opens_a_fresh_linear_think():
         assert len(created2) == 1
         drop_live_chat(g2)
         third = _open_wake(g2, "after drop")
-        assert third is not first
-        assert len(created2) == 2
+        assert third is first
+        assert len(created2) == 1
     finally:
         note_wake(None)
 
 
 def test_rth_yield_keeps_chat_park_resets():
-    """End-of-turn keeps chat on paper stay-up; park / overnight drop it."""
+    """End-of-turn keeps the chat, including park."""
     from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
 
     g, created = _stub_chat_client()
@@ -2300,7 +2404,7 @@ def test_rth_yield_keeps_chat_park_resets():
     _finish_look_chat(g, BrainTurn(text="watching the book"), session="regular")
     assert getattr(g, "chat", None) is chat
     _finish_look_chat(g, BrainTurn(parked=True, text="gate off"), session="regular")
-    assert getattr(g, "chat", None) is None
+    assert getattr(g, "chat", None) is chat
     nxt = _ensure_chat(g, kind="alarm")
     assert nxt is not chat
     assert len(created) == 2
@@ -2314,7 +2418,7 @@ def test_finish_look_chat_overnight_and_dead_stream_drop():
     _finish_look_chat(g, BrainTurn(text="watching the book"), session="premarket")
     assert getattr(g, "chat", None) is chat
     _finish_look_chat(g, BrainTurn(text="watching the book"), session="closed")
-    assert getattr(g, "chat", None) is None
+    assert getattr(g, "chat", None) is chat
     chat = _ensure_chat(g, kind="boot")
     _finish_look_chat(g, BrainTurn(stream_error="RESOURCE_EXHAUSTED"), session="regular")
     assert getattr(g, "chat", None) is chat
@@ -2448,7 +2552,8 @@ def test_finish_look_chat_unknown_session_rth_keeps_spoken(monkeypatch):
     assert getattr(g, "chat", None) is chat
 
 
-def test_finish_look_chat_live_regular_drops(monkeypatch):
+def test_finish_look_chat_live_regular_keeps(monkeypatch):
+    """Live (non-paper) RTH also keeps the chat — conversation is never dropped."""
     from abcxauto.brain import BrainTurn, _ensure_chat, _finish_look_chat
 
     monkeypatch.setattr(
@@ -2456,9 +2561,9 @@ def test_finish_look_chat_live_regular_drops(monkeypatch):
         property(lambda self: False),
     )
     g, _created = _stub_chat_client()
-    _ensure_chat(g, kind="boot")
+    chat = _ensure_chat(g, kind="boot")
     _finish_look_chat(g, BrainTurn(text="watching the book"), session="regular")
-    assert getattr(g, "chat", None) is None
+    assert getattr(g, "chat", None) is chat
 
 
 def test_stay_up_open_wake_reuses_live_chat():
@@ -2470,8 +2575,8 @@ def test_stay_up_open_wake_reuses_live_chat():
     assert second is first
     assert len(created) == 1
     third = _open_wake(g, "wake", resume=True, reset=True)
-    assert third is not first
-    assert len(created) == 2
+    assert third is first
+    assert len(created) == 1
 
 
 def test_stay_up_resume_skips_append_when_poke_pending():
@@ -2511,18 +2616,12 @@ def test_agent_tools_omit_set_wake_in_every_session():
     for sess in ("regular", "premarket", "postmarket", "closed"):
         names = _names_of(agent_tools(session=sess))
         assert "set_wake" not in names, sess
-        if sess == "regular":
-            assert "send" in names, sess
-            assert "web" in names, sess
-            assert "news" in names, sess
-            assert "scan" in names, sess
-            assert "note" in names, sess
-        else:
-            assert "send" not in names, sess
-            assert "web" in names, sess
-            assert "news" in names, sess
-            assert "scan" in names, sess
-            assert "note" in names, sess
+        assert "send" in names, sess
+        assert "web" in names, sess
+        assert "news" in names, sess
+        assert "scan" in names, sess
+        assert "note" not in names, sess
+        assert "recall" in names, sess
 
 
 @pytest.mark.asyncio
@@ -2920,7 +3019,24 @@ async def test_stream_round_empty_banner_is_empty_not_ok():
     assert reason == "empty"
 
 
-def test_open_wake_resets_dead_chat():
+@pytest.mark.asyncio
+async def test_stream_round_no_chunks_is_empty_with_none_response():
+    """Provider returned no stream chunks — empty + response None (void sample)."""
+    from abcxauto import brain
+
+    class Chat:
+        async def stream(self):
+            if False:  # async gen that yields nothing
+                yield None, None
+
+    text, resp, reason = await brain.stream_round(Chat())
+    assert text == ""
+    assert resp is None
+    assert reason == "empty"
+
+
+def test_open_wake_reset_keeps_live_chat():
+    """reset=True must not drop the conversation."""
     from abcxauto.brain import _open_wake
 
     created: list[int] = []
@@ -2935,18 +3051,20 @@ def test_open_wake_resets_dead_chat():
             created.append(1)
             return Chat()
 
+    live = Chat()
     g = SimpleNamespace(
         client=SimpleNamespace(chat=_ChatNS()),
         model="grok-4.6",
         temperature=0.3,
         max_tokens=256,
-        chat=object(),
+        chat=live,
         _wake_n=3,
+        _last_desk_fact="",
     )
     chat = _open_wake(g, "wake", reset=True)
-    assert isinstance(chat, Chat)
-    assert len(created) == 1
-    assert g._wake_n == 1
+    assert chat is live
+    assert len(created) == 0
+    assert g._wake_n == 4
 
 
 def test_new_chat_does_not_force_a_tool():
@@ -2997,7 +3115,7 @@ def test_new_chat_premarket_omits_set_wake():
     _new_chat(g, session="premarket")
     names = _names_of(captured.get("tools") or [])
     assert "set_wake" not in names
-    assert "send" not in names
+    assert "send" in names
     assert "web" in names
 
 
@@ -3480,6 +3598,92 @@ def test_append_tool_result_emits_the_paid_json(tmp_path, monkeypatch):
     assert not (tmp_path / "think_tail.txt").exists()
 
 
+def test_append_tool_result_bounds_candles_scan_web_errors(monkeypatch):
+    """Fat candles/scan/web errors stay usable on chat.append, not multi-k dumps."""
+    from types import SimpleNamespace
+
+    from abcxauto import brain
+
+    monkeypatch.setattr(
+        brain,
+        "tool_result",
+        lambda result, tool_call_id=None: ("tr", result, tool_call_id),
+    )
+    monkeypatch.setattr(brain, "_emit_paid_look", lambda *_a, **_k: None)
+
+    class Chat:
+        def __init__(self) -> None:
+            self.rows: list = []
+
+        def append(self, row) -> None:
+            self.rows.append(row)
+
+    fat_trace = "boom\n" + ("x" * 8_000)
+    cases = [
+        (
+            "candles",
+            {
+                "symbol": "IWM",
+                "resolution": "5mins",
+                "error": fat_trace,
+                "bars": [{"t": "09:30", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 9}],
+                "run": {"essay": "y" * 4_000},
+            },
+        ),
+        (
+            "scan",
+            {
+                "ok": False,
+                "error": fat_trace,
+                "arena": "mega_cap",
+                "scan_code": "TOP_PERC_GAIN",
+                "hits": [{"symbol": "NVDA"}] * 50,
+            },
+        ),
+        (
+            "web",
+            {
+                "error": fat_trace,
+                "query": "AVGO earnings",
+                "url": "https://example.com/x",
+                "text": "z" * 5_000,
+            },
+        ),
+    ]
+    for name, payload in cases:
+        chat = Chat()
+        tc = SimpleNamespace(
+            id="e1",
+            function=SimpleNamespace(name=name, arguments="{}"),
+        )
+        brain._append_tool_result(chat, tc, json.dumps(payload))
+        assert len(chat.rows) == 1
+        _kind, paid, _id = chat.rows[0]
+        assert len(paid) <= brain.TOOL_ERROR_CHAT_CHARS + 80
+        data = json.loads(paid)
+        assert data.get("_clipped") == "error"
+        assert fat_trace not in paid
+        assert "boom" in str(data.get("error") or "")
+        if name == "candles":
+            assert data.get("symbol") == "IWM"
+            assert data.get("resolution") == "5mins"
+            assert data.get("last_bar") or data.get("last") is not None
+        if name == "scan":
+            assert data.get("arena") == "mega_cap" or data.get("error")
+        if name == "web":
+            assert data.get("query") == "AVGO earnings" or data.get("url")
+
+    # Success payloads are not rewritten here.
+    ok = json.dumps({"ok": True, "hits": [{"symbol": "AAPL"}], "ranked": True})
+    chat = Chat()
+    brain._append_tool_result(
+        chat,
+        SimpleNamespace(id="ok", function=SimpleNamespace(name="scan", arguments="{}")),
+        ok,
+    )
+    assert chat.rows[0][1] == ok
+
+
 def test_append_tool_result_skips_empty_args_object(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -3508,100 +3712,66 @@ def test_append_tool_result_skips_empty_args_object(tmp_path, monkeypatch):
     assert "{}" not in session
 
 
-def _proto_stay_up_chat():
-    """Mutable xAI-style messages list (same shape as chat.messages)."""
-    from xai_sdk.chat import assistant, developer, system, tool_result
-    from xai_sdk.proto import chat_pb2
+def test_new_chat_continues_with_previous_response_id(tmp_path, monkeypatch):
+    """Stored response id is passed as previous_response_id; no message list."""
+    from abcxauto import chat_cursor
+    from abcxauto.brain import _new_chat, drop_live_chat
 
-    class Chat:
-        def __init__(self) -> None:
-            self._proto = chat_pb2.GetCompletionsRequest()
+    monkeypatch.setattr(chat_cursor, "_STATE_DIR", tmp_path)
+    chat_cursor.save_previous_response_id("resp_keep_me")
 
-        @property
-        def messages(self):
-            return self._proto.messages
+    captured: dict = {}
 
-        def append(self, m) -> None:
-            self._proto.messages.append(m)
+    class _ChatNS:
+        @staticmethod
+        def create(**k):
+            captured.update(k)
+            return SimpleNamespace()
 
-    chat = Chat()
-    chat.append(system("SYS_PROMPT"))
-    chat.append(developer("wake fact"))
-    return chat, assistant, tool_result
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=_ChatNS()),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=None,
+        _wake_n=0,
+        model_params={},
+    )
+    _new_chat(g, session="regular")
+    assert captured.get("previous_response_id") == "resp_keep_me"
+    assert captured.get("store_messages") is True
+    assert captured.get("use_encrypted_content") is True
+    assert "messages" not in captured
+
+    # Deliberate drop is a no-op: cursor survives for the next create.
+    drop_live_chat(g)
+    assert chat_cursor.load_previous_response_id() == "resp_keep_me"
+
+    captured.clear()
+    g.chat = None
+    _new_chat(g, session="regular")
+    assert captured.get("previous_response_id") == "resp_keep_me"
+    assert "messages" not in captured
 
 
-def test_omit_older_tool_results_stubs_past_keep():
+def test_persist_response_id_survives_finish_and_park(tmp_path, monkeypatch):
+    from abcxauto import chat_cursor
     from abcxauto.brain import (
-        KEEP_TOOL_RESULTS,
-        _OMITTED_TOOL_RESULT,
-        _omit_older_tool_results,
+        BrainTurn,
+        _finish_look_chat,
+        _persist_response_id,
+        drop_live_chat,
     )
 
-    chat, _assistant, tool_result = _proto_stay_up_chat()
-    for i in range(KEEP_TOOL_RESULTS + 2):
-        chat.append(tool_result("FAT" * 2000, tool_call_id=f"c{i}"))
-    _omit_older_tool_results(chat)
-    tool_texts = [
-        str(m.content[0].text)
-        for m in chat.messages
-        if m.content and str(getattr(m.content[0], "text", "") or "")
-    ]
-    # system/wake untouched; first two tool blobs stubbed; last six full.
-    assert chat.messages[0].content[0].text == "SYS_PROMPT"
-    assert chat.messages[1].content[0].text == "wake fact"
-    stubs = [t for t in tool_texts if t == _OMITTED_TOOL_RESULT]
-    full = [t for t in tool_texts if t.startswith("FAT")]
-    assert len(stubs) == 2
-    assert len(full) == KEEP_TOOL_RESULTS
-    assert full[-1] == "FAT" * 2000
+    monkeypatch.setattr(chat_cursor, "_STATE_DIR", tmp_path)
+    _persist_response_id(SimpleNamespace(id="resp_after_stream"))
+    assert chat_cursor.load_previous_response_id() == "resp_after_stream"
 
-
-def test_omit_older_assistant_turns_stubs_say_and_reasoning():
-    from abcxauto.brain import (
-        KEEP_ASSISTANT_TURNS,
-        _OMITTED_ASSISTANT,
-        _OMITTED_REASONING,
-        _OMITTED_TOOL_RESULT,
-        _omit_older_assistant_turns,
-        _omit_older_tool_results,
-    )
-
-    chat, assistant, tool_result = _proto_stay_up_chat()
-    # Interleave assistant turns with tool results like a stay-up look.
-    for i in range(KEEP_ASSISTANT_TURNS + 3):
-        msg = assistant(f"say-{i} " + ("X" * 500))
-        msg.reasoning_content = f"reason-{i} " + ("R" * 2000)
-        msg.encrypted_content = f"enc-{i}-" + ("E" * 200)
-        chat.append(msg)
-        chat.append(tool_result(f"tool-blob-{i}", tool_call_id=f"t{i}"))
-
-    _omit_older_assistant_turns(chat)
-    _omit_older_tool_results(chat)
-
-    asst = [m for m in chat.messages if int(m.role) == 2]
-    assert len(asst) == KEEP_ASSISTANT_TURNS + 3
-    # Oldest three stubbed; last KEEP intact.
-    for m in asst[:-KEEP_ASSISTANT_TURNS]:
-        assert m.content[0].text == _OMITTED_ASSISTANT
-        assert m.reasoning_content == _OMITTED_REASONING
-        assert not m.encrypted_content
-    for i, m in enumerate(asst[-KEEP_ASSISTANT_TURNS:]):
-        idx = (KEEP_ASSISTANT_TURNS + 3) - KEEP_ASSISTANT_TURNS + i
-        assert m.content[0].text.startswith(f"say-{idx}")
-        assert m.reasoning_content.startswith(f"reason-{idx}")
-        assert m.encrypted_content.startswith(f"enc-{idx}")
-    # Latest say and latest tool results survive.
-    assert asst[-1].content[0].text.startswith(
-        f"say-{KEEP_ASSISTANT_TURNS + 2}"
-    )
-    tools = [m for m in chat.messages if int(m.role) == 5]
-    assert tools[-1].content[0].text.startswith(
-        f"tool-blob-{KEEP_ASSISTANT_TURNS + 2}"
-    )
-    assert tools[-1].content[0].text != _OMITTED_TOOL_RESULT
-    # system / wake never stubbed
-    assert chat.messages[0].content[0].text == "SYS_PROMPT"
-    assert chat.messages[1].content[0].text == "wake fact"
+    g = SimpleNamespace(chat=object())
+    _finish_look_chat(g, BrainTurn(parked=True, text="gate off"), session="regular")
+    drop_live_chat(g)
+    assert chat_cursor.load_previous_response_id() == "resp_after_stream"
+    assert g.chat is not None
 
 
 @pytest.mark.asyncio
@@ -3961,8 +4131,8 @@ async def test_stay_up_resume_keeps_chat_cold_start_does_not():
         resume=False,
     )
     assert fourth.look_failed() is False
-    assert g.chat is not live
-    assert len(created) == 2
+    assert g.chat is live
+    assert len(created) == 1
 
 
 @pytest.mark.asyncio
@@ -4278,7 +4448,7 @@ async def test_rth_duplicate_lead_still_ends_without_poke():
 
 @pytest.mark.asyncio
 async def test_work_resume_same_lead_still_calls_model():
-    """Work-streak resume with unchanged lead still streams on the kept chat."""
+    """If _work_resume is set, same lead still streams — no harness sentence."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt
 
@@ -4309,6 +4479,10 @@ async def test_work_resume_same_lead_still_calls_model():
     assert "Still managing AVGO" in (second.text or "")
     assert int(getattr(created[0], "rounds", 0) or 0) == 2
     assert getattr(g, "_work_resume", True) is False
+    # No permanent harness developer line for the model to quote.
+    blob = " ".join(str(m) for m in (created[0].appended or []))
+    assert "Prior look on the open lot called no tool" not in blob
+    assert "No tool this look" not in blob
 
 
 @pytest.mark.asyncio
@@ -4767,10 +4941,10 @@ async def test_send_then_empty_final_keeps_chat(monkeypatch):
     assert turn.failed is False
     assert turn.look_failed() is False
     assert getattr(g, "chat", None) is not None
-    # Empty GROK after send ends the look. Same prompt is not re-billed.
+    # Empty GROK after send: same-chat recover, do not drop the paid send.
     assert g.chat.n == 2
     assert turn.trailing_empty_grok is True
-    assert turn.skip_identical_retry is True
+    assert turn.skip_identical_retry is False
 
 
 @pytest.mark.asyncio
@@ -5062,7 +5236,7 @@ async def test_empty_grok_after_tools_reenters_think_same_chat(monkeypatch):
     assert turn.failed is False
     assert g.chat is chat
     assert turn.trailing_empty_grok is True
-    assert turn.skip_identical_retry is True
+    assert turn.skip_identical_retry is False
 
 
 @pytest.mark.asyncio
@@ -5137,7 +5311,7 @@ async def test_empty_grok_after_send_reenters_think_same_chat(monkeypatch):
     assert turn.look_failed() is False
     assert g.chat is chat
     assert turn.trailing_empty_grok is True
-    assert turn.skip_identical_retry is True
+    assert turn.skip_identical_retry is False
 
 
 @pytest.mark.asyncio
@@ -5275,7 +5449,7 @@ async def test_empty_grok_after_quote_or_book_reenters_same_chat(monkeypatch):
         assert chat.n == 2
         assert g.chat is chat
         assert turn.trailing_empty_grok is True
-        assert turn.skip_identical_retry is True
+        assert turn.skip_identical_retry is False
 
 
 @pytest.mark.asyncio
@@ -5388,6 +5562,122 @@ def test_empty_grok_round_after_send_is_not_look_end():
 
 
 @pytest.mark.asyncio
+async def test_void_after_tools_keeps_spoken_look_no_skip_identical(monkeypatch):
+    """2026-09-22 09:07: void sample after fat tools wiped a spoken look.
+
+    No stream chunks (input=0 finish_reason=- response=None) after tools must
+    not set skip_identical_retry when this look already spoke — pro_engine
+    would drop the chat and lose the say.
+    """
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name, "last": 248.1})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="book", arguments="{}")
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                    content="watching IWM vert. Holding.",
+                    reasoning_content="",
+                )
+            else:
+                # Void: no chunks (provider returned nothing).
+                if False:
+                    yield None, None
+
+    chat = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: chat)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=chat,
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert "book" in turn.tool_trace
+    assert "watching IWM" in (turn.text or "")
+    assert chat.n == 2
+    assert turn.failed is False
+    assert turn.look_failed() is False
+    assert g.chat is chat
+    assert turn.trailing_empty_grok is False
+    assert turn.skip_identical_retry is False
+
+
+@pytest.mark.asyncio
+async def test_void_after_tools_keeps_chat_when_never_spoke(monkeypatch):
+    """Tools-only then void: keep paid tools, same-chat recover — no cold drop."""
+    from abcxauto import brain
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    monkeypatch.setattr(brain, "EMPTY_GROK_DEAD_S", 0.0)
+    monkeypatch.setenv("ABCXAUTO_EMPTY_GROK_DEAD_S", "0")
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name, "last": 248.1})
+
+    monkeypatch.setattr(brain, "_run_tool", fake_read)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="book", arguments="{}")
+
+    class Chat:
+        n = 0
+
+        def append(self, *_a, **_k):
+            pass
+
+        async def stream(self):
+            self.n += 1
+            if self.n == 1:
+                yield SimpleNamespace(tool_calls=[TC()]), SimpleNamespace(
+                    content="", reasoning_content=""
+                )
+            else:
+                if False:
+                    yield None, None
+
+    chat = Chat()
+    g = SimpleNamespace(
+        client=SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: chat)),
+        model="grok-4.6",
+        temperature=0.3,
+        max_tokens=256,
+        chat=chat,
+        _wake_n=1,
+    )
+    turn = await grok_turn(g, connector=None, world=_world(), snap={}, wake="hi")
+    assert "book" in turn.tool_trace
+    assert chat.n == 2
+    assert g.chat is chat
+    assert turn.trailing_empty_grok is True
+    assert turn.skip_identical_retry is False
+
+
+@pytest.mark.asyncio
 async def test_recover_flag_reenters_same_chat_without_wake_reintro():
     """recover=True streams on the open chat. Same wake is not a cold wipe."""
     from abcxauto.brain import grok_turn
@@ -5468,7 +5758,7 @@ async def test_empty_after_poke_on_prior_grok_reenters_same_chat(monkeypatch):
     assert g.chat is live
     assert int(getattr(live, "rounds", 0) or 0) == 2
     assert second.trailing_empty_grok is True
-    assert second.skip_identical_retry is True
+    assert second.skip_identical_retry is False
     clear_interrupt()
 
 
@@ -5517,7 +5807,7 @@ async def test_empty_after_poke_then_tools_reenters_same_chat(monkeypatch):
     assert g.chat is live
     assert "book" in second.tool_trace
     assert second.trailing_empty_grok is True
-    assert second.skip_identical_retry is True
+    assert second.skip_identical_retry is False
     clear_interrupt()
 
 
@@ -5619,6 +5909,8 @@ def test_recall_description_matches_write_ops():
     assert "cards" in desc
     store = (_tool_props("recall") or {}).get("store") or {}
     assert store.get("enum") == ["notes", "cards"]
+    body = (_tool_props("recall") or {}).get("body") or {}
+    assert "160" in str(body.get("description") or "")
 
 
 def test_owned_files_have_no_watchlist_prose():

@@ -361,6 +361,113 @@ def new_risk_card_error(
     return ""
 
 
+def check_alloc_gates(
+    proposal: Any,
+    snap: dict[str, Any] | None = None,
+    *,
+    nl: float | None = None,
+) -> Tuple[bool, str]:
+    """Refuse new risk when qty exceeds alloc target, or heat_block is set.
+
+    Exits and management skip. Missing ``alloc_size`` skips (no crash).
+    Prefer ``snap["sized"][symbol]["sized"]`` when that field is an int;
+    otherwise size via ``target_shares`` from nl / last / stop. Heat uses the
+    snap ``heat_block`` fact only — correlation is not recomputed here.
+    """
+    if is_exit_or_management(proposal):
+        return True, "exit"
+
+    try:
+        from abcxauto.alloc_size import target_shares
+    except ImportError:
+        return True, "alloc_size_missing"
+
+    snap_d = snap if isinstance(snap, dict) else {}
+    if "heat_pct" in snap_d and snap_d.get("heat_block") is True:
+        heat = snap_d.get("heat_pct")
+        return False, f"heat_block heat_pct={heat}"
+
+    params = getattr(proposal, "params", None)
+    if params is None:
+        return True, "no_params"
+
+    try:
+        qty = int(getattr(params, "quantity", 0) or 0)
+    except (TypeError, ValueError):
+        return True, "no_qty"
+    if qty <= 0:
+        return True, "no_qty"
+
+    symbol = str(getattr(params, "symbol", "") or "").strip()
+    sized: Any = None
+    sized_map = snap_d.get("sized")
+    if isinstance(sized_map, dict) and symbol:
+        panel = sized_map.get(symbol)
+        if panel is None and symbol.upper() != symbol:
+            panel = sized_map.get(symbol.upper())
+        if panel is None and symbol.lower() != symbol:
+            panel = sized_map.get(symbol.lower())
+        if isinstance(panel, dict) and "sized" in panel:
+            raw = panel.get("sized")
+            if isinstance(raw, bool):
+                raw = None
+            elif isinstance(raw, int):
+                sized = raw
+            elif raw is not None:
+                try:
+                    sized = int(raw)
+                except (TypeError, ValueError):
+                    sized = None
+
+    if not isinstance(sized, int):
+        last = None
+        for key in ("entry_price", "price_hint", "limit_price"):
+            raw = getattr(params, key, None)
+            try:
+                last = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                last = None
+            if last is not None and math.isfinite(last) and last > 0:
+                break
+            last = None
+        stop = getattr(params, "stop_price", None)
+        try:
+            stop_f = float(stop) if stop is not None else None
+        except (TypeError, ValueError):
+            stop_f = None
+        if stop_f is not None and (not math.isfinite(stop_f) or stop_f <= 0):
+            stop_f = None
+
+        nl_v = nl
+        if nl_v is None:
+            for key in ("nl", "netliquidation", "NetLiquidation"):
+                if key in snap_d:
+                    try:
+                        nl_v = float(snap_d.get(key))
+                    except (TypeError, ValueError):
+                        nl_v = None
+                    break
+            if nl_v is None:
+                acct = snap_d.get("account")
+                if isinstance(acct, dict):
+                    nl_v = _account_float(
+                        acct, "netliquidation", "NetLiquidation"
+                    )
+        try:
+            nl_f = float(nl_v) if nl_v is not None else None
+        except (TypeError, ValueError):
+            nl_f = None
+        if nl_f is None or last is None:
+            return True, "alloc_unpriced"
+        if not math.isfinite(nl_f) or nl_f <= 0:
+            return True, "alloc_unpriced"
+        sized = target_shares(nl=nl_f, last=last, stop=stop_f)
+
+    if isinstance(sized, int) and qty > sized:
+        return False, f"alloc_size qty={qty} > fit_qty={sized}"
+    return True, "ok"
+
+
 def _market_bracket_entry_proxy(params: Any) -> Optional[float]:
     """Entry proxy for market_bracket notional / risk sizing.
 
@@ -1151,6 +1258,11 @@ class RiskGate:
                     f"{pct_of_nl(cash, book)} "
                     f"notional_usd={notional:.2f} cash_usd={cash:.2f}"
                 )
+
+        # Alloc qty / heat — always armed when facts exist; not sizing_floors.
+        ok_alloc, why_alloc = check_alloc_gates(proposal, None, nl=net_liq)
+        if not ok_alloc:
+            return False, why_alloc
 
         if not gates_on:
             return True, "risk gates disabled"

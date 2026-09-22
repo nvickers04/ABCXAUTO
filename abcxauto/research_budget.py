@@ -1,12 +1,13 @@
-"""Named-card research-brief budget + lineage (Rank 2).
+"""Named-card research-brief lineage (Rank 2).
 
-research_card_id → prove_window_id → gate_verdict + model_cost_window_USD.
-Hard $ / turns / tool-call budget per named card. Trip ⇒ brief_loop_halted.
-Unreadable / non-finite cost fail-closes the loop.
+research_card_id → prove_window_id + model_cost_window_USD.
+The week card is not a trading document and does not latch looks.
+allow_brief_turn always allows; the dollar fuse is the F10 ledger elsewhere.
+note_brief_turn / mark_brief_loop_halt are no-ops (no new latch).
 
 V0 constants are code constants — not self_tune-raiseable.
-AH_RESEARCH_LOOKS_PER_WEEK is 0 (off). After-hours cost is the F10 dollar
-fuse; RESEARCH_PROMPT_TOKENS_MAX stays the runaway-prompt rail.
+AH_RESEARCH_LOOKS_PER_WEEK is 0 (off). RESEARCH_PROMPT_TOKENS_MAX stays
+the runaway-prompt rail.
 Paper 7497. Not looking. Do not grow SYSTEM_PROMPT.
 """
 
@@ -425,22 +426,16 @@ def mark_brief_loop_halt(
     reason: str = REASON_BRIEF_LOOP,
     missing_cost: bool = False,
 ) -> dict[str, Any]:
-    """Latch brief_loop_halted for this card/window. Idempotent."""
+    """No-op. Looks are not latched on the week card."""
+    _ = reason, missing_cost
     card = str(research_card_id or "").strip()
     window = str(prove_window_id or "").strip()
     if not card or not window:
         return _empty_row(card, window)
-    with _io:
-        table = _load_table()
-        key = card_key(card, window)
-        row = _row_of(table.get(key) or _empty_row(card, window), card, window)
-        row["brief_loop_halted"] = True
-        row["halt_reason"] = str(reason or REASON_BRIEF_LOOP)
-        if missing_cost:
-            row["model_cost_window_USD"] = None
-        table[key] = row
-        _save_table(table)
-        return dict(row)
+    row = card_row(card, window)
+    if row is None:
+        return _empty_row(card, window)
+    return dict(row)
 
 
 def brief_loop_halted(
@@ -473,56 +468,15 @@ def allow_brief_turn(
     est: Any = EST_BRIEF_TURN_USD,
     add_tools: int = 0,
 ) -> dict[str, Any]:
-    """False when halted or the next billed turn would trip any rail."""
-    card = str(research_card_id or "").strip()
-    window = str(prove_window_id or "").strip()
-    if not card or not window:
-        return {
-            "allow": False,
-            "reason_code": REASON_BRIEF_COST,
-            "note": "research_card_id / prove_window_id missing — fail-closed",
-            "projected": None,
-        }
-    row = card_row(card, window)
-    if row is None:
-        return {
-            "allow": True,
-            "reason_code": "",
-            "note": "",
-            "projected": parse_model_cost(est) or EST_BRIEF_TURN_USD,
-        }
-    if row.get("brief_loop_halted"):
-        return {
-            "allow": False,
-            "reason_code": str(row.get("halt_reason") or REASON_BRIEF_LOOP),
-            "note": "brief_loop_halted",
-            "projected": None,
-        }
-    cost = row.get("model_cost_window_USD")
-    if cost is None or parse_model_cost(cost) is None:
-        mark_brief_loop_halt(card, window, reason=REASON_BRIEF_COST, missing_cost=True)
-        return {
-            "allow": False,
-            "reason_code": REASON_BRIEF_COST,
-            "note": "model_cost_window unreadable — fail-closed",
-            "projected": None,
-        }
-    gate = brief_budget_gate(
-        cost,
-        row.get("turns"),
-        row.get("tool_calls"),
-        est=est,
-        add_tools=add_tools,
-    )
-    if not gate.get("allow"):
-        missing = str(gate.get("reason_code") or "") == REASON_BRIEF_COST
-        mark_brief_loop_halt(
-            card,
-            window,
-            reason=str(gate.get("reason_code") or REASON_BRIEF_LOOP),
-            missing_cost=missing,
-        )
-    return gate
+    """Always allow. The dollar fuse is the F10 ledger, owned elsewhere."""
+    _ = research_card_id, prove_window_id, add_tools
+    projected = parse_model_cost(est)
+    return {
+        "allow": True,
+        "reason_code": "",
+        "note": "",
+        "projected": EST_BRIEF_TURN_USD if projected is None else projected,
+    }
 
 
 def note_brief_turn(
@@ -532,60 +486,21 @@ def note_brief_turn(
     cost_usd: Any = EST_BRIEF_TURN_USD,
     tool_calls: int = 0,
 ) -> dict[str, Any]:
-    """Increment the named-card ledger. After trip, no further billing."""
+    """No-op. Do not increment, do not latch, do not set brief_loop_halted."""
+    _ = cost_usd, tool_calls
     card = str(research_card_id or "").strip()
     window = str(prove_window_id or "").strip()
-    add_tools = _int_ge0(tool_calls)
     if not card or not window:
         return {
             **_empty_row(card, window),
             "billed": False,
             "reason_code": REASON_BRIEF_COST,
         }
-    ensure_research_card(card, window)
-    gate = allow_brief_turn(card, window, est=cost_usd, add_tools=add_tools)
-    row = card_row(card, window) or ensure_research_card(card, window)
-    if not gate.get("allow"):
-        out = dict(card_row(card, window) or row)
-        out["billed"] = False
-        out["reason_code"] = str(gate.get("reason_code") or REASON_BRIEF_LOOP)
-        return out
-    add = parse_model_cost(cost_usd)
-    if add is None:
-        halted = mark_brief_loop_halt(
-            card, window, reason=REASON_BRIEF_COST, missing_cost=True
-        )
-        halted["billed"] = False
-        halted["reason_code"] = REASON_BRIEF_COST
-        return halted
-    with _io:
-        table = _load_table()
-        key = card_key(card, window)
-        row = _row_of(table.get(key) or _empty_row(card, window), card, window)
-        so_far = parse_model_cost(row.get("model_cost_window_USD"))
-        if so_far is None:
-            halted = mark_brief_loop_halt(
-                card, window, reason=REASON_BRIEF_COST, missing_cost=True
-            )
-            halted["billed"] = False
-            halted["reason_code"] = REASON_BRIEF_COST
-            return halted
-        row["turns"] = _int_ge0(row.get("turns")) + 1
-        row["tool_calls"] = _int_ge0(row.get("tool_calls")) + add_tools
-        row["model_cost_window_USD"] = so_far + add
-        if (
-            row["turns"] >= BRIEF_CARD_TURNS_MAX
-            or row["tool_calls"] >= BRIEF_CARD_TOOLS_MAX
-            or float(row["model_cost_window_USD"]) > BRIEF_CARD_MODEL_HARD_USD
-        ):
-            row["brief_loop_halted"] = True
-            row["halt_reason"] = REASON_BRIEF_LOOP
-        table[key] = row
-        _save_table(table)
-        out = dict(row)
-        out["billed"] = True
-        out["reason_code"] = str(row.get("halt_reason") or "")
-        return out
+    row = card_row(card, window)
+    out = dict(row) if isinstance(row, dict) else _empty_row(card, window)
+    out["billed"] = False
+    out["reason_code"] = str(out.get("halt_reason") or "")
+    return out
 
 
 def set_gate_verdict(
@@ -644,10 +559,12 @@ def research_brief_skip_reason(
     now: datetime | None = None,
     unprotected: bool = False,
 ) -> str:
-    """Non-empty = do not start a billed research/brief turn.
+    """Dead book skips. A halted brief card does not.
 
-    Regular/RTH is never the AH-card skip — RTH looks are not billed on that card.
+    The card latch stops further billing. Premarket and postmarket still look.
+    Regular/RTH is not billed on that card.
     """
+    _ = session, now
     if unprotected:
         return ""
     blob = snap if isinstance(snap, dict) else {}
@@ -661,20 +578,7 @@ def research_brief_skip_reason(
             return dead
     except Exception:
         logger.debug("research brief dead-socket skip failed", exc_info=True)
-    try:
-        from abcxauto.desk_mode import is_research_session, is_rth_session
-
-        if not is_research_session(session) or is_rth_session(session):
-            return ""
-    except Exception:
-        sess = str(session or "").strip().lower()
-        if sess in ("", "regular", "unknown"):
-            return ""
-    card, window = resolve_research_card(snap=snap, now=now)
-    gate = allow_brief_turn(card, window)
-    if gate.get("allow"):
-        return ""
-    return str(gate.get("reason_code") or REASON_BRIEF_LOOP)
+    return ""
 
 
 def stamp_brief_lineage(
@@ -685,7 +589,7 @@ def stamp_brief_lineage(
     snap: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Write named-card lineage onto a research brief payload."""
+    """Write named-card ids onto a research brief. No verdict / conclusion."""
     bag = payload if isinstance(payload, dict) else {}
     card, window = resolve_research_card(
         research_card_id=research_card_id,
@@ -695,6 +599,8 @@ def stamp_brief_lineage(
         now=now,
     )
     row = ensure_research_card(card, window)
-    bag.update(lineage_fields(row))
+    bag["research_card_id"] = card
+    bag["prove_window_id"] = window
+    bag["model_cost_window_USD"] = row.get("model_cost_window_USD")
     bag["brief_loop_halted"] = bool(row.get("brief_loop_halted"))
     return bag

@@ -673,14 +673,7 @@ class ProEngine:
         prev_mode = desk_mode(prev) if prev in KNOWN_SESSIONS else ""
         cur_mode = desk_mode(cur) if cur in KNOWN_SESSIONS else ""
         mode_rolled = bool(prev_mode and cur_mode and prev_mode != cur_mode)
-        want = session_model(cur) if cur in KNOWN_SESSIONS else ""
-        have = str(getattr(g, "model", "") or "") if g is not None else ""
-        model_moved = bool(have) and bool(want) and have != want
-        if g is not None and (mode_rolled or model_moved):
-            from abcxauto.brain import drop_live_chat
-
-            drop_live_chat(g)
-            g = self._new_grok(session=cur)
+        _ = session_model, g
         if mode_rolled and cur_mode == "rth":
             self._research_color_injected = False
         return g
@@ -1300,11 +1293,11 @@ class ProEngine:
         does not mill. Re-enter on RTH roll, lead change, or poke.
         Leftover cash alone does not arm a sit clock. Scan-only leftover
         or a correctable refuse may re-enter the same chat (capped).
-        A book with a lot on re-enters the same chat (capped) so the
-        next look keeps researching. A full position is not the end.
-        Words-only flat RTH with leftover sitting under deployed still
-        waits for a real event. Chat is kept. Overnight park is
-        park_clock after a closed skip.
+        An open-lot look with no send (tooled or spoken) sits for a book
+        event, lead change, or premarket→RTH roll — never a same-lead
+        work-resume. A full position is not the end. Words-only flat RTH
+        with leftover sitting under deployed still waits for a real event.
+        Chat is kept. Overnight park is park_clock after a closed skip.
         """
         session = self._resolve_session(session)
         self._last_session = session
@@ -1421,7 +1414,6 @@ class ProEngine:
             self._kill_entry_in_flight = False
             self._look_ended_mono = time.monotonic()
             from abcxauto.world_state import (
-                book_still_working,
                 leftover_dominates,
                 look_gathered_research,
             )
@@ -1452,24 +1444,15 @@ class ProEngine:
                     self._resume_think = True
             else:
                 self._scan_only_streak = 0
-                working = book_still_working(
-                    bag, payload.get("positions")
-                ) or sends > 0
-                if working:
-                    self._work_streak = int(
-                        getattr(self, "_work_streak", 0) or 0
-                    ) + 1
-                    if self._work_streak <= 2:
-                        self._resume_think = True
-                        if g is not None:
-                            try:
-                                g._work_resume = True
-                            except Exception:
-                                logger.debug(
-                                    "work resume stamp failed", exc_info=True
-                                )
-                else:
-                    self._work_streak = 0
+                # Open lot + no send: sit for book / lead / RTH roll.
+                # Cap-2 same-lead work-resume (tooled or words-only) loops
+                # the model under store_messages; do not arm it.
+                self._work_streak = 0
+                if g is not None:
+                    try:
+                        g._work_resume = False
+                    except Exception:
+                        logger.debug("work resume clear failed", exc_info=True)
         else:
             self._cold_next = bool(failed or parked or stream_err)
         if not failed:
@@ -1510,15 +1493,6 @@ class ProEngine:
             return False
         if payload.get("_think_only"):
             return False
-        if payload.get("_skip_identical_retry"):
-            if payload.get("_empty_grok") and not bool(
-                getattr(self, "_recover_gave_up", False)
-            ):
-                self._recover_gave_up = True
-                logger.warning(
-                    "empty/junk GROK — skip identical same-chat recover"
-                )
-            return False
         from abcxauto.brain import (
             EMPTY_GROK_RECOVER_TRIES,
             _look_text_is_junk,
@@ -1531,6 +1505,23 @@ class ProEngine:
         except (TypeError, ValueError):
             sends = 0
         had_work = bool(tools or sends > 0 or payload.get("_poked"))
+        if payload.get("_skip_identical_retry"):
+            # Paid tools/send/poke then empty: never immediate drop. Same-chat
+            # recover (capped) keeps the paid trace. Bare empty tip may still
+            # skip identical re-bill.
+            if had_work and payload.get("_empty_grok"):
+                logger.warning(
+                    "empty GROK after paid tools — ignore skip_identical, same-chat recover"
+                )
+            else:
+                if payload.get("_empty_grok") and not bool(
+                    getattr(self, "_recover_gave_up", False)
+                ):
+                    self._recover_gave_up = True
+                    logger.warning(
+                        "empty/junk GROK — skip identical same-chat recover"
+                    )
+                return False
         live = str(getattr(self.state, "think_live", "") or "")
         rationale = str(payload.get("rationale") or "")
         junk_say = _look_text_is_junk(rationale)
@@ -1585,12 +1576,7 @@ class ProEngine:
         payload = out if isinstance(out, dict) else {}
         if payload.get("_ended") or payload.get("_parked"):
             return False
-        from abcxauto.brain import drop_live_chat
-
-        try:
-            drop_live_chat(g)
-        except Exception:
-            logger.debug("drop live chat after empty/junk failed", exc_info=True)
+        _ = g
         self._recover_streak = 0
         self._recover_gave_up = False
         self._recover_same_chat = False
@@ -1599,11 +1585,11 @@ class ProEngine:
         self._mill_wake = False
         self._mill_streak = 0
         self._mill_gave_up = False
-        self._cold_next = True
+        self._cold_next = False
         self._resume_think = True
-        logger.warning("empty/junk GROK — drop chat, keep looking")
+        logger.warning("empty/junk GROK — same chat, keep looking")
         try:
-            self._note("LOOK", "empty/junk GROK — new chat, keep looking")
+            self._note("LOOK", "empty/junk GROK — same chat, keep looking")
         except Exception:
             pass
         return True
@@ -1673,12 +1659,7 @@ class ProEngine:
         payload = out if isinstance(out, dict) else {}
         if payload.get("_ended") or payload.get("_parked"):
             return False
-        from abcxauto.brain import drop_live_chat
-
-        try:
-            drop_live_chat(g)
-        except Exception:
-            logger.debug("drop live chat after synthesize mill failed", exc_info=True)
+        _ = g
         self._mill_streak = 0
         self._mill_gave_up = False
         self._mill_wake = False
@@ -1687,11 +1668,11 @@ class ProEngine:
         self._recover_same_chat = False
         self._inventory_wake = False
         self._ticket_wake = False
-        self._cold_next = True
+        self._cold_next = False
         self._resume_think = True
-        logger.warning("synthesize mill — drop chat, keep looking")
+        logger.warning("synthesize mill — same chat, keep looking")
         try:
-            self._note("LOOK", "synthesize mill — new chat, keep looking")
+            self._note("LOOK", "synthesize mill — same chat, keep looking")
         except Exception:
             pass
         return True
@@ -1824,6 +1805,17 @@ class ProEngine:
                 day["research_brief_full"] = False
         except Exception:
             logger.debug("research color flag failed", exc_info=True)
+        try:
+            from abcxauto.brain import apply_pre_model_look_systems
+
+            await apply_pre_model_look_systems(
+                connector=self.conn,
+                world=world,
+                snap=s,
+                day=day,
+            )
+        except Exception:
+            logger.debug("pre-model alloc/research wire failed", exc_info=True)
         wake = format_wake(
             cycle=n,
             session=world.session_status,
@@ -2260,12 +2252,7 @@ class ProEngine:
                             )
                         except Exception:
                             self._note("WAKE", "next look seed failed")
-                    try:
-                        from abcxauto.brain import drop_live_chat
-
-                        drop_live_chat(g)
-                    except Exception:
-                        pass
+                    _ = g
                     self.state.status = "Waiting"
                     self._note("SKIP", f"session={session or 'closed'} — no Grok")
                     continue
@@ -2277,22 +2264,21 @@ class ProEngine:
                     except Exception:
                         logger.debug("kill-look skip failed", exc_info=True)
                         skip = ""
-                    if not skip:
-                        try:
-                            from abcxauto.thin_rth_kill_look import (
-                                REASON_F10,
-                                f10_open_look_halted,
-                            )
-
-                            if f10_open_look_halted():
-                                skip = REASON_F10
-                        except Exception:
-                            logger.debug("f10 skip fail-closed failed", exc_info=True)
                 # Start/bounce one-shot is spent after the first look gate.
                 self._force_first_look = False
                 if skip:
                     self._note("SKIP", skip)
                     self.state.skip_reason = skip
+                    try:
+                        from abcxauto.thin_rth_kill_look import skip_glass_line
+                        from abcxauto.think_stream import emit as think_emit
+
+                        line = skip_glass_line(skip)
+                        if line:
+                            think_emit("tool", f"\n{line}\n")
+                    except Exception:
+                        logger.debug("skip stream line failed", exc_info=True)
+                    logger.info("look skipped: %s", skip)
                     try:
                         from abcxauto.park_clock import book_fingerprint
                         from abcxauto.thin_rth_kill_look import (
@@ -2304,37 +2290,23 @@ class ProEngine:
                             self._stay_up_book_fp = book_fingerprint(s)
                     except Exception:
                         logger.debug("dead-socket skip fingerprint failed", exc_info=True)
-                    from abcxauto.thin_rth_kill_look import is_f10_look_halt
+                    try:
+                        from abcxauto.research_budget import (
+                            is_brief_look_halt,
+                            mark_brief_loop_halt,
+                            resolve_research_card,
+                        )
 
-                    if is_f10_look_halt(skip):
-                        try:
-                            from abcxauto.thin_rth_kill_look import (
-                                record_f10_loop_halt,
+                        if is_brief_look_halt(skip):
+                            card, window = resolve_research_card(snap=s)
+                            mark_brief_loop_halt(
+                                card, window, reason=skip
                             )
-
-                            record_f10_loop_halt(
-                                session=session, skip_reason=skip, snap=s
-                            )
-                        except Exception:
-                            logger.debug("f10 halt persist failed", exc_info=True)
-                    else:
-                        try:
-                            from abcxauto.research_budget import (
-                                is_brief_look_halt,
-                                mark_brief_loop_halt,
-                                resolve_research_card,
-                            )
-
-                            if is_brief_look_halt(skip):
-                                card, window = resolve_research_card(snap=s)
-                                mark_brief_loop_halt(
-                                    card, window, reason=skip
-                                )
-                        except Exception:
-                            logger.debug(
-                                "research brief halt persist failed",
-                                exc_info=True,
-                            )
+                    except Exception:
+                        logger.debug(
+                            "research brief halt persist failed",
+                            exc_info=True,
+                        )
                     continue
 
                 n += 1

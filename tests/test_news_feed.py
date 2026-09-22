@@ -16,6 +16,7 @@ from abcxauto.news_feed import (
     format_news_for_prompt,
     news_hard_miss,
     news_need_symbols,
+    news_timed_out,
     public_news_item,
     public_news_items,
     remember_headlines,
@@ -169,15 +170,18 @@ class _MDA:
     def __init__(self, impl):
         self.is_configured = True
         self.calls: list[str] = []
+        self.timeouts: list[float] = []
         self._impl = impl
 
-    async def get_stock_news(self, symbol, countback=4):
+    async def get_stock_news(self, symbol, countback=4, timeout=None):
         self.calls.append(str(symbol).upper())
-        return await self._impl(symbol, countback)
+        if timeout is not None:
+            self.timeouts.append(float(timeout))
+        return await self._impl(symbol, countback, timeout)
 
 
 def test_news_wait_is_fail_fast_not_a_12s_look():
-    """2026-08-26: 12s sequential was the whole look. Cap stays parallel < 12s."""
+    """2026-08-26: 12s sequential was the whole look. Cap stays shared batch < 12s."""
     assert NEWS_SYMBOL_S * max(1, int(NEWS_TRIES)) <= 8.0
     assert NEWS_SYMBOL_S < 12.0
     assert NEWS_TRIES == 1
@@ -202,7 +206,7 @@ def test_news_hard_miss_only_when_no_headlines():
 
 @pytest.mark.asyncio
 async def test_timeout_is_not_empty_success(monkeypatch):
-    async def hang(_symbol, _countback):
+    async def hang(_symbol, _countback, _timeout=None):
         await asyncio.sleep(30)
         return [{"symbol": "NKE", "headline": "should not land"}]
 
@@ -216,6 +220,7 @@ async def test_timeout_is_not_empty_success(monkeypatch):
         "(unavailable" in str(it.get("headline") or "") for it in items
     )
     assert news_hard_miss(items) == "timed out"
+    assert list(getattr(items, "timed_out", []) or news_timed_out()) == ["NKE"]
     assert client.calls == ["NKE"]
     assert not _CACHE["items"]
 
@@ -224,7 +229,7 @@ async def test_timeout_is_not_empty_success(monkeypatch):
 async def test_timeout_does_not_retry_into_the_stall(monkeypatch):
     hits = {"n": 0}
 
-    async def once_then_ok(symbol, _countback):
+    async def once_then_ok(symbol, _countback, _timeout=None):
         hits["n"] += 1
         if hits["n"] < 2:
             await asyncio.sleep(30)
@@ -250,7 +255,7 @@ async def test_timeout_does_not_retry_into_the_stall(monkeypatch):
 async def test_timeout_does_not_cache_so_next_look_refetches(monkeypatch):
     n = {"hits": 0}
 
-    async def hang(_symbol, _countback):
+    async def hang(_symbol, _countback, _timeout=None):
         n["hits"] += 1
         await asyncio.sleep(30)
         return []
@@ -275,7 +280,7 @@ async def test_timeout_does_not_cache_so_next_look_refetches(monkeypatch):
 async def test_slow_source_does_not_eat_a_12s_look(monkeypatch):
     """Default cap, hanging MDA: miss in the fail-fast window, not 12s empty."""
 
-    async def hang(_symbol, _countback):
+    async def hang(_symbol, _countback, _timeout=None):
         await asyncio.sleep(30)
         return [{"symbol": _symbol, "headline": "should not land"}]
 
@@ -291,12 +296,73 @@ async def test_slow_source_does_not_eat_a_12s_look(monkeypatch):
         "(unavailable" in str(it.get("headline") or "") for it in items
     )
     assert news_hard_miss(items) == "timed out"
+    assert set(getattr(items, "timed_out", []) or news_timed_out()) == {
+        "HEI",
+        "WDAY",
+        "GDDY",
+        "SJM",
+        "ROST",
+    }
     assert client.calls == ["HEI", "WDAY", "GDDY", "SJM", "ROST"]
 
 
 @pytest.mark.asyncio
+async def test_shared_batch_deadline_not_per_symbol(monkeypatch):
+    """Serialized MDA must burn one shared budget, not 2s × N after each slot."""
+    gate = asyncio.Semaphore(1)
+    seen_timeouts: list[float] = []
+
+    async def gated(_symbol, _countback, timeout=None):
+        # Burn the whole remaining budget while holding the only slot — under a
+        # per-symbol fresh 2s this would cascade; shared deadline must not.
+        budget = float(timeout) if timeout is not None else float(NEWS_SYMBOL_S)
+        seen_timeouts.append(budget)
+        async with gate:
+            await asyncio.sleep(max(budget, 0.01) + 0.05)
+            return []
+
+    client = _MDA(gated)
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.2)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    names = ["AVGO", "QQQ", "NVDA", "CRCL", "INTC"]
+    t0 = time.monotonic()
+    items = await fetch_symbols_news(names)
+    elapsed = time.monotonic() - t0
+    assert items == []
+    assert news_hard_miss(items) == "timed out"
+    assert elapsed < 0.2 + 0.35
+    assert elapsed < 0.2 * len(names)
+    assert set(getattr(items, "timed_out", []) or news_timed_out()) == set(names)
+    assert seen_timeouts  # at least the first slot was entered under the batch budget
+
+
+@pytest.mark.asyncio
+async def test_partial_batch_returns_hits_and_timed_out(monkeypatch):
+    """Fast names land; slow names are timed_out — not invented headlines."""
+
+    async def mixed(symbol, _countback, _timeout=None):
+        su = str(symbol).upper()
+        if su in {"AMD", "SPY"}:
+            return [{"symbol": su, "headline": f"{su} printed"}]
+        await asyncio.sleep(30)
+        return [{"symbol": su, "headline": "should not land"}]
+
+    client = _MDA(mixed)
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.1)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["AMD", "AVGO", "SPY", "NVDA"])
+    assert [it.get("headline") for it in items] == ["AMD printed", "SPY printed"]
+    assert news_hard_miss(items) is None
+    assert set(getattr(items, "timed_out", []) or news_timed_out()) == {"AVGO", "NVDA"}
+    assert not any(it.get("error") for it in items)
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "") for it in items
+    )
+
+
+@pytest.mark.asyncio
 async def test_good_fetch_still_returns_items(monkeypatch):
-    async def ok(symbol, _countback):
+    async def ok(symbol, _countback, _timeout=None):
         return [{"symbol": symbol, "headline": f"{symbol} printed"}]
 
     client = _MDA(ok)
@@ -305,11 +371,12 @@ async def test_good_fetch_still_returns_items(monkeypatch):
     assert [it.get("headline") for it in items] == ["INTU printed", "FIG printed"]
     assert news_hard_miss(items) is None
     assert not any(it.get("error") for it in items)
+    assert list(getattr(items, "timed_out", []) or news_timed_out()) == []
 
 
 @pytest.mark.asyncio
 async def test_completed_empty_fetch_is_still_empty(monkeypatch):
-    async def none(_symbol, _countback):
+    async def none(_symbol, _countback, _timeout=None):
         return []
 
     client = _MDA(none)
@@ -325,7 +392,7 @@ async def test_completed_empty_fetch_is_still_empty(monkeypatch):
 async def test_timeout_returns_rail_headline_not_no_print(monkeypatch):
     """2026-08-27: HPQ Q3 was on What's happening while news HPQ timed out."""
 
-    async def hang(_symbol, _countback):
+    async def hang(_symbol, _countback, _timeout=None):
         await asyncio.sleep(30)
         return [{"symbol": "HPQ", "headline": "should not land"}]
 
@@ -407,7 +474,7 @@ def test_coalesce_news_fills_nvda_timeout_from_remembered():
 
 @pytest.mark.asyncio
 async def test_timeout_only_fetch_has_no_unavailable_items(monkeypatch):
-    async def hang(_symbol, _countback):
+    async def hang(_symbol, _countback, _timeout=None):
         await asyncio.sleep(30)
         return [{"symbol": "NVDA", "headline": "should not land"}]
 
@@ -424,7 +491,7 @@ async def test_timeout_only_fetch_has_no_unavailable_items(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_asked_nvda_drops_exxon_and_empty_symbol(monkeypatch):
-    async def junk(_symbol, _countback):
+    async def junk(_symbol, _countback, _timeout=None):
         return [
             {"symbol": "EXXON", "headline": "Exxon posts profit"},
             {"symbol": "", "headline": "oil patch note"},
@@ -444,7 +511,7 @@ async def test_asked_nvda_drops_exxon_and_empty_symbol(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_remembered_nvda_fills_timeout_fetch(monkeypatch):
-    async def hang(_symbol, _countback):
+    async def hang(_symbol, _countback, _timeout=None):
         await asyncio.sleep(30)
         return [{"symbol": "NVDA", "headline": "should not land"}]
 

@@ -29,7 +29,7 @@ KNOWN_SESSIONS = frozenset({RTH_SESSION}) | RESEARCH_SESSIONS
 REASON_RESEARCH_NO_SEND = "research_no_send"
 REASON_RESEARCH_THIN = "research_thin"
 _RESEARCH_THIN_NOTE = (
-    "research_thin: new risk needs this-look candles and news|web on the name"
+    "research_thin: this look has no dossier for the name"
 )
 _OCC_TICKET = re.compile(r"^([A-Z]{1,6})\d{6}[CP]\d{8}$")
 _OPTION_READ_STRATS = frozenset({
@@ -205,10 +205,10 @@ def rth_flat_keep_looking(
 
 # Spoken CLOSE/EXIT on an open lot is not a finished RTH look when send never
 # ran. A named ORDER EXAMPLES ticket with zero send is the same class even
-# when the book is flat. Hold speech that only names open lots is not a
-# ticket — those names need a real ORDER EXAMPLES structure to re-enter.
-# Detection is code (say + positions + sends==0 + tool_trace), not a prompt
-# sermon. Close/exit+lots stays its own path; ticket names widen it.
+# when the book is flat. Hold / no-ticket / will-not-cut speech is finished —
+# those names need a real ORDER EXAMPLES structure *without* a stand-down to
+# re-enter. Detection is code (say + positions + sends==0 + tool_trace), not
+# a prompt sermon. Close/exit+lots stays its own path; ticket names widen it.
 _CLOSE_OR_EXIT_RE = re.compile(
     r"\b(?:close|closing|closed|exit|exiting|exited)\b",
     re.IGNORECASE,
@@ -378,8 +378,9 @@ def inventory_wake_fact(
 
 
 # Wake lead when a look named a sendable ticket and never called send.
-# Not a fill / order_change / unprotected poke. Forces the unpaid ticket path.
-TICKET_WAKE_FACT = "SEND-THE-TICKET open decision still unpaid."
+# Not a fill / order_change / unprotected poke. Desk fact only — not an
+# operator command (do not say SEND-THE-TICKET; models invent hold fills).
+TICKET_WAKE_FACT = "Named order spoken; send did not run."
 
 # RTH synthesize/decide mill: zero tools and zero send is not a finished look.
 # Same-chat re-enter with a tool-or-send wake. After SYNTHESIZE_MILL_TRIES
@@ -437,6 +438,24 @@ _SYM_INTENT_RE = re.compile(
 _SYM_OPTION_RE = re.compile(
     r"\b([A-Z]{2,5})\s+(?:\d+(?:\.\d+)?\s+)?(puts?|calls?)\b"
     r"|\b(puts?|calls?)\s+(?:spread\s+)?(?:on\s+)?([A-Z]{2,5})\b",
+    re.IGNORECASE,
+)
+# Hold / pass / no-trade / no-ticket / will-not-cut conclusions are finished
+# looks, not unpaid sends. "bracket stop / target" on an already-held lot
+# must not arm wake — even when the essay names other tickers.
+_STAND_DOWN_OPEN_RE = re.compile(
+    r"\bno\s+ticket\b"
+    r"|\bno[-\s]trade\b"
+    r"|\b(?:standing|stand)\s+down\b"
+    r"|\bpass(?:ing)?\s+on\b"
+    r"|\bi(?:'ll|\s+will)\s+pass\b"
+    r"|\bpass\s*[.!]"
+    r"|\b(?:i\s+)?will\s+not\s+cut\b"
+    r"|\b(?:i\s+)?won'?t\s+cut\b"
+    r"|\b(?:conclusion|decision|verdict)\s*:?\s*hold(?:ing)?\b"
+    r"|\b(?:i(?:'ll|\s+will)\s+)?(?:just\s+)?hold(?:ing)?\b"
+    r"|\bhold(?:ing)?\s+(?:the\s+)?"
+    r"(?:[A-Z]{2,5}|lot|lots|position|positions|shares|name)\b",
     re.IGNORECASE,
 )
 _RESERVED_TICKERS = frozenset({
@@ -530,6 +549,11 @@ def _book_ticker_set(
     return held
 
 
+def _stand_down_open_decision(text: str) -> bool:
+    """Hold / pass / no-trade / no-ticket / will-not-cut — not an unpaid order."""
+    return bool(_STAND_DOWN_OPEN_RE.search(str(text or "")))
+
+
 def spoken_ticket_without_send(
     text: str = "",
     *,
@@ -543,9 +567,12 @@ def spoken_ticket_without_send(
     Flat book is enough — open lots are not required. Describing existing
     lots is not an unpaid ticket: if every spoken intent ticker is already
     on the book, only a real ORDER EXAMPLES structure re-enters.
-    CLOSE/EXIT+lots stays on ``spoken_close_without_send``. A send tool
-    call — filled or clerk-blocked — is a send. Illegal STK still has to
-    attempt send.
+    A hold / pass / no-trade conclusion does not arm on stop/target/bracket
+    prose or other tickers named for comparison. An explicit buy/sell/short
+    (or option) of a name not already held still arms even when the say
+    also stands down. CLOSE/EXIT+lots stays on ``spoken_close_without_send``.
+    A send tool call — filled or clerk-blocked — is a send. Illegal STK
+    still has to attempt send.
     """
     if _had_send_tool(sends, tool_trace):
         return False
@@ -554,9 +581,8 @@ def spoken_ticket_without_send(
         return False
     if not _spoken_tickers(blob):
         return False
-    if _ticket_structure_pattern().search(blob):
-        return True
     held = _book_ticker_set(positions, open_lots)
+    # Explicit new-name intent survives a hold/pass essay in the same say.
     for m in _SYM_INTENT_RE.finditer(blob):
         tok = _captured_ticker(m)
         if tok and tok not in held:
@@ -565,6 +591,10 @@ def spoken_ticket_without_send(
         tok = _captured_ticker(m)
         if tok and tok not in held:
             return True
+    if _stand_down_open_decision(blob):
+        return False
+    if _ticket_structure_pattern().search(blob):
+        return True
     return False
 
 
@@ -714,6 +744,41 @@ def load_research_brief() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _snap_research_tools(snap: dict[str, Any] | None) -> list[str]:
+    """Tools already stamped on the look snap (even when the bag note missed)."""
+    blob = snap if isinstance(snap, dict) else {}
+    tools: list[str] = []
+    store = blob.get("session_range")
+    if isinstance(store, dict):
+        for row in store.values():
+            if isinstance(row, dict) and _bar_structure_row(row):
+                tools.append("candles")
+                break
+            if isinstance(row, dict) and _finite_px(row.get("last")):
+                tools.append("candles")
+                break
+    src = str(blob.get("candle_source") or "").strip().lower()
+    if src and src not in ("", "ibkr_miss", "none") and "candles" not in tools:
+        tools.append("candles")
+    items = blob.get("news_items")
+    if isinstance(items, list) and any(isinstance(it, dict) for it in items):
+        tools.append("news")
+    hits = blob.get("scan_hits") if isinstance(blob.get("scan_hits"), dict) else {}
+    rows = hits.get("rows") if isinstance(hits, dict) else None
+    if isinstance(rows, list) and rows:
+        tools.append("scan")
+    elif blob.get("scan_fetched"):
+        tools.append("scan")
+    if _web_ok(blob):
+        tools.append("web")
+    facts = blob.get("option_facts")
+    if isinstance(facts, dict):
+        facts = facts.get("facts")
+    if isinstance(facts, list) and facts:
+        tools.append("option_facts")
+    return tools
+
+
 def this_look_research(
     snap: dict[str, Any] | None,
     world: Any = None,
@@ -727,6 +792,9 @@ def this_look_research(
         src = str(row.get("source") or "").strip()
         if src and src not in tools:
             tools.append(src)
+    for src in _snap_research_tools(snap):
+        if src not in tools:
+            tools.append(src)
     used = set(tools)
     return {
         "symbols": list(bag.get("symbols") or [])[:SYMBOL_CAP],
@@ -737,20 +805,66 @@ def this_look_research(
     }
 
 
+def _inline_dossier_blocks_new_risk(
+    dossier: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    """Same gate as research_dossier.dossier_blocks_new_risk when that module is absent."""
+    if not isinstance(dossier, dict) or not dossier:
+        return True, "no_dossier"
+    earnings = str(dossier.get("earnings") or "").strip().lower()
+    if earnings in ("", "unknown"):
+        return True, "earnings_unknown"
+    earnings_in = dossier.get("earnings_in")
+    if isinstance(earnings_in, int) and not isinstance(earnings_in, bool) and earnings_in <= 2:
+        return True, "earnings_window"
+    return False, ""
+
+
+def _dossier_for_symbol(snap: dict[str, Any], sym: str) -> dict[str, Any] | None:
+    store = snap.get("dossiers")
+    if not isinstance(store, dict):
+        return None
+    row = store.get(sym)
+    if row is None:
+        for key, val in store.items():
+            if str(key).upper().strip() == sym:
+                row = val
+                break
+    if isinstance(row, dict) and row:
+        return row
+    return None
+
+
 def new_risk_research_error(
     symbol: str,
     snap: dict[str, Any] | None,
     *,
     strat: str = "",
 ) -> str:
-    """Empty = may go. Non-empty = this look has not researched the ticket name."""
+    """Empty = may go. Non-empty = this look has no usable dossier for the ticket name.
+
+    Scan / web / news alone never clear. Exits skip this in the caller.
+    """
+    del strat
     blob = snap if isinstance(snap, dict) else {}
     name = _ticket_research_name(symbol)
     if not name:
         return ""
-    if _structure_this_look(blob, name) and _read_this_look(blob, name, strat):
+    dossier = _dossier_for_symbol(blob, name)
+    if dossier is None:
+        return _RESEARCH_THIN_NOTE
+    try:
+        from abcxauto.research_dossier import dossier_blocks_new_risk
+    except ImportError:
+        blocked, reason = _inline_dossier_blocks_new_risk(dossier)
+    else:
+        blocked, reason = dossier_blocks_new_risk(dossier)
+    if not blocked:
         return ""
-    return _RESEARCH_THIN_NOTE
+    code = str(reason or "no_dossier").strip() or "no_dossier"
+    if code == "no_dossier":
+        return _RESEARCH_THIN_NOTE
+    return f"research_thin: {code}"
 
 
 def _ticket_research_name(symbol: str) -> str:
@@ -955,6 +1069,60 @@ def _prior_session_stub(
     return out
 
 
+def _brief_research_sources(brief: dict[str, Any] | None) -> set[str]:
+    row = brief if isinstance(brief, dict) else {}
+    out: set[str] = set()
+    for fact in row.get("facts") or []:
+        if not isinstance(fact, dict):
+            continue
+        src = str(fact.get("source") or "").strip()
+        if src in RESEARCH_TOOLS:
+            out.add(src)
+    return out
+
+
+def _this_look_empty(this_look: dict[str, Any] | None) -> bool:
+    row = this_look if isinstance(this_look, dict) else {}
+    return not row.get("tools") and not row.get("facts")
+
+
+def _merge_brief_research_into_look(
+    this_look: dict[str, Any],
+    brief: dict[str, Any],
+) -> dict[str, Any]:
+    """Fold research-tool facts from a mid-look disk write into this_look."""
+    facts = [row for row in (this_look.get("facts") or []) if isinstance(row, dict)]
+    tools = [str(t) for t in (this_look.get("tools") or []) if str(t).strip()]
+    seen = {(str(row.get("source") or ""), str(row.get("text") or "")) for row in facts}
+    for fact in brief.get("facts") or []:
+        if not isinstance(fact, dict):
+            continue
+        src = str(fact.get("source") or "").strip()
+        if src not in RESEARCH_TOOLS:
+            continue
+        key = (src, str(fact.get("text") or ""))
+        if key in seen:
+            continue
+        facts.append({"source": src, "text": str(fact.get("text") or "")})
+        seen.add(key)
+        if src not in tools:
+            tools.append(src)
+        if len(facts) >= FACT_CAP:
+            break
+    used = set(tools)
+    out = dict(this_look)
+    out["facts"] = facts[:FACT_CAP]
+    out["tools"] = tools
+    out["open"] = [line for name, line in _RESEARCH_OPEN if name not in used]
+    if not out.get("symbols"):
+        out["symbols"] = [
+            str(s).upper().strip()
+            for s in (brief.get("symbols") or [])
+            if str(s).strip()
+        ][:SYMBOL_CAP]
+    return out
+
+
 def research_brief_look_payload(
     brief: dict[str, Any] | None,
     *,
@@ -967,15 +1135,24 @@ def research_brief_look_payload(
     missing = not bool(row)
     stale = True if missing else research_brief_stale(row, now=now)
     this_look = this_look_research(snap, world)
+    brief_src = _brief_research_sources(row)
+    look_src = set(this_look.get("tools") or [])
+    # Mid-look write_research_brief overwrites the on-disk brief with this look.
+    # Overlap means that file is this-look color, not a prior-session stub.
+    if not _this_look_empty(this_look) and brief_src and (brief_src & look_src):
+        this_look = _merge_brief_research_into_look(this_look, row)
+        prior = _prior_session_stub(row, missing=False, stale=True)
+    else:
+        prior = _prior_session_stub(row, missing=missing, stale=stale)
     out: dict[str, Any] = {
         "use": "color, never a live trigger",
         "send_geometry": False,
         "this_look": this_look,
-        "prior_session": _prior_session_stub(row, missing=missing, stale=stale),
+        "prior_session": prior,
         "missing": missing,
         "stale": stale,
     }
-    if not this_look.get("tools") and not this_look.get("facts"):
+    if _this_look_empty(this_look):
         out["need"] = THIS_LOOK_NEED
     return out
 
@@ -1124,8 +1301,22 @@ def _candle_fact_line(payload: dict[str, Any]) -> str:
     src = str(payload.get("source") or "ibkr")
     if bits:
         return f"{' | '.join(bits)} src={src}"
+    # Single-symbol candles put session on the payload, not under series.
+    top = _candle_bar_bit(
+        {
+            "symbol": payload.get("symbol"),
+            "session": payload.get("session"),
+            "bars": payload.get("bars"),
+        }
+    )
+    if top:
+        return f"{top} src={src}"
     bars = payload.get("bars") if isinstance(payload.get("bars"), list) else []
     if not bars:
+        last = payload.get("last")
+        sym = str(payload.get("symbol") or "").strip()
+        if last is not None:
+            return f"{(sym + ' ') if sym else ''}{last} src={src}".strip()
         return ""
     sym = str(payload.get("symbol") or "bars").strip()
     last = bars[-1] if isinstance(bars[-1], dict) else {}
@@ -1572,7 +1763,7 @@ def desk_mode_wake_bit(session: str = "", *, rth_full: bool = True) -> str:
         )
     sess = desk_session(session)
     return (
-        f"desk_mode=research send=blocked({REASON_RESEARCH_NO_SEND}) "
+        f"desk_mode=research send=allowed(existing gates) "
         f"session={sess}."
     )
 
@@ -1703,8 +1894,41 @@ def _search_handles(raw: Any) -> list[str]:
     return out
 
 
+_X_HANDLE_IN_URL = re.compile(
+    r"(?:x|twitter)\.com/(?!i/|intent/|search)([A-Za-z0-9_]{1,15})(?:/|$)",
+    re.I,
+)
+_MD_CITE_URL = re.compile(r"\[\[[^\]]+\]\]\((https?://[^)\s]+)\)")
+
+
+def _x_host(host: str) -> bool:
+    h = str(host or "").strip().lower()
+    return h in ("x.com", "twitter.com") or h.endswith((".x.com", ".twitter.com"))
+
+
+def _x_handle_from_url(url: str) -> str:
+    """xai-sdk XCitation is url-only; pull @handle from /user/status paths when present."""
+    m = _X_HANDLE_IN_URL.search(str(url or ""))
+    return m.group(1) if m else ""
+
+
+def _cite_has(cite: Any, field: str) -> bool:
+    """Prefer protobuf HasField for oneof cites; fall back for SimpleNamespace tests."""
+    has = getattr(cite, "HasField", None)
+    if callable(has):
+        try:
+            return bool(has(field))
+        except (ValueError, TypeError, AttributeError):
+            return False
+    return getattr(cite, field, None) is not None
+
+
 def _cite_rows(resp: Any) -> list[dict[str, Any]]:
-    """Titles and urls from an xAI search response. X posts stay marked source=x."""
+    """Titles and urls from an xAI agent-tools search response.
+
+    xai-sdk 1.19 InlineCitation oneof is url-only (WebCitation.url / XCitation.url).
+    Plain ``citations`` and markdown ``[[n]](url)`` in content are folded as backup.
+    """
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -1719,47 +1943,56 @@ def _cite_rows(resp: Any) -> list[dict[str, Any]]:
         seen.add(url)
         rows.append(row)
 
+    def add_url(url: str, *, kind: str = "", title: str = "", handle: str = "") -> None:
+        raw = str(url or "").strip()
+        if not raw:
+            return
+        host = _web_host(raw)
+        src = kind or ("x" if _x_host(host) else "web")
+        hand = str(handle or "").strip().lstrip("@")
+        if src == "x" and not hand:
+            hand = _x_handle_from_url(raw)
+        label = str(title or "").strip() or hand or raw
+        row: dict[str, Any] = {"source": src, "url": raw, "title": label[:180]}
+        if hand and src == "x":
+            row["handle"] = hand
+        add(row)
+
     for cite in list(getattr(resp, "inline_citations", None) or []):
-        x = getattr(cite, "x_citation", None)
-        web = getattr(cite, "web_citation", None)
-        x_url = str(getattr(x, "url", "") or "").strip() if x is not None else ""
-        web_url = str(getattr(web, "url", "") or "").strip() if web is not None else ""
-        if x_url:
+        if _cite_has(cite, "x_citation"):
+            x = getattr(cite, "x_citation", None)
+            x_url = str(getattr(x, "url", "") or "").strip() if x is not None else ""
             handle = str(
                 getattr(x, "username", None) or getattr(x, "handle", None) or ""
             ).strip().lstrip("@")
             title = str(
-                getattr(x, "title", None) or getattr(x, "snippet", None) or handle or x_url
+                getattr(x, "title", None) or getattr(x, "snippet", None) or ""
             ).strip()
-            row: dict[str, Any] = {"source": "x", "url": x_url, "title": title[:180]}
-            if handle:
-                row["handle"] = handle
-            add(row)
-        elif web_url:
-            title = str(getattr(web, "title", None) or web_url).strip()
-            add({"source": "web", "url": web_url, "title": title[:180]})
+            add_url(x_url, kind="x", title=title, handle=handle)
+        elif _cite_has(cite, "web_citation"):
+            web = getattr(cite, "web_citation", None)
+            web_url = str(getattr(web, "url", "") or "").strip() if web is not None else ""
+            title = str(getattr(web, "title", None) or "").strip()
+            add_url(web_url, kind="web", title=title)
     # Prefer structured inline cites; still fold plain citation urls (deduped).
     for raw in list(getattr(resp, "citations", None) or []):
-        url = str(raw or "").strip()
-        if not url:
-            continue
-        host = _web_host(url)
-        # www.x.com / www.twitter.com are still X (exact host set missed the www form).
-        x_host = host in ("x.com", "twitter.com") or host.endswith(
-            (".x.com", ".twitter.com")
-        )
-        kind = "x" if x_host else "web"
-        add({"source": kind, "url": url, "title": url[:180]})
+        add_url(str(raw or "").strip())
+    # Markdown [[n]](url) in content when structured fields were empty.
+    if len(rows) < WEB_SEARCH_CAP:
+        text = str(getattr(resp, "content", "") or "")
+        for m in _MD_CITE_URL.finditer(text):
+            add_url(m.group(1))
+            if len(rows) >= WEB_SEARCH_CAP:
+                break
     return rows
 
 
-async def _xai_search_sample(query: str, sources: list[Any]) -> Any:
-    """One short xAI search. Not the desk brain, and not xhigh."""
+async def _xai_search_sample(query: str, tools: list[Any]) -> Any:
+    """One short xAI agent-tools search. Not the desk brain, and not xhigh."""
     import asyncio
 
     from xai_sdk import AsyncClient
     from xai_sdk.chat import user as xai_user
-    from xai_sdk.search import SearchParameters
 
     from abcxauto.config import get_config
 
@@ -1767,6 +2000,14 @@ async def _xai_search_sample(query: str, sources: list[Any]) -> Any:
     if not getattr(cfg, "xai_api_key", ""):
         raise RuntimeError("XAI_API_KEY is not set")
     model = str(getattr(cfg, "model", "") or "grok-4.7")
+    # Search is color only — never ride an xhigh brain id.
+    try:
+        from abcxauto.thin_rth_kill_look import rth_model_no_xhigh
+
+        model = rth_model_no_xhigh(model, enabled=True) or model
+    except Exception:
+        if "xhigh" in model.lower():
+            model = "grok-4.7"
     client = AsyncClient(api_key=cfg.xai_api_key, timeout=WEB_SEARCH_TIMEOUT_S)
     try:
         chat = client.chat.create(
@@ -1779,13 +2020,9 @@ async def _xai_search_sample(query: str, sources: list[Any]) -> Any:
                 )
             ],
             max_tokens=600,
+            tools=list(tools or []),
+            max_turns=3,
             include=["inline_citations"],
-            search_parameters=SearchParameters(
-                sources=sources,
-                mode="on",
-                return_citations=True,
-                max_search_results=WEB_SEARCH_CAP,
-            ),
         )
         return await asyncio.wait_for(chat.sample(), timeout=WEB_SEARCH_TIMEOUT_S)
     finally:
@@ -1813,21 +2050,23 @@ async def search_public(
     q = q[:240]
     names = _search_handles(handles)
     try:
-        from xai_sdk.search import web_source, x_source
-    except Exception as exc:
-        return _web_payload(error=f"xai search unavailable: {exc}", query=q, where=which)
-    sources: list[Any] = []
+        from xai_sdk.tools import web_search, x_search
+    except Exception:
+        return _web_payload(error="web search unavailable", query=q, where=which)
+    tools: list[Any] = []
     if which in ("web", "both"):
-        sources.append(web_source(country="US"))
+        tools.append(web_search(user_location_country="US"))
     if which in ("x", "both"):
         x_kw: dict[str, Any] = {}
         if names:
-            x_kw["included_x_handles"] = names
-        sources.append(x_source(**x_kw))
+            x_kw["allowed_x_handles"] = names
+        tools.append(x_search(**x_kw))
+    if not tools:
+        return _web_payload(error="web search unavailable", query=q, where=which)
     try:
-        resp = await _xai_search_sample(q, sources)
-    except Exception as exc:
-        return _web_payload(error=f"search failed: {exc}", query=q, where=which)
+        resp = await _xai_search_sample(q, tools)
+    except Exception:
+        return _web_payload(error="web search unavailable", query=q, where=which)
     text = str(getattr(resp, "content", "") or "").strip()
     results = _cite_rows(resp)
     return _web_payload(

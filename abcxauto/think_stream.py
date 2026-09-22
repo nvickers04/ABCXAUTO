@@ -3,9 +3,12 @@
 Headless prints to stdout (ASCII). ProEngine binds so the UI can show the same buffer.
 A short tail file lets Cursor review the stream without the window.
 One append-only file per ET day under data/state/think_session/YYYY-MM-DD.txt
-keeps the paid look: think, tool names, tool args when present, the tool JSON
-the model paid to see, say. Bounces append a run banner; begin_run never wipes
-it. think_tail.txt stays an 8kb overwrite; think_live stays a 24kb RAM window.
+keeps the paid look: spoken [say], tool names, tool args when present, a short
+desk line for large tool JSON (chat.append still gets the full paid blob).
+Reasoning (kind think) is omitted from the day file and think_live — listeners
+still get the original tokens. Bounces append a run banner; begin_run never
+wipes it. think_tail.txt stays an 8kb overwrite; think_live stays a 24kb RAM
+window.
 """
 
 from __future__ import annotations
@@ -307,9 +310,315 @@ def _grok_segment_junk_say(seg: str) -> bool:
     return (not raw) or raw == "?"
 
 
+# Glass/day-file budget for tool results. Short chips and args stay verbatim;
+# large JSON becomes one desk line so a live look cannot flood the pane.
+_TOOL_GLASS_KEEP = 240
+_TOOL_GLASS_MAX = 200
+
+
+def _try_json_payload(text: str) -> Any | None:
+    """Parse a tool blob that is a JSON object or array. Else None."""
+    raw = (text or "").strip()
+    if not raw or raw[0] not in "{[":
+        return None
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if isinstance(payload, (dict, list)):
+        return payload
+    return None
+
+
+def _short_tool_error(err: Any) -> str:
+    """One short error line. Drop gRPC debug_error_string noise."""
+    s = ascii_text(str(err or "")).strip()
+    if not s:
+        return "error"
+    cut = re.split(r"debug_error_string", s, maxsplit=1, flags=re.I)[0]
+    cut = cut.strip(" ,;:\n\t")
+    # Common grpc Status trailing junk after the human message.
+    cut = re.sub(r"\s*[,{]\s*$", "", cut).strip()
+    if not cut:
+        cut = "error"
+    if len(cut) > _TOOL_GLASS_MAX:
+        cut = cut[: _TOOL_GLASS_MAX - 3].rstrip() + "..."
+    return cut if cut.lower().startswith("error") else f"error: {cut}"
+
+
+def _fmt_px(val: Any) -> str:
+    try:
+        px = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if px != px:  # NaN
+        return ""
+    if abs(px) >= 100:
+        return f"{px:.2f}".rstrip("0").rstrip(".")
+    text = f"{px:.4f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _quote_desk_line(row: dict[str, Any]) -> str | None:
+    sym = str(row.get("symbol") or "").upper().strip()
+    if not sym:
+        return None
+    if row.get("last") is None and row.get("bid") is None and row.get("ask") is None:
+        if row.get("mid") is None:
+            return None
+    bits = [sym]
+    last = row.get("last")
+    if last is None:
+        last = row.get("mid")
+    last_s = _fmt_px(last)
+    if last_s:
+        bits.append(f"last={last_s}")
+    bid_s = _fmt_px(row.get("bid"))
+    ask_s = _fmt_px(row.get("ask"))
+    if bid_s or ask_s:
+        bits.append(f"bid={bid_s or '-'}/{ask_s or '-'}")
+    return " ".join(bits) if len(bits) > 1 else None
+
+
+def _candle_series_line(row: dict[str, Any]) -> str | None:
+    bars = row.get("bars")
+    if not isinstance(bars, list):
+        return None
+    sym = str(row.get("symbol") or "").upper().strip() or "?"
+    res = str(row.get("resolution") or row.get("barSize") or "").strip()
+    n = len(bars)
+    bits = [sym]
+    if res:
+        bits.append(res)
+    bits.append(f"bars={n}")
+    last = bars[-1] if bars and isinstance(bars[-1], dict) else {}
+    if isinstance(last, dict) and last:
+        t = last.get("t_iso") or last.get("t") or last.get("time") or last.get("date")
+        c = last.get("c") if last.get("c") is not None else last.get("close")
+        c_s = _fmt_px(c)
+        if t not in (None, ""):
+            bits.append(f"last={t}")
+        if c_s:
+            bits.append(f"close={c_s}")
+    return " ".join(bits)
+
+
+def _scan_symbols(payload: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        sym = str(raw or "").upper().strip()
+        if sym and sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+
+    for raw in payload.get("symbols") or []:
+        _add(raw)
+    for key in ("hits", "rows"):
+        for row in payload.get(key) or []:
+            if isinstance(row, dict):
+                _add(row.get("symbol"))
+            else:
+                _add(row)
+    return out
+
+
+def _notes_cards_line(payload: dict[str, Any]) -> str | None:
+    """ok/error + id for notes/cards tool results — not the whole card body."""
+    note = payload.get("note") if isinstance(payload.get("note"), dict) else None
+    card = payload.get("card") if isinstance(payload.get("card"), dict) else None
+    body = note or card
+    store = str(payload.get("store") or "").strip().lower()
+    has_notes_shape = bool(
+        body
+        or store in ("notes", "cards")
+        or isinstance(payload.get("notes"), list)
+        or isinstance(payload.get("cards"), list)
+        or (payload.get("id") not in (None, "") and "ok" in payload)
+    )
+    if not has_notes_shape:
+        return None
+    nid = ""
+    if body and body.get("id") not in (None, ""):
+        nid = str(body.get("id"))
+    elif payload.get("id") not in (None, ""):
+        nid = str(payload.get("id"))
+    elif isinstance(payload.get("ids"), list) and payload["ids"]:
+        nid = ",".join(str(x) for x in payload["ids"][:4] if str(x).strip())
+    err = payload.get("error")
+    if err not in (None, "") or payload.get("ok") is False:
+        bits = [_short_tool_error(err or "failed")]
+        if nid:
+            bits.append(f"id={nid}")
+        return " ".join(bits)
+    bits = ["ok"]
+    if store:
+        bits.append(store)
+    if nid:
+        bits.append(f"id={nid}")
+    n = payload.get("n")
+    if n is None and isinstance(payload.get("notes"), list):
+        n = len(payload["notes"])
+    if n is None and isinstance(payload.get("cards"), list):
+        n = len(payload["cards"])
+    if n is not None:
+        bits.append(f"n={n}")
+    return " ".join(bits)
+
+
+def _is_notes_cards_payload(payload: dict[str, Any]) -> bool:
+    store = str(payload.get("store") or "").strip().lower()
+    if store in ("notes", "cards"):
+        return True
+    if isinstance(payload.get("note"), dict) or isinstance(payload.get("card"), dict):
+        return True
+    if isinstance(payload.get("notes"), list) or isinstance(payload.get("cards"), list):
+        return True
+    return False
+
+
+def _summarize_tool_json(payload: Any) -> str:
+    """One desk fact from a large tool JSON object/array."""
+    if isinstance(payload, list):
+        if not payload:
+            return "[]"
+        if all(isinstance(x, dict) for x in payload):
+            if any(isinstance(x.get("bars"), list) for x in payload):
+                lines = [_candle_series_line(x) for x in payload[:5]]
+                clean = [ln for ln in lines if ln]
+                if clean:
+                    return "; ".join(clean)
+            quotes = [_quote_desk_line(x) for x in payload[:8]]
+            clean_q = [ln for ln in quotes if ln]
+            if clean_q:
+                return "; ".join(clean_q)
+        raw = json.dumps(payload, default=str, separators=(",", ":"))
+        return raw if len(raw) <= _TOOL_GLASS_MAX else raw[: _TOOL_GLASS_MAX - 3] + "..."
+
+    if not isinstance(payload, dict):
+        return str(payload)[:_TOOL_GLASS_MAX]
+
+    # notes/cards first among structured shapes when clearly that tool —
+    # still surface ok/error + id (not the card body).
+    if _is_notes_cards_payload(payload):
+        notes = _notes_cards_line(payload)
+        if notes:
+            return notes
+
+    err = payload.get("error")
+    if err not in (None, ""):
+        return _short_tool_error(err)
+
+    alloc = payload.get("allocation_line")
+    if isinstance(alloc, str) and alloc.strip():
+        return ascii_text(alloc.strip())
+
+    # Candles before quote: a series row can also carry symbol/last metrics.
+    if isinstance(payload.get("bars"), list):
+        line = _candle_series_line(payload)
+        if line:
+            return line
+    series = payload.get("series")
+    if isinstance(series, list) and series:
+        lines = [
+            _candle_series_line(x)
+            for x in series[:5]
+            if isinstance(x, dict)
+        ]
+        clean = [ln for ln in lines if ln]
+        if clean:
+            return "; ".join(clean)
+
+    if isinstance(payload.get("quotes"), list):
+        lines = [
+            _quote_desk_line(x)
+            for x in payload["quotes"][:8]
+            if isinstance(x, dict)
+        ]
+        clean = [ln for ln in lines if ln]
+        if clean:
+            return "; ".join(clean)
+    qline = _quote_desk_line(payload)
+    if qline and not payload.get("hits") and not payload.get("rows"):
+        return qline
+
+    # Scan: arena/scan_code + symbols, no hit objects.
+    if (
+        payload.get("arena") not in (None, "")
+        or payload.get("scan_code") not in (None, "")
+        or payload.get("hits") is not None
+        or (
+            isinstance(payload.get("rows"), list)
+            and (
+                payload.get("symbols") is not None
+                or any(
+                    isinstance(r, dict) and r.get("symbol")
+                    for r in (payload.get("rows") or [])[:3]
+                )
+            )
+        )
+    ):
+        bits: list[str] = []
+        arena = str(payload.get("arena") or "").strip()
+        code = str(payload.get("scan_code") or "").strip()
+        if arena or code:
+            bits.append("/".join(p for p in (arena, code) if p))
+        syms = _scan_symbols(payload)
+        if syms:
+            bits.append(" ".join(syms[:24]))
+        elif payload.get("empty"):
+            bits.append("empty")
+        if bits:
+            return " ".join(bits)
+
+    notes = _notes_cards_line(payload)
+    if notes:
+        return notes
+
+    try:
+        raw = json.dumps(payload, default=str, separators=(",", ":"))
+    except (TypeError, ValueError):
+        raw = str(payload)
+    raw = ascii_text(raw)
+    if len(raw) <= _TOOL_GLASS_MAX:
+        return raw
+    return raw[: _TOOL_GLASS_MAX - 3].rstrip() + "..."
+
+
+def _tool_glass_text(text: str) -> str:
+    """Glass/day-file text for one tool emit. Large JSON → one desk line."""
+    raw = text or ""
+    stripped = raw.strip()
+    if not stripped:
+        return ascii_text(raw)
+    # Short chips, args, and hits= lines stay as emitted.
+    if len(stripped) <= _TOOL_GLASS_KEEP:
+        return ascii_text(raw)
+    payload = _try_json_payload(stripped)
+    if payload is not None:
+        line = _summarize_tool_json(payload).strip()
+        if not line:
+            line = stripped[:_TOOL_GLASS_MAX]
+        line = ascii_text(line)
+        if len(line) > _TOOL_GLASS_MAX:
+            line = line[: _TOOL_GLASS_MAX - 3].rstrip() + "..."
+        nl = "\n" if raw.endswith("\n") or "\n" in raw else ""
+        # Leading newline from brain (`\n[book]\n` style) is for chips only;
+        # summarized JSON results are one trailing-newline desk line.
+        return f"{line}\n" if (nl or raw.endswith("\n")) else line
+    # Large non-JSON tool text: keep a one-line cap.
+    one = ascii_text(stripped.replace("\n", " "))
+    if len(one) > _TOOL_GLASS_MAX:
+        one = one[: _TOOL_GLASS_MAX - 3].rstrip() + "..."
+    return one + ("\n" if raw.endswith("\n") else "")
+
+
 def _paint(kind: str, text: str) -> str:
     """Turn one emit into stream text. Tool results stay unmarked; no clerk speaker."""
     global _speaker
+    if kind == "think":
+        return ascii_text(text)
     if kind == "stage":
         label = ascii_text(text).strip().upper()
         _speaker = "grok"
@@ -318,6 +627,8 @@ def _paint(kind: str, text: str) -> str:
         return f"\n--- GROK {label} ---\n"
     if kind == "stage_end":
         return "\n"
+    if kind == "tool":
+        return _tool_glass_text(text)
     return ascii_text(text)
 
 
@@ -335,8 +646,8 @@ def emit(kind: str, text: str) -> None:
         _append_think_session(piece)
     if eng is not None and piece:
         try:
-            # Say/think must reach think_tail even inside the 2s throttle —
-            # tool JSON can wait; spoken text must not stall the glass.
+            # Say and think must reach think_tail even inside the 2s throttle.
+            # Tool JSON can wait; spoken text must not stall the glass.
             _append_engine_piece(
                 eng, piece, force_tail=kind in ("say", "think")
             )
@@ -378,9 +689,10 @@ def _append_engine_piece(
 
 
 def _append_engine(eng: Any, kind: str, text: str) -> None:
-    _append_engine_piece(
-        eng, _paint(kind, text), force_tail=kind in ("say", "think")
-    )
+    piece = _paint(kind, text)
+    if not piece:
+        return
+    _append_engine_piece(eng, piece, force_tail=kind == "say")
 
 
 def _et_session_day() -> str:
@@ -891,7 +1203,6 @@ def begin_run() -> dict[str, Any]:
     the tape the next wake needs. Overnight and killed mid-turn still stale.
     Today's think_session file is one ET day — bounces append a run banner;
     this must not truncate or replace that file.
-    Working memory is this-flight only — a new process clears it.
     """
     global _run
     prev = _read_json(last_turn_path())
@@ -905,12 +1216,6 @@ def begin_run() -> dict[str, Any]:
     else:
         mark_review_stale(archive_tail=True)
     reset_speaker()
-    try:
-        from abcxauto.working_memory import clear_working_memory
-
-        clear_working_memory(reason="begin_run")
-    except Exception:
-        logger.debug("working_memory clear on begin_run failed", exc_info=True)
     try:
         from abcxauto.park_clock import ensure_next_look
 
@@ -1466,14 +1771,6 @@ def write_last_turn(out: dict[str, Any]) -> None:
                 or ""
             ).strip(),
         }
-        try:
-            from abcxauto.working_memory import working_memory_lines
-
-            wm = working_memory_lines()
-        except Exception:
-            wm = []
-        if wm:
-            payload["working_memory"] = wm
         if str(payload.get("strat") or "") == "in_progress":
             brief = load_desk_brief()
             if brief.get("strat"):

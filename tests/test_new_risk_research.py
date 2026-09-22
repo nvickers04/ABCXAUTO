@@ -1,4 +1,4 @@
-"""New-risk send needs this-look structure plus news|web|option_facts."""
+"""New-risk send needs a this-look dossier that clears the earnings gate."""
 
 from __future__ import annotations
 
@@ -14,6 +14,16 @@ from abcxauto.world_state import WorldState
 def _thin_note(msg: str) -> None:
     assert msg
     assert "research_thin" in msg
+
+
+def _ok_dossier(**extra) -> dict:
+    row = {
+        "last": 178.5,
+        "earnings": "2026-10-22",
+        "earnings_in": 30,
+    }
+    row.update(extra)
+    return row
 
 
 def test_quote_or_scan_last_only_is_research_thin():
@@ -36,15 +46,26 @@ def _bar_row(**extra) -> dict:
     return row
 
 
-def test_session_range_plus_news_clears():
+def test_web_fact_alone_is_research_thin():
+    snap = {
+        "research_web": {
+            "url": "https://example.com/ir",
+            "title": "IR",
+            "text": "announces merger",
+        },
+    }
+    _thin_note(new_risk_research_error("AAPL", snap, strat="bracket"))
+
+
+def test_session_range_plus_news_is_research_thin():
     snap = {
         "session_range": {"AAPL": _bar_row()},
         "news_items": [{"symbol": "AAPL", "headline": "AAPL prints after hours"}],
     }
-    assert new_risk_research_error("AAPL", snap, strat="market_bracket") == ""
+    _thin_note(new_risk_research_error("AAPL", snap, strat="market_bracket"))
 
 
-def test_session_range_plus_research_web_clears():
+def test_session_range_plus_research_web_is_research_thin():
     snap = {
         "session_range": {"AAPL": _bar_row()},
         "research_web": {
@@ -53,7 +74,7 @@ def test_session_range_plus_research_web_clears():
             "text": "announces merger",
         },
     }
-    assert new_risk_research_error("AAPL", snap, strat="bracket") == ""
+    _thin_note(new_risk_research_error("AAPL", snap, strat="bracket"))
 
 
 def test_session_range_only_is_research_thin():
@@ -100,12 +121,24 @@ def test_scan_stashed_session_range_stays_thin_after_compact():
     _thin_note(new_risk_research_error("AAPL", snap, strat="market_bracket"))
 
 
-def test_option_strat_session_range_plus_option_facts_clears():
+def test_option_strat_session_range_plus_option_facts_is_research_thin():
     snap = {
         "session_range": {"SPY": _bar_row(open=500.0, high=501.0, low=499.0, last=500.12)},
         "option_facts": [{"symbol": "SPY", "right": "P", "strike": 500.0}],
     }
-    assert new_risk_research_error("SPY", snap, strat="vertical_spread") == ""
+    _thin_note(new_risk_research_error("SPY", snap, strat="vertical_spread"))
+
+
+def test_dossier_earnings_unknown_is_research_thin():
+    snap = {"dossiers": {"AAPL": _ok_dossier(earnings="unknown", earnings_in=None)}}
+    msg = new_risk_research_error("AAPL", snap, strat="market_bracket")
+    _thin_note(msg)
+    assert "earnings_unknown" in msg
+
+
+def test_dossier_earnings_in_30_clears():
+    snap = {"dossiers": {"AAPL": _ok_dossier(earnings_in=30)}}
+    assert new_risk_research_error("AAPL", snap, strat="market_bracket") == ""
 
 
 def test_oca_is_not_new_risk():
@@ -296,3 +329,77 @@ def test_send_preview_appends_research_thin_note():
     assert "research_thin" in blob
     out = preview_ticket(ticket, world=world, snap=snap)
     assert any("research_thin" in str(r) for r in (out.get("would_refuse") or []))
+
+
+def _color_snap(symbol: str = "AAPL", last: float = 178.5) -> dict:
+    snap = _look_quote_snap(symbol=symbol, last=last)
+    snap["session_range"] = {
+        symbol: {
+            "open": last - 0.5,
+            "high": last + 0.5,
+            "low": last - 1.0,
+            "last": last,
+            "n": 40,
+        }
+    }
+    snap["news_items"] = [
+        {"symbol": symbol, "headline": f"{symbol} prints after hours"}
+    ]
+    return snap
+
+
+def _dossier_snap(symbol: str = "AAPL", last: float = 178.5) -> dict:
+    snap = _look_quote_snap(symbol=symbol, last=last)
+    snap["dossiers"] = {
+        symbol: _ok_dossier(last=last, earnings="2026-10-22", earnings_in=30)
+    }
+    return snap
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_allows_when_dossier_clears(monkeypatch):
+    """This-look dossier with earnings far out clears research_thin even outside RTH."""
+    from abcxauto.agent_loop import execute_ticket
+
+    sent = _stub_siblings(monkeypatch)
+    result = await execute_ticket(
+        _new_risk_ticket(),
+        MagicMock(),
+        _world(session_status="premarket"),
+        _dossier_snap(),
+    )
+    assert result.get("reason_code") != REASON_RESEARCH_THIN
+    assert "research_thin" not in str(result.get("note") or "")
+    # May still refuse on other gates (token/cash/geometry); just not thin.
+    assert result.get("reason_code") != "research_no_send"
+    del sent
+
+
+@pytest.mark.asyncio
+async def test_execute_ticket_research_thin_without_structure_outside_rth(monkeypatch):
+    """Scan/quote last alone is still research_thin outside RTH."""
+    from abcxauto.agent_loop import execute_ticket
+
+    sent = _stub_siblings(monkeypatch)
+    result = await execute_ticket(
+        _new_risk_ticket(),
+        MagicMock(),
+        _world(session_status="premarket"),
+        _look_quote_snap(),
+    )
+    assert result.get("status") == "blocked"
+    assert result.get("reason_code") == REASON_RESEARCH_THIN
+    assert "research_thin" in str(result.get("note") or "")
+    assert sent == []
+
+
+def test_send_preview_no_research_no_send_outside_rth():
+    from abcxauto.send_preview import collect_would_refuse
+
+    ticket = _new_risk_ticket()
+    snap = _dossier_snap()
+    world = _world(session_status="premarket")
+    reasons = collect_would_refuse(ticket, world=world, snap=snap)
+    blob = " ".join(str(r) for r in reasons)
+    assert "research_no_send" not in blob
+    assert "research_thin" not in blob

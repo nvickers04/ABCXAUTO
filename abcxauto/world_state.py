@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -351,6 +352,11 @@ def reconcile_book_with_fills(
     Closing: SLD reduces longs; BOT reduces shorts. Opening SLD on a short
     wing must not erase the live combo. Missing BAG legs are attached from
     multi-leg fills when a mate lot is already on the book.
+
+    The bool is True only when a fill in the window changed the desk book
+    (qty reduced, filled order dropped, or combo leg attached). A qty-matched
+    working stop with no such fill leaves it False — that is fill-lag status,
+    not a protection mismatch.
     """
     pos_out = [dict(p) for p in (positions or []) if isinstance(p, dict)]
     ord_out = [dict(o) for o in (orders or []) if isinstance(o, dict)]
@@ -508,6 +514,36 @@ def _contract_fp(row: dict[str, Any] | None, *, use_id: bool = True) -> tuple[An
     return ("stk", sym, sec)
 
 
+def _sane_trail_value(raw: Any, *, percent: bool) -> float | None:
+    """Real trail only — IBKR leaves unset doubles at ~sys.float_info.max."""
+    if raw in (None, "", 0, 0.0, "0"):
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(v) or v <= 0:
+        return None
+    # Percent trails are typically under 100; amount trails are price-sized.
+    if percent:
+        return v if v < 100.0 else None
+    return v if v < 1e6 else None
+
+
+def compact_trail(order: dict[str, Any] | None) -> float | None:
+    """First sane trail percent or amount; omit IBKR unset sentinels."""
+    o = order if isinstance(order, dict) else {}
+    for key, is_pct in (
+        ("trail_percent", True),
+        ("trailingPercent", True),
+        ("trail_amount", False),
+    ):
+        got = _sane_trail_value(o.get(key), percent=is_pct)
+        if got is not None:
+            return got
+    return None
+
+
 def compact_working_orders(
     orders: list[dict] | None,
     *,
@@ -571,8 +607,8 @@ def compact_working_orders(
         lmt = o.get("lmt_price") or o.get("lmtPrice") or o.get("limit_price")
         if lmt not in (None, 0, 0.0, "0"):
             row["lmt"] = lmt
-        trail = o.get("trail_percent") or o.get("trailingPercent") or o.get("trail_amount")
-        if trail not in (None, 0, 0.0, "0"):
+        trail = compact_trail(o)
+        if trail is not None:
             row["trail"] = trail
         if sec == "BAG":
             legs = o.get("combo_legs") or o.get("comboLegs")
@@ -1429,6 +1465,10 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         "portfolio_risk": port,
         "exposure": port.get("exposure"),
         "capital_liquidity": cap_liq,
+        "buying_power_usd": _real_float(
+            port.get("buying_power_usd") if isinstance(port, dict) else None
+        ),
+        "cash_only": bool(getattr(get_config(), "cash_only", True)),
         "minutes_to_open": mins_open,
         "countdown_to": sess_block.get("countdown_to"),
         "countdown_human": sess_block.get("countdown_human"),
@@ -1448,6 +1488,28 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         )
         if isinstance(max_loss, dict):
             facts["defined_risk_concentration"] = max_loss
+    except Exception:
+        pass
+    # Same allocation bag the book tool paints — wake needs the liquidity
+    # tail on continued chats when prior tool rows are omitted.
+    try:
+        cash = _total_cash_in(cap_liq)
+        if cash is None:
+            cash = _total_cash_in(port)
+        alloc = allocation_facts(
+            list(getattr(world, "positions", None) or []),
+            net_liq=nl,
+            total_cash=cash,
+            quotes=getattr(world, "ibkr_live_quotes", None),
+            orders=list(getattr(world, "open_orders", None) or []),
+        )
+        if isinstance(alloc, dict) and (
+            alloc.get("lots")
+            or alloc.get("cash_pct_nl") is not None
+            or alloc.get("liquidity")
+            or alloc.get("risk_to_stop_usd") is not None
+        ):
+            facts["allocation"] = alloc
     except Exception:
         pass
     return facts
@@ -1733,7 +1795,12 @@ def _pnl_wake_bits(day: dict[str, Any]) -> str:
 
 
 def _portfolio_wake_bits(day: dict[str, Any]) -> str:
-    """Leftover $ / cash% / deployed% plus top concentration (facts only)."""
+    """Leftover $ / cash% / deployed% plus top + liquidity tail (facts only).
+
+    Continuation chats (previous_response_id) omit prior book tool rows, so
+    cut-half / cut-all / risk-to-stop must live on this wake line — same
+    dollars as ``allocation_line``, no advice wording.
+    """
     exp = day.get("exposure") if isinstance(day.get("exposure"), dict) else {}
     port = day.get("portfolio_risk") if isinstance(day.get("portfolio_risk"), dict) else {}
     bits: list[str] = []
@@ -1748,7 +1815,98 @@ def _portfolio_wake_bits(day: dict[str, Any]) -> str:
     if top_pct is not None:
         sym = f" {top_sym}" if top_sym else ""
         bits.append(f"top{sym}={top_pct}% NL")
+    liq_tail = _allocation_liquidity_tail(day)
+    if liq_tail:
+        bits.append(liq_tail)
+    bp = _real_float(day.get("buying_power_usd"))
+    if bp is None:
+        bp = _real_float(port.get("buying_power_usd"))
+    if bp is not None:
+        bits.append(f"buying_power={_fmt_usd_compact(bp)}")
+    if "cash_only" in day:
+        bits.append("cash_only=" + ("on" if day.get("cash_only") else "off"))
     return " ".join(bits)
+
+
+def _lot_context_line(day: dict[str, Any]) -> str:
+    """Per-lot last, stop, target, and dollars to the target. Facts only.
+
+    Continuation drops the book tool row, so this geometry has to ride the wake.
+    """
+    alloc = day.get("allocation") if isinstance(day.get("allocation"), dict) else {}
+    nl = _real_float(day.get("nl"))
+    if nl is None:
+        nl = _real_float(alloc.get("nl"))
+    bits: list[str] = []
+    for lot in alloc.get("lots") or []:
+        if not isinstance(lot, dict):
+            continue
+        sym = str(lot.get("symbol") or "").strip()
+        if not sym:
+            continue
+        qty = lot.get("qty")
+        qty_bit = str(qty) if qty is not None else ""
+        part = f"{sym}{qty_bit}"
+        if lot.get("pct_nl") is not None:
+            part += f" {lot['pct_nl']}%"
+        if lot.get("last") is not None:
+            part += f" {lot['last']}"
+        if lot.get("uPnL") is not None:
+            part += f" uPnL={lot['uPnL']}"
+        if lot.get("risk_pct_nl") is not None:
+            part += f" risk={lot['risk_pct_nl']}%"
+        if lot.get("stop") is not None:
+            part += f" stp={lot['stop']}"
+        if lot.get("target") is not None:
+            part += f" tgt={lot['target']}"
+        to_tgt = _real_float(lot.get("to_target_usd"))
+        if to_tgt is not None:
+            part += f" to_tgt={_fmt_usd_compact(to_tgt)}"
+            if nl is not None and nl > 0:
+                part += f" {round(to_tgt / nl * 100.0, 2)}%NL"
+        eff = _real_float(lot.get("eff"))
+        if eff is not None:
+            part += f" eff={eff:.4f}"
+        bits.append(part)
+    return " | ".join(bits)
+
+
+def _allocation_rank_line(day: dict[str, Any]) -> str:
+    """Open lots, lowest target-dollars per deployed dollar first.
+
+    ``eff`` is to-target dollars divided by market value. A missing target
+    sorts after any lot that has one. Not a buy list and not a send.
+    """
+    alloc = day.get("allocation") if isinstance(day.get("allocation"), dict) else {}
+    ranked: list[tuple[bool, float, float, dict[str, Any]]] = []
+    for lot in alloc.get("lots") or []:
+        if not isinstance(lot, dict) or not str(lot.get("symbol") or "").strip():
+            continue
+        eff = _real_float(lot.get("eff"))
+        cap = _real_float(lot.get("pct_nl")) or 0.0
+        ranked.append((eff is None, eff if eff is not None else 0.0, -cap, lot))
+    ranked.sort()
+    bits: list[str] = []
+    nl = _real_float(day.get("nl"))
+    if nl is None:
+        nl = _real_float(alloc.get("nl"))
+    for _missing, _eff, _cap, lot in ranked:
+        sym = str(lot.get("symbol") or "").strip()
+        part = sym
+        if lot.get("pct_nl") is not None:
+            part += f" cap={lot['pct_nl']}%NL"
+        if lot.get("risk_pct_nl") is not None:
+            part += f" risk={lot['risk_pct_nl']}%NL"
+        to_tgt = _real_float(lot.get("to_target_usd"))
+        if to_tgt is not None:
+            part += f" to_tgt={_fmt_usd_compact(to_tgt)}"
+            if nl is not None and nl > 0:
+                part += f" {round(to_tgt / nl * 100.0, 2)}%NL"
+        eff = _real_float(lot.get("eff"))
+        if eff is not None:
+            part += f" eff={eff:.4f}"
+        bits.append(part)
+    return " | ".join(bits)
 
 
 def _halt_is_tight(day: dict[str, Any]) -> bool:
@@ -2254,6 +2412,21 @@ def worst_wake_fact(
             bit = f"closest_stop {ident} dist={dist} stop={px}"
             if last is not None:
                 bit += f" last={last}"
+            ctx = _lot_context_line(day)
+            if ctx:
+                bit += " | " + ctx
+            bp = _real_float(day.get("buying_power_usd"))
+            if bp is None:
+                port = (
+                    day.get("portfolio_risk")
+                    if isinstance(day.get("portfolio_risk"), dict)
+                    else {}
+                )
+                bp = _real_float(port.get("buying_power_usd"))
+            if bp is not None:
+                bit += f" buying_power={_fmt_usd_compact(bp)}"
+            if "cash_only" in day:
+                bit += " cash_only=" + ("on" if day.get("cash_only") else "off")
             return _desk_fact_line(bit)
     missing = [
         str(x).strip()
@@ -2351,6 +2524,12 @@ def format_wake(
         )
         if port_bits:
             parts.append(f"{port_bits}.")
+        lot_ctx = _lot_context_line(day)
+        if lot_ctx:
+            parts.append(f"{lot_ctx}.")
+        alloc_rank = _allocation_rank_line(day)
+        if alloc_rank:
+            parts.append(f"alloc {alloc_rank}.")
         if lot_s:
             parts.append(f"open_lots={lot_s}.")
         if (
@@ -2378,6 +2557,30 @@ def format_wake(
             parts.append(f"mix={mix_s}.")
         if ev is not None:
             parts.append(f"event={ev.kind} {ev.detail}.".strip())
+        # Preformatted day lines from other modules — facts only, no invented RS.
+        body_so_far = " ".join(parts)
+        alloc_line = day.get("alloc_line")
+        if isinstance(alloc_line, str):
+            al = alloc_line.strip()
+            if al:
+                check = al.rstrip(".")
+                if check and check not in body_so_far:
+                    parts.append(al if al.endswith(".") else f"{al}.")
+        research_line = day.get("research_line")
+        if isinstance(research_line, str):
+            rl = research_line.strip()
+            if rl:
+                parts.append(rl if rl.endswith(".") else f"{rl}.")
+        spend_line = day.get("spend_line")
+        if isinstance(spend_line, str) and spend_line.strip():
+            sl = spend_line.strip()
+            parts.append(sl if sl.endswith(".") else f"{sl}.")
+        else:
+            spend_usd = _real_float(day.get("session_spend_usd"))
+            if spend_usd is not None:
+                parts.append(f"spend session={_fmt_usd_compact(spend_usd)}.")
+            elif day.get("session_spend_unknown") is True:
+                parts.append("spend session=unknown.")
         # leftover say / prev= / unused= stay off wake.
     # Desk facts only — no trailing "send." (Grok reads that as an operator command).
     body = " ".join(parts)
@@ -2648,6 +2851,27 @@ def _target_map(orders: list[dict[str, Any]] | None) -> dict[str, float]:
     return out
 
 
+def _lot_px_for_liquidity(pos: dict[str, Any], quote: Any) -> float | None:
+    """Last from quote/lot, else bid already on the lot. No invented prices."""
+    last = _as_px(quote)
+    if last is not None:
+        return last
+    return _as_px(
+        pos.get("mkt")
+        or pos.get("market_price")
+        or pos.get("marketPrice")
+        or pos.get("last")
+        or pos.get("bid")
+    )
+
+
+def _cut_half_shares(qty: float) -> int | None:
+    """Whole shares freed by selling half a long lot. None when qty < 2."""
+    if qty < 2:
+        return None
+    return max(1, int(math.floor(qty / 2.0)))
+
+
 def allocation_facts(
     positions: list[dict[str, Any]] | None,
     *,
@@ -2668,6 +2892,12 @@ def allocation_facts(
     targets = _target_map(orders)
     lots: list[dict[str, Any]] = []
     deployed = 0.0
+    risk_to_stop_sum = 0.0
+    risk_to_stop_any = False
+    cut_all_sum = 0.0
+    cut_half_sum = 0.0
+    cut_all_any = False
+    cut_half_any = False
     for pos in positions or []:
         if not isinstance(pos, dict):
             continue
@@ -2675,14 +2905,10 @@ def allocation_facts(
         if not sym:
             continue
         qty = _lot_qty(pos)
-        last = _as_px(qmap.get(sym))
-        if last is None:
-            last = _as_px(
-                pos.get("mkt")
-                or pos.get("market_price")
-                or pos.get("marketPrice")
-                or pos.get("last")
-            )
+        # Zero-qty ghosts are not open lots.
+        if qty is None or abs(qty) < 1e-12:
+            continue
+        last = _lot_px_for_liquidity(pos, qmap.get(sym))
         sec = str(pos.get("secType") or pos.get("sec_type") or pos.get("sec") or "STK").upper()
         mult = 100.0 if sec.startswith("OPT") else 1.0
         mv = None
@@ -2690,25 +2916,31 @@ def allocation_facts(
             mv = _as_px(pos.get(key))
             if mv is not None:
                 break
-        if mv is None and last is not None and qty is not None:
+        if mv is None and last is not None:
             mv = abs(qty) * last * mult
         if mv is not None:
             deployed += mv
         pct = pct_of_nl(mv, nl, digits=2) if mv is not None else None
         upnl = lot_upnl(pos)
-        if upnl is None and last is not None and qty is not None:
+        if upnl is None and last is not None:
             avg = position_avg_facts(pos).get("avg")
             if avg is not None:
                 upnl = round((last - float(avg)) * qty * mult, 2)
         stop = stops.get(sym)
         if stop is None:
             stop = _as_px(pos.get("stop") or pos.get("stop_price"))
-        risk_pct = None
-        if stop is not None and last is not None and qty is not None and nl:
-            risk_pct = pct_of_nl(abs(last - stop) * abs(qty) * mult, nl, digits=2)
+        risk_usd = None
+        if stop is not None and last is not None:
+            risk_usd = abs(last - stop) * abs(qty) * mult
+        risk_pct = pct_of_nl(risk_usd, nl, digits=2) if risk_usd is not None and nl else None
+        # Book risk-to-stop sums long lots only (abs(last-stop)*qty).
+        risk_to_stop_lot = (
+            abs(last - stop) * qty * mult
+            if stop is not None and last is not None and qty > 0
+            else None
+        )
         row: dict[str, Any] = {"symbol": sym}
-        if qty is not None:
-            row["qty"] = int(qty) if abs(qty - int(qty)) < 1e-9 else qty
+        row["qty"] = int(qty) if abs(qty - int(qty)) < 1e-9 else qty
         if last is not None:
             row["last"] = last
         avg = position_avg_facts(pos).get("avg")
@@ -2724,14 +2956,35 @@ def allocation_facts(
             row["risk_pct_nl"] = risk_pct
         if stop is not None:
             row["stop"] = stop
+        # STK long liquidity facts: dollars freed at last (or lot bid).
+        if sec.startswith("STK") and qty > 0 and last is not None:
+            cut_all = round(qty * last, 2)
+            row["cut_all_usd"] = cut_all
+            cut_all_sum += cut_all
+            cut_all_any = True
+            half_n = _cut_half_shares(qty)
+            if half_n is not None:
+                cut_half = round(half_n * last, 2)
+                row["cut_half_usd"] = cut_half
+                cut_half_sum += cut_half
+                cut_half_any = True
+        if risk_to_stop_lot is not None:
+            risk_to_stop_sum += risk_to_stop_lot
+            risk_to_stop_any = True
         target = targets.get(sym)
         if target is not None:
             row["target"] = target
-            if last is not None and qty is not None:
+            if last is not None:
                 if qty > 0:
                     row["to_target_usd"] = round((target - last) * qty * mult, 2)
                 elif qty < 0:
                     row["to_target_usd"] = round((last - target) * abs(qty) * mult, 2)
+        if (
+            row.get("to_target_usd") is not None
+            and mv is not None
+            and mv > 0
+        ):
+            row["eff"] = round(float(row["to_target_usd"]) / float(mv), 4)
         if row.keys() - {"symbol"}:
             lots.append(row)
     lots.sort(key=lambda r: -float(r.get("pct_nl") or 0))
@@ -2759,7 +3012,38 @@ def allocation_facts(
     ]
     if to_tgt_vals:
         out["lots_to_target_usd"] = round(sum(float(v) for v in to_tgt_vals), 2)
+    if cut_all_any or cut_half_any:
+        liq: dict[str, Any] = {}
+        if cut_half_any:
+            liq["cut_half_usd"] = round(cut_half_sum, 2)
+        if cut_all_any:
+            liq["cut_all_usd"] = round(cut_all_sum, 2)
+        out["liquidity"] = liq
+    if risk_to_stop_any:
+        out["risk_to_stop_usd"] = round(risk_to_stop_sum, 2)
     return out
+
+
+def _allocation_liquidity_tail(bag: dict[str, Any] | None) -> str:
+    """cut-half / cut-all / risk-to-stop dollars. Facts only — no advice."""
+    src = bag if isinstance(bag, dict) else {}
+    alloc = src.get("allocation") if isinstance(src.get("allocation"), dict) else src
+    liq = alloc.get("liquidity") if isinstance(alloc.get("liquidity"), dict) else {}
+    if not liq and isinstance(src.get("liquidity"), dict):
+        liq = src["liquidity"]
+    cut_half = _real_float(liq.get("cut_half_usd"))
+    cut_all = _real_float(liq.get("cut_all_usd"))
+    risk_stop = _real_float(alloc.get("risk_to_stop_usd"))
+    if risk_stop is None:
+        risk_stop = _real_float(src.get("risk_to_stop_usd"))
+    tail_bits: list[str] = []
+    if cut_half is not None:
+        tail_bits.append(f"cut-half {_fmt_usd_compact(cut_half)}")
+    if cut_all is not None:
+        tail_bits.append(f"cut-all {_fmt_usd_compact(cut_all)}")
+    if risk_stop is not None:
+        tail_bits.append(f"risk-to-stop {_fmt_usd_compact(risk_stop)}")
+    return " ".join(tail_bits)
 
 
 def allocation_line(facts: dict[str, Any] | None) -> str:
@@ -2800,6 +3084,9 @@ def allocation_line(facts: dict[str, Any] | None) -> str:
         if lot.get("to_target_usd") is not None:
             part += f" to_tgt={lot['to_target_usd']}"
         bits.append(part)
+    liq_tail = _allocation_liquidity_tail(bag)
+    if liq_tail:
+        bits.append(liq_tail)
     return " | ".join(bits)
 
 
@@ -3024,6 +3311,9 @@ def build_world_state(
     plans_dicts = [p.to_dict() for p in plans]
     regime = _regime_from_opps(opportunities, pulse)
     port_risk = _portfolio_risk(positions, net, total_cash=total_cash)
+    bp = account_float(acct, "availablefunds", "AvailableFunds")
+    if bp is not None and isinstance(port_risk, dict):
+        port_risk["buying_power_usd"] = round(float(bp), 2)
     try:
         max_open = int(getattr(cfg, "max_open_positions", 0) or 0)
     except (TypeError, ValueError):
