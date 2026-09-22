@@ -8,6 +8,7 @@ Usage:
   python scripts/cleanup_pro.py
   python scripts/cleanup_pro.py --aggressive      # also empty-cmdline python orphans
   python scripts/cleanup_pro.py --flet-cache      # wipe ~/.flet/client
+  python scripts/cleanup_pro.py --dry-run        # list targets; never Stop-Process
   python -m abcxauto --cleanup
 """
 
@@ -26,15 +27,20 @@ REPO = Path(__file__).resolve().parents[1]
 
 # Same launchers the supervisor uses to see a lockless _start_pro. Not cleanup
 # itself — Start is not flatten.
+# ``abcxauto`` catches ``python -m abcxauto`` children whose Win32 CommandLine
+# is a package path / quoted argv the old ``-m abcxauto`` regex missed — not
+# unrelated python (no abcxauto in the line).
 _PRO_CMDLINE_MARKERS = (
-    "-m abcxauto",
-    "-mabcxauto",
-    "abcxauto.pro_desktop",
+    "abcxauto",
     "pro_desktop.py",
     "_start_pro.py",
     "pro_launch",
 )
 _PRO_CMDLINE_SKIP = ("cleanup_pro", "--cleanup", "pytest")
+# PowerShell -match alternation (case-insensitive). Keep in sync with markers.
+_PS_PRO_CMDLINE_MATCH = (
+    "abcxauto|pro_desktop\\.py|_start_pro\\.py|pro_launch"
+)
 
 
 def _ps(cmd: str) -> str:
@@ -48,7 +54,11 @@ def _ps(cmd: str) -> str:
 
 
 def cmdline_is_pro(cmd: Any) -> bool:
-    """True for a Pro / supervisor launcher, never for cleanup or pytest."""
+    """True for a Pro / supervisor launcher, never for cleanup or pytest.
+
+    Any python whose command line contains ``abcxauto`` (module, package path,
+    or repo path) counts — still skips cleanup / pytest / ``--cleanup``.
+    """
     if isinstance(cmd, (list, tuple)):
         blob = " ".join(str(part) for part in cmd)
     else:
@@ -197,7 +207,7 @@ Get-CimInstance Win32_Process | Where-Object {{
   $isFlet = ($killFlet -eq 'true') -and ($_.Name -eq 'flet.exe')
   $isCleanup = $cmd -and ($cmd -match 'cleanup_pro|--cleanup|pytest')
   $isPro = ($killPy -eq 'true') -and $cmd -and (-not $isCleanup) -and (
-    $cmd -match '(-m\\s+abcxauto(\\s|$))|-mabcxauto|abcxauto\\.pro_desktop|pro_desktop\\.py|_start_pro\\.py|pro_launch'
+    $cmd -match '{_PS_PRO_CMDLINE_MATCH}'
   )
   $isOrphanPy = ($aggressive -eq 'true') -and ($_.Name -match '^pythonw?\\.exe$') -and (-not $cmd)
   if ($isFlet -or $isPro -or $isOrphanPy) {{ Kill-Pid $procId "$($_.Name)" }}
@@ -214,6 +224,47 @@ Get-Process -ErrorAction SilentlyContinue | Where-Object {{
 if ($killed.Count -eq 0) {{ 'killed none' }} else {{ $killed }}
 """
     print(_ps(script) or "killed none")
+
+
+def dry_run_kill_targets(
+    *,
+    aggressive: bool = False,
+    exclude_pids: set[int] | None = None,
+    python_targets: bool = True,
+) -> list[str]:
+    """List python/flet kill_stale would target. Never Stop-Process / taskkill.
+
+    Window-title matches stay PowerShell-only; this path is for cmdline checks.
+    """
+    exclude, kill_python, kill_flet, _kill_pro_title = kill_policy(
+        aggressive=aggressive,
+        exclude_pids=exclude_pids,
+        python_targets=python_targets,
+    )
+    lines: list[str] = []
+    try:
+        import psutil
+    except Exception:
+        return ["dry-run scan unavailable"]
+    try:
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            info = proc.info or {}
+            pid = int(info.get("pid") or 0)
+            if pid <= 0 or pid in exclude:
+                continue
+            name = str(info.get("name") or "").lower()
+            cmd = info.get("cmdline") or []
+            blob = " ".join(str(p) for p in cmd) if cmd else ""
+            is_flet = bool(kill_flet) and name in {"flet.exe", "flet"}
+            is_py = name in {"python.exe", "pythonw.exe", "python", "pythonw"}
+            is_pro = bool(kill_python) and is_py and cmdline_is_pro(cmd if cmd else blob)
+            is_orphan = bool(aggressive) and is_py and not blob
+            if is_flet or is_pro or is_orphan:
+                why = "flet" if is_flet else ("orphan" if is_orphan else "abcxauto")
+                lines.append(f"would-kill {pid} {name or 'proc'} {why}")
+    except Exception:
+        return lines or ["dry-run scan failed"]
+    return lines
 
 
 def _is_project_path(path: Path) -> bool:
@@ -275,9 +326,22 @@ def main() -> int:
         action="store_true",
         help="only kill orphan flet.exe / leftover titles (never python -m abcxauto)",
     )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print would-kill targets via cmdline match; never Stop-Process",
+    )
     args = ap.parse_args()
     os.chdir(REPO)
     print(f"repo={REPO}")
+    if args.dry_run:
+        lines = dry_run_kill_targets(
+            aggressive=args.aggressive,
+            exclude_pids=set(args.exclude_pid or []),
+            python_targets=not args.ui_only,
+        )
+        print("\n".join(lines) if lines else "would-kill none")
+        return 0
     kill_stale(
         aggressive=args.aggressive,
         exclude_pids=set(args.exclude_pid or []),

@@ -32,6 +32,32 @@ def _flip_buy_sell(action: str) -> str:
     return "SELL" if str(action or "BUY").upper() == "BUY" else "BUY"
 
 
+def _pick_sec_def_chain(chains: List[Any], symbol: str) -> Any:
+    """IB returns one OptionChain per exchange; prefer SMART over chains[0]."""
+    if not chains:
+        return None
+    sym = str(symbol or "").strip().upper()
+    smart = [
+        c
+        for c in chains
+        if str(getattr(c, "exchange", "") or "").upper() == "SMART"
+    ]
+    pool = smart or list(chains)
+    matched = [
+        c
+        for c in pool
+        if str(getattr(c, "tradingClass", "") or "").upper() == sym
+    ]
+    candidates = matched or pool
+    return max(
+        candidates,
+        key=lambda c: (
+            len(list(getattr(c, "expirations", None) or [])),
+            len(list(getattr(c, "strikes", None) or [])),
+        ),
+    )
+
+
 def _combo_close_limit(
     closing: bool,
     limit_price: Optional[float],
@@ -478,7 +504,9 @@ class IBKROptionsMixin:
             if not chains:
                 return {'error': f'No option chains found for {symbol}'}
 
-            chain = chains[0]
+            chain = _pick_sec_def_chain(chains, symbol)
+            if chain is None:
+                return {'error': f'No option chains found for {symbol}'}
             today = datetime.now().date()
             valid_expirations = []
 

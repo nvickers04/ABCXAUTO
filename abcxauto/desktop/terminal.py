@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,10 @@ from abcxauto.reality_pulse import build_reality_pulse
 
 logger = logging.getLogger("abcxauto.pro_desktop")
 
+# Full page.update() patches the whole control tree and holds the GIL — never
+# on every 0.12s drain tick. Cap paints at 1 Hz when the cheap fingerprint moves.
+_POLL_UI_MIN_S = 1.0
+
 
 class ProTerminal(WidgetsMixin, PagesMixin, SyncMixin, ActionsMixin):
     def __init__(self, page: ft.Page):
@@ -34,6 +40,8 @@ class ProTerminal(WidgetsMixin, PagesMixin, SyncMixin, ActionsMixin):
         self.engine = ProEngine()
         self.tab = "overview"
         self._think_sync_key: str | None = None  # None = never painted, "" = painted empty
+        self._poll_fp: tuple | None = None  # last painted fingerprint (None = never)
+        self._poll_ui_at: float = 0.0
         self._build_refs()
         self._sync_widgets()
 
@@ -110,6 +118,12 @@ class ProTerminal(WidgetsMixin, PagesMixin, SyncMixin, ActionsMixin):
                 kill_descendant_flet()
         except Exception:
             logger.debug("operator stop on window close failed", exc_info=True)
+        try:
+            # Drop the IBKR socket (via stop_engine) so TWS releases client id
+            # before a fast restart — no flatten / no order cancels.
+            self.engine.stop_engine()
+        except Exception:
+            logger.debug("engine stop on window close failed", exc_info=True)
         finally:
             # prevent_close holds the window open, so the operator only gets out
             # if this runs no matter what happened above.
@@ -129,6 +143,30 @@ class ProTerminal(WidgetsMixin, PagesMixin, SyncMixin, ActionsMixin):
                 logger.debug("window %s failed", step, exc_info=True)
 
     # ----------------------------------------------------------------- polls
+
+    def _poll_ui_fingerprint(self) -> tuple:
+        """Cheap engine-state digests for skipping page.update on quiet ticks."""
+        s = self.engine.state
+        live = str(getattr(s, "think_live", "") or "")
+        tail = live[-512:].encode("utf-8", "replace")
+        return (
+            str(getattr(s, "status", "") or ""),
+            round(float(getattr(s, "equity", 0) or 0), 2),
+            len(live),
+            hashlib.blake2b(tail, digest_size=8).hexdigest(),
+        )
+
+    def _poll_should_update(self) -> bool:
+        """True when the poll fingerprint moved and the 1 Hz paint budget allows."""
+        fp = self._poll_ui_fingerprint()
+        if fp == self._poll_fp:
+            return False
+        now = time.monotonic()
+        if self._poll_fp is not None and (now - self._poll_ui_at) < _POLL_UI_MIN_S:
+            return False
+        self._poll_fp = fp
+        self._poll_ui_at = now
+        return True
 
     async def _reveal_window(self) -> None:
         try:
@@ -150,7 +188,10 @@ class ProTerminal(WidgetsMixin, PagesMixin, SyncMixin, ActionsMixin):
             try:
                 self.engine.drain_apply()
                 self._sync_widgets()
-                self._safe_update()
+                # Skip page.update when status/equity/think_live fingerprint is
+                # unchanged, or when a paint already ran within _POLL_UI_MIN_S.
+                if self._poll_should_update():
+                    self._safe_update()
             except Exception:
                 logger.exception("poll loop tick failed")
             await asyncio.sleep(0.12)

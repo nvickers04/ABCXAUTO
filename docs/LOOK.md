@@ -22,16 +22,20 @@ Call the model.
   tool_calls → run tools, append results to this chat, call the model again.
                Repeat until there are no tool_calls.
   words only → stop calling the model.
-               Wait for fill / order_change / unprotected / operator poke.
+               Wait for fill / order_change / unprotected / book_move /
+               socket-up / operator poke / leftover>deployed after 90s RTH.
                Then call again with this chat plus a fresh snap.
                Do not call the model again because it spoke.
 ```
 
-Overnight / after-close / park drop the chat. Paper RTH and premarket stay
-up on this process — no sit clock. Closed / postmarket does not call Grok
-(unprotected still does); park_clock until premarket.
+- Closed / overnight: code park until 04:00 ET premarket. No Grok. Unprotected still interrupts.
+- Premarket, postmarket, and RTH stay on this process.
+- Stay-up waits for fill / order_change / unprotected / book_move / socket-up / operator poke. Do not re-enter because research has no sends.
+- RTH leftover cash > deployed re-enters after 90s (engine cooldown, not a park file, not a general chair). Premarket / AH stay event-driven; RTH roll still starts a look.
+- Dead socket / book_unreliable is not a billed look unless unprotected.
+- Host does not invent 8-minute or 10-second mills. Overnight park is code.
 
-Session look/token cap (Settings) idles when hit. Chat is kept. No sit clock.
+Session look/token cap (Settings) idles when hit. Chat is kept.
 Do not grow the system prompt as memory.
 
 `send` → gates → IBKR. Journal write is code, not a Grok tool.
@@ -40,17 +44,10 @@ tool or live book poke. Repeat-text detectors, a 64-call runaway ceiling,
 and per-tool timeouts stay. There is no stream time box.
 `wait_for_pace` is the pulse sleep until the next poke.
 
-After a think:
-
-- Closed / postmarket: no Grok (unprotected still interrupts); park until premarket
-- Paper RTH / premarket: stay up on this process. Next model call is fill / order_change / unprotected / a lead fact that actually changed
-- Session look/token cap hit: stay idle. Chat kept. No grok_wake / set_wake
-- Last hour to the open is stay-up, not a sit clock
-
 ## Hard (code)
 
 - Unprotected STK → last-stop first; hold forbidden until it rests at IBKR. Paper RTH + flat → hold is not a ticket. Combo close (`closing_position`) is one BAG, not new risk
-- RTH may use news/scan/web as COLOR; `research_brief` is this-look gathered color plus a prior-session stub, never a live trigger
+- Premarket, postmarket, and RTH may use news/scan/web as COLOR; `research_brief` is this-look gathered color plus a prior-session stub, never a live trigger
 - Capacity, defined-risk, cash-only, size/loss floors, fail-closed
 - New risk without params.card naming a play (scorecard label, not a catalog)
 - IBKR live last for ticket geometry (not MDA)

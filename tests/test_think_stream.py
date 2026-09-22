@@ -263,6 +263,60 @@ def test_think_tail_and_last_turn_files(tmp_path, monkeypatch):
     assert brief["open_lots"][0].startswith("IWM 260821C306 long 1")
 
 
+def test_say_think_force_think_tail_inside_throttle(tmp_path, monkeypatch):
+    """Spoken say/think must land in think_tail even inside the 2s write throttle."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
+    monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 2.0)
+    monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+    st = SimpleNamespace(think_live="")
+    ts.bind_engine(SimpleNamespace(state=st))
+    try:
+        ts.emit("say", "\n[say]\n")
+        # Same look, under the throttle window — previously left the glass on a bare [say].
+        ts.emit(
+            "say",
+            "AVGO is nearly the whole book. I'll check the live lot.\n",
+        )
+        tail_after_say = (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
+        assert "[say]" in tail_after_say
+        assert "AVGO is nearly the whole book" in tail_after_say
+
+        ts.emit("say", "\n[think]\n")
+        ts.emit("think", "weigh rotation before the close ")
+        tail_after_think = (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
+        assert "[think]" in tail_after_think
+        assert "weigh rotation before the close" in tail_after_think
+        assert "AVGO is nearly the whole book" in tail_after_think
+    finally:
+        ts.bind_engine(None)
+        monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+
+
+def test_tool_emit_stays_throttled_inside_window(tmp_path, monkeypatch):
+    """Noisy tool JSON still respects the tail throttle; only say/think force."""
+    from abcxauto import think_stream as ts
+
+    monkeypatch.setattr(ts, "THINK_TAIL_PATH", tmp_path / "think_tail.txt")
+    monkeypatch.setattr(ts, "_TAIL_MIN_INTERVAL", 2.0)
+    monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+    st = SimpleNamespace(think_live="")
+    ts.bind_engine(SimpleNamespace(state=st))
+    try:
+        ts.emit("tool", "[book]\n")
+        first = (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
+        assert "[book]" in first
+        ts.emit("tool", '{"fat_tool_json": true, "rows": [1, 2, 3]}\n')
+        second = (tmp_path / "think_tail.txt").read_text(encoding="utf-8")
+        assert second == first
+        assert "fat_tool_json" not in second
+        assert "fat_tool_json" in st.think_live
+    finally:
+        ts.bind_engine(None)
+        monkeypatch.setattr(ts, "_last_tail_write", 0.0)
+
+
 def test_think_session_keeps_looks_the_tail_window_drops(tmp_path, monkeypatch):
     """Two looks stay on disk after the 8kb glass tail has forgotten the first."""
     from abcxauto import think_stream as ts
@@ -696,11 +750,11 @@ def test_last_turn_keeps_open_gap_rows_and_the_gate_table(tmp_path, monkeypatch)
     assert last["scan_hits"]["rows"][0]["open_gap_pct"] == -6.5
     snap: dict = {}
     ts.seed_snap_from_last_turn(snap)
-    assert snap["scan_hits"]["rows"][0]["open_gap_pct"] == -6.5
+    assert "scan_hits" not in snap
     assert "SNDK" not in (snap.get("ibkr_live_quotes") or {})
     snap_none = {"candle_source": "none"}
     ts.seed_snap_from_last_turn(snap_none)
-    assert snap_none["scan_hits"]["rows"][0]["open_gap_pct"] == -6.5
+    assert "scan_hits" not in snap_none
     brief = json.loads((tmp_path / "desk_brief.json").read_text(encoding="utf-8"))
     assert "open_gap -6.5%" in brief["rationale"]
 
@@ -822,7 +876,7 @@ def test_stale_last_turn_does_not_seed_yesterday_scan_hits(tmp_path, monkeypatch
     assert not snap.get("ibkr_live_quotes")
 
 
-def test_seed_snap_carries_fresh_ibkr_quotes(tmp_path, monkeypatch):
+def test_seed_snap_does_not_inherit_last_look_quotes(tmp_path, monkeypatch):
     from datetime import datetime, timezone
 
     from abcxauto import think_stream as ts
@@ -847,10 +901,10 @@ def test_seed_snap_carries_fresh_ibkr_quotes(tmp_path, monkeypatch):
     snap: dict = {"ibkr_live_quotes": {"SPY": 500.0}}
     ts.seed_snap_from_last_turn(snap)
     assert snap["ibkr_live_quotes"]["SPY"] == 500.0
-    assert snap["ibkr_live_quotes"]["SNDK"] == 91.5
-    assert snap["ibkr_live_quotes"]["MU"] == 910.0
+    assert "SNDK" not in snap["ibkr_live_quotes"]
+    assert "MU" not in snap["ibkr_live_quotes"]
     assert "AMD" not in snap["ibkr_live_quotes"]
-    assert snap["scan_hits"]["rows"][0]["symbol"] == "MU"
+    assert "scan_hits" not in snap
 
 
 def test_quotes_from_scan_hits_never_seeds_mda_last():
@@ -993,7 +1047,7 @@ def test_seed_snap_from_in_progress_keeps_today_session(tmp_path, monkeypatch):
     assert snap["session_range"]["SNDK"]["low"] == 88.0
 
 
-def test_seed_snap_keeps_hits_but_does_not_reuse_last_look_screens(
+def test_seed_snap_does_not_inherit_screens_or_hits(
     tmp_path, monkeypatch
 ):
     from datetime import datetime, timezone
@@ -1020,7 +1074,7 @@ def test_seed_snap_keeps_hits_but_does_not_reuse_last_look_screens(
     ts.seed_snap_from_last_turn(snap)
     assert "scan_screens" not in snap
     assert "scan_calls" not in snap
-    assert snap["scan_hits"]["rows"][0]["symbol"] == "ALB"
+    assert "scan_hits" not in snap
 
 
 def test_seed_snap_does_not_slide_manage_reuse_off_look_ts(tmp_path, monkeypatch):
@@ -1044,7 +1098,7 @@ def test_seed_snap_does_not_slide_manage_reuse_off_look_ts(tmp_path, monkeypatch
     snap: dict = {"candle_source": "none"}
     ts.seed_snap_from_last_turn(snap)
     assert "scan_screens" not in snap
-    assert snap["scan_at"]
+    assert "scan_at" not in snap
 
 
 def test_seed_snap_does_not_reuse_when_row_asof_is_stale(tmp_path, monkeypatch):
@@ -1101,7 +1155,7 @@ def test_seed_snap_does_not_reuse_manage_screens_as_this_look(tmp_path, monkeypa
     ts.seed_snap_from_last_turn(manage)
     assert "scan_screens" not in manage
     assert "scan_calls" not in manage
-    assert manage["scan_hits"]["rows"][0]["symbol"] == "NKE"
+    assert "scan_hits" not in manage
 
 
 def test_last_look_for_hunt_drops_an_overnight_brief():

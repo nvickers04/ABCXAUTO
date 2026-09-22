@@ -32,9 +32,20 @@ SOURCE_GATE = "gate"
 SOURCE_HALT = "halt"
 SOURCE_FILL = "fill"
 SOURCE_IMPORT = "import"
+SOURCE_BROKER = "broker"
 SOURCES = frozenset(
-    {SOURCE_GROK, SOURCE_GATE, SOURCE_HALT, SOURCE_FILL, SOURCE_IMPORT}
+    {
+        SOURCE_GROK,
+        SOURCE_GATE,
+        SOURCE_HALT,
+        SOURCE_FILL,
+        SOURCE_IMPORT,
+        SOURCE_BROKER,
+    }
 )
+
+# Farm / connectivity chatter — log only, never a durable note.
+_QUIET_IBKR_CODES = frozenset({2104, 2106, 2108, 2158})
 
 MAX_LIVE = 32
 MAX_BODY = 160
@@ -729,6 +740,97 @@ def record_fill_note(fill: dict[str, Any] | None) -> None:
         )
     except Exception:
         logger.debug("fill note failed", exc_info=True)
+
+
+def _broker_order_label(order_type: str = "") -> str:
+    ot = str(order_type or "").strip().upper()
+    if ot.startswith("STP") or ot in ("TRAIL", "TRAIL LIMIT", "TRAILLIMIT"):
+        return "stop"
+    if ot:
+        return ot.lower()
+    return "order"
+
+
+def record_broker_order_note(
+    *,
+    symbol: str = "",
+    order_id: Any = "",
+    order_type: str = "",
+    status: str = "",
+    error_code: Any = "",
+    detail: str = "",
+) -> dict[str, Any]:
+    """One durable line for cancel / IBKR order error. Fail soft; never raises.
+
+    Example body: ``stop cancelled AVGO oid 23210 10326``.
+    Quiet farm codes 2104/2106/2108/2158 write nothing.
+    """
+    try:
+        code_raw = error_code
+        try:
+            code_i = int(code_raw) if code_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            code_i = None
+        if code_i is not None and code_i in _QUIET_IBKR_CODES:
+            return {"ok": False, "error": "quiet_code"}
+
+        sym = str(symbol or "").upper().strip()
+        oid = str(order_id if order_id not in (None, "") else "").strip()
+        code_s = str(code_i if code_i is not None else (code_raw or "")).strip()
+        st = str(status or "").strip().lower()
+        label = _broker_order_label(order_type)
+        cancelled = st in ("cancelled", "canceled", "apicancelled")
+
+        bits: list[str] = []
+        if cancelled:
+            bits.append(f"{label} cancelled")
+        elif code_s:
+            bits.append(f"IBKR {code_s}" if label == "order" else f"{label} IBKR {code_s}")
+        else:
+            bits.append(label)
+        if sym:
+            bits.append(sym)
+        if oid:
+            bits.append(f"oid {oid}")
+        if code_s and cancelled:
+            bits.append(code_s)
+        body = " ".join(bits).strip()[:MAX_BODY]
+        if not body:
+            return {"ok": False, "error": "empty_body"}
+
+        reason = ""
+        if oid and code_s:
+            reason = f"broker-{oid}-{code_s}"
+        elif oid:
+            reason = f"broker-cancel-{oid}"
+        elif code_s:
+            reason = f"broker-{code_s}"
+        else:
+            reason = f"broker-{label}-{sym or 'x'}"
+
+        tags = ["broker"]
+        if cancelled:
+            tags.append("cancel")
+        if code_s:
+            tags.append(f"ibkr-{code_s}")
+        if sym:
+            tags.append(sym.lower())
+
+        from abcxauto.memory import get_journal
+
+        return get_journal().record_code_note(
+            source=SOURCE_BROKER,
+            reason_code=reason,
+            kind=KIND_EVENT,
+            symbol=sym,
+            tags=tags,
+            body=body,
+            evidence=str(detail or "")[:MAX_BODY] or f"broker:{reason}",
+            invalidate="order gone / new protect / flat book",
+        )
+    except Exception:
+        logger.debug("broker order note failed", exc_info=True)
+        return {"ok": False, "error": "write_failed"}
 
 
 def record_book_health_notes(snap: dict[str, Any] | None) -> None:

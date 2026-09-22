@@ -221,6 +221,54 @@ class TestExitOnlyVerification:
         assert result["success"] is True
 
     @pytest.mark.asyncio
+    async def test_bracket_unprotected_dispatch_keeps_protection(self):
+        """Naked bracket fill must not be journaled as ok / rewritten to protected."""
+        import json
+
+        from abcxauto.executor import _dispatch_succeeded
+        from abcxauto.memory import get_journal
+
+        assert _dispatch_succeeded({"success": True, "order_id": 1}) is True
+        assert _dispatch_succeeded({"success": True, "protection": "protected"}) is True
+        assert _dispatch_succeeded({"success": True, "protection": "unprotected"}) is False
+        assert (
+            _dispatch_succeeded({"error": "modify_stop failed", "protection": "unprotected"})
+            is False
+        )
+
+        class NakedBracketGateway(FakeGateway):
+            def __getattr__(self, name):
+                if name != "place_bracket_order":
+                    return super().__getattr__(name)
+
+                async def _method(**kwargs):
+                    self.calls.append((name, kwargs))
+                    return {
+                        "success": True,
+                        "filled": True,
+                        "bracket_order_id": 1,
+                        "stop_order_id": 2,
+                        "protection": "unprotected",
+                    }
+
+                return _method
+
+        gateway = NakedBracketGateway(positions=[])
+        proposal = validate_proposal("bracket", VALID_PAYLOADS["bracket"], RATIONALE)
+        result = await execute_proposal(proposal, gateway)
+        assert result.get("protection") == "unprotected"
+
+        rows = get_journal().recent_dispatches(limit=5)
+        assert rows, "expected a dispatch row"
+        row = rows[0]
+        assert int(row.get("ok") or 0) == 0
+        blob = row.get("result_json") or row.get("result") or {}
+        if isinstance(blob, str):
+            blob = json.loads(blob)
+        assert blob.get("protection") == "unprotected"
+        assert blob.get("protection") != "protected"
+
+    @pytest.mark.asyncio
     async def test_stock_exit_against_option_position_hints_close_option(self):
         """Stock orders can't close options — the error must point at close_option."""
         gateway = FakeGateway(positions=[

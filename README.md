@@ -11,7 +11,7 @@ Same rules at $1k, $100k, or $1M. Size, daily-loss, and the scorecard are **% of
 | Owner | Job |
 |-------|-----|
 | **Grok** | Tickets (`send`), risk knobs (`self_tune`) |
-| **Code** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, overnight / after-close park |
+| **Code** | Live facts, `ORDER EXAMPLES` schema, hard gates Grok cannot talk around, overnight park until 04:00 ET. Stay-up has no sit clock |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No approval step. |
 
 Do not grow the system prompt. Strategy is Grok’s. Switch the brain from Pro Settings — `model` / `model_rth` / `model_research` / `model_params` / `model_params_rth` / `model_params_research` persist to `risk_settings.json`, which beats the env forms. DESK launch reloads those knobs. Default stays grok-4.6 (+ xhigh suffix) until the operator flips. Grok is the only RTH process. There is no clerk process (`clerk_*` names are in-process gates).
@@ -41,7 +41,7 @@ order_change / unprotected / operator poke. Do not call the model again
 because it spoke. A poke does not start a new messages list.
 
 ```
-WAKE     Overnight / after-close park until premarket. Paper RTH / premarket stay up.
+WAKE     Closed / overnight: code park until 04:00 ET premarket. Premarket, postmarket, and RTH stay on this process.
          fill / order_change / unprotected can poke the open think.
     |
 SNAP     IBKR book, orders, protection
@@ -50,7 +50,7 @@ GROK     tools (facts + send). Wake is a short line — Grok fetches what it nee
     |
 SEND     send → gates → IBKR. Journal write is code, not a Grok tool.
     |
-LOOK     Finished RTH look writes no grok_wake.json. Stay-up has no sit clock.
+LOOK     Overnight park is code. Stay-up has no sit clock. Host invents no mills.
          Session cap idles; chat is kept. Overnight / park drop the chat.
 ```
 
@@ -148,6 +148,7 @@ Precedence: Settings / `risk_settings.json` > env > default. `scan_fetch_cap` is
 | `ABCXAUTO_PCS_KILL_LOOK` | `true` | PCS kill-window LOOK contract (not a Settings knob) |
 | `ABCXAUTO_JOURNAL_PATH` | `journal.db` | SQLite journal (code-written) |
 | `ABCXAUTO_DEFAULT_LOOK_S` | `90` | Overnight / after-close park seconds. Stay-up (`clerk_look_s`) is 0 |
+| `ABCXAUTO_LEFTOVER_RELOOK_S` | `90` | RTH leftover > deployed re-enter seconds. Not a general chair |
 
 See `.env.template` for the rest (paths, monitor, vestigial unread names). Live: `TRADING_MODE=live`, port **7496**, `ABCXAUTO_LIVE_CONFIRM=I_UNDERSTAND_LIVE_TRADING_RISK`. Same gates as paper.
 
@@ -159,7 +160,7 @@ Priority: **risk > execution > monitoring > thin UI**.
 abcxauto/
   __main__.py           Pro + supervisor; --cleanup = operator stop
   supervisor.py         Useful hours + TWS probe; relaunch on crash
-  park_clock.py         Overnight / after-close park; book-event pulse. No RTH sit clock
+  park_clock.py         Overnight park until 04:00 ET; book-event pulse. Stay-up has no sit clock. RTH leftover > deployed re-enters after 90s
   agent_loop.py         Snap facts, send gates
   brain.py              Call the model; tool results stay on the same chat
   llm.py                Short system prompt; no prompt_extra

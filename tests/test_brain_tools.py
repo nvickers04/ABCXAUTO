@@ -901,22 +901,13 @@ def test_scan_paint_rows_uses_live_last():
 
 
 @pytest.mark.asyncio
-async def test_bare_candles_on_gap_hits_request_five_minute_hist():
-    seen: dict = {}
-
+async def test_bare_candles_do_not_invent_scan_hits():
     class Conn:
         async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
-            seen["symbol"] = symbol
-            seen["resolution"] = resolution
-            return {
-                "symbol": symbol,
-                "bars": [{"t": "2026-08-25", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 1}],
-                "source": "ibkr",
-                "freshness": "ibkr_rth",
-            }
+            raise AssertionError("flat book must not invent a candle symbol")
 
         async def get_realtime_bars(self, symbol, **_k):
-            raise AssertionError("hist answered — do not open the 5s stream")
+            raise AssertionError("flat book must not invent a candle symbol")
 
     snap = {
         "scan_hits": {
@@ -924,7 +915,7 @@ async def test_bare_candles_on_gap_hits_request_five_minute_hist():
             "rows": [{"symbol": "SNDK", "last": 1485.0, "open_gap_pct": -6.5}],
         }
     }
-    await _run_tool(
+    raw = await _run_tool(
         "candles",
         {},
         connector=Conn(),
@@ -932,8 +923,9 @@ async def test_bare_candles_on_gap_hits_request_five_minute_hist():
         snap=snap,
         turn=BrainTurn(),
     )
-    assert seen["symbol"] == "SNDK"
-    assert seen["resolution"] == "5"
+    data = json.loads(raw)
+    assert data["fetched"] is False
+    assert data["need"] == "symbol | symbols[]"
 
 
 
@@ -1332,13 +1324,18 @@ def test_clip_keeps_batch_series_bars():
 
 @pytest.mark.asyncio
 async def test_candles_uses_ibkr_hist_when_connected():
+    seen: dict = {}
+
     class Conn:
         async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
+            seen["resolution"] = resolution
+            seen["countback"] = countback
             return {
                 "symbol": symbol,
                 "bars": [{"t": "2026-08-18", "o": 1, "h": 2, "l": 0.5, "c": 768.5, "v": 1}],
                 "source": "ibkr",
                 "freshness": "ibkr_rth",
+                "resolution": resolution,
             }
 
         async def get_realtime_bars(self, symbol, **_k):
@@ -1356,12 +1353,46 @@ async def test_candles_uses_ibkr_hist_when_connected():
             turn=BrainTurn(),
         )
     )
+    assert seen["resolution"] == "15"
     assert data["source"] == "ibkr"
     assert data["freshness"] == "ibkr_rth"
+    assert data["resolution"] == "15"
     assert data["bars"][0]["c"] == 768.5
     assert "mda_last_is" not in data
     assert world.candle_source == "ibkr"
     assert snap["candle_source"] == "ibkr"
+
+
+@pytest.mark.asyncio
+async def test_candles_refuses_silent_daily_under_15_ask():
+    """Hist that stamps D under a 15 request must not pass as 15-minute bars."""
+
+    class Conn:
+        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
+            return {
+                "symbol": symbol,
+                "bars": [{"t": "2026-09-21", "o": 1, "h": 2, "l": 0.5, "c": 100.0, "v": 1}],
+                "source": "ibkr",
+                "freshness": "ibkr_rth",
+                "resolution": "D",
+            }
+
+        async def get_realtime_bars(self, symbol, **_k):
+            return {"error": "no IBKR realtime bars", "source": "ibkr", "symbol": symbol}
+
+    data = json.loads(
+        await _run_tool(
+            "candles",
+            {"symbol": "AVGO", "resolution": "15", "countback": 40},
+            connector=Conn(),
+            world=_world(),
+            snap={},
+            turn=BrainTurn(),
+        )
+    )
+    assert data.get("resolution") != "D" or not data.get("bars")
+    assert data.get("error") or data.get("freshness") == "ibkr_miss"
+    assert not data.get("bars")
 
 
 @pytest.mark.asyncio
@@ -1701,6 +1732,8 @@ async def test_option_chain_batch_returns_chains():
     assert data["source"] == "ibkr"
     assert [row["symbol"] for row in data["chains"]] == ["SPY", "QQQ"]
     assert data["chains"][0]["expirations"] == ["20260821"]
+    assert "option_quote" in (data.get("note") or "")
+    assert "not a live limit" in (data.get("note") or "")
 
 
 @pytest.mark.asyncio
@@ -1911,13 +1944,12 @@ async def test_status_tool():
     assert "trading_mode" in data
     assert "session" in data
     assert "ibkr_port" in data or "ibkr_client_id" in data
-    assert "levers" in data
-    assert "max_risk_per_trade_pct" in data["levers"]
-    assert "max_open_positions" in data["levers"]
+    assert "levers" not in data
     assert data["countdown"]["to"] == "close"
     assert data["tradable_now"]["equity_rth"] is True
-    assert data["freshness"]["spy_last"] == 500.0
-    assert data["freshness"]["vix"] == 15.0
+    assert data["freshness"]["ibkr_connected"] is True
+    assert "spy_last" not in data["freshness"]
+    assert "vix" not in data["freshness"]
 
 
 @pytest.mark.asyncio
@@ -1959,30 +1991,26 @@ def test_book_is_structured_facts_not_worldstate_lecture(monkeypatch):
     assert "legal_n" not in blob["world"]
     assert "legal_sample" not in blob["world"]
     assert "working_thesis" not in blob["world"]
+    assert "working_memory" not in blob
     assert "working_memory" not in blob["world"]
     assert "floor" not in blob
     assert "operator_card" not in blob
     assert "scorecard" not in blob
-    assert blob["ibkr_live_quotes"]["SPY"] == 501.0
+    assert "levers" not in blob
+    assert "path" not in blob
+    assert "last_look" not in blob
+    assert "scan_tape" not in blob["world"]
+    assert "news" not in blob["world"]
+    assert "trade_plan" not in blob["world"]
+    assert "ibkr_live_quotes" not in blob
+    assert "marks" not in blob["world"]
     dumped = json.dumps(blob["world"])
     assert "WORLDSTATE" not in dumped
-    assert "trade_plan" in blob["world"]
-    assert "book_unreliable" in blob["world"]
-    assert "path" in blob
-    assert "max_risk_per_trade_pct" in blob["levers"]
-    assert blob["levers"]["max_open_positions"]["min"] == 0
-    assert blob["levers"]["max_open_positions"]["off"] == 0
-    # Do not teach leftover 25 as the working ceiling on paper or live.
-    assert "max" not in blob["levers"]["max_open_positions"]
-    assert blob["levers"]["max_open_positions"]["pick"] == "this book"
-    assert blob["levers"]["max_open_positions"]["with"] == "size_pct_nl"
-    assert "not pick-one" in blob["levers"]["together"]
+    assert "book_unreliable" not in blob["world"]
     assert "day" in blob
-    assert "edge_usd" in blob["day"]
-    assert blob["day"]["edge_meaning"] == "nl_vs_start_minus_model"
+    assert "edge_usd" not in blob["day"]
     assert "open_upnl" in blob["day"]
     assert "ibkr_daily_pnl" in blob["day"]
-    assert "cloned" in blob["day"]
     assert list(blob.keys())[0] == "day"
     assert "do_more" not in (blob.get("playbook") or {})
     assert "stop_doing" not in (blob.get("playbook") or {})
@@ -2048,6 +2076,125 @@ def test_book_lists_full_capacity(monkeypatch):
     ]
     blob = _book_payload(_world(positions=positions))
     assert len(blob["world"]["positions"]) == 15
+
+
+def test_book_marks_are_open_lots_only():
+    from abcxauto.brain import _book_payload
+
+    blob = _book_payload(
+        _world(
+            flat=False,
+            positions=[{"symbol": "NVDA", "sec_type": "STK", "quantity": 10}],
+            ibkr_live_quotes={"NVDA": 180.5, "SPY": 501.0, "SNDK": 91.0},
+        )
+    )
+    assert blob["world"]["marks"] == {"NVDA": 180.5}
+    assert blob["marks"] == {"NVDA": 180.5}
+    assert "SPY" not in blob["world"]["marks"]
+    assert "scan_tape" not in blob["world"]
+    assert "last_look" not in blob
+
+
+def test_book_allocation_ranks_lots_by_capital():
+    from abcxauto.brain import _book_payload
+
+    blob = _book_payload(
+        _world(
+            flat=False,
+            net_liquidation=32340.39,
+            positions=[
+                {
+                    "symbol": "AMZN",
+                    "sec_type": "STK",
+                    "quantity": 10,
+                    "avg_cost": 251.76,
+                    "market_price": 252.24,
+                    "marketValue": 2522.4,
+                },
+                {
+                    "symbol": "QCOM",
+                    "sec_type": "STK",
+                    "quantity": 26,
+                    "avg_cost": 190.10,
+                    "market_price": 190.26,
+                    "marketValue": 4946.76,
+                },
+            ],
+            open_orders=[
+                {"symbol": "QCOM", "type": "STP", "stop": 187.5, "role": "exit"},
+            ],
+            ibkr_live_quotes={"AMZN": 252.24, "QCOM": 190.26},
+            portfolio_risk={
+                "capital_liquidity": {"total_cash": 22433.74, "cash_pct_nl": 69.37}
+            },
+        )
+    )
+    alloc = blob["allocation"]
+    assert alloc["cash_pct_nl"] == pytest.approx(69.37, abs=0.05)
+    assert alloc["lots"][0]["symbol"] == "QCOM"
+    assert alloc["lots"][0]["pct_nl"] > alloc["lots"][1]["pct_nl"]
+    assert alloc["lots"][0]["stop"] == 187.5
+    assert "leftover" in blob["allocation_line"]
+    assert "%" in blob["allocation_line"]
+    assert "QCOM" in blob["allocation_line"]
+
+
+@pytest.mark.asyncio
+async def test_bare_quote_flat_needs_a_name():
+    raw = await _run_tool(
+        "quote", {}, connector=None, world=_world(), snap={}, turn=BrainTurn()
+    )
+    data = json.loads(raw)
+    assert data["fetched"] is False
+    assert data["need"] == "symbol | symbols[]"
+    assert data["source"] == "ibkr"
+
+
+@pytest.mark.asyncio
+async def test_quote_page_adds_mid_and_spread():
+    class Conn:
+        async def get_live_quote(self, symbol, fresh=False):
+            return {
+                "symbol": symbol,
+                "last": 100.5,
+                "bid": 100.4,
+                "ask": 100.6,
+                "source": "ibkr",
+                "freshness": "live",
+            }
+
+    raw = await _run_tool(
+        "quote",
+        {"symbol": "NVDA"},
+        connector=Conn(),
+        world=_world(),
+        snap={},
+        turn=BrainTurn(),
+    )
+    data = json.loads(raw)
+    assert data["symbol"] == "NVDA"
+    assert data["mid"] == 100.5
+    assert data["spread"] == 0.2
+    assert data["source"] == "ibkr"
+
+
+def test_public_news_keeps_publisher():
+    from abcxauto.brain_tools import _public_news_item
+
+    row = _public_news_item(
+        {
+            "symbol": "NVDA",
+            "headline": "NVDA reports",
+            "publisher": "Reuters",
+            "published": "2026-09-17T16:00:00Z",
+            "source": "mda",
+            "freshness": "delayed_15m",
+            "pad": "drop me",
+        }
+    )
+    assert row["publisher"] == "Reuters"
+    assert row["headline"] == "NVDA reports"
+    assert "pad" not in row
 
 
 def test_quote_cache_hit():
@@ -2580,7 +2727,7 @@ _WOM_FACT_PREMARKET = (
 
 
 def test_research_keep_looking_open_wake_still_appends_same_fact():
-    """Research has no broker poke. Same lead fact still re-enters looking."""
+    """Mill is dead. Same lead fact does not re-enter looking."""
     from abcxauto.brain import _open_wake
     from abcxauto.llm import SYSTEM_PROMPT
     from abcxauto.park_clock import clear_interrupt
@@ -2607,9 +2754,9 @@ def test_research_keep_looking_open_wake_still_appends_same_fact():
     _open_wake(g, _WOM_FACT_PREMARKET, session="premarket")
     assert len(got) == 1
     _open_wake(g, _WOM_FACT_PREMARKET, session="premarket", resume=True)
-    assert len(got) == 2
+    assert len(got) == 1
     _open_wake(g, _WOM_FACT, session="regular", resume=True)
-    assert len(got) == 2
+    assert len(got) == 1
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
 
 
@@ -3234,7 +3381,7 @@ async def test_book_has_combo_avg_and_sends_count():
     raw = await _run_tool("book", {}, connector=None, world=world, snap={}, turn=turn)
     data = json.loads(raw)
     assert data["sends_this_turn"] == 0
-    assert "BAG" in (data.get("world") or {}).get("combo", "")
+    assert "combo" not in (data.get("world") or {})
     pos = (data.get("world") or {}).get("positions") or []
     assert pos
     assert abs(float(pos[0]["avg"]) - 1.26) < 1e-9
@@ -3359,6 +3506,102 @@ def test_append_tool_result_skips_empty_args_object(tmp_path, monkeypatch):
     session = (tmp_path / "think_session" / "2026-08-28.txt").read_text(encoding="utf-8")
     assert paid in session
     assert "{}" not in session
+
+
+def _proto_stay_up_chat():
+    """Mutable xAI-style messages list (same shape as chat.messages)."""
+    from xai_sdk.chat import assistant, developer, system, tool_result
+    from xai_sdk.proto import chat_pb2
+
+    class Chat:
+        def __init__(self) -> None:
+            self._proto = chat_pb2.GetCompletionsRequest()
+
+        @property
+        def messages(self):
+            return self._proto.messages
+
+        def append(self, m) -> None:
+            self._proto.messages.append(m)
+
+    chat = Chat()
+    chat.append(system("SYS_PROMPT"))
+    chat.append(developer("wake fact"))
+    return chat, assistant, tool_result
+
+
+def test_omit_older_tool_results_stubs_past_keep():
+    from abcxauto.brain import (
+        KEEP_TOOL_RESULTS,
+        _OMITTED_TOOL_RESULT,
+        _omit_older_tool_results,
+    )
+
+    chat, _assistant, tool_result = _proto_stay_up_chat()
+    for i in range(KEEP_TOOL_RESULTS + 2):
+        chat.append(tool_result("FAT" * 2000, tool_call_id=f"c{i}"))
+    _omit_older_tool_results(chat)
+    tool_texts = [
+        str(m.content[0].text)
+        for m in chat.messages
+        if m.content and str(getattr(m.content[0], "text", "") or "")
+    ]
+    # system/wake untouched; first two tool blobs stubbed; last six full.
+    assert chat.messages[0].content[0].text == "SYS_PROMPT"
+    assert chat.messages[1].content[0].text == "wake fact"
+    stubs = [t for t in tool_texts if t == _OMITTED_TOOL_RESULT]
+    full = [t for t in tool_texts if t.startswith("FAT")]
+    assert len(stubs) == 2
+    assert len(full) == KEEP_TOOL_RESULTS
+    assert full[-1] == "FAT" * 2000
+
+
+def test_omit_older_assistant_turns_stubs_say_and_reasoning():
+    from abcxauto.brain import (
+        KEEP_ASSISTANT_TURNS,
+        _OMITTED_ASSISTANT,
+        _OMITTED_REASONING,
+        _OMITTED_TOOL_RESULT,
+        _omit_older_assistant_turns,
+        _omit_older_tool_results,
+    )
+
+    chat, assistant, tool_result = _proto_stay_up_chat()
+    # Interleave assistant turns with tool results like a stay-up look.
+    for i in range(KEEP_ASSISTANT_TURNS + 3):
+        msg = assistant(f"say-{i} " + ("X" * 500))
+        msg.reasoning_content = f"reason-{i} " + ("R" * 2000)
+        msg.encrypted_content = f"enc-{i}-" + ("E" * 200)
+        chat.append(msg)
+        chat.append(tool_result(f"tool-blob-{i}", tool_call_id=f"t{i}"))
+
+    _omit_older_assistant_turns(chat)
+    _omit_older_tool_results(chat)
+
+    asst = [m for m in chat.messages if int(m.role) == 2]
+    assert len(asst) == KEEP_ASSISTANT_TURNS + 3
+    # Oldest three stubbed; last KEEP intact.
+    for m in asst[:-KEEP_ASSISTANT_TURNS]:
+        assert m.content[0].text == _OMITTED_ASSISTANT
+        assert m.reasoning_content == _OMITTED_REASONING
+        assert not m.encrypted_content
+    for i, m in enumerate(asst[-KEEP_ASSISTANT_TURNS:]):
+        idx = (KEEP_ASSISTANT_TURNS + 3) - KEEP_ASSISTANT_TURNS + i
+        assert m.content[0].text.startswith(f"say-{idx}")
+        assert m.reasoning_content.startswith(f"reason-{idx}")
+        assert m.encrypted_content.startswith(f"enc-{idx}")
+    # Latest say and latest tool results survive.
+    assert asst[-1].content[0].text.startswith(
+        f"say-{KEEP_ASSISTANT_TURNS + 2}"
+    )
+    tools = [m for m in chat.messages if int(m.role) == 5]
+    assert tools[-1].content[0].text.startswith(
+        f"tool-blob-{KEEP_ASSISTANT_TURNS + 2}"
+    )
+    assert tools[-1].content[0].text != _OMITTED_TOOL_RESULT
+    # system / wake never stubbed
+    assert chat.messages[0].content[0].text == "SYS_PROMPT"
+    assert chat.messages[1].content[0].text == "wake fact"
 
 
 @pytest.mark.asyncio
@@ -3962,7 +4205,7 @@ async def test_research_spoken_no_tool_ends_this_turn_not_a_mill(tmp_path, monke
 async def test_research_keep_looking_resume_calls_model_without_poke(
     tmp_path, monkeypatch
 ):
-    """Host re-entry after a brief must look again. Same wake is not _ended."""
+    """Mill is dead. Same wake without a poke ends the look."""
     from abcxauto.brain import grok_turn
     from abcxauto.park_clock import clear_interrupt, peek_interrupt
 
@@ -3993,11 +4236,11 @@ async def test_research_keep_looking_resume_calls_model_without_poke(
         wake=wake,
         resume=True,
     )
-    assert second.ended is False
-    assert "news again" in (second.text or "")
+    assert second.ended is True
+    assert "news again" not in (second.text or "")
     assert g.chat is created[0]
     assert len(created) == 1
-    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
     assert peek_interrupt() is None
 
 
@@ -4031,6 +4274,41 @@ async def test_rth_duplicate_lead_still_ends_without_poke():
     assert second.ended is True
     assert "should not run" not in (second.text or "")
     assert int(getattr(created[0], "rounds", 0) or 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_work_resume_same_lead_still_calls_model():
+    """Work-streak resume with unchanged lead still streams on the kept chat."""
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+
+    clear_interrupt()
+    wake = (
+        "fact: closest_stop AVGO 89 STP 350.00.\n"
+        "session=regular flat=False unprotected=none ibkr=up."
+    )
+    g, created = _scripted_chat_client(
+        rounds=["AVGO stop working.", "Still managing AVGO."]
+    )
+    first = await grok_turn(
+        g, connector=None, world=_world(flat=False), snap={}, wake=wake
+    )
+    assert first.ended is False
+    assert "AVGO stop working" in (first.text or "")
+    assert int(getattr(created[0], "rounds", 0) or 0) == 1
+    g._work_resume = True
+    second = await grok_turn(
+        g,
+        connector=None,
+        world=_world(flat=False),
+        snap={},
+        wake=wake,
+        resume=True,
+    )
+    assert second.ended is False
+    assert "Still managing AVGO" in (second.text or "")
+    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+    assert getattr(g, "_work_resume", True) is False
 
 
 @pytest.mark.asyncio
@@ -5667,7 +5945,11 @@ def test_scan_clip_keeps_ranked_page_plus_news():
         if isinstance(row, dict)
     )
     assert all("session" not in row for row in public["hits"] if isinstance(row, dict))
-    assert all("publisher" not in item for item in public["news"])
+    assert all(item.get("headline") for item in public["news"])
+    assert all(
+        not str(item.get("publisher") or "").startswith("http")
+        for item in public["news"]
+    )
     defaulted = json.loads(_clip(payload))
     assert defaulted.get("_dropped") or defaulted.get("_clipped")
     kept = json.loads(_clip_scan(payload))
@@ -5913,4 +6195,51 @@ async def test_scan_symbols_header_is_this_job_not_prior_screen(monkeypatch):
         if isinstance(row, dict):
             assert "session" not in row
             assert "news" not in (row.get("mda") or {})
+
+
+@pytest.mark.asyncio
+async def test_web_query_clip_keeps_x_hits(monkeypatch):
+    """Fat search text must not make _clip drop results before the model sees them."""
+    from abcxauto.brain_tools import _WEB_HIT_CAP
+
+    async def _fat_search(query, *, where="both", handles=None):
+        return {
+            "source": "web",
+            "use": "color_not_live_trigger",
+            "query": query,
+            "where": where,
+            "text": "pad " * 5_000,
+            "results": [
+                {
+                    "source": "x",
+                    "url": f"https://x.com/example/status/{i}",
+                    "title": f"AVGO note {i}",
+                    "handle": "example",
+                    "snippet": "s" * 2_000,
+                }
+                for i in range(_WEB_HIT_CAP + 3)
+            ],
+            "n": _WEB_HIT_CAP + 3,
+        }
+
+    monkeypatch.setattr("abcxauto.desk_mode.search_public", _fat_search)
+    snap: dict = {}
+    raw = await _run_tool(
+        "web",
+        {"query": "AVGO", "where": "x"},
+        connector=None,
+        world=_world(session_status="regular"),
+        snap=snap,
+        turn=BrainTurn(),
+    )
+    data = json.loads(raw)
+    results = data.get("results") or []
+    assert results, data
+    assert all(row.get("source") == "x" for row in results)
+    assert len(results) <= _WEB_HIT_CAP
+    assert results[0].get("url")
+    assert results[0].get("title")
+    assert results[0].get("handle") == "example"
+    assert "snippet" not in results[0]
+    assert snap.get("research_web", {}).get("where") == "x"
 

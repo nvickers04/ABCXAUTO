@@ -54,20 +54,25 @@ def mda_greeks_only(oq: dict[str, Any] | None, *, occ: str | None = None) -> dic
     """MDA blob with prices stripped so they cannot be used as live."""
     if not isinstance(oq, dict):
         return {}
+    greeks: dict[str, Any] = {}
+    for k in _MDA_GREEK_KEYS:
+        if oq.get(k) is not None:
+            greeks[k] = oq.get(k)
+    # occ alone is identity, not greeks — do not fake a mda blob.
+    if not greeks:
+        return {}
     out: dict[str, Any] = {
         "source": "mda",
         "freshness": "delayed_15m",
         "use": "greeks_only_not_send_geometry",
+        **greeks,
     }
     if occ:
         out["occ"] = occ
-    for k in _MDA_GREEK_KEYS:
-        if oq.get(k) is not None:
-            out[k] = oq.get(k)
     from abcxauto.prints import asof_fields
 
     out.update(asof_fields(oq.get("asof") or oq.get("updated")))
-    return out if len(out) > 3 else {}
+    return out
 
 
 def _finite(raw: Any) -> float | None:

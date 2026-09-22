@@ -249,7 +249,8 @@ def test_write_research_brief_stamps_lineage(tmp_path, monkeypatch):
     assert "tickets" not in out
     assert "expectancy" not in out
     rth = write_research_brief(session="regular", snap={"news_items": []})
-    assert rth == {}
+    assert rth.get("session") == "regular"
+    assert rth.get("mode") == "research"
 
 
 @pytest.mark.asyncio
@@ -329,3 +330,103 @@ def test_empty_or_failed_research_round_is_not_billed():
     assert _should_bill_research_round(spoken) is True
     tools_only = BrainTurn(text="")
     assert _should_bill_research_round(tools_only, tool_calls=2) is True
+    assert _bill_research_brief_round(spoken, session="premarket", snap=snap) is False
+    assert spoken.brief_billed is True
+    assert card_row(CARD, WINDOW)["turns"] == 1
+    assert _bill_research_brief_round(spoken, session="premarket", snap=snap) is False
+    assert card_row(CARD, WINDOW)["turns"] == 1
+    rth = BrainTurn(text="watching the open")
+    assert _bill_research_brief_round(rth, session="regular", snap=snap) is False
+    assert rth.brief_billed is False
+    assert card_row(CARD, WINDOW)["turns"] == 1
+
+
+@pytest.mark.asyncio
+async def test_one_research_look_bills_one_turn_for_two_inner_rounds(monkeypatch):
+    import json
+
+    from abcxauto.brain import grok_turn
+    from abcxauto.park_clock import clear_interrupt
+    from tests.test_brain_tools import _scripted_chat_client
+
+    reset_research_budget()
+    open_research_card(CARD, WINDOW)
+    billed: list[dict] = []
+    real = note_brief_turn
+
+    def spy(card, window, **kwargs):
+        billed.append(dict(kwargs))
+        return real(card, window, **kwargs)
+
+    monkeypatch.setattr("abcxauto.research_budget.note_brief_turn", spy)
+
+    class TC:
+        id = "1"
+        function = SimpleNamespace(name="news", arguments="{}")
+
+    async def fake_read(name, args, **_k):
+        return json.dumps({"ok": name, "items": [{"symbol": "NVDA", "headline": "beats"}]})
+
+    monkeypatch.setattr("abcxauto.brain._run_tool", fake_read)
+    clear_interrupt()
+    g, created = _scripted_chat_client(
+        rounds=[("", [TC()]), "watching NVDA after the news."]
+    )
+    turn = await grok_turn(
+        g,
+        connector=None,
+        world=_world(session_status="premarket"),
+        snap={
+            "positions": [],
+            "protection": {},
+            "research_card_id": CARD,
+            "prove_window_id": WINDOW,
+        },
+        wake="session=premarket desk_mode=research.",
+    )
+    assert turn.failed is False
+    assert turn.parked is False
+    assert turn.brief_billed is True
+    assert int(getattr(created[0], "rounds", 0) or 0) == 2
+    assert len(billed) == 1
+    assert card_row(CARD, WINDOW)["turns"] == 1
+
+
+@pytest.mark.asyncio
+async def test_rth_look_writes_brief_without_billing_ah_card(monkeypatch):
+    from abcxauto.brain import grok_turn
+    from abcxauto.desk_mode import load_research_brief
+    from abcxauto.park_clock import clear_interrupt
+    from tests.test_brain_tools import _scripted_chat_client
+
+    reset_research_budget()
+    open_research_card(CARD, WINDOW)
+    billed: list[int] = []
+    real = note_brief_turn
+
+    def spy(*_a, **_k):
+        billed.append(1)
+        return real(*_a, **_k)
+
+    monkeypatch.setattr("abcxauto.research_budget.note_brief_turn", spy)
+    clear_interrupt()
+    g, _created = _scripted_chat_client(rounds=["watching SPY. No ticket."])
+    turn = await grok_turn(
+        g,
+        connector=None,
+        world=_world(session_status="regular"),
+        snap={
+            "positions": [],
+            "protection": {},
+            "research_card_id": CARD,
+            "prove_window_id": WINDOW,
+        },
+        wake="session=regular send.",
+    )
+    assert "watching SPY" in (turn.text or "")
+    assert turn.brief_billed is False
+    assert billed == []
+    assert card_row(CARD, WINDOW)["turns"] == 0
+    brief = load_research_brief()
+    assert brief.get("session") == "regular"
+    assert brief.get("mode") == "research"

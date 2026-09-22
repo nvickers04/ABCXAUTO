@@ -1,7 +1,7 @@
 """Portfolio defined-max-loss math. Display only — never a place refuse.
 
 Deterministic sum: defined max-loss(open lots) + working new-risk
-+ candidate. ``portfolio_cap_usd`` default $800 is not a clerk gate.
++ candidate. ``portfolio_cap_usd`` 0 / unset is off — not a clerk gate.
 Closers / closing_position / unprotected last-stop stay free.
 Mid / mark / last are not max-loss evidence.
 
@@ -18,7 +18,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PORTFOLIO_CAP_USD_DEFAULT = 800.0
+PORTFOLIO_CAP_USD_DEFAULT = 0.0
 PORTFOLIO_CAP_KEY = "portfolio_cap_usd"
 PORTFOLIO_CAP_ENV = "ABCXAUTO_PORTFOLIO_CAP_USD"
 
@@ -403,9 +403,9 @@ def resolve_portfolio_cap_usd(
 ) -> dict[str, Any]:
     """Resolve the display-only USD figure.
 
-    Unset → default 800 (not a refuse). Present + finite ≥ 0 → use it,
-    clamped so persist cannot raise above 800. Present + garbage /
-    non-finite → unreadable. Never a place or preview refuse.
+    Unset → no cap. Present + finite ≥ 0 → that number. Present + garbage /
+    non-finite → unreadable. There is no $800 ceiling. Never a place or
+    preview refuse.
     """
     if raw is _UNSET:
         saw = False if present is None else bool(present)
@@ -416,7 +416,7 @@ def resolve_portfolio_cap_usd(
     if not saw:
         return {
             "ok": True,
-            "cap": PORTFOLIO_CAP_USD_DEFAULT,
+            "cap": None,
             "unreadable": False,
             "defaulted": True,
         }
@@ -435,17 +435,16 @@ def resolve_portfolio_cap_usd(
             "unreadable": True,
             "defaulted": False,
         }
-    cap = min(float(n), PORTFOLIO_CAP_USD_DEFAULT)
     return {
         "ok": True,
-        "cap": cap,
+        "cap": float(n),
         "unreadable": False,
         "defaulted": False,
     }
 
 
 def coerce_portfolio_cap_usd(value: Any) -> float:
-    """Operator persist path: finite ≥ 0, cannot raise above the default."""
+    """Operator persist path: finite ≥ 0. No ceiling."""
     resolved = resolve_portfolio_cap_usd(value, present=True)
     if not resolved["ok"] or resolved["cap"] is None:
         raise ValueError("portfolio_cap_usd unreadable")
@@ -456,7 +455,7 @@ def load_portfolio_cap_raw() -> tuple[Any, bool]:
     """Raw operator-disk / env value. present=True even when garbage.
 
     File key wins. Env is used only when the file omits the key. Missing
-    both → (unset, False). Display default $800 is not a refuse.
+    both → (unset, False). Unset / 0 is off — not a refuse.
     """
     try:
         from abcxauto.config import risk_settings_path
@@ -569,10 +568,10 @@ def portfolio_usd_check(
 
 
 def stamp_portfolio_usd(out: dict[str, Any], check: dict[str, Any]) -> dict[str, Any]:
-    """Copy display fields. Never stamps a USD refuse."""
+    """Copy defined max-loss only. No dollar cap and no refuse flag."""
     out["portfolio_max_loss_usd"] = check.get("portfolio_max_loss_usd")
-    out["portfolio_cap_usd"] = check.get("portfolio_cap_usd")
-    out["portfolio_usd_refused"] = False
+    out.pop("portfolio_cap_usd", None)
+    out.pop("portfolio_usd_refused", None)
     return out
 
 

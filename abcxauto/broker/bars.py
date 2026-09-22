@@ -9,9 +9,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from abcxauto.broker.connection import safe_sleep as _safe_sleep
-from abcxauto.prints import bar_time_fields
+from abcxauto.prints import asof_fields, bar_time_fields, parse_ibkr_bar_et
 
 logger = logging.getLogger(__name__)
+
+
+# Candles schema enum. Unknown keys must not silently become daily.
+HIST_RESOLUTIONS = frozenset({"D", "5", "15", "60"})
 
 
 def normalize_resolution(resolution: str) -> str:
@@ -43,19 +47,27 @@ def normalize_resolution(resolution: str) -> str:
         "DAY": "D",
         "DAILY": "D",
     }
-    return aliases.get(key, key or "D")
+    if not key:
+        return "D"
+    return aliases.get(key, key)
 
 
 def hist_spec(resolution: str) -> tuple[str, str]:
-    """IBKR (barSizeSetting, durationStr) for a Grok candles resolution."""
+    """IBKR (barSizeSetting, durationStr) for a Grok candles resolution.
+
+    Only D/5/15/60. Unknown must raise — never fall through to daily bars
+    under an intraday ask (2026-09-21 AVGO resolution=15 → silent D).
+    """
     key = normalize_resolution(resolution)
-    if key == "60":
-        return "1 hour", "10 D"
-    if key == "15":
-        return "15 mins", "5 D"
-    if key == "5":
-        return "5 mins", "3 D"
-    return "1 day", "6 M"
+    specs = {
+        "60": ("1 hour", "10 D"),
+        "15": ("15 mins", "5 D"),
+        "5": ("5 mins", "3 D"),
+        "D": ("1 day", "6 M"),
+    }
+    if key not in specs:
+        raise ValueError(f"unsupported resolution {resolution!r}")
+    return specs[key]
 
 
 def session_countback(
@@ -115,7 +127,18 @@ def bars_from_ibkr(raw: Any) -> list[dict[str, Any]]:
             vol = int(getattr(bar, "volume", 0) or 0)
         except (TypeError, ValueError):
             vol = 0
-        row: dict[str, Any] = {**bar_time_fields(stamp), "c": close, "v": vol}
+        # formatDate=1 daily is YYYYMMDD. parse_asof treats that string as a
+        # small float and drops t_unix — prefer the IBKR ET wall clock.
+        et = parse_ibkr_bar_et(stamp)
+        if et is not None:
+            raw_t = stamp.isoformat() if hasattr(stamp, "isoformat") else str(stamp or "")
+            row: dict[str, Any] = {"t": raw_t or _bar_stamp(bar), "c": close, "v": vol}
+            extra = asof_fields(et)
+            if extra:
+                row["t_unix"] = extra["asof"]
+                row["t_iso"] = extra["asof_iso"]
+        else:
+            row = {**bar_time_fields(stamp), "c": close, "v": vol}
         if not row.get("t"):
             row["t"] = _bar_stamp(bar)
         for src, key in (("high", "h"), ("low", "l")):
@@ -164,7 +187,23 @@ class IBKRBarsMixin:
             n = max(5, min(int(countback or 60), 120))
         except (TypeError, ValueError):
             n = 60
-        bar_size, duration = hist_spec(resolution)
+        res_key = normalize_resolution(resolution)
+        if res_key not in HIST_RESOLUTIONS:
+            return {
+                "error": f"unsupported resolution {resolution!r}",
+                "source": "ibkr",
+                "symbol": sym,
+                "requested_resolution": str(resolution or "").strip(),
+            }
+        try:
+            bar_size, duration = hist_spec(res_key)
+        except ValueError as exc:
+            return {
+                "error": str(exc),
+                "source": "ibkr",
+                "symbol": sym,
+                "requested_resolution": str(resolution or "").strip(),
+            }
         contract = None
         try:
             prepare = getattr(self, "_prepare_contract", None)
@@ -201,8 +240,8 @@ class IBKRBarsMixin:
             "symbol": sym,
             "bars": bars,
             "source": "ibkr",
-            "freshness": ibkr_bar_freshness(resolution),
-            "resolution": str(resolution or "D").strip() or "D",
+            "freshness": ibkr_bar_freshness(res_key),
+            "resolution": res_key,
             "use": "ibkr_rth_structure",
         }
         if last_bar.get("t_unix"):

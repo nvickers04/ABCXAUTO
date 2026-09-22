@@ -1760,9 +1760,29 @@ async def test_execute_ticket_size_pct_nl_is_not_a_card_one_pct_refuse(monkeypat
             "positions": [],
             "open_orders": [],
             "ibkr_live_quotes": {"BKNG": 500.0},
+            "session_range": {
+                "BKNG": {
+                    "open": 498.0,
+                    "high": 505.0,
+                    "low": 490.0,
+                    "last": 500.0,
+                    "n": 40,
+                }
+            },
+            "news_items": [{"symbol": "BKNG", "headline": "BKNG prints"}],
         },
     )
     assert result.get("status") == "ok", result
     assert sent
     assert sent[0]["params"]["quantity"] == 3
     assert sent[0]["params"]["size_pct_nl"] == 5.0
+    assert sent[0].get("_hash_as_sent_qty") is True
+    from abcxauto.send_preview import ticket_preview_hash
+
+    bare = {
+        "strategy": sent[0].get("strategy"),
+        "action": sent[0].get("action"),
+        "params": dict(sent[0]["params"]),
+    }
+    bare["params"].pop("quantity", None)
+    assert ticket_preview_hash(sent[0]) == ticket_preview_hash(bare)

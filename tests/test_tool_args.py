@@ -73,7 +73,7 @@ def test_bare_quote_uses_book_symbols():
     assert args["symbols"][0] == "IWM"
 
 
-def test_bare_quote_uses_scan_hits_not_spy():
+def test_bare_quote_scan_hits_do_not_feed_fallback():
     snap = {
         "scan_hits": {
             "rows": [
@@ -83,23 +83,21 @@ def test_bare_quote_uses_scan_hits_not_spy():
         }
     }
     fb = fallback_quote_symbols(_world(positions=[]), snap)
-    assert fb[:2] == ["SNDK", "MU"]
-    assert "SPY" not in fb
+    assert fb == []
     name, args = normalize_tool_call("quote", {}, fallback_symbols=fb)
-    assert args["symbols"][:2] == ["SNDK", "MU"]
+    assert name == "quote"
+    assert not args.get("symbols")
     news_name, news_args = normalize_tool_call("news", {}, fallback_symbols=fb)
     assert news_name == "news"
     assert not news_args.get("symbols")
     candle_name, candle_args = normalize_tool_call("candles", {}, fallback_symbols=fb)
     assert candle_name == "candles"
-    assert candle_args["symbols"][:2] == ["SNDK", "MU"]
+    assert not candle_args.get("symbols")
 
 
-def test_bare_quote_empty_book_still_has_spy(monkeypatch):
-    monkeypatch.setattr("abcxauto.think_stream.last_look_facts", lambda: {})
-    monkeypatch.setattr("abcxauto.think_stream.last_look_for_hunt", lambda: {})
+def test_bare_quote_empty_book_has_no_fallback():
     fb = fallback_quote_symbols(_world(positions=[]), {})
-    assert fb == ["SPY"]
+    assert fb == []
 
 
 
@@ -229,3 +227,22 @@ def test_scan_filter_aliases_include_stock_type_and_pe():
     assert args["usdMarketCapAbove"] == "5000"
     assert "stockTypeFilter" not in args
     assert "pe_ratio_above" not in args
+
+
+def test_parse_candle_keeps_15m_and_short_wait():
+    """A 15-minute request must not lose resolution when the wait constant loads."""
+    from types import SimpleNamespace
+
+    from abcxauto.brain import _parse_tool_call
+    from abcxauto.brain_tools import CANDLE_WAIT_S
+
+    tc = SimpleNamespace(
+        function=SimpleNamespace(
+            name="candles",
+            arguments='{"symbol":"AVGO","resolution":"15","countback":40}',
+        )
+    )
+    name, args, _tc, timeout = _parse_tool_call(tc, world=None, snap={})
+    assert name == "candles"
+    assert str(args.get("resolution")) == "15"
+    assert timeout == CANDLE_WAIT_S == 8.0

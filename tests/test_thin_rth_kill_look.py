@@ -40,6 +40,7 @@ from abcxauto.thin_rth_kill_look import (
     MODE_OPEN,
     PCS_CARD,
     REASON_ALLOWLIST,
+    REASON_BOOK_UNRELIABLE,
     REASON_NAMELESS,
     REASON_F10,
     REASON_MODEL_COST,
@@ -56,6 +57,7 @@ from abcxauto.thin_rth_kill_look import (
     mark_f10_hard_trip,
     record_f10_loop_halt,
     has_open_pcs_skew_lot,
+    has_open_stk_lot,
     kill_look_enabled,
     kill_look_port_ok,
     kill_look_rth,
@@ -102,6 +104,15 @@ def _pcs_lot() -> dict:
         "right": "P",
         "card": PCS_CARD,
         "strategy": "vertical_spread",
+    }
+
+
+def _stk_lot() -> dict:
+    return {
+        "symbol": "AVGO",
+        "quantity": 89,
+        "secType": "STK",
+        "sec_type": "STK",
     }
 
 
@@ -269,6 +280,83 @@ def test_manage_replaces_second_entry(monkeypatch):
             positions=[lot],
             open_lots=["pcs-skew SPY vert"],
             f10=_allow_f10(),
+        )
+        is None
+    )
+
+
+def test_open_stk_lot_is_manage_like_pcs(monkeypatch):
+    """Open STK (e.g. 89 AVGO) is MANAGE for look-skip; F10 still blocks new risk."""
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    lot = _stk_lot()
+    label = "AVGO STK LONG 89"
+    assert has_open_stk_lot([lot], [label]) is True
+    assert has_open_pcs_skew_lot([lot], [label]) is False
+    assert (
+        kill_mode(
+            "regular",
+            positions=[lot],
+            open_lots=[label],
+            f10=_allow_f10(),
+        )
+        == MODE_MANAGE
+    )
+    hard = f10_gate(14.80, est_this_look=0.35, window_cost=0.0)
+    assert hard["reason_code"] == REASON_F10
+    # Flat book: F10 skips the look. Open STK: look still runs.
+    assert skip_look_reason("regular", positions=[], f10=hard) == REASON_F10
+    assert (
+        skip_look_reason(
+            "regular",
+            positions=[lot],
+            open_lots=[label],
+            f10=hard,
+        )
+        == ""
+    )
+    new_risk = {
+        "strategy": "vertical_spread",
+        "params": dict(PCS_OPEN),
+        "card": PCS_CARD,
+    }
+    blocked = kill_look_send_block(
+        new_risk,
+        session="regular",
+        positions=[lot],
+        open_lots=[label],
+        f10=hard,
+    )
+    assert blocked is not None
+    assert blocked["reason_code"] == REASON_F10
+    # Even under preferred F10 allow, MANAGE blocks new named risk.
+    blocked_open = kill_look_send_block(
+        new_risk,
+        session="regular",
+        positions=[lot],
+        open_lots=[label],
+        f10=_allow_f10(),
+    )
+    assert blocked_open is not None
+    assert blocked_open["reason_code"] == REASON_ALLOWLIST
+    close = {
+        "strategy": "market_bracket",
+        "params": {
+            "symbol": "AVGO",
+            "quantity": 89,
+            "stop_price": 100.0,
+            "closing_position": True,
+            "card": "avgo-exit",
+        },
+        "card": "avgo-exit",
+    }
+    assert (
+        kill_look_send_block(
+            close,
+            session="regular",
+            positions=[lot],
+            open_lots=[label],
+            f10=hard,
         )
         is None
     )
@@ -647,13 +735,13 @@ def test_dual_mode_rth_strips_xhigh_ah_no_week_quota(monkeypatch):
     assert research_prompt_ok(RESEARCH_PROMPT_TOKENS_MAX) is False
 
 
-def test_write_research_brief_still_skips_rth(tmp_path, monkeypatch):
+def test_write_research_brief_writes_rth_under_kill(tmp_path, monkeypatch):
     _kill_on(monkeypatch)
     path = tmp_path / "research_brief.json"
     monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(path))
     out = write_research_brief(session="regular", snap={"news_items": []})
-    assert out == {}
-    assert not path.is_file()
+    assert out.get("session") == "regular"
+    assert path.is_file()
 
 
 def test_f10_hard_preferred_unreadable_window_exits(monkeypatch):
@@ -778,6 +866,27 @@ def test_pro_engine_skip_reason_no_entry_budget(monkeypatch):
     )
 
 
+def test_skip_look_reason_book_unreliable(monkeypatch):
+    _kill_on(monkeypatch)
+    reset_session_caps()
+    snap = {"book_unreliable": True, "positions": []}
+    assert (
+        skip_look_reason("regular", positions=[], snap=snap, f10=_allow_f10())
+        == REASON_BOOK_UNRELIABLE
+    )
+    assert (
+        skip_look_reason(
+            "regular",
+            positions=[],
+            snap=snap,
+            f10=_allow_f10(),
+            unprotected=True,
+        )
+        == ""
+    )
+    assert skip_look_reason("regular", positions=[], f10=_allow_f10()) == ""
+
+
 def test_f10_trip_halts_open_look_exits_still_ok(monkeypatch):
     """KEEP-1: hard F10 latches; OPEN looks skip; MANAGE / close still go."""
     from abcxauto.pro_engine import ProEngine
@@ -818,6 +927,16 @@ def test_f10_trip_halts_open_look_exits_still_ok(monkeypatch):
             "regular",
             positions=[lot],
             open_lots=["pcs-skew SPY vert"],
+            f10=hard,
+        )
+        == ""
+    )
+    stk = _stk_lot()
+    assert (
+        skip_look_reason(
+            "regular",
+            positions=[stk],
+            open_lots=["AVGO STK LONG 89"],
             f10=hard,
         )
         == ""

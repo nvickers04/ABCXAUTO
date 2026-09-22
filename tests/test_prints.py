@@ -236,15 +236,11 @@ async def test_scan_with_metrics_nests_mda_not_last(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_underlying_price_is_ibkr_only(monkeypatch):
+async def test_underlying_price_is_ibkr_only():
     from abcxauto.broker.options import IBKROptionsMixin
 
     class Host(IBKROptionsMixin):
         async def get_live_quote(self, symbol, **_k):
             return {"error": "no tick", "source": "ibkr"}
 
-    def boom():
-        raise AssertionError("MDA must not price send geometry")
-
-    monkeypatch.setattr("abcxauto.marketdata.provider.get_data_provider", boom)
     assert await Host()._get_underlying_price("SPY") is None

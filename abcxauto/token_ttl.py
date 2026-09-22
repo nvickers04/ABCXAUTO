@@ -16,9 +16,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Two minutes. Long enough for a preview → place, short enough that an
-# unused authorization cannot sit a session. Operator env is clamped.
-DEFAULT_PLACE_TOKEN_TTL_S = 120.0
+# Ten minutes. xhigh reasoning between preview and place needs minutes,
+# not two; still short enough that unused auth cannot sit a session.
+# Operator env is clamped (MAX 900).
+DEFAULT_PLACE_TOKEN_TTL_S = 600.0
 MIN_PLACE_TOKEN_TTL_S = 5.0
 MAX_PLACE_TOKEN_TTL_S = 900.0
 TOKEN_TTL_ENV = "ABCXAUTO_PLACE_TOKEN_TTL_S"

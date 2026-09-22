@@ -15,6 +15,20 @@ from abcxauto.desktop.tokens import (
     _IN_FLIGHT_MARKERS,
 )
 
+def format_stream_poke(kind: str, detail: str = "") -> str:
+    """Visible poke chip for the think stream.
+
+    Unprotected keeps ``[unprotected]`` and appends the event payload (symbols)
+    when present. Other poke kinds stay marker-only. Halt/send are untouched.
+    """
+    k = str(kind or "").strip().lower()
+    marker = f"[{k}]" if k else "[]"
+    payload = str(detail or "").strip()
+    if k == "unprotected" and payload:
+        return f"{marker} {payload}"
+    return marker
+
+
 def stream_line_kind(line: str) -> str:
     """Marker class for one raw stream line. Reads the text, never edits it."""
     s = (line or "").strip()
@@ -32,7 +46,8 @@ def stream_line_kind(line: str) -> str:
         return "say"
     if s == "[clerk]":
         return "clerk"
-    if s in STREAM_POKE:
+    # Exact chip or chip + payload (e.g. [unprotected] AAPL STK).
+    if any(s == poke or s.startswith(f"{poke} ") for poke in STREAM_POKE):
         return "poke"
     if any(frag in s for frag in STREAM_ALARM):
         return "alarm"

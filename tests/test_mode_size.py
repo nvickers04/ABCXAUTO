@@ -104,39 +104,27 @@ def _floor_cfg(*, live: bool, max_risk: float = 1.0) -> SimpleNamespace:
     )
 
 
-def test_explore_clamps_12pct_learning_card_send_when_paper_gates_off():
-    """A learning card cannot send a live-intolerable % of NL — even gates-off."""
+def test_size_pct_nl_fills_the_percent_sent():
+    """A percent fills quantity. It is not clamped to a single-digit band."""
     card = "learn flush"
     params = {"card": card, "symbol": "AAPL", "size_pct_nl": 12.0}
     note = apply_size_pct_nl(
         params, net_liq=100_000.0, price=50.0, strategy="market_bracket"
     )
     assert note is not None
-    assert note.get("clamped") is True
-    assert note["raw_size_pct_nl"] == 12.0
-    assert note["size_pct_nl"] == MODE_SIZE_CEILING_EXPLORE
-    assert params["size_pct_nl"] == MODE_SIZE_CEILING_EXPLORE
-    lottery = qty_from_size_pct_nl(12.0, 100_000.0, 50.0)
-    assert params["quantity"] == qty_from_size_pct_nl(
-        MODE_SIZE_CEILING_EXPLORE, 100_000.0, 50.0
-    )
-    assert params["quantity"] < lottery
-    assert MODE_SIZE_CEILING_EXPLORE < 10
-    assert MODE_SIZE_CEILING_EXPLORE != 1.0
-    assert MODE_SIZE_CEILING_EXPLORE != 25.0
+    assert note.get("clamped") is not True
+    assert params["size_pct_nl"] == 12.0
+    assert params["quantity"] == qty_from_size_pct_nl(12.0, 100_000.0, 50.0)
+    assert MODE_SIZE_CEILING_EXPLORE == 100.0
 
 
-def test_explore_clamps_lottery_qty_without_size_pct_nl():
+def test_explicit_qty_is_not_rewritten():
     params = {"card": "learn flush", "symbol": "AAPL", "quantity": 240}
     note = apply_size_pct_nl(
         params, net_liq=100_000.0, price=50.0, strategy="market_bracket"
     )
-    assert note is not None
-    assert note.get("clamped") is True
-    assert params["quantity"] == qty_from_size_pct_nl(
-        MODE_SIZE_CEILING_EXPLORE, 100_000.0, 50.0
-    )
-    assert params["quantity"] < 240
+    assert note is None
+    assert params["quantity"] == 240
 
 
 @pytest.mark.asyncio
@@ -177,22 +165,24 @@ async def test_execute_ticket_explore_clamps_12pct_when_paper_gates_off(monkeypa
             "positions": [],
             "open_orders": [],
             "ibkr_live_quotes": {"AAPL": 50.0},
+            "session_range": {
+                "AAPL": {
+                    "open": 49.0,
+                    "high": 51.0,
+                    "low": 48.5,
+                    "last": 50.0,
+                    "n": 40,
+                }
+            },
+            "news_items": [{"symbol": "AAPL", "headline": "AAPL prints"}],
         },
     )
-    assert result.get("status") in ("ok", "blocked"), result
-    if result.get("status") == "blocked":
-        note = str(result.get("note") or "")
-        assert "mode_size" in note or "12" in note
-        assert sent == []
-        return
+    assert result.get("status") == "ok", result
     assert sent
     pct = float(sent[0]["params"]["size_pct_nl"])
     qty = int(sent[0]["params"]["quantity"])
-    assert pct <= MODE_SIZE_CEILING_EXPLORE + 1e-6
-    assert pct < 10
-    lottery = qty_from_size_pct_nl(12.0, 100_000.0, 50.0)
-    assert qty < lottery
-    assert qty == qty_from_size_pct_nl(pct, 100_000.0, 50.0)
+    assert pct == 12.0
+    assert qty == qty_from_size_pct_nl(12.0, 100_000.0, 50.0)
 
 
 def test_exploit_without_graduated_cards_does_not_widen():
@@ -206,12 +196,13 @@ def test_exploit_without_graduated_cards_does_not_widen():
         params, net_liq=100_000.0, price=50.0, strategy="market_bracket"
     )
     assert note is not None
-    assert note["size_pct_nl"] == MODE_SIZE_CEILING_EXPLORE
-    assert params["size_pct_nl"] == MODE_SIZE_CEILING_EXPLORE
+    assert note.get("clamped") is not True
+    assert params["size_pct_nl"] == 12.0
+    assert params["quantity"] == qty_from_size_pct_nl(12.0, 100_000.0, 50.0)
     out = apply_self_tune({"size_pct_nl": 12.0}, persist=True)
     assert out["status"] == "ok"
-    assert out["applied"]["size_pct_nl"] == MODE_SIZE_CEILING_EXPLORE
-    assert out["clamped"]["size_pct_nl"]["raw"] == 12.0
+    assert out["applied"]["size_pct_nl"] == 12.0
+    assert "size_pct_nl" not in (out.get("clamped") or {})
 
 
 
@@ -228,12 +219,10 @@ def test_self_tune_may_move_inside_the_band_not_only_down():
 def test_paper_start_does_not_restore_25pct_working_size():
     assert get_config().trading_mode == "paper"
     assert get_config().ibkr_port == 7497
-    assert working_size_ceiling() != 25.0
-    assert working_size_ceiling() < 10
+    assert working_size_ceiling() == 100.0
     assert working_size_ceiling() == MODE_SIZE_CEILING_EXPLORE
     ensure_immutable_floor(persist=True)
-    assert working_size_ceiling() != 25.0
-    assert working_size_ceiling() < 10
+    assert working_size_ceiling() == 100.0
     state = load_agent_state()
     assert state.get("size_pct_nl") not in (25, 25.0)
     paper = _floor_cfg(live=False, max_risk=1.0)
@@ -280,11 +269,10 @@ def test_live_start_repairs_gates_off(tmp_path, monkeypatch):
     assert working_size_ceiling() != 25.0
 
 
-def test_mode_size_ticket_error_rejects_unclamped_12pct():
+def test_mode_size_ticket_error_does_not_refuse_notional():
     raw = {"card": "learn", "size_pct_nl": 12.0, "quantity": 240}
     note = mode_size_ticket_error(raw, net_liq=100_000.0, price=50.0)
-    assert note
-    assert "mode_size" in note
+    assert note == ""
 
 
 def test_size_and_slots_stay_together_on_the_band():
@@ -368,7 +356,7 @@ def test_option_implied_units_are_premium_not_underlying_notional():
     right = implied_size_pct_nl(1, _PROD_NL, _PROD_PREMIUM, multiplier=100.0)
     assert wrong == pytest.approx(85.0746, rel=1e-4)
     assert right == pytest.approx(0.37313, rel=1e-3)
-    assert wrong > MODE_SIZE_CEILING_EXPLORE
+    assert wrong > right
     assert right < _SHADOW
 
     px, mult = option_size_mark(
@@ -454,7 +442,7 @@ def test_mode_size_does_not_veto_defined_risk_option_when_max_risk_off():
     assert params["quantity"] == _PROD_QTY
 
 
-def test_mode_size_still_rejects_lottery_stk_when_max_risk_is_on():
+def test_mode_size_does_not_refuse_lottery_stk_when_max_risk_is_on():
     from abcxauto.config import update_risk_config
 
     update_risk_config(max_risk_per_trade_pct=2.0, persist=True, _skip_clamp=True)
@@ -466,8 +454,26 @@ def test_mode_size_still_rejects_lottery_stk_when_max_risk_is_on():
         price=50.0,
         strategy="market_bracket",
     )
-    assert note
-    assert "mode_size" in note
+    assert note == ""
+    params = {"card": "learn", "symbol": "AAPL", "quantity": 240}
+    assert apply_size_pct_nl(
+        params, net_liq=100_000.0, price=50.0, strategy="market_bracket"
+    ) is None
+    assert params["quantity"] == 240
+
+
+def test_mode_size_does_not_refuse_avgo_share_count():
+    """88 shares is a cash question, not a notional-percent refuse."""
+    from abcxauto.config import update_risk_config
+
+    update_risk_config(max_risk_per_trade_pct=2.0, persist=True, _skip_clamp=True)
+    note = mode_size_ticket_error(
+        {"card": "avgo long", "quantity": 88},
+        net_liq=32_361.08,
+        price=359.40,
+        strategy="market_bracket",
+    )
+    assert note == ""
 
 
 @pytest.mark.asyncio
@@ -495,6 +501,16 @@ async def test_execute_ticket_named_vertical_not_blocked_by_size_pct_nl_shadow(
         "positions": [],
         "open_orders": [],
         "ibkr_live_quotes": {"SPY": _PROD_UNDERLYING},
+        "session_range": {
+            "SPY": {
+                "open": 560.0,
+                "high": 575.0,
+                "low": 555.0,
+                "last": _PROD_UNDERLYING,
+                "n": 40,
+            }
+        },
+        "news_items": [{"symbol": "SPY", "headline": "SPY prints"}],
     }
     begin_look(snap)
     record_look_tool(

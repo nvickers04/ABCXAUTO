@@ -18,9 +18,10 @@ def test_paper_stay_up_and_honor_park(monkeypatch):
     assert honor_park(session="regular") is False
     assert honor_park(session="premarket") is False
     assert honor_park(session="closed") is True
-    assert honor_park(session="postmarket") is True
+    assert honor_park(session="postmarket") is False
     assert paper_stay_up("regular") is True
     assert paper_stay_up("premarket") is True
+    assert paper_stay_up("postmarket") is True
     assert paper_stay_up("closed") is False
     monkeypatch.setattr(
         "abcxauto.config.Config.is_paper",
@@ -230,12 +231,16 @@ def test_live_poke_clears_tool_cache_skips_last_tick_stop_dist():
 
 
 def test_paper_rth_set_wake_writes_no_sit_clock(tmp_path, monkeypatch):
-    """RTH has no sit clock. set_wake in regular hours must not write grok_wake.json."""
+    """RTH has no code park. set_wake kind=park in regular must not write grok_wake.json."""
     from abcxauto.park_clock import load_alarm, set_wake
 
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     alarm = set_wake(wake_in_s=600, session="regular", flat=True, wake_if=["fill"])
     assert alarm.wake_at is None
+    assert load_alarm().wake_at is None
+    assert not (tmp_path / "wake.json").exists()
+    park = set_wake(wake_in_s=600, session="regular", kind="park")
+    assert park.wake_at is None
     assert load_alarm().wake_at is None
     assert not (tmp_path / "wake.json").exists()
 
@@ -266,6 +271,8 @@ def test_set_wake_offered_in_no_session():
 
     for sess in ("regular", "premarket", "postmarket", "closed", ""):
         assert set_wake_offered(session=sess) is False, sess
+        assert set_wake_offered(session=sess, kind="park") is False, sess
+        assert set_wake_offered(session=sess, kind="nap") is False, sess
 
 
 def test_set_wake_live_premarket_writes_no_sit_clock(tmp_path, monkeypatch):
@@ -326,6 +333,53 @@ def test_book_move_wakes_on_mark_bucket(monkeypatch):
     assert "book_move" in kinds
 
 
+def _nvda_manage_lot(*, last: float, stop: float | None = 216.9) -> dict:
+    row = {
+        "symbol": "NVDA",
+        "quantity": 11,
+        "avg": 219.13,
+        "last": last,
+    }
+    if stop is not None:
+        row["stop"] = stop
+    return row
+
+
+def test_lot_r_hold_to_r05_is_book_move():
+    """+0.5R is a book fact. Not a sit clock."""
+    from abcxauto.park_clock import book_fingerprint, events_from_diff
+
+    hold = book_fingerprint({"positions": [_nvda_manage_lot(last=219.16)]})
+    assert hold["lot_r"] == ("NVDA:hold",)
+    crossed = book_fingerprint({"positions": [_nvda_manage_lot(last=220.25)]})
+    assert crossed["lot_r"] == ("NVDA:r0.5",)
+    kinds = {e.kind for e in events_from_diff(hold, crossed)}
+    assert "book_move" in kinds
+
+
+def test_lot_r_near_stop_is_book_move():
+    """Halfway to the stop is a book fact. Not a sit clock."""
+    from abcxauto.park_clock import book_fingerprint, events_from_diff
+
+    hold = book_fingerprint({"positions": [_nvda_manage_lot(last=219.16)]})
+    near = book_fingerprint({"positions": [_nvda_manage_lot(last=218.0)]})
+    assert near["lot_r"] == ("NVDA:near_stop",)
+    kinds = {e.kind for e in events_from_diff(hold, near)}
+    assert "book_move" in kinds
+
+
+def test_lot_r_hold_tick_is_not_book_move():
+    """A 0.2% last tick inside hold is not book_move from lot_r."""
+    from abcxauto.park_clock import book_fingerprint, events_from_diff
+
+    a = book_fingerprint({"positions": [_nvda_manage_lot(last=219.16)]})
+    b = book_fingerprint({"positions": [_nvda_manage_lot(last=219.16 * 1.002)]})
+    assert a["lot_r"] == ("NVDA:hold",)
+    assert b["lot_r"] == ("NVDA:hold",)
+    kinds = {e.kind for e in events_from_diff(a, b)}
+    assert "book_move" not in kinds
+
+
 def test_first_snap_is_not_a_flood():
     b = book_fingerprint({
         "fills": [{"symbol": "QQQ", "exec_id": "e1"}],
@@ -358,6 +412,7 @@ def test_clerk_look_s_stay_up_is_zero(monkeypatch):
     assert clerk_look_s(flat=True, session="regular", next_look_s=None) == 0.0
     assert clerk_look_s(flat=False, session="regular", next_look_s=120) == 0.0
     assert clerk_look_s(flat=True, session="premarket", minutes_to_open=45) == 0.0
+    assert clerk_look_s(flat=True, session="postmarket") == 0.0
 
 
 
@@ -406,6 +461,77 @@ def test_clerk_look_s_overnight_closed_still_parks(monkeypatch):
     ) == (10 * 60 - PREMARKET_MINUTES_TO_OPEN) * 60.0
 
 
+def test_clerk_look_s_closed_after_bell_parks_until_premarket(monkeypatch):
+    """After today's open, minutes_to_rth_open is None — do not flatten to 90s."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from abcxauto.park_clock import clerk_look_s
+
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    et = ZoneInfo("America/New_York")
+    now = datetime(2026, 9, 22, 21, 0, tzinfo=et)
+    nxt = datetime(2026, 9, 23, 4, 0, tzinfo=et)
+    monkeypatch.setattr(
+        "abcxauto.marketdata.market_hours.next_premarket_open",
+        lambda *_a, **_k: nxt,
+    )
+    monkeypatch.setattr(
+        "abcxauto.park_clock._utc_now",
+        lambda: now.astimezone(timezone.utc),
+    )
+    sec = clerk_look_s(session="closed", minutes_to_open=None, flat=True)
+    assert abs(sec - (nxt - now).total_seconds()) < 2.0
+    # Flat vs open book must not collapse the overnight park.
+    sec_open = clerk_look_s(session="closed", minutes_to_open=None, flat=False)
+    assert abs(sec_open - sec) < 2.0
+
+
+def test_honor_park_blank_after_close_still_parks(monkeypatch):
+    """Empty snap label after the close must still honor overnight park."""
+    from abcxauto.park_clock import honor_park
+
+    monkeypatch.setattr(
+        "abcxauto.park_clock.et_minutes_to_rth_open",
+        lambda **_k: None,
+    )
+    monkeypatch.setattr(
+        "abcxauto.marketdata.market_hours.session_of",
+        lambda *_a, **_k: "closed",
+    )
+    assert honor_park(session="") is True
+    monkeypatch.setattr(
+        "abcxauto.marketdata.market_hours.session_of",
+        lambda *_a, **_k: "postmarket",
+    )
+    assert honor_park(session="") is False
+
+
+def test_ensure_next_look_closed_after_bell_writes_premarket_wake(
+    tmp_path, monkeypatch
+):
+    from abcxauto.park_clock import _parse_iso, _utc_now, ensure_next_look, load_alarm
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.delenv("ABCXAUTO_DEFAULT_LOOK_S", raising=False)
+    monkeypatch.setattr(
+        "abcxauto.park_clock._seconds_until_next_premarket",
+        lambda **_k: 7 * 3600.0,
+    )
+    monkeypatch.setattr(
+        "abcxauto.park_clock.et_minutes_to_rth_open",
+        lambda **_k: None,
+    )
+    alarm = ensure_next_look(session="closed", flat=True, minutes_to_open=None)
+    assert alarm.wake_at
+    at = _parse_iso(alarm.wake_at or "")
+    assert at is not None
+    remaining = (at - _utc_now()).total_seconds()
+    # Wake near next 04:00 ET, not a 90s flatten.
+    assert 7 * 3600 - 30 <= remaining <= 7 * 3600 + 30
+    assert load_alarm().wake_at == alarm.wake_at
+
+
 def test_ensure_next_look_premarket_clears_a_leftover_clock(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
@@ -420,6 +546,76 @@ def test_ensure_next_look_premarket_clears_a_leftover_clock(tmp_path, monkeypatc
         flat=True,
         minutes_to_open=5,
     )
+    assert alarm.wake_at is None
+    assert not (tmp_path / "wake.json").exists()
+
+
+def test_ensure_next_look_postmarket_clears_a_leftover_park(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.park_clock import GrokAlarm, ensure_next_look, save_alarm
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+    save_alarm(GrokAlarm(wake_at=soon, set_at=soon, session="closed", kind="park"))
+    alarm = ensure_next_look(session="postmarket", flat=True)
+    assert alarm.wake_at is None
+    assert not (tmp_path / "wake.json").exists()
+
+
+def test_set_wake_nap_stay_up_writes_no_sit_clock(tmp_path, monkeypatch):
+    """kind=nap is gone. Stay-up must not write grok_wake.json."""
+    from abcxauto.park_clock import load_alarm, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    for sess in ("regular", "premarket", "postmarket"):
+        alarm = set_wake(wake_in_s=120, session=sess, kind="nap")
+        assert alarm.wake_at is None, sess
+        assert load_alarm().wake_at is None
+        assert not (tmp_path / "wake.json").exists()
+
+
+def test_set_wake_nap_closed_is_refused(tmp_path, monkeypatch):
+    from abcxauto.park_clock import alarm_kind, load_alarm, set_wake
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    park = set_wake(wake_in_s=600, session="closed", kind="park")
+    assert park.wake_at
+    out = set_wake(wake_in_s=90, session="closed", kind="nap")
+    assert alarm_kind(out) == "park"
+    assert load_alarm().wake_at == park.wake_at
+    assert load_alarm().kind == "park"
+
+
+def test_load_save_kind_roundtrip(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.park_clock import GrokAlarm, alarm_kind, load_alarm, save_alarm
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=90)).isoformat()
+    save_alarm(GrokAlarm(wake_at=soon, set_at=soon, session="regular", kind="nap"))
+    got = load_alarm()
+    assert got.kind == "nap"
+    assert alarm_kind(got) == "nap"
+    save_alarm(GrokAlarm(wake_at=soon, set_at=soon, session="closed", kind="park"))
+    got = load_alarm()
+    assert got.kind == "park"
+    assert alarm_kind(got) == "park"
+    save_alarm(GrokAlarm(wake_at=soon, set_at=soon, session="closed", kind=""))
+    assert load_alarm().kind == ""
+    assert alarm_kind(load_alarm()) == "park"
+
+
+def test_ensure_next_look_clears_a_leftover_nap_on_stay_up(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.park_clock import GrokAlarm, ensure_next_look, save_alarm
+
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=40)).isoformat()
+    save_alarm(GrokAlarm(wake_at=soon, set_at=soon, session="premarket", kind="nap"))
+    alarm = ensure_next_look(session="premarket", flat=False, minutes_to_open=75)
     assert alarm.wake_at is None
     assert not (tmp_path / "wake.json").exists()
 
@@ -518,6 +714,31 @@ def test_begin_run_premarket_writes_no_sit_clock(tmp_path, monkeypatch):
     ts.begin_run()
     assert load_alarm().wake_at is None
     assert not (tmp_path / "wake.json").exists()
+
+
+def test_leftover_relook_s_defaults_and_env(monkeypatch):
+    from abcxauto.park_clock import LEFTOVER_RELOOK_S, leftover_relook_s
+
+    monkeypatch.delenv("ABCXAUTO_LEFTOVER_RELOOK_S", raising=False)
+    assert leftover_relook_s() == LEFTOVER_RELOOK_S
+    monkeypatch.setenv("ABCXAUTO_LEFTOVER_RELOOK_S", "0.05")
+    assert leftover_relook_s() == 0.05
+    monkeypatch.setenv("ABCXAUTO_LEFTOVER_RELOOK_S", "nope")
+    assert leftover_relook_s() == LEFTOVER_RELOOK_S
+
+
+def test_researched_leftover_relook_s_defaults_and_env(monkeypatch):
+    from abcxauto.park_clock import (
+        RESEARCHED_LEFTOVER_RELOOK_S,
+        researched_leftover_relook_s,
+    )
+
+    monkeypatch.delenv("ABCXAUTO_RESEARCHED_LEFTOVER_RELOOK_S", raising=False)
+    assert researched_leftover_relook_s() == RESEARCHED_LEFTOVER_RELOOK_S
+    monkeypatch.setenv("ABCXAUTO_RESEARCHED_LEFTOVER_RELOOK_S", "0.05")
+    assert researched_leftover_relook_s() == 0.05
+    monkeypatch.setenv("ABCXAUTO_RESEARCHED_LEFTOVER_RELOOK_S", "nope")
+    assert researched_leftover_relook_s() == RESEARCHED_LEFTOVER_RELOOK_S
 
 
 def test_clamp_next_look_s_floors_and_caps():

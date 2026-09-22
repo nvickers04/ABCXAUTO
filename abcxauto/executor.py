@@ -581,7 +581,19 @@ def _dispatch_succeeded(result: Dict[str, Any]) -> bool:
         return False
     if result.get("success") is False:
         return False
+    # Bracket / protect results report cover explicitly. Keep whatever value
+    # the gateway returned — never treat a naked or modify-error fill as ok,
+    # and never invent "unprotected" when the key is absent (plain LMT/MKT).
+    if "protection" in result and result.get("protection") != "protected":
+        return False
     return True
+
+
+def _dispatch_journal_payload(result: Any) -> Dict[str, Any]:
+    """Copy the gateway result for the dispatch record; do not rewrite protection."""
+    if isinstance(result, dict):
+        return dict(result)
+    return {"raw": result}
 
 
 async def _verify_riskless_combo_cap(
@@ -778,8 +790,8 @@ async def execute_proposal(
         logger.debug("pcs fill-λ pre-send failed", exc_info=True)
     result = await method(**kwargs)
     logger.info(f"Proposal #{proposal.id} result: {result}")
-    ok = _dispatch_succeeded(result)
-    journal_result = dict(result) if isinstance(result, dict) else {"raw": result}
+    journal_result = _dispatch_journal_payload(result)
+    ok = _dispatch_succeeded(journal_result)
     payload: Dict[str, Any] = journal_result
     marks: Optional[dict] = None
     try:
@@ -792,7 +804,7 @@ async def execute_proposal(
             result=journal_result,
             ok=ok,
         )
-        payload = dict(journal_result)
+        payload = _dispatch_journal_payload(journal_result)
         payload["send_marks"] = public_marks(marks)
     except Exception:
         logger.debug("send_marks build failed", exc_info=True)

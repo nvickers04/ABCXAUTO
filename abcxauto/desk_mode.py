@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -26,6 +27,24 @@ RESEARCH_SESSIONS = frozenset({"premarket", "postmarket", "closed"})
 KNOWN_SESSIONS = frozenset({RTH_SESSION}) | RESEARCH_SESSIONS
 
 REASON_RESEARCH_NO_SEND = "research_no_send"
+REASON_RESEARCH_THIN = "research_thin"
+_RESEARCH_THIN_NOTE = (
+    "research_thin: new risk needs this-look candles and news|web on the name"
+)
+_OCC_TICKET = re.compile(r"^([A-Z]{1,6})\d{6}[CP]\d{8}$")
+_OPTION_READ_STRATS = frozenset({
+    "vertical_spread",
+    "iron_condor",
+    "iron_butterfly",
+    "straddle",
+    "strangle",
+    "butterfly",
+    "calendar_spread",
+    "diagonal_spread",
+    "cash_secured_put",
+    "covered_call",
+})
+_NEWS_WEB_ONLY_STRATS = frozenset({"bracket", "market_bracket", "oca"})
 
 RESEARCH_TOOLS = frozenset({
     "news",
@@ -45,6 +64,8 @@ BRIEF_STALE_S = 18 * 3600.0
 WEB_TIMEOUT_S = 8.0
 WEB_MAX_BYTES = 200_000
 WEB_TEXT_CAP = 2_000
+WEB_SEARCH_CAP = 5
+WEB_SEARCH_TIMEOUT_S = 12.0
 THIS_LOOK_NEED = (
     "this look has no gathered color — scan|news|candles|web|odds|recall"
 )
@@ -61,6 +82,10 @@ _PRIOR_SESSION_KEYS = (
     "symbols",
     "facts",
     "uncertainties",
+)
+_MID_GATHER = re.compile(
+    r"^(pulling|checking|gathering|fetching|looking up)\b",
+    re.I,
 )
 # Capability leftovers only — not a trading lecture.
 _RESEARCH_OPEN: tuple[tuple[str, str], ...] = (
@@ -115,45 +140,9 @@ def is_research_session(session: str = "") -> bool:
 
 
 def research_keep_looking(session: str = "") -> bool:
-    """True when a finished research look must re-enter, not wait for a book poke.
-
-    Research has no sends, so fill / order_change never arrive. A looking
-    premarket session keeps looking (news / scan / web, overwrite the brief)
-    until RTH roll, operator stop, or an overnight park that still applies.
-    RTH with open lots or working orders still waits for a real poke.
-    Flat paper RTH with nothing to manage waits for a real event —
-    not this path. Closed / postmarket stay parked. Blank labels do not clock-fill into a mill — the host passes the
-    resolved snap label.
-    """
-    raw = str(session or "").strip().lower()
-    if raw in ("", "unknown"):
-        return False
-    sess = desk_session(raw)
-    if sess == RTH_SESSION or sess not in RESEARCH_SESSIONS:
-        return False
-    try:
-        from abcxauto.thin_rth_kill_look import kill_look_enabled
-
-        # Kill-window AH is one-shot, not a keep-looking mill.
-        if kill_look_enabled():
-            return False
-    except Exception:
-        pass
-    try:
-        from abcxauto.park_clock import honor_park
-
-        if honor_park(session=sess):
-            return False
-    except Exception:
-        return False
-    try:
-        from abcxauto.research_budget import brief_loop_halted
-
-        if brief_loop_halted():
-            return False
-    except Exception:
-        pass
-    return True
+    """Mill is dead; after words-only wait for fill / order_change / unprotected / book event / poke."""
+    _ = session
+    return False
 
 
 def _snap_is_known_flat_no_manage(snap: dict | None) -> bool:
@@ -748,6 +737,203 @@ def this_look_research(
     }
 
 
+def new_risk_research_error(
+    symbol: str,
+    snap: dict[str, Any] | None,
+    *,
+    strat: str = "",
+) -> str:
+    """Empty = may go. Non-empty = this look has not researched the ticket name."""
+    blob = snap if isinstance(snap, dict) else {}
+    name = _ticket_research_name(symbol)
+    if not name:
+        return ""
+    if _structure_this_look(blob, name) and _read_this_look(blob, name, strat):
+        return ""
+    return _RESEARCH_THIN_NOTE
+
+
+def _ticket_research_name(symbol: str) -> str:
+    raw = str(symbol or "").upper().strip()
+    if not raw:
+        return ""
+    compact = raw.replace(" ", "")
+    m = _OCC_TICKET.match(compact)
+    return m.group(1) if m else raw
+
+
+def _bag_view(snap: dict[str, Any] | None) -> dict[str, Any]:
+    blob = snap if isinstance(snap, dict) else {}
+    bag = blob.get(_SNAP_BAG)
+    if isinstance(bag, dict):
+        return bag
+    return {"facts": [], "symbols": [], "uncertainties": []}
+
+
+def _text_starts_with_sym(text: str, sym: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw or not sym:
+        return False
+    up = raw.upper()
+    if not up.startswith(sym):
+        return False
+    if len(up) == len(sym):
+        return True
+    return not up[len(sym)].isalnum()
+
+
+def _field_is_sym(row: dict[str, Any], sym: str) -> bool:
+    for key in ("symbol", "ticker", "underlying"):
+        raw = str(row.get(key) or "").upper().strip()
+        if not raw:
+            continue
+        if raw == sym or _ticket_research_name(raw) == sym:
+            return True
+    return False
+
+
+def _fact_names_sym(row: dict[str, Any], sym: str) -> bool:
+    if _field_is_sym(row, sym):
+        return True
+    text = str(row.get("text") or "")
+    if _text_starts_with_sym(text, sym):
+        return True
+    for part in text.split("|"):
+        if _text_starts_with_sym(part.strip(), sym):
+            return True
+    return False
+
+
+def _scan_stashed_last(row: dict[str, Any]) -> bool:
+    if str(row.get("print") or "") == "live_open":
+        return True
+    return str(row.get("source") or "").strip().lower() == "scan"
+
+
+def _finite_px(raw: Any) -> bool:
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(n)
+
+
+def _bar_structure_row(row: dict[str, Any]) -> bool:
+    if _scan_stashed_last(row):
+        return False
+    for key in ("open", "high", "low", "last"):
+        if not _finite_px(row.get(key)):
+            return False
+    try:
+        n = int(row.get("n"))
+    except (TypeError, ValueError):
+        return False
+    return n >= 1
+
+
+def _structure_this_look(snap: dict[str, Any], sym: str) -> bool:
+    store = snap.get("session_range")
+    if isinstance(store, dict):
+        row = store.get(sym)
+        if row is None:
+            for key, val in store.items():
+                if str(key).upper().strip() == sym:
+                    row = val
+                    break
+        if isinstance(row, dict) and _bar_structure_row(row):
+            return True
+    for fact in _bag_view(snap).get("facts") or []:
+        if not isinstance(fact, dict):
+            continue
+        if str(fact.get("source") or "") == "candles" and _fact_names_sym(fact, sym):
+            return True
+    return False
+
+
+def _news_this_look(snap: dict[str, Any], sym: str) -> bool:
+    items = snap.get("news_items")
+    if not isinstance(items, list):
+        return False
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if _field_is_sym(it, sym):
+            return True
+        for key in ("headline", "title", "text"):
+            if _text_starts_with_sym(str(it.get(key) or ""), sym):
+                return True
+    return False
+
+
+def _web_ok(snap: dict[str, Any]) -> bool:
+    page = snap.get("research_web")
+    if not isinstance(page, dict):
+        return False
+    if str(page.get("error") or "").strip():
+        return False
+    return bool(
+        str(page.get("url") or "").strip()
+        and str(page.get("title") or "").strip()
+        and str(page.get("text") or "").strip()
+    )
+
+
+def _option_read_strat(strat: str) -> bool:
+    st = str(strat or "").strip().lower()
+    return st in _OPTION_READ_STRATS or "option" in st
+
+
+def _option_payload_ok(row: Any, sym: str) -> bool:
+    if not isinstance(row, dict) or row.get("error"):
+        return False
+    if _field_is_sym(row, sym):
+        return True
+    return False
+
+
+def _option_read_present(snap: dict[str, Any], sym: str) -> bool:
+    facts = snap.get("option_facts")
+    if isinstance(facts, dict):
+        facts = facts.get("facts")
+    if isinstance(facts, list):
+        for row in facts:
+            if _option_payload_ok(row, sym):
+                return True
+    chains = snap.get("option_chains")
+    if isinstance(chains, dict):
+        for key, row in chains.items():
+            if str(key).upper().strip() == sym and isinstance(row, dict) and not row.get("error"):
+                return True
+            if _option_payload_ok(row, sym):
+                return True
+    chain = snap.get("option_chain")
+    if _option_payload_ok(chain, sym):
+        return True
+    if (
+        isinstance(chain, dict)
+        and not chain.get("error")
+        and not str(chain.get("symbol") or chain.get("underlying") or "").strip()
+        and (chain.get("expirations") or chain.get("strikes") or chain.get("n_strikes"))
+    ):
+        return True
+    for fact in _bag_view(snap).get("facts") or []:
+        if not isinstance(fact, dict):
+            continue
+        src = str(fact.get("source") or "")
+        if src in {"option_facts", "option_chain"} and _fact_names_sym(fact, sym):
+            return True
+    return False
+
+
+def _read_this_look(snap: dict[str, Any], sym: str, strat: str) -> bool:
+    if _news_this_look(snap, sym) or _web_ok(snap):
+        return True
+    st = str(strat or "").strip().lower()
+    if st in _NEWS_WEB_ONLY_STRATS:
+        return False
+    return _option_read_strat(st) and _option_read_present(snap, sym)
+
+
 def _prior_session_stub(
     brief: dict[str, Any],
     *,
@@ -891,25 +1077,74 @@ def _as_dict(payload: Any) -> dict[str, Any]:
     return {"text": str(payload)[:400]}
 
 
+def _news_fact_line(payload: dict[str, Any]) -> str:
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    heads: list[str] = []
+    seen: set[str] = set()
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        hl = str(it.get("headline") or "").strip()
+        if not hl:
+            continue
+        sym = str(it.get("symbol") or "").strip().upper()
+        key = sym or hl[:24]
+        if key in seen:
+            continue
+        seen.add(key)
+        heads.append(f"{sym + ': ' if sym else ''}{hl}"[:90])
+        if len(heads) >= 6:
+            break
+    if heads:
+        return "; ".join(heads)
+    return str(payload.get("error") or payload.get("note") or "")[:200]
+
+
+def _candle_bar_bit(row: dict[str, Any]) -> str:
+    sym = str(row.get("symbol") or "").strip().upper()
+    sess = row.get("session") if isinstance(row.get("session"), dict) else {}
+    bars = row.get("bars") if isinstance(row.get("bars"), list) else []
+    last = bars[-1] if bars and isinstance(bars[-1], dict) else {}
+    px = sess.get("last")
+    if px is None:
+        px = last.get("c")
+    if px is None:
+        return ""
+    bit = f"{sym} {px}" if sym else f"{px}"
+    vs = sess.get("vs_open")
+    if vs is not None:
+        bit += f" vs_open={vs}"
+    return bit
+
+
+def _candle_fact_line(payload: dict[str, Any]) -> str:
+    series = payload.get("series") if isinstance(payload.get("series"), list) else []
+    bits = [_candle_bar_bit(row) for row in series[:8] if isinstance(row, dict)]
+    bits = [b for b in bits if b]
+    src = str(payload.get("source") or "ibkr")
+    if bits:
+        return f"{' | '.join(bits)} src={src}"
+    bars = payload.get("bars") if isinstance(payload.get("bars"), list) else []
+    if not bars:
+        return ""
+    sym = str(payload.get("symbol") or "bars").strip()
+    last = bars[-1] if isinstance(bars[-1], dict) else {}
+    px = last.get("c")
+    if px is None:
+        return f"{sym} n={len(bars)} src={src} use={payload.get('use') or ''}".strip()
+    return f"{sym} {px} n={len(bars)} src={src}".strip()
+
+
 def _fact_line(source: str, payload: dict[str, Any], args: dict[str, Any] | None) -> str:
     src = str(source or "").strip() or "tool"
     if src == "news":
-        items = payload.get("items") if isinstance(payload.get("items"), list) else []
-        heads = []
-        for it in items[:4]:
-            if not isinstance(it, dict):
-                continue
-            hl = str(it.get("headline") or "").strip()
-            sym = str(it.get("symbol") or "").strip()
-            if hl:
-                heads.append(f"{sym + ': ' if sym else ''}{hl}"[:160])
-        if heads:
-            return "; ".join(heads)
-        return str(payload.get("error") or payload.get("note") or "news fetched")[:200]
+        return _news_fact_line(payload)
     if src == "scan":
         rows = payload.get("rows") or payload.get("hits") or []
         n = len(rows) if isinstance(rows, list) else 0
         deepest = ""
+        named: list[str] = []
+        skipped = 0
         if isinstance(rows, list):
             best = None
             best_mag = -1.0
@@ -922,15 +1157,31 @@ def _fact_line(source: str, payload: dict[str, Any], args: dict[str, Any] | None
                 try:
                     mag = abs(float(gap))
                 except (TypeError, ValueError):
-                    continue
-                if mag > best_mag:
+                    mag = None
+                if mag is not None and mag > best_mag:
                     best_mag = mag
                     best = row
+                skip = str(row.get("skip_class") or "").strip()
+                if skip:
+                    skipped += 1
+                    continue
+                if len(named) >= 5:
+                    continue
+                sym = str(row.get("symbol") or "").strip()
+                if not sym:
+                    continue
+                bit = sym
+                last = row.get("last")
+                if last is not None:
+                    bit += f" {last}"
+                if mag is not None:
+                    bit += f" gap={gap}"
+                named.append(bit)
             if best is not None:
-                deepest = (
-                    f" deepest={best.get('symbol')} {best_mag:g}%"
-                )
-        return f"hits={n}{deepest} src={payload.get('source') or 'scan'}"
+                deepest = f" deepest={best.get('symbol')} {best_mag:g}%"
+        names = (" " + " ".join(named)) if named else ""
+        skip_bit = f" skip={skipped}" if skipped else ""
+        return f"hits={n}{deepest}{names}{skip_bit} src={payload.get('source') or 'scan'}"
     if src == "option_facts":
         facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
         n = len(facts) if isinstance(facts, list) else 0
@@ -942,19 +1193,25 @@ def _fact_line(source: str, payload: dict[str, Any], args: dict[str, Any] | None
         bit = f" query={q}" if q else ""
         return f"implied-prob events n={n}{bit} (not send geometry)"
     if src == "candles":
-        bars = payload.get("bars") if isinstance(payload.get("bars"), list) else []
-        n = len(bars)
-        return (
-            f"{payload.get('symbol') or 'bars'} n={n} "
-            f"src={payload.get('source') or 'candles'} "
-            f"use={payload.get('use') or ''}"
-        ).strip()
+        return _candle_fact_line(payload)
     if src == "web":
-        title = str(payload.get("title") or "").strip()
-        url = str(payload.get("url") or (args or {}).get("url") or "").strip()
         err = str(payload.get("error") or "").strip()
         if err:
             return f"web error {err}"[:200]
+        hits = payload.get("results")
+        if isinstance(hits, list) and hits:
+            titles = []
+            for row in hits[:3]:
+                if not isinstance(row, dict):
+                    continue
+                bit = str(row.get("title") or "").strip()
+                if bit:
+                    titles.append(bit)
+            q = str(payload.get("query") or (args or {}).get("query") or "").strip()
+            head = f"web search {q}: " if q else "web search: "
+            return (head + "; ".join(titles))[:220]
+        title = str(payload.get("title") or "").strip()
+        url = str(payload.get("url") or (args or {}).get("url") or "").strip()
         return f"{title or 'page'} {url}".strip()[:220]
     text = str(payload.get("text") or payload.get("note") or payload.get("error") or src)
     return text[:200]
@@ -976,6 +1233,9 @@ def _uncertainty_for(source: str, payload: dict[str, Any]) -> str | None:
             return "candles missed IBKR hist and live 5s"
         return None
     if src == "web":
+        where = str(payload.get("where") or "").strip().lower()
+        if where in ("x", "both"):
+            return "X posts and web snippets are color, not a live trigger"
         return "web fetch is a public page snippet, not a live trigger"
     return None
 
@@ -1007,6 +1267,176 @@ def note_research_tool(
             uns.append(note)
 
 
+def _px(raw: Any) -> float | None:
+    if isinstance(raw, dict):
+        raw = raw.get("last") if raw.get("last") is not None else raw.get("mid")
+    try:
+        px = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return px if px > 0 else None
+
+
+def _as_quote_map(snap: dict[str, Any] | None, world: Any) -> dict[str, float]:
+    qmap: dict[str, float] = {}
+    blobs: list[Any] = []
+    lists: list[Any] = []
+    if world is not None:
+        blobs.append(getattr(world, "ibkr_live_quotes", None))
+        lists.append(getattr(world, "quotes", None))
+        book = getattr(world, "book", None)
+        if isinstance(book, dict):
+            lists.append(book.get("quotes"))
+    if isinstance(snap, dict):
+        blobs.append(snap.get("ibkr_live_quotes"))
+        lists.append(snap.get("quotes"))
+    for blob in blobs:
+        if not isinstance(blob, dict):
+            continue
+        for key, raw in blob.items():
+            px = _px(raw)
+            if px is None:
+                continue
+            name = str(key).upper().strip()
+            if name:
+                qmap[name] = px
+    for rows in lists:
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("symbol") or "").upper().strip()
+            px = _px(row)
+            if name and px is not None:
+                qmap[name] = px
+    return qmap
+
+
+def _dict_rows(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    return [row for row in raw if isinstance(row, dict)]
+
+
+def _lot_rows(snap: dict[str, Any] | None, world: Any) -> list[dict[str, Any]]:
+    if world is not None:
+        rows = _dict_rows(getattr(world, "positions", None))
+        if rows:
+            return rows
+    if isinstance(snap, dict):
+        return _dict_rows(snap.get("positions"))
+    return []
+
+
+def _working_rows(snap: dict[str, Any] | None, world: Any) -> list[dict[str, Any]]:
+    if world is not None:
+        rows = _dict_rows(getattr(world, "working_orders", None))
+        if rows:
+            return rows
+    if isinstance(snap, dict):
+        return _dict_rows(snap.get("working_orders"))
+    return []
+
+
+def _mark_fact_rows(
+    snap: dict[str, Any] | None,
+    world: Any,
+    bag: dict[str, Any],
+) -> list[dict[str, str]]:
+    from abcxauto.world_state import allocation_facts, allocation_line
+
+    qmap = _as_quote_map(snap, world)
+    lots = _lot_rows(snap, world)
+    cash = None
+    nl = None
+    if world is not None:
+        nl = getattr(world, "net_liquidation", None)
+        port = getattr(world, "portfolio_risk", None)
+        if isinstance(port, dict):
+            cap = port.get("capital_liquidity") if isinstance(port.get("capital_liquidity"), dict) else {}
+            cash = cap.get("total_cash")
+    if cash is None and isinstance(snap, dict):
+        cap = snap.get("capital_liquidity") if isinstance(snap.get("capital_liquidity"), dict) else {}
+        cash = cap.get("total_cash")
+        if nl is None:
+            nl = snap.get("net_liquidation") or snap.get("nl")
+    alloc = allocation_facts(
+        lots,
+        net_liq=nl,
+        total_cash=cash,
+        quotes=qmap,
+        orders=_working_rows(snap, world),
+    )
+    for lot in alloc.get("lots") or []:
+        if isinstance(lot, dict):
+            _add_symbol(bag, lot.get("symbol"))
+    held = {
+        str(lot.get("symbol") or "").upper()
+        for lot in (alloc.get("lots") or [])
+        if isinstance(lot, dict) and lot.get("symbol")
+    }
+    rows: list[dict[str, str]] = []
+    line = allocation_line(alloc)
+    if line:
+        rows.append({"source": "marks", "text": line})
+    exits: list[str] = []
+    for order in _working_rows(snap, world)[:12]:
+        typ = str(order.get("type") or "").upper()
+        role = str(order.get("role") or "").lower()
+        if typ not in {"STP", "LMT"} and role != "exit":
+            continue
+        sym = str(order.get("symbol") or "").upper().strip()
+        if not sym:
+            continue
+        _add_symbol(bag, sym)
+        if typ == "STP" or order.get("stop") is not None:
+            px = order.get("stop")
+            if px is not None:
+                exits.append(f"{sym} stp {px}")
+                continue
+        if typ == "LMT" or order.get("lmt") is not None:
+            px = order.get("lmt")
+            if px is not None:
+                exits.append(f"{sym} tgt {px}")
+    if exits:
+        rows.append({"source": "marks", "text": "exits " + " / ".join(exits[:8])})
+    tape: list[str] = []
+    for name in ("SPY", "QQQ", "IWM", "VIX"):
+        if name in qmap and name not in held:
+            tape.append(f"{name} {qmap[name]}")
+    if tape:
+        rows.append({"source": "marks", "text": "tape " + " ".join(tape)})
+    return rows
+
+
+def _spoken_conclusion(turn: Any) -> str:
+    text = str(getattr(turn, "text", None) or "").strip()
+    if not text:
+        act = getattr(turn, "last_act", None)
+        if isinstance(act, dict):
+            text = str(act.get("rationale") or "").strip()
+    if not text:
+        return ""
+    paras = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
+    pick = paras[-1] if paras else text
+    first = pick.splitlines()[0].strip() if pick else ""
+    if _MID_GATHER.match(first):
+        return ""
+    if re.search(r"\b(pulling|gathering|fetching)\b", pick, re.I) and len(pick) < 280:
+        return ""
+    if pick.endswith("...") and len(pick) < 180:
+        return ""
+    return pick[:400]
+def _marks_conclusion(marks: list[dict[str, str]], session: str) -> str:
+    bits = [str(row.get("text") or "") for row in marks if row.get("text")]
+    if not bits:
+        return ""
+    sess = str(session or "").strip()
+    prefix = f"no spoken conclude session={sess}. " if sess else "no spoken conclude. "
+    return (prefix + " ".join(bits))[:400]
+
+
 def write_research_brief(
     *,
     session: str = "",
@@ -1019,12 +1449,10 @@ def write_research_brief(
 ) -> dict[str, Any]:
     """Overwrite ``data/state/research_brief.json``. Gathered color only.
 
-    Premarket / AH / closed only. RTH web/news/scan are COLOR on the look;
-    they do not rebuild this brief. No expectancy, no tickets.
+    RTH and research sessions write. COLOR, never a trigger.
+    No expectancy, no tickets.
     """
     sess = desk_session(session)
-    if sess == RTH_SESSION:
-        return {}
     bag = _bag(snap)
     if world is not None:
         for pos in getattr(world, "positions", None) or []:
@@ -1040,11 +1468,14 @@ def write_research_brief(
                 _add_symbol(bag, row.get("symbol"))
         for raw in snap.get("scan_fetched") or []:
             _add_symbol(bag, raw)
-    facts = list(bag.get("facts") or [])[:FACT_CAP]
+    marks = _mark_fact_rows(snap, world, bag)
+    facts = (marks + list(bag.get("facts") or []))[:FACT_CAP]
     uns = list(bag.get("uncertainties") or [])
     if not facts:
         if _NOTHING_GATHERED not in uns:
             uns.append(_NOTHING_GATHERED)
+    spoken = _spoken_conclusion(turn)
+    conclusion = spoken or _marks_conclusion(marks, sess)
     payload = {
         "as_of": _iso(now),
         "session": sess,
@@ -1054,6 +1485,8 @@ def write_research_brief(
         "uncertainties": uns[:12],
         "tool_trace": list(getattr(turn, "tool_trace", None) or [])[:24],
     }
+    if conclusion:
+        payload["conclusion"] = conclusion
     try:
         from abcxauto.research_budget import stamp_brief_lineage
 
@@ -1124,6 +1557,9 @@ def rth_research_color(
     if named:
         bits.append(" ".join(named) + ".")
     bits.append(f"facts={len(facts)}.")
+    conclusion = str(brief.get("conclusion") or "").strip()
+    if conclusion:
+        bits.append(conclusion[:200])
     return " ".join(bits)
 
 
@@ -1141,17 +1577,49 @@ def desk_mode_wake_bit(session: str = "", *, rth_full: bool = True) -> str:
     )
 
 
+_HTML_SKIP_TAGS = frozenset(
+    {"script", "style", "noscript", "header", "nav", "footer", "aside"}
+)
+_PUBLISHED_META = frozenset(
+    {"article:published_time", "og:article:published_time", "datepublished"}
+)
+
+
 class _HTMLText(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._skip = 0
         self.title_parts: list[str] = []
         self.body_parts: list[str] = []
+        self.og_title = ""
+        self.published = ""
         self._in_title = False
+
+    def _meta_map(self, attrs: list[tuple[str, str | None]]) -> dict[str, str]:
+        return {str(k or "").lower(): str(v or "") for k, v in attrs}
+
+    def _ingest_meta(self, attrs: list[tuple[str, str | None]]) -> None:
+        ad = self._meta_map(attrs)
+        key = (ad.get("property") or ad.get("name") or ad.get("itemprop") or "").strip().lower()
+        content = (ad.get("content") or "").strip()
+        if not content:
+            return
+        if key == "og:title" and not self.og_title:
+            self.og_title = content
+        if key in _PUBLISHED_META and not self.published:
+            self.published = content
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         name = str(tag or "").lower()
-        if name in ("script", "style", "noscript"):
+        if name == "meta":
+            self._ingest_meta(attrs)
+            return
+        if name == "time" and not self.published:
+            ad = self._meta_map(attrs)
+            prop = (ad.get("itemprop") or ad.get("property") or "").strip().lower()
+            if prop == "datepublished":
+                self.published = (ad.get("datetime") or ad.get("content") or "").strip()
+        if name in _HTML_SKIP_TAGS:
             self._skip += 1
             return
         if name == "title":
@@ -1159,7 +1627,7 @@ class _HTMLText(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         name = str(tag or "").lower()
-        if name in ("script", "style", "noscript") and self._skip:
+        if name in _HTML_SKIP_TAGS and self._skip:
             self._skip -= 1
             return
         if name == "title":
@@ -1193,11 +1661,182 @@ def _public_http_url(url: str) -> str:
 WEB_USE = "color_not_live_trigger"
 
 
+def _web_host(url: str) -> str:
+    return str(urlparse(str(url or "")).hostname or "").strip().lower()
+
+
 def _web_payload(**fields: Any) -> dict[str, Any]:
     row = dict(fields)
     row.setdefault("source", "web")
     row.setdefault("use", WEB_USE)
+    row.setdefault("as_of", _iso())
+    if not row.get("host"):
+        host = _web_host(str(row.get("url") or ""))
+        if host:
+            row["host"] = host
     return row
+
+
+def _search_where(raw: str) -> str:
+    key = str(raw or "").strip().lower()
+    if key in ("x", "twitter"):
+        return "x"
+    if key == "web":
+        return "web"
+    return "both"
+
+
+def _search_handles(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        parts = re.split(r"[\s,]+", raw)
+    elif isinstance(raw, (list, tuple)):
+        parts = [str(x) for x in raw]
+    else:
+        parts = []
+    out: list[str] = []
+    for part in parts:
+        name = str(part or "").strip().lstrip("@")
+        if name and name not in out:
+            out.append(name)
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _cite_rows(resp: Any) -> list[dict[str, Any]]:
+    """Titles and urls from an xAI search response. X posts stay marked source=x."""
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(row: dict[str, Any]) -> None:
+        url = str(row.get("url") or "").strip()
+        if not url or url in seen or len(rows) >= WEB_SEARCH_CAP:
+            return
+        try:
+            _public_http_url(url)
+        except ValueError:
+            return
+        seen.add(url)
+        rows.append(row)
+
+    for cite in list(getattr(resp, "inline_citations", None) or []):
+        x = getattr(cite, "x_citation", None)
+        web = getattr(cite, "web_citation", None)
+        x_url = str(getattr(x, "url", "") or "").strip() if x is not None else ""
+        web_url = str(getattr(web, "url", "") or "").strip() if web is not None else ""
+        if x_url:
+            handle = str(
+                getattr(x, "username", None) or getattr(x, "handle", None) or ""
+            ).strip().lstrip("@")
+            title = str(
+                getattr(x, "title", None) or getattr(x, "snippet", None) or handle or x_url
+            ).strip()
+            row: dict[str, Any] = {"source": "x", "url": x_url, "title": title[:180]}
+            if handle:
+                row["handle"] = handle
+            add(row)
+        elif web_url:
+            title = str(getattr(web, "title", None) or web_url).strip()
+            add({"source": "web", "url": web_url, "title": title[:180]})
+    # Prefer structured inline cites; still fold plain citation urls (deduped).
+    for raw in list(getattr(resp, "citations", None) or []):
+        url = str(raw or "").strip()
+        if not url:
+            continue
+        host = _web_host(url)
+        # www.x.com / www.twitter.com are still X (exact host set missed the www form).
+        x_host = host in ("x.com", "twitter.com") or host.endswith(
+            (".x.com", ".twitter.com")
+        )
+        kind = "x" if x_host else "web"
+        add({"source": kind, "url": url, "title": url[:180]})
+    return rows
+
+
+async def _xai_search_sample(query: str, sources: list[Any]) -> Any:
+    """One short xAI search. Not the desk brain, and not xhigh."""
+    import asyncio
+
+    from xai_sdk import AsyncClient
+    from xai_sdk.chat import user as xai_user
+    from xai_sdk.search import SearchParameters
+
+    from abcxauto.config import get_config
+
+    cfg = get_config()
+    if not getattr(cfg, "xai_api_key", ""):
+        raise RuntimeError("XAI_API_KEY is not set")
+    model = str(getattr(cfg, "model", "") or "grok-4.7")
+    client = AsyncClient(api_key=cfg.xai_api_key, timeout=WEB_SEARCH_TIMEOUT_S)
+    try:
+        chat = client.chat.create(
+            model=model,
+            messages=[
+                xai_user(
+                    "Quote the matching posts and pages. "
+                    "Short bullets only: who, what they said, url. No trade advice.\n"
+                    f"Query: {query}"
+                )
+            ],
+            max_tokens=600,
+            include=["inline_citations"],
+            search_parameters=SearchParameters(
+                sources=sources,
+                mode="on",
+                return_citations=True,
+                max_search_results=WEB_SEARCH_CAP,
+            ),
+        )
+        return await asyncio.wait_for(chat.sample(), timeout=WEB_SEARCH_TIMEOUT_S)
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            try:
+                done = close()
+                if asyncio.iscoroutine(done):
+                    await done
+            except Exception:
+                logger.debug("xai search client close failed", exc_info=True)
+
+
+async def search_public(
+    query: str,
+    *,
+    where: str = "both",
+    handles: Any = None,
+) -> dict[str, Any]:
+    """Public web and/or X search. Color only. Not send geometry."""
+    q = str(query or "").strip()
+    which = _search_where(where)
+    if not q:
+        return _web_payload(error="web search needs a query", where=which)
+    q = q[:240]
+    names = _search_handles(handles)
+    try:
+        from xai_sdk.search import web_source, x_source
+    except Exception as exc:
+        return _web_payload(error=f"xai search unavailable: {exc}", query=q, where=which)
+    sources: list[Any] = []
+    if which in ("web", "both"):
+        sources.append(web_source(country="US"))
+    if which in ("x", "both"):
+        x_kw: dict[str, Any] = {}
+        if names:
+            x_kw["included_x_handles"] = names
+        sources.append(x_source(**x_kw))
+    try:
+        resp = await _xai_search_sample(q, sources)
+    except Exception as exc:
+        return _web_payload(error=f"search failed: {exc}", query=q, where=which)
+    text = str(getattr(resp, "content", "") or "").strip()
+    results = _cite_rows(resp)
+    return _web_payload(
+        query=q,
+        where=which,
+        text=text[:WEB_TEXT_CAP],
+        results=results,
+        n=len(results),
+    )
 
 
 async def fetch_public_page(url: str) -> dict[str, Any]:
@@ -1229,15 +1868,19 @@ async def fetch_public_page(url: str) -> dict[str, Any]:
         parser.close()
     except Exception:
         logger.debug("web html parse failed", exc_info=True)
-    title = " ".join(parser.title_parts).strip()
+    title = str(parser.og_title or "").strip() or " ".join(parser.title_parts).strip()
     text = " ".join(parser.body_parts).strip()
     if not title:
         m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
         if m:
             title = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(1))).strip()
-    return _web_payload(
-        url=str(resp.url) if getattr(resp, "url", None) else target,
-        status=int(getattr(resp, "status_code", 0) or 0),
-        title=title[:200],
-        text=text[:WEB_TEXT_CAP],
-    )
+    published = str(parser.published or "").strip()
+    fields: dict[str, Any] = {
+        "url": str(resp.url) if getattr(resp, "url", None) else target,
+        "status": int(getattr(resp, "status_code", 0) or 0),
+        "title": title[:200],
+        "text": text[:WEB_TEXT_CAP],
+    }
+    if published:
+        fields["published"] = published
+    return _web_payload(**fields)

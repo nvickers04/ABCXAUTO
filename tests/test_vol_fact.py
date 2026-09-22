@@ -30,6 +30,8 @@ from abcxauto.world_state import WorldState, day_facts, format_wake
 SYSTEM_PROMPT_LOCK = (
     "You own an Interactive Brokers {mode} book. Strategy is yours.\n"
     "Risk is code.\n"
+    "Keep researching after a fill. A full book is only for a name you will not cut. Otherwise rotate into the better name.\n"
+    "A refuse for price or size is resent at the live print and a quantity that fits, or you take a better name.\n"
     "send tickets that match ORDER EXAMPLES.\n"
     "Size vs max_risk_per_trade_pct of NetLiq.\n"
 )
@@ -217,8 +219,8 @@ def test_day_facts_and_wake_and_book_paint_clipped_vol():
     assert "iv=22.0" in text
     assert "iv-rv=" in text
     book = _book_facts(world)
-    assert book["vol"][0]["sym"] == "IWM"
-    assert len(json.dumps(book["vol"])) < 400
+    assert "vol" not in book
+    assert "scan_tape" not in book
 
 
 def test_wake_vol_is_clipped():
@@ -299,7 +301,8 @@ def test_news_facts_text_is_color_not_trigger():
     assert "garch" not in text.lower()
     catalog = json.dumps(AGENT_TOOLS, default=str)
     assert "Color only, never a trigger" in catalog
-    assert "+15 minutes is already in the price" in catalog
+    assert "publisher" in catalog
+    assert "+15 minutes is already in the price" not in catalog
     assert banned_vol_prompt_terms(catalog) == []
 
 

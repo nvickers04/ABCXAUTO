@@ -98,6 +98,8 @@ class WidgetsMixin:
         )
         self.lbl_equity = ft.Text("$0", size=28, weight=ft.FontWeight.BOLD, color=TEXT)
         self.lbl_equity_sub = ft.Text("", size=11, color=MUTED)
+        # Cash $ and deployed % — painted from capital_liquidity / TotalCashValue.
+        self.lbl_capital = ft.Text("", size=11, color=MUTED, selectable=True)
         self.lbl_pnl = ft.Text("$+0.00", size=14, weight=ft.FontWeight.W_600, color=GREEN)
         self.lbl_pnl_pct = ft.Text("", size=11, color=MUTED)
         self.lbl_ret_1w = ft.Text("—", size=14, weight=ft.FontWeight.W_600, color=MUTED)
@@ -178,8 +180,9 @@ class WidgetsMixin:
             font_family="Consolas",
         )
         self.btn_copy_stream = self._btn("Copy stream", outlined=True, on_click=self._copy_stream)
-        # The spine: one control per stream line so markers can be styled.
-        # think_live is the empty-state label only — never a sliced day.
+        # Hot poll paints the live look into think_live (one Text). col_stream
+        # stays empty on that path so page.update does not walk hundreds of
+        # line controls. _sync_stream_lines can still mount styled lines.
         self.col_stream = ft.Column(spacing=0, tight=True)
         self._stream_lines_key = ""
         self._stream_follow = True
@@ -858,6 +861,7 @@ class WidgetsMixin:
                     ft.Text("Total value", size=12, color=MUTED),
                     self.lbl_equity,
                     self.lbl_equity_sub,
+                    self.lbl_capital,
                     ft.Row(
                         [
                             _ret_col("Today", self.lbl_pnl),

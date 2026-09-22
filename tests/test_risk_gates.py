@@ -1534,6 +1534,9 @@ async def test_cash_only_rejects_notional_over_cash(gate, monkeypatch):
     ok, reason = await gate.pre_trade_check(_bracket(qty=200, entry=100.0), conn)
     assert ok is False
     assert "cash" in reason.lower()
+    assert "notional_usd=20000.00" in reason
+    assert "cash_usd=5000.00" in reason
+    assert "AvailableFunds" not in reason
 
     conn.account["TotalCashValue"] = 50_000.0
     ok, _ = await gate.pre_trade_check(_bracket(qty=200, entry=100.0), conn)
@@ -1821,6 +1824,8 @@ def test_defined_risk_only_rejects_market_bracket_stk(monkeypatch):
     assert SYSTEM_PROMPT == (
         "You own an Interactive Brokers {mode} book. Strategy is yours.\n"
         "Risk is code.\n"
+        "Keep researching after a fill. A full book is only for a name you will not cut. Otherwise rotate into the better name.\n"
+        "A refuse for price or size is resent at the live print and a quantity that fits, or you take a better name.\n"
         "send tickets that match ORDER EXAMPLES.\n"
         "Size vs max_risk_per_trade_pct of NetLiq.\n"
     )
@@ -2327,7 +2332,7 @@ async def test_option_risk_uses_defined_max_loss_not_premium(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cash_only_notional_fires_when_floors_off(monkeypatch):
-    """Cash-only vs AvailableFunds is a constitution floor, not a % sizing gate."""
+    """Cash-only vs TotalCashValue is a constitution floor, not a % sizing gate."""
     monkeypatch.setattr(
         "abcxauto.risk_gates.get_config",
         lambda: _cfg(
@@ -2375,9 +2380,52 @@ async def test_cash_only_fires_when_paper_gates_off(monkeypatch):
         account={
             "netliquidation": 100_000.0,
             "dailypnl": 0.0,
-            "AvailableFunds": 1_000.0,
+            "TotalCashValue": 1_000.0,
         }
     )
     ok, reason = await gate.pre_trade_check(_bracket(qty=200, entry=100.0), conn)
     assert ok is False
     assert "cash" in reason.lower()
+    assert "cash_usd=1000.00" in reason
+    assert "notional_usd=20000.00" in reason
+
+
+@pytest.mark.asyncio
+async def test_cash_only_spend_cap_is_total_cash_not_available_funds(monkeypatch):
+    """AvailableFunds is margin; cash_only spend cap is TotalCashValue only."""
+    monkeypatch.setattr(
+        "abcxauto.risk_gates.get_config",
+        lambda: _cfg(
+            cash_only=True,
+            sizing_floors=False,
+            risk_gates_enabled=True,
+            daily_loss_limit_pct=0,
+            max_position_pct=0,
+            max_open_positions=0,
+            defined_risk_only=False,
+        ),
+    )
+    monkeypatch.setattr("abcxauto.proposals.get_config", lambda: _cfg())
+    gate = reset_risk_gate()
+    # Margin would cover 20k notional; cash would not.
+    conn = FakeConnector(
+        account={
+            "netliquidation": 100_000.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 5_000.0,
+            "AvailableFunds": 80_000.0,
+        }
+    )
+    ok, reason = await gate.pre_trade_check(_bracket(qty=200, entry=100.0), conn)
+    assert ok is False
+    assert "cash_usd=5000.00" in reason
+    assert "notional_usd=20000.00" in reason
+    assert "AvailableFunds" not in reason
+    assert "80000" not in reason
+
+    # Missing TotalCashValue: fail-closed even when AvailableFunds covers notional.
+    conn.account.pop("TotalCashValue", None)
+    ok, reason = await gate.pre_trade_check(_bracket(qty=200, entry=100.0), conn)
+    assert ok is False
+    assert "TotalCashValue" in reason
+    assert "AvailableFunds" not in reason

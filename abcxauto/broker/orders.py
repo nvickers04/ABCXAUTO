@@ -59,6 +59,32 @@ def _finite_px(raw: Any) -> float | None:
     return v
 
 
+def last_known_stop_price(owner: Any, symbol: str) -> float | None:
+    """Finite stop from in-process last dispatch / bracket group. Never invent."""
+    want = str(symbol or "").strip().upper()
+    if not want:
+        return None
+    groups = getattr(owner, "_bracket_groups", None) or {}
+    found: float | None = None
+    try:
+        items = list(groups.values())
+    except Exception:
+        items = []
+    for group in items:
+        sym = str(getattr(group, "symbol", "") or "").upper()
+        if not sym and isinstance(group, dict):
+            sym = str(group.get("symbol") or "").upper()
+        if sym != want:
+            continue
+        raw = getattr(group, "stop_price", None)
+        if raw is None and isinstance(group, dict):
+            raw = group.get("stop_price")
+        px = _finite_px(raw)
+        if px is not None:
+            found = px
+    return found
+
+
 def modify_did_stick(*, requested: float, live: float | None, tol: float = 0.005) -> bool:
     """True only if IBKR reread matches the requested modify."""
     if live is None:
@@ -554,7 +580,8 @@ class IBKROrdersMixin:
 
         Parent ``transmit=False`` + stop ``parentId`` / ``transmit=True`` is the
         IBKR-supported shrink of the naked window. Target stays a sibling OCA
-        after the fill. Fill-adjusted stop uses modify, not a second place.
+        after the fill. Fill-adjusted stop prefers modify; if that fails or kills
+        the OCA stop (e.g. IBKR 10326), a bare ``place_stop_order`` replaces it.
         """
         blocked = stale_new_risk_block(self)
         if blocked:
@@ -701,11 +728,65 @@ class IBKROrdersMixin:
 
             logger.info(f"Entry FILLED: {direction} {filled_qty} {symbol} @ ${actual_fill_price:.2f}")
             if abs(float(adjusted_stop) - float(planned_stop)) > 1e-9 and stop_id:
+                adjust_failed = False
                 try:
-                    await self.modify_stop_price(stop_id, adjusted_stop)
+                    mod_result = await self.modify_stop_price(stop_id, adjusted_stop)
+                    if isinstance(mod_result, dict) and mod_result.get("error"):
+                        adjust_failed = True
+                        logger.warning(
+                            "fill-adjust modify_stop returned error: %s",
+                            mod_result.get("error"),
+                        )
                 except Exception:
-                    logger.warning("fill-adjust modify_stop failed; planned stop remains", exc_info=True)
-                    adjusted_stop = planned_stop
+                    adjust_failed = True
+                    logger.warning(
+                        "fill-adjust modify_stop failed; planned stop remains",
+                        exc_info=True,
+                    )
+
+                # IBKR 10326 cancels an OCA stop on modify; modify_stop_price
+                # returns {'error': ...} without raising — re-check live status.
+                _stop_dead = frozenset({
+                    "Cancelled", "ApiCancelled", "Inactive", "Error",
+                })
+                stop_dead = _order_status_name(stop_trade) in _stop_dead
+                if adjust_failed or stop_dead:
+                    replace_px = planned_stop if adjust_failed else adjusted_stop
+                    if adjust_failed:
+                        adjusted_stop = planned_stop
+                    logger.warning(
+                        "OCA stop %s unusable after fill-adjust "
+                        "(status=%s, adjust_failed=%s); placing bare stop @ %s",
+                        stop_id,
+                        _order_status_name(stop_trade),
+                        adjust_failed,
+                        replace_px,
+                    )
+                    rep = await self.place_stop_order(
+                        symbol, exit_action, int(filled_qty), float(replace_px)
+                    )
+                    new_id = None
+                    if isinstance(rep, dict) and rep.get("success") and rep.get("order_id") is not None:
+                        try:
+                            new_id = int(rep["order_id"])
+                        except (TypeError, ValueError):
+                            new_id = None
+                    if new_id is not None:
+                        stop_id = new_id
+                        found = None
+                        try:
+                            found = self._open_trade_for(new_id)
+                        except Exception:
+                            found = None
+                        if found is not None:
+                            stop_trade = found
+                            await self._wait_until_working(stop_trade)
+                        else:
+                            # Claimed place but no live trade — not confirmed working.
+                            stop_trade = None
+                    else:
+                        stop_id = None
+                        stop_trade = None
 
             # Take profit order (GTC, OCA-linked to the already-resting stop)
             target_order = Order()
@@ -729,7 +810,17 @@ class IBKROrdersMixin:
                 logger.warning(f"Stop order {stop_id} remains active - position is protected")
                 # Continue with partial success - stop is more important than target
 
-            logger.info(f"OCA protection placed: stop_id={stop_id}, target_id={target_id}, oca_group={oca_group}")
+            stop_protected = (
+                stop_id is not None
+                and stop_trade is not None
+                and _order_is_working(stop_trade)
+            )
+            protection = "protected" if stop_protected else "unprotected"
+
+            logger.info(
+                "OCA protection placed: stop_id=%s, target_id=%s, oca_group=%s, protection=%s",
+                stop_id, target_id, oca_group, protection,
+            )
 
             # Track bracket group for monitoring
             bracket_group_obj = BracketGroup(
@@ -750,7 +841,7 @@ class IBKROrdersMixin:
                 self._bracket_groups[bracket_group_obj.group_id] = bracket_group_obj
 
             return {
-                'success': True,
+                'success': bool(stop_protected),
                 'filled': True,
                 'bracket_order_id': entry_id,
                 'bracket_group_id': bracket_group_obj.group_id,
@@ -763,7 +854,7 @@ class IBKROrdersMixin:
                 'entry_price': actual_fill_price,
                 'stop_price': adjusted_stop,
                 'target_price': adjusted_target,
-                'protection': 'protected',
+                'protection': protection,
                 'timestamp': datetime.now(timezone.utc).isoformat()
             }
 

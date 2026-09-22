@@ -852,6 +852,7 @@ class SyncMixin:
 
     def _pane_stream_text(self) -> str:
         """Visible Grok stream: pane view of today's keep-file, not think_live[-24000:]."""
+        # Hot poll paints one Text into think_live; col_stream stays empty there.
         bits: list[str] = []
         for node in getattr(self.col_stream, "controls", None) or []:
             val = getattr(node, "value", None)
@@ -862,7 +863,9 @@ class SyncMixin:
             cval = getattr(content, "value", None)
             if isinstance(cval, str) and cval:
                 bits.append(cval)
-        return "\n".join(bits)
+        if bits:
+            return "\n".join(bits)
+        return str(getattr(self.think_live, "value", None) or "")
 
 
     # ------------------------------------------------------------- notebook
@@ -2012,6 +2015,12 @@ class SyncMixin:
 
 
     def _sync_think_stream(self) -> None:
+        """Hot poll: one Text for the live look — never a long control list.
+
+        Mounting one ft.Text per view line makes Flet's page.update diff walk
+        hundreds of nodes and hold the GIL; the trading thread then never
+        reaches tool start. Copy stream still reads the full day file.
+        """
         live = str(getattr(self.engine.state, "think_live", "") or "")
         status = str(getattr(self.engine.state, "status", "") or "").strip()
         body = think_session_text(live=live)
@@ -2021,31 +2030,39 @@ class SyncMixin:
             return
         self._think_sync_key = body
         shown = body.strip()
+        # Always clear the per-line column on the poll path so page.update
+        # is not diffing hundreds of stream nodes.
+        self.col_stream.controls = []
+        self._stream_lines_key = ""
         if not shown:
             prev = self._prev_stream()
             self.think_live.value = prev or "Grok stream: waiting for tools..."
             self.think_live.color = MUTED
             self.think_live.visible = True
-            self.col_stream.controls = []
-            self._stream_lines_key = ""
-        else:
-            # Empty-state label only. The spine is the day; JSON dumps
-            # collapse in the view, not on the keep-file.
-            self.think_live.value = ""
-            self.think_live.visible = False
-            self._sync_stream_lines(body)
-            if getattr(self, "_stream_follow", True):
-                self.think_scroll.auto_scroll = True
+            return
+        lines = stream_view_lines(body)
+        if len(lines) > 200:
+            lines = lines[-200:]
+        self.think_live.value = "\n".join(lines)
+        self.think_live.color = TEXT
+        self.think_live.visible = True
+        if getattr(self, "_stream_follow", True):
+            self.think_scroll.auto_scroll = True
 
 
     def _sync_stream_lines(self, body: str) -> None:
         """One control per view line so markers read at a glance.
 
-        Chips, banners, and think/say prose paint verbatim. JSON object dumps
-        collapse to a short stub — the pane is a view, not the keep-file.
-        The operator scrolls the look, not 40kb of [book]/[scan] JSON.
+        Kept for tests / callers that want styled chips. The hot poll path
+        must not use this — page.update walking hundreds of nodes freezes
+        the desk. Chips, banners, and think/say prose paint verbatim. JSON
+        object dumps collapse to a short stub — the pane is a view, not the
+        keep-file.
         """
         lines = stream_view_lines(body)
+        # The day file stays complete for Copy. The pane is the live look.
+        if len(lines) > 200:
+            lines = lines[-200:]
         key = "\n".join(lines)
         if key == self._stream_lines_key:
             return
@@ -2295,6 +2312,7 @@ class SyncMixin:
         self.lbl_equity.value = f"${nl:,.2f}" if nl else "—"
         self.lbl_equity.color = TEXT if s.equity else MUTED
         self.lbl_equity_sub.value = "live" if s.equity else self._brief_age(brief) if nl else ""
+        self._paint_capital_line(s)
         if s.equity:
             self.lbl_pnl.value = f"${s.pnl:+.2f}"
             self.lbl_pnl.color = GREEN if s.pnl >= 0 else RED
@@ -2408,12 +2426,7 @@ class SyncMixin:
         self.lbl_recent_fills.value = self._format_recent_fills(fills)
         self.lbl_recent_fills.color = TEXT if fills else MUTED
         self.lbl_activity.value = self._cycle_log_text(s.records)
-        health = str(getattr(s, "mandate_health", "") or "green")
-        label = str(getattr(s, "mandate_health_label", "") or "protected")
-        self.lbl_mandate_health.value = f"{health} — {label}"
-        self.lbl_mandate_health.color = (
-            RED if health == "red" else (AMBER if health == "amber" else GREEN)
-        )
+        self._paint_mandate_health(s)
         self._sync_active_page()
         self._maybe_finish_flatten_report()
         try:
@@ -2524,6 +2537,133 @@ class SyncMixin:
         if narrative:
             self.lbl_pulse_narrative.value = str(narrative)
             self.lbl_pulse_narrative.color = TEXT
+
+
+    @staticmethod
+    def _as_real_float(raw: Any) -> float | None:
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if val != val:
+            return None
+        return val
+
+
+    @staticmethod
+    def _capital_liquidity_of(s: Any) -> dict:
+        """capital_liquidity from engine portfolio / portfolio_risk / world / book."""
+        bags: list[Any] = [
+            getattr(s, "portfolio", None),
+            getattr(s, "portfolio_risk", None),
+            getattr(s, "world_state", None),
+        ]
+        ws = getattr(s, "world_state", None)
+        if isinstance(ws, dict):
+            bags.extend(
+                [
+                    ws.get("portfolio_risk"),
+                    ws.get("book"),
+                    ws.get("day_facts") or ws.get("day"),
+                ]
+            )
+        for bag in bags:
+            if not isinstance(bag, dict):
+                continue
+            cap = bag.get("capital_liquidity")
+            if isinstance(cap, dict) and cap:
+                return cap
+            # portfolio_risk itself may already be the liquidity bag.
+            if bag.get("total_cash") is not None or bag.get("deployed_long_pct_nl") is not None:
+                return bag
+        return {}
+
+
+    @classmethod
+    def _cash_from_account(cls, acct: Any) -> float | None:
+        """TotalCashValue only — never AvailableFunds when cash value is present."""
+        if not isinstance(acct, dict):
+            return None
+        for key in ("TotalCashValue", "totalcashvalue", "total_cash", "TotalCash"):
+            hit = cls._as_real_float(acct.get(key))
+            if hit is not None:
+                return hit
+        return None
+
+
+    def _paint_capital_line(self, s: Any) -> None:
+        """Account card: cash dollars + deployed % when the snapshot already has them."""
+        cap = self._capital_liquidity_of(s)
+        cash = self._as_real_float(cap.get("total_cash") if isinstance(cap, dict) else None)
+        if cash is None:
+            pulse = getattr(s, "reality_pulse", None) or {}
+            cash = self._cash_from_account(
+                pulse.get("account") if isinstance(pulse, dict) else None
+            )
+        deployed = self._as_real_float(
+            (cap or {}).get("deployed_long_pct_nl") if isinstance(cap, dict) else None
+        )
+        bits: list[str] = []
+        if cash is not None:
+            bits.append(f"cash ${cash:,.2f}")
+        if deployed is not None:
+            bits.append(f"deployed {deployed:g}%")
+        lbl = getattr(self, "lbl_capital", None)
+        if lbl is None:
+            return
+        lbl.value = " · ".join(bits) if bits else ""
+        lbl.color = TEXT if bits else MUTED
+        lbl.visible = bool(bits)
+
+
+    @staticmethod
+    def _naked_symbols(s: Any) -> list[str]:
+        """unprotected_symbols from portfolio / pulse / world when present."""
+        candidates: list[Any] = []
+        book = getattr(s, "portfolio", None)
+        if isinstance(book, dict):
+            candidates.append(book.get("unprotected_symbols"))
+        pulse = getattr(s, "reality_pulse", None) or {}
+        if isinstance(pulse, dict):
+            prot = pulse.get("protection") if isinstance(pulse.get("protection"), dict) else {}
+            candidates.append(prot.get("unprotected_symbols"))
+        ws = getattr(s, "world_state", None) or {}
+        if isinstance(ws, dict):
+            candidates.append(ws.get("unprotected"))
+            book = ws.get("book") if isinstance(ws.get("book"), dict) else {}
+            candidates.append(book.get("unprotected_symbols"))
+        for raw in candidates:
+            if isinstance(raw, (list, tuple)) and raw:
+                out = [str(x).strip() for x in raw if str(x).strip()]
+                if out:
+                    return out
+        return []
+
+
+    def _paint_mandate_health(self, s: Any) -> None:
+        """Risk posture line. Naked symbols beat a stale 'protected' label."""
+        naked = self._naked_symbols(s)
+        unprot = int(getattr(s, "unprotected_count", 0) or 0)
+        halted = bool(getattr(s, "halted", False))
+        if naked:
+            bits: list[str] = []
+            if halted:
+                bits.append("halt")
+            bits.append("naked " + ", ".join(naked))
+            health, label = "red", " · ".join(bits)
+        elif unprot > 0:
+            bits = []
+            if halted:
+                bits.append("halt")
+            bits.append(f"{unprot} naked")
+            health, label = "red", " · ".join(bits)
+        else:
+            health = str(getattr(s, "mandate_health", "") or "green")
+            label = str(getattr(s, "mandate_health_label", "") or "protected")
+        self.lbl_mandate_health.value = f"{health} — {label}"
+        self.lbl_mandate_health.color = (
+            RED if health == "red" else (AMBER if health == "amber" else GREEN)
+        )
 
 
     # ------------------------------------------------------------ right rail

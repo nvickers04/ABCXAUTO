@@ -12,6 +12,9 @@ def test_connection_status_keys():
 
     connector = MagicMock()
     connector.connected = False
+    # Spec the stale flag — bare MagicMock auto-attrs are truthy and must
+    # not flip ibkr_data_stale via bool(...).
+    connector.ibkr_data_stale = False
     status = connection_status(connector)
     assert set(status.keys()) >= {
         "ibkr_connected",
@@ -24,9 +27,25 @@ def test_connection_status_keys():
         "trading_mode",
     }
     assert status["ibkr_connected"] is False
+    assert status["ibkr_data_stale"] is False
     assert isinstance(status["mda_configured"], bool)
     assert isinstance(status["xai_configured"], bool)
     assert isinstance(status["trading_mode"], str)
+
+
+def test_connection_status_stale_is_explicit_true_only():
+    from abcxauto.connections import connection_status
+
+    bare = MagicMock()
+    bare.connected = True
+    # Unset public flag: MagicMock child is truthy, but not `is True`.
+    assert connection_status(bare)["ibkr_data_stale"] is False
+
+    bare.ibkr_data_stale = True
+    assert connection_status(bare)["ibkr_data_stale"] is True
+
+    bare.ibkr_data_stale = False
+    assert connection_status(bare)["ibkr_data_stale"] is False
 
 
 @pytest.mark.asyncio

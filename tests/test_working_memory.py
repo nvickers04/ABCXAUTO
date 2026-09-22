@@ -1,7 +1,7 @@
 """This-flight working-memory one-liners.
 
 Grok owns the sentences. Clerk does not invent. Tools stay facts.
-Clear on hard reset / overnight park / research↔RTH chat drop.
+Clear on hard reset / overnight park / research↔RTH chat drop / begin_run.
 Hygiene: F10 $15 hard, nameless card, port≠7496, SYSTEM_PROMPT lock.
 Does not start looking, TWS, or 7496.
 """
@@ -95,6 +95,21 @@ def test_remember_requires_grok_line_and_material_beat(tmp_path, monkeypatch):
     ok = remember("Fade the SNDK gap this open.", tool_trace=["scan"], text="")
     assert ok["reason"] == "ok"
     assert working_memory_lines() == ["Fade the SNDK gap this open."]
+    remember("Watch NVDA instead.", tool_trace=["scan"], text="")
+    again = remember("Fade the SNDK gap this open.", tool_trace=["scan"], text="")
+    assert again["reason"] == "ok"
+    assert working_memory_lines() == [
+        "Fade the SNDK gap this open.",
+        "Watch NVDA instead.",
+        "Fade the SNDK gap this open.",
+    ]
+    dup = remember("Fade the SNDK gap this open.", tool_trace=["scan"], text="")
+    assert dup["reason"] == "duplicate"
+    assert working_memory_lines() == [
+        "Fade the SNDK gap this open.",
+        "Watch NVDA instead.",
+        "Fade the SNDK gap this open.",
+    ]
 
 
 def test_remember_caps_at_twenty_fifo(tmp_path, monkeypatch):
@@ -149,11 +164,12 @@ async def test_note_tool_read_and_write(tmp_path, monkeypatch):
 def test_book_root_shard_not_world_facts(tmp_path, monkeypatch):
     _wm(tmp_path, monkeypatch)
     empty = _book_payload(_world())
+    assert "working_memory" not in empty
     assert "working_memory" not in empty.get("world", {})
     assert "working_thesis" not in empty.get("world", {})
     remember("Fade the SNDK gap this open.", tool_trace=["scan"], text="")
     blob = _book_payload(_world())
-    assert blob["working_memory"] == ["Fade the SNDK gap this open."]
+    assert "working_memory" not in blob
     assert "working_memory" not in blob["world"]
 
 
@@ -185,6 +201,18 @@ def test_last_turn_shard_not_last_look_or_wake(tmp_path, monkeypatch):
     )
     assert "Fade the SNDK" not in wake
     assert "working_memory" not in wake
+
+
+def test_begin_run_clears_working_memory(tmp_path, monkeypatch):
+    """A new process must not reload the previous flight's sentences."""
+    from abcxauto.think_stream import begin_run
+
+    _wm(tmp_path, monkeypatch)
+    remember("AVGO gap is a fade this open.", tool_trace=["scan"], text="")
+    assert working_memory_lines() == ["AVGO gap is a fade this open."]
+    begin_run()
+    assert working_memory_lines() == []
+    assert not (tmp_path / "working_memory.json").is_file()
 
 
 def test_reset_chat_and_hard_reset_clear(tmp_path, monkeypatch):

@@ -227,11 +227,10 @@ def _collect_symbols(*blobs: Any) -> list[str]:
 
 
 def fallback_quote_symbols(world: Any = None, snap: dict | None = None) -> list[str]:
-    """Open STK, then this look's scan hits, then last look — SPY only if empty.
+    """Open STK names from world.positions and snap.positions only. Cap 8.
 
-    Bare quote/candles used to land on SPY while flat. The live card
-    forbids a same-session SPY scrape, so that fallback skipped the screen
-    Grok had just pulled. news/odds do not use this list.
+    Bare quote/candles must not invent names. A flat book returns [] so
+    the handler can emit a need payload. Never SPY, scan_hits, or last look.
     """
     out: list[str] = []
     rows = []
@@ -250,37 +249,7 @@ def fallback_quote_symbols(world: Any = None, snap: dict | None = None) -> list[
             out.append(sym)
         if len(out) >= 8:
             return out
-    hits = []
-    if isinstance(snap, dict):
-        hits.extend(
-            _collect_symbols(
-                snap.get("scan_hits"),
-                snap.get("opportunities"),
-                snap.get("scan_fetched"),
-            )
-        )
-    if world is not None:
-        hits.extend(
-            _collect_symbols(
-                getattr(world, "opportunities", None),
-                getattr(world, "scan_fetched", None),
-            )
-        )
-    if not hits:
-        try:
-            from abcxauto.think_stream import last_look_for_hunt
-
-            hits = _collect_symbols((last_look_for_hunt() or {}).get("scan_hits"))
-        except Exception:
-            hits = []
-    for sym in hits:
-        if sym not in out:
-            out.append(sym)
-        if len(out) >= 8:
-            return out
-    if not out:
-        out.append("SPY")
-    return out[:8]
+    return out
 
 
 def hoist_send_params(args: dict[str, Any]) -> dict[str, Any]:

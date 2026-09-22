@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -16,14 +17,13 @@ _UNIVERSE_CAP = 14
 # news() may copy this onto a sibling error/note.
 _LAST_FETCH_MISS: str | None = None
 
-# Per-symbol prints the What's-happening rail already painted. A 2s MDA
-# stall is not "no headline" when this memory still has the print.
+# Per-symbol prints the What's-happening rail already painted. A stall is
+# not "no headline" when this memory still has the print.
 _HEADLINES: dict[str, dict[str, Any]] = {}
 _HEADLINE_TTL_S = 15 * 60.0
-
-# Fail fast. MDA's HTTP client allows 30s and a 12s per-symbol wait_for was
-# the whole look: Grok sat through empty news() batches (HEI/WDAY/…) instead
-# of a miss the think can skip. One try; a stall is a hard miss.
+# Parallel per-symbol cap. Fetch is asyncio.gather, so wait is the slowest
+# symbol. One try. 8s still timed out on the same names; 2s is the miss.
+# A later look refetches. A stall is a hard miss, not a fake headline.
 NEWS_SYMBOL_S = 2.0
 NEWS_TRIES = 1
 
@@ -45,6 +45,72 @@ def is_real_headline(item: Any) -> bool:
     return not hl.startswith("(unavailable")
 
 
+# Comparable news page. Outlet is publisher; source is the feed (mda), not Yahoo.
+_PUBLIC_NEWS_KEYS = (
+    "symbol",
+    "headline",
+    "publisher",
+    "published",
+    "as_of",
+    "asof_iso",
+    "url",
+    "source",
+    "freshness",
+    "use",
+)
+_FEED_SOURCES = frozenset({"mda", "ibkr", "web"})
+
+
+def _publisher_and_url(item: dict[str, Any]) -> tuple[str, str]:
+    """Outlet name + URL. MDA often stuffs a Yahoo link into publisher."""
+    publisher = str(item.get("publisher") or "").strip()
+    url = str(item.get("url") or "").strip()
+    src = str(item.get("source") or "").strip()
+    if not publisher and src.lower() not in _FEED_SOURCES:
+        publisher = src
+    raw = publisher
+    if raw.lower().startswith(("http://", "https://")):
+        if not url:
+            url = raw
+        host = str(urlparse(raw).hostname or "").strip().lower()
+        publisher = host[4:] if host.startswith("www.") else host
+    return publisher, url
+
+
+def public_news_item(item: Any) -> dict[str, Any] | None:
+    """One real headline Grok can cross-ref with web(url) / quote(symbol)."""
+    if not is_real_headline(item):
+        return None
+    src = str(item.get("source") or "").strip()
+    src_l = src.lower()
+    feed = src if src_l in _FEED_SOURCES else "mda"
+    publisher, url = _publisher_and_url(item)
+    out: dict[str, Any] = {}
+    for key in _PUBLIC_NEWS_KEYS:
+        if key == "publisher":
+            val = publisher
+        elif key == "url":
+            val = url
+        elif key == "source":
+            val = feed
+        else:
+            val = item.get(key)
+        if val not in (None, ""):
+            out[key] = val
+    return out if out.get("headline") else None
+
+
+def public_news_items(items: Any) -> list[dict[str, Any]]:
+    """Real headlines only, same public keys as public_news_item."""
+    rows = items if isinstance(items, (list, tuple)) else []
+    out: list[dict[str, Any]] = []
+    for it in rows:
+        row = public_news_item(it)
+        if row:
+            out.append(row)
+    return out
+
+
 def news_need_symbols(already: list[str] | None = None) -> dict[str, Any]:
     """Bare news() is a choice. Do not poll SPY or the scan tape."""
     out: dict[str, Any] = {
@@ -64,7 +130,7 @@ def news_need_symbols(already: list[str] | None = None) -> dict[str, Any]:
 
 
 def remember_headlines(items: list[dict] | None) -> None:
-    """Keep rail / think prints so news() can return them after a 2s miss."""
+    """Keep rail / think prints so news() can return them after an 8s miss."""
     now = time.monotonic()
     for it in items or []:
         if not is_real_headline(it):

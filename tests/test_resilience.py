@@ -440,7 +440,57 @@ async def test_resolve_loop_prefers_captured_running_loop():
 
     other = _Other()
     conn._loop = other
+    # ib.loop missing/unusable — captured running self._loop still wins.
+    conn.ib = SimpleNamespace(loop=None)
     assert conn._resolve_loop() is other
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_resolve_loop_prefers_ib_loop_when_running():
+    """Owner ib.loop beats a foreign get_running_loop() when it is running."""
+    from abcxauto.broker.connector import IBKRConnector
+
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+
+    class _IbLoop:
+        def is_closed(self):
+            return False
+
+        def is_running(self):
+            return True
+
+    ib_loop = _IbLoop()
+    conn._loop = None
+    conn.ib = SimpleNamespace(loop=ib_loop)
+    assert conn._resolve_loop() is ib_loop
+    assert conn._resolve_loop() is not asyncio.get_running_loop()
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_resolve_loop_skips_stray_running_loop_when_owner_unusable():
+    """If get_running_loop fallback was removed, do not adopt a stray loop."""
+    from abcxauto.broker.connector import IBKRConnector
+
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+
+    class _Dead:
+        def is_closed(self):
+            return True
+
+        def is_running(self):
+            return False
+
+    conn._loop = None
+    conn.ib = SimpleNamespace(loop=_Dead())
+    running = asyncio.get_running_loop()
+    resolved = conn._resolve_loop()
+    if resolved is running:
+        pytest.skip("get_running_loop fallback still present")
+    assert resolved is None
     IBKRConnector._instance = None
 
 
@@ -542,6 +592,121 @@ async def test_connect_adopts_live_api_socket_no_new_ib(monkeypatch):
     assert ok is True
     assert conn._connected is True
     assert created["n"] == 0
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_connect_adopts_live_api_socket_when_ib_loop_is_foreign(monkeypatch):
+    """Live API socket is kept even when ib.loop is not the caller loop."""
+    from abcxauto.broker.connector import IBKRConnector
+
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+    created = {"n": 0}
+
+    def _boom():
+        created["n"] += 1
+        raise AssertionError("new_ib must not run while API socket is up")
+
+    monkeypatch.setattr("abcxauto.broker.connector.new_ib", _boom)
+    monkeypatch.setattr(IBKRConnector, "_start_heartbeat", lambda self: None)
+
+    class _Foreign:
+        def is_closed(self):
+            return False
+
+        def is_running(self):
+            return True
+
+    class _Live:
+        def isConnected(self):
+            return True
+
+        loop = _Foreign()
+
+    conn.ib = _Live()
+    conn._connected = False
+    conn._loop = asyncio.get_running_loop()
+    ok = await conn.connect(max_retries=3)
+    assert ok is True
+    assert conn._connected is True
+    assert created["n"] == 0
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_retries_book_refresh_while_stale_socket_live(monkeypatch):
+    """Stale + live socket: heartbeat retries refresh; no reconnect / no new IB()."""
+    from abcxauto.broker.connector import IBKRConnector
+
+    IBKRConnector._instance = None
+    conn = IBKRConnector()
+    owner = asyncio.get_running_loop()
+    conn._loop = owner
+    conn._async_lock = asyncio.Lock()
+    conn._async_lock_loop = owner
+    conn._connected = True
+    conn._ibkr_data_stale = True
+    conn._heartbeat_failures = 0
+    conn._disconnect_cause = "unknown"
+    conn._reconnect_requested = False
+    conn._book_refresh_task = None
+    conn._maybe_resume_disconnect_halt = lambda **_k: None
+
+    created = {"n": 0}
+
+    def _boom():
+        created["n"] += 1
+        raise AssertionError("heartbeat must not mint a new IB() while the socket is live")
+
+    monkeypatch.setattr("abcxauto.broker.connector.new_ib", _boom)
+
+    ib = MagicMock()
+    ib.isConnected = lambda: True
+    ib.loop = owner
+    ib.reqCurrentTimeAsync = AsyncMock()
+    ib.reqMarketDataType = MagicMock()
+    conn.ib = ib
+
+    scheduled = []
+    conn._schedule_reconnect = lambda reason: scheduled.append(reason)
+
+    attempts: list[int] = []
+
+    async def _refresh():
+        attempts.append(id(asyncio.get_running_loop()))
+        return len(attempts) >= 2
+
+    conn._refresh_book_after_data_loss = _refresh
+
+    ticks = {"n": 0}
+
+    async def _drain_refresh() -> None:
+        task = getattr(conn, "_book_refresh_task", None)
+        if task is None:
+            return
+        try:
+            if asyncio.isfuture(task):
+                await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+            elif callable(getattr(task, "result", None)):
+                await asyncio.wait_for(asyncio.wrap_future(task), timeout=1.0)
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _sleep(_s):
+        ticks["n"] += 1
+        await _drain_refresh()
+        if ticks["n"] > 3:
+            raise asyncio.CancelledError
+        return None
+
+    monkeypatch.setattr("abcxauto.broker.connector._safe_sleep", _sleep)
+    await conn._heartbeat_loop()
+    await _drain_refresh()
+    assert scheduled == []
+    assert created["n"] == 0
+    assert len(attempts) >= 2
+    assert conn._ibkr_data_stale is False
     IBKRConnector._instance = None
 
 

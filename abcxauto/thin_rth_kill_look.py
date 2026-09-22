@@ -45,6 +45,8 @@ REASON_RESEARCH_PROMPT = "kill_look_research_prompt"
 REASON_BRIEF_LOOP = "brief_loop_halted"
 REASON_BRIEF_COST = "brief_model_cost_missing"
 REASON_PORT = "kill_look_live_port"
+REASON_BOOK_UNRELIABLE = "book_unreliable"
+REASON_IBKR_DOWN = "ibkr_down"
 
 LIVE_PORTS = frozenset({7496, 4001})
 
@@ -97,16 +99,21 @@ def rth_model_no_xhigh(model: str, *, enabled: bool | None = None) -> str:
 
 
 def _is_xhigh_param(key: str, value: Any) -> bool:
+    """True when a param looks like a model-id xhigh leak (drop it in RTH).
+
+    ``effort`` / ``reasoning_effort`` are operator knobs — keep them even when
+    the value is xhigh so session_model_params("regular") can send max effort.
+    """
     name = str(key or "").strip().lower()
-    blob = str(value or "").strip().lower()
-    if name in {"effort", "reasoning_effort"} and "xhigh" in blob:
-        return True
+    if name in {"effort", "reasoning_effort"}:
+        return False
     return isinstance(value, str) and "xhigh" in value.lower()
 
 
 def rth_params_no_xhigh(params: Any, *, enabled: bool | None = None) -> dict[str, Any]:
-    """RTH thin: drop xhigh effort so params cannot undo ``rth_model_no_xhigh`` / F10.
+    """RTH thin: keep effort/reasoning_effort; drop other string xhigh leaks.
 
+    Model-id suffix stripping stays in ``rth_model_no_xhigh``. F10 is unchanged.
     Invalid / empty maps fail-closed to ``{}``.
     """
     try:
@@ -168,6 +175,36 @@ def has_open_pcs_skew_lot(
         if sec == "BAG" and right == "P":
             return True
     return False
+
+
+def has_open_stk_lot(
+    positions: list[Any] | None = None,
+    open_lots: list[Any] | None = None,
+) -> bool:
+    """True when the book has an open STK lot (look-skip manage bypass)."""
+    for lab in open_lots or []:
+        # lot_ident style: "AVGO STK LONG 89"
+        if re.search(r"\bSTK\b", str(lab or ""), flags=re.IGNORECASE):
+            return True
+    book = [p for p in (positions or []) if isinstance(p, dict) and _qty_open(p)]
+    for row in book:
+        # Missing secType reads as STK, same as the book.
+        sec = str(
+            row.get("secType") or row.get("sec_type") or row.get("sec") or "STK"
+        ).upper()
+        if sec == "STK":
+            return True
+    return False
+
+
+def has_open_manage_lot(
+    positions: list[Any] | None = None,
+    open_lots: list[Any] | None = None,
+) -> bool:
+    """True when an open pcs-skew or STK lot keeps looks in MANAGE."""
+    return has_open_pcs_skew_lot(positions, open_lots) or has_open_stk_lot(
+        positions, open_lots
+    )
 
 
 def look_kill_mill(payload: dict[str, Any] | None, *, session: str = "") -> bool:
@@ -683,8 +720,9 @@ def kill_mode(
     """OPEN / MANAGE / ABORT / research / empty (contract off).
 
     No one-look RTH entry budget. Named scorecard abort fuses stop new-risk
-    looks even in-flight. Open lots stay MANAGE so exits are not blocked.
-    ``in_flight`` retained for callers; unused for entry-budget gates.
+    looks even in-flight. Open pcs-skew or STK lots stay MANAGE so exits are
+    not blocked. ``in_flight`` retained for callers; unused for entry-budget
+    gates.
     """
     if not kill_look_enabled():
         return ""
@@ -700,7 +738,7 @@ def kill_mode(
             return MODE_RESEARCH
     if not rth:
         return MODE_RESEARCH
-    if has_open_pcs_skew_lot(positions, open_lots):
+    if has_open_manage_lot(positions, open_lots):
         return MODE_MANAGE
     if not kill_look_port_ok():
         return MODE_ABORT
@@ -736,6 +774,43 @@ def research_prompt_ok(prompt_tokens: int) -> bool:
     return 0 <= n < RESEARCH_PROMPT_TOKENS_MAX
 
 
+def _flag_true(raw: Any) -> bool:
+    return raw is True or raw in (1, "1", "true", "True", "yes", "on")
+
+
+def _flag_false(raw: Any) -> bool:
+    return raw is False or raw in (0, "0", "false", "False", "no", "off")
+
+
+def dead_socket_skip_reason(
+    snap: dict[str, Any] | None = None,
+    *,
+    unprotected: bool = False,
+    ibkr_connected: bool | None = None,
+) -> str:
+    """Skip billed Grok on a dead/unreliable book. Unprotected still looks."""
+    if unprotected:
+        return ""
+    blob = snap if isinstance(snap, dict) else {}
+    pulse = blob.get("reality_pulse") if isinstance(blob.get("reality_pulse"), dict) else {}
+    gates = blob.get("gates") if isinstance(blob.get("gates"), dict) else {}
+    if (
+        _flag_true(blob.get("book_unreliable"))
+        or _flag_true(pulse.get("book_unreliable"))
+        or _flag_true(gates.get("book_unreliable"))
+    ):
+        return REASON_BOOK_UNRELIABLE
+    connected = ibkr_connected
+    if connected is None:
+        if "ibkr_connected" in blob:
+            connected = blob.get("ibkr_connected")
+        elif "ibkr_connected" in pulse:
+            connected = pulse.get("ibkr_connected")
+    if _flag_false(connected):
+        return REASON_IBKR_DOWN
+    return ""
+
+
 def skip_look_reason(
     session: str = "",
     *,
@@ -756,6 +831,9 @@ def skip_look_reason(
     """
     if unprotected:
         return ""
+    dead = dead_socket_skip_reason(snap, unprotected=unprotected)
+    if dead:
+        return dead
     # Named-card brief halt is independent of kill-look (no mill escape).
     try:
         from abcxauto.research_budget import research_brief_skip_reason

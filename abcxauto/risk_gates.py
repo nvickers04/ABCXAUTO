@@ -1128,17 +1128,19 @@ class RiskGate:
                     "Cash-only mode: SHORT stock brackets are rejected "
                     "(no short selling). Set ABCXAUTO_CASH_ONLY=false to allow."
                 )
+            # Spend cap is TotalCashValue only. AvailableFunds is margin buying
+            # power — never the cash_only notional cap.
             cash = _account_float(
                 account,
                 "TotalCashValue",
                 "totalcashvalue",
-                "AvailableFunds",
-                "availablefunds",
+                "total_cash",
+                "TotalCash",
             )
             if cash is None:
                 return False, (
                     "Risk gate fail-closed: cash-only mode requires TotalCashValue "
-                    "(or AvailableFunds) in account summary"
+                    "in account summary"
                 )
             notional = estimate_notional(proposal)
             if notional is None:
@@ -1146,7 +1148,8 @@ class RiskGate:
             if notional > cash:
                 return False, (
                     f"size_cash {pct_of_nl(notional, book)} > "
-                    f"{pct_of_nl(cash, book)}"
+                    f"{pct_of_nl(cash, book)} "
+                    f"notional_usd={notional:.2f} cash_usd={cash:.2f}"
                 )
 
         if not gates_on:

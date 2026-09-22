@@ -1,8 +1,9 @@
 """This-flight working memory — Grok-owned one-liners, not facts.
 
 Cap is a short list. Clerk does not invent conclusions. Hard reset /
-overnight park / research↔RTH chat drop clear the shard (same as
-``_reset_chat``). Not SYSTEM_PROMPT. Not a 40k residue bus.
+overnight park / research↔RTH chat drop / ``begin_run`` (new process)
+clear the shard (same as ``_reset_chat``). Not SYSTEM_PROMPT. Not a
+40k residue bus.
 """
 
 from __future__ import annotations
@@ -112,7 +113,7 @@ def remember(
 
 
 def clear_working_memory(*, reason: str = "clear") -> dict[str, Any]:
-    """Drop this-flight lines. Overnight / park / hard reset / desk-mode roll."""
+    """Drop this-flight lines. Overnight / park / hard reset / desk-mode roll / begin_run."""
     _ = reason
     path = working_memory_path()
     try:
@@ -150,7 +151,7 @@ def _load() -> dict[str, Any]:
     lines: list[str] = []
     for item in list(raw.get("lines") or []):
         bit = shape_line(str(item or ""))
-        if bit and bit not in lines:
+        if bit:
             lines.append(bit)
         if len(lines) >= MAX_LINES:
             break

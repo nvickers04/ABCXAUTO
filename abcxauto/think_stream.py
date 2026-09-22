@@ -335,7 +335,11 @@ def emit(kind: str, text: str) -> None:
         _append_think_session(piece)
     if eng is not None and piece:
         try:
-            _append_engine_piece(eng, piece)
+            # Say/think must reach think_tail even inside the 2s throttle —
+            # tool JSON can wait; spoken text must not stall the glass.
+            _append_engine_piece(
+                eng, piece, force_tail=kind in ("say", "think")
+            )
         except Exception:
             logger.debug("think_stream engine append failed", exc_info=True)
     for fn in fns:
@@ -362,17 +366,21 @@ def keep(text: str) -> None:
     _append_think_session(piece)
 
 
-def _append_engine_piece(eng: Any, piece: str) -> None:
+def _append_engine_piece(
+    eng: Any, piece: str, *, force_tail: bool = False
+) -> None:
     s = getattr(eng, "state", None)
     if s is None or not piece:
         return
     cur = getattr(s, "think_live", "") or ""
     s.think_live = (cur + piece)[-24000:]
-    _write_think_tail(s.think_live)
+    _write_think_tail(s.think_live, force=force_tail)
 
 
 def _append_engine(eng: Any, kind: str, text: str) -> None:
-    _append_engine_piece(eng, _paint(kind, text))
+    _append_engine_piece(
+        eng, _paint(kind, text), force_tail=kind in ("say", "think")
+    )
 
 
 def _et_session_day() -> str:
@@ -883,6 +891,7 @@ def begin_run() -> dict[str, Any]:
     the tape the next wake needs. Overnight and killed mid-turn still stale.
     Today's think_session file is one ET day — bounces append a run banner;
     this must not truncate or replace that file.
+    Working memory is this-flight only — a new process clears it.
     """
     global _run
     prev = _read_json(last_turn_path())
@@ -896,6 +905,12 @@ def begin_run() -> dict[str, Any]:
     else:
         mark_review_stale(archive_tail=True)
     reset_speaker()
+    try:
+        from abcxauto.working_memory import clear_working_memory
+
+        clear_working_memory(reason="begin_run")
+    except Exception:
+        logger.debug("working_memory clear on begin_run failed", exc_info=True)
     try:
         from abcxauto.park_clock import ensure_next_look
 
@@ -947,6 +962,8 @@ _SESSION_KEEP = (
     "retrace_50",
     "size",
     "ticket",
+    "print",
+    "source",
 )
 
 
@@ -1026,10 +1043,13 @@ def _seed_live_quotes_from_last(
 
 
 def seed_snap_from_last_turn(snap: dict[str, Any] | None) -> None:
-    """Carry last look's tape onto a fresh IBKR snap.
+    """Carry last look's send geometry onto a fresh IBKR snap.
 
-    ``snap()`` always stamps ``candle_source`` (``none`` until bars run). That
-    must not skip scan hits or today's session range — a later send needs them.
+    This-look screens are not inherited: do not copy ``scan_hits`` or
+    ``scan_at``. Grok fetches a screen if it wants one. Session range may
+    copy when last_turn is fresh (open-hunt send geometry).
+    ``snap()`` always stamps ``candle_source`` (``none`` until bars run).
+    Copy a real last_turn source only when the live snap is blank or ``none``.
     Skip overwriting a live this-look bar source. Skip ``none`` as a source.
     """
     if not isinstance(snap, dict):
@@ -1043,20 +1063,10 @@ def seed_snap_from_last_turn(snap: dict[str, Any] | None) -> None:
         if src and src not in ("none",):
             snap["candle_source"] = src
     fresh = not data.get("stale") and last_look_is_fresh(data)
-    hits = _compact_scan_hits(data.get("scan_hits"))
-    if hits and not snap.get("scan_hits") and fresh:
-        snap["scan_hits"] = hits
     if not snap.get("session_range") and fresh:
         rng = _compact_session_range(data.get("session_range"))
         if rng:
             snap["session_range"] = rng
-    if fresh:
-        _seed_live_quotes_from_last(snap, data, hits or snap.get("scan_hits"))
-    scan_at = str(data.get("scan_at") or "").strip()
-    if scan_at:
-        snap["scan_at"] = scan_at
-    # Hits stay for send geometry. Screens/calls are this look's work —
-    # seeding them made the next look paint hits=N reused as if Grok scanned.
 
 
 def last_turn_is_live(payload: dict[str, Any] | None = None) -> bool:

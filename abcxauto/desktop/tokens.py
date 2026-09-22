@@ -121,7 +121,7 @@ RISK_FIELDS = (
     ("max_peak_drawdown_pct", "Peak drawdown", "% of NetLiq, 2 - 40 paper / 25 live"),
     ("max_option_premium_pct", "Max option premium", "% of NetLiq, 0 = off, else 1 – 25"),
     ("max_open_positions", "Max open lots", "0 = off — Grok may set N for this book"),
-    ("portfolio_cap_usd", "Portfolio max-loss $", "Display only. Not a place refuse. Default 800 is not a gate"),
+    ("portfolio_cap_usd", "Portfolio max-loss $", "Off at 0. Not a send gate."),
 )
 RISK_FIELD_KEYS = frozenset(k for k, _l, _h in RISK_FIELDS)
 # ProEngine._note kinds. Anything not listed still paints its message in MUTED,

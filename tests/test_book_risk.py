@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from abcxauto import book
 
 
@@ -21,8 +23,11 @@ def test_build_book_returns_net_liq(monkeypatch):
     assert "portfolio_risk" in state
     assert "exposure" in state
     assert "capital_liquidity" in state
-    assert state["capital_liquidity"]["cash_pct_nl"] == 0.0
+    assert state["capital_liquidity"].get("cash_pct_nl") is None
+    assert "total_cash" not in state["capital_liquidity"]
     assert state["capital_liquidity"]["deployed_long_pct_nl"] == 0.0
+    assert "note" not in state["capital_liquidity"]
+    assert "note" not in state["exposure"]
 
 
 def test_build_book_portfolio_risk_pct_nl(monkeypatch):
@@ -53,6 +58,8 @@ def test_build_book_portfolio_risk_pct_nl(monkeypatch):
     assert state["exposure"]["symbols"][0]["pct_nl"] == 30.0
     assert state["capital_liquidity"]["cash_pct_nl"] == 70.0
     assert state["capital_liquidity"]["deployed_long_pct_nl"] == 30.0
+    assert "note" not in state["capital_liquidity"]
+    assert "note" not in state["exposure"]
 
 
 def test_build_book_from_snap(monkeypatch):
@@ -147,6 +154,9 @@ def test_slim_positions_follows_open_lots_not_tape_names(monkeypatch):
         include_narrative=False,
     )
     assert [p.get("symbol") for p in state["positions"]] == ["AAPL", "MSFT"]
+    # portfolio_risk must not count zero-qty / bare-ticker tape residue
+    assert state["portfolio_risk"]["n_positions"] == 2
+    assert [r["symbol"] for r in state["exposure"]["symbols"]] == ["AAPL", "MSFT"]
 
 
 def test_slim_positions_keeps_real_index_lots():
@@ -176,3 +186,70 @@ def test_slim_positions_limit_skips_tape_filler():
     slim = book._slim_positions(filler + lots, limit=12)
     assert [p.get("symbol") for p in slim] == ["NVDA", "XLE"]
     assert slim[1]["qty"] == -1
+
+
+def test_allocation_line_leads_with_leftover():
+    from abcxauto.world_state import allocation_facts, allocation_line
+
+    facts = allocation_facts(
+        [
+            {
+                "symbol": "QQQ",
+                "quantity": 10,
+                "marketValue": 3000,
+                "secType": "STK",
+            }
+        ],
+        net_liq=10_000,
+        total_cash=7000,
+    )
+    assert facts["leftover_usd"] == 7000.0
+    assert facts["deployed_usd"] == 3000.0
+    assert facts["cash_pct_nl"] == 70.0
+    assert facts["deployed_pct_nl"] == 30.0
+    facts["daily_pnl"] = -72
+    line = allocation_line(facts)
+    assert line.startswith("leftover $7000 cash=70.0% deployed=30.0% day=-72 on deployed")
+    assert "vs lots-to-target" not in line
+    assert "QQQ" in line
+
+
+def test_allocation_line_leftover_vs_lots_to_target():
+    from abcxauto.world_state import allocation_facts, allocation_line
+
+    facts = allocation_facts(
+        [
+            {
+                "symbol": "AMZN",
+                "quantity": 10,
+                "secType": "STK",
+                "mkt": 255.22,
+            }
+        ],
+        net_liq=50_000,
+        total_cash=27_304,
+        quotes={"AMZN": 255.22},
+        orders=[
+            {
+                "symbol": "AMZN",
+                "type": "LMT",
+                "lmt": 256,
+                "role": "exit",
+            }
+        ],
+    )
+    lot = facts["lots"][0]
+    assert lot["symbol"] == "AMZN"
+    assert lot["qty"] == 10
+    assert lot["last"] == 255.22
+    assert lot["target"] == 256
+    assert lot["to_target_usd"] == pytest.approx(7.8)
+    assert facts["lots_to_target_usd"] == pytest.approx(7.8)
+    assert facts["leftover_usd"] == 27304.0
+    line = allocation_line(facts)
+    assert line.startswith("leftover $27304")
+    assert " vs lots-to-target $" in line
+    assert "7.8" in line
+    assert "tgt=256" in line
+    assert "to_tgt=" in line
+    assert "AMZN" in line

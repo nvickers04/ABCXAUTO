@@ -60,6 +60,29 @@ def test_default_model_is_one_constant():
     assert knobs["model_params_research"] == {}
 
 
+def test_create_chat_downgrades_rejected_xhigh():
+    from abcxauto.llm import create_chat
+
+    seen: list[dict] = []
+
+    class _Chat:
+        def create(self, **kwargs):
+            seen.append(dict(kwargs))
+            if kwargs.get("reasoning_effort") == "xhigh":
+                raise ValueError(
+                    "Invalid reasoning effort: xhigh. Must be one of: ('low', 'high')"
+                )
+            return {"ok": True}
+
+    out = create_chat(
+        SimpleNamespace(chat=_Chat()),
+        model="grok-4.7",
+        reasoning_effort="xhigh",
+    )
+    assert out == {"ok": True}
+    assert seen[-1]["reasoning_effort"] == "high"
+
+
 def test_default_desk_create_kwargs_omit_effort():
     """Empty Settings maps send no reasoning_effort; SDK then defaults high."""
     cfg = get_config()
@@ -434,12 +457,24 @@ def test_session_params_fall_back_to_shared():
 
 
 def test_rth_params_cannot_defeat_xhigh_strip_or_f10(monkeypatch):
+    """RTH keeps effort/reasoning_effort xhigh; still strips model-id suffix.
+
+    F10 dollar cap is separate and unchanged.
+    """
     raw = {"effort": "xhigh", "reasoning_effort": "xhigh", "thinking": True}
-    assert rth_params_no_xhigh(raw, enabled=True) == {"thinking": True}
+    assert rth_params_no_xhigh(raw, enabled=True) == {
+        "effort": "xhigh",
+        "reasoning_effort": "xhigh",
+        "thinking": True,
+    }
+    assert rth_params_no_xhigh(
+        {"leak": "grok-4.7-xhigh", "effort": "xhigh"}, enabled=True
+    ) == {"effort": "xhigh"}
     assert rth_params_no_xhigh("not-json", enabled=True) == {}
     assert rth_params_no_xhigh(None, enabled=True) == {}
     kept = rth_params_no_xhigh(raw, enabled=False)
     assert kept["effort"] == "xhigh"
+    assert rth_model_no_xhigh("grok-4.7-xhigh", enabled=True) == "grok-4.7"
     monkeypatch.setattr(
         "abcxauto.thin_rth_kill_look.kill_look_enabled", lambda: True
     )
@@ -449,8 +484,8 @@ def test_rth_params_cannot_defeat_xhigh_strip_or_f10(monkeypatch):
         model_params_research={"effort": "xhigh"},
     )
     rth = session_model_params("regular", cfg)
-    assert rth == {"thinking": True}
-    assert rth.get("effort") != "xhigh"
+    assert rth == {"effort": "xhigh", "thinking": True}
+    assert rth.get("effort") == "xhigh"
     assert session_model_params("premarket", cfg) == {"effort": "xhigh"}
 
 
@@ -473,8 +508,8 @@ def test_new_chat_applies_rth_params_when_client_had_no_session(monkeypatch):
     g = GrokClient(client=SimpleNamespace(chat=_ChatAPI()))
     assert g.model_params.get("effort") == "xhigh"
     _new_chat(g, session="regular")
-    assert g.model_params.get("effort") != "xhigh"
-    assert created.get("reasoning_effort") != "xhigh"
+    assert g.model_params.get("effort") == "xhigh"
+    assert created.get("reasoning_effort") == "xhigh"
     assert "thinking" not in created
     client = SimpleNamespace(chat=SimpleNamespace(create=lambda **_k: SimpleNamespace()))
     update_agent_config(
@@ -482,7 +517,7 @@ def test_new_chat_applies_rth_params_when_client_had_no_session(monkeypatch):
         persist=False,
     )
     g = GrokClient(client=client, session="regular")
-    assert g.model_params.get("effort") != "xhigh"
+    assert g.model_params.get("effort") == "xhigh"
     assert g.model_params.get("thinking") is True
 
 

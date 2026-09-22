@@ -87,6 +87,187 @@ def test_unprotected_beats_session_cap_and_vol():
     assert "vol=" not in fact
 
 
+def test_idle_cash_beats_closest_stop():
+    fact = worst_wake_fact(
+        unprotected=[],
+        day={
+            "capital_liquidity": {
+                "total_cash": 27304,
+                "cash_pct_nl": 84.57,
+                "deployed_long_pct_nl": 15.33,
+            },
+            "ibkr_daily_pnl": -72,
+            "stop_dist": {
+                "ident": "AMZN STK long 10",
+                "last": 252.51,
+                "stop": 248.9,
+                "dist": 3.61,
+            },
+            "session_cap": {"looks_left": 40, "tokens_left": 1_000_000},
+        },
+    )
+    assert fact == (
+        f"{WAKE_FACT_PREFIX} leftover $27304 cash=84.57% deployed=15.33% "
+        "day=-72 on deployed"
+    )
+    assert "closest_stop" not in fact
+
+
+def test_leftover_relook_due_is_rth_only_after_cooldown():
+    from abcxauto.world_state import leftover_dominates, leftover_relook_due
+
+    bag = {
+        "capital_liquidity": {
+            "total_cash": 32326,
+            "cash_pct_nl": 99.89,
+            "deployed_long_pct_nl": 0.0,
+        }
+    }
+    occupied = {
+        "capital_liquidity": {
+            "total_cash": 3000,
+            "cash_pct_nl": 30.0,
+            "deployed_long_pct_nl": 70.0,
+        }
+    }
+    assert leftover_dominates(bag) is True
+    assert leftover_dominates(occupied) is False
+    assert leftover_relook_due(
+        bag, session="regular", last_look_mono=0.0, now_mono=89.0
+    ) is False
+    assert leftover_relook_due(
+        bag, session="regular", last_look_mono=0.0, now_mono=90.0
+    ) is True
+    assert leftover_relook_due(
+        bag, session="premarket", last_look_mono=0.0, now_mono=90.0
+    ) is False
+    assert leftover_relook_due(
+        occupied, session="regular", last_look_mono=0.0, now_mono=90.0
+    ) is False
+    assert leftover_relook_due(
+        bag, session="regular", last_look_mono=None, now_mono=90.0
+    ) is False
+
+
+def test_leftover_relook_due_researched_waits_fifteen_min():
+    from abcxauto.world_state import leftover_relook_due
+
+    bag = {
+        "capital_liquidity": {
+            "total_cash": 32326,
+            "cash_pct_nl": 99.89,
+            "deployed_long_pct_nl": 0.0,
+        }
+    }
+    assert leftover_relook_due(
+        bag,
+        session="regular",
+        last_look_mono=0.0,
+        now_mono=90.0,
+        researched=True,
+    ) is False
+    assert leftover_relook_due(
+        bag,
+        session="regular",
+        last_look_mono=0.0,
+        now_mono=15 * 60.0,
+        researched=True,
+    ) is True
+    assert leftover_relook_due(
+        bag,
+        session="regular",
+        last_look_mono=0.0,
+        now_mono=90.0,
+        researched=False,
+    ) is True
+
+
+def test_range_compare_line_ranks_this_look_candles():
+    from abcxauto.world_state import range_compare_line
+
+    line = range_compare_line(
+        {
+            "INTC": {"gap_pct": 7.274, "vs_open": 2.1, "last": 116.96},
+            "AMD": {"gap_pct": 4.487, "vs_open": 1.2, "last": 598.3},
+            "VEEE": {
+                "gap_pct": 69.58,
+                "last": 18.44,
+                "source": "scan",
+            },
+            "MSFT": {"print": "live_open", "gap_pct": 9.0, "last": 494.0},
+        }
+    )
+    assert line.startswith("range INTC gap=7.274 vs_open=2.1 AMD gap=4.487")
+    assert "VEEE" not in line
+    assert "MSFT" not in line
+    assert range_compare_line({}) == ""
+    assert range_compare_line(None) == ""
+
+
+def test_to_high_line_ranks_and_skips_scan_live_open():
+    from abcxauto.world_state import to_high_line
+
+    line = to_high_line(
+        {
+            "AVGO": {
+                "last": 180.0,
+                "high": 200.0,
+                "size": {"qty": 912.05},
+            },
+            "MSFT": {
+                "last": 400.0,
+                "high": 410.0,
+                "size": {"qty": 922.5},
+            },
+            "AMD": {
+                "last": 100.0,
+                "high": 110.0,
+                # missing size — skip
+            },
+            "VEEE": {
+                "last": 10.0,
+                "high": 20.0,
+                "size": {"qty": 100},
+                "source": "scan",
+            },
+            "INTC": {
+                "print": "live_open",
+                "last": 50.0,
+                "high": 60.0,
+                "size": {"qty": 200},
+            },
+            "META": {
+                "last": 500.0,
+                "high": 490.0,
+                "size": {"qty": 10},
+            },
+        }
+    )
+    assert line == "to_high AVGO $18241 MSFT $9225"
+    assert "VEEE" not in line
+    assert "INTC" not in line
+    assert "AMD" not in line
+    assert "META" not in line
+    assert to_high_line({}) == ""
+    assert to_high_line(None) == ""
+
+
+def test_idle_cash_line_omits_dollars_and_day_when_missing():
+    from abcxauto.world_state import idle_cash_line, parse_desk_fact
+
+    line = idle_cash_line(
+        {
+            "capital_liquidity": {
+                "cash_pct_nl": 84.57,
+                "deployed_long_pct_nl": 15.33,
+            }
+        }
+    )
+    assert line == "leftover cash=84.57% deployed=15.33%"
+    assert parse_desk_fact(f"{WAKE_FACT_PREFIX} {line}") is None
+    assert parse_desk_fact(f"{WAKE_FACT_PREFIX} leftover $27304 cash=84.57% deployed=15.33%") is None
+
+
 def test_stop_distance_beats_session_cap():
     fact = worst_wake_fact(
         unprotected=[],

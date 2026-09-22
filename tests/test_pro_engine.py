@@ -780,8 +780,9 @@ def _wire_stay_up_engine(monkeypatch, *, session: str, think, paper: bool = True
     # clock has to go under the floor directly or one look eats the deadline.
     monkeypatch.setattr("abcxauto.park_clock.min_look_s", lambda: 0.01)
     if session in ("closed", "postmarket"):
-        # Labeled overnight snaps must not follow the wall-clock premarket roll.
-        # start() uses et_minutes_to_rth_open, not infer_session_before_open.
+        # Labeled closed / postmarket snaps must not follow the wall-clock
+        # premarket roll. start() uses et_minutes_to_rth_open.
+        # Postmarket is stay-up; this only freezes the clock label.
         monkeypatch.setattr(
             "abcxauto.park_clock.infer_session_before_open",
             lambda **_k: (session, 12 * 60.0),
@@ -853,7 +854,11 @@ def test_research_stay_up_rolled_to_rth_is_premarket_to_regular(monkeypatch):
     assert eng._research_stay_up_rolled_to_rth("premarket", "premarket") is False
     assert eng._research_stay_up_rolled_to_rth("regular", "regular") is False
     assert eng._research_stay_up_rolled_to_rth("closed", "regular") is False
-    assert eng._research_stay_up_rolled_to_rth("postmarket", "regular") is False
+    from abcxauto.park_clock import paper_stay_up
+
+    assert eng._research_stay_up_rolled_to_rth(
+        "postmarket", "regular"
+    ) is paper_stay_up("postmarket")
     assert eng._research_stay_up_rolled_to_rth("", "regular") is False
 
 
@@ -2330,6 +2335,36 @@ async def test_launch_honors_closed_park_after_rth_bell(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_launch_ignores_a_leftover_nap(monkeypatch, tmp_path):
+    """A leftover kind=nap from the prior process must not sit Start."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    from datetime import datetime, timedelta, timezone
+
+    from abcxauto.park_clock import GrokAlarm, save_alarm
+
+    later = (datetime.now(timezone.utc) + timedelta(minutes=40)).isoformat()
+    save_alarm(
+        GrokAlarm(wake_at=later, set_at=later, session="premarket", kind="nap")
+    )
+    calls = {"n": 0}
+
+    async def think(self, n, g, s, *, resume=False):
+        calls["n"] += 1
+        return {"cycle": n, "pnl": 0, "equity": 100000, "_failed": False}
+
+    _wire_stay_up_engine(monkeypatch, session="premarket", think=think)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 2
+    while time.time() < deadline and calls["n"] < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert calls["n"] >= 1
+
+
+@pytest.mark.asyncio
 async def test_launch_ignores_a_leftover_rth_clock(monkeypatch, tmp_path):
     """A leftover grok_wake.json from the old RTH launcher must not sit Start."""
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
@@ -3057,10 +3092,20 @@ async def test_pulse_timeout_unchanged_wom_set_sits(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_research_keep_looking_after_brief_without_poke(monkeypatch, tmp_path):
-    """Premarket brief must not nap waiting for a book poke that never comes."""
+    """Finished research look does not mill on pulse timeout.
+
+    Re-enter only on RTH roll, lead change, poke, or book events. Soften=FAIL.
+    """
     monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
     monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(tmp_path / "research_brief.json"))
     monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+
+    async def no_lead(_self, _g):
+        return False
+
+    monkeypatch.setattr(
+        "abcxauto.pro_engine.ProEngine._stay_up_lead_changed", no_lead
+    )
     calls: list[bool] = []
 
     async def think(self, n, g, s, *, resume=False):
@@ -3100,13 +3145,18 @@ async def test_research_keep_looking_after_brief_without_poke(monkeypatch, tmp_p
     eng = ProEngine()
     assert eng.start() is None
     deadline = time.time() + 4
-    while time.time() < deadline and len(calls) < 2:
+    while time.time() < deadline and len(calls) < 1:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    idle_until = time.time() + 0.4
+    while time.time() < idle_until:
         eng.drain_apply()
         await asyncio.sleep(0.05)
     eng.stop_engine()
     eng.drain_apply()
-    assert len(calls) >= 2
+    assert len(calls) == 1
     assert calls[0] is True
+    assert eng._resume_think is False
     from abcxauto.desk_mode import load_research_brief
     from abcxauto.park_clock import load_alarm, peek_interrupt
 
@@ -3654,6 +3704,395 @@ async def test_stay_up_lead_changed_detects_material_book_lots(monkeypatch):
     g = SimpleNamespace(chat=None, _last_desk_fact="")
     assert await eng._stay_up_lead_changed(g) is False
     assert await eng._stay_up_lead_changed(g) is True
+
+
+def _socket_snap(session: str, *, connected: bool) -> dict:
+    snap = _stay_up_snap(session)
+    snap["ibkr_connected"] = connected
+    pulse = dict(snap.get("reality_pulse") or {})
+    pulse["ibkr_connected"] = connected
+    snap["reality_pulse"] = pulse
+    return snap
+
+
+@pytest.mark.asyncio
+async def test_stay_up_lead_changed_true_on_socket_up(monkeypatch):
+    down = _socket_snap("regular", connected=False)
+    up = _socket_snap("regular", connected=True)
+    snaps = [down, up]
+    n = {"i": 0}
+
+    async def fake_snap(_c):
+        i = min(n["i"], 1)
+        n["i"] += 1
+        return snaps[i]
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: "session_cap remaining=10 looks, 99 tokens",
+    )
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    g = SimpleNamespace(chat=None, _last_desk_fact="")
+    assert await eng._stay_up_lead_changed(g) is False
+    assert await eng._stay_up_lead_changed(g) is True
+
+
+@pytest.mark.asyncio
+async def test_stay_up_lead_changed_false_on_socket_down(monkeypatch):
+    up = _socket_snap("regular", connected=True)
+    down = _socket_snap("regular", connected=False)
+    snaps = [up, down]
+    n = {"i": 0}
+
+    async def fake_snap(_c):
+        i = min(n["i"], 1)
+        n["i"] += 1
+        return snaps[i]
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    monkeypatch.setattr(
+        "abcxauto.world_state.worst_wake_fact",
+        lambda **_k: "session_cap remaining=10 looks, 99 tokens",
+    )
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    g = SimpleNamespace(chat=None, _last_desk_fact="")
+    assert await eng._stay_up_lead_changed(g) is False
+    assert await eng._stay_up_lead_changed(g) is False
+
+
+def _leftover_rth_snap() -> dict:
+    snap = _stay_up_snap("regular")
+    snap["account"] = {
+        "netliquidation": 32361.08,
+        "totalcashvalue": 32326.14,
+        "unrealizedpnl": 0,
+    }
+    return snap
+
+
+@pytest.mark.asyncio
+async def test_stay_up_lead_changed_leftover_does_not_wake_on_timer(monkeypatch):
+    """Flat leftover after a sat look does not wake on a leftover clock."""
+    monkeypatch.setattr("abcxauto.park_clock.leftover_relook_s", lambda: 0.05)
+
+    async def fake_snap(_c):
+        return _leftover_rth_snap()
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    eng._look_ended_mono = time.monotonic() - 1.0
+    g = SimpleNamespace(chat=None, _last_desk_fact="")
+    assert await eng._stay_up_lead_changed(g) is False
+
+
+@pytest.mark.asyncio
+async def test_stay_up_lead_changed_leftover_unchanged_cash_does_not_wake(monkeypatch):
+    """Stay-up pulse does not wake solely because leftover cash is unchanged."""
+    monkeypatch.setattr("abcxauto.park_clock.leftover_relook_s", lambda: 90.0)
+
+    async def fake_snap(_c):
+        return _leftover_rth_snap()
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    eng._look_ended_mono = time.monotonic()
+    g = SimpleNamespace(chat=None, _last_desk_fact="")
+    assert await eng._stay_up_lead_changed(g) is False
+    assert await eng._stay_up_lead_changed(g) is False
+
+
+@pytest.mark.asyncio
+async def test_stay_up_lead_changed_leftover_skips_premarket(monkeypatch):
+    monkeypatch.setattr("abcxauto.park_clock.leftover_relook_s", lambda: 0.05)
+
+    async def fake_snap(_c):
+        snap = _leftover_rth_snap()
+        snap["market_hours"] = {"session": "premarket"}
+        snap["reality_pulse"] = {"session": {"status": "premarket"}}
+        return snap
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    eng._look_ended_mono = time.monotonic() - 1.0
+    g = SimpleNamespace(chat=None, _last_desk_fact="")
+    assert await eng._stay_up_lead_changed(g) is False
+
+
+@pytest.mark.asyncio
+async def test_stay_up_lead_changed_researched_leftover_no_timer(monkeypatch):
+    """Researched leftover does not arm a 15m leftover wake either."""
+    monkeypatch.setattr("abcxauto.park_clock.leftover_relook_s", lambda: 0.05)
+    monkeypatch.setattr(
+        "abcxauto.park_clock.researched_leftover_relook_s", lambda: 900.0
+    )
+
+    async def fake_snap(_c):
+        return _leftover_rth_snap()
+
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    eng = ProEngine()
+    eng.conn = SimpleNamespace(connected=True)
+    eng._look_ended_mono = time.monotonic() - 1.0
+    eng._last_look_researched = False
+    g = SimpleNamespace(chat=None, _last_desk_fact="")
+    assert await eng._stay_up_lead_changed(g) is False
+
+    eng._last_look_researched = True
+    eng._look_ended_mono = time.monotonic() - 1000.0
+    assert await eng._stay_up_lead_changed(g) is False
+
+
+def test_rearm_scan_only_leftover_streak_caps_at_two():
+    """Scan-only leftover RTH re-enters at most twice, then sits for a book event."""
+    eng = ProEngine()
+    leftover_ws = {
+        "portfolio_risk": {
+            "capital_liquidity": {
+                "total_cash": 32326,
+                "cash_pct_nl": 99.89,
+                "deployed_long_pct_nl": 0.0,
+            }
+        }
+    }
+    payload = {
+        "_failed": False,
+        "rationale": "Checking the book. No ticket.",
+        "sends": 0,
+        "positions": [],
+        "session_range": {},
+        "world_state": leftover_ws,
+    }
+    eng._rearm_after_think(payload, session="regular")
+    assert eng._last_look_researched is False
+    assert eng._scan_only_streak == 1
+    assert eng._resume_think is True
+
+    eng._rearm_after_think(payload, session="regular")
+    assert eng._scan_only_streak == 2
+    assert eng._resume_think is True
+
+    eng._rearm_after_think(payload, session="regular")
+    assert eng._scan_only_streak == 3
+    assert eng._resume_think is False
+
+    researched = {
+        **payload,
+        "session_range": {
+            "AVGO": {
+                "open": 175.0,
+                "high": 200.0,
+                "low": 170.0,
+                "last": 180.0,
+                "n": 12,
+            }
+        },
+        "news_items": [{"symbol": "AVGO", "headline": "AVGO beats"}],
+        "research_web": {},
+    }
+    eng._rearm_after_think(researched, session="regular")
+    assert eng._last_look_researched is True
+    assert eng._scan_only_streak == 0
+    assert eng._resume_think is False
+
+
+def test_rearm_deployed_book_keeps_researching_then_caps():
+    """A fill does not end the work. Two more looks, then a book event."""
+    eng = ProEngine()
+    g = SimpleNamespace()
+    deployed = {
+        "_failed": False,
+        "rationale": "Filled AVGO. Looking for a better name.",
+        "sends": 1,
+        "positions": [{"symbol": "AVGO", "quantity": 89}],
+        "world_state": {
+            "portfolio_risk": {
+                "capital_liquidity": {
+                    "total_cash": 214,
+                    "cash_pct_nl": 0.66,
+                    "deployed_long_pct_nl": 99.2,
+                }
+            }
+        },
+    }
+    eng._rearm_after_think(deployed, session="regular", g=g)
+    assert eng._work_streak == 1
+    assert eng._resume_think is True
+    assert getattr(g, "_work_resume", False) is True
+
+    g._work_resume = False
+    eng._rearm_after_think(deployed, session="regular", g=g)
+    assert eng._work_streak == 2
+    assert eng._resume_think is True
+    assert getattr(g, "_work_resume", False) is True
+
+    g._work_resume = False
+    eng._rearm_after_think(deployed, session="regular", g=g)
+    assert eng._work_streak == 3
+    assert eng._resume_think is False
+    assert getattr(g, "_work_resume", False) is False
+
+
+def test_rearm_words_only_open_lot_sets_work_resume_then_caps():
+    """Say with zero tools on an open lot must arm work-resume (cap 2)."""
+    eng = ProEngine()
+    g = SimpleNamespace()
+    words_only = {
+        "_failed": False,
+        "rationale": "Holding AVGO. Watching for a better name.",
+        "sends": 0,
+        "tool_trace": [],
+        "positions": [{"symbol": "AVGO", "quantity": 89}],
+        "world_state": {
+            "portfolio_risk": {
+                "capital_liquidity": {
+                    "total_cash": 214,
+                    "cash_pct_nl": 0.66,
+                    "deployed_long_pct_nl": 99.2,
+                }
+            }
+        },
+    }
+    eng._rearm_after_think(words_only, session="regular", g=g)
+    assert eng._work_streak == 1
+    assert eng._resume_think is True
+    assert getattr(g, "_work_resume", False) is True
+    assert not getattr(eng, "_mill_wake", False)
+
+    g._work_resume = False
+    eng._rearm_after_think(words_only, session="regular", g=g)
+    assert eng._work_streak == 2
+    assert eng._resume_think is True
+    assert getattr(g, "_work_resume", False) is True
+
+    g._work_resume = False
+    eng._rearm_after_think(words_only, session="regular", g=g)
+    assert eng._work_streak == 3
+    assert eng._resume_think is False
+    assert getattr(g, "_work_resume", False) is False
+
+
+def test_rearm_leftover_correctable_refuse_resumes_then_caps():
+    """Leftover + correctable refuse re-enters same chat; third time sits."""
+    eng = ProEngine()
+    leftover_ws = {
+        "portfolio_risk": {
+            "capital_liquidity": {
+                "total_cash": 32326,
+                "cash_pct_nl": 99.89,
+                "deployed_long_pct_nl": 0.0,
+            }
+        }
+    }
+    payload = {
+        "_failed": False,
+        "rationale": "Bracket refused; standing down.",
+        "sends": 0,
+        "positions": [],
+        "session_range": {
+            "AVGO": {
+                "open": 360.0,
+                "high": 362.0,
+                "low": 358.0,
+                "last": 360.91,
+                "n": 12,
+            }
+        },
+        "news_items": [{"symbol": "AVGO", "headline": "AVGO news"}],
+        "world_state": leftover_ws,
+        "result": {
+            "status": "blocked",
+            "reason_code": "preview_refuse",
+            "note": "mode_size 11.11 > 8.0 fit_qty=7",
+            "would_refuse": [
+                "stale_or_invented_number: entry_price=359.4 not in this look",
+                "mode_size 11.11 > 8.0 fit_qty=7",
+            ],
+        },
+        "validation": "mode_size 11.11 > 8.0 fit_qty=7",
+    }
+    eng._rearm_after_think(payload, session="regular")
+    assert eng._last_look_researched is True
+    assert eng._scan_only_streak == 1
+    assert eng._resume_think is True
+
+    eng._rearm_after_think(payload, session="regular")
+    assert eng._scan_only_streak == 2
+    assert eng._resume_think is True
+
+    eng._rearm_after_think(payload, session="regular")
+    assert eng._scan_only_streak == 3
+    assert eng._resume_think is False
+
+
+@pytest.mark.asyncio
+async def test_rth_leftover_think_only_starts_another_look(monkeypatch, tmp_path):
+    """Think-only on leftover cash must not sit the RTH book forever."""
+    monkeypatch.setenv("ABCXAUTO_GROK_WAKE_PATH", str(tmp_path / "wake.json"))
+    monkeypatch.setattr("abcxauto.park_clock.PULSE_S", 0.05)
+    calls: list[bool] = []
+    leftover_ws = {
+        "portfolio_risk": {
+            "capital_liquidity": {
+                "total_cash": 32326,
+                "cash_pct_nl": 99.89,
+                "deployed_long_pct_nl": 0.0,
+            }
+        }
+    }
+
+    async def think(self, n, g, s, *, resume=False):
+        calls.append(resume)
+        return {
+            "cycle": n,
+            "pnl": 0,
+            "equity": 32361,
+            "_failed": False,
+            "rationale": "Checking the book. No ticket.",
+            "sends": 0,
+            "positions": [],
+            "session_range": {},
+            "world_state": leftover_ws,
+        }
+
+    _wire_stay_up_engine(monkeypatch, session="regular", think=think)
+
+    async def fake_snap(_c):
+        return _leftover_rth_snap()
+
+    monkeypatch.setattr("abcxauto.pro_engine.snap", fake_snap)
+    monkeypatch.setattr("abcxauto.agent_loop.snap", fake_snap)
+    eng = ProEngine()
+    assert eng.start() is None
+    deadline = time.time() + 4
+    while time.time() < deadline and len(calls) < 2:
+        eng.drain_apply()
+        await asyncio.sleep(0.05)
+    eng.stop_engine()
+    eng.drain_apply()
+    assert len(calls) >= 2
+    from abcxauto.park_clock import load_alarm
+
+    assert load_alarm().wake_at is None
+
+
+def test_kill_look_skip_reason_book_unreliable():
+    from abcxauto.thin_rth_kill_look import REASON_BOOK_UNRELIABLE
+
+    eng = ProEngine()
+    snap = {
+        "positions": [],
+        "protection": {},
+        "book_unreliable": True,
+    }
+    assert eng._kill_look_skip_reason("regular", snap) == REASON_BOOK_UNRELIABLE
+    snap["protection"] = {"unprotected_symbols": ["SPY"]}
+    assert eng._kill_look_skip_reason("regular", snap) == ""
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,29 @@ _CACHE_TTL_S = 150.0
 TAPE_SEED_CAP = 12
 # Top-N screen hits that get an IBKR last stamped on in the same call.
 SCAN_QUOTE_CAP = 12
+# Top hits may keep compact MDA metrics; past this, nest is headline-only.
+SCAN_MDA_HIT_CAP = 8
+# Compact nest only — never bars/candles/series or a news list.
+_MDA_HIT_KEEP = frozenset(
+    {
+        "sma20",
+        "sma50",
+        "dist20",
+        "ret5",
+        "above_sma20",
+        "mda_last",
+        "mda_last_is",
+        "mda_last_t",
+        "bar",
+        "source",
+        "freshness",
+        "use",
+        "asof_iso",
+        "as_of",
+        "headline",
+    }
+)
+_MDA_BLOB_KEYS = frozenset({"bars", "candles", "series", "news", "news_use"})
 
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,7}$")
 
@@ -175,7 +198,7 @@ def overlay_hits(
     return rows
 
 
-# Ranked screen row. last/volume/market_cap only when the scanner supplied them.
+# Ranked screen row. last is IBKR live on the top hits; volume/market_cap when present.
 RANKED_ROW_KEYS = frozenset(
     {
         "symbol",
@@ -224,7 +247,7 @@ _GAP_SCAN_CODES = frozenset(
 )
 THIN_RANK_MEANING = (
     "metric_name/metric_value are IBKR distance|benchmark for this scanCode; "
-    "skip_class is levered|micro|empty; last only if the scanner supplied it"
+    "skip_class is levered|micro|empty; last is IBKR live on the top hits"
 )
 SILENT_SCAN_NOTE = (
     "flush default screens (MOST_ACTIVE, TOP_PERC_LOSE, TOP_PERC_GAIN); "
@@ -362,31 +385,126 @@ def scrub_aliased_gap_pct(row: dict[str, Any] | None) -> dict[str, Any] | None:
     return row
 
 
-def _drop_nested_mda_news(row: dict[str, Any]) -> dict[str, Any]:
-    """News is top-level only. Same nest keys as ``brain_tools._strip_hit_news``."""
+def _one_line_headline(news: Any) -> str | None:
+    """First real headline from a nested news list or string. Caps length."""
+    if isinstance(news, str):
+        text = news.strip()
+        return text[:160] if text else None
+    rows = news if isinstance(news, (list, tuple)) else []
+    for it in rows:
+        if isinstance(it, str):
+            text = it.strip()
+            if text and not text.startswith("(unavailable"):
+                return text[:160]
+            continue
+        if not isinstance(it, dict):
+            continue
+        try:
+            from abcxauto.news_feed import is_real_headline
+
+            if not is_real_headline(it):
+                continue
+        except Exception:
+            hl = str(it.get("headline") or "").strip()
+            if not hl or hl.startswith("(unavailable"):
+                continue
+        text = str(it.get("headline") or "").strip()
+        if text:
+            return text[:160]
+    return None
+
+
+def slim_hit_mda(
+    row: dict[str, Any],
+    *,
+    keep_metrics: bool = True,
+) -> dict[str, Any]:
+    """Clip nested MDA/news. Keep live ``last`` on the row.
+
+    Nested ``news`` becomes a one-line ``headline``. Bars/candles/series drop.
+    Past the top hits, metrics drop too — color only, not a second daily tape.
+    """
+    for blob in ("bars", "candles", "series"):
+        row.pop(blob, None)
     mda = row.get("mda")
-    if not isinstance(mda, dict) or ("news" not in mda and "news_use" not in mda):
+    if not isinstance(mda, dict):
         return row
-    nest = dict(mda)
-    nest.pop("news", None)
-    nest.pop("news_use", None)
-    if nest:
-        row["mda"] = nest
+    headline = _one_line_headline(mda.get("news"))
+    if headline is None:
+        existing = mda.get("headline")
+        if isinstance(existing, str) and existing.strip():
+            headline = existing.strip()[:160]
+    if not keep_metrics:
+        if headline:
+            row["mda"] = {
+                "headline": headline,
+                "use": "color_not_trigger",
+                "source": "mda",
+            }
+        else:
+            row.pop("mda", None)
+        return row
+    slim: dict[str, Any] = {}
+    for key in _MDA_HIT_KEEP:
+        if key == "headline":
+            continue
+        val = mda.get(key)
+        if val not in (None, ""):
+            slim[key] = val
+    for blob in _MDA_BLOB_KEYS:
+        slim.pop(blob, None)
+    if headline:
+        slim["headline"] = headline
+    if slim:
+        row["mda"] = slim
     else:
         row.pop("mda", None)
     return row
 
 
-def public_scan_row(row: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Thin or fat public hit after scrub. No nested ``mda.news``.
+def _drop_nested_mda_news(row: dict[str, Any]) -> dict[str, Any]:
+    """News is top-level only. Compat shim → ``slim_hit_mda``."""
+    return slim_hit_mda(row, keep_metrics=True)
 
-    Mutates fat rows in place (same object). Thin rows are scrubbed, not rebuilt.
+
+def public_scan_row(
+    row: dict[str, Any] | None,
+    *,
+    rank_index: int | None = None,
+    mda_cap: int | None = None,
+) -> dict[str, Any] | None:
+    """Thin or fat public hit after scrub. Nested MDA is metrics or one headline.
+
+    Mutates in place. Live ``last`` stays. Rows past ``mda_cap`` keep at most a
+    one-line headline under ``mda`` — no daily-bar echo.
     """
     if not isinstance(row, dict):
         return row
-    if not is_thin_ranked_row(row):
-        _drop_nested_mda_news(row)
+    cap = SCAN_MDA_HIT_CAP if mda_cap is None else max(0, int(mda_cap))
+    keep = True if rank_index is None else int(rank_index) < cap
+    if isinstance(row.get("mda"), dict) or not is_thin_ranked_row(row):
+        slim_hit_mda(row, keep_metrics=keep)
+    elif any(k in row for k in ("bars", "candles", "series")):
+        slim_hit_mda(row, keep_metrics=keep)
     return scrub_aliased_gap_pct(row)
+
+
+def public_scan_hits(
+    rows: list[Any] | None,
+    *,
+    mda_cap: int | None = None,
+) -> list[dict[str, Any]]:
+    """Public hit list: top-N compact MDA, tail headline-only, no bar blobs."""
+    out: list[dict[str, Any]] = []
+    for i, row in enumerate(rows or []):
+        item = (
+            public_scan_row(row, rank_index=i, mda_cap=mda_cap)
+            if isinstance(row, dict)
+            else None
+        )
+        if isinstance(item, dict):
+            out.append(item)
+    return out
 
 
 def is_thin_ranked_row(row: Any) -> bool:
@@ -597,18 +715,27 @@ async def attach_mda_metrics(
     *,
     cap: int = 8,
 ) -> int:
-    """Nest delayed daily metrics on the top hits. Never writes ``last``."""
+    """Nest delayed daily metrics on the top hits. Never writes ``last``.
+
+    Compact nest only (sma/dist/ret). No bars/candles. Rows past ``cap`` keep
+    at most a one-line headline if news was already nested.
+    """
     from abcxauto.prints import merge_mda_metrics, mda_worth_asking
 
+    limit = max(0, int(cap))
     targets = [
         str(r.get("symbol") or "")
-        for r in (rows or [])[: max(0, int(cap))]
+        for r in (rows or [])[:limit]
         if r.get("symbol") and mda_worth_asking(str(r.get("symbol") or ""))
     ]
     if not targets:
         return 0
-    ideas = await fetch_scan_metrics(targets, cap=cap)
-    return merge_mda_metrics(rows, ideas)
+    ideas = await fetch_scan_metrics(targets, cap=limit)
+    n = merge_mda_metrics(rows, ideas)
+    for i, row in enumerate(rows or []):
+        if isinstance(row, dict):
+            slim_hit_mda(row, keep_metrics=i < limit)
+    return n
 
 
 async def criteria_scan(
@@ -694,25 +821,23 @@ async def criteria_scan(
             if code_out and isinstance(row, dict) and row.get("symbol"):
                 row.setdefault("scan_code", str(code_out).upper())
     screen = bool(has_arena or has_code)
+    screen_id = str(arena_id or "").strip() or None
+    code_id = str(code_out or "").strip() or None
     if screen:
-        quoted = 0
-        rows = thin_ranked_hits(
-            rows,
-            screen=str(arena_id or "").strip() or None,
-            scan_code=str(code_out or "").strip() or None,
-        )
+        rows = thin_ranked_hits(rows, screen=screen_id, scan_code=code_id)
+        quoted = await attach_live_quotes(rows, connector=connector)
+        slim: list[dict[str, Any]] = []
+        for row in rows:
+            item = thin_ranked_row(row, screen=screen_id, scan_code=code_id)
+            if item:
+                slim.append(item)
+        rows = slim
         empty = bool(empty or not rows)
         kept = len(rows)
     else:
         quoted = await attach_live_quotes(rows, connector=connector)
         empty = False
-    rows = [
-        item
-        for item in (
-            public_scan_row(r) if isinstance(r, dict) else None for r in rows
-        )
-        if isinstance(item, dict)
-    ]
+    rows = public_scan_hits(rows)
     ranked = bool(scanner_rows) and source == "ibkr" and not empty
     out: dict[str, Any] = {
         "ok": True,

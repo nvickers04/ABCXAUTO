@@ -181,6 +181,14 @@ def test_book_strip_sync(headless_pro):
     s.equity = 100_000.0
     s.pnl = -50.0
     s.unprotected_count = 2
+    s.portfolio = {
+        "unprotected_symbols": ["SPY", "AAPL"],
+        "capital_liquidity": {
+            "total_cash": 72_500.0,
+            "cash_pct_nl": 72.5,
+            "deployed_long_pct_nl": 27.5,
+        },
+    }
     s.halted = True
     s.brain_strat = "oca"
     s.brain_rationale = "cover SPY"
@@ -190,6 +198,10 @@ def test_book_strip_sync(headless_pro):
     s.open_orders = [{"order_id": 9, "symbol": "SPY", "order_type": "STP", "quantity": 5, "aux_price": 490}]
     headless_pro._sync_widgets()
     assert headless_pro.lbl_equity.value == "$100,000.00"
+    assert "cash $72,500.00" in (headless_pro.lbl_capital.value or "")
+    assert "deployed 27.5%" in (headless_pro.lbl_capital.value or "")
+    assert "naked SPY" in (headless_pro.lbl_mandate_health.value or "")
+    assert "protected" not in (headless_pro.lbl_mandate_health.value or "")
     assert "-50.00" in (headless_pro.lbl_pnl.value or "")
     assert headless_pro.lbl_unprotected.value == "2"
     assert headless_pro.lbl_halt.value == "HALTED"
@@ -217,7 +229,24 @@ def test_book_strip_sync(headless_pro):
     assert "quote" in (headless_pro.lbl_tools.value or "")
     assert headless_pro.lbl_banner.visible is True
     assert "ibkr_down" in (headless_pro.lbl_banner.value or "")
-
+    # TotalCashValue on the pulse account fills cash when capital_liquidity is empty.
+    s.portfolio = {"unprotected_symbols": []}
+    s.unprotected_count = 0
+    s.halted = False
+    s.mandate_health = "green"
+    s.mandate_health_label = "protected"
+    s.portfolio_risk = {}
+    s.reality_pulse = {
+        "account": {
+            "NetLiquidation": 100_000.0,
+            "TotalCashValue": 40_000.0,
+            "AvailableFunds": 99_999.0,
+        }
+    }
+    headless_pro._sync_widgets()
+    assert "cash $40,000.00" in (headless_pro.lbl_capital.value or "")
+    assert "99,999" not in (headless_pro.lbl_capital.value or "")
+    assert headless_pro.lbl_mandate_health.value == "green — protected"
 
 def test_shell_tree_builds_three_columns(headless_pro):
     from abcxauto.pro_desktop import ASIDE_W, RAIL_W
@@ -473,7 +502,8 @@ def test_stream_line_widget_follows_tokens(headless_pro):
     headless_pro._think_sync_key = ""
     headless_pro._sync_think_stream()
     assert headless_pro.think_live is widget
-    assert headless_pro.think_live.visible is False
+    assert headless_pro.think_live.visible is True
+    assert headless_pro.col_stream.controls == []
     pane = headless_pro._pane_stream_text()
     assert "alpha" in pane
     assert "gamma" in pane
@@ -483,18 +513,17 @@ def test_stream_line_widget_follows_tokens(headless_pro):
     assert "delta" in headless_pro._pane_stream_text()
 
 
-def test_stream_paints_full_buffer_not_just_a_tail(headless_pro):
+def test_stream_paints_live_look_as_one_text_not_line_controls(headless_pro):
+    """Hot poll: last 200 view lines in think_live; col_stream stays empty."""
     blob = "HEAD_MARK\n" + ("mid.\n" * 500) + "TAIL_MARK\n"
     headless_pro.engine.state.think_live = blob
     headless_pro._think_sync_key = ""
     headless_pro._sync_think_stream()
-    painted = "\n".join(
-        str(getattr(n, "value", "") or "")
-        for n in _walk(headless_pro.col_stream)
-        if getattr(n, "value", None)
-    )
-    assert "HEAD_MARK" in painted
+    painted = headless_pro.think_live.value or ""
+    assert headless_pro.think_live.visible is True
+    assert headless_pro.col_stream.controls == []
     assert "TAIL_MARK" in painted
+    assert "HEAD_MARK" not in painted  # dropped by the 200-line live-look cap
     assert str(len(blob)) in (headless_pro.lbl_stream_status.value or "").replace(",", "")
 
 
@@ -986,6 +1015,41 @@ def test_stream_pane_pins_the_tail_without_an_invoke_method(headless_pro):
     headless_pro.tab = "overview"
     asyncio.run(_tick())
     assert rec.calls == []
+
+
+def test_poll_skips_page_update_when_fingerprint_unchanged(headless_pro, monkeypatch):
+    """Quiet drain ticks must not call page.update — that patch holds the GIL."""
+    paints: list[int] = []
+    monkeypatch.setattr(headless_pro, "_safe_update", lambda: paints.append(1))
+    monkeypatch.setattr(headless_pro, "_sync_widgets", lambda: None)
+    monkeypatch.setattr(headless_pro.engine, "drain_apply", lambda: None)
+
+    headless_pro.engine.state.status = "Running"
+    headless_pro.engine.state.equity = 100_000.0
+    headless_pro.engine.state.think_live = "hello"
+
+    assert headless_pro._poll_should_update() is True
+    assert headless_pro._poll_should_update() is False  # same fingerprint
+
+    headless_pro.engine.state.think_live = "hello!"
+    # Fingerprint moved, but 1 Hz budget still blocks.
+    assert headless_pro._poll_should_update() is False
+
+    headless_pro._poll_ui_at = time.monotonic() - 1.1
+    assert headless_pro._poll_should_update() is True
+
+    async def _quiet_ticks() -> None:
+        task = asyncio.ensure_future(headless_pro._poll_loop())
+        await asyncio.sleep(0.4)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    paints.clear()
+    asyncio.run(_quiet_ticks())
+    assert paints == []  # fingerprint still "hello!" — no paint
 
 
 def test_no_invoke_method_calls_on_page_only_controls():

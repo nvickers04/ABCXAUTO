@@ -538,6 +538,7 @@ def test_scrub_pops_opt_volume_leftover_gap_pct():
     nest = inherited.get("mda") or {}
     assert "news" not in nest
     assert "news_use" not in nest
+    assert nest.get("headline") == "color only"
     assert nest.get("sma20") == pytest.approx(150.0)
 
     gap_screen = {
@@ -556,6 +557,62 @@ def test_scrub_pops_opt_volume_leftover_gap_pct():
     thin_gap = thin_ranked_row(gap_screen, scan_code="HIGH_OPEN_GAP")
     assert thin_gap["gap_pct"] == pytest.approx(8.2)
     assert thin_gap["metric_value"] == pytest.approx(8.2)
+
+
+def test_public_scan_hits_clip_mda_past_top_and_drop_bars():
+    """Tail rows: one-line headline, no daily-bar echo. Live last stays."""
+    from abcxauto.opportunity_scan import SCAN_MDA_HIT_CAP, public_scan_hits
+
+    fat_bars = [{"t": i, "c": 100.0 + i} for i in range(120)]
+    rows = []
+    for i in range(SCAN_MDA_HIT_CAP + 4):
+        rows.append(
+            {
+                "symbol": f"S{i:02d}",
+                "rank": i,
+                "last": 10.0 + i,
+                "skip_class": "",
+                "source": "ibkr",
+                "open": 9.0 + i,
+                "mda": {
+                    "sma20": 100.0 + i,
+                    "dist20": 0.01,
+                    "bars": list(fat_bars),
+                    "news": [
+                        {
+                            "headline": f"S{i:02d} catalyst print with enough text",
+                            "source": "mda",
+                            "summary": "x" * 400,
+                        }
+                    ],
+                    "news_use": "color_not_trigger",
+                },
+                "bars": list(fat_bars),
+            }
+        )
+
+    out = public_scan_hits(rows)
+    assert len(out) == len(rows)
+    top = out[0]
+    assert top["last"] == pytest.approx(10.0)
+    assert "bars" not in top
+    nest = top.get("mda") or {}
+    assert "bars" not in nest
+    assert "news" not in nest
+    assert "news_use" not in nest
+    assert nest.get("headline") == "S00 catalyst print with enough text"
+    assert nest.get("sma20") == pytest.approx(100.0)
+
+    tail = out[SCAN_MDA_HIT_CAP]
+    assert tail["last"] == pytest.approx(10.0 + SCAN_MDA_HIT_CAP)
+    assert "bars" not in tail
+    thin = tail.get("mda") or {}
+    assert thin.get("headline") == (
+        f"S{SCAN_MDA_HIT_CAP:02d} catalyst print with enough text"
+    )
+    assert "sma20" not in thin
+    assert "bars" not in thin
+    assert "news" not in thin
 
 
 def test_thin_ranked_row_labels_levered_etf():
@@ -634,17 +691,24 @@ async def test_criteria_scan_arena_emits_thin_gap_rows(monkeypatch):
             "applied": {},
         }
 
-    async def boom(*_a, **_k):
-        raise AssertionError("ranked screen must not quote")
+    async def quotes(rows, **_k):
+        for row in rows:
+            if row.get("symbol") == "NVDA":
+                row["last"] = 181.5
+                row["bid"] = 181.4
+                row["ask"] = 181.6
+            if row.get("symbol") == "AMD":
+                row["last"] = 4.2
+        return 2
 
     monkeypatch.setattr("abcxauto.universe.pull_one_screen", fake_pull)
-    monkeypatch.setattr("abcxauto.opportunity_scan.attach_live_quotes", boom)
+    monkeypatch.setattr("abcxauto.opportunity_scan.attach_live_quotes", quotes)
     out = await criteria_scan(scan_code="TOP_PERC_GAIN", connector=object())
     assert out["ok"] is True
     assert out["thin"] is True
     assert out["sort"] == "TOP_PERC_GAIN"
     assert out["criteria"]["scan_code"] == "TOP_PERC_GAIN"
-    assert out["quoted"] == 0
+    assert out["quoted"] == 2
     assert out["ranked"] is True
     assert out["empty"] is False
     assert "watch" not in out
@@ -662,11 +726,13 @@ async def test_criteria_scan_arena_emits_thin_gap_rows(monkeypatch):
         assert "distance" not in row
         assert "open_gap_pct" not in row
     assert out["hits"][0]["symbol"] == "NVDA"
+    assert out["hits"][0]["last"] == 181.5
     assert "gap_pct" not in out["hits"][0]
     assert out["hits"][0]["metric_name"] == "percent_change"
     assert out["hits"][0]["metric_value"] == pytest.approx(12.4)
     assert out["hits"][0]["rank"] == 0
     assert out["hits"][0]["skip_class"] == ""
+    assert out["hits"][1]["skip_class"] == "micro"
 
 
 @pytest.mark.asyncio

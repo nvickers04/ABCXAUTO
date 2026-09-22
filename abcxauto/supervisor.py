@@ -681,7 +681,14 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
     env["ABCXAUTO_SUPERVISED"] = "1"
     backoff = 15.0
     child_pid = 0
+    last_code = 0
     while True:
+        # Before every spawn (including after backoff): honor operator_stop.
+        # Post-exit check alone races the sleep window — Stop during backoff
+        # must not relaunch on exit 1.
+        if operator_stopped():
+            note("supervisor: operator stop — stay down")
+            return int(last_code or 0)
         try:
             # Reap leftover _start_pro / Pro python and orphan flet before spawn.
             # Do not clear operator_stop here — a crash loop must still honor Stop.
@@ -722,17 +729,20 @@ def supervise(child_env: dict[str, str] | None = None) -> int:
             except Exception:
                 nest_pids = set()
         code = proc.wait()
+        last_code = int(code or 0)
         try:
             kill_descendant_flet(root=child_pid)
             reap_leftover_desk(exclude={child_pid})
         except Exception:
             logger.debug("post-exit Pro reap skipped", exc_info=True)
-        if int(code or 0) == 0:
+        if last_code == 0:
             note("supervisor: clean exit — operator closed the window, stay down")
             return 0
+        # Exit ≠0 (incl. 1): refuse relaunch when Stop is latched, before
+        # useful-hours / TWS / backoff work.
         if operator_stopped():
             note("supervisor: operator stop — stay down")
-            return int(code or 0)
+            return last_code
         held = foreign_desk_pid(exclude={child_pid})
         if held and held in nest_pids:
             # Our crashed child's leftover nest/flet — reap it; do not stay

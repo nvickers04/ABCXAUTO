@@ -202,9 +202,9 @@ class Config:
     auto_panic_on_breach: bool = True
     defined_risk_only: bool = True
     cash_only: bool = True
-    # Display-only portfolio defined-max-loss figure. Default 800 is not a
-    # place/preview refuse. Operator disk may persist it; self_tune cannot.
-    portfolio_cap_usd: float = 800.0
+    # Off. Not a place or preview cap. Operator disk may persist a number;
+    # self_tune cannot. 0 means no figure.
+    portfolio_cap_usd: float = 0.0
     max_peak_drawdown_pct: float = 25.0
     max_option_premium_pct: float = 25.0
     max_risk_per_trade_pct: float = 25.0
@@ -239,13 +239,13 @@ def _env_portfolio_cap_usd() -> float:
     """Display default. Not a place or preview refuse."""
     raw = _env("ABCXAUTO_PORTFOLIO_CAP_USD")
     if not raw:
-        return 800.0
+        return 0.0
     try:
         from abcxauto.portfolio_loss import coerce_portfolio_cap_usd
 
         return coerce_portfolio_cap_usd(raw)
     except (TypeError, ValueError):
-        return 800.0
+        return 0.0
 
 
 def default_file_log_path() -> Path:

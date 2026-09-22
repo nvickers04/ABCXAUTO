@@ -163,7 +163,7 @@ UNSUPERVISED_DEFAULTS: dict[str, Any] = {
     "auto_panic_on_breach": True,
     "defined_risk_only": True,
     "cash_only": True,
-    "portfolio_cap_usd": 800.0,
+    "portfolio_cap_usd": 0.0,
     "daily_loss_limit_pct": 25.0,
     "max_position_pct": 25.0,
     "max_risk_per_trade_pct": 25.0,
@@ -501,6 +501,11 @@ def apply_self_tune(
     after = {k: getattr(get_config(), k, None) for k in list(applied)}
     if size_pct is not None:
         after[_SIZE_PCT_NL_KEY] = size_pct
+    if not clamped and not rejected:
+        note = "self_tune applied"
+    else:
+        held = sorted({*clamped, *rejected})
+        note = "self_tune applied; floor cannot be weakened (" + ", ".join(held) + ")"
     return {
         "status": "ok",
         "strategy": "self_tune",
@@ -509,7 +514,7 @@ def apply_self_tune(
         "rejected": rejected,
         "before": before,
         "after": after,
-        "note": "self_tune applied (floor cannot be weakened)",
+        "note": note,
     }
 
 
@@ -708,6 +713,9 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
 
     c = cfg if cfg is not None else get_config()
 
+    def _change_who(key: str) -> str:
+        return "operator" if key in OPERATOR_DISK_KEYS else "self_tune"
+
     def _pct(key: str) -> dict[str, Any]:
         lo, hi = risk_floor_bounds(key, c)
         out: dict[str, Any] = {
@@ -715,6 +723,7 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
             "min": lo,
             "max": hi,
             "unit": "pct_nl",
+            "change": _change_who(key),
         }
         if key in _ZERO_OFF_RISK_KEYS:
             out["off"] = 0
@@ -728,6 +737,7 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
         "off": 0,
         "pick": "this book",
         "with": "size_pct_nl",
+        "change": _change_who("max_open_positions"),
     }
     out = {
         "max_risk_per_trade_pct": _pct("max_risk_per_trade_pct"),
@@ -737,7 +747,6 @@ def levers_snapshot(cfg: Any = None) -> dict[str, Any]:
         "max_peak_drawdown_pct": _pct("max_peak_drawdown_pct"),
         "max_open_positions": mop_lever,
         "together": "size_pct_nl and max_open_positions — not pick-one",
-        "change": "self_tune",
     }
     try:
         from abcxauto.mode_size import mode_size_band

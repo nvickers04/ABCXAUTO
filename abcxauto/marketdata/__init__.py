@@ -1,1 +1,1 @@
-"""Market data layer — MarketData.app client + sync provider facade."""
+"""Market data layer — MarketData.app client."""

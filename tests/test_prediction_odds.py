@@ -53,6 +53,32 @@ def test_compact_event_skips_closed():
     assert compact_event({"title": "x", "closed": True, "markets": []}) is None
 
 
+def test_compact_event_keeps_open_market_after_closed_prefix():
+    """Closed/archived prefix must not hide a later open book (no fixed slice)."""
+    closed = {
+        "question": "Old?",
+        "closed": True,
+        "outcomes": '["Yes", "No"]',
+        "outcomePrices": '["0.9", "0.1"]',
+    }
+    live = {
+        "question": "Will the Fed cut 25 bps?",
+        "outcomes": '["Yes", "No"]',
+        "outcomePrices": '["0.55", "0.45"]',
+    }
+    row = compact_event({
+        "title": "Fed Decision in September?",
+        "slug": "fed-september",
+        "markets": [closed] * 8 + [live],
+    })
+    assert row is not None
+    assert row["markets"][0]["q"].startswith("Will the Fed cut")
+    assert row["markets"][0]["implied"] == [
+        {"name": "Yes", "px": 0.55},
+        {"name": "No", "px": 0.45},
+    ]
+
+
 def test_compact_event_does_not_invent_50_from_last():
     """Missing outcomePrices is a miss. last / mid / 50 is not a crowd book."""
     row = compact_event(_event(

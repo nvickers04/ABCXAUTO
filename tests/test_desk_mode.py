@@ -65,10 +65,10 @@ def test_labeled_sessions_do_not_invent_a_second_clock():
     assert desk_mode("regular") == "rth"
 
 
-def test_research_keep_looking_is_premarket_not_rth_or_park():
-    """Idle-after-brief is the defect. Overnight park still parks. RTH still waits."""
+def test_research_keep_looking_does_not_reenter_without_a_poke():
+    """Mill is dead; after words-only wait for book event / poke."""
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
-    assert research_keep_looking("premarket") is True
+    assert research_keep_looking("premarket") is False
     assert research_keep_looking("regular") is False
     assert research_keep_looking("closed") is False
     assert research_keep_looking("postmarket") is False
@@ -615,8 +615,16 @@ def test_research_send_block_payload():
 @pytest.mark.asyncio
 async def test_web_fetch_is_thin_title_and_text(monkeypatch):
     html = (
-        "<html><head><title>Acme raises guidance</title></head>"
-        "<body><script>ignore()</script><p>After-hours earnings beat.</p></body></html>"
+        "<html><head>"
+        "<title>Tab title</title>"
+        '<meta property="og:title" content="Acme raises guidance">'
+        '<meta property="article:published_time" content="2026-09-17T16:00:00Z">'
+        "</head><body>"
+        "<nav>Home Markets Watchlist</nav>"
+        "<script>ignore()</script>"
+        "<p>After-hours earnings beat.</p>"
+        "<footer>Copyright Acme</footer>"
+        "</body></html>"
     )
 
     class _Resp:
@@ -644,12 +652,76 @@ async def test_web_fetch_is_thin_title_and_text(monkeypatch):
     monkeypatch.setattr(httpx_mod, "AsyncClient", _Client)
     page = await fetch_public_page("https://example.com/pr")
     assert page.get("title") == "Acme raises guidance"
+    assert page.get("host") == "example.com"
+    assert page.get("as_of")
+    assert page.get("published") == "2026-09-17T16:00:00Z"
     assert "earnings beat" in (page.get("text") or "")
+    assert "Watchlist" not in (page.get("text") or "")
+    assert "Copyright" not in (page.get("text") or "")
     assert page.get("source") == "web"
     assert page.get("use") == WEB_USE
     refused = await fetch_public_page("file:///etc/passwd")
     assert refused.get("error")
     assert refused.get("use") == WEB_USE
+    assert refused.get("as_of")
+
+
+@pytest.mark.asyncio
+async def test_search_public_quotes_web_and_x(monkeypatch):
+    from types import SimpleNamespace
+
+    from abcxauto.desk_mode import search_public
+
+    seen: dict = {}
+
+    class _X:
+        url = "https://x.com/example/status/1"
+        title = "AVGO guide raised"
+        username = "example"
+
+    class _Web:
+        url = "https://example.com/avgo"
+        title = "Broadcom filing"
+
+    class _CiteX:
+        x_citation = _X()
+        web_citation = None
+
+    class _CiteWeb:
+        x_citation = None
+        web_citation = _Web()
+
+    async def _sample(query, sources):
+        seen["query"] = query
+        seen["n"] = len(sources)
+        return SimpleNamespace(
+            content="Guide raised.",
+            inline_citations=[_CiteX(), _CiteWeb()],
+            citations=[],
+        )
+
+    monkeypatch.setattr("abcxauto.desk_mode._xai_search_sample", _sample)
+    page = await search_public("AVGO guidance", where="both", handles="@example, other")
+    assert page.get("use") == WEB_USE
+    assert page.get("where") == "both"
+    assert page.get("query") == "AVGO guidance"
+    assert "Guide raised" in (page.get("text") or "")
+    results = page.get("results") or []
+    assert results[0]["source"] == "x"
+    assert results[0]["handle"] == "example"
+    assert results[1]["source"] == "web"
+    assert seen["query"] == "AVGO guidance"
+    assert seen["n"] == 2
+
+    async def _x_only(query, sources):
+        seen["x_n"] = len(sources)
+        return SimpleNamespace(content="post", inline_citations=[], citations=["https://x.com/a/status/2"])
+
+    monkeypatch.setattr("abcxauto.desk_mode._xai_search_sample", _x_only)
+    xpage = await search_public("AVGO", where="x")
+    assert xpage.get("where") == "x"
+    assert seen["x_n"] == 1
+    assert (xpage.get("results") or [])[0]["source"] == "x"
 
 
 def _world(session: str):
@@ -703,7 +775,7 @@ def test_agent_tools_web_on_rth_and_research():
         assert "scan" in research, sess
 
 
-def test_write_research_brief_skips_rth(tmp_path, monkeypatch):
+def test_write_research_brief_writes_rth(tmp_path, monkeypatch):
     path = tmp_path / "research_brief.json"
     monkeypatch.setenv("ABCXAUTO_RESEARCH_BRIEF_PATH", str(path))
     snap = {
@@ -715,9 +787,11 @@ def test_write_research_brief_skips_rth(tmp_path, monkeypatch):
             }
         ]
     }
+    note_research_tool(snap, "news", {"items": snap["news_items"]})
     out = write_research_brief(session="regular", snap=snap, now=datetime.now(timezone.utc))
-    assert out == {}
-    assert not path.is_file()
+    assert out.get("session") == "regular"
+    assert out.get("mode") == "research"
+    assert path.is_file()
     wrote = write_research_brief(session="premarket", snap=snap, now=datetime.now(timezone.utc))
     assert wrote.get("session") == "premarket"
     assert path.is_file()
@@ -783,7 +857,9 @@ async def test_web_tool_fetches_in_rth_and_research(monkeypatch, tmp_path):
         snap={},
         turn=BrainTurn(),
     )
-    assert not rth_path.is_file()
+    assert rth_path.is_file()
+    disk = load_research_brief()
+    assert disk.get("session") == "regular"
 
     await _invoke_named_tool(
         "web",
@@ -795,6 +871,7 @@ async def test_web_tool_fetches_in_rth_and_research(monkeypatch, tmp_path):
         turn=BrainTurn(),
     )
     assert rth_path.is_file()
+    assert load_research_brief().get("session") == "premarket"
 
 
 @pytest.mark.asyncio

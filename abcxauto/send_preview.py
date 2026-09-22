@@ -172,13 +172,22 @@ def _legs_of(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def ticket_preview_hash(act: Any) -> str:
-    """Stable SHA-256 of legs, qty, side, card, limit."""
+    """Stable SHA-256 of legs, qty, side, card, limit.
+
+    ``_hash_as_sent_qty`` means quantity was filled from size_pct_nl after
+    the model sent the ticket. The hash stays on the absent quantity so a
+    passing preview still places.
+    """
     params = _params_of(act)
+    if isinstance(act, dict) and act.get("_hash_as_sent_qty"):
+        qty = None
+    else:
+        qty = _qty_of(params)
     payload = {
         "card": _card_of(act if isinstance(act, dict) else {}, params),
         "legs": _legs_of(params),
         "limit": _limit_of(params),
-        "qty": _qty_of(params),
+        "qty": qty,
         "side": _side_of(act if isinstance(act, dict) else {}, params),
         "strategy": _strategy_of(act),
     }
@@ -347,6 +356,102 @@ def _preview_account(world: Any, snap_d: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _quote_map_last(qmap: Any, symbol: str) -> float | None:
+    """Positive last from an ibkr_live_quotes map. No invented price."""
+    if not isinstance(qmap, dict) or not symbol:
+        return None
+    raw = qmap.get(symbol)
+    if isinstance(raw, dict):
+        for key in ("last", "price", "mid", "mark"):
+            px = _finite(raw.get(key))
+            if px is not None and px > 0:
+                return px
+        return None
+    px = _finite(raw)
+    if px is not None and px > 0:
+        return px
+    return None
+
+
+def _preview_ibkr_last(
+    symbol: str,
+    snap_d: dict[str, Any],
+    world: Any,
+) -> float | None:
+    """This-look IBKR last for mode_size when the ticket has no entry/limit.
+
+    Order: snap ibkr_live_quotes[symbol] → snap ibkr_live_last when
+    ibkr_live_symbol matches → world.ibkr_live_quotes. Never invent.
+    """
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return None
+    px = _quote_map_last(snap_d.get("ibkr_live_quotes"), sym)
+    if px is not None:
+        return px
+    live_sym = str(snap_d.get("ibkr_live_symbol") or "").strip().upper()
+    if live_sym == sym:
+        px = _finite(snap_d.get("ibkr_live_last"))
+        if px is not None and px > 0:
+            return px
+    if world is not None:
+        px = _quote_map_last(getattr(world, "ibkr_live_quotes", None), sym)
+        if px is not None:
+            return px
+    return None
+
+
+def _size_cash_refuse_note(
+    *,
+    notional: float,
+    cash: float,
+    book: float,
+    work: dict[str, Any],
+    snap_d: dict[str, Any],
+    world: Any,
+) -> str:
+    """size_cash refuse with live print + fit qty so the model can resent."""
+    from abcxauto.world_state import pct_of_nl
+
+    params = _params_of(work)
+    note = (
+        f"size_cash {pct_of_nl(notional, book)} > "
+        f"{pct_of_nl(cash, book)}"
+    )
+    live: float | None = None
+    for key in ("entry_price", "limit_price", "price_hint"):
+        live = _finite(params.get(key))
+        if live is not None and live > 0:
+            break
+        live = None
+    if live is None:
+        live = _preview_ibkr_last(
+            str(params.get("symbol") or params.get("underlying") or ""),
+            snap_d,
+            world,
+        )
+    if live is not None and live > 0:
+        note = f"{note} print={live}"
+    fit: int | None = None
+    qty = _qty_of(params)
+    if qty is not None and notional > 0 and cash > 0:
+        unit = float(notional) / float(qty)
+        if unit > 0:
+            fit = int(float(cash) / unit)
+    if (fit is None or fit < 1) and live is not None and live > 0 and cash > 0:
+        try:
+            from abcxauto.send import option_size_mark
+
+            mark, mult = option_size_mark(_strategy_of(work), params, live)
+        except Exception:
+            mark, mult = live, 1.0
+        if mark is not None and mark > 0 and mult > 0:
+            fit = int(float(cash) / (float(mark) * float(mult)))
+    if fit is not None and fit >= 1:
+        note = f"{note} fit_qty={fit}"
+    return note
+
+
 def _always_armed_refuses(
     work: dict[str, Any],
     world: Any,
@@ -354,18 +459,27 @@ def _always_armed_refuses(
 ) -> list[str]:
     """Mirror #200 send refusals that stay armed when paper gates are off.
 
-    Daily-loss, defined-risk, cash-only, and the halt latch. Preview is
-    sync and must not call ``halt()`` or async ``pre_trade_check``.
+    New-risk card label, daily-loss, defined-risk, cash-only, and the halt
+    latch. Preview is sync and must not call ``halt()`` or async
+    ``pre_trade_check``.
     """
     from abcxauto.agent_loop import is_new_risk
 
-    if not is_new_risk(_strategy_of(work), _params_of(work)):
+    params = _params_of(work)
+    if not is_new_risk(_strategy_of(work), params):
         return []
 
     from abcxauto.config import get_config
+    from abcxauto.risk_gates import new_risk_card_error
 
     cfg = get_config()
     reasons: list[str] = []
+    # Same label gate as gate_ticket. Never invent a card; exits never reach here.
+    card_note = new_risk_card_error(
+        params.get("card") or work.get("card"), type=_strategy_of(work)
+    )
+    if card_note:
+        reasons.append(str(card_note))
     proposal = _ticket_proposal(work)
 
     try:
@@ -443,17 +557,19 @@ def _always_armed_refuses(
                         "Cash-only mode: SHORT stock brackets are rejected "
                         "(no short selling). Set ABCXAUTO_CASH_ONLY=false to allow."
                     )
+                # Spend cap is TotalCashValue only — same as risk_gates.
+                # AvailableFunds is margin buying power, never the cash_only cap.
                 cash = _account_float(
                     account,
                     "TotalCashValue",
                     "totalcashvalue",
-                    "AvailableFunds",
-                    "availablefunds",
+                    "total_cash",
+                    "TotalCash",
                 )
                 if cash is None:
                     reasons.append(
                         "Risk gate fail-closed: cash-only mode requires "
-                        "TotalCashValue (or AvailableFunds) in account summary"
+                        "TotalCashValue in account summary"
                     )
                 else:
                     try:
@@ -464,8 +580,14 @@ def _always_armed_refuses(
                         reasons.append("size_unknown_notional")
                     elif notional > cash:
                         reasons.append(
-                            f"size_cash {pct_of_nl(notional, book)} > "
-                            f"{pct_of_nl(cash, book)}"
+                            _size_cash_refuse_note(
+                                notional=float(notional),
+                                cash=float(cash),
+                                book=book,
+                                work=work,
+                                snap_d=snap_d,
+                                world=world,
+                            )
                         )
     except Exception:
         logger.debug("preview daily-loss/cash-only check failed", exc_info=True)
@@ -594,6 +716,31 @@ def collect_would_refuse(
         except Exception:
             logger.debug("preview look-numbers check failed", exc_info=True)
         try:
+            from abcxauto.agent_loop import is_new_risk
+
+            needs_research = is_new_risk(strat, params)
+        except Exception:
+            logger.debug("preview new-risk research check failed", exc_info=True)
+            reasons.append("research_thin")
+        else:
+            if needs_research:
+                try:
+                    from abcxauto.desk_mode import new_risk_research_error
+
+                    r_note = new_risk_research_error(
+                        str(params.get("symbol") or params.get("underlying") or ""),
+                        snap_d,
+                        strat=strat,
+                    )
+                    if r_note:
+                        reasons.append(str(r_note))
+                except Exception:
+                    logger.debug(
+                        "preview new-risk research check failed",
+                        exc_info=True,
+                    )
+                    reasons.append("research_thin")
+        try:
             from abcxauto.agent_loop import validate_action_against_inventory
 
             ok_i, vmsg = validate_action_against_inventory(work, positions)
@@ -614,6 +761,13 @@ def collect_would_refuse(
                     px = _finite(params.get(key))
                     if px is not None and px > 0:
                         break
+                    px = None
+                if px is None:
+                    px = _preview_ibkr_last(
+                        str(params.get("symbol") or params.get("underlying") or ""),
+                        snap_d,
+                        world,
+                    )
                 size_note = mode_size_ticket_error(
                     params, net_liq=nl, price=px, strategy=strat
                 )
@@ -767,6 +921,7 @@ def consume_place_token(
             "note": "preview_token is bound to a different ticket hash",
             "preview_id": preview_id,
             "preview_hash": stored,
+            "place_hash": str(expected_hash or ""),
             "would_refuse": [REASON_PREVIEW_MISMATCH],
             "token_used": False,
         }
@@ -961,6 +1116,8 @@ def authorize_place(act: Any, *, now: Any = None) -> dict[str, Any] | None:
         return None
     meta.setdefault("strategy", _strategy_of(act) or "blocked")
     meta.setdefault("preview_hash", digest)
+    if meta.get("reason_code") == REASON_PREVIEW_MISMATCH:
+        meta["place_hash"] = digest
     return meta
 
 

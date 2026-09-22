@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from abcxauto.option_facts import (
+    mda_greeks_only,
     net_fill_premium_usd,
     occ_symbol,
     signed_fill_premium_usd,
@@ -20,6 +21,24 @@ def test_occ_symbol():
     assert occ_symbol("SPY", "20260718", "C", 500.0) == "SPY260718C00500000"
     assert occ_symbol("AAPL", "260120", "P", 150.0) == "AAPL260120P00150000"
     assert occ_symbol("", "20260718", "C", 1.0) is None
+
+
+def test_mda_greeks_only_requires_greeks_not_occ_alone():
+    # occ + prices with no greeks must not look like a greeks fact
+    assert mda_greeks_only(
+        {"bid": 9.9, "ask": 10.1, "last": 10.0, "mid": 10.0},
+        occ="SPY260718C00500000",
+    ) == {}
+    assert mda_greeks_only({}, occ="SPY260718C00500000") == {}
+    blob = mda_greeks_only(
+        {"delta": 0.4, "iv": 0.2, "bid": 9.9, "ask": 10.1},
+        occ="SPY260718C00500000",
+    )
+    assert blob["delta"] == 0.4
+    assert blob["iv"] == 0.2
+    assert blob["occ"] == "SPY260718C00500000"
+    assert "bid" not in blob
+    assert "ask" not in blob
 
 
 def test_signed_fill_keeps_debit_and_credit():
@@ -225,6 +244,37 @@ async def test_fetch_option_facts_keeps_ibkr_and_strips_mda_prices(monkeypatch):
     assert "ask" not in facts[0]["mda"]
     assert "last" not in facts[0]["mda"]
     assert "mid" not in facts[0]["mda"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_option_facts_skips_mda_without_greeks(monkeypatch):
+    from abcxauto import option_facts as of
+
+    class FakeMDA:
+        is_configured = True
+
+        async def get_option_quote(self, occ, **_k):
+            return {"bid": 9.9, "ask": 10.1, "last": 10.0, "mid": 10.0}
+
+    monkeypatch.setattr(
+        "abcxauto.marketdata.client.get_marketdata_client",
+        lambda: FakeMDA(),
+    )
+    facts = await of.fetch_option_facts(
+        [
+            {
+                "symbol": "SPY",
+                "sec_type": "OPT",
+                "quantity": 1,
+                "conId": 9,
+                "expiration": "20260718",
+                "strike": 500,
+                "right": "C",
+            }
+        ]
+    )
+    assert "mda" not in facts[0]
+    assert facts[0]["source"] == "book"
 
 
 @pytest.mark.asyncio

@@ -209,35 +209,101 @@ class MarketDataClient:
         params: Optional[Dict[str, Any]] = None,
         label: str,
         throttle_options: bool = False,
+        timeout: Optional[float] = None,
+        attempts: Optional[int] = None,
     ) -> Optional[httpx.Response]:
-        """Issue a GET with bounded retry/backoff for transient option-data failures."""
+        """Issue a GET with bounded retry/backoff for transient option-data failures.
+
+        When ``timeout`` is set, the budget covers semaphore acquire + HTTP.
+        A slow peer must not keep the global slot after the wait ends — release
+        immediately on timeout/cancel; do not await httpx teardown.
+        """
         client = self._get_http_client()
         if not client:
             return None
+        max_attempts = max(1, int(attempts if attempts is not None else _OPTIONS_RETRY_ATTEMPTS))
 
         async def _do_request() -> Optional[httpx.Response]:
-            for attempt in range(_OPTIONS_RETRY_ATTEMPTS):
+            for attempt in range(max_attempts):
                 try:
                     if self._track_request():
                         return None
-                    async with self._get_global_semaphore():
-                        response = await client.get(path, params=params)
+                    get_kwargs: Dict[str, Any] = {"params": params}
+                    # Hold the global slot only for the bounded wait. Acquire is
+                    # inside the budget so a full look of candles/quotes cannot
+                    # starve news into an outer 2s miss while the slot queue sits.
+                    sem = self._get_global_semaphore()
+                    sem_held = False
+                    t0 = asyncio.get_running_loop().time()
+                    budget = float(timeout) if timeout is not None else None
+                    try:
+                        if budget is None:
+                            await sem.acquire()
+                            sem_held = True
+                            response = await client.get(path, **get_kwargs)
+                        else:
+                            remaining = budget - (asyncio.get_running_loop().time() - t0)
+                            if remaining <= 0:
+                                raise TimeoutError(f"{label} exceeded {timeout}s")
+                            try:
+                                await asyncio.wait_for(sem.acquire(), timeout=remaining)
+                            except asyncio.TimeoutError as exc:
+                                raise TimeoutError(
+                                    f"{label} exceeded {timeout}s"
+                                ) from exc
+                            sem_held = True
+                            remaining = budget - (asyncio.get_running_loop().time() - t0)
+                            if remaining <= 0:
+                                raise TimeoutError(f"{label} exceeded {timeout}s")
+                            get_kwargs["timeout"] = remaining
+                            get_task = asyncio.create_task(
+                                client.get(path, **get_kwargs)
+                            )
+                            try:
+                                done, _pending = await asyncio.wait(
+                                    {get_task}, timeout=remaining
+                                )
+                                if get_task not in done:
+                                    get_task.cancel()
+                                    raise TimeoutError(
+                                        f"{label} exceeded {timeout}s"
+                                    )
+                                response = get_task.result()
+                            except asyncio.CancelledError:
+                                if not get_task.done():
+                                    get_task.cancel()
+                                raise
+                    finally:
+                        if sem_held:
+                            sem.release()
                     self._parse_rate_headers(response)
                     if response.status_code in (401, 403):
                         self._log_http_denied(response, label)
-                    if response.status_code not in _OPTIONS_RETRY_STATUSES or attempt == _OPTIONS_RETRY_ATTEMPTS - 1:
+                    if (
+                        response.status_code not in _OPTIONS_RETRY_STATUSES
+                        or attempt == max_attempts - 1
+                    ):
                         return response
                     logger.debug(
                         f"Retrying {label} after HTTP {response.status_code} "
-                        f"({attempt + 1}/{_OPTIONS_RETRY_ATTEMPTS})"
+                        f"({attempt + 1}/{max_attempts})"
                     )
+                except TimeoutError:
+                    raise
                 except (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout, httpx.ReadTimeout,
                         httpx.RemoteProtocolError, httpx.PoolTimeout, httpx.NetworkError) as exc:
-                    if attempt == _OPTIONS_RETRY_ATTEMPTS - 1:
+                    if attempt == max_attempts - 1:
+                        # One-shot timed calls: surface as TimeoutError so the
+                        # news outer wait_for records an honest miss, not [].
+                        if timeout is not None and isinstance(
+                            exc,
+                            (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.PoolTimeout),
+                        ):
+                            raise TimeoutError(f"{label} exceeded {timeout}s") from exc
                         raise
                     logger.debug(
                         f"Retrying {label} after transport error "
-                        f"({attempt + 1}/{_OPTIONS_RETRY_ATTEMPTS}): {exc}"
+                        f"({attempt + 1}/{max_attempts}): {exc}"
                     )
                 await _safe_sleep(0.5 * (attempt + 1))
             return None
@@ -728,17 +794,24 @@ class MarketDataClient:
 
         Returns a list of {symbol, headline, source, published} dicts.
         Empty list when unconfigured, credits exhausted, or no data.
+
+        Bare path (no countback/to). MDA's beta news docs serve recent prints
+        on GET /stocks/news/{symbol}/; countback without ``to`` stalls some
+        names past the 2s budget. Slice client-side. One try — options retry
+        storms must not eat the news wait_for.
         """
         if not self.is_configured or self._is_credits_exhausted():
             return []
         sym = (symbol or "").strip().upper()
         if not sym:
             return []
+        limit = max(1, int(countback or 8))
         try:
             resp = await self._get_with_retries(
                 f"/stocks/news/{sym}/",
-                params={"countback": int(countback)},
                 label=f"news {sym}",
+                timeout=2.0,
+                attempts=1,
             )
             if resp is None:
                 return []
@@ -777,7 +850,11 @@ class MarketDataClient:
                     use="color_not_trigger",
                     asof=pub,
                 ))
+                if len(out) >= limit:
+                    break
             return out
+        except TimeoutError:
+            raise
         except Exception:
             logger.exception("get_stock_news failed for %s", symbol)
             return []

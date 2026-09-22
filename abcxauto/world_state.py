@@ -90,9 +90,13 @@ def compact_position(
         "conId": p.get("conId") or p.get("con_id"),
         "symbol": p.get("symbol"),
         "sec": p.get("secType") or p.get("sec_type"),
-        "qty": p.get("quantity") if p.get("quantity") is not None else p.get("position"),
+        "qty": (
+            p.get("quantity")
+            if p.get("quantity") is not None
+            else (p.get("position") if p.get("position") is not None else p.get("qty"))
+        ),
         "avg": avg_row.get("avg"),
-        "mkt": p.get("market_price") or p.get("marketPrice") or p.get("last"),
+        "mkt": p.get("market_price") or p.get("marketPrice") or p.get("mkt") or p.get("last"),
     }
     if avg_row.get("avg_usd") is not None:
         row["avg_usd"] = avg_row["avg_usd"]
@@ -1353,6 +1357,9 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         except Exception:
             floors = None
     port = dict(getattr(world, "portfolio_risk", None) or {})
+    cap_liq = _stamp_day_capital_liquidity(world, port, nl)
+    if isinstance(cap_liq, dict):
+        port["capital_liquidity"] = cap_liq
     mins_open = _minutes_to_open(world)
     pulse = getattr(world, "pulse", None) if isinstance(getattr(world, "pulse", None), dict) else {}
     sess_block = pulse.get("session") if isinstance(pulse.get("session"), dict) else {}
@@ -1421,7 +1428,7 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
         # Soft concentration / liquidity % of NL (from WorldState._portfolio_risk).
         "portfolio_risk": port,
         "exposure": port.get("exposure"),
-        "capital_liquidity": port.get("capital_liquidity"),
+        "capital_liquidity": cap_liq,
         "minutes_to_open": mins_open,
         "countdown_to": sess_block.get("countdown_to"),
         "countdown_human": sess_block.get("countdown_human"),
@@ -1726,17 +1733,14 @@ def _pnl_wake_bits(day: dict[str, Any]) -> str:
 
 
 def _portfolio_wake_bits(day: dict[str, Any]) -> str:
-    """Cash / deployed / top concentration as % of NL (facts only)."""
-    cap = day.get("capital_liquidity") if isinstance(day.get("capital_liquidity"), dict) else {}
+    """Leftover $ / cash% / deployed% plus top concentration (facts only)."""
     exp = day.get("exposure") if isinstance(day.get("exposure"), dict) else {}
     port = day.get("portfolio_risk") if isinstance(day.get("portfolio_risk"), dict) else {}
     bits: list[str] = []
-    cash_pct = cap.get("cash_pct_nl")
-    if cash_pct is not None:
-        bits.append(f"cash={cash_pct}% NL")
-    deployed = cap.get("deployed_long_pct_nl")
-    if deployed is not None:
-        bits.append(f"deployed={deployed}% NL")
+    cash_pct, deployed = cash_deployed_pct(day)
+    head = _leftover_deployed_text(_leftover_usd_of(day), cash_pct, deployed)
+    if head:
+        bits.append(head)
     top_pct = exp.get("top_concentration_pct")
     if top_pct is None:
         top_pct = port.get("top_concentration_pct")
@@ -1984,13 +1988,252 @@ def omit_duplicate_fact_lead(prev: Any, text: str) -> str:
     return "\n".join(lines[1:]).strip()
 
 
+def _real_float(raw: Any) -> float | None:
+    """Coerce a number. Missing / unreadable is None — never invented 0."""
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if val != val:
+        return None
+    return val
+
+
+def _total_cash_in(bag: Any) -> float | None:
+    """Real total_cash on a bag or its capital_liquidity / portfolio_risk."""
+    if not isinstance(bag, dict):
+        return None
+    hit = _real_float(bag.get("total_cash"))
+    if hit is not None:
+        return hit
+    cap = bag.get("capital_liquidity")
+    if isinstance(cap, dict):
+        hit = _real_float(cap.get("total_cash"))
+        if hit is not None:
+            return hit
+    port = bag.get("portfolio_risk")
+    if isinstance(port, dict) and port is not bag:
+        return _total_cash_in(port)
+    return None
+
+
+def _leftover_usd_of(bag: dict[str, Any] | None) -> float | None:
+    src = bag if isinstance(bag, dict) else {}
+    alloc = src.get("allocation") if isinstance(src.get("allocation"), dict) else {}
+    hit = _real_float(alloc.get("leftover_usd"))
+    if hit is not None:
+        return hit
+    hit = _real_float(src.get("leftover_usd"))
+    if hit is not None:
+        return hit
+    return _total_cash_in(src)
+
+
+def _day_pnl_of(bag: dict[str, Any] | None) -> float | None:
+    src = bag if isinstance(bag, dict) else {}
+    hit = _real_float(src.get("ibkr_daily_pnl"))
+    if hit is not None:
+        return hit
+    return _real_float(src.get("daily_pnl"))
+
+
+def _fmt_usd_compact(val: float) -> str:
+    n = round(float(val), 2)
+    if abs(n - round(n)) < 1e-9:
+        return f"${int(round(n))}"
+    return f"${n:.2f}"
+
+
+def _fmt_pnl_compact(val: float) -> str:
+    n = round(float(val), 2)
+    if abs(n - round(n)) < 1e-9:
+        return str(int(round(n)))
+    return f"{n:.2f}".rstrip("0").rstrip(".")
+
+
+def _leftover_deployed_text(
+    leftover_usd: float | None,
+    cash_pct: float | None,
+    deployed_pct: float | None,
+    day_pnl: float | None = None,
+) -> str:
+    """Comparable leftover $ / % vs deployed %."""
+    if leftover_usd is None and cash_pct is None and deployed_pct is None:
+        return ""
+    bits: list[str] = []
+    if leftover_usd is not None or cash_pct is not None:
+        bits.append("leftover")
+        if leftover_usd is not None:
+            bits.append(_fmt_usd_compact(leftover_usd))
+        if cash_pct is not None:
+            bits.append(f"cash={cash_pct}%")
+    if deployed_pct is not None:
+        bits.append(f"deployed={deployed_pct}%")
+    if day_pnl is not None:
+        bits.append(f"day={_fmt_pnl_compact(day_pnl)} on deployed")
+    return " ".join(bits)
+
+
+def cash_deployed_pct(bag: dict[str, Any] | None) -> tuple[float | None, float | None]:
+    """cash_pct_nl, deployed_pct_nl from allocation or capital_liquidity."""
+    src = bag if isinstance(bag, dict) else {}
+    cap = src.get("capital_liquidity") if isinstance(src.get("capital_liquidity"), dict) else {}
+    if not cap:
+        port = src.get("portfolio_risk") if isinstance(src.get("portfolio_risk"), dict) else {}
+        cap = port.get("capital_liquidity") if isinstance(port.get("capital_liquidity"), dict) else {}
+    alloc = src.get("allocation") if isinstance(src.get("allocation"), dict) else {}
+    cash = cap.get("cash_pct_nl")
+    if cash is None:
+        cash = alloc.get("cash_pct_nl")
+    dep = cap.get("deployed_long_pct_nl")
+    if dep is None:
+        dep = alloc.get("deployed_pct_nl")
+    return _real_float(cash), _real_float(dep)
+
+
+def idle_cash_line(bag: dict[str, Any] | None) -> str:
+    """One fact when leftover cash is larger than deployed lots."""
+    cash, dep = cash_deployed_pct(bag)
+    if cash is None or dep is None or cash <= dep:
+        return ""
+    return _leftover_deployed_text(_leftover_usd_of(bag), cash, dep, _day_pnl_of(bag))
+
+
+def leftover_dominates(bag: dict[str, Any] | None) -> bool:
+    """True when leftover cash is larger than deployed lots."""
+    return bool(idle_cash_line(bag))
+
+
+def book_still_working(
+    bag: dict[str, Any] | None,
+    positions: Any = None,
+) -> bool:
+    """True when a lot is on. The next look still has work."""
+    _, dep = cash_deployed_pct(bag)
+    if dep is not None and dep > 0:
+        return True
+    if isinstance(positions, list):
+        return any(isinstance(row, dict) and row for row in positions)
+    return False
+
+
+def leftover_relook_due(
+    bag: dict[str, Any] | None,
+    *,
+    session: str = "",
+    last_look_mono: float | None = None,
+    now_mono: float | None = None,
+    researched: bool = False,
+) -> bool:
+    """RTH leftover > deployed, last look sat long enough. Not a general chair."""
+    if str(session or "").strip().lower() != "regular":
+        return False
+    if not leftover_dominates(bag):
+        return False
+    if last_look_mono is None or now_mono is None:
+        return False
+    try:
+        if researched:
+            from abcxauto.park_clock import researched_leftover_relook_s
+
+            need = float(researched_leftover_relook_s())
+        else:
+            from abcxauto.park_clock import leftover_relook_s
+
+            need = float(leftover_relook_s())
+    except Exception:
+        need = 15 * 60.0 if researched else 90.0
+    return (float(now_mono) - float(last_look_mono)) >= need
+
+
+def look_gathered_research(payload: dict[str, Any] | None) -> bool:
+    """True when a non-book name has this-look structure and read.
+
+    Held positions do not count. Scan-only looks (no structure+read on a
+    non-book name) return False.
+    """
+    if not isinstance(payload, dict) or not payload:
+        return False
+    from abcxauto.desk_mode import _read_this_look, _structure_this_look
+
+    snap: dict[str, Any] = {
+        "session_range": (
+            payload.get("session_range")
+            if isinstance(payload.get("session_range"), dict)
+            else {}
+        ),
+        "news_items": (
+            list(payload.get("news_items") or [])
+            if isinstance(payload.get("news_items"), list)
+            else []
+        ),
+        "research_web": (
+            payload.get("research_web")
+            if isinstance(payload.get("research_web"), dict)
+            else {}
+        ),
+        "option_facts": payload.get("option_facts"),
+        "_research_bag": (
+            payload.get("_research_bag")
+            if isinstance(payload.get("_research_bag"), dict)
+            else {}
+        ),
+    }
+    held: set[str] = set()
+    for row in payload.get("positions") or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("symbol") or "").upper().strip()
+        if name:
+            held.add(name)
+    candidates: set[str] = set()
+    store = snap.get("session_range")
+    if isinstance(store, dict):
+        for key in store:
+            name = str(key or "").upper().strip()
+            if name:
+                candidates.add(name)
+    for it in snap.get("news_items") or []:
+        if not isinstance(it, dict):
+            continue
+        for key in ("symbol", "ticker", "underlying"):
+            name = str(it.get(key) or "").upper().strip()
+            if name:
+                candidates.add(name)
+    facts = snap.get("option_facts")
+    if isinstance(facts, dict):
+        facts = facts.get("facts")
+    if isinstance(facts, list):
+        for row in facts:
+            if not isinstance(row, dict):
+                continue
+            for key in ("symbol", "ticker", "underlying"):
+                name = str(row.get(key) or "").upper().strip()
+                if name:
+                    candidates.add(name)
+    bag = snap.get("_research_bag")
+    if isinstance(bag, dict):
+        for raw in bag.get("symbols") or []:
+            name = str(raw or "").upper().strip()
+            if name:
+                candidates.add(name)
+    for sym in candidates:
+        if sym in held:
+            continue
+        if _structure_this_look(snap, sym) and _read_this_look(snap, sym, ""):
+            return True
+    return False
+
+
 def worst_wake_fact(
     *,
     unprotected: list[str] | None,
     day: dict[str, Any] | None = None,
     session: str = "",
 ) -> str:
-    """One leading fact: unprotected, stop distance, missing working order, halt, cap.
+    """One leading fact: unprotected, idle cash, stop distance, missing order, halt, cap.
 
     Not a strategy menu. Unprotected STK already fail-closes — publish it first.
     """
@@ -1998,6 +2241,9 @@ def worst_wake_fact(
     unprot = [str(x).strip() for x in (unprotected or []) if str(x).strip()]
     if unprot:
         return "unprotected=" + ",".join(unprot)
+    idle = idle_cash_line(day)
+    if idle:
+        return _desk_fact_line(idle)
     stop = day.get("stop_dist") if isinstance(day.get("stop_dist"), dict) else None
     if stop and stop.get("ident"):
         ident = stop.get("ident")
@@ -2241,6 +2487,42 @@ def _regime_from_opps(opportunities: list[dict], pulse: dict) -> dict[str, Any]:
     }
 
 
+def _stamp_day_capital_liquidity(
+    world: Any,
+    port: dict[str, Any],
+    nl: Any,
+) -> dict[str, Any] | None:
+    """capital_liquidity on day_facts. Rebuild percents when missing; never invent cash=0."""
+    cap = port.get("capital_liquidity") if isinstance(port.get("capital_liquidity"), dict) else {}
+    if cap.get("cash_pct_nl") is not None and cap.get("deployed_long_pct_nl") is not None:
+        return cap
+    book = getattr(world, "book", None) if world is not None else None
+    total_cash = _total_cash_in(cap)
+    if total_cash is None:
+        total_cash = _total_cash_in(port)
+    if total_cash is None:
+        total_cash = _total_cash_in(book)
+    try:
+        nl_f = float(nl) if nl is not None else None
+    except (TypeError, ValueError):
+        nl_f = None
+    if nl_f is not None and (nl_f <= 0 or nl_f != nl_f):
+        nl_f = None
+    if nl_f is None:
+        return cap or None
+    positions = [
+        p
+        for p in (getattr(world, "positions", None) or [])
+        if isinstance(p, dict)
+    ]
+    rebuilt = _portfolio_risk(positions, nl_f, total_cash=total_cash)
+    out = dict(rebuilt.get("capital_liquidity") or {})
+    if total_cash is None:
+        out.pop("total_cash", None)
+        out.pop("cash_pct_nl", None)
+    return out or None
+
+
 def _portfolio_risk(
     positions: list[dict],
     net_liq: float | None,
@@ -2272,7 +2554,6 @@ def _portfolio_risk(
                 best = mv
                 top_sym = str(p.get("symbol") or "")
         top_pct = pct_of_nl(best, net_liq, digits=2) or 0.0
-    # Soft exposure Fact (not a hold gate): top names + share of NL.
     exposure = {
         "top_symbol": top_sym,
         "top_concentration_pct": top_pct,
@@ -2286,20 +2567,16 @@ def _portfolio_risk(
             ),
             key=lambda r: -float(r.get("pct_nl") or 0),
         )[:8],
-        "note": "Fact — soft concentration; not a narrative hold gate",
     }
-    try:
-        cash = float(total_cash) if total_cash is not None else 0.0
-    except (TypeError, ValueError):
-        cash = 0.0
-    cash_pct = pct_of_nl(cash, net_liq, digits=2) or 0.0
+    cash = _real_float(total_cash)
+    cash_pct = pct_of_nl(cash, net_liq, digits=2) if cash is not None else None
     deployed_pct = pct_of_nl(long_mv, net_liq, digits=2) or 0.0
-    capital_liquidity = {
-        "total_cash": round(cash, 2),
+    capital_liquidity: dict[str, Any] = {
         "cash_pct_nl": cash_pct,
         "deployed_long_pct_nl": deployed_pct,
-        "note": "Fact — liquidity vs NL; not a hold/sell gate",
     }
+    if cash is not None:
+        capital_liquidity["total_cash"] = round(cash, 2)
     return {
         "n_positions": n,
         "top_symbol": top_sym,
@@ -2307,6 +2584,293 @@ def _portfolio_risk(
         "exposure": exposure,
         "capital_liquidity": capital_liquidity,
     }
+
+
+def _as_px(raw: Any) -> float | None:
+    if isinstance(raw, dict):
+        raw = raw.get("last") if raw.get("last") is not None else raw.get("mid")
+    try:
+        px = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return px if px > 0 else None
+
+
+def _lot_qty(pos: dict[str, Any]) -> float | None:
+    for key in ("qty", "quantity", "position"):
+        if pos.get(key) is None:
+            continue
+        try:
+            return float(pos[key])
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _stop_map(orders: list[dict[str, Any]] | None) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for order in orders or []:
+        if not isinstance(order, dict):
+            continue
+        typ = str(order.get("type") or order.get("order_type") or "").upper()
+        role = str(order.get("role") or "").lower()
+        if role == "entry":
+            continue
+        if typ not in ("STP", "STP LMT", "TRAIL") and order.get("stop") is None:
+            continue
+        sym = str(order.get("symbol") or "").upper().strip()
+        px = _as_px(order.get("stop") or order.get("auxPrice") or order.get("aux_price"))
+        if sym and px is not None:
+            out[sym] = px
+    return out
+
+
+def _target_map(orders: list[dict[str, Any]] | None) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for order in orders or []:
+        if not isinstance(order, dict):
+            continue
+        typ = str(order.get("type") or order.get("order_type") or "").upper()
+        role = str(order.get("role") or "").lower()
+        if role == "entry":
+            continue
+        if typ not in ("LMT", "LIMIT"):
+            continue
+        sym = str(order.get("symbol") or "").upper().strip()
+        px = _as_px(
+            order.get("lmt")
+            or order.get("limit")
+            or order.get("limit_price")
+            or order.get("lmtPrice")
+        )
+        if sym and px is not None:
+            out[sym] = px
+    return out
+
+
+def allocation_facts(
+    positions: list[dict[str, Any]] | None,
+    *,
+    net_liq: Any = None,
+    total_cash: Any = None,
+    quotes: dict[str, Any] | None = None,
+    orders: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Lots ranked by capital used. Facts only."""
+    try:
+        nl = float(net_liq) if net_liq is not None else None
+    except (TypeError, ValueError):
+        nl = None
+    if nl is not None and nl <= 0:
+        nl = None
+    qmap = quotes if isinstance(quotes, dict) else {}
+    stops = _stop_map(orders)
+    targets = _target_map(orders)
+    lots: list[dict[str, Any]] = []
+    deployed = 0.0
+    for pos in positions or []:
+        if not isinstance(pos, dict):
+            continue
+        sym = str(pos.get("symbol") or "").upper().strip()
+        if not sym:
+            continue
+        qty = _lot_qty(pos)
+        last = _as_px(qmap.get(sym))
+        if last is None:
+            last = _as_px(
+                pos.get("mkt")
+                or pos.get("market_price")
+                or pos.get("marketPrice")
+                or pos.get("last")
+            )
+        sec = str(pos.get("secType") or pos.get("sec_type") or pos.get("sec") or "STK").upper()
+        mult = 100.0 if sec.startswith("OPT") else 1.0
+        mv = None
+        for key in ("marketValue", "market_value"):
+            mv = _as_px(pos.get(key))
+            if mv is not None:
+                break
+        if mv is None and last is not None and qty is not None:
+            mv = abs(qty) * last * mult
+        if mv is not None:
+            deployed += mv
+        pct = pct_of_nl(mv, nl, digits=2) if mv is not None else None
+        upnl = lot_upnl(pos)
+        if upnl is None and last is not None and qty is not None:
+            avg = position_avg_facts(pos).get("avg")
+            if avg is not None:
+                upnl = round((last - float(avg)) * qty * mult, 2)
+        stop = stops.get(sym)
+        if stop is None:
+            stop = _as_px(pos.get("stop") or pos.get("stop_price"))
+        risk_pct = None
+        if stop is not None and last is not None and qty is not None and nl:
+            risk_pct = pct_of_nl(abs(last - stop) * abs(qty) * mult, nl, digits=2)
+        row: dict[str, Any] = {"symbol": sym}
+        if qty is not None:
+            row["qty"] = int(qty) if abs(qty - int(qty)) < 1e-9 else qty
+        if last is not None:
+            row["last"] = last
+        avg = position_avg_facts(pos).get("avg")
+        if avg is None:
+            avg = _as_px(pos.get("avg"))
+        if avg is not None:
+            row["avg"] = avg
+        if pct is not None:
+            row["pct_nl"] = pct
+        if upnl is not None:
+            row["uPnL"] = round(float(upnl), 2)
+        if risk_pct is not None:
+            row["risk_pct_nl"] = risk_pct
+        if stop is not None:
+            row["stop"] = stop
+        target = targets.get(sym)
+        if target is not None:
+            row["target"] = target
+            if last is not None and qty is not None:
+                if qty > 0:
+                    row["to_target_usd"] = round((target - last) * qty * mult, 2)
+                elif qty < 0:
+                    row["to_target_usd"] = round((last - target) * abs(qty) * mult, 2)
+        if row.keys() - {"symbol"}:
+            lots.append(row)
+    lots.sort(key=lambda r: -float(r.get("pct_nl") or 0))
+    leftover_usd = _real_float(total_cash)
+    if leftover_usd is not None:
+        leftover_usd = round(leftover_usd, 2)
+    cash_pct = pct_of_nl(leftover_usd, nl, digits=2) if leftover_usd is not None else None
+    if cash_pct is None and nl is not None:
+        cash_pct = pct_of_nl(max(0.0, nl - deployed), nl, digits=2)
+    deployed_pct = pct_of_nl(deployed, nl, digits=2) if nl is not None else None
+    out: dict[str, Any] = {"lots": lots[:8]}
+    if leftover_usd is not None:
+        out["leftover_usd"] = leftover_usd
+    out["deployed_usd"] = round(deployed, 2)
+    if cash_pct is not None:
+        out["cash_pct_nl"] = cash_pct
+    if deployed_pct is not None:
+        out["deployed_pct_nl"] = deployed_pct
+    if nl is not None:
+        out["nl"] = round(nl, 2)
+    to_tgt_vals = [
+        r.get("to_target_usd")
+        for r in lots
+        if isinstance(r, dict) and r.get("to_target_usd") is not None
+    ]
+    if to_tgt_vals:
+        out["lots_to_target_usd"] = round(sum(float(v) for v in to_tgt_vals), 2)
+    return out
+
+
+def allocation_line(facts: dict[str, Any] | None) -> str:
+    """One comparable line: leftover cash, then lots by capital used."""
+    bag = facts if isinstance(facts, dict) else {}
+    bits: list[str] = []
+    leftover = _real_float(bag.get("leftover_usd"))
+    cash = _real_float(bag.get("cash_pct_nl"))
+    dep = _real_float(bag.get("deployed_pct_nl"))
+    head = _leftover_deployed_text(leftover, cash, dep, _day_pnl_of(bag))
+    lots_to_tgt = _real_float(bag.get("lots_to_target_usd"))
+    if leftover is not None and lots_to_tgt is not None:
+        vs = f" vs lots-to-target ${lots_to_tgt}"
+        head = f"{head}{vs}" if head else vs.strip()
+    if head:
+        bits.append(head)
+    for lot in bag.get("lots") or []:
+        if not isinstance(lot, dict):
+            continue
+        sym = str(lot.get("symbol") or "").strip()
+        if not sym:
+            continue
+        qty = lot.get("qty")
+        qty_bit = str(qty) if qty is not None else ""
+        part = f"{sym}{qty_bit}"
+        if lot.get("pct_nl") is not None:
+            part += f" {lot['pct_nl']}%"
+        if lot.get("last") is not None:
+            part += f" {lot['last']}"
+        if lot.get("uPnL") is not None:
+            part += f" uPnL={lot['uPnL']}"
+        if lot.get("risk_pct_nl") is not None:
+            part += f" risk={lot['risk_pct_nl']}%"
+        if lot.get("stop") is not None:
+            part += f" stp={lot['stop']}"
+        if lot.get("target") is not None:
+            part += f" tgt={lot['target']}"
+        if lot.get("to_target_usd") is not None:
+            part += f" to_tgt={lot['to_target_usd']}"
+        bits.append(part)
+    return " | ".join(bits)
+
+
+def _scan_stashed_range(row: dict[str, Any]) -> bool:
+    if str(row.get("print") or "") == "live_open":
+        return True
+    return str(row.get("source") or "").strip().lower() == "scan"
+
+
+def range_compare_line(session_range: dict[str, Any] | None) -> str:
+    """This-look candle ranges, largest |gap_pct| first. Not expected profit."""
+    store = session_range if isinstance(session_range, dict) else {}
+    ranked: list[tuple[float, str, str]] = []
+    for raw_sym, row in store.items():
+        if not isinstance(row, dict) or _scan_stashed_range(row):
+            continue
+        sym = str(raw_sym or "").upper().strip()
+        if not sym:
+            continue
+        gap = _real_float(row.get("gap_pct"))
+        vs = _real_float(row.get("vs_open"))
+        if gap is None and vs is None:
+            continue
+        key = abs(gap) if gap is not None else abs(vs or 0.0)
+        bit = sym
+        if gap is not None:
+            bit += f" gap={gap}"
+        if vs is not None:
+            bit += f" vs_open={vs}"
+        ranked.append((key, sym, bit))
+    ranked.sort(key=lambda r: (-r[0], r[1]))
+    bits = [row[2] for row in ranked[:6]]
+    if not bits:
+        return ""
+    return "range " + " ".join(bits)
+
+
+def _fmt_to_high_usd(usd: float) -> str:
+    """Round dollars without cents when >= 1, else one decimal."""
+    if float(usd) >= 1.0:
+        return f"${int(round(float(usd)))}"
+    return f"${round(float(usd), 1):.1f}"
+
+
+def to_high_line(session_range: dict[str, Any] | None) -> str:
+    """This-look dollar room to session high for sized names. Not expectancy."""
+    store = session_range if isinstance(session_range, dict) else {}
+    ranked: list[tuple[float, str, str]] = []
+    for raw_sym, row in store.items():
+        if not isinstance(row, dict) or _scan_stashed_range(row):
+            continue
+        sym = str(raw_sym or "").upper().strip()
+        if not sym:
+            continue
+        last = _real_float(row.get("last"))
+        high = _real_float(row.get("high"))
+        size = row.get("size") if isinstance(row.get("size"), dict) else None
+        if last is None or high is None or size is None:
+            continue
+        qty = _real_float(size.get("qty"))
+        if qty is None or qty <= 0:
+            continue
+        usd = (high - last) * qty
+        if usd <= 0:
+            continue
+        ranked.append((usd, sym, f"{sym} {_fmt_to_high_usd(usd)}"))
+    ranked.sort(key=lambda r: (-r[0], r[1]))
+    bits = [row[2] for row in ranked[:6]]
+    if not bits:
+        return ""
+    return "to_high " + " ".join(bits)
 
 
 @dataclass

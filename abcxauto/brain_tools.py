@@ -51,6 +51,10 @@ TOOL_S = 20.0
 SEND_S = 45.0
 CHAIN_S = 60.0
 CANDLE_S = 35.0
+# Bars are gathered in parallel. The wait is the slowest name, not n times.
+CANDLE_WAIT_S = 8.0
+# One chain page. A multi-name chain does not get 22s each.
+CHAIN_WAIT_S = 12.0
 SCAN_S = 35.0
 # Ranked 30-row page is ~5,811 chars. Provenance ~300, envelope ~400.
 # with=news stays a short top-level list (no nested row.mda.news).
@@ -483,29 +487,154 @@ def _scan_catalog_payload() -> dict[str, Any]:
 _SCAN_NEWS_KEEP = (
     "symbol",
     "headline",
+    "publisher",
+    "published",
+    "as_of",
     "asof_iso",
+    "url",
     "use",
     "freshness",
     "source",
-    "error",
 )
+
+
+def _public_news_item(item: Any) -> dict[str, Any] | None:
+    """One headline Grok can cross-ref. Outlet is publisher, feed is source."""
+    try:
+        from abcxauto.news_feed import public_news_item
+
+        row = public_news_item(item)
+        if isinstance(row, dict) and row.get("headline"):
+            return row
+        if row is None and not is_real_headline(item):
+            return None
+    except Exception:
+        row = None
+    if not is_real_headline(item) or not isinstance(item, dict):
+        return None
+    slim: dict[str, Any] = {}
+    for key in _SCAN_NEWS_KEEP:
+        val = item.get(key)
+        if val not in (None, ""):
+            slim[key] = val
+    if "publisher" not in slim:
+        outlet = str(item.get("publisher") or "").strip()
+        src = str(item.get("source") or "").strip()
+        if not outlet and src.lower() not in ("mda", "ibkr", "web"):
+            outlet = src
+        if outlet:
+            slim["publisher"] = outlet
+    if slim.get("source") in (None, "") or str(slim.get("source") or "").lower() not in (
+        "mda",
+        "ibkr",
+        "web",
+    ):
+        slim["source"] = "mda"
+    slim.setdefault("freshness", "delayed_15m")
+    slim.setdefault("use", "color_not_trigger")
+    return slim if slim.get("headline") else None
+
+
+def _public_news_items(items: Any) -> list[dict[str, Any]]:
+    try:
+        from abcxauto.news_feed import public_news_items
+
+        rows = public_news_items(items)
+        if isinstance(rows, list):
+            return [r for r in rows if isinstance(r, dict) and r.get("headline")]
+    except Exception:
+        pass
+    out: list[dict[str, Any]] = []
+    for it in items or []:
+        slim = _public_news_item(it)
+        if slim:
+            out.append(slim)
+    return out
 
 
 def _slim_scan_news(items: Any) -> list[dict[str, Any]]:
     """Headline color only. Timeouts and error rows are not headlines."""
-    out: list[dict[str, Any]] = []
-    for it in items or []:
-        if not is_real_headline(it):
-            continue
-        slim = {
-            key: it[key]
-            for key in _SCAN_NEWS_KEEP
-            if it.get(key) not in (None, "")
-        }
-        slim.pop("error", None)
-        if slim.get("headline"):
-            out.append(slim)
+    return _public_news_items(items)
+
+
+def _quote_need(already: list[str] | None = None) -> dict[str, Any]:
+    """Bare quote/candles is a choice when the book is flat."""
+    out: dict[str, Any] = {
+        "ok": False,
+        "need": "symbol | symbols[]",
+        "source": "ibkr",
+        "freshness": "live",
+        "fetched": False,
+        "note": "pass symbol or symbols[]",
+    }
+    names = [str(s).upper().strip() for s in (already or []) if str(s).strip()]
+    if names:
+        out["already"] = names[:8]
     return out
+
+
+def _public_quote_row(row: dict[str, Any] | None) -> dict[str, Any]:
+    """IBKR last/bid/ask plus mid/spread when both sides exist."""
+    if not isinstance(row, dict):
+        return {}
+    out = dict(row)
+    bid, ask = out.get("bid"), out.get("ask")
+    try:
+        bid_f = float(bid) if bid is not None else None
+        ask_f = float(ask) if ask is not None else None
+    except (TypeError, ValueError):
+        bid_f = ask_f = None
+    if bid_f is not None and ask_f is not None and bid_f > 0 and ask_f > 0:
+        out.setdefault("mid", round((bid_f + ask_f) / 2.0, 4))
+        out["spread"] = round(ask_f - bid_f, 4)
+    out.setdefault("source", "ibkr")
+    out.setdefault("freshness", "live")
+    return out
+
+
+def _public_quote_payload(data: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    out = dict(data)
+    quotes = out.get("quotes")
+    if isinstance(quotes, list):
+        out["quotes"] = [
+            _public_quote_row(q) if isinstance(q, dict) else q for q in quotes
+        ]
+    elif out.get("symbol") or out.get("last") is not None:
+        out = _public_quote_row(out)
+    return out
+
+
+def _candle_read(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Surface already-computed structure. Do not invent new indicators."""
+    if not isinstance(row, dict):
+        return None
+    read: dict[str, Any] = {}
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    for key in (
+        "bar_last",
+        "sma20",
+        "sma50",
+        "dist20",
+        "ret5",
+        "above_sma20",
+        "asof_iso",
+        "as_of",
+    ):
+        if metrics.get(key) not in (None, ""):
+            read[key] = metrics[key]
+    bars = row.get("bars") if isinstance(row.get("bars"), list) else []
+    last = bars[-1] if bars and isinstance(bars[-1], dict) else {}
+    if last:
+        bar = {
+            k: last[k]
+            for k in ("t", "t_iso", "o", "h", "l", "c", "v")
+            if last.get(k) not in (None, "")
+        }
+        if bar:
+            read["last_bar"] = bar
+    return read or None
 
 
 def _strip_hit_news(row: dict[str, Any]) -> dict[str, Any]:
@@ -1111,7 +1240,8 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
             "One IBKR ticket per call. Call send again this turn for another ticket. "
             "strategy name + fields match ORDER EXAMPLES. "
             "Size (% of NL) and book width (self_tune max_open_positions) are together, not pick-one. "
-            "Knobs are self_tune, not a ticket. Hard risk is code."
+            "Knobs are self_tune, not a ticket. Hard risk is code. "
+            "New risk needs this-look candles and news|web|option_facts on the name."
         ),
         parameters=_schema(
             {
@@ -1165,22 +1295,100 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
     )
 
 
+_WEB_HIT_CAP = 5
+_WEB_TEXT_CLIP = 2_000
+
+
+def _slim_web_hits(rows: Any) -> list[dict[str, Any]]:
+    """Title/url/handle only. Up to five hits so _clip cannot drop search to empty."""
+    out: list[dict[str, Any]] = []
+    for raw in list(rows or [])[:_WEB_HIT_CAP]:
+        if not isinstance(raw, dict):
+            continue
+        hit: dict[str, Any] = {}
+        source = str(raw.get("source") or "").strip()
+        if source:
+            hit["source"] = source
+        title = str(raw.get("title") or "").strip()
+        if title:
+            hit["title"] = title[:180]
+        url = str(raw.get("url") or "").strip()
+        if url:
+            hit["url"] = url[:400]
+        handle = str(raw.get("handle") or "").strip().lstrip("@")
+        if handle:
+            hit["handle"] = handle
+        if hit.get("url") or hit.get("title"):
+            out.append(hit)
+    return out
+
+
+def _clip_web(page: dict[str, Any]) -> str:
+    """Clip a web/search payload. Search hits survive when text is fat."""
+    slim = dict(page)
+    text = slim.get("text")
+    if isinstance(text, str) and len(text) > _WEB_TEXT_CLIP:
+        slim["text"] = text[:_WEB_TEXT_CLIP]
+    hits: list[dict[str, Any]] | None = None
+    if isinstance(slim.get("results"), list):
+        hits = _slim_web_hits(slim["results"])
+        slim["results"] = hits
+        slim["n"] = len(hits)
+    raw = _hub()._clip(slim)
+    if not hits:
+        return raw
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return raw
+    kept = data.get("results") if isinstance(data, dict) else None
+    if isinstance(kept, list) and kept:
+        return raw
+    rescued: dict[str, Any] = {
+        "source": slim.get("source") or "web",
+        "use": slim.get("use"),
+        "query": slim.get("query"),
+        "where": slim.get("where"),
+        "results": hits,
+        "n": len(hits),
+        "_clipped": "text",
+    }
+    return json.dumps(
+        {k: v for k, v in rescued.items() if v is not None},
+        default=str,
+    )
+
+
 def _web_tool() -> Any:
-    """Public page fetch. COLOR on research and RTH. Not a crawler. Not a send trigger."""
+    """Public page fetch or a short web/X search. COLOR. Not a crawler. Not a send trigger."""
     return tool(
         name="web",
         description=(
-            "Fetch one public http(s) URL (title + short text). "
-            "Color only, never a live trigger. Not send geometry."
+            "Color only, never a live trigger, not send geometry. "
+            "Pass query to search the public web and X (titles, urls, snippets). "
+            "Pass url to fetch one public http(s) page."
         ),
         parameters=_schema(
             {
+                "query": {
+                    "type": "string",
+                    "description": "Search words, e.g. a name plus what you want.",
+                },
+                "where": {
+                    "type": "string",
+                    "enum": ["web", "x", "both"],
+                    "description": "web, x, or both. Default both.",
+                },
+                "handles": {
+                    "type": "string",
+                    "description": "Optional X handles without @, comma-separated. Only with where x or both.",
+                },
                 "url": {
                     "type": "string",
                     "description": "Public http(s) page (press release, IR, SEC).",
-                }
+                },
             },
-            ["url"],
+            [],
         ),
     )
 
@@ -1190,19 +1398,23 @@ AGENT_TOOLS = [
     tool(
         name="book",
         description=(
-            "Live IBKR book: positions, working orders, protection, tape, "
-            "scorecard."
+            "Live IBKR blotter: lots, working orders, fills, protection, NL, PnL, "
+            "idle-cash leftover vs lots. Not tape. Scan/news/odds/web stay their own tools."
         ),
         parameters=_schema({}, []),
     ),
     tool(
         name="status",
-        description="IBKR/MDA/xAI link and trading mode.",
+        description="IBKR/MDA/xAI link, trading mode, idle-cash leftover vs lots.",
         parameters=_schema({}, []),
     ),
     tool(
         name="quote",
-        description="IBKR live last/bid/ask (TWS stream). One symbol or symbols[] (max 8). Not MDA.",
+        description=(
+            "IBKR live last/bid/ask/mid/spread (TWS stream). "
+            "Pass symbol or symbols[] (max 8). Bare quote() quotes open STK lots; "
+            "flat book needs a name. Not MDA."
+        ),
         parameters=_schema(
             {"symbol": _QUOTE_SCHEMA, "symbols": _SYMBOLS_SCHEMA},
             [],
@@ -1216,15 +1428,15 @@ AGENT_TOOLS = [
     tool(
         name="news",
         description=(
-            "MDA headlines (~15 min delayed). Color only, never a trigger. "
-            "Pass symbols[]. Bare news() does not poll the scan tape or SPY."
+            "MDA headlines (~15 min delayed): symbol, headline, publisher, published. "
+            "Color only, never a trigger. Pass symbols[]. Bare news() does not invent names."
         ),
         parameters=_schema({"symbols": _SYMBOLS_SCHEMA}, []),
     ),
     tool(
         name="odds",
         description=(
-            "Prediction-market implied probs (Polymarket). "
+            "Prediction-market implied probs (Polymarket): title, implied, url, as_of. "
             "Pass query or symbols[]. Bare odds() does not search the book. "
             "Not IBKR last."
         ),
@@ -1243,7 +1455,8 @@ AGENT_TOOLS = [
             "arena and/or scan_code fetches that sort. symbols[] is a fat drill-down. "
             "Ranked hits stay thin: symbol, rank, screen, scan_code, "
             "metric_name, metric_value, skip_class, source; "
-            "last/volume/market_cap only when IBKR supplied them. "
+            "last on the top hits when IBKR is up so tape can be compared to open lots "
+            "and idle cash. "
             "skip_class is levered|micro|empty. "
             "with=news is a short top-level headline list. "
             "with=metrics nests delayed daily context on the top names. "
@@ -1346,8 +1559,9 @@ AGENT_TOOLS = [
     tool(
         name="candles",
         description=(
-            "IBKR hist or live 5s. Error if both miss. Not MDA. "
-            "One symbol or symbols[] (max 8). "
+            "IBKR hist or live 5s plus structure already on the bars (sma/dist/ret). "
+            "Error if both miss. Not MDA. Pass symbol or symbols[] (max 8). "
+            "Bare candles() uses open STK lots; flat book needs a name. "
             "resolution D = daily; 15/5/60 = hist size (stream is always 5s)."
         ),
         parameters=_schema(
@@ -1487,7 +1701,12 @@ AGENT_TOOLS = [
                 "kind": {"enum": ["fact", "event", "invalidate"]},
                 "symbol": {},
                 "body": {},
-                "evidence": {},
+                "evidence": {
+                    "description": (
+                        "store=cards: list of objects with optional tool (string) "
+                        "and facts (object). store=notes: string."
+                    ),
+                },
                 "invalidate": {},
                 "label": {},
                 "screen": {},
@@ -1520,9 +1739,9 @@ def _send_strategy_names_for_look(*, session: str = "") -> list[str]:
 
 
 def agent_tools(*, session: str = "") -> list:
-    """Tools this look. Overnight park is code, not a Grok clock.
+    """Tools this look. Overnight park is code. Stay-up has no sit clock.
 
-    Research (premarket / AH / closed) omits ``send``. RTH keeps ``send``.
+    Research (premarket / postmarket / closed) omits ``send``. RTH keeps ``send``.
     ``web`` is COLOR on both (not a live trigger).
     """
     from abcxauto.desk_mode import is_research_session
@@ -1830,20 +2049,12 @@ async def _run_tool(
     if name == "status":
         from abcxauto.connections import connection_status
         from abcxauto.marketdata.market_hours import get_session_info
-        from abcxauto.world_state import COMBO_FACT
 
         st = connection_status(connector)
         try:
             st["session"] = get_session_info()
         except Exception:
             st["session"] = {"session": world.session_status}
-        try:
-            from abcxauto.self_tune import levers_snapshot
-
-            st["levers"] = levers_snapshot()
-        except Exception:
-            st["levers"] = {}
-        st["combo"] = COMBO_FACT
         st["sends_this_turn"] = len(turn.sends)
         try:
             from abcxauto.desk_mode import desk_mode, is_research_session
@@ -1869,6 +2080,39 @@ async def _run_tool(
         except Exception:
             st["open_lots"] = []
             st["working_orders"] = []
+        try:
+            from abcxauto.world_state import allocation_facts, allocation_line
+
+            cash = None
+            port = getattr(world, "portfolio_risk", None) or {}
+            inner = port.get("capital_liquidity") if isinstance(port, dict) else {}
+            if isinstance(inner, dict) and inner.get("total_cash") is not None:
+                cash = inner.get("total_cash")
+            alloc = allocation_facts(
+                list(getattr(world, "positions", None) or []),
+                net_liq=getattr(world, "net_liquidation", None),
+                total_cash=cash,
+                quotes=getattr(world, "ibkr_live_quotes", None),
+                orders=list(getattr(world, "open_orders", None) or []),
+            )
+            line = allocation_line(alloc)
+            if line:
+                st["allocation_line"] = line
+            from abcxauto.world_state import range_compare_line, to_high_line
+
+            range_src = (
+                snap.get("session_range")
+                if isinstance(snap.get("session_range"), dict)
+                else getattr(world, "session_range", None)
+            )
+            range_line = range_compare_line(range_src)
+            if range_line:
+                st["range_line"] = range_line
+            high_line = to_high_line(range_src)
+            if high_line:
+                st["to_high_line"] = high_line
+        except Exception:
+            logger.debug("status allocation_line failed", exc_info=True)
         pulse = snap.get("reality_pulse") if isinstance(snap.get("reality_pulse"), dict) else {}
         if not pulse:
             pulse = getattr(world, "pulse", None) or {}
@@ -1884,21 +2128,27 @@ async def _run_tool(
                 st["tradable_now"] = pulse.get("tradable_now")
             fresh = pulse.get("data_freshness") if isinstance(pulse.get("data_freshness"), dict) else {}
             if fresh:
-                st["freshness"] = {
+                ibkr_fresh = {
                     "ibkr_connected": fresh.get("ibkr_connected"),
                     "ibkr_snapshot_age_s": fresh.get("ibkr_snapshot_age_s"),
-                    "mda_spy_quote_age_s": fresh.get("mda_spy_quote_age_s"),
-                    "spy_last": fresh.get("spy_last"),
-                    "vix": fresh.get("vix"),
                 }
+                if any(v is not None for v in ibkr_fresh.values()):
+                    st["freshness"] = ibkr_fresh
         return _hub()._clip(st)
     if name == "quote":
+        asked = normalize_tickers(
+            args.get("symbols") or args.get("symbol"), cap=8
+        )
+        if not asked:
+            return _hub()._clip(_quote_need())
         raw = await run_readonly_tool("quote", args, connector)
         try:
             data = json.loads(raw) if isinstance(raw, str) else dict(raw)
         except (TypeError, json.JSONDecodeError, ValueError):
             data = {}
         if isinstance(data, dict):
+            data = _public_quote_payload(data)
+            raw = data
             _hub()._stash_live(world, snap, data)
             _stash_vol_quote_iv(snap, data)
             live = _live_open_session(
@@ -1947,13 +2197,14 @@ async def _run_tool(
         items = await _hub()._mda_news(asked)
         items = coalesce_news(items, asked)
         remember_headlines(items)
-        world.news_items = list(items)
-        snap["news_items"] = list(items)
+        page = _public_news_items(items)
+        world.news_items = list(page)
+        snap["news_items"] = list(page)
         payload = {
             "source": "mda",
             "freshness": "delayed_15m",
             "use": "color_not_trigger",
-            "items": items[:24],
+            "items": page[:24],
         }
         miss = news_hard_miss(items)
         if miss:
@@ -1961,13 +2212,14 @@ async def _run_tool(
         _attach_run_sheet(payload, turn=turn, world=world, tool="news", quoted=snap)
         return _hub()._clip(payload)
     if name == "odds":
-        from abcxauto.config import get_config
         from abcxauto.prediction_odds import fetch_odds
 
         asked = normalize_tickers(args.get("symbols"))
         q = str(args.get("query") or "").strip()
         payload = await fetch_odds(symbols=asked, query=q)
-        payload["path"] = _hub()._path_block(world, get_config())
+        if isinstance(payload, dict):
+            payload.setdefault("as_of", datetime.now(timezone.utc).isoformat())
+            payload.pop("path", None)
         if isinstance(snap, dict):
             snap["odds"] = dict(payload)
         return _hub()._clip(payload)
@@ -2193,20 +2445,35 @@ async def _run_tool(
             args.get("symbols") or args.get("symbol"), cap=CANDLE_CAP
         )
         if not syms:
-            return json.dumps({"error": "symbol required", "source": "ibkr"})
+            return _hub()._clip(_quote_need())
         try:
             countback = int(args.get("countback") or 60)
         except (TypeError, ValueError):
             countback = 60
         countback = max(5, min(countback, 120))
-        from abcxauto.broker.bars import normalize_resolution, session_countback
+        from abcxauto.broker.bars import (
+            HIST_RESOLUTIONS,
+            normalize_resolution,
+            session_countback,
+        )
 
-        res = str(args.get("resolution") or "").strip()
+        raw_res = args.get("resolution")
+        res = str(raw_res if raw_res is not None else "").strip()
+        explicit_res = bool(res)
         if not res:
             res = _candle_res_from_tape(snap)
         else:
             res = normalize_resolution(res)
-        if normalize_resolution(res) in ("5", "15", "60"):
+        if res not in HIST_RESOLUTIONS:
+            return _hub()._clip(
+                {
+                    "error": f"unsupported resolution {raw_res!r}",
+                    "requested_resolution": str(raw_res or "").strip(),
+                    "source": "ibkr",
+                    "freshness": "ibkr_miss",
+                }
+            )
+        if res in ("5", "15", "60"):
             countback = min(
                 120,
                 max(countback, session_countback(res, n_symbols=len(syms))),
@@ -2222,7 +2489,7 @@ async def _run_tool(
         if isinstance(snap.get("ibkr_live_quotes"), dict):
             qmap.update(snap["ibkr_live_quotes"])
         t0 = time.monotonic()
-        budget = min(CANDLE_S, max(28.0, 12.0 + 8.0 * len(syms)))
+        budget = CANDLE_WAIT_S
 
         def _live_last(sym: str) -> Any:
             return qmap.get(sym)
@@ -2243,31 +2510,44 @@ async def _run_tool(
                     raw = {"error": str(exc), "source": "ibkr", "symbol": sym}
                 if isinstance(raw, dict) and raw.get("bars"):
                     out = dict(raw)
-                    out["bars"] = list(out.get("bars") or [])[-bar_cap:]
-                    out.setdefault("source", "ibkr")
-                    out.setdefault("freshness", ibkr_bar_freshness(res))
-                    last_bar = (out["bars"] or [{}])[-1]
-                    if last_bar.get("t_unix"):
-                        out.setdefault("asof", last_bar["t_unix"])
-                        if last_bar.get("t_iso"):
-                            out.setdefault("asof_iso", last_bar["t_iso"])
-                    if out.get("freshness") != "ibkr_rt_5s":
-                        from abcxauto.opportunity_scan import structure_from_bars
+                    # Never accept silent daily under an intraday ask.
+                    got = out.get("resolution")
+                    if (
+                        res in ("5", "15", "60")
+                        and got is not None
+                        and normalize_resolution(str(got)) == "D"
+                    ):
+                        hist_err = f"daily bars for requested {res}"
+                    else:
+                        out["bars"] = list(out.get("bars") or [])[-bar_cap:]
+                        out.setdefault("source", "ibkr")
+                        out.setdefault("freshness", ibkr_bar_freshness(res))
+                        out.setdefault("resolution", res)
+                        if explicit_res and out.get("resolution") != res:
+                            out.setdefault("requested_resolution", res)
+                        last_bar = (out["bars"] or [{}])[-1]
+                        if last_bar.get("t_unix"):
+                            out.setdefault("asof", last_bar["t_unix"])
+                            if last_bar.get("t_iso"):
+                                out.setdefault("asof_iso", last_bar["t_iso"])
+                        if out.get("freshness") != "ibkr_rt_5s":
+                            from abcxauto.opportunity_scan import structure_from_bars
 
-                        metrics = structure_from_bars(
-                            out["bars"],
-                            sym,
-                            resolution=res,
-                            source="ibkr",
-                            freshness=str(out.get("freshness") or "ibkr_rth"),
+                            metrics = structure_from_bars(
+                                out["bars"],
+                                sym,
+                                resolution=res,
+                                source="ibkr",
+                                freshness=str(out.get("freshness") or "ibkr_rth"),
+                            )
+                            if metrics:
+                                out["metrics"] = metrics
+                        _apply_candle_session(
+                            out, sym=sym, snap=snap, world=world, last=_live_last(sym)
                         )
-                        if metrics:
-                            out["metrics"] = metrics
-                    _apply_candle_session(
-                        out, sym=sym, snap=snap, world=world, last=_live_last(sym)
-                    )
-                    return out
-                hist_err = str((raw or {}).get("error") or "no IBKR bars")
+                        return out
+                if not hist_err:
+                    hist_err = str((raw or {}).get("error") or "no IBKR bars")
             elif warm:
                 hist_err = "skipped_hist_rt_warm"
             remain = max(0.0, budget - (time.monotonic() - t0) - 2.0)
@@ -2407,8 +2687,17 @@ async def _run_tool(
                     payload["asof_iso"] = series[0]["asof_iso"]
                 if series[0].get("session"):
                     payload["session"] = series[0]["session"]
+                read = _candle_read(series[0])
+                if read:
+                    payload["read"] = read
         else:
             payload["series"] = series
+            for row in payload["series"]:
+                if not isinstance(row, dict):
+                    continue
+                read = _candle_read(row)
+                if read:
+                    row["read"] = read
         # A miss is an error, not a stub payload.
         if kinds:
             _attach_run_sheet(
@@ -2449,9 +2738,16 @@ async def _run_tool(
         for row in chains:
             _stash_vol_chain(snap, row)
         _hub()._publish_vol(world, snap)
+        chain_note = (
+            "vertical send needs option_quote with long_strike and short_strike; "
+            "chain prices are not a live limit."
+        )
         if len(chains) == 1:
+            chains[0]["note"] = chain_note
             return _hub()._clip(chains[0])
-        return _hub()._clip({"source": "ibkr", "chains": chains})
+        return _hub()._clip(
+            {"source": "ibkr", "chains": chains, "note": chain_note}
+        )
     if name == "option_quote":
         combo = _combo_quote_spec(args)
         if combo:
@@ -2489,9 +2785,9 @@ async def _run_tool(
         except Exception:
             logger.debug("look snapshot option_quote record failed", exc_info=True)
         if len(rows) == 1:
-            return _hub()._clip(rows[0])
+            return _hub()._clip(_public_quote_row(rows[0]))
         return _hub()._clip({
-            "quotes": list(rows),
+            "quotes": [_public_quote_row(r) if isinstance(r, dict) else r for r in rows],
             "use": "ibkr_live_for_decisions; mda_greeks_delayed",
         })
     if name == "option_facts":
@@ -2596,17 +2892,31 @@ async def _run_tool(
         turn.last_strat = strat
         return _hub()._clip(result)
     if name == "web":
-        from abcxauto.desk_mode import WEB_USE, fetch_public_page
+        from abcxauto.desk_mode import WEB_USE, fetch_public_page, search_public
 
         url = str(args.get("url") or "").strip()
-        page = await fetch_public_page(url)
+        query = str(args.get("query") or args.get("q") or "").strip()
+        if url:
+            page = await fetch_public_page(url)
+        elif query:
+            page = await search_public(
+                query,
+                where=str(args.get("where") or "both"),
+                handles=args.get("handles"),
+            )
+        else:
+            page = {
+                "error": "web needs query or url",
+                "source": "web",
+                "use": WEB_USE,
+            }
         if not isinstance(page, dict):
             page = {"error": str(page), "source": "web", "use": WEB_USE}
         else:
             page.setdefault("use", WEB_USE)
         if isinstance(snap, dict):
             snap["research_web"] = dict(page)
-        return _hub()._clip(page)
+        return _clip_web(page)
     if name == "note":
         from abcxauto.working_memory import MAX_LINES, remember, working_memory_lines
 
@@ -2651,9 +2961,13 @@ __all__ = [
     'SEND_S',
     'CHAIN_S',
     'CANDLE_S',
+    'CANDLE_WAIT_S',
+    'CHAIN_WAIT_S',
     'SCAN_S',
     'SCAN_CLIP_CHARS',
     '_clip_scan',
+    '_clip_web',
+    '_slim_web_hits',
     '_QUOTE_SCHEMA',
     '_SYMBOLS_SCHEMA',
     '_scan_arena_keys',

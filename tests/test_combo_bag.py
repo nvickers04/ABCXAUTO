@@ -262,3 +262,55 @@ async def test_place_iron_condor_close_requires_limit():
     )
     assert "error" in out
     assert "limit_price" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_option_chain_prefers_smart_not_first_exchange():
+    """Live AVGO once returned exchange=GEMINI because chains[0] won."""
+    from datetime import datetime, timedelta
+
+    from abcxauto.broker.options import IBKROptionsMixin
+
+    today = datetime.now().date()
+    exp_near = (today + timedelta(days=14)).strftime("%Y%m%d")
+    exp_far = (today + timedelta(days=28)).strftime("%Y%m%d")
+
+    class Mix(IBKROptionsMixin):
+        pass
+
+    mix = Mix()
+
+    async def connected():
+        return True
+
+    class FakeIB:
+        async def qualifyContractsAsync(self, stock):
+            stock.conId = 1
+            stock.symbol = "AVGO"
+            stock.secType = "STK"
+
+        async def reqSecDefOptParamsAsync(self, *_a, **_k):
+            return [
+                SimpleNamespace(
+                    exchange="GEMINI",
+                    tradingClass="AVGO",
+                    multiplier="100",
+                    expirations=[exp_near],
+                    strikes=[100.0, 105.0],
+                ),
+                SimpleNamespace(
+                    exchange="SMART",
+                    tradingClass="AVGO",
+                    multiplier="100",
+                    expirations=[exp_near, exp_far],
+                    strikes=[100.0, 105.0, 110.0],
+                ),
+            ]
+
+    mix._ensure_connected = connected
+    mix.ib = FakeIB()
+    out = await mix.get_option_chain("AVGO", min_dte=7, max_dte=45)
+    assert out.get("exchange") == "SMART"
+    assert "error" not in out
+    assert exp_far in {row["expiration"] for row in out["expirations"]}
+    assert out["strikes"] == [100.0, 105.0, 110.0]

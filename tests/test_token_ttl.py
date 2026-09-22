@@ -88,7 +88,7 @@ def test_hygiene_does_not_soften_f10_or_enable_live():
     assert F10_PREFERRED_USD == 10.0
     assert get_config().ibkr_port != 7496
     assert Config().ibkr_port == 7497
-    assert DEFAULT_PLACE_TOKEN_TTL_S == 120.0
+    assert DEFAULT_PLACE_TOKEN_TTL_S == 600.0
     assert MIN_PLACE_TOKEN_TTL_S == 5.0
     assert MAX_PLACE_TOKEN_TTL_S == 900.0
     assert DEFAULT_PLACE_TOKEN_TTL_S <= MAX_PLACE_TOKEN_TTL_S

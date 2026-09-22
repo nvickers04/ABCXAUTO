@@ -644,9 +644,23 @@ def research_brief_skip_reason(
     now: datetime | None = None,
     unprotected: bool = False,
 ) -> str:
-    """Non-empty = do not start a billed research/brief turn."""
+    """Non-empty = do not start a billed research/brief turn.
+
+    Regular/RTH is never the AH-card skip — RTH looks are not billed on that card.
+    """
     if unprotected:
         return ""
+    blob = snap if isinstance(snap, dict) else {}
+    if blob.get("book_unreliable"):
+        return "book_unreliable"
+    try:
+        from abcxauto.thin_rth_kill_look import dead_socket_skip_reason
+
+        dead = dead_socket_skip_reason(blob, unprotected=unprotected)
+        if dead:
+            return dead
+    except Exception:
+        logger.debug("research brief dead-socket skip failed", exc_info=True)
     try:
         from abcxauto.desk_mode import is_research_session, is_rth_session
 

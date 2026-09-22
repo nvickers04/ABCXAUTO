@@ -197,6 +197,7 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
         "short_strike": 505.0,
         "right": "C",
         "quantity": 1,
+        "card": "card-name",
     },
     "iron_condor": {
         "symbol": "SPY",
@@ -313,13 +314,17 @@ ORDER_EXAMPLES: dict[str, dict[str, Any]] = {
     },
 }
 
-SENDABLE_TYPES = frozenset(ORDER_EXAMPLES)
 # Knobs are the self_tune tool. Keep send aliases in the dict for old tickets.
 NOT_TICKETS = frozenset({"self_tune", "set_risk"})
+# defined_risk_only always rejects these — keep shapes for STRATEGIES parity,
+# do not list them as sendable or print them in ORDER EXAMPLES.
+NEVER_TEACH = frozenset({"ratio_spread", "jade_lizard"})
+SENDABLE_TYPES = frozenset(
+    k for k in ORDER_EXAMPLES if k not in NEVER_TEACH
+)
 
 # Defined-risk combo tickets openable as BAG. Teach a close sibling in
 # format_order_examples only — keep ORDER_EXAMPLES 1:1 with STRATEGIES.
-# ratio_spread / jade_lizard stay open-only (defined_risk_only rejects them).
 COMBO_BAG_CLOSE = frozenset({
     "vertical_spread",
     "calendar_spread",
@@ -348,7 +353,11 @@ def combo_close_example(name: str) -> dict[str, Any]:
 
 def ticket_strategy_names() -> list[str]:
     """send strategy enum — tickets only, so knobs are not buried in this list."""
-    return sorted(k for k in ORDER_EXAMPLES if k not in NOT_TICKETS)
+    return sorted(
+        k
+        for k in ORDER_EXAMPLES
+        if k not in NOT_TICKETS and k not in NEVER_TEACH
+    )
 
 
 def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -> str:
@@ -364,7 +373,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         try:
             from abcxauto.agent_loop import ALLOWED_ACTIONS as _allowed
         except Exception:
-            _allowed = frozenset(ORDER_EXAMPLES)
+            _allowed = frozenset(SENDABLE_TYPES)
         allowed = _allowed
     lines = [
         "ORDER EXAMPLES (send tool — strategy + params)",
@@ -392,7 +401,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "",
     ]
     for name in sorted(ORDER_EXAMPLES):
-        if name not in allowed or name in NOT_TICKETS:
+        if name not in allowed or name in NOT_TICKETS or name in NEVER_TEACH:
             continue
         params = ORDER_EXAMPLES[name]
         lines.append(f"{name}: {json.dumps(params, separators=(',', ':'))}")

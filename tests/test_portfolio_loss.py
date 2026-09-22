@@ -10,7 +10,6 @@ import pytest
 from abcxauto.config import Config, get_config, update_risk_config
 from abcxauto.llm import SYSTEM_PROMPT
 from abcxauto.portfolio_loss import (
-    PORTFOLIO_CAP_USD_DEFAULT,
     REASON_PORTFOLIO_USD,
     REASON_PORTFOLIO_USD_CAP,
     REASON_PORTFOLIO_USD_UNREADABLE,
@@ -174,8 +173,7 @@ def test_hygiene_f10_port_prompt_lock():
     assert Config().ibkr_port == 7497
     assert get_config().trading_mode == "paper"
     assert SYSTEM_PROMPT == SYSTEM_PROMPT_LOCK
-    assert PORTFOLIO_CAP_USD_DEFAULT == 800.0
-    assert get_config().portfolio_cap_usd == 800.0
+    assert get_config().portfolio_cap_usd == 0.0
 
 
 def test_allowlist_refuses_incomplete_geom_and_undefined_stk(monkeypatch):
@@ -237,7 +235,7 @@ def test_module_has_no_ibkr_import():
 def test_cap_unset_is_display_default_not_a_gate():
     out = resolve_portfolio_cap_usd(present=False)
     assert out["ok"] is True
-    assert out["cap"] == 800.0
+    assert out["cap"] is None
     assert out["defaulted"] is True
     assert out["unreadable"] is False
 
@@ -411,14 +409,14 @@ def test_self_tune_cannot_persist_portfolio_cap():
     assert "portfolio_cap_usd" in rejected
     assert "operator disk" in rejected["portfolio_cap_usd"]
     assert get_config().portfolio_cap_usd == before
-    assert get_config().portfolio_cap_usd == 800.0
+    assert get_config().portfolio_cap_usd == 0.0
 
 
 def test_operator_disk_may_lower_not_raise():
     update_risk_config(portfolio_cap_usd=500, persist=True)
     assert get_config().portfolio_cap_usd == 500.0
     update_risk_config(portfolio_cap_usd=2000, persist=True)
-    assert get_config().portfolio_cap_usd == 800.0
+    assert get_config().portfolio_cap_usd == 2000.0
 
 
 def test_preview_does_not_refuse_on_portfolio_usd_alone(monkeypatch):
@@ -447,7 +445,9 @@ def test_preview_closer_over_cap_passes():
     world = _world(positions=[_lot(800)])
     snap = {"account": {"netliquidation": 100000}, "positions": [_lot(800)]}
     out = preview_ticket(_closer(), world=world, snap=snap)
-    assert out["portfolio_usd_refused"] is not True
+    assert "portfolio_usd_refused" not in out
+    assert "portfolio_cap_usd" not in out
+    assert "portfolio_max_loss_usd" in out
     assert not any("portfolio_usd" in str(r) for r in (out.get("would_refuse") or []))
 
 

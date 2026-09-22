@@ -509,6 +509,8 @@ async def test_scan_mda_last_refused_for_geometry(monkeypatch):
         "open_orders": [],
         "ibkr_live_quotes": {},
         "scan_hits": {"rows": [{"symbol": "SNDK", "last": 91.5}]},
+        "session_range": {"SNDK": {"last": 91.5}},
+        "news_items": [{"symbol": "SNDK", "headline": "SNDK tape"}],
     }
     begin_look(snap_ex)
     record_look_tool(

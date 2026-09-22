@@ -9,11 +9,13 @@ import pytest
 
 from abcxauto.config import Config, get_config
 from abcxauto.memory import get_journal, reset_journal
+from abcxauto.mode_size import MODE_SIZE_CEILING_EXPLORE
 from abcxauto.send_preview import (
     REASON_PREVIEW_MISMATCH,
     REASON_PREVIEW_TOKEN,
     REASON_PREVIEW_USED,
     REASON_TOKEN_EXPIRED,
+    authorize_place,
     bind_place_token,
     collect_would_refuse,
     consume_place_token,
@@ -168,18 +170,36 @@ def test_needs_token_new_risk_only():
 
 
 def test_preview_nameless_card_would_refuse(tmp_path, monkeypatch):
+    """vertical_spread with no params.card refuses like gate_ticket; exits do not."""
+    from abcxauto.risk_gates import new_risk_card_error
+
     monkeypatch.setenv("ABCXAUTO_JOURNAL_PATH", str(tmp_path / "journal.db"))
     reset_journal(path=str(tmp_path / "journal.db"), enabled=True)
+    want = new_risk_card_error("")
+    assert want == "new risk requires params.card naming a play"
+
     ticket = _vertical()
     ticket["params"].pop("card", None)
     ticket.pop("card", None)
+    # world=None: still refuse via always-armed path (not invent a card).
+    reasons = collect_would_refuse(ticket, world=None, snap={})
+    assert want in reasons
+
     out = preview_ticket(ticket, world=_world(), snap={"account": {"netliquidation": 100000}})
     assert out["preview"] is True
     assert out["pass"] is False
     assert out["preview_token"] in (None, "")
-    assert any("card" in str(r).lower() for r in out["would_refuse"])
+    assert want in out["would_refuse"]
     assert out["preview_id"]
     assert out["preview_hash"] == ticket_preview_hash(ticket)
+
+    exit_reasons = collect_would_refuse(_exit_ticket(), world=None, snap={})
+    assert want not in exit_reasons
+    close = _vertical()
+    close["params"]["closing_position"] = True
+    close["params"].pop("card", None)
+    close.pop("card", None)
+    assert want not in collect_would_refuse(close, world=None, snap={})
 
 
 @pytest.mark.asyncio
@@ -578,3 +598,235 @@ async def test_live_port_still_wins_over_preview_token(monkeypatch):
     assert F10_HARD_USD == 15.0
     assert get_config().ibkr_port == 7496
     assert get_config().trading_mode == "paper"
+
+
+def test_market_bracket_no_entry_is_not_a_notional_refuse(monkeypatch):
+    """88 shares is not a mode_size refuse. Cash is the spend cap."""
+    from abcxauto.config import update_risk_config
+    from abcxauto.self_tune import apply_self_tune
+
+    update_risk_config(max_risk_per_trade_pct=2.0, persist=True, _skip_clamp=True)
+    apply_self_tune({"size_pct_nl": MODE_SIZE_CEILING_EXPLORE}, persist=True)
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.kill_look_send_block",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "abcxauto.look_snapshot.check_ticket_numbers",
+        lambda *_a, **_k: (True, "", ""),
+    )
+    monkeypatch.setattr(
+        "abcxauto.desk_mode.new_risk_research_error",
+        lambda *_a, **_k: None,
+    )
+
+    nl = 32_361.08
+    last = 359.40
+    # qty 88 ≈ 98% of NL. Notional percent does not refuse it.
+    ticket = _bracket(
+        symbol="AVGO",
+        quantity=88,
+        stop_price=356.2,
+        target_price=366.8,
+        card="avgo long",
+    )
+    ticket["params"].pop("entry_price", None)
+    assert "entry_price" not in ticket["params"]
+    assert "limit_price" not in ticket["params"]
+    assert "price_hint" not in ticket["params"]
+
+    world = _world(net_liquidation=nl, session_status="regular")
+    snap = {
+        "account": {"netliquidation": nl},
+        "positions": [],
+        "open_lots": [],
+        "ibkr_live_quotes": {"AVGO": last},
+    }
+    reasons = collect_would_refuse(ticket, world=world, snap=snap)
+    joined = " ".join(str(r) for r in reasons)
+    assert "mode_size" not in joined, reasons
+    assert ticket["params"]["quantity"] == 88
+
+
+def test_preview_hash_stable_when_quantity_not_rewritten():
+    """Preview path must not rewrite qty — hash stays bound to the ticket."""
+    ticket = _bracket(
+        symbol="AVGO",
+        quantity=88,
+        stop_price=356.2,
+        target_price=366.8,
+        card="avgo long",
+    )
+    ticket["params"].pop("entry_price", None)
+    before = ticket_preview_hash(ticket)
+    digest = ticket_preview_hash(
+        {
+            "strategy": "market_bracket",
+            "params": dict(ticket["params"]),
+        }
+    )
+    assert digest == before
+    assert ticket["params"]["quantity"] == 88
+    assert ticket_preview_hash(ticket) == before
+
+
+def test_mismatch_includes_place_hash_different_from_preview_hash():
+    """On preview_token_mismatch the model must see both hashes."""
+    previewed = _bracket(quantity=88, card="avgo long")
+    bind = bind_place_token(previewed)
+    assert bind["preview_token"]
+    preview_hash = bind["preview_hash"]
+    assert preview_hash == ticket_preview_hash(previewed)
+
+    placed = _bracket(quantity=7, card="avgo long")
+    placed["preview_token"] = bind["preview_token"]
+    place_hash = ticket_preview_hash(placed)
+    assert place_hash != preview_hash
+
+    blocked = authorize_place(placed)
+    assert blocked is not None
+    assert blocked.get("reason_code") == REASON_PREVIEW_MISMATCH
+    assert blocked.get("preview_hash") == preview_hash
+    assert blocked.get("place_hash") == place_hash
+    assert blocked.get("place_hash") != blocked.get("preview_hash")
+    assert blocked.get("token_used") is False
+
+    # Mismatch must not spend the token.
+    ok, _meta = consume_place_token(bind["preview_token"], preview_hash)
+    assert ok is True
+
+
+def test_size_pct_nl_fill_keeps_preview_hash():
+    """Filling quantity from size_pct_nl must not break a passing preview."""
+    ticket = _bracket(quantity=1, card="sized")
+    ticket["params"].pop("quantity", None)
+    ticket["params"]["size_pct_nl"] = 5.0
+    assert ticket_preview_hash(ticket)
+    bind = bind_place_token(ticket)
+    placed = {
+        "strategy": ticket["strategy"],
+        "action": ticket.get("action"),
+        "params": dict(ticket["params"]),
+        "preview_token": bind["preview_token"],
+        "_hash_as_sent_qty": True,
+    }
+    placed["params"]["quantity"] = 7
+    assert ticket_preview_hash(placed) == bind["preview_hash"]
+    assert authorize_place(placed) is None
+
+
+def test_size_cash_refuse_names_print_and_fit_qty(monkeypatch):
+    """Cash refuse must name the live print and a quantity that fits."""
+    from dataclasses import replace
+
+    cfg = replace(
+        get_config(),
+        risk_gates_enabled=False,
+        sizing_floors=False,
+        cash_only=True,
+        trading_mode="paper",
+        ibkr_port=7497,
+    )
+    monkeypatch.setattr("abcxauto.config.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.kill_look_send_block",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "abcxauto.look_snapshot.check_ticket_numbers",
+        lambda *_a, **_k: (True, "", ""),
+    )
+    monkeypatch.setattr(
+        "abcxauto.desk_mode.new_risk_research_error",
+        lambda *_a, **_k: None,
+    )
+
+    # market_bracket notional uses max(stop, target)=110 -> 11k; 5k cash -> fit_qty=45.
+    ticket = _bracket(
+        symbol="AVGO",
+        quantity=100,
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=110.0,
+        card="cash fit",
+    )
+    world = _world(net_liquidation=100_000.0, session_status="regular")
+    snap = {
+        "account": {
+            "netliquidation": 100_000.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 5_000.0,
+        },
+        "positions": [],
+        "open_lots": [],
+        "ibkr_live_quotes": {"AVGO": 100.0},
+    }
+    reasons = collect_would_refuse(ticket, world=world, snap=snap)
+    joined = " ".join(str(r) for r in reasons)
+    assert "size_cash" in joined, reasons
+    assert "print=100" in joined, reasons
+    assert "fit_qty=45" in joined, reasons
+
+
+def test_preview_cash_gate_is_total_cash_not_available_funds(monkeypatch):
+    """Preview cash_only must match place: TotalCashValue only, never margin."""
+    from dataclasses import replace
+
+    cfg = replace(
+        get_config(),
+        risk_gates_enabled=False,
+        sizing_floors=False,
+        cash_only=True,
+        trading_mode="paper",
+        ibkr_port=7497,
+    )
+    monkeypatch.setattr("abcxauto.config.get_config", lambda: cfg)
+    monkeypatch.setattr("abcxauto.risk_gates.get_config", lambda: cfg)
+    monkeypatch.setattr(
+        "abcxauto.thin_rth_kill_look.kill_look_send_block",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "abcxauto.look_snapshot.check_ticket_numbers",
+        lambda *_a, **_k: (True, "", ""),
+    )
+    monkeypatch.setattr(
+        "abcxauto.desk_mode.new_risk_research_error",
+        lambda *_a, **_k: None,
+    )
+
+    ticket = _bracket(
+        symbol="AVGO",
+        quantity=100,
+        entry_price=100.0,
+        stop_price=95.0,
+        target_price=110.0,
+        card="cash vs margin",
+    )
+    world = _world(net_liquidation=100_000.0, session_status="regular")
+    # Margin covers 11k notional; cash does not.
+    snap = {
+        "account": {
+            "netliquidation": 100_000.0,
+            "dailypnl": 0.0,
+            "TotalCashValue": 5_000.0,
+            "AvailableFunds": 80_000.0,
+        },
+        "positions": [],
+        "open_lots": [],
+        "ibkr_live_quotes": {"AVGO": 100.0},
+    }
+    reasons = collect_would_refuse(ticket, world=world, snap=snap)
+    joined = " ".join(str(r) for r in reasons)
+    assert "size_cash" in joined, reasons
+    assert "80000" not in joined, reasons
+    assert "AvailableFunds" not in joined, reasons
+
+    # Missing TotalCashValue: fail-closed even when AvailableFunds covers.
+    snap["account"].pop("TotalCashValue", None)
+    missing = collect_would_refuse(ticket, world=world, snap=snap)
+    miss_joined = " ".join(str(r) for r in missing)
+    assert "TotalCashValue" in miss_joined, missing
+    assert "AvailableFunds" not in miss_joined, missing
+    assert "size_cash" not in miss_joined, missing

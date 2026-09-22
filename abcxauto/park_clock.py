@@ -1,9 +1,8 @@
-"""Overnight / after-close park clock. Clerk is not a runner.
+"""Overnight closed park clock. Clerk is not a runner.
 
 Book events are facts. Hard interrupts poke the open think.
-Paper RTH and premarket stay up on the same process — no grok_wake.json
-sit clock after a finished look. Overnight / postmarket park until
-premarket.
+Paper RTH, premarket, and postmarket stay up on the same process.
+Overnight park is code. Stay-up has no sit clock.
 """
 
 from __future__ import annotations
@@ -46,9 +45,14 @@ DEFAULT_LOOK_S = 90.0
 DEFAULT_LOOK_OPEN_S = 300.0
 MIN_LOOK_S = 30.0
 NEXT_LOOK_S_MAX = 4 * 3600.0
-# Overnight / after-close only. Premarket stay-up is not a park.
-PARK_SESSIONS = frozenset({"closed", "postmarket"})
-STAY_UP_SESSIONS = frozenset({"regular", "premarket"})
+# RTH only: leftover cash > deployed re-enters after this. Not a general chair.
+# Premarket / AH stay event-driven (RTH roll still starts a look).
+LEFTOVER_RELOOK_S = 90.0
+# After a look that researched a non-book name, leftover waits longer.
+RESEARCHED_LEFTOVER_RELOOK_S = 15 * 60.0
+# Overnight closed only. Premarket / postmarket stay-up is not a park.
+PARK_SESSIONS = frozenset({"closed"})
+STAY_UP_SESSIONS = frozenset({"regular", "premarket", "postmarket"})
 PAPER_STAY_UP_SESSIONS = STAY_UP_SESSIONS
 # 04:00 ET premarket start is 5.5h before the 09:30 bell.
 PREMARKET_MINUTES_TO_OPEN = 5.5 * 60.0
@@ -152,6 +156,7 @@ class GrokAlarm:
     wake_if: list[str] = field(default_factory=list)
     set_at: str = ""
     session: str = ""
+    kind: str = ""
 
     def due(self, now: datetime | None = None) -> bool:
         at = _parse_iso(self.wake_at or "")
@@ -197,6 +202,7 @@ def load_alarm() -> GrokAlarm:
         wake_if=[str(x).strip().lower() for x in ifs if str(x).strip()],
         set_at=str(raw.get("set_at") or ""),
         session=str(raw.get("session") or "").strip().lower(),
+        kind=str(raw.get("kind") or "").strip().lower(),
     )
 
 
@@ -209,6 +215,7 @@ def save_alarm(alarm: GrokAlarm) -> GrokAlarm:
             "wake_if": list(alarm.wake_if),
             "set_at": alarm.set_at or _utc_now().isoformat(),
             "session": str(alarm.session or "").strip().lower(),
+            "kind": str(alarm.kind or "").strip().lower(),
         }
         p.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError:
@@ -227,11 +234,19 @@ def clear_park() -> GrokAlarm:
     return GrokAlarm()
 
 
+def alarm_kind(alarm: GrokAlarm | None) -> str:
+    """``nap`` or ``park``. Leftover files may still say kind=nap."""
+    raw = str(getattr(alarm, "kind", "") or "").strip().lower()
+    if raw == "nap":
+        return "nap"
+    return "park"
+
+
 def _is_park_session(
     session: str = "",
     minutes_to_open: float | None = None,
 ) -> bool:
-    """Overnight / after-close only. Regular and premarket have no sit clock."""
+    """Overnight closed only. Stay-up sessions have no code park."""
     sess = str(session or "").lower()
     if sess in STAY_UP_SESSIONS:
         return False
@@ -254,11 +269,20 @@ def _is_park_session(
     if inferred == "closed":
         return True
     _ = inferred_mins
+    # After today's RTH bell / weekend: minutes_to_rth_open is None, but
+    # the NYSE clock is still closed. Blank snap labels must park too.
+    try:
+        from abcxauto.marketdata.market_hours import session_of
+
+        if session_of() == "closed":
+            return True
+    except Exception:
+        logger.debug("session_of for park check failed", exc_info=True)
     return False
 
 
 def paper_stay_up(session: str = "") -> bool:
-    """Paper RTH and premarket keep looking on this process. Not a sit clock."""
+    """Paper RTH, premarket, and postmarket keep looking on this process."""
     if str(session or "").lower() not in PAPER_STAY_UP_SESSIONS:
         return False
     try:
@@ -274,12 +298,13 @@ def resolve_stay_up_session(
     *,
     now: datetime | None = None,
 ) -> str:
-    """Fill a blank snap label from the ET clock. Closed / postmarket stay parked.
+    """Fill a blank snap label from the ET clock. Empty after-close stays empty.
 
     A junk look must not sit the desk because IBKR omitted session=. Weekday
     RTH becomes regular via ``opportunity_scan.rth_now`` (NYSE clock);
     last-hour-to-open becomes premarket. After the close an empty label
-    stays empty so overnight park can still shut down.
+    stays empty so overnight park can still shut down. Explicit postmarket
+    is stay-up; it is not inferred here.
     """
     sess = str(session or "").strip().lower()
     if sess == "unknown":
@@ -304,7 +329,7 @@ def honor_park(
     session: str = "",
     minutes_to_open: float | None = None,
 ) -> bool:
-    """True only for overnight / after-close. RTH and premarket have no sit clock."""
+    """True only for overnight / closed. Stay-up sessions have no code park."""
     return _is_park_session(session, minutes_to_open)
 
 
@@ -334,9 +359,38 @@ def min_look_s() -> float:
     return _env_float("ABCXAUTO_MIN_LOOK_S", MIN_LOOK_S, lo=5.0)
 
 
-def set_wake_offered(*, session: str = "") -> bool:
-    """Never. Overnight park is code. Stay-up has no sit clock."""
-    _ = session
+def leftover_relook_s() -> float:
+    """Seconds after a sat RTH look before leftover > deployed re-enters.
+
+    Not a park file. Not a general sit clock. Tests may set the env.
+    """
+    raw = (os.environ.get("ABCXAUTO_LEFTOVER_RELOOK_S") or "").strip()
+    if raw:
+        try:
+            return max(0.05, float(raw))
+        except ValueError:
+            pass
+    return LEFTOVER_RELOOK_S
+
+
+def researched_leftover_relook_s() -> float:
+    """Seconds after a researched RTH look before leftover > deployed re-enters.
+
+    Longer than leftover_relook_s so a researched non-book name does not
+    re-fire every 90s. Tests may set the env.
+    """
+    raw = (os.environ.get("ABCXAUTO_RESEARCHED_LEFTOVER_RELOOK_S") or "").strip()
+    if raw:
+        try:
+            return max(0.05, float(raw))
+        except ValueError:
+            pass
+    return RESEARCHED_LEFTOVER_RELOOK_S
+
+
+def set_wake_offered(*, session: str = "", kind: str = "") -> bool:
+    """Stay-up has no sit clock. Overnight park is code."""
+    _ = session, kind
     return False
 
 
@@ -442,6 +496,29 @@ def clamp_next_look_s(raw: Any) -> float | None:
     return max(min_look_s(), min(float(NEXT_LOOK_S_MAX), sec))
 
 
+def _seconds_until_next_premarket(*, now: datetime | None = None) -> float | None:
+    """Seconds until the next 04:00 ET premarket open. None if unknown."""
+    try:
+        from abcxauto.marketdata.market_hours import next_premarket_open
+
+        nxt = next_premarket_open(now)
+    except Exception:
+        logger.debug("next_premarket_open failed", exc_info=True)
+        return None
+    if nxt is None:
+        return None
+    clock = now or _utc_now()
+    if clock.tzinfo is None:
+        clock = clock.replace(tzinfo=timezone.utc)
+    try:
+        sec = (nxt - clock.astimezone(nxt.tzinfo)).total_seconds()
+    except Exception:
+        return None
+    if sec != sec or sec <= 0:
+        return None
+    return float(sec)
+
+
 def clerk_look_s(
     *,
     flat: bool | None = None,
@@ -449,10 +526,12 @@ def clerk_look_s(
     minutes_to_open: float | None = None,
     next_look_s: float | None = None,
 ) -> float:
-    """Overnight / after-close park seconds. Stay-up sessions return 0.
+    """Overnight closed park seconds. Stay-up sessions return 0.
 
     Session-card opening-print wait is a send gate, not this clock.
     Overnight closed parks until premarket (4:00 ET).
+    After today's RTH bell (and on weekends) minutes_to_rth_open is None —
+    still park until next 04:00, not a 90s default that flattens the park.
     """
     _ = next_look_s
     sess = str(session or "").lower()
@@ -470,6 +549,11 @@ def clerk_look_s(
         return max(min_look_s(), (mins - PREMARKET_MINUTES_TO_OPEN) * 60.0)
     if sess in PARK_SESSIONS and mins is not None and mins > 60:
         return max(min_look_s(), (mins - 60.0) * 60.0)
+    # Closed / blank overnight after the bell: until next 04:00 ET.
+    if sess in PARK_SESSIONS or (not sess and _is_park_session(sess, mins)):
+        until = _seconds_until_next_premarket()
+        if until is not None:
+            return max(min_look_s(), until)
     return default_look_s(flat=flat, session=session)
 
 
@@ -481,11 +565,12 @@ def ensure_next_look(
     minutes_to_open: float | None = None,
     replace: bool = False,
 ) -> GrokAlarm:
-    """Overnight / after-close park only. RTH and premarket write no sit clock.
+    """Overnight closed park only. Stay-up never invents a park.
 
-    A finished stay-up look must not leave grok_wake.json — that launcher
-    killed the think and started the next look cold. ``previous_set_at`` is
-    unused. ``replace`` still reseeds a standing overnight park.
+    Premarket / postmarket / regular drop leftover code parks and a
+    leftover nap from a prior process. A nap is not a thing anymore.
+    ``previous_set_at`` is unused. ``replace`` reseeds a standing
+    overnight park.
     """
     _ = previous_set_at
     sess = str(session or "").lower()
@@ -497,7 +582,12 @@ def ensure_next_look(
     if not _is_park_session(sess, mins):
         return clear_park()
     alarm = load_alarm()
-    if alarm.wake_at and not alarm.due() and not replace:
+    if (
+        alarm.wake_at
+        and not alarm.due()
+        and not replace
+        and alarm_kind(alarm) == "park"
+    ):
         return alarm
     return set_wake(
         wake_in_s=clerk_look_s(
@@ -507,6 +597,7 @@ def ensure_next_look(
         ),
         flat=flat,
         session=sess,
+        kind="park",
     )
 
 
@@ -531,9 +622,21 @@ def set_wake(
     wake_if: list[str] | str | None = None,
     flat: bool | None = None,
     session: str = "",
+    kind: str = "park",
 ) -> GrokAlarm:
-    """Overnight / after-close park. Stay-up sessions write no sit clock."""
+    """Overnight closed park. Stay-up has no sit clock.
+
+    kind=park writes only for closed (or blank). Stay-up park kind clears.
+    kind=nap never writes. Stay-up drops leftover nap files. Closed
+    returns the standing alarm so an overnight park is not wiped.
+    """
     sess = str(session or "").lower()
+    k = str(kind or "").strip().lower() or "park"
+    if k == "nap":
+        if sess in STAY_UP_SESSIONS:
+            return clear_park()
+        return load_alarm()
+    k = "park"
     if sess in STAY_UP_SESSIONS:
         return clear_park()
     clean = _clean_wake_if(wake_if)
@@ -558,6 +661,7 @@ def set_wake(
             wake_if=clean,
             set_at=_utc_now().isoformat(),
             session=sess,
+            kind=k,
         )
     )
 
@@ -596,6 +700,57 @@ def _lot_mtm_key(pos: dict[str, Any]) -> str:
     return f"{ident}:{bucket}"
 
 
+# Not a sit clock. R-cross / near-stop is a book fact.
+_R_STEP = 0.5
+
+
+def _lot_r_bucket(r: float) -> str:
+    """hold while −0.5 < R < 0.5; r0.5 / r1 / r1.5…; near_stop at R ≤ −0.5."""
+    if r <= -_R_STEP:
+        return "near_stop"
+    if r < _R_STEP:
+        return "hold"
+    n = int(r / _R_STEP)
+    if n % 2 == 0:
+        return f"r{n // 2}"
+    return f"r{n // 2}.5"
+
+
+def _lot_r_key(pos: dict[str, Any]) -> str:
+    """Manage-bucket key. Not a sit clock — R-cross / near-stop is a book fact."""
+    ident = str(pos.get("conId") or pos.get("con_id") or pos.get("symbol") or "")
+    if not ident:
+        return ""
+    entry = _first_num(pos, "avg", "avgCost", "avg_cost", "averageCost")
+    last = _first_num(pos, "mkt", "last", "market_price", "marketPrice")
+    stop = _first_num(pos, "stop", "stop_price", "aux_price", "auxPrice")
+    if entry is None or last is None or stop is None:
+        return ""
+    if entry <= 0 or last <= 0 or stop <= 0:
+        return ""
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return ""
+    qty = _first_num(pos, "quantity", "position") or 0.0
+    if qty < 0:
+        r_mult = (entry - last) / risk
+    else:
+        r_mult = (last - entry) / risk
+    return f"{ident}:{_lot_r_bucket(r_mult)}"
+
+
+def _lots_for_fingerprint(positions: list[Any], open_orders: list[Any]) -> list[Any]:
+    """Copy lots and join covering last-stop for the fingerprint only."""
+    rows = [p for p in positions if isinstance(p, dict)]
+    try:
+        from abcxauto.world_state import attach_covering_last_stops
+
+        return attach_covering_last_stops(rows, open_orders)
+    except Exception:
+        logger.debug("fingerprint last-stop join failed", exc_info=True)
+        return rows
+
+
 def book_fingerprint(snap: dict[str, Any] | None) -> dict[str, Any]:
     s = snap if isinstance(snap, dict) else {}
     fills = s.get("fills") if isinstance(s.get("fills"), list) else []
@@ -624,20 +779,26 @@ def book_fingerprint(snap: dict[str, Any] | None) -> dict[str, Any]:
         if not isinstance(o, dict):
             continue
         order_keys.append(str(o.get("order_id") or o.get("orderId") or o.get("perm_id") or ""))
+    lots = _lots_for_fingerprint(pos, orders)
     lot_keys = []
     lot_mtm = []
-    for p in pos:
+    lot_r = []
+    for p in lots:
         if not isinstance(p, dict):
             continue
         ident = str(p.get("conId") or p.get("con_id") or p.get("symbol") or "")
         if ident:
             lot_keys.append(ident)
             lot_mtm.append(_lot_mtm_key(p))
+            r_key = _lot_r_key(p)
+            if r_key:
+                lot_r.append(r_key)
     return {
         "fills": tuple(fill_keys),
         "orders": tuple(sorted(x for x in order_keys if x)),
         "lots": tuple(sorted(x for x in lot_keys if x)),
         "lot_mtm": tuple(sorted(x for x in lot_mtm if x)),
+        "lot_r": tuple(sorted(x for x in lot_r if x)),
         "unprotected": tuple(sorted(str(x) for x in unprot if x)),
         "session": sess.lower(),
         "connected": bool(s.get("ibkr_connected") or (s.get("reality_pulse") or {}).get("ibkr_connected")),
@@ -658,9 +819,14 @@ def events_from_diff(
         out.append(BookEvent("fill", "fills changed"))
     if a.get("orders") != b.get("orders"):
         out.append(BookEvent("order_change", "working orders changed"))
-    if a.get("lot_mtm") != b.get("lot_mtm") and (a.get("lot_mtm") or b.get("lot_mtm")):
-        prev_m = set(a.get("lot_mtm") or ())
-        now_m = set(b.get("lot_mtm") or ())
+    mtm_changed = a.get("lot_mtm") != b.get("lot_mtm") and (
+        a.get("lot_mtm") or b.get("lot_mtm")
+    )
+    # Not a sit clock. R-cross / near-stop is a book fact.
+    r_changed = a.get("lot_r") != b.get("lot_r") and (a.get("lot_r") or b.get("lot_r"))
+    if mtm_changed or r_changed:
+        prev_m = set(a.get("lot_mtm") or ()) | set(a.get("lot_r") or ())
+        now_m = set(b.get("lot_mtm") or ()) | set(b.get("lot_r") or ())
         changed = sorted(now_m - prev_m)[:6]
         out.append(BookEvent("book_move", ",".join(changed) or "marks"))
     if a.get("unprotected") != b.get("unprotected") and b.get("unprotected"):

@@ -26,26 +26,16 @@ def _one_line(text: Any, n: int = 240) -> str:
 
 
 def format_cycle_digest(d: dict[str, Any]) -> str:
-    """Human look block: send, why, result, next sleep."""
-    j = d.get("judgment") or {}
-    strat = str(d.get("strat") or d.get("action") or "-")
-    stance = str(d.get("stance") or j.get("stance") or "").strip()
-    thesis = _one_line(d.get("thesis") or j.get("thesis") or "", 220)
-    why = _one_line(
-        d.get("rationale")
-        or d.get("market_read")
-        or j.get("focus")
-        or d.get("validation")
-        or "",
-        280,
-    )
+    """Human look block from live cycle fields: strat, rationale, result, next sleep."""
+    strat = str(d.get("strat") or d.get("action") or "-") or "-"
+    why = _one_line(d.get("rationale") or d.get("validation") or "", 280)
     result = d.get("result") if isinstance(d.get("result"), dict) else {}
     status = _one_line(
         result.get("status") or result.get("note") or d.get("validation") or "",
         160,
     )
-    err = _one_line(d.get("stage_error") or "", 200)
-    if "grok_error" in why or "judge_error" in why or "UNAVAILABLE" in why or "AioRpcError" in why:
+    err = _one_line(d.get("stage_error") or d.get("_stream_error") or "", 200)
+    if "grok_error" in why or "UNAVAILABLE" in why or "AioRpcError" in why:
         why = "grok_error: Grok API connection dropped"
         if not status:
             status = "blocked"
@@ -62,10 +52,7 @@ def format_cycle_digest(d: dict[str, Any]) -> str:
     pace = d.get("pace") if isinstance(d.get("pace"), dict) else {}
     sleep = pace.get("sleep_s")
     tier = pace.get("tier") or pace.get("reason") or ""
-    lead = f"{stance} -> " if stance else ""
-    lines = [f"{lead}{strat}{book}".strip()]
-    if thesis:
-        lines.append(f"  thesis: {thesis}")
+    lines = [f"{strat}{book}".strip()]
     if why:
         lines.append(f"  why: {why}")
     if err:

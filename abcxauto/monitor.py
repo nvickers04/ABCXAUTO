@@ -467,7 +467,10 @@ class PortfolioMonitor:
             return
         prot = snapshot.get("protection") or {}
         unprot = {str(s).upper() for s in (prot.get("unprotected_symbols") or []) if s}
-        if unprot - self._prev_unprotected:
+        # New naked symbols win this tick: a vanished stop also changes
+        # working orders, and a later order_change would overwrite the wake.
+        new_unprotected = bool(unprot - self._prev_unprotected)
+        if new_unprotected:
             self._emit_wake("unprotected")
         self._prev_unprotected = unprot
 
@@ -487,7 +490,11 @@ class PortfolioMonitor:
             self._prev_fill_keys = fill_keys
 
         order_keys = _working_order_ids(snapshot.get("open_orders"))
-        if self._orders_seeded and order_keys != self._prev_order_keys:
+        if (
+            self._orders_seeded
+            and order_keys != self._prev_order_keys
+            and not new_unprotected
+        ):
             self._emit_wake("order_change")
         self._orders_seeded = True
         self._prev_order_keys = order_keys

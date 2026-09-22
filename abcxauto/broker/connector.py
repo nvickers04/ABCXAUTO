@@ -689,13 +689,36 @@ class IBKRQueriesMixin:
         if contract is None:
             return {"error": "qualify failed", "source": "ibkr", "symbol": sym}
         ticker = None
+        # True only if THIS call issued a throwaway snapshot reqMktData.
+        # Persistent quote-owned streams stay in _tickers until disconnect.
+        # Book mirrors are read-only: never cache them in _tickers (lot exit
+        # cancelMktData would leave a dead ticker reused forever).
+        subscribed = False
         try:
-            req = getattr(self.ib, "reqTickersAsync", None)
-            if callable(req):
-                tickers = await req(contract)
-                ticker = tickers[0] if tickers else None
+            streams = getattr(self, "_tickers", None)
+            if not isinstance(streams, dict):
+                streams = {}
+                self._tickers = streams
+            owned = getattr(self, "_quote_mkt_syms", None)
+            if not isinstance(owned, set):
+                owned = set()
+                self._quote_mkt_syms = owned
+            ticker = streams.get(sym)
+            if ticker is not None and sym not in owned:
+                streams.pop(sym, None)
+                ticker = None
+            con_id = int(getattr(contract, "conId", 0) or 0)
+            if ticker is None and con_id and con_id in getattr(self, "_book_subs", {}):
+                # Book already streams this conId — reuse, do not re-req or cache.
+                get_t = getattr(self.ib, "ticker", None)
+                if callable(get_t):
+                    ticker = get_t(contract)
             if ticker is None:
-                ticker = self.ib.reqMktData(contract, "", True, False)
+                # Streaming once (not reqTickersAsync snapshot churn). Keeps the
+                # line so TWS UI + this client do not fight on every quote.
+                ticker = self.ib.reqMktData(contract, "", False, False)
+                streams[sym] = ticker
+                owned.add(sym)
                 await _safe_sleep(0.8)
             out = quote_from_ticker(ticker, symbol=sym)
             if out.get("last") is None and out.get("mid") is None:
@@ -707,10 +730,11 @@ class IBKRQueriesMixin:
             logger.warning("IBKR live quote failed for %s: %s", sym, exc)
             return {"error": str(exc), "source": "ibkr", "symbol": sym}
         finally:
+            # Cancel only a throwaway snapshot this call opened. Never cancel
+            # after a reused stream or book sub (was: cancel after
+            # reqTickersAsync → flood "No reqId found").
             con_id = int(getattr(contract, "conId", 0) or 0)
-            if con_id and con_id in getattr(self, "_book_subs", {}):
-                pass
-            else:
+            if subscribed and not (con_id and con_id in getattr(self, "_book_subs", {})):
                 try:
                     self.ib.cancelMktData(contract)
                 except Exception:
@@ -842,6 +866,31 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         except Exception:
             return False
 
+    def _loop_is_usable(self, loop: Any) -> bool:
+        """True when *loop* exists, is not closed, and is running."""
+        if loop is None:
+            return False
+        try:
+            if loop.is_closed():
+                return False
+            return bool(loop.is_running())
+        except Exception:
+            return False
+
+    def _async_job_in_flight(self, task: Any) -> bool:
+        if task is None:
+            return False
+        done = getattr(task, "done", None)
+        if not callable(done):
+            return True
+        try:
+            return not bool(done())
+        except Exception:
+            return False
+
+    def _book_refresh_in_flight(self) -> bool:
+        return self._async_job_in_flight(getattr(self, "_book_refresh_task", None))
+
     def _ib_usable_on_running_loop(self) -> bool:
         """Live API socket that this event loop is allowed to keep (no new IB())."""
         if not self._api_socket_live():
@@ -942,8 +991,9 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         self.available_funds: float = 0.0  # AvailableFunds (INCLUDES MARGIN — do NOT use for order sizing, use cash_value instead)
         self.day_trades_remaining: int = 3  # PDT tracking - updated on connect
 
-        # Active streaming subscriptions: symbol -> ticker (legacy; no public subscribe API)
+        # Quote-owned streaming subscriptions: symbol -> ticker (reqMktData we opened).
         self._tickers: Dict[str, Any] = {}
+        self._quote_mkt_syms: set[str] = set()
         self._pnl: Any = None
 
         # Background heartbeat task
@@ -1149,6 +1199,10 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             )
             return
 
+        if errorCode in (2104, 2106, 2108, 2158):
+            logger.debug(f"IBKR [{errorCode}] reqId={reqId}: {errorString}")
+            return
+
         if errorCode in self._SUPPRESSED_ERROR_CODES:
             logger.debug(f"IBKR [{errorCode}] reqId={reqId}: {errorString}")
         elif errorCode == 202:  # Order cancelled — check attribution
@@ -1176,14 +1230,41 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         else:
             logger.info(f"IBKR [{errorCode}] reqId={reqId}: {errorString}")
 
+        # Durable journal line for order-scoped IBKR errors (not farm chatter).
+        try:
+            rid = int(reqId or 0)
+        except (TypeError, ValueError):
+            rid = 0
+        if rid > 0 and errorCode not in self._SUPPRESSED_ERROR_CODES:
+            try:
+                from abcxauto.memory.notes import record_broker_order_note
+
+                sym = ""
+                try:
+                    sym = str(getattr(contract, "symbol", None) or "").upper().strip()
+                except Exception:
+                    sym = ""
+                record_broker_order_note(
+                    symbol=sym,
+                    order_id=rid,
+                    error_code=errorCode,
+                    detail=str(errorString or ""),
+                )
+            except Exception:
+                logger.debug("broker order note from error failed", exc_info=True)
+
     def _schedule_book_refresh_after_restore(self) -> None:
-        """Refresh positions/orders/account after 1101/1102; stay stale on failure."""
+        """Refresh positions/orders/account after 1101/1102; stay stale on failure.
+
+        Runs ``_refresh_book_after_data_loss`` on the owning loop only.
+        Never ``create_task`` on a foreign Flet/worker loop.
+        """
         loop = self._resolve_loop()
         if loop is None:
             logger.error("IBKR restore: no event loop to refresh book — stay stale")
             return
         prev = getattr(self, "_book_refresh_task", None)
-        if prev is not None and not getattr(prev, "done", lambda: True)():
+        if self._async_job_in_flight(prev):
             try:
                 prev.cancel()
             except Exception:
@@ -1191,6 +1272,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
 
         async def _run() -> None:
             try:
+                bind_thread_loop(loop)
                 ok = await self._refresh_book_after_data_loss()
                 if ok:
                     self._ibkr_data_stale = False
@@ -1210,14 +1292,48 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         if running is loop:
             self._book_refresh_task = loop.create_task(_run())
             return
+
+        def _spawn() -> None:
+            bind_thread_loop(loop)
+            self._book_refresh_task = loop.create_task(_run())
+
         try:
             self._book_refresh_task = asyncio.run_coroutine_threadsafe(_run(), loop)
         except Exception:
-            logger.exception("IBKR restore: could not schedule book refresh — stay stale")
+            try:
+                loop.call_soon_threadsafe(_spawn)
+            except Exception:
+                logger.exception(
+                    "IBKR restore: could not schedule book refresh — stay stale"
+                )
+
+    def _retry_stale_book_refresh(self) -> None:
+        """Heartbeat retry: schedule refresh if stale, socket live, nothing in flight."""
+        if not getattr(self, "_ibkr_data_stale", False):
+            return
+        if not self._api_socket_live():
+            return
+        bind_thread_loop(self._resolve_loop())
+        if self._book_refresh_in_flight():
+            return
+        self._schedule_book_refresh_after_restore()
 
     async def _refresh_book_after_data_loss(self) -> bool:
         """Mandatory positions + open orders + account pull after data loss."""
         if not (self._connected or self._api_socket_live()):
+            return False
+        owner = self._resolve_loop()
+        bind_thread_loop(owner)
+        if owner is None:
+            logger.error("IBKR book refresh: no owning loop — stay stale")
+            return False
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.exception("IBKR book refresh after data restore failed")
+            return False
+        if running is not owner:
+            logger.error("IBKR book refresh on foreign loop — stay stale")
             return False
         try:
             async with self.async_lock:
@@ -1240,6 +1356,9 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         if symbols:
             self._pending_resubscribe.update(s.upper() for s in symbols)
         self._tickers.clear()
+        owned = getattr(self, "_quote_mkt_syms", None)
+        if isinstance(owned, set):
+            owned.clear()
         drop_rt = getattr(self, "abandon_realtime_bars", None)
         if callable(drop_rt):
             try:
@@ -1269,23 +1388,21 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         self._schedule_reconnect(cause)
 
     def _resolve_loop(self) -> Optional[asyncio.AbstractEventLoop]:
-        """Prefer the loop captured at connect if it is still running.
+        """Owning loop = IB socket loop first, then the loop captured at connect.
 
-        Using whichever loop happens to be running (Flet, a stray caller)
-        schedules reconnect off the lock's loop and raises
-        ``Lock bound to a different event loop``.
+        Do not fall back to ``asyncio.get_running_loop()`` — that would
+        schedule book refresh / reconnect on a foreign Flet or worker loop
+        and raise ``IBKR async_lock is bound to a different event loop``.
+        If no owning loop is running, return None (heartbeat will retry).
         """
+        ib = getattr(self, "ib", None)
+        ib_loop = getattr(ib, "loop", None) if ib is not None else None
+        if self._loop_is_usable(ib_loop):
+            return ib_loop
         captured = getattr(self, "_loop", None)
-        if captured is not None:
-            try:
-                if not captured.is_closed() and captured.is_running():
-                    return captured
-            except Exception:
-                pass
-        try:
-            return asyncio.get_running_loop()
-        except RuntimeError:
-            return None
+        if self._loop_is_usable(captured):
+            return captured
+        return None
 
     def _schedule_reconnect(self, reason: str) -> None:
         """Kick off reconnect on the connector loop without blocking callers."""
@@ -1465,8 +1582,13 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             if await self._refresh_book_after_data_loss():
                 self._ibkr_data_stale = False
                 book_ok = True
+            else:
+                # Fresh process starts False; failure must block new risk until verified.
+                self._ibkr_data_stale = True
+                logger.error("post-reconnect book refresh failed - stay stale")
         except Exception:
             logger.exception("post-reconnect book refresh failed - stay stale")
+            self._ibkr_data_stale = True
             book_ok = False
         self._maybe_resume_disconnect_halt(book_complete=book_ok)
 
@@ -1512,6 +1634,12 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             status = trade.orderStatus.status
             symbol = trade.contract.symbol
             order_type = trade.order.orderType
+            aux = getattr(trade.order, "auxPrice", None)
+            try:
+                if aux is not None and float(aux) > 1e300:
+                    aux = None
+            except (TypeError, ValueError):
+                aux = None
             event = {
                 "order_id": trade.order.orderId,
                 "symbol": symbol,
@@ -1521,12 +1649,26 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 "filled": trade.orderStatus.filled,
                 "remaining": trade.orderStatus.remaining,
                 "avg_fill_price": trade.orderStatus.avgFillPrice,
+                "aux_price": aux,
+                "stop_price": aux,
+                "quantity": getattr(trade.order, "totalQuantity", None),
             }
 
             if status == 'Filled':
                 logger.info(f"[OK] Order FILLED: {order_type} {symbol}")
-            elif status == 'Cancelled':
+            elif status in ('Cancelled', 'ApiCancelled'):
                 logger.info(f"[X] Order CANCELLED: {order_type} {symbol}")
+                try:
+                    from abcxauto.memory.notes import record_broker_order_note
+
+                    record_broker_order_note(
+                        symbol=str(symbol or ""),
+                        order_id=trade.order.orderId,
+                        order_type=str(order_type or ""),
+                        status=str(status or ""),
+                    )
+                except Exception:
+                    logger.debug("broker order note from cancel failed", exc_info=True)
 
             for listener in list(self._order_status_listeners):
                 try:
@@ -1590,20 +1732,29 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         self._connect_block = ""
 
         try:
-            self._loop = asyncio.get_running_loop()
-            bind_thread_loop(self._loop)
+            running = asyncio.get_running_loop()
         except RuntimeError:
-            pass
+            running = None
 
         # 1100 / heartbeat may clear _connected while the API socket is still up.
-        if self._ib_usable_on_running_loop():
+        # Always keep that socket — even when the caller is on a foreign loop
+        # (10197 competing session). Never replace IB() while it is live.
+        if self._api_socket_live():
+            if self._resolve_loop() is None and running is not None:
+                self._loop = running
+            bind_thread_loop(self._resolve_loop() or running)
             return self._adopt_live_socket()
+
+        if running is not None:
+            self._loop = running
+            bind_thread_loop(running)
 
         async with self.async_lock:
             # Double-check after acquiring lock
             if self.connected:
                 return True
-            if self._ib_usable_on_running_loop():
+            if self._api_socket_live():
+                bind_thread_loop(self._resolve_loop() or running)
                 return self._adopt_live_socket()
 
             for attempt in range(max_retries):
@@ -1783,13 +1934,16 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
             # Stop heartbeat
             self._stop_heartbeat()
 
-            # Cancel all streaming subscriptions
+            # Cancel quote-owned streaming subscriptions only
             for ticker in self._tickers.values():
                 try:
                     self.ib.cancelMktData(ticker.contract)
                 except Exception:
                     pass
             self._tickers.clear()
+            owned = getattr(self, "_quote_mkt_syms", None)
+            if isinstance(owned, set):
+                owned.clear()
             self._cancel_account_pnl()
             drop_rt = getattr(self, "abandon_realtime_bars", None)
             if callable(drop_rt):
@@ -2351,9 +2505,33 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
         return max(10.0, slow)
 
     def _start_heartbeat(self):
-        """Start background heartbeat to prevent idle disconnect."""
+        """Start background heartbeat on the owning IB loop."""
         self._stop_heartbeat()
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        loop = self._resolve_loop()
+        bind_thread_loop(loop)
+        if loop is None:
+            logger.error("IBKR heartbeat: no owning loop — not started")
+            return
+
+        def _spawn() -> None:
+            bind_thread_loop(loop)
+            existing = getattr(self, "_heartbeat_task", None)
+            if self._async_job_in_flight(existing):
+                return
+            self._heartbeat_task = loop.create_task(self._heartbeat_loop())
+
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            _spawn()
+        else:
+            try:
+                loop.call_soon_threadsafe(_spawn)
+            except Exception:
+                logger.exception("IBKR heartbeat: could not schedule on owning loop")
+                return
         logger.info(f"Heartbeat started (interval {self._heartbeat_interval_s():.0f}s)")
 
     def _stop_heartbeat(self):
@@ -2366,8 +2544,10 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
     async def _heartbeat_loop(self):
         """Ping TWS on a cadence; reconnect on loss (incl. Gateway restart)."""
         try:
+            bind_thread_loop(self._resolve_loop())
             while True:
                 await _safe_sleep(self._heartbeat_interval_s())
+                bind_thread_loop(self._resolve_loop())
 
                 if not self.connected:
                     if self._api_socket_live():
@@ -2377,6 +2557,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                             "keep socket; no new IB()",
                             self._ibkr_data_stale,
                         )
+                        self._retry_stale_book_refresh()
                         continue
                     self._disconnect_cause = self._disconnect_cause or DisconnectCause.HEARTBEAT_FAILED.value
                     logger.warning(
@@ -2400,6 +2581,7 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                             f"Heartbeat failed ({e}) — API socket still up; "
                             "keep socket; no new IB()"
                         )
+                        self._retry_stale_book_refresh()
                         continue
                     self._connected = False
                     self._disconnect_cause = DisconnectCause.HEARTBEAT_FAILED.value
@@ -2407,6 +2589,9 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                         f"Heartbeat failed ({e}) — failures={self._heartbeat_failures}"
                     )
                     self._schedule_reconnect(DisconnectCause.HEARTBEAT_FAILED.value)
+                    continue
+
+                self._retry_stale_book_refresh()
         except asyncio.CancelledError:
             pass
 

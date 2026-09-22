@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -35,8 +36,6 @@ from abcxauto.order_examples import format_order_examples, ticket_strategy_names
 from abcxauto.think_stream import emit as think_emit
 from abcxauto.tools import run_readonly_tool
 from abcxauto.tool_args import (
-    CANDLE_CAP,
-    CHAIN_CAP,
     OPTION_QUOTE_CAP,
     bind_send_card,
     fallback_quote_symbols,
@@ -105,6 +104,8 @@ class BrainTurn:
     f10_tripped: bool = False
     loop_halted: bool = False
     brief_loop_halted: bool = False
+    # One AH-card debit per completed research look, not per stream_round.
+    brief_billed: bool = False
 
     def look_failed(self) -> bool:
         """True empty / lone '?' only. A real say or send/fill is not junk.
@@ -271,20 +272,6 @@ def _look_text_is_junk(text: str) -> bool:
     return (not raw) or raw == "?"
 
 
-def _look_has_send_or_fill(turn: "BrainTurn") -> bool:
-    """True when this look dispatched a send (filled or working counts)."""
-    if turn.sends:
-        return True
-    return _send_succeeded(turn.last_result)
-
-
-def _look_is_empty_or_question(turn: "BrainTurn") -> bool:
-    """Junk-drop: true empty assistant text or a lone '?', and no send/fill."""
-    if _look_has_send_or_fill(turn):
-        return False
-    return _look_text_is_junk(turn.text)
-
-
 def _send_succeeded(result: dict[str, Any] | None) -> bool:
     """True when send() actually dispatched — not a clerk block/reject."""
     if not isinstance(result, dict):
@@ -296,11 +283,39 @@ def _send_succeeded(result: dict[str, Any] | None) -> bool:
         return False
     if result.get("success") is False:
         return False
+    if str(result.get("reason_code") or "").lower() == "preview_refuse":
+        return False
     return (
         result.get("success") is True
         or result.get("filled") is True
         or status in ("executed", "submitted", "ok", "filled", "success")
     )
+
+
+def _successful_send_count(sends: list | None) -> int:
+    """Count finished broker sends. Preview refuse / blocked do not count."""
+    n = 0
+    for item in sends or []:
+        if not isinstance(item, dict):
+            continue
+        res = item.get("result")
+        if _send_succeeded(res if isinstance(res, dict) else None):
+            n += 1
+    return n
+
+
+def _look_has_send_or_fill(turn: "BrainTurn") -> bool:
+    """True when this look dispatched a send (filled or working counts)."""
+    if _successful_send_count(getattr(turn, "sends", None)):
+        return True
+    return _send_succeeded(turn.last_result)
+
+
+def _look_is_empty_or_question(turn: "BrainTurn") -> bool:
+    """Junk-drop: true empty assistant text or a lone '?', and no send/fill."""
+    if _look_has_send_or_fill(turn):
+        return False
+    return _look_text_is_junk(turn.text)
 
 
 async def _write_last_turn_after_send(
@@ -344,7 +359,7 @@ async def _write_last_turn_after_send(
 
     write_last_turn_after_send(
         strat=strat,
-        sends=len(turn.sends),
+        sends=_successful_send_count(turn.sends),
         positions=positions,
         orders=orders,
         rationale=str(act.get("rationale") or ""),
@@ -579,19 +594,17 @@ _LIVE_BOOK_KEEP = (
     "working_orders",
     "positions",
     "fills",
-    "ibkr_live_quotes",
+    "marks",
+    "allocation",
     "sends_this_turn",
     "ibkr_connected",
     "trading_mode",
     "session",
-    "combo",
     "freshness",
     "tradable_now",
     "countdown",
-    "levers",
     "mode",
     "ibkr",
-    "working_memory",
 )
 
 
@@ -659,13 +672,6 @@ def _keep_live_book(data: dict[str, Any]) -> dict[str, Any]:
     for key in _LIVE_BOOK_KEEP:
         if key in data:
             out[key] = data[key]
-    look = data.get("last_look")
-    if isinstance(look, dict) and look.get("_clipped"):
-        out["last_look"] = {
-            k: look[k]
-            for k in ("fresh", "send_calls", "tools", "_clipped", "_dropped")
-            if k in look
-        }
     return out
 
 
@@ -1087,20 +1093,30 @@ async def stream_round(
         model_id = str(getattr(get_config(), "model", "") or "")
         if inn <= 0 and out <= 0 and cached <= 0:
             logger.info("model usage journal skip: zero tokens (row would be dropped)")
-        get_journal().record_model_usage(
-            stage=stage,
-            model=model_id,
-            input_tokens=inn,
-            output_tokens=out,
-            cached_tokens=cached,
-            cost_usd=estimate_cost_usd(inn, out, cached_tokens=cached),
-        )
-        try:
-            from abcxauto.look_meter import note_model_call
+        cost = estimate_cost_usd(inn, out, cached_tokens=cached)
 
-            note_model_call(used, model=model_id)
-        except Exception:
-            logger.exception("look_meter note_model_call failed")
+        def _write_usage() -> None:
+            get_journal().record_model_usage(
+                stage=stage,
+                model=model_id,
+                input_tokens=inn,
+                output_tokens=out,
+                cached_tokens=cached,
+                cost_usd=cost,
+            )
+            try:
+                from abcxauto.look_meter import note_model_call
+
+                note_model_call(used, model=model_id)
+            except Exception:
+                logger.exception("look_meter note_model_call failed")
+
+        # Journal lock must not freeze the look. The UI reads the same db.
+        writer = threading.Thread(target=_write_usage, name="usage-journal", daemon=True)
+        writer.start()
+        writer.join(2.0)
+        if writer.is_alive():
+            logger.warning("usage journal still running — look continues")
     except Exception:
         logger.exception("model usage journal failed")
     return o, last_resp, reason
@@ -1452,7 +1468,9 @@ async def _inject_live_poke(
         turn.tool_cache.clear()
         # Do not begin_look. A book poke means positions/orders moved. It
         # does not make a two-second-old IBKR option print invented.
-    think_emit("tool", f"\n[{ev.kind}]\n")
+    from abcxauto.desktop.stream import format_stream_poke
+
+    think_emit("tool", f"\n{format_stream_poke(ev.kind, ev.detail)}\n")
     # Refresh book facts when we can — thin poke, not a second wake dump.
     day: dict[str, Any] | None = None
     try:
@@ -1511,15 +1529,106 @@ async def _inject_live_poke(
     return True
 
 
+_BLOTTER_DAY_KEYS = (
+    "nl",
+    "ibkr_daily_pnl",
+    "daily_pnl",
+    "daily_pnl_pct",
+    "open_upnl",
+    "open_upnl_pct_of_nl",
+    "names",
+    "lots",
+    "structures",
+    "by_name",
+    "open_lots",
+    "mix",
+    "capacity",
+    "max_risk_per_trade_pct",
+    "lot_lasts",
+    "working_exits",
+    "halt_trips_at_usd",
+    "halt_trips_at_pct_of_nl",
+    "ibkr_day_vs_halt",
+    "ibkr_day_vs_halt_pct_of_nl",
+    "clerk_halted",
+    "sizing_floors",
+    "portfolio_risk",
+    "exposure",
+    "capital_liquidity",
+    "minutes_to_open",
+    "countdown_to",
+    "countdown_human",
+    "tradable_now",
+    "defined_risk_concentration",
+    "stop_dist",
+    "working_order_missing",
+    "session_cap",
+)
+
+
+def _open_book_names(world: WorldState) -> list[str]:
+    """Symbols on the live blotter — lots and working orders, not a scan tape."""
+    out: list[str] = []
+    for row in list(getattr(world, "positions", None) or []) + list(
+        getattr(world, "open_orders", None) or []
+    ):
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("symbol") or "").upper().strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def _open_book_marks(world: WorldState) -> dict[str, float]:
+    """IBKR lasts for open-book names only. Scan leftovers stay off the blotter."""
+    qmap = dict(getattr(world, "ibkr_live_quotes", None) or {})
+    marks: dict[str, float] = {}
+    for name in _open_book_names(world):
+        raw = qmap.get(name)
+        try:
+            px = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if px > 0:
+            marks[name] = px
+    return marks
+
+
+_BLOTTER_KEEP_NONE = frozenset(
+    {"nl", "daily_pnl", "ibkr_daily_pnl", "open_upnl", "daily_pnl_pct"}
+)
+
+
+def _blotter_day(day: dict[str, Any] | None) -> dict[str, Any]:
+    """Day facts that are the book. Score windows and playbooks stay off."""
+    src = day if isinstance(day, dict) else {}
+    out: dict[str, Any] = {}
+    for key in _BLOTTER_DAY_KEYS:
+        if key not in src:
+            continue
+        val = src[key]
+        if val in ("", {}, []):
+            continue
+        if val is None and key not in _BLOTTER_KEEP_NONE:
+            continue
+        out[key] = val
+    return out
+
+
 def _book_facts(world: WorldState) -> dict[str, Any]:
     from abcxauto.world_state import (
-        COMBO_FACT,
         compact_position,
         compact_working_orders,
         open_upnl_of,
     )
 
-    return {
+    unreliable = bool((world.gates or {}).get("book_unreliable")) or bool(
+        getattr(world, "book_unreliable", False)
+    )
+    facts: dict[str, Any] = {
+        "source": "ibkr",
+        "freshness": "live",
         "session": world.session_status,
         "flat": world.flat,
         "needs_protection": world.needs_protection,
@@ -1527,13 +1636,7 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
         "net_liquidation": world.net_liquidation,
         "daily_pnl": world.daily_pnl,
         "open_upnl": open_upnl_of(world.positions),
-        "posture": world.effective_posture or world.risk_posture,
-        "gates": world.gates,
-        "envelope": world.envelope,
-        "capacity": dict(world.capacity or {}),
         "quote_source": "IBKR live",
-        "ibkr_live_quotes": dict(world.ibkr_live_quotes or {}),
-        "combo": COMBO_FACT,
         "book_reconciled": bool(getattr(world, "book_reconciled", False)),
         "positions": [
             compact_position(p) for p in (world.positions or [])[:16]
@@ -1552,26 +1655,19 @@ def _book_facts(world: WorldState) -> dict[str, Any]:
             for f in (getattr(world, "fills", None) or [])[:8]
             if isinstance(f, dict)
         ],
-        "stop_qty_fact": world.stop_qty_fact,
-        "scan_tape": [
-            {
-                "symbol": o.get("symbol"),
-                "source": o.get("source") or "mda",
-                "freshness": o.get("freshness") or "delayed",
-                "mda_last": o.get("mda_last") or o.get("last"),
-            }
-            for o in (world.opportunities or [])[:12]
-        ],
-        "option_facts": list(world.option_facts or [])[:16],
-        "vol": list(getattr(world, "vol_facts", None) or [])[:6],
-        "news": [
-            f"[{n.get('symbol')}] {n.get('headline')}"
-            for n in (world.news_items or [])[:8]
-            if n.get("headline")
-        ],
-        "trade_plan": world.trade_plan,
-        "book_unreliable": bool((world.gates or {}).get("book_unreliable")),
     }
+    cap = dict(world.capacity or {})
+    if cap:
+        facts["capacity"] = cap
+    marks = _open_book_marks(world)
+    if marks:
+        facts["marks"] = marks
+    sq = getattr(world, "stop_qty_fact", None)
+    if isinstance(sq, dict) and sq:
+        facts["stop_qty_fact"] = sq
+    if unreliable:
+        facts["book_unreliable"] = True
+    return facts
 
 
 def _mark_incomplete_book(
@@ -1625,11 +1721,9 @@ def _book_payload(
     tool_trace: list[str] | None = None,
     snap: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from abcxauto.config import get_config
-    from abcxauto.self_tune import levers_snapshot
+    """Live blotter. Tape, notes, levers, and last look stay tools."""
     from abcxauto.world_state import day_facts
 
-    cfg = get_config()
     try:
         from abcxauto.scorecard import compute_scorecard
 
@@ -1637,58 +1731,49 @@ def _book_payload(
     except Exception:
         sc = {}
     facts = _book_facts(world)
-    last_look: dict[str, Any] = {}
-    try:
-        from abcxauto.think_stream import last_look_facts
-
-        last_look = last_look_facts()
-    except Exception:
-        last_look = {}
-    day = day_facts(world, sc)
-    if isinstance(day, dict):
-        day = dict(day)
-        for alias in (
-            "daily_pnl_pct_of_nl",
-            "ibkr_daily_pnl_pct_of_nl",
-            "risk_per_trade_pct",
-        ):
-            day.pop(alias, None)
-        if not day.get("playbook"):
-            day.pop("playbook", None)
-    windows = (sc or {}).get("windows") or {}
-    useful_windows = {
-        name: row
-        for name, row in dict(windows).items()
-        if isinstance(row, dict) and row.get("snaps")
-    }
-    score_windows: dict[str, Any] = {}
-    fastest = (sc or {}).get("fastest_beating")
-    best = (sc or {}).get("best_pace")
-    if fastest is not None:
-        score_windows["fastest_beating"] = fastest
-    if best is not None:
-        score_windows["best_pace"] = best
-    if useful_windows:
-        score_windows["windows"] = useful_windows
+    day = _blotter_day(day_facts(world, sc))
     out: dict[str, Any] = {
         "day": day,
         "world": facts,
-        "ibkr_live_quotes": dict(world.ibkr_live_quotes or {}),
-        "levers": levers_snapshot(cfg),
-        "path": _path_block(world, cfg),
     }
-    if score_windows:
-        out["score_windows"] = score_windows
-    if last_look:
-        out["last_look"] = last_look
     try:
-        from abcxauto.working_memory import working_memory_lines
+        cash = None
+        cap = day.get("capital_liquidity") if isinstance(day.get("capital_liquidity"), dict) else {}
+        if isinstance(cap, dict) and cap.get("total_cash") is not None:
+            cash = cap.get("total_cash")
+        if cash is None:
+            port = getattr(world, "portfolio_risk", None) or {}
+            inner = port.get("capital_liquidity") if isinstance(port, dict) else {}
+            if isinstance(inner, dict) and inner.get("total_cash") is not None:
+                cash = inner.get("total_cash")
+        from abcxauto.world_state import allocation_facts, allocation_line
 
-        lines = working_memory_lines()
+        alloc = allocation_facts(
+            list(getattr(world, "positions", None) or []),
+            net_liq=getattr(world, "net_liquidation", None),
+            total_cash=cash,
+            quotes=getattr(world, "ibkr_live_quotes", None),
+            orders=list(getattr(world, "open_orders", None) or []),
+        )
+        if alloc.get("lots") or alloc.get("cash_pct_nl") is not None:
+            out["allocation"] = alloc
+            line = allocation_line(alloc)
+            if line:
+                out["allocation_line"] = line
+        from abcxauto.world_state import range_compare_line, to_high_line
+
+        bag = snap if isinstance(snap, dict) else {}
+        range_line = range_compare_line(bag.get("session_range"))
+        if range_line:
+            out["range_line"] = range_line
+        high_line = to_high_line(bag.get("session_range"))
+        if high_line:
+            out["to_high_line"] = high_line
     except Exception:
-        lines = []
-    if lines:
-        out["working_memory"] = lines
+        logger.debug("book allocation facts failed", exc_info=True)
+    marks = facts.get("marks")
+    if isinstance(marks, dict) and marks:
+        out["marks"] = marks
     _mark_incomplete_book(out, world, snap)
     _ = tool_trace
     return out
@@ -1729,7 +1814,12 @@ def _bill_research_brief_round(
     snap: dict[str, Any] | None,
     tool_calls: int = 0,
 ) -> bool:
-    """Count one billed research model turn. True when the card is now halted."""
+    """Count one billed research look. True when the card is now halted.
+
+    Research-session only — RTH looks are not billed on the AH card.
+    """
+    if getattr(turn, "brief_billed", False):
+        return bool(getattr(turn, "brief_loop_halted", False))
     if not _should_bill_research_round(turn, tool_calls=tool_calls):
         return False
     try:
@@ -1740,6 +1830,7 @@ def _bill_research_brief_round(
             return False
         card, window = resolve_research_card(snap=snap)
         out = note_brief_turn(card, window, tool_calls=tool_calls)
+        turn.brief_billed = True
         if out.get("brief_loop_halted"):
             turn.brief_loop_halted = True
             turn.loop_halted = True
@@ -1855,13 +1946,13 @@ def _parse_tool_call(
         args,
         fallback_symbols=fallback_quote_symbols(world, snap),
     )
+    from abcxauto.brain_tools import CANDLE_WAIT_S, CHAIN_WAIT_S, SCAN_S
+
     timeout = SEND_S if name in _MUTATING_TOOLS else TOOL_S
     if name == "option_chain":
-        n = max(1, len(normalize_tickers(args.get("symbols") or args.get("symbol"), cap=CHAIN_CAP)))
-        timeout = min(90.0, max(CHAIN_S, 22.0 * n))
+        timeout = CHAIN_WAIT_S
     if name == "candles":
-        n = max(1, len(normalize_tickers(args.get("symbols") or args.get("symbol"), cap=CANDLE_CAP)))
-        timeout = min(CANDLE_S, max(28.0, 12.0 + 8.0 * n))
+        timeout = CANDLE_WAIT_S
     if name == "scan":
         timeout = SCAN_S
     return name, args, tc, timeout
@@ -1877,6 +1968,7 @@ async def _invoke_named_tool(
     snap: dict[str, Any],
     turn: BrainTurn,
 ) -> str:
+    logger.info("tool start %s", name)
     think_emit("tool", f"\n[{name}]\n")
     turn.tool_trace.append(name)
     try:
@@ -1891,14 +1983,13 @@ async def _invoke_named_tool(
         # A read is worth cancelling — the book moved, so the answer is stale
         # before it lands. A send is not: cancelling it mid-flight can leave an
         # entry on the book with no protection attached. The poke waits.
+        # Do not await the cancelled task. A quote/news call that ignores
+        # cancel used to sit here forever after the timeout, with the
+        # window stuck on the name chips.
         droppable = name not in _MUTATING_TOOLS
         while True:
             if droppable and peek_interrupt() is not None:
                 tool_task.cancel()
-                try:
-                    await tool_task
-                except (asyncio.CancelledError, Exception):
-                    pass
                 _record_tool_deferred(
                     name, "book event cancelled the read in flight", args=args
                 )
@@ -1910,10 +2001,6 @@ async def _invoke_named_tool(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 tool_task.cancel()
-                try:
-                    await tool_task
-                except (asyncio.CancelledError, Exception):
-                    pass
                 raise asyncio.TimeoutError()
             done, _ = await asyncio.wait({tool_task}, timeout=min(0.25, remaining))
             if tool_task in done:
@@ -1924,7 +2011,6 @@ async def _invoke_named_tool(
                 try:
                     from abcxauto.desk_mode import (
                         RESEARCH_TOOLS,
-                        is_research_session,
                         note_research_tool,
                         write_research_brief,
                     )
@@ -1932,10 +2018,9 @@ async def _invoke_named_tool(
                     if name in RESEARCH_TOOLS:
                         note_research_tool(snap, name, result, args=args)
                         sess = str(getattr(world, "session_status", "") or "")
-                        if is_research_session(sess):
-                            write_research_brief(
-                                session=sess, snap=snap, turn=turn, world=world
-                            )
+                        write_research_brief(
+                            session=sess, snap=snap, turn=turn, world=world
+                        )
                 except Exception:
                     logger.debug("research fact note failed", exc_info=True)
                 return result
@@ -1980,11 +2065,161 @@ def _emit_paid_look(tc: Any, result: str) -> None:
         think_emit("tool", paid if paid.endswith("\n") else f"{paid}\n")
 
 
+# Stay-up re-bills every prior tool blob on each later call. Keep the last
+# N full; rewrite older ROLE_TOOL content in place on the SDK messages list.
+KEEP_TOOL_RESULTS = 6
+_OMITTED_TOOL_RESULT = "[earlier tool result omitted]"
+# Same chat: old assistant says + reasoning also re-bill. Keep a small tail;
+# stub older ROLE_ASSISTANT bodies in place (tool_calls stay).
+KEEP_ASSISTANT_TURNS = 4
+_OMITTED_ASSISTANT = "[earlier assistant turn omitted]"
+_OMITTED_REASONING = "[earlier reasoning omitted]"
+
+
+def _is_tool_result_message(msg: Any) -> bool:
+    """True for a client tool-result row (ROLE_TOOL), not an assistant tool_call."""
+    role = getattr(msg, "role", None)
+    if role is None:
+        return False
+    name = str(getattr(role, "name", "") or "").upper()
+    if name in ("ROLE_TOOL", "TOOL"):
+        return True
+    try:
+        return role == tool_result("").role
+    except Exception:
+        return False
+
+
+def _is_assistant_message(msg: Any) -> bool:
+    """True for ROLE_ASSISTANT rows (says / reasoning / tool_calls)."""
+    role = getattr(msg, "role", None)
+    if role is None:
+        return False
+    name = str(getattr(role, "name", "") or "").upper()
+    if name in ("ROLE_ASSISTANT", "ASSISTANT"):
+        return True
+    try:
+        from xai_sdk.chat import assistant as _assistant
+
+        return role == _assistant("").role
+    except Exception:
+        return False
+
+
+def _set_tool_result_text(msg: Any, stub: str) -> bool:
+    """Rewrite one tool-result message's content in place. True when changed."""
+    content = getattr(msg, "content", None)
+    if content is None:
+        return False
+    try:
+        if len(content) >= 1 and hasattr(content[0], "text"):
+            if str(content[0].text or "") == stub and len(content) == 1:
+                return False
+            content[0].text = stub
+            while len(content) > 1:
+                del content[-1]
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _set_assistant_turn_bodies(msg: Any) -> bool:
+    """Stub say + reasoning on one assistant row. Keeps tool_calls. True when changed."""
+    changed = False
+    content = getattr(msg, "content", None)
+    if content is not None:
+        try:
+            if len(content) >= 1 and hasattr(content[0], "text"):
+                cur = str(content[0].text or "")
+                if cur and (
+                    cur != _OMITTED_ASSISTANT or len(content) > 1
+                ):
+                    content[0].text = _OMITTED_ASSISTANT
+                    while len(content) > 1:
+                        del content[-1]
+                    changed = True
+        except Exception:
+            pass
+    try:
+        rc = str(getattr(msg, "reasoning_content", None) or "")
+        if rc and rc != _OMITTED_REASONING:
+            msg.reasoning_content = _OMITTED_REASONING
+            changed = True
+    except Exception:
+        pass
+    try:
+        ec = getattr(msg, "encrypted_content", None)
+        if ec:
+            msg.encrypted_content = ""
+            changed = True
+    except Exception:
+        pass
+    return changed
+
+
+def _omit_older_tool_results(
+    chat: Any, *, keep: int = KEEP_TOOL_RESULTS
+) -> None:
+    """Stub tool-result contents older than the most recent ``keep``.
+
+    Uses the xAI chat ``messages`` list (mutable protobuf). Does not start a
+    second chat, does not drop system / wake, does not touch streaming.
+    """
+    msgs = getattr(chat, "messages", None)
+    if msgs is None:
+        return
+    try:
+        tool_idxs = [i for i, msg in enumerate(msgs) if _is_tool_result_message(msg)]
+    except Exception:
+        logger.debug("omit older tool results: messages not iterable", exc_info=True)
+        return
+    if len(tool_idxs) <= keep:
+        return
+    for i in tool_idxs[:-keep] if keep > 0 else tool_idxs:
+        try:
+            _set_tool_result_text(msgs[i], _OMITTED_TOOL_RESULT)
+        except Exception:
+            logger.debug("omit older tool results: row not editable", exc_info=True)
+            return
+
+
+def _omit_older_assistant_turns(
+    chat: Any, *, keep: int = KEEP_ASSISTANT_TURNS
+) -> None:
+    """Stub assistant say/reasoning older than the most recent ``keep``.
+
+    Same ``chat.messages`` in-place edit as tool-result omit. Does not drop
+    the latest say, system / wake, or tool_calls. Latest tool results are
+    owned by ``_omit_older_tool_results``.
+    """
+    msgs = getattr(chat, "messages", None)
+    if msgs is None:
+        return
+    try:
+        asst_idxs = [i for i, msg in enumerate(msgs) if _is_assistant_message(msg)]
+    except Exception:
+        logger.debug("omit older assistant turns: messages not iterable", exc_info=True)
+        return
+    if len(asst_idxs) <= keep:
+        return
+    for i in asst_idxs[:-keep] if keep > 0 else asst_idxs:
+        try:
+            _set_assistant_turn_bodies(msgs[i])
+        except Exception:
+            logger.debug("omit older assistant turns: row not editable", exc_info=True)
+            return
+
+
 def _append_tool_result(chat: Any, tc: Any, result: str) -> None:
     try:
         chat.append(tool_result(result, tool_call_id=getattr(tc, "id", None)))
     except TypeError:
         chat.append(tool_result(result))
+    # SDK chat.messages is a mutable protobuf list — stub older ROLE_TOOL
+    # contents in place. If that list were not editable we would leave a
+    # note here and skip (no second chat; streaming stays intact).
+    _omit_older_tool_results(chat)
     _emit_paid_look(tc, result)
     try:
         from abcxauto.look_meter import note_tool_result
@@ -2108,9 +2343,24 @@ async def _dispatch_tool_calls(
     """
     from abcxauto.park_clock import peek_interrupt
 
-    parsed = [_parse_tool_call(tc, world=world, snap=snap) for tc in calls]
+    parsed = []
+    for tc in calls:
+        try:
+            parsed.append(_parse_tool_call(tc, world=world, snap=snap))
+        except Exception:
+            logger.exception("tool parse failed")
+            fn = getattr(tc, "function", None)
+            raw = getattr(fn, "arguments", None) or "{}"
+            try:
+                kept = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+            except (TypeError, json.JSONDecodeError, ValueError):
+                kept = {}
+            if not isinstance(kept, dict):
+                kept = {}
+            parsed.append((str(getattr(fn, "name", None) or "?"), kept, tc, TOOL_S))
     reads = [p for p in parsed if p[0] not in _MUTATING_TOOLS]
     writes = [p for p in parsed if p[0] in _MUTATING_TOOLS]
+    logger.info("dispatch %s", ",".join(p[0] for p in parsed))
 
     async def _one(item: tuple[str, dict[str, Any], Any, float]) -> tuple[Any, str]:
         name, args, tc, timeout = item
@@ -2374,6 +2624,12 @@ async def _grok_turn_impl(
                 g._chat_had_work = True
             except Exception:
                 logger.debug("chat work stamp failed", exc_info=True)
+        work_resume = bool(getattr(g, "_work_resume", False))
+        if work_resume:
+            try:
+                g._work_resume = False
+            except Exception:
+                logger.debug("work resume clear failed", exc_info=True)
         if resume and not appended:
             from abcxauto.park_clock import peek_interrupt
 
@@ -2391,6 +2647,20 @@ async def _grok_turn_impl(
                     g._chat_had_work = True
                 except Exception:
                     logger.debug("chat work stamp failed", exc_info=True)
+            elif work_resume:
+                # Work-streak resume: lot still on, prior look had no tools.
+                # Same lead — still call the model on the kept chat (cap 2).
+                # The chat already ends on the say. A new turn is required
+                # or the next sample has nothing to answer.
+                logger.info("work resume, same lead, calling the model")
+                try:
+                    chat.append(
+                        developer(
+                            "Same lead. No tool this look. Call book, quote, or scan."
+                        )
+                    )
+                except Exception:
+                    logger.debug("work resume append failed", exc_info=True)
             else:
                 # Duplicate lead-fact identity. Do not start a fresh go-do-desk.
                 turn.ended = True
@@ -2506,7 +2776,19 @@ async def _grok_turn_impl(
                 chat.append(response)
             except Exception:
                 logger.debug("chat.append(response) failed", exc_info=True)
+            else:
+                # Stay-up: stub old assistant/reasoning bodies in place.
+                _omit_older_assistant_turns(chat)
         calls = list(getattr(response, "tool_calls", None) or []) if response is not None else []
+        # Paint the names before any tool work. A hang inside dispatch
+        # used to leave the window on the say.
+        called = []
+        for tc in calls:
+            fn = getattr(tc, "function", None)
+            called.append(str(getattr(fn, "name", None) or "?"))
+        if called:
+            think_emit("tool", "\n" + " ".join(f"[{n}]" for n in called) + "\n")
+        logger.info("grok round back tools=%s %s", len(calls), ",".join(called))
         if not calls:
             # Empty GROK after any completed tool is hung, not a checkpoint
             # and not a completed look. #147 keyed this on
@@ -2541,16 +2823,11 @@ async def _grok_turn_impl(
             # Words (or empty) and no tools: stop calling the model. Chat
             # stays. Next call is fill / order_change / unprotected / poke
             # with this chat plus a fresh snap. Do not call again because it spoke.
-            if not empty_after_work and _bill_research_brief_round(
-                turn, session=session, snap=snap
-            ):
-                ran_out = False
-                break
+            # AH-card billing is one debit at the end of this grok_turn.
             ran_out = False
             break
         turn.trailing_empty_grok = False
         turn.trailing_think_only = False
-        tools_before = len(turn.tool_trace)
         interrupted = await _dispatch_tool_calls(
             calls,
             chat=chat,
@@ -2559,14 +2836,6 @@ async def _grok_turn_impl(
             snap=snap,
             turn=turn,
         )
-        if _bill_research_brief_round(
-            turn,
-            session=session,
-            snap=snap,
-            tool_calls=max(0, len(turn.tool_trace) - tools_before),
-        ):
-            ran_out = False
-            break
         if turn.tool_trace or turn.sends or turn.poked:
             try:
                 g._chat_had_work = True
@@ -2594,13 +2863,18 @@ async def _grok_turn_impl(
         # Idle in this chat. Do not stamp failed — that cold-restarts.
         logger.warning("look idle: empty or junk assistant text")
     _bill_spoken_look_if_unbilled(turn, before_calls=billed_before)
+    _bill_research_brief_round(
+        turn,
+        session=session,
+        snap=snap,
+        tool_calls=len(turn.tool_trace),
+    )
     try:
-        from abcxauto.desk_mode import is_research_session, write_research_brief
+        from abcxauto.desk_mode import write_research_brief
 
-        if is_research_session(session):
-            write_research_brief(
-                session=session, snap=snap, turn=turn, world=world
-            )
+        write_research_brief(
+            session=session, snap=snap, turn=turn, world=world
+        )
     except Exception:
         logger.debug("research brief write failed", exc_info=True)
     _stash_look_tool_bag(getattr(g, "chat", None), snap)

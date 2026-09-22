@@ -61,18 +61,69 @@ def test_book_facts_have_no_controls_lecture(monkeypatch):
     from tests.conftest import assert_no_cycle_keys
 
     assert_no_cycle_keys(blob.get("world") if isinstance(blob.get("world"), dict) else {})
-    prompt = "\n".join(str(blob.get(k) or "") for k in ("world", "levers", "playbook"))
+    prompt = "\n".join(str(blob.get(k) or "") for k in ("world", "day"))
     assert "controls" not in blob
     assert "CONTROLS" not in prompt
     assert "mandate_summary" not in str(blob)
     assert "MANDATE" not in prompt
-    assert "SCAN TAPE" in prompt or "scan_tape" in prompt.lower()
+    assert "scan_tape" not in prompt.lower()
+    assert "SCAN TAPE" not in prompt
     assert "prefer manage" not in prompt.lower()
     assert "prefer acting" not in prompt.lower()
     assert "floor" not in blob
     assert "operator_card" not in blob
-    assert "QUOTE SOURCES" in prompt or "IBKR" in prompt
+    assert "levers" not in blob
+    assert "last_look" not in blob
+    assert "IBKR" in prompt
     assert "idle_streak" not in prompt
+
+
+def test_book_payload_keeps_zero_cash():
+    """TotalCashValue 0 is leftover $0, not NL minus deployed."""
+    from abcxauto.brain import _book_payload
+    from abcxauto.world_state import WorldState
+
+    world = WorldState(
+        cycle=1,
+        session_status="regular",
+        flat=False,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=10000.0,
+        daily_pnl=0.0,
+        positions=[
+            {
+                "symbol": "AVGO",
+                "sec_type": "STK",
+                "quantity": 10,
+                "market_price": 300.0,
+                "avg_cost": 300.0,
+            }
+        ],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="aggressive",
+        effective_posture="aggressive",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={
+            "capital_liquidity": {
+                "total_cash": 0.0,
+                "cash_pct_nl": 0.0,
+                "deployed_long_pct_nl": 30.0,
+            }
+        },
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    blob = _book_payload(world)
+    line = str(blob.get("allocation_line") or "")
+    assert "leftover $0" in line
+    assert "cash=0" in line
+    assert "cash=70" not in line
 
 
 def test_day_facts_surface_portfolio_risk():
@@ -154,5 +205,79 @@ def test_format_wake_includes_portfolio_pct_nl():
     assert "cash=80.0% NL" in text
     assert "deployed=20.0% NL" in text
     assert "top QQQ=20.0% NL" in text
+
+
+def _day_world(**kwargs):
+    from abcxauto.world_state import WorldState
+
+    fields = dict(
+        cycle=1,
+        session_status="regular",
+        flat=False,
+        needs_protection=False,
+        unprotected=[],
+        net_liquidation=37000.0,
+        daily_pnl=0.0,
+        positions=[],
+        open_orders=[],
+        opportunities=[],
+        news_items=[],
+        risk_posture="balanced",
+        effective_posture="balanced",
+        gates={},
+        envelope={},
+        regime={},
+        portfolio_risk={},
+        working_thesis="",
+        recent_decisions=[],
+        trade_plan=None,
+    )
+    fields.update(kwargs)
+    return WorldState(**fields)
+
+
+def test_day_facts_rebuilds_capital_liquidity_when_bag_missing():
+    """Positions + NL + real cash still stamp cash_pct / deployed when the risk bag is empty."""
+    from abcxauto.world_state import day_facts
+
+    world = _day_world(
+        positions=[
+            {
+                "symbol": "QQQ",
+                "quantity": 10,
+                "marketValue": 5000,
+                "secType": "STK",
+            }
+        ],
+        portfolio_risk={},
+        book={"capital_liquidity": {"total_cash": 32000.0}},
+    )
+    day = day_facts(world, {})
+    cap = day["capital_liquidity"]
+    assert cap["cash_pct_nl"] == 86.49
+    assert cap["deployed_long_pct_nl"] == 13.51
+    assert cap["total_cash"] == 32000.0
+
+
+def test_day_facts_does_not_invent_cash_pct_when_cash_missing():
+    from abcxauto.world_state import day_facts
+
+    world = _day_world(
+        positions=[
+            {
+                "symbol": "QQQ",
+                "quantity": 10,
+                "marketValue": 5000,
+                "secType": "STK",
+            }
+        ],
+        portfolio_risk={},
+        book={},
+    )
+    day = day_facts(world, {})
+    cap = day.get("capital_liquidity") or {}
+    assert cap.get("cash_pct_nl") is None
+    assert cap.get("total_cash") is None
+    assert cap.get("deployed_long_pct_nl") == 13.51
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from datetime import datetime
 from threading import Lock
@@ -77,6 +78,202 @@ async def test_get_live_quote_errors_when_stale():
     assert out["ibkr_data_stale"] is True
 
 
+def _quote_bag(**kwargs):
+    """Minimal host for IBKRQueriesMixin.get_live_quote tests."""
+    base = {
+        "_QUOTE_CACHE_S": 2.5,
+        "_ibkr_data_stale": False,
+        "_quote_cache": {},
+        "_tickers": {},
+        "_quote_mkt_syms": set(),
+        "_book_subs": {},
+    }
+    base.update(kwargs)
+    bag = SimpleNamespace(**base)
+    bag._live_quote_cached = lambda sym: IBKRQueriesMixin._live_quote_cached(bag, sym)
+    bag._live_quote_remember = lambda sym, payload: IBKRQueriesMixin._live_quote_remember(
+        bag, sym, payload
+    )
+    return bag
+
+
+@pytest.mark.asyncio
+async def test_get_live_quote_subscribes_once_no_cancel_churn(monkeypatch):
+    """Streaming quote: one reqMktData, no cancelMktData, reuse on next call."""
+    from abcxauto.broker import connector as connector_mod
+
+    contract = SimpleNamespace(symbol="AVGO", conId=12345)
+    ticker = SimpleNamespace(
+        contract=contract, last=180.5, bid=180.4, ask=180.6, time=None
+    )
+    ib = MagicMock()
+    ib.reqTickersAsync = AsyncMock(return_value=[ticker])
+    ib.reqMktData = MagicMock(return_value=ticker)
+    ib.cancelMktData = MagicMock()
+    ib.ticker = MagicMock(return_value=ticker)
+
+    bag = _quote_bag(
+        ib=ib,
+        _ensure_connected=AsyncMock(return_value=True),
+        _prepare_contract=AsyncMock(return_value=contract),
+    )
+    monkeypatch.setattr(connector_mod, "_safe_sleep", AsyncMock())
+
+    first = await IBKRQueriesMixin.get_live_quote(bag, "AVGO", fresh=True)
+    second = await IBKRQueriesMixin.get_live_quote(bag, "AVGO", fresh=True)
+
+    assert first.get("last") == 180.5
+    assert second.get("last") == 180.5
+    assert ib.reqMktData.call_count == 1
+    assert ib.reqMktData.call_args.args[2] is False  # streaming, not snapshot
+    ib.reqTickersAsync.assert_not_called()
+    ib.cancelMktData.assert_not_called()
+    assert "AVGO" in bag._tickers
+    assert "AVGO" in bag._quote_mkt_syms
+
+
+@pytest.mark.asyncio
+async def test_get_live_quote_skips_cancel_when_only_tickers_async(monkeypatch):
+    """Reuse path: subscribed stays False so cancelMktData must not run."""
+    from abcxauto.broker import connector as connector_mod
+
+    contract = SimpleNamespace(symbol="NVDA", conId=99)
+    ticker = SimpleNamespace(
+        contract=contract, last=500.0, bid=499.9, ask=500.1, time=None
+    )
+    ib = MagicMock()
+    ib.reqMktData = MagicMock(return_value=ticker)
+    ib.cancelMktData = MagicMock()
+    ib.ticker = MagicMock(return_value=None)
+
+    bag = _quote_bag(
+        _tickers={"NVDA": ticker},
+        _quote_mkt_syms={"NVDA"},
+        ib=ib,
+        _ensure_connected=AsyncMock(return_value=True),
+        _prepare_contract=AsyncMock(return_value=contract),
+    )
+    monkeypatch.setattr(connector_mod, "_safe_sleep", AsyncMock())
+
+    out = await IBKRQueriesMixin.get_live_quote(bag, "NVDA", fresh=True)
+    assert out.get("last") == 500.0
+    ib.reqMktData.assert_not_called()
+    ib.cancelMktData.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_live_quote_reuses_book_sub_without_req(monkeypatch):
+    from abcxauto.broker import connector as connector_mod
+
+    contract = SimpleNamespace(symbol="AMZN", conId=777)
+    ticker = SimpleNamespace(
+        contract=contract, last=200.0, bid=199.9, ask=200.1, time=None
+    )
+    ib = MagicMock()
+    ib.reqMktData = MagicMock(return_value=ticker)
+    ib.cancelMktData = MagicMock()
+    ib.ticker = MagicMock(return_value=ticker)
+
+    bag = _quote_bag(
+        _book_subs={777: contract},
+        ib=ib,
+        _ensure_connected=AsyncMock(return_value=True),
+        _prepare_contract=AsyncMock(return_value=contract),
+    )
+    monkeypatch.setattr(connector_mod, "_safe_sleep", AsyncMock())
+
+    out = await IBKRQueriesMixin.get_live_quote(bag, "AMZN", fresh=True)
+    assert out.get("last") == 200.0
+    ib.reqMktData.assert_not_called()
+    ib.cancelMktData.assert_not_called()
+    ib.ticker.assert_called_once_with(contract)
+    # Book mirror must not poison _tickers — lot exit would cancel the line.
+    assert "AMZN" not in bag._tickers
+    assert "AMZN" not in bag._quote_mkt_syms
+
+
+@pytest.mark.asyncio
+async def test_get_live_quote_rereqs_after_book_unsub(monkeypatch):
+    """After book cancels the lot stream, quote must open its own line."""
+    from abcxauto.broker import connector as connector_mod
+
+    contract = SimpleNamespace(symbol="AMZN", conId=777)
+    book_ticker = SimpleNamespace(
+        contract=contract, last=200.0, bid=199.9, ask=200.1, time=None
+    )
+    fresh_ticker = SimpleNamespace(
+        contract=contract, last=201.0, bid=200.9, ask=201.1, time=None
+    )
+    ib = MagicMock()
+    ib.reqMktData = MagicMock(return_value=fresh_ticker)
+    ib.cancelMktData = MagicMock()
+    ib.ticker = MagicMock(return_value=book_ticker)
+
+    bag = _quote_bag(
+        _book_subs={777: contract},
+        ib=ib,
+        _ensure_connected=AsyncMock(return_value=True),
+        _prepare_contract=AsyncMock(return_value=contract),
+    )
+    monkeypatch.setattr(connector_mod, "_safe_sleep", AsyncMock())
+
+    first = await IBKRQueriesMixin.get_live_quote(bag, "AMZN", fresh=True)
+    assert first.get("last") == 200.0
+    ib.reqMktData.assert_not_called()
+
+    bag._book_subs.clear()
+    second = await IBKRQueriesMixin.get_live_quote(bag, "AMZN", fresh=True)
+    assert second.get("last") == 201.0
+    assert ib.reqMktData.call_count == 1
+    assert ib.reqMktData.call_args.args[2] is False
+    ib.cancelMktData.assert_not_called()
+    assert "AMZN" in bag._tickers
+    assert "AMZN" in bag._quote_mkt_syms
+
+
+@pytest.mark.asyncio
+async def test_get_live_quote_drops_stale_book_mirror_in_tickers(monkeypatch):
+    """Poisoned _tickers entry from a prior book mirror must not block re-req."""
+    from abcxauto.broker import connector as connector_mod
+
+    contract = SimpleNamespace(symbol="META", conId=42)
+    dead = SimpleNamespace(
+        contract=contract, last=100.0, bid=99.9, ask=100.1, time=None
+    )
+    live = SimpleNamespace(
+        contract=contract, last=105.0, bid=104.9, ask=105.1, time=None
+    )
+    ib = MagicMock()
+    ib.reqMktData = MagicMock(return_value=live)
+    ib.cancelMktData = MagicMock()
+    ib.ticker = MagicMock(return_value=None)
+
+    bag = _quote_bag(
+        _tickers={"META": dead},  # not in _quote_mkt_syms → treated as foreign
+        _book_subs={},
+        ib=ib,
+        _ensure_connected=AsyncMock(return_value=True),
+        _prepare_contract=AsyncMock(return_value=contract),
+    )
+    monkeypatch.setattr(connector_mod, "_safe_sleep", AsyncMock())
+
+    out = await IBKRQueriesMixin.get_live_quote(bag, "META", fresh=True)
+    assert out.get("last") == 105.0
+    assert ib.reqMktData.call_count == 1
+    ib.cancelMktData.assert_not_called()
+    assert "META" in bag._quote_mkt_syms
+
+
+def test_farm_ok_codes_stay_quiet():
+    conn = IBKRConnector.__new__(IBKRConnector)
+    conn._ibkr_data_stale = False
+    conn._connected = True
+    conn._reconnect_requested = False
+    for code in (2104, 2106, 2108, 2158):
+        conn._on_error(-1, code, "farm ok", "")
+    assert conn._ibkr_data_stale is False
+
+
 def test_account_summary_exposes_stale_fact():
     conn = IBKRConnector.__new__(IBKRConnector)
     conn._ibkr_data_stale = True
@@ -87,6 +284,7 @@ def test_quote_cache_flushed_on_disconnect():
     conn = IBKRConnector.__new__(IBKRConnector)
     conn._quote_cache = {"SPY": (time.monotonic(), {"last": 501.0})}
     conn._tickers = {}
+    conn._quote_mkt_syms = {"SPY"}
     conn._ibkr_data_stale = False
     conn._disconnect_cause = DisconnectCause.USER_DISCONNECT.value
     conn.client_id = 42
@@ -97,6 +295,7 @@ def test_quote_cache_flushed_on_disconnect():
     conn._on_disconnect()
     assert conn._quote_cache == {}
     assert conn._ibkr_data_stale is True
+    assert conn._quote_mkt_syms == set()
 
 
 def test_1100_marks_stale_and_drops_quote_cache():
@@ -138,6 +337,181 @@ async def test_1102_forces_refresh_before_clearing_stale():
     assert refreshed == [1]
     assert conn._ibkr_data_stale is False
     assert conn._quote_cache == {}
+
+
+async def _await_book_refresh(conn, *, timeout: float = 1.0) -> None:
+    """Wait for a 1101/1102 book-refresh task (Task or threadsafe Future)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        task = getattr(conn, "_book_refresh_task", None)
+        if task is not None:
+            if asyncio.isfuture(task):
+                await asyncio.wait_for(task, timeout=timeout)
+                return
+            result = getattr(task, "result", None)
+            if callable(result):
+                await asyncio.wait_for(asyncio.wrap_future(task), timeout=timeout)
+                return
+        await asyncio.sleep(0)
+
+
+def _bind_owner_loop(conn) -> asyncio.AbstractEventLoop:
+    owner = asyncio.get_running_loop()
+    conn._loop = owner
+    conn._async_lock = asyncio.Lock()
+    conn._async_lock_loop = owner
+    conn.ib = SimpleNamespace(loop=owner, isConnected=lambda: True)
+    return owner
+
+
+@pytest.mark.asyncio
+async def test_1102_from_foreign_loop_refreshes_on_owner_loop():
+    """1102 on a stray running loop must refresh on the connector owner loop."""
+    IBKRConnector._instance = None
+    conn = IBKRConnector.__new__(IBKRConnector)
+    conn._ibkr_data_stale = True
+    conn._quote_cache = {"SPY": (time.monotonic(), {"last": 1.0})}
+    conn._connected = True
+    conn._book_refresh_task = None
+    conn._maybe_resume_disconnect_halt = lambda **_k: None
+    owner = _bind_owner_loop(conn)
+    owner_id = id(owner)
+
+    loops: list[int] = []
+
+    async def _refresh():
+        loops.append(id(asyncio.get_running_loop()))
+        return True
+
+    conn._refresh_book_after_data_loss = _refresh
+
+    fired = threading.Event()
+    seen: dict[str, object] = {}
+
+    def _foreign() -> None:
+        async def _fire() -> None:
+            conn._on_error(-1, 1102, "Connectivity has been restored.", "")
+            seen["stale"] = conn._ibkr_data_stale
+            seen["loops"] = list(loops)
+            seen["foreign"] = id(asyncio.get_running_loop())
+
+        try:
+            asyncio.run(_fire())
+        finally:
+            fired.set()
+
+    t = threading.Thread(target=_foreign)
+    t.start()
+    assert fired.wait(timeout=2)
+    t.join(timeout=2)
+    assert not t.is_alive()
+    assert seen["stale"] is True
+    assert seen["loops"] == []
+
+    await _await_book_refresh(conn)
+    deadline = time.monotonic() + 1.0
+    while not loops and time.monotonic() < deadline:
+        await asyncio.sleep(0)
+    assert loops == [owner_id]
+    assert loops[0] != seen["foreign"]
+    assert conn._ibkr_data_stale is False
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_failed_book_refresh_after_1102_stays_stale():
+    IBKRConnector._instance = None
+    conn = IBKRConnector.__new__(IBKRConnector)
+    conn._ibkr_data_stale = True
+    conn._quote_cache = {"SPY": (time.monotonic(), {"last": 1.0})}
+    conn._connected = True
+    conn._book_refresh_task = None
+    conn._maybe_resume_disconnect_halt = lambda **_k: None
+    _bind_owner_loop(conn)
+
+    async def _refresh():
+        return False
+
+    conn._refresh_book_after_data_loss = _refresh
+    conn._on_error(-1, 1102, "Connectivity has been restored.", "")
+    assert conn._ibkr_data_stale is True
+    try:
+        await _await_book_refresh(conn)
+    except Exception:
+        pass
+    assert conn._ibkr_data_stale is True
+    IBKRConnector._instance = None
+
+
+@pytest.mark.asyncio
+async def test_book_refresh_raise_after_1102_stays_stale():
+    IBKRConnector._instance = None
+    conn = IBKRConnector.__new__(IBKRConnector)
+    conn._ibkr_data_stale = True
+    conn._quote_cache = {}
+    conn._connected = True
+    conn._book_refresh_task = None
+    conn._maybe_resume_disconnect_halt = lambda **_k: None
+    _bind_owner_loop(conn)
+
+    async def _refresh():
+        raise RuntimeError("book refresh failed")
+
+    conn._refresh_book_after_data_loss = _refresh
+    conn._on_error(-1, 1102, "Connectivity has been restored.", "")
+    assert conn._ibkr_data_stale is True
+    try:
+        await _await_book_refresh(conn)
+    except Exception:
+        pass
+    assert conn._ibkr_data_stale is True
+    IBKRConnector._instance = None
+
+
+def _after_connect_conn(*, refresh_ok: bool = True, refresh_raise: bool = False):
+    """Minimal connector for _after_connect_restore (fresh process starts not-stale)."""
+    conn = IBKRConnector.__new__(IBKRConnector)
+    conn._ibkr_data_stale = False
+    conn._disconnect_cause = "unknown"
+    conn._reconnect_requested = False
+    conn._heartbeat_failures = 0
+    conn._reconnect_attempt = 0
+    conn._disconnect_since = None
+    conn._last_heartbeat_ok = 0.0
+    conn._pending_resubscribe = set()
+    conn._quote_cache = {}
+    conn._maybe_resume_disconnect_halt = lambda **_k: None
+
+    async def _refresh() -> bool:
+        if refresh_raise:
+            raise RuntimeError("book refresh failed")
+        return bool(refresh_ok)
+
+    conn._refresh_book_after_data_loss = _refresh
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_after_connect_refresh_fail_marks_stale():
+    """New process starts False; failed post-connect refresh must set stale."""
+    conn = _after_connect_conn(refresh_ok=False)
+    await conn._after_connect_restore()
+    assert conn._ibkr_data_stale is True
+
+
+@pytest.mark.asyncio
+async def test_after_connect_refresh_raise_marks_stale():
+    conn = _after_connect_conn(refresh_raise=True)
+    await conn._after_connect_restore()
+    assert conn._ibkr_data_stale is True
+
+
+@pytest.mark.asyncio
+async def test_after_connect_refresh_ok_clears_stale():
+    conn = _after_connect_conn(refresh_ok=True)
+    conn._ibkr_data_stale = True
+    await conn._after_connect_restore()
+    assert conn._ibkr_data_stale is False
 
 
 @pytest.mark.asyncio

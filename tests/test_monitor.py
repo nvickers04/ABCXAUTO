@@ -539,6 +539,54 @@ def test_detect_pace_wakes_order_change_fill_unprotected():
     assert wakes == ["order_change", "fill", "unprotected"]
 
 
+def test_detect_pace_wakes_new_unprotected_suppresses_order_change():
+    """A vanished stop must store unprotected, not a later order_change."""
+    from types import SimpleNamespace
+
+    from abcxauto.monitor import PortfolioMonitor
+    from abcxauto.risk_gates import reset_risk_gate
+
+    reset_risk_gate()
+    wakes: list[str] = []
+    mon = PortfolioMonitor(
+        SimpleNamespace(emit=lambda *_a, **_k: None),
+        SimpleNamespace(),
+        on_wake=wakes.append,
+    )
+    seed = {
+        "protection": {"unprotected_symbols": []},
+        "fills": [],
+        "positions": [{"symbol": "AAPL", "quantity": 10}],
+        "open_orders": [
+            {"order_id": 1, "action": "SELL", "order_type": "STP"},
+        ],
+    }
+    mon._detect_pace_wakes(seed)
+    assert wakes == []
+    # Same tick: stop gone + AAPL newly naked. Only unprotected must fire.
+    mon._detect_pace_wakes(
+        {
+            "protection": {"unprotected_symbols": ["AAPL"]},
+            "fills": [],
+            "positions": [{"symbol": "AAPL", "quantity": 10}],
+            "open_orders": [],
+        }
+    )
+    assert wakes == ["unprotected"]
+    # Order-only change with no new naked symbol still wakes order_change.
+    mon._detect_pace_wakes(
+        {
+            "protection": {"unprotected_symbols": ["AAPL"]},
+            "fills": [],
+            "positions": [{"symbol": "AAPL", "quantity": 10}],
+            "open_orders": [
+                {"order_id": 9, "action": "BUY", "order_type": "LMT"},
+            ],
+        }
+    )
+    assert wakes == ["unprotected", "order_change"]
+
+
 def test_detect_pace_wakes_without_callback_is_silent():
     from types import SimpleNamespace
 

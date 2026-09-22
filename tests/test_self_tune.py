@@ -141,7 +141,15 @@ def test_levers_snapshot_shows_now_and_range():
     assert snap["max_open_positions"]["pick"] == "this book"
     assert snap["max_open_positions"]["with"] == "size_pct_nl"
     assert "not pick-one" in snap["together"]
-    assert snap["change"] == "self_tune"
+    # Operator disk knobs — file wins; self_tune rejects them.
+    assert snap["max_open_positions"]["change"] == "operator"
+    assert snap["max_risk_per_trade_pct"]["change"] == "operator"
+    assert snap["max_position_pct"]["change"] == "operator"
+    assert snap["max_option_premium_pct"]["change"] == "operator"
+    assert snap["daily_loss_limit_pct"]["change"] == "operator"
+    # Peak-DD remains agent-tunable (tighten-only).
+    assert snap["max_peak_drawdown_pct"]["change"] == "self_tune"
+    assert "change" not in snap
 
 
 def test_live_levers_snapshot_does_not_invent_25():
@@ -499,6 +507,36 @@ def test_set_risk_alias_no_approval():
     blocked = set_risk_knobs({"max_risk_per_trade_pct": 0.6}, persist=False)
     assert "max_risk_per_trade_pct" in (blocked.get("rejected") or {})
     assert get_config().max_risk_per_trade_pct != 0.6
+
+
+def test_ok_note_plain_when_nothing_held():
+    """Clean apply must not sound like a floor refusal."""
+    out = apply_self_tune({"max_symbol_concentration_pct": 15.0}, persist=False)
+    assert out["status"] == "ok"
+    assert out.get("applied", {}).get("max_symbol_concentration_pct") == 15.0
+    assert not (out.get("clamped") or {})
+    assert not (out.get("rejected") or {})
+    assert out["note"] == "self_tune applied"
+
+
+def test_ok_note_names_held_keys_when_clamped_or_rejected():
+    """Clamped or rejected keys stay in the dicts and appear in the note."""
+    clamped = apply_self_tune({"max_symbol_concentration_pct": 50.0}, persist=False)
+    assert clamped["status"] == "ok"
+    assert "max_symbol_concentration_pct" in (clamped.get("clamped") or {})
+    assert not (clamped.get("rejected") or {})
+    assert "floor cannot be weakened" in clamped["note"]
+    assert "max_symbol_concentration_pct" in clamped["note"]
+
+    mixed = apply_self_tune(
+        {"max_symbol_concentration_pct": 12.0, "universe": {"enabled_arenas": ["mega_cap"]}},
+        persist=False,
+    )
+    assert mixed["status"] == "ok"
+    assert mixed.get("applied", {}).get("max_symbol_concentration_pct") == 12.0
+    assert "universe" in (mixed.get("rejected") or {})
+    assert "floor cannot be weakened" in mixed["note"]
+    assert "universe" in mixed["note"]
 
 
 def test_self_tune_cannot_write_any_universe_state(tmp_path, monkeypatch):

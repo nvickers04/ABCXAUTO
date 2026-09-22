@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """\
 You own an Interactive Brokers {mode} book. Strategy is yours.
 Risk is code.
+Keep researching after a fill. A full book is only for a name you will not cut. Otherwise rotate into the better name.
+A refuse for price or size is resent at the live print and a quantity that fits, or you take a better name.
 send tickets that match ORDER EXAMPLES.
 Size vs max_risk_per_trade_pct of NetLiq.
 """
@@ -145,6 +147,9 @@ def chat_create_kwargs(
         "temperature": g.temperature,
         "max_tokens": int(g.max_tokens or 8192),
         "include": ["verbose_streaming"],
+        # grok-4.7: pass encrypted reasoning back on append so the next
+        # turn keeps the trace and the prompt prefix can cache.
+        "use_encrypted_content": True,
     }
     if tools is not None:
         kw["tools"] = list(tools)
@@ -197,6 +202,21 @@ def create_chat(client: Any, **kwargs: Any) -> Any:
     create = client.chat.create
     try:
         return create(**kwargs)
+    except ValueError as exc:
+        effort = kwargs.get("reasoning_effort")
+        if (
+            effort
+            and effort != "high"
+            and "Invalid reasoning effort" in str(exc)
+        ):
+            logger.warning(
+                "reasoning_effort %s rejected by this SDK; using high",
+                effort,
+            )
+            downgraded = dict(kwargs)
+            downgraded["reasoning_effort"] = "high"
+            return create(**downgraded)
+        raise
     except TypeError:
         if "include" in kwargs:
             no_include = dict(kwargs)
@@ -289,9 +309,20 @@ class GrokClient:
                 raise RuntimeError(
                     "XAI_API_KEY is not set — copy .env.template to .env and fill it in"
                 )
+            import uuid
+
             from xai_sdk import AsyncClient
 
-            client = AsyncClient(api_key=cfg.xai_api_key)
+            # Sticky server for this process. grok-4.7 bills cached input
+            # at a quarter of the cold rate when the prefix is unchanged.
+            self.conv_id = str(uuid.uuid4())
+            client = AsyncClient(
+                api_key=cfg.xai_api_key,
+                metadata=(("x-grok-conv-id", self.conv_id),),
+                timeout=3600,
+            )
+        if not hasattr(self, "conv_id"):
+            self.conv_id = ""
         self.client = _wrap_client(client)
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens

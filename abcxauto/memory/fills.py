@@ -82,7 +82,11 @@ class JournalFills:
             logger.exception("journal.record_snapshot failed")
 
     def record_fills(self, fills: Optional[list] = None) -> int:
-        """Idempotent insert of fill dicts (UNIQUE exec_id). Returns rows inserted."""
+        """Idempotent insert of fill dicts (UNIQUE exec_id). Returns rows inserted.
+
+        A later poll may bring commission / realized_pnl after the print row
+        already landed — those NULL cells are backfilled; other columns stay.
+        """
         if not self.enabled:
             return 0
         try:
@@ -190,8 +194,9 @@ class JournalFills:
                                 _fill_multiplier(fill),
                             ),
                         )
-                        inserted += int(cur.rowcount or 0)
-                        if int(cur.rowcount or 0):
+                        row_n = int(cur.rowcount or 0)
+                        inserted += row_n
+                        if row_n:
                             new_fills.append(fill)
                             card_label = ""
                             if isinstance(raw_mark, dict):
@@ -218,8 +223,12 @@ class JournalFills:
                                         "ts": fill_ts,
                                     }
                                 )
+                        else:
+                            # Same exec_id already stored — IBKR often attaches
+                            # commissionReport on a later poll. Fill NULL only.
+                            self._backfill_fill_money_locked(conn, str(exec_id), fill)
                         if (
-                            int(cur.rowcount or 0)
+                            row_n
                             and isinstance(raw_mark, dict)
                             and oid is not None
                         ):
@@ -239,9 +248,7 @@ class JournalFills:
                 conn.commit()
             for fill in new_fills:
                 try:
-                    from abcxauto.memory.notes import record_fill_note
-
-                    record_fill_note(fill)
+                    self._record_fill_note(fill)
                 except Exception:
                     logger.debug("fill note failed", exc_info=True)
             if pending_links and hasattr(self, "link_card"):
@@ -254,6 +261,68 @@ class JournalFills:
         except Exception:
             logger.exception("journal.record_fills failed")
             return 0
+
+    def _backfill_fill_money_locked(
+        self,
+        conn: sqlite3.Connection,
+        exec_id: str,
+        fill: dict,
+    ) -> None:
+        """Write commission / realized_pnl onto an existing row only when NULL."""
+        sets: list[str] = []
+        args: list[Any] = []
+        if fill.get("commission") is not None:
+            sets.append("commission = COALESCE(commission, ?)")
+            args.append(fill.get("commission"))
+        if fill.get("realized_pnl") is not None:
+            sets.append("realized_pnl = COALESCE(realized_pnl, ?)")
+            args.append(fill.get("realized_pnl"))
+        if not sets:
+            return
+        args.append(exec_id)
+        conn.execute(
+            f"UPDATE fills SET {', '.join(sets)} WHERE exec_id = ?",
+            args,
+        )
+
+    def _record_fill_note(self, fill: dict) -> None:
+        """Durable fill line. One reason_code per exec_id so partials keep.
+
+        ``notes.record_fill_note`` uses ``fill-{SYM}`` once per ET day, which
+        drops a second print (e.g. AVGO 60@360.80 then 29@360.79). Fills-table
+        rows stay UNIQUE on exec_id; notes must match that grain.
+        """
+        from abcxauto.memory.notes import KIND_EVENT, MAX_BODY, SOURCE_FILL
+
+        row = fill if isinstance(fill, dict) else {}
+        sym = str(row.get("symbol") or "").upper().strip()
+        side = str(row.get("side") or "").upper().strip()
+        qty = row.get("quantity")
+        px = row.get("price")
+        exec_id = str(row.get("exec_id") or "").strip()
+        bits = ["fill"]
+        if sym:
+            bits.append(sym)
+        if side:
+            bits.append(side)
+        if qty is not None:
+            bits.append(str(qty))
+        if px is not None:
+            bits.append(f"@{px}")
+        body = " ".join(bits)[:MAX_BODY]
+        code = f"fill-{exec_id}" if exec_id else (f"fill-{sym}" if sym else "fill")
+        from abcxauto.memory import get_journal
+
+        get_journal().record_code_note(
+            source=SOURCE_FILL,
+            reason_code=code,
+            kind=KIND_EVENT,
+            symbol=sym,
+            tags=["fill", sym.lower()] if sym else ["fill"],
+            body=body,
+            evidence=f"fills.exec_id={exec_id}",
+            invalidate="position closed / opposite fill",
+        )
 
     def _fill_mark_values(self, mark: Optional[dict], fill: dict) -> dict:
         """Fill-time IBKR bid/ask, else this send's NBBO. Never invent a mid.

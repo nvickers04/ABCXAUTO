@@ -16,6 +16,8 @@ from abcxauto.news_feed import (
     format_news_for_prompt,
     news_hard_miss,
     news_need_symbols,
+    public_news_item,
+    public_news_items,
     remember_headlines,
     reset_news_cache,
 )
@@ -26,6 +28,71 @@ def _clean_news_cache():
     reset_news_cache()
     yield
     reset_news_cache()
+
+
+def test_public_news_item_keeps_publisher_published_drops_junk():
+    raw = {
+        "symbol": "AAPL",
+        "headline": "Apple raises guidance",
+        "publisher": "Yahoo",
+        "published": "2026-09-17T12:00:00Z",
+        "source": "mda",
+        "freshness": "delayed_15m",
+        "use": "color_not_trigger",
+        "asof_iso": "2026-09-17T12:00:00Z",
+        "asof": 1758103200,
+        "url": "https://finance.yahoo.com/news/apple-raises-guidance",
+        "junk": "blob",
+        "raw": {"drop": True},
+        "error": None,
+    }
+    out = public_news_item(raw)
+    assert out is not None
+    assert out["publisher"] == "Yahoo"
+    assert out["published"] == "2026-09-17T12:00:00Z"
+    assert out["headline"] == "Apple raises guidance"
+    assert out["symbol"] == "AAPL"
+    assert out["source"] == "mda"
+    assert out["url"] == "https://finance.yahoo.com/news/apple-raises-guidance"
+    assert "junk" not in out
+    assert "raw" not in out
+    assert "asof" not in out
+    assert "error" not in out
+    assert set(out) <= {
+        "symbol",
+        "headline",
+        "publisher",
+        "published",
+        "as_of",
+        "asof_iso",
+        "url",
+        "source",
+        "freshness",
+        "use",
+    }
+    assert public_news_item({
+        "symbol": "NKE",
+        "headline": "(unavailable - timed out)",
+        "error": "timed out",
+        "publisher": "Yahoo",
+    }) is None
+    rows = public_news_items([raw, {"headline": ""}, None])
+    assert [row.get("publisher") for row in rows] == ["Yahoo"]
+
+
+def test_public_news_item_yahoo_link_becomes_url_and_host():
+    out = public_news_item(
+        {
+            "symbol": "NVDA",
+            "headline": "NVDA prints",
+            "publisher": "https://finance.yahoo.com/markets/stocks/articles/nvda-1.html",
+            "source": "mda",
+        }
+    )
+    assert out is not None
+    assert out["publisher"] == "finance.yahoo.com"
+    assert out["url"].startswith("https://finance.yahoo.com/")
+    assert out["source"] == "mda"
 
 
 def test_format_news_for_prompt_empty():
@@ -110,8 +177,8 @@ class _MDA:
 
 
 def test_news_wait_is_fail_fast_not_a_12s_look():
-    """2026-08-26: 12s per symbol was the whole look. A stall must miss fast."""
-    assert NEWS_SYMBOL_S * max(1, int(NEWS_TRIES)) <= 2.0
+    """2026-08-26: 12s sequential was the whole look. Cap stays parallel < 12s."""
+    assert NEWS_SYMBOL_S * max(1, int(NEWS_TRIES)) <= 8.0
     assert NEWS_SYMBOL_S < 12.0
     assert NEWS_TRIES == 1
 
@@ -256,7 +323,7 @@ async def test_completed_empty_fetch_is_still_empty(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_timeout_returns_rail_headline_not_no_print(monkeypatch):
-    """2026-08-27: HPQ Q3 was on What's happening while news HPQ timed out at 2s."""
+    """2026-08-27: HPQ Q3 was on What's happening while news HPQ timed out."""
 
     async def hang(_symbol, _countback):
         await asyncio.sleep(30)

@@ -27,8 +27,8 @@ MAX_LABEL = 32
 MAX_SCREEN = 40
 MAX_SCAN_CODE = 40
 MAX_DIRECTION = 16
-MAX_EXPECTATION = 80
-MAX_INVALIDATE = 80
+MAX_EXPECTATION = 240
+MAX_INVALIDATE = 240
 MAX_EVIDENCE_ITEMS = 6
 MAX_FACT_KEYS = 6
 MAX_FACT_VALUE = 48
@@ -172,15 +172,16 @@ def _parse_evidence(raw: Any) -> list[dict[str, Any]]:
     return out
 
 
+BAD_EVIDENCE_NOTE = (
+    "must be a list of objects with optional tool string and facts object"
+)
+
+
 def _evidence_error(raw: Any) -> str:
     if raw in (None, "", [], {}):
         return ""
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except (TypeError, ValueError):
-            return "bad_evidence"
-    if not isinstance(raw, list):
+    # Write path: evidence must be a real list, not a bare / JSON string.
+    if isinstance(raw, str) or not isinstance(raw, list):
         return "bad_evidence"
     if len(raw) > MAX_EVIDENCE_ITEMS:
         return "evidence_too_long"
@@ -385,7 +386,11 @@ class JournalCards:
             return {"ok": False, "error": "journal_disabled"}
         ev_err = _evidence_error(evidence)
         if ev_err:
-            return {"ok": False, "error": ev_err}
+            out: dict[str, Any] = {"ok": False, "error": ev_err}
+            if ev_err == "bad_evidence":
+                out["note"] = BAD_EVIDENCE_NOTE
+            return out
+
         screen_s = str(screen or "").strip()
         scan_s = str(scan_code or "").strip()
         dir_s = str(direction or "").strip().lower()

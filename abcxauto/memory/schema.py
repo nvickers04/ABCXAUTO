@@ -530,9 +530,14 @@ class JournalSchema:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        with self._io_lock:
+        # A UI read must not freeze the look. Fail the write; do not wait.
+        if not self._io_lock.acquire(timeout=2.0):
+            raise TimeoutError("journal lock")
+        try:
             conn = self._open()
             try:
                 yield conn
             finally:
                 conn.close()
+        finally:
+            self._io_lock.release()

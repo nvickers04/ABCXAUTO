@@ -527,6 +527,91 @@ def test_record_fills_round_trip_and_dedup(journal, tmp_path):
     assert rows[1][7] == 42.0
 
 
+def test_record_fills_backfills_late_commission(journal, tmp_path):
+    """IBKR often lands the print before commissionReport — do not keep NULL."""
+    bare = {
+        "ts": "2026-07-09T14:00:00.000Z",
+        "exec_id": "late-fee-1",
+        "order_id": 201,
+        "symbol": "SPY",
+        "sec_type": "STK",
+        "side": "BOT",
+        "quantity": 1.0,
+        "price": 500.0,
+    }
+    assert journal.record_fills([bare]) == 1
+    assert journal.record_fills(
+        [{**bare, "commission": 1.25, "realized_pnl": 0.0}]
+    ) == 0
+
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        row = conn.execute(
+            "SELECT commission, realized_pnl FROM fills WHERE exec_id = 'late-fee-1'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    assert row[0] == 1.25
+    assert row[1] == 0.0
+    # Already-set money is not overwritten by a later print.
+    assert journal.record_fills([{**bare, "commission": 9.99, "realized_pnl": 50.0}]) == 0
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        row = conn.execute(
+            "SELECT commission, realized_pnl FROM fills WHERE exec_id = 'late-fee-1'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == (1.25, 0.0)
+
+
+def test_record_fills_keeps_both_avgo_partial_notes(journal, tmp_path):
+    """Same-symbol partials: two fills rows and two notes (not fill-SYM once/day)."""
+    a = {
+        "ts": "2026-09-21T18:00:00.000Z",
+        "exec_id": "avgo-exec-60",
+        "order_id": 501,
+        "symbol": "AVGO",
+        "sec_type": "STK",
+        "side": "BOT",
+        "quantity": 60.0,
+        "price": 360.80,
+        "commission": 0.0,
+        "realized_pnl": 0.0,
+    }
+    b = {
+        **a,
+        "exec_id": "avgo-exec-29",
+        "quantity": 29.0,
+        "price": 360.79,
+    }
+    assert journal.record_fills([a, b]) == 2
+    assert journal.record_fills([a, b]) == 0  # UNIQUE exec_id
+
+    conn = sqlite3.connect(str(tmp_path / "journal.db"))
+    try:
+        fill_rows = conn.execute(
+            "SELECT exec_id, quantity, price FROM fills ORDER BY id"
+        ).fetchall()
+        note_rows = conn.execute(
+            "SELECT reason_code, body FROM notes WHERE source='fill' ORDER BY ts, id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert fill_rows == [
+        ("avgo-exec-60", 60.0, 360.80),
+        ("avgo-exec-29", 29.0, 360.79),
+    ]
+    assert len(note_rows) == 2
+    bodies = " ".join(r[1] for r in note_rows)
+    assert "60" in bodies and "360.8" in bodies
+    assert "29" in bodies and "360.79" in bodies
+    codes = {r[0] for r in note_rows}
+    assert codes == {"fill-avgo-exec-60", "fill-avgo-exec-29"}
+
+
 def test_strategy_performance_attribution(journal):
     day = "2026-07-09"
     ts = f"{day}T12:00:00.000Z"
@@ -1619,9 +1704,15 @@ def test_invalidated_card_is_inert_and_still_attributable(journal):
 
 
 def test_card_caps_count_and_field_length(journal):
-    too = journal.write_card(
+    ok_len = journal.write_card(
         label="ok-lab",
-        expectation="x" * 81,
+        expectation="x" * 240,
+        invalidate="y",
+    )
+    assert ok_len.get("ok") is True
+    too = journal.write_card(
+        label="too-lab",
+        expectation="x" * 241,
         invalidate="y",
     )
     assert too.get("ok") is False

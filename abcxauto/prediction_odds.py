@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -257,7 +258,8 @@ def compact_event(ev: dict[str, Any], *, market_cap: int = MARKET_CAP) -> dict[s
         return None
     slug = str(ev.get("slug") or "").strip()
     markets: list[dict[str, Any]] = []
-    for m in (ev.get("markets") or [])[: market_cap * 2]:
+    # Do not slice: a closed prefix must not hide later open books.
+    for m in ev.get("markets") or []:
         if not isinstance(m, dict):
             continue
         if m.get("closed") or m.get("archived"):
@@ -364,6 +366,7 @@ async def fetch_odds(
         "source": "polymarket",
         "freshness": "betting_book",
         "use": "crowd_odds_not_send_geometry",
+        "as_of": datetime.now(timezone.utc).isoformat(),
         "searched": searches,
         "related_queries": related,
         "events": rows,

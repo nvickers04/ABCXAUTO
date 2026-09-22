@@ -323,6 +323,10 @@ class ProEngine:
         self._kill_entry_in_flight = False
         self._force_first_look = False
         self._stay_up_book_fp = None
+        self._look_ended_mono = None
+        self._scan_only_streak = 0
+        self._work_streak = 0
+        self._last_look_researched = False
         # Armed once per IBKR connect: first flat orphan sweep is skipped.
         self._flat_start_orphan_gate = False
         self._brain_key: tuple = ()
@@ -400,11 +404,16 @@ class ProEngine:
             from abcxauto.park_clock import load_alarm, start_looks_now
 
             alarm = load_alarm()
-            if alarm.wake_at and not alarm.due() and not start_looks_now(alarm, session=alarm.session):
-                # Fresh launch: honor Grok's leftover park, except a
-                # remaining-to-bell / session-card clock — that is a send
-                # gate, not a think shutdown. Operator Start on a live
-                # worker still pokes (already=True returned above).
+            leftover_park = bool(
+                alarm.wake_at
+                and not alarm.due()
+                and not start_looks_now(alarm, session=alarm.session)
+            )
+            if leftover_park:
+                # Overnight closed park only. Leftover nap is not a sit
+                # clock; drop it. Do not wait because a file says
+                # kind=nap. Operator Start on a live worker still pokes
+                # (already=True returned above).
                 self._resume_think = False
                 self._force_first_look = False
                 self.state.status = "Waiting"
@@ -520,11 +529,41 @@ class ProEngine:
             except Exception:
                 pass
 
+    def _disconnect_broker_socket(
+        self,
+        conn: Any,
+        loop: asyncio.AbstractEventLoop | None,
+    ) -> None:
+        """Release the IBKR API socket only — no flatten, no order cancels."""
+        if conn is None:
+            return
+        disc = getattr(conn, "disconnect", None) or getattr(conn, "close", None)
+        if not callable(disc):
+            return
+        try:
+            if asyncio.iscoroutinefunction(disc):
+                if loop is None or not loop.is_running():
+                    return
+                fut = asyncio.run_coroutine_threadsafe(disc(), loop)
+                try:
+                    fut.result(timeout=10)
+                except Exception:
+                    logger.debug("IBKR disconnect wait failed", exc_info=True)
+            else:
+                disc()
+        except Exception:
+            logger.debug("IBKR disconnect on stop failed", exc_info=True)
+
     def stop_engine(self) -> None:
         was_linked = bool(self.state.connected) or (
             self.worker is not None and self.worker.is_alive()
         )
         worker = self.worker
+        conn = self.conn
+        loop = self._worker_loop
+        # Drop the IBKR socket so a fast restart with the same client id
+        # does not hit TWS error 326. Does not flatten or cancel orders.
+        self._disconnect_broker_socket(conn, loop)
         self.stop.set()
         self.pause.clear()
         self._gen += 1
@@ -664,8 +703,8 @@ class ProEngine:
             sess = self._resolve_session(
                 str(getattr(self, "_last_session", "") or "")
             )
-            # Paper RTH / premarket stay-up must still poke. Overnight /
-            # closed / postmarket may still honor the cap.
+            # Paper stay-up (RTH / premarket / postmarket) must still poke.
+            # Overnight closed may still honor the cap.
             if is_capped(session=sess) and not paper_stay_up(sess):
                 return
         except Exception:
@@ -1161,11 +1200,17 @@ class ProEngine:
             pass
         return True
 
+    def _clear_code_park(self) -> None:
+        """Drop leftover parks including leftover nap files."""
+        from abcxauto.park_clock import clear_park
+
+        clear_park()
+
     def _idle_on_session_cap(self, session: str = "", *, note: bool = True) -> bool:
         """True when overnight/closed should sit on a hit cap. Paper stay-up does not.
 
         The cap still paints on the wake (session_cap remaining). A hit in
-        paper RTH / premarket must not Idle the desk with no GROK.
+        paper stay-up must not Idle the desk with no GROK.
         """
         from abcxauto.park_clock import paper_stay_up
         from abcxauto.session_caps import is_capped
@@ -1195,12 +1240,28 @@ class ProEngine:
         )
 
     def _kill_look_skip_reason(self, session: str, snap: dict | None) -> str:
-        """Non-empty = do not call Grok (entry budget / AH cap)."""
+        """Non-empty = do not call Grok (dead socket / entry budget / AH cap)."""
         from abcxauto.scorecard import estimate_tokens
-        from abcxauto.thin_rth_kill_look import skip_look_reason
+        from abcxauto.thin_rth_kill_look import (
+            REASON_IBKR_DOWN,
+            dead_socket_skip_reason,
+            skip_look_reason,
+        )
 
         blob = snap if isinstance(snap, dict) else {}
         prot = blob.get("protection") if isinstance(blob.get("protection"), dict) else {}
+        unprotected = bool(prot.get("unprotected_symbols"))
+        if not unprotected:
+            conn_up = None
+            if self.conn is not None:
+                conn_up = bool(getattr(self.conn, "connected", False))
+            dead = dead_socket_skip_reason(
+                blob, unprotected=False, ibkr_connected=conn_up
+            )
+            if dead:
+                return dead
+            if conn_up is False:
+                return REASON_IBKR_DOWN
         prompt_n = 0
         try:
             from abcxauto.llm import SYSTEM_PROMPT
@@ -1213,29 +1274,37 @@ class ProEngine:
             positions=list(blob.get("positions") or []),
             open_lots=list(blob.get("open_lots") or []),
             same_look=self._kill_look_same_look(),
-            unprotected=bool(prot.get("unprotected_symbols")),
+            unprotected=unprotected,
             prompt_tokens=prompt_n,
             in_flight=bool(getattr(self, "_kill_entry_in_flight", False)),
             snap=blob,
         )
 
-    def _rearm_after_think(self, out: dict | None, *, session: str) -> float:
+    def _rearm_after_think(
+        self, out: dict | None, *, session: str, g: Any = None
+    ) -> float:
         """Stay-up keeps the process. Rearm itself does not self-schedule.
 
-        Paper RTH / premarket stay on this process. A good look writes no
-        grok_wake.json. Duplicate lead-fact looks end with no send when
-        there is something to manage. Words with no tool_calls already
-        stopped the model. RTH with open lots or working orders waits for
-        fill / order_change / unprotected / operator poke or a changed
-        lead fact — except a spoken CLOSE/EXIT on an open lot, or a named
-        ORDER EXAMPLES ticket (flat or with lots), with zero sends, or a
-        synthesize/decide mill with zero tools and zero send. Unpaid
-        tickets re-enter the same chat with lots / SEND-THE-TICKET. A mill
-        re-enters with TOOL-OR-SEND; after SYNTHESIZE_MILL_TRIES consecutive
-        mill turns, drop the chat and continue cold. Research keep-looking is the stay-up pulse timeout
-        (desk_mode.research_keep_looking), not a fake poke and not a
-        sit-wake clock. Words-only flat RTH waits for a real event. Chat is kept. Overnight park
-        is park_clock after a closed skip.
+        Paper RTH / premarket / postmarket stay on this process. A good
+        look writes no sit clock. Duplicate lead-fact looks end with no
+        send when there is something to manage. Words with no
+        tool_calls already stopped the model. RTH with open lots or
+        working orders waits for fill / order_change / unprotected /
+        operator poke or a changed lead fact — except a spoken
+        CLOSE/EXIT on an open lot, or a named ORDER EXAMPLES ticket
+        (flat or with lots), with zero sends, or a synthesize/decide
+        mill with zero tools and zero send. Unpaid tickets re-enter
+        the same chat with lots / SEND-THE-TICKET. A mill re-enters
+        with TOOL-OR-SEND; after SYNTHESIZE_MILL_TRIES consecutive
+        mill turns, drop the chat and continue cold.         Pulse timeout
+        does not mill. Re-enter on RTH roll, lead change, or poke.
+        Leftover cash alone does not arm a sit clock. Scan-only leftover
+        or a correctable refuse may re-enter the same chat (capped).
+        A book with a lot on re-enters the same chat (capped) so the
+        next look keeps researching. A full position is not the end.
+        Words-only flat RTH with leftover sitting under deployed still
+        waits for a real event. Chat is kept. Overnight park is
+        park_clock after a closed skip.
         """
         session = self._resolve_session(session)
         self._last_session = session
@@ -1259,6 +1328,7 @@ class ProEngine:
         # CLOSE/EXIT on an open lot, or a named ticket, with no send is not
         # finished — including when the book is flat. A synthesize/decide
         # mill with zero tools and zero send is not finished either.
+        # Preview refuse / blocked are not successful sends (payload.sends).
         ended = bool(payload.get("_ended"))
         close_no_send = False
         ticket_no_send = False
@@ -1349,6 +1419,57 @@ class ProEngine:
             self._mill_streak = 0
             self._mill_gave_up = False
             self._kill_entry_in_flight = False
+            self._look_ended_mono = time.monotonic()
+            from abcxauto.world_state import (
+                book_still_working,
+                leftover_dominates,
+                look_gathered_research,
+            )
+
+            researched = look_gathered_research(payload)
+            self._last_look_researched = researched
+            ws = (
+                payload.get("world_state")
+                if isinstance(payload.get("world_state"), dict)
+                else {}
+            )
+            bag = (
+                ws.get("portfolio_risk")
+                if isinstance(ws.get("portfolio_risk"), dict)
+                else ws
+            )
+            correctable = self._correctable_refuse(payload)
+            if (
+                sends == 0
+                and leftover_dominates(bag)
+                and (not researched or correctable)
+            ):
+                self._work_streak = 0
+                self._scan_only_streak = int(
+                    getattr(self, "_scan_only_streak", 0) or 0
+                ) + 1
+                if self._scan_only_streak <= 2:
+                    self._resume_think = True
+            else:
+                self._scan_only_streak = 0
+                working = book_still_working(
+                    bag, payload.get("positions")
+                ) or sends > 0
+                if working:
+                    self._work_streak = int(
+                        getattr(self, "_work_streak", 0) or 0
+                    ) + 1
+                    if self._work_streak <= 2:
+                        self._resume_think = True
+                        if g is not None:
+                            try:
+                                g._work_resume = True
+                            except Exception:
+                                logger.debug(
+                                    "work resume stamp failed", exc_info=True
+                                )
+                else:
+                    self._work_streak = 0
         else:
             self._cold_next = bool(failed or parked or stream_err)
         if not failed:
@@ -1575,8 +1696,27 @@ class ProEngine:
             pass
         return True
 
+    @staticmethod
+    def _correctable_refuse(payload: dict | None) -> bool:
+        """True when the last send note is a fixable preview/size refuse."""
+        if not isinstance(payload, dict):
+            return False
+        chunks: list[str] = [str(payload.get("validation") or "")]
+        result = (
+            payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        )
+        for key in ("note", "reason_code", "reason", "error", "stage_error"):
+            chunks.append(str(result.get(key) or ""))
+        for row in result.get("would_refuse") or []:
+            chunks.append(str(row or ""))
+        blob = " ".join(chunks).lower()
+        return (
+            "stale_or_invented_number" in blob
+            or "mode_size" in blob
+        )
+
     async def _stay_up_lead_changed(self, g: Any) -> bool:
-        """True when a collapsible lead fact or the book moved since last look."""
+        """True when a collapsible lead fact or the book moved."""
         from abcxauto.agent_loop import snap as take_snap
         from abcxauto.park_clock import book_fingerprint, events_from_diff
         from abcxauto.world_state import (
@@ -1600,9 +1740,18 @@ class ProEngine:
         if prev_fp is None:
             self._stay_up_book_fp = fp
         else:
-            kinds = {e.kind for e in events_from_diff(prev_fp, fp)}
-            if kinds & {"fill", "order_change", "book_move", "unprotected"}:
+            events = events_from_diff(prev_fp, fp)
+            kinds = {e.kind for e in events}
+            socket_up = any(
+                e.kind == "socket" and str(e.detail or "") == "up" for e in events
+            )
+            if kinds & {"fill", "order_change", "book_move", "unprotected"} or socket_up:
                 return True
+            # Remember socket-down so a later False→True wakes. Do not wake on down.
+            if "socket" in kinds and isinstance(prev_fp, dict):
+                stored = dict(prev_fp)
+                stored["connected"] = bool(fp.get("connected"))
+                self._stay_up_book_fp = stored
         world = build_world_state(
             cycle=0, snap=s, opportunities=[], news_items=[]
         )
@@ -1717,6 +1866,8 @@ class ProEngine:
         act = dict(turn.last_act or {})
         result = dict(turn.last_result or {})
         strat = str(turn.last_strat or act.get("strategy") or "")
+        from abcxauto.brain import _successful_send_count
+
         if (
             not getattr(turn, "sends", None)
             and strat.lower() not in ("blocked",)
@@ -1748,13 +1899,21 @@ class ProEngine:
             "scan_at": str(s.get("scan_at") or ""),
             "session_range": dict(s.get("session_range") or {}),
             "scan_fetched": list(getattr(world, "scan_fetched", None) or []),
-            "news_items": list(
-                getattr(world, "news_items", None) or s.get("news_items") or []
+            "news_items": list(s.get("news_items") or []),
+            "research_web": (
+                dict(s.get("research_web"))
+                if isinstance(s.get("research_web"), dict)
+                else {}
+            ),
+            "_research_bag": (
+                dict(s.get("_research_bag"))
+                if isinstance(s.get("_research_bag"), dict)
+                else {}
             ),
             "candle_source": (
                 getattr(world, "candle_source", None) or s.get("candle_source") or ""
             ),
-            "sends": len(getattr(turn, "sends", None) or []),
+            "sends": _successful_send_count(getattr(turn, "sends", None)),
             "validation": str(result.get("note") or result.get("status") or "ok"),
             "structure_grade": str(act.get("_structure_grade") or ""),
             "pace": {"tier": "stay", "sleep_s": 0, "reason": "yield"},
@@ -1961,7 +2120,6 @@ class ProEngine:
                     continue
                 from abcxauto.park_clock import (
                     PULSE_S,
-                    clear_park,
                     honor_park,
                     infer_session_before_open,
                     load_alarm,
@@ -1980,7 +2138,9 @@ class ProEngine:
                     sess = inferred
                 honor = honor_park(session=sess, minutes_to_open=mins_now)
                 future_park = honor and bool(alarm.wake_at) and not alarm.due()
-                if not poked and not want_look and (not first_think or future_park):
+                if not poked and not want_look and (
+                    not first_think or future_park
+                ):
                     first_think = False
                     if honor and alarm.due():
                         self._resume_think = True
@@ -1991,7 +2151,7 @@ class ProEngine:
                                 await asyncio.sleep(0.25)
                                 continue
                             try:
-                                clear_park()
+                                self._clear_code_park()
                             except Exception:
                                 pass
                             # Research stay-up → RTH: clock/snap regular
@@ -1999,13 +2159,8 @@ class ProEngine:
                             # Chat drop is _apply_desk_mode_brain on start.
                             if await self._resume_if_research_rolled_to_rth(sess):
                                 continue
-                            # Stay-up pulse. Research keep-looking may
-                            # re-enter on timeout. Words-only flat
-                            # RTH waits for fill / order_change /
-                            # unprotected / poke / halt / a changed
-                            # lead fact or a genuinely changed book.
-                            # session_change into regular is the
-                            # same physics as the roll check above.
+                            # Stay-up pulse. Timeout does not mill.
+                            # Re-enter on RTH roll, lead change, or poke.
                             wait = float(PULSE_S)
                             self.state.status = "On"
                             ev = self._wake_event
@@ -2023,23 +2178,10 @@ class ProEngine:
                             if peek_interrupt() is not None:
                                 continue
                             if timed_out:
-                                keep_research = False
-                                try:
-                                    from abcxauto.desk_mode import (
-                                        research_keep_looking,
-                                    )
-
-                                    keep_research = research_keep_looking(sess)
-                                except Exception:
-                                    keep_research = False
                                 rolled = await self._resume_if_research_rolled_to_rth(
                                     sess
                                 )
-                                if (
-                                    keep_research
-                                    or rolled
-                                    or await self._stay_up_lead_changed(g)
-                                ):
+                                if rolled or await self._stay_up_lead_changed(g):
                                     self._resume_think = True
                                 continue
                             continue
@@ -2089,7 +2231,6 @@ class ProEngine:
                     logger.debug("abort fuse cancel failed", exc_info=True)
                 from abcxauto.agent_loop import _wake_grok_for_session
                 from abcxauto.park_clock import (
-                    clear_park,
                     ensure_next_look,
                     honor_park,
                     load_alarm,
@@ -2104,10 +2245,13 @@ class ProEngine:
                 stay = paper_stay_up(session)
                 if self._idle_on_session_cap(session):
                     continue
-                if not _wake_grok_for_session(session, needs_prot=needs_prot):
-                    # Overnight / after-close only. Do not call ensure_next_look
-                    # in RTH / premarket — stay-up looks on this process.
-                    if not stay:
+                if not stay and not _wake_grok_for_session(
+                    session, needs_prot=needs_prot
+                ):
+                    # Closed only. Stay-up (RTH / premarket / postmarket)
+                    # looks on this process. honor_park / ensure_next_look
+                    # are not postmarket parks.
+                    if honor_park(session=session, minutes_to_open=mins_open):
                         try:
                             ensure_next_look(
                                 flat=flat_book,
@@ -2149,6 +2293,17 @@ class ProEngine:
                 if skip:
                     self._note("SKIP", skip)
                     self.state.skip_reason = skip
+                    try:
+                        from abcxauto.park_clock import book_fingerprint
+                        from abcxauto.thin_rth_kill_look import (
+                            REASON_BOOK_UNRELIABLE,
+                            REASON_IBKR_DOWN,
+                        )
+
+                        if skip in (REASON_BOOK_UNRELIABLE, REASON_IBKR_DOWN):
+                            self._stay_up_book_fp = book_fingerprint(s)
+                    except Exception:
+                        logger.debug("dead-socket skip fingerprint failed", exc_info=True)
                     from abcxauto.thin_rth_kill_look import is_f10_look_halt
 
                     if is_f10_look_halt(skip):
@@ -2236,16 +2391,16 @@ class ProEngine:
                         continue
                     if out.get("_ended"):
                         # Duplicate lead fact. A look may end.
-                        self._rearm_after_think(out, session=session)
+                        self._rearm_after_think(out, session=session, g=g)
                         continue
                     if out.get("_parked"):
                         self.ui.put(("cycle", out))
                         if stay:
                             try:
-                                clear_park()
+                                self._clear_code_park()
                             except Exception:
                                 pass
-                            self._rearm_after_think(out, session=session)
+                            self._rearm_after_think(out, session=session, g=g)
                         elif honor_park(session=session, minutes_to_open=mins_open):
                             alarm = load_alarm()
                             if not (alarm.wake_at and alarm.seconds_until() is not None):
@@ -2269,10 +2424,10 @@ class ProEngine:
                     self.state.status = "On"
                     self.ui.put(("cycle", out))
                     # Stay-up writes no sit clock and does not call
-                    # ensure_next_look / set_wake. Overnight skip still parks.
+                    # ensure_next_look / set_wake. Closed skip still parks.
                     if stay:
                         try:
-                            clear_park()
+                            self._clear_code_park()
                         except Exception:
                             pass
                     elif honor_park(session=session, minutes_to_open=mins_open):
@@ -2290,11 +2445,12 @@ class ProEngine:
                                 )
                             except Exception:
                                 self._note("WAKE", "next look seed failed")
-                    self._rearm_after_think(out, session=session)
+                    self._rearm_after_think(out, session=session, g=g)
                 except Exception as e:
+                    logger.exception("look failed")
                     self.ui.put(("error", str(e)))
                     payload = {"_failed": True, "_stream_error": str(e)}
-                    self._rearm_after_think(payload, session=session)
+                    self._rearm_after_think(payload, session=session, g=g)
         finally:
             self._stop_monitor()
             self._worker_loop = None

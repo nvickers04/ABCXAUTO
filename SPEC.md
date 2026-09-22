@@ -19,7 +19,7 @@ the cost of the model. Same rules at $1k, $100k, or $1M.
 | Owner | Job |
 |-------|-----|
 | **Grok** | Tickets (`send`), knobs (`self_tune`) |
-| **Code** | Live facts, `ORDER EXAMPLES`, hard gates, overnight / after-close park |
+| **Code** | Live facts, `ORDER EXAMPLES`, hard gates, overnight park until 04:00 ET. Stay-up has no sit clock |
 | **Operator** | `.env` + paper TWS, Start, kill switch, Settings knobs (brain, pacing, link). No strategy card. |
 
 Do not grow the system prompt. Do not inject strategy menus or a Judge/Act form.
@@ -73,11 +73,12 @@ call the model again with those results on the same chat. Repeat until there
 are no `tool_calls`. If words only: stop calling the model until fill /
 order_change / unprotected / operator poke. Do not call the model again
 because it spoke. A poke does not start a new messages list. Tool results
-stay on the chat. A spoken line does not wipe it.
+stay on the chat. A spoken line does not wipe it. RTH leftover cash >
+deployed re-enters after 90s (not a general chair).
 
-Overnight / after-close / park drop the chat. Paper RTH / premarket stay up
-(no sit clock). Closed/postmarket does not call Grok (unprotected still does);
-park_clock until premarket. Session cap idles; chat is kept. Durable notes
+Overnight park is code until 04:00 ET premarket. Stay-up has no sit clock —
+premarket, postmarket, and RTH stay on this process (unprotected still interrupts).
+Session cap idles; chat is kept. Durable notes
 live in `journal.db` (14d or until `invalidate`). Wake carries a pointer
 (counts/tags/ages, no bodies). `recall` lists, gets, writes, and retires
 notes and cards; never auto-injected into `book` / `status` / `day_facts` /

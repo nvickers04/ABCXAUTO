@@ -186,6 +186,21 @@ def _journal_memory_bits() -> tuple[List[dict], str]:
     return recent, thesis
 
 
+def _narrative_leftover(state: dict) -> str:
+    """Leftover $ when TotalCashValue is known — even if mostly deployed."""
+    from abcxauto.world_state import (
+        _leftover_deployed_text,
+        _leftover_usd_of,
+        cash_deployed_pct,
+    )
+
+    leftover = _leftover_usd_of(state)
+    if leftover is None:
+        return ""
+    cash_pct, deployed_pct = cash_deployed_pct(state)
+    return _leftover_deployed_text(leftover, cash_pct, deployed_pct)
+
+
 def portfolio_narrative(state: dict) -> str:
     """One-liner summary of book/portfolio state."""
     nliq = state.get("net_liq")
@@ -203,6 +218,9 @@ def portfolio_narrative(state: dict) -> str:
         f"{n_pos} pos",
         f"{state.get('open_orders_count', 0)} orders",
     ]
+    leftover = _narrative_leftover(state)
+    if leftover:
+        bits.append(leftover)
     if unprotected:
         bits.append(f"UNPROTECTED:{','.join(str(x) for x in unprotected)}")
     else:
@@ -243,13 +261,16 @@ def build_book(
     recent_decisions, working_thesis = _journal_memory_bits()
     from abcxauto.world_state import _portfolio_risk, open_upnl_of, pct_of_nl
 
-    open_upnl = open_upnl_of(positions)
+    # Risk + uPnL follow open lots only — same filter as the positions list.
+    # Raw snap bags can carry zero-qty / bare-ticker tape residue.
+    open_lots = [p for p in positions if _is_open_lot(p)]
+    open_upnl = open_upnl_of(open_lots)
     halt_facts = clerk_halt_facts(net_liq, daily_pnl)
     total_cash = _account_float(
         account, "totalcashvalue", "TotalCashValue", "total_cash", "TotalCash"
     )
     port = _portfolio_risk(
-        positions,
+        open_lots,
         net_liq,
         total_cash=total_cash,
     )
@@ -264,7 +285,7 @@ def build_book(
         "halt_trips_at_pct_of_nl": pct_of_nl(halt_facts.get("halt_trips_at_usd"), net_liq),
         "ibkr_day_vs_halt_pct_of_nl": pct_of_nl(halt_facts.get("ibkr_day_vs_halt"), net_liq),
         "peak_dd_pct": _peak_dd_pct(net_liq),
-        "positions": _slim_positions(positions, net_liq=net_liq),
+        "positions": _slim_positions(open_lots, net_liq=net_liq),
         "portfolio_risk": port,
         "exposure": port.get("exposure"),
         "capital_liquidity": port.get("capital_liquidity"),

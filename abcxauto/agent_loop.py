@@ -772,6 +772,24 @@ async def execute_ticket(
             act["rationale"] = n_msg
             _record_clerk_block(act, asked, n_msg, stage="look_numbers")
             return {"status": "blocked", "note": n_msg, "reason_code": n_code}
+        try:
+            from abcxauto.desk_mode import new_risk_research_error
+
+            r_msg = new_risk_research_error(
+                str(params.get("symbol") or params.get("underlying") or ""),
+                snap,
+                strat=strat,
+            )
+        except Exception:
+            logger.debug("new-risk research gate failed closed", exc_info=True)
+            r_msg = (
+                "research_thin: new risk needs this-look candles and news|web on the name"
+            )
+        if r_msg:
+            act["strategy"] = act["action"] = BLOCKED_STRAT
+            act["rationale"] = r_msg
+            _record_clerk_block(act, asked, r_msg, stage="research")
+            return {"status": "blocked", "note": r_msg, "reason_code": "research_thin"}
     elif _book_unreliable(world, snap):
         note = "book unreliable - fail-closed"
         act["strategy"] = act["action"] = BLOCKED_STRAT
@@ -852,7 +870,8 @@ async def execute_ticket(
                         break
                 except (TypeError, ValueError):
                     continue
-        apply_size_pct_nl(params, net_liq=nl, price=px, strategy=strat)
+        # Refuse over-ceiling qty before apply_size_pct_nl can rewrite it —
+        # a rewrite would break the preview_token hash bind.
         size_note = mode_size_ticket_error(
             params, net_liq=nl, price=px, strategy=strat
         )
@@ -861,6 +880,16 @@ async def execute_ticket(
             act["rationale"] = size_note
             _record_clerk_block(act, asked, size_note, stage="mode_size")
             return {"status": "blocked", "note": size_note}
+        raw_qty = params.get("quantity")
+        try:
+            had_qty = int(float(raw_qty)) >= 1
+        except (TypeError, ValueError):
+            had_qty = False
+        apply_size_pct_nl(params, net_liq=nl, price=px, strategy=strat)
+        if not had_qty:
+            # Broker needs a quantity. The preview hash stays on the ticket
+            # Grok sent, which had size_pct_nl and no quantity.
+            act["_hash_as_sent_qty"] = True
         if strat in ("market_bracket", "oca", "bracket"):
             raw_qty = params.get("quantity")
             try:

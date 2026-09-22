@@ -1,15 +1,11 @@
-"""Explore/exploit is a MODE BIT that sizes, not a personality label.
+"""Explore/exploit is a MODE BIT, not a personality label.
 
-Grok still chooses ``size_pct_nl``. This module is the floor/ceiling that
-choice is clamped to — on send (``apply_size_pct_nl``) and via ``self_tune``.
-It runs even when paper risk gates are off, except when
-``max_risk_per_trade_pct`` is 0 (off): then Grok sizes and this module
-does not veto. 25% is the live walk-away ceiling for the risk knobs,
-not the working size.
+Notional percent of NetLiq is not a send refuse. Grok's quantity stands.
+Cash caps spend. Defined risk and ``max_risk_per_trade_pct`` cap loss
+when those gates are armed. ``size_pct_nl`` only fills a missing quantity.
 
 Option implied % of NL is premium × 100 (the contract multiplier), never
-underlying last × 100. That stock-equivalent notional is incomparable to
-``size_pct_nl`` and produced the production ``mode_size ~85 > 0.5`` miss.
+underlying last × 100.
 """
 
 from __future__ import annotations
@@ -17,9 +13,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
-# Single-digit % of NL. Not 1. Not 25. Not a working size — a ceiling
-# Grok may tighten. Do not copy this number into SYSTEM_PROMPT.
-MODE_SIZE_CEILING_EXPLORE = 8.0
+# Whole book. Notional is not a send refuse. Do not copy this into SYSTEM_PROMPT.
+MODE_SIZE_CEILING_EXPLORE = 100.0
 MODE_SIZE_FLOOR = 0.25
 SIZE_PCT_NL_KEY = "size_pct_nl"
 
@@ -91,11 +86,10 @@ def mode_size_ceiling(
     type: str = "",
     mode: str | None = None,
 ) -> float:
-    """Hard % NL ceiling for this mode/card. Grok may tighten, not raise.
+    """Notional band for facts and self_tune. Not a send refuse.
 
-    Explore and unproven exploit stay single-digit. A learning card never
-    inherits a wider band. Exploit plus graduated cards opens the
-    walk-away band — it does not set 25% as the working size.
+    The book may use the whole NetLiq. A learning card does not get a
+    tighter notional cap.
     """
     bit = str(mode or playbook_mode() or "explore").strip().lower()
     if bit not in ("explore", "exploit"):
@@ -230,33 +224,10 @@ def mode_size_ticket_error(
     price: Any = None,
     strategy: str = "",
 ) -> str:
-    """Reject if the ticket is still over the mode ceiling after clamp.
+    """Notional percent is not a refuse. Quantity stands.
 
-    One writer. When max_risk is off this returns empty — Grok's qty stands.
-    Option implied uses premium × 100, not the underlying last agent_loop
-    quoted for geometry.
+    Cash caps spend. Defined-risk and max_risk_per_trade_pct cap loss
+    when those gates are armed. Kept so callers have one writer.
     """
-    if max_risk_per_trade_off():
-        return ""
-    p = params if isinstance(params, dict) else {}
-    card = p.get("card")
-    ceiling = working_size_ceiling(card=card, type=strategy)
-    pct = _pos_float(p.get(SIZE_PCT_NL_KEY))
-    if pct is not None and pct > ceiling + 1e-6:
-        return f"mode_size {pct} > {ceiling}"
-    try:
-        from abcxauto.send import option_size_mark
-    except Exception:
-        def option_size_mark(_s, _p, fallback=None):
-            return _pos_float(fallback), 1.0
-
-    px, mult = option_size_mark(strategy, p, price)
-    implied = implied_size_pct_nl(
-        p.get("quantity"),
-        net_liq,
-        px,
-        multiplier=mult,
-    )
-    if implied is not None and implied > ceiling + 1e-6:
-        return f"mode_size {implied} > {ceiling}"
+    _ = (params, net_liq, price, strategy)
     return ""

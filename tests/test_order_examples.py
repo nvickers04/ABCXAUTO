@@ -5,6 +5,7 @@ import pytest
 from abcxauto.config import Config, get_config
 from abcxauto.order_examples import (
     COMBO_BAG_CLOSE,
+    NEVER_TEACH,
     ORDER_EXAMPLES,
     SENDABLE_TYPES,
     assert_examples_cover_strategies,
@@ -49,7 +50,30 @@ def test_self_tune_present():
 
 
 def test_sendable_types_matches_examples():
-    assert SENDABLE_TYPES == frozenset(ORDER_EXAMPLES)
+    assert SENDABLE_TYPES == frozenset(ORDER_EXAMPLES) - NEVER_TEACH
+    assert NEVER_TEACH <= set(ORDER_EXAMPLES)
+    assert NEVER_TEACH.isdisjoint(SENDABLE_TYPES)
+
+
+def test_never_teach_unlimited_shapes():
+    """defined_risk_only rejects these — do not teach or list as sendable."""
+    assert NEVER_TEACH == frozenset({"ratio_spread", "jade_lizard"})
+    text = format_order_examples()
+    assert "ratio_spread:" not in text
+    assert "jade_lizard:" not in text
+    assert "ratio_spread close:" not in text
+    assert "jade_lizard close:" not in text
+
+
+def test_bracket_and_vertical_kept_with_card():
+    assert "bracket" in SENDABLE_TYPES
+    assert "vertical_spread" in SENDABLE_TYPES
+    assert ORDER_EXAMPLES["bracket"]["card"] == "card-name"
+    assert ORDER_EXAMPLES["vertical_spread"]["card"] == "card-name"
+    text = format_order_examples()
+    assert "bracket:" in text
+    assert "vertical_spread:" in text
+    assert '"card":"card-name"' in text
 
 
 def test_format_order_examples():
@@ -67,6 +91,10 @@ def test_format_order_examples():
     assert "self_tune:" not in text
     assert "set_risk:" not in text
     assert "self_tune" not in ticket_strategy_names()
+    assert "ratio_spread" not in ticket_strategy_names()
+    assert "jade_lizard" not in ticket_strategy_names()
+    assert "ratio_spread" not in ALLOWED_ACTIONS
+    assert "jade_lizard" not in ALLOWED_ACTIONS
     assert NOT_TICKETS <= SENDABLE_TYPES
     # Combo close is a sibling line, not a new strategy key.
     assert "vertical_spread close:" in text
@@ -95,6 +123,8 @@ def test_format_order_examples():
     assert "Clerk will not invent omitted stop/target/qty" in text
     assert "Clerk fills missing" not in text
     assert "price_hint" not in text
+    assert "ratio_spread:" not in text
+    assert "jade_lizard:" not in text
     assert "ratio_spread close:" not in text
     assert "jade_lizard close:" not in text
     # OPEN dict values stay free of closing_position (assert_examples 1:1).
@@ -141,6 +171,7 @@ def test_examples_are_not_clerk_defaults_or_invented_fields():
 def test_combo_bag_close_excludes_unlimited_shapes():
     assert "ratio_spread" not in COMBO_BAG_CLOSE
     assert "jade_lizard" not in COMBO_BAG_CLOSE
+    assert NEVER_TEACH.isdisjoint(COMBO_BAG_CLOSE)
     assert COMBO_BAG_CLOSE <= set(ORDER_EXAMPLES)
 
 

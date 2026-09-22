@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from abcxauto.desktop.stream import format_stream_poke
 from abcxauto.pro_desktop import (
     AMBER,
     GREEN,
@@ -112,6 +113,11 @@ def _line(pro, needle: str):
     raise AssertionError(f"{needle!r} not painted in the spine")
 
 
+def _pane(pro) -> str:
+    """Visible live-look text from the hot poll path (single think_live Text)."""
+    return str(pro.think_live.value or "")
+
+
 BUFFER = "\n".join(
     [
         "--- GROK ---",
@@ -155,11 +161,19 @@ def test_stream_line_kind_classifies_every_marker_the_desk_emits():
     assert stream_line_kind("[fill]") == "poke"
     assert stream_line_kind("[order_change]") == "poke"
     assert stream_line_kind("[unprotected]") == "poke"
+    assert stream_line_kind("[unprotected] AVGO") == "poke"
     assert stream_line_kind("[stop_dist]") == "poke"
     assert stream_line_kind("hits=3 quoted=2 src=ibkr") == "scan"
     assert stream_line_kind('{"open_lots": [], "nl": 35000}') == "json"
     assert stream_line_kind("WMT is holding the shelf.") == "prose"
     assert stream_line_kind("   ") == "blank"
+
+
+def test_format_stream_poke_appends_unprotected_detail():
+    assert format_stream_poke("unprotected", "AVGO") == "[unprotected] AVGO"
+    assert format_stream_poke("unprotected", "") == "[unprotected]"
+    assert format_stream_poke("fill", "SPY") == "[fill]"
+    assert stream_line_kind(format_stream_poke("unprotected", "AVGO")) == "poke"
 
 
 def test_stream_view_lines_collapses_json_objects_and_keeps_chips():
@@ -242,13 +256,14 @@ def test_pane_and_copy_read_full_session_not_glass_tail(pro, tmp_path, monkeypat
 
     pro._think_sync_key = None
     pro._sync_think_stream()
-    painted = "\n".join(_texts(pro.col_stream))
+    painted = _pane(pro)
     assert "LOOK_ONE" in painted
     assert "LOOK_TWO" in painted
     assert painted != live
     assert painted != (pro.engine.state.think_live or "")[-24000:]
     assert "LOOK_ONE" not in (pro.engine.state.think_live or "")[-24000:]
-    assert pro.think_live.visible is False
+    assert pro.think_live.visible is True
+    assert pro.col_stream.controls == []
     assert "LOOK_ONE" in pro._pane_stream_text()
     status = (pro.lbl_stream_status.value or "").replace(",", "")
     assert str(len(session)) in status
@@ -283,17 +298,19 @@ def test_spine_collapses_json_object_lines_and_keeps_chips(pro):
     )
     pro.engine.state.think_live = body
     pro._sync_think_stream()
-    painted = _texts(pro.col_stream)
+    painted = _pane(pro)
     for chip in ("[book]", "[playbook]", "[scan]", "[think]", "[say]"):
         assert chip in painted
     assert "WMT is holding the 103 shelf." in painted
     assert "watching the gap" in painted
-    blob = "\n".join(painted)
-    assert dump not in blob
-    assert '"open_lots"' not in blob
-    assert '"cards"' not in blob
-    assert any(v.startswith("{json ") and v.endswith(" chars}") for v in painted)
-    stub = next(v for v in painted if v.startswith("{json "))
+    assert dump not in painted
+    assert '"open_lots"' not in painted
+    assert '"cards"' not in painted
+    assert "{json " in painted and " chars}" in painted
+    assert pro.col_stream.controls == []
+    # Styled per-line path still collapses JSON (tests / optional callers).
+    pro._sync_stream_lines(body)
+    stub = next(v for v in _texts(pro.col_stream) if v.startswith("{json "))
     assert _line(pro, stub).color == MUTED
     copied = pro._copy_stream_text()
     assert dump in copied
@@ -327,7 +344,7 @@ def test_pane_collapses_keep_file_json_without_clipping_disk(pro, tmp_path, monk
     pro.engine.state.think_live = session[-200:]
     pro._think_sync_key = None
     pro._sync_think_stream()
-    painted = "\n".join(_texts(pro.col_stream))
+    painted = _pane(pro)
     assert "[book]" in painted
     assert "[think]" in painted
     assert "[say]" in painted
@@ -335,6 +352,7 @@ def test_pane_collapses_keep_file_json_without_clipping_disk(pro, tmp_path, monk
     assert "watching the gap" in painted
     assert "SNDK_GAP" not in painted
     assert dump not in painted
+    assert pro.col_stream.controls == []
     assert path.read_text(encoding="utf-8") == before
     assert "SNDK_GAP" in before
     assert pro._copy_stream_text() == before
@@ -343,14 +361,15 @@ def test_pane_collapses_keep_file_json_without_clipping_disk(pro, tmp_path, monk
 def test_spine_paints_every_marker_verbatim(pro):
     pro.engine.state.think_live = BUFFER
     pro._sync_think_stream()
-    painted = _texts(pro.col_stream)
+    painted = _pane(pro)
     for raw in BUFFER.splitlines():
         if raw.strip():
             assert raw in painted, f"{raw!r} was not painted verbatim"
+    assert pro.col_stream.controls == []
 
 
 def test_spine_makes_clerk_and_grok_banners_distinct(pro):
-    pro.engine.state.think_live = "\n".join(
+    body = "\n".join(
         [
             "--- CLERK ---",
             "[clerk]",
@@ -364,7 +383,12 @@ def test_spine_makes_clerk_and_grok_banners_distinct(pro):
             "",
         ]
     )
+    pro.engine.state.think_live = body
     pro._sync_think_stream()
+    assert "watching the gap" in _pane(pro)
+    assert "[say]" in _pane(pro)
+    # Per-line colors live on the optional styled path.
+    pro._sync_stream_lines(body)
     assert _line(pro, "--- CLERK ---").color == MUTED
     assert _line(pro, "[clerk]").color == MUTED
     assert _line(pro, "--- GROK ---").color != MUTED
@@ -375,6 +399,8 @@ def test_spine_makes_clerk_and_grok_banners_distinct(pro):
 def test_spine_makes_think_and_say_visually_distinct(pro):
     pro.engine.state.think_live = BUFFER
     pro._sync_think_stream()
+    assert "Bought WMT 70 with a stop at 101." in _pane(pro)
+    pro._sync_stream_lines(BUFFER)
     # Reasoning is quiet, output is not — same font, different weight of voice.
     assert _line(pro, "WMT is holding the 103 shelf.").color == MUTED
     assert _line(pro, "Bought WMT 70 with a stop at 101.").color == TEXT
@@ -385,6 +411,9 @@ def test_spine_makes_think_and_say_visually_distinct(pro):
 def test_spine_makes_the_tool_skeleton_scannable(pro):
     pro.engine.state.think_live = BUFFER
     pro._sync_think_stream()
+    for chip in ("[book]", "[send]", "[fill]"):
+        assert chip in _pane(pro)
+    pro._sync_stream_lines(BUFFER)
     assert _line(pro, "[book]").weight is not None
     assert _line(pro, "[send]").color == GREEN
     assert _line(pro, "[quote = already have it]").color == MUTED
@@ -396,6 +425,9 @@ def test_spine_makes_the_tool_skeleton_scannable(pro):
 def test_spine_rules_off_look_boundaries(pro):
     pro.engine.state.think_live = BUFFER
     pro._sync_think_stream()
+    assert "--- GROK ---" in _pane(pro)
+    assert pro.col_stream.controls == []
+    pro._sync_stream_lines(BUFFER)
     banner = _line(pro, "--- GROK ---")
     holder = [c for c in pro.col_stream.controls if banner in list(_walk(c))][0]
     assert holder is not banner, "the banner needs its own separated block"
@@ -414,8 +446,9 @@ def test_empty_buffer_is_a_stated_state_not_a_blank_void(pro):
 def test_buffer_arriving_hides_the_fallback_but_keeps_it_readable(pro):
     pro.engine.state.think_live = BUFFER
     pro._sync_think_stream()
-    assert pro.think_live.visible is False
-    assert "Bought WMT 70" in "\n".join(_texts(pro.col_stream))
+    assert pro.think_live.visible is True
+    assert pro.col_stream.controls == []
+    assert "Bought WMT 70" in _pane(pro)
     assert "Bought WMT 70" in pro._copy_stream_text()
 
 
@@ -454,6 +487,10 @@ def test_scan_renders_inline_where_the_scan_happened(pro):
     s.think_live = BUFFER
     pro._sync_scan_tape()
     pro._sync_think_stream()
+    assert "hits=3 quoted=2 src=ibkr" in _pane(pro)
+    assert pro.col_stream.controls == []
+    # Inline screen mounts only on the styled per-line path.
+    pro._sync_stream_lines(BUFFER)
     mounted = list(_walk(pro.col_stream))
     assert pro.col_scan in mounted, "the screen belongs at the look that pulled it"
     assert pro.lbl_scan_head in mounted
@@ -468,7 +505,7 @@ def test_inline_scan_is_collapsible(pro):
     s.scan_hits = _ranked_hits()
     s.think_live = BUFFER
     pro._sync_scan_tape()
-    pro._sync_think_stream()
+    pro._sync_stream_lines(BUFFER)
     pro._toggle_scan_inline()
     assert pro.col_scan.visible is False
     pro._toggle_scan_inline()
@@ -484,9 +521,12 @@ def test_inline_scan_never_dresses_an_unranked_pull_as_ranked(pro):
         "quoted": 0,
         "rows": [{"symbol": "QQQ", "rank": 9}],
     }
-    s.think_live = "--- GROK ---\n[scan]\nhits=1 quoted=0 src=symbols\n"
+    body = "--- GROK ---\n[scan]\nhits=1 quoted=0 src=symbols\n"
+    s.think_live = body
     pro._sync_scan_tape()
     pro._sync_think_stream()
+    assert "hits=1 quoted=0 src=symbols" in _pane(pro)
+    pro._sync_stream_lines(body)
     assert pro.col_scan in list(_walk(pro.col_stream))
     assert "not ranked" in (pro.lbl_scan_head.value or "")
     blob = " | ".join(_texts(pro.col_scan))
@@ -505,6 +545,9 @@ def test_inline_scan_will_not_pair_a_stale_screen_with_this_look(pro):
     s.think_live = BUFFER
     pro._sync_scan_tape()
     pro._sync_think_stream()
+    assert "hits=3 quoted=2 src=ibkr" in _pane(pro)
+    assert pro.col_stream.controls == []
+    pro._sync_stream_lines(BUFFER)
     assert pro.col_scan not in list(_walk(pro.col_stream))
     assert "hits=3 quoted=2 src=ibkr" in _texts(pro.col_stream)
 
@@ -519,9 +562,12 @@ def test_empty_screen_mounts_inline_on_hits_zero(pro):
         "quoted": 0,
         "rows": [],
     }
-    s.think_live = "--- GROK ---\n[scan]\nhits=0 deepest=n/a src=empty\n"
+    body = "--- GROK ---\n[scan]\nhits=0 deepest=n/a src=empty\n"
+    s.think_live = body
     pro._sync_scan_tape()
     pro._sync_think_stream()
+    assert "hits=0" in _pane(pro)
+    pro._sync_stream_lines(body)
     assert pro.col_scan in list(_walk(pro.col_stream))
     assert "empty" in (pro.lbl_scan_head.value or "").lower()
 
@@ -540,6 +586,7 @@ def test_scan_is_no_longer_a_dashboard_section(pro):
     pro.engine.state.think_live = BUFFER
     pro._sync_scan_tape()
     pro._sync_think_stream()
+    pro._sync_stream_lines(BUFFER)
     mounted = [c for c in _walk(pro._page_overview()) if c is pro.col_scan]
     assert len(mounted) == 1, "the screen must live in exactly one place"
 

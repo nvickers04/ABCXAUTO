@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from abcxauto.broker.bars import bars_from_ibkr, hist_spec, ibkr_bar_freshness
 
 
@@ -30,6 +32,66 @@ def test_hist_spec_maps_resolutions():
     assert normalize_resolution("5-min") == "5"
     assert hist_spec("5min") == ("5 mins", "3 D")
     assert hist_spec("15 minutes") == ("15 mins", "5 D")
+
+
+def test_hist_spec_rejects_unknown_instead_of_daily():
+    """Unknown must error — never silently serve 1-day bars."""
+    from abcxauto.broker.bars import HIST_RESOLUTIONS, normalize_resolution
+
+    assert "15" in HIST_RESOLUTIONS
+    assert normalize_resolution("15") == "15"
+    assert normalize_resolution("bogus") == "BOGUS"
+    with pytest.raises(ValueError, match="unsupported resolution"):
+        hist_spec("bogus")
+    with pytest.raises(ValueError, match="unsupported resolution"):
+        hist_spec("15D")
+
+
+@pytest.mark.asyncio
+async def test_get_historical_bars_keeps_15_and_rejects_unknown():
+    """A 15 ask must request 15-mins hist; garbage resolution must not become D."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from abcxauto.broker.bars import IBKRBarsMixin
+
+    class Conn(IBKRBarsMixin):
+        def __init__(self):
+            self.ib = SimpleNamespace()
+            self.async_lock = asyncio.Lock()
+            self._seen = None
+
+        async def _ensure_connected(self):
+            return True
+
+        async def _prepare_contract(self, sym):
+            return SimpleNamespace(symbol=sym, conId=1)
+
+    conn = Conn()
+
+    async def hist_req(contract, **kw):
+        conn._seen = kw
+        bar = SimpleNamespace(
+            date="2026-09-21 10:00:00",
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=10,
+        )
+        return [bar]
+
+    conn.ib.reqHistoricalDataAsync = hist_req
+    out = await conn.get_historical_bars("AVGO", resolution="15", countback=40)
+    assert out.get("error") is None
+    assert out["resolution"] == "15"
+    assert conn._seen["barSizeSetting"] == "15 mins"
+    assert conn._seen["durationStr"] == "5 D"
+
+    bad = await conn.get_historical_bars("AVGO", resolution="bogus", countback=40)
+    assert "unsupported resolution" in str(bad.get("error") or "")
+    assert not bad.get("bars")
+    assert bad.get("resolution") != "D"
 
 
 def test_bars_from_ibkr_skips_bad_close():

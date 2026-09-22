@@ -50,7 +50,9 @@ def connection_status(connector: Any = None) -> Dict[str, Any]:
         host = str(getattr(cfg, "ibkr_host", "") or "")
     return {
         "ibkr_connected": bool(getattr(conn, "connected", False)),
-        "ibkr_data_stale": bool(getattr(conn, "ibkr_data_stale", False)),
+        # Explicit True only — same rule as risk_gates.ibkr_data_stale_reason.
+        # bool(MagicMock()) / truthy placeholders must not report stale.
+        "ibkr_data_stale": getattr(conn, "ibkr_data_stale", None) is True,
         "ibkr_host": host,
         "ibkr_port": _as_int(getattr(conn, "port", None), int(getattr(cfg, "ibkr_port", 0) or 0)),
         "ibkr_client_id": _as_int(

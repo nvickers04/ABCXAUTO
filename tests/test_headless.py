@@ -26,9 +26,7 @@ def test_format_cycle_digest_hold():
     text = format_cycle_digest(
         {
             "cycle": 1,
-            "stance": "idle",
             "strat": "hold",
-            "thesis": "Flat and protected. No A-grade setup.",
             "rationale": "Idle with full cash; skip weak tape.",
             "equity": 1_000_000.0,
             "pnl": 0.0,
@@ -39,12 +37,38 @@ def test_format_cycle_digest_hold():
     from tests.conftest import assert_no_cycle_counter
 
     assert_no_cycle_counter(text)
-    assert "idle -> hold" in text
+    assert text.startswith("hold")
     assert "CYCLE" not in text
     assert "NL=1000000" in text
-    assert "thesis:" in text
-    assert "why:" in text
+    assert "why: Idle with full cash" in text
+    assert "result: ok" in text
     assert "sleep 300s" in text
+    assert "judgment" not in text.lower()
+    assert "thesis:" not in text
+
+
+def test_format_cycle_digest_ignores_judgment_blob():
+    """Live cycles fill rationale/result/strat — nested judgment must not drive the digest."""
+    text = format_cycle_digest(
+        {
+            "strat": "bracket",
+            "rationale": "Live loop why.",
+            "result": {"status": "placed", "note": "oid=1"},
+            "judgment": {
+                "stance": "new_entry",
+                "thesis": "Judge thesis must not appear.",
+                "focus": "Judge focus must not appear.",
+            },
+            "equity": 500_000.0,
+            "pnl": 12.5,
+        }
+    )
+    assert "bracket" in text
+    assert "why: Live loop why." in text
+    assert "result: placed" in text
+    assert "Judge" not in text
+    assert "thesis:" not in text
+    assert "new_entry" not in text
 
 
 def test_format_record_skips_snapshots():
@@ -119,3 +143,6 @@ def test_headless_source_never_flattens_or_panics():
     assert ".panic(" not in src
     assert "apply_kill_switch" in src
     assert "logger = logging.getLogger(__name__)" in src
+    assert "judgment" not in src
+    assert "judge_error" not in src
+    assert "def run_headless" in src
