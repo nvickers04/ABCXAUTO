@@ -643,7 +643,6 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
             "sizing_floors",
             "auto_panic_on_breach",
             "defined_risk_only",
-            "cash_only",
         ) or k in RISK_FLOOR
     }
     controls_fix = {
@@ -669,6 +668,7 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
         # Persist the locked floor. Paper keeps operator risk_gates_enabled;
         # live always writes gates on so a stale file cannot linger.
         cfg_now = get_config()
+        # cash_only: operator file wins — never rewrite on start.
         update_risk_config(
             risk_gates_enabled=(
                 True if live_desk(cfg_now)
@@ -676,7 +676,6 @@ def ensure_immutable_floor(*, persist: bool = True) -> dict[str, Any]:
             ),
             auto_panic_on_breach=True,
             defined_risk_only=True,
-            cash_only=True,
             daily_loss_limit_pct=float(getattr(get_config(), "daily_loss_limit_pct")),
             max_position_pct=float(getattr(get_config(), "max_position_pct")),
             max_risk_per_trade_pct=float(getattr(get_config(), "max_risk_per_trade_pct")),

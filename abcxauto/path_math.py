@@ -372,6 +372,28 @@ def path_pnls_from_rows(rows: list[Any] | None) -> list[float]:
     return out
 
 
+def growth_unequal(p: float, b: float, f: float) -> float | None:
+    """g = p*ln(1+b*f) + (1-p)*ln(1-f). None if args invalid or f not in (0,1) or b<=0."""
+    try:
+        p_f = float(p)
+        b_f = float(b)
+        f_f = float(f)
+    except (TypeError, ValueError):
+        return None
+    if p_f != p_f or b_f != b_f or f_f != f_f:
+        return None
+    if p_f in (float("inf"), float("-inf")):
+        return None
+    if b_f in (float("inf"), float("-inf")) or b_f <= 0:
+        return None
+    if f_f in (float("inf"), float("-inf")) or not (0.0 < f_f < 1.0):
+        return None
+    try:
+        return p_f * math.log(1.0 + b_f * f_f) + (1.0 - p_f) * math.log(1.0 - f_f)
+    except (ValueError, OverflowError):
+        return None
+
+
 def path_facts(
     pnls: list[Any] | None,
     *,

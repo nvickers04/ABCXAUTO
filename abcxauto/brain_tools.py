@@ -1237,7 +1237,12 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
                 "strategy": {
                     "type": "string",
                     "enum": names,
-                    "description": "Ticket name from ORDER EXAMPLES.",
+                    "description": (
+                        "Ticket name from ORDER EXAMPLES. "
+                        "buy_option right=P is a long put, right=C a long call. "
+                        "vertical_spread right=P is a put vertical, right=C a call vertical. "
+                        "cancel_order is order_id only."
+                    ),
                 },
                 "symbol": _QUOTE_SCHEMA,
                 "quantity": {"type": "number"},
@@ -1249,7 +1254,10 @@ def _send_tool(strategy_names: list[str] | None = None) -> Any:
                 "order_id": {"type": "integer"},
                 "expiration": {"type": "string", "description": "YYYYMMDD"},
                 "strike": {"type": "number"},
-                "right": {"type": "string", "description": "C or P"},
+                "right": {
+                    "type": "string",
+                    "description": "C call or P put. buy_option right=P is a long put.",
+                },
                 "params": {
                     "type": "object",
                     "description": "Extra ticket fields from ORDER EXAMPLES if not top-level.",
@@ -1869,13 +1877,15 @@ def _compact_chain(raw: dict[str, Any], *, last: float | None = None) -> dict[st
 
 async def _mda_news(symbols: list[str], *, per_symbol: int = 4) -> list[dict[str, Any]]:
     """Headlines for named symbols. Timeout is a miss item, not an empty success."""
-    from abcxauto.news_feed import fetch_symbols_news
+    from abcxauto.news_feed import NEWS_LOOK_BUDGET_S, fetch_symbols_news
     from abcxauto.prints import mda_worth_asking
 
     syms = [s for s in symbols[:8] if s and mda_worth_asking(s)]
     if not syms:
         return []
-    return await fetch_symbols_news(syms, per_symbol=per_symbol)
+    return await fetch_symbols_news(
+        syms, per_symbol=per_symbol, budget_s=NEWS_LOOK_BUDGET_S
+    )
 
 
 def _combo_quote_spec(args: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2143,6 +2153,14 @@ async def _run_tool(
             record_look_tool(snap, "quote", data)
         except Exception:
             logger.debug("look snapshot quote record failed", exc_info=True)
+        if isinstance(data, dict):
+            try:
+                from abcxauto.world_state import attach_tool_math
+
+                attach_tool_math(data, world)
+            except Exception:
+                logger.debug("quote math page failed", exc_info=True)
+            raw = data
         return raw if isinstance(raw, str) else _hub()._clip(raw)
     if name == "fills":
         fn = getattr(connector, "get_fills", None) or getattr(connector, "get_recent_executions", None)
@@ -2728,6 +2746,13 @@ async def _run_tool(
                 record_look_tool(snap, "option_quote", row)
             except Exception:
                 logger.debug("look snapshot option_quote record failed", exc_info=True)
+            if isinstance(row, dict):
+                try:
+                    from abcxauto.world_state import attach_tool_math
+
+                    attach_tool_math(row, world)
+                except Exception:
+                    logger.debug("combo math page failed", exc_info=True)
             return _hub()._clip(row)
         specs = option_quote_specs(args)
         if not specs:
@@ -2755,11 +2780,25 @@ async def _run_tool(
         except Exception:
             logger.debug("look snapshot option_quote record failed", exc_info=True)
         if len(rows) == 1:
-            return _hub()._clip(_public_quote_row(rows[0]))
-        return _hub()._clip({
+            one = _public_quote_row(rows[0])
+            try:
+                from abcxauto.world_state import attach_tool_math
+
+                attach_tool_math(one, world)
+            except Exception:
+                logger.debug("option quote math page failed", exc_info=True)
+            return _hub()._clip(one)
+        packed = {
             "quotes": [_public_quote_row(r) if isinstance(r, dict) else r for r in rows],
             "use": "ibkr_live_for_decisions; mda_greeks_delayed",
-        })
+        }
+        try:
+            from abcxauto.world_state import attach_tool_math
+
+            attach_tool_math(packed, world)
+        except Exception:
+            logger.debug("option quote math page failed", exc_info=True)
+        return _hub()._clip(packed)
     if name == "option_facts":
         from abcxauto.option_facts import fetch_option_facts
 
@@ -2875,10 +2914,10 @@ async def _run_tool(
 
         return _hub()._clip(recall_tool(args if isinstance(args, dict) else {}))
     if name == "research_brief":
-        from abcxauto.desk_mode import load_research_brief, research_brief_look_payload
+        from abcxauto.desk_mode import load_research_brief, research_brief_tool_payload
 
         return _hub()._clip(
-            research_brief_look_payload(
+            research_brief_tool_payload(
                 load_research_brief(),
                 snap=snap if isinstance(snap, dict) else None,
                 world=world,

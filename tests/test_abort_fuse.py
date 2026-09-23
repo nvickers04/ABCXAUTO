@@ -20,7 +20,7 @@ from abcxauto.thin_rth_kill_look import (
     MODE_MANAGE,
     MODE_OPEN,
     PCS_CARD,
-    REASON_ALLOWLIST,
+    REASON_STRUCTURE,
     REASON_DD,
     REASON_F10,
     REASON_QTY0,
@@ -300,7 +300,7 @@ def test_exits_never_blocked_on_abort_fuse(monkeypatch):
     )
     assert blocked_f10 is not None
     assert blocked_f10["reason_code"] == REASON_F10
-    assert blocked_f10["reason_code"] != REASON_ALLOWLIST
+    assert blocked_f10["reason_code"] != REASON_STRUCTURE
 
 
 @pytest.mark.asyncio

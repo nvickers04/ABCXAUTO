@@ -135,12 +135,19 @@ def _spend_flags(total: float | None, *, unknown: bool) -> dict[str, Any]:
 
 
 def _sum_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Sum finite usd rows. Skip unknown. Fail-closed only if all unknown."""
+    if not rows:
+        return _spend_flags(0.0, unknown=False)
     total = 0.0
+    finite = 0
     for row in rows:
         parsed = _finite_usd(row.get("usd"))
         if parsed is None:
-            return _spend_flags(None, unknown=True)
+            continue
         total += parsed
+        finite += 1
+    if finite == 0:
+        return _spend_flags(None, unknown=True)
     return _spend_flags(total, unknown=False)
 
 

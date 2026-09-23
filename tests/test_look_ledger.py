@@ -69,6 +69,7 @@ def test_append_003_session_sum(tmp_path: Path):
 
 
 def test_unknown_usd_hard_no_estimate(tmp_path: Path):
+    """Every row unknown → fail-closed. One unknown does not invent an estimate."""
     path = tmp_path / "look_ledger.jsonl"
     row = append_call(
         asof="2026-09-22T13:00:00Z",
@@ -88,6 +89,57 @@ def test_unknown_usd_hard_no_estimate(tmp_path: Path):
     assert spend["hard"] is True
     assert spend["usd"] != 0.20
     assert "brief_loop_halted" not in spend
+
+
+def test_mixed_unknown_skips_sums_finite(tmp_path: Path):
+    """Unknown rows are skipped; finite peers still sum. Not fail-closed."""
+    path = tmp_path / "look_ledger.jsonl"
+    append_call(
+        asof="2026-09-22T10:00:00Z",
+        model="grok-4.6",
+        input_tokens=10,
+        output_tokens=5,
+        usd=None,
+        session="regular",
+        path=path,
+    )
+    append_call(
+        asof="2026-09-22T11:00:00Z",
+        model="grok-4.6",
+        input_tokens=100,
+        output_tokens=50,
+        usd=0.03,
+        session="regular",
+        path=path,
+    )
+    append_call(
+        asof="2026-09-22T12:00:00Z",
+        model="grok-4.6",
+        input_tokens=1,
+        output_tokens=1,
+        usd="unknown",
+        session="regular",
+        path=path,
+    )
+    spend = session_spend("2026-09-22", path=path)
+    assert spend == {
+        "usd": 0.03,
+        "unknown": False,
+        "preferred": False,
+        "hard": False,
+    }
+
+
+def test_empty_day_zero_not_hard(tmp_path: Path):
+    path = tmp_path / "look_ledger.jsonl"
+    path.write_text("", encoding="utf-8")
+    spend = session_spend("2026-09-22", path=path)
+    assert spend == {
+        "usd": 0.0,
+        "unknown": False,
+        "preferred": False,
+        "hard": False,
+    }
 
 
 def test_sum_1501_is_hard(tmp_path: Path):

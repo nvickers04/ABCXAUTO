@@ -64,7 +64,7 @@ def test_sized_book_avgo_positive_vs_spy():
     assert row["stop"] == STOP
 
 
-def test_sized_book_avgo_negative_vs_spy_zeros():
+def test_sized_book_avgo_negative_vs_spy_keeps_target():
     snap = {
         "nl": NL,
         "names": {
@@ -79,27 +79,9 @@ def test_sized_book_avgo_negative_vs_spy_zeros():
     scores = {"AVGO": {"vs_spy": -0.05, "partial": False}}
     out = sized_book(snap, scores)
     row = out["AVGO"]
-    assert row["sized"] == 0
-    assert row["excess"] == 89
-
-
-def test_partial_negative_vs_spy_does_not_flatten():
-    snap = {
-        "nl": NL,
-        "names": {
-            "AVGO": {
-                "last": LAST,
-                "stop": STOP,
-                "qty": QTY,
-                "aligned": True,
-            },
-        },
-    }
-    scores = {"AVGO": {"vs_spy": -0.05, "partial": True}}
-    out = sized_book(snap, scores)
-    row = out["AVGO"]
     assert row["sized"] == 22
     assert row["excess"] == 67
+    assert row["vs_spy"] == -0.05
 
 
 def test_unaligned_sized_none():

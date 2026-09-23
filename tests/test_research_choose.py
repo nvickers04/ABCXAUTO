@@ -168,11 +168,15 @@ async def test_research_brief_empty_snap_is_a_choice():
     this_look = data.get("this_look") or {}
     assert this_look.get("tools") == []
     assert this_look.get("facts") == []
+    assert "symbols" not in this_look
+    assert data.get("use") == "color, never a live trigger"
+    assert data.get("send_geometry") is False
     assert "scan|news" in str(data.get("need") or "")
     assert "candles" in str(data.get("need") or "")
     prior = data.get("prior_session") or {}
     assert "expectancy" not in data
     assert "expectancy" not in prior
+    assert "symbols" not in prior
 
 
 @pytest.mark.asyncio
@@ -189,7 +193,11 @@ async def test_research_brief_this_look_after_scan_and_news():
         {"items": [{"symbol": "NVDA", "headline": "NVDA prints after hours"}]},
     )
     data = await _tool("research_brief", {}, snap=snap)
-    tools = (data.get("this_look") or {}).get("tools") or []
+    this_look = data.get("this_look") or {}
+    tools = this_look.get("tools") or []
     assert "scan" in tools
     assert "news" in tools
     assert "need" not in data
+    assert "symbols" not in this_look
+    assert data.get("use") == "color, never a live trigger"
+    assert data.get("send_geometry") is False

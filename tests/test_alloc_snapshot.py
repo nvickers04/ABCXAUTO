@@ -168,3 +168,36 @@ async def test_missing_nl_marks_ok_false_and_empty_asof():
     assert snap["asof"] == ""
     assert snap["nl"] is None
     assert "SPY" in snap["names"]
+
+
+@pytest.mark.asyncio
+async def test_quote_keeps_ask_mid_and_iv():
+    class Conn:
+        async def get_live_quote(self, symbol, *, fresh=False):
+            return {
+                "symbol": symbol,
+                "last": 161.11,
+                "bid": 161.05,
+                "ask": 161.2,
+                "iv": 0.22,
+                "delta": -0.4,
+                "asof_iso": "2026-09-23T17:00:00Z",
+            }
+
+        async def get_historical_bars(self, symbol, *, resolution="D", countback=60):
+            return {"bars": [{"date": "2026-09-22", "close": 160.0}]}
+
+    snap = await build_allocation_snapshot(
+        Conn(),
+        positions=[{"symbol": "XOM", "quantity": 48}],
+        orders=[],
+        account={"NetLiquidation": 32541.48, "TotalCashValue": 24768.78},
+        scan_symbols=[],
+        today="2026-09-23",
+    )
+    row = snap["names"]["XOM"]
+    assert row["bid"] == 161.05
+    assert row["ask"] == 161.2
+    assert row["mid"] == (161.05 + 161.2) / 2.0
+    assert row["iv"] == 0.22
+    assert row["delta"] == -0.4

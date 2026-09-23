@@ -131,9 +131,6 @@ def sized_book(
             continue
 
         sized = target_shares(nl=nl, last=last, stop=stop)
-        # A partial window is not a year of relative strength. Do not flatten on it.
-        if vs_spy is not None and vs_spy < 0 and score.get("partial") is False:
-            sized = 0
         excess = max(0, held - sized)
         out[str(symbol)] = {
             "held": held,

@@ -351,12 +351,13 @@ def assemble_dossiers(
 
 
 def dossier_blocks_new_risk(dossier: dict | None) -> tuple[bool, str]:
-    """Whether new risk is blocked by this dossier. Exits are not decided here."""
+    """Whether new risk is blocked by this dossier. Exits are not decided here.
+
+    Unknown / unavailable / missing earnings do not refuse. Only a known
+    ``earnings_in`` inside 2 sessions refuses. A missing dossier still refuses.
+    """
     if dossier is None or dossier == {}:
         return True, "no_dossier"
-    earnings = dossier.get("earnings")
-    if earnings is None or earnings == "" or earnings == "unknown":
-        return True, "earnings_unknown"
     earnings_in = dossier.get("earnings_in")
     if (
         isinstance(earnings_in, int)
@@ -365,3 +366,255 @@ def dossier_blocks_new_risk(dossier: dict | None) -> tuple[bool, str]:
     ):
         return True, "earnings_window"
     return False, ""
+
+
+def _finite_last(raw: Any) -> Any:
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if n != n or n <= 0:  # NaN / non-positive
+        return None
+    return n
+
+
+def _sym_match(raw: Any, sym: str) -> bool:
+    name = str(raw or "").strip().upper()
+    return bool(name) and name == sym
+
+
+def _session_row(snap: dict, sym: str) -> dict[str, Any] | None:
+    store = snap.get("session_range")
+    if not isinstance(store, dict):
+        return None
+    row = store.get(sym)
+    if row is None:
+        for key, val in store.items():
+            if _sym_match(key, sym):
+                row = val
+                break
+    return row if isinstance(row, dict) else None
+
+
+def _scan_hit_row(snap: dict, sym: str) -> dict[str, Any] | None:
+    hits = snap.get("scan_hits") if isinstance(snap.get("scan_hits"), dict) else {}
+    rows = hits.get("rows") if isinstance(hits, dict) else None
+    if not isinstance(rows, list):
+        return None
+    for raw in rows:
+        if isinstance(raw, dict) and _sym_match(raw.get("symbol"), sym):
+            return raw
+    return None
+
+
+def _quote_on_snap(snap: dict, sym: str) -> Any:
+    quotes = snap.get("ibkr_live_quotes")
+    if isinstance(quotes, dict):
+        if sym in quotes:
+            last = _finite_last(quotes.get(sym))
+            if last is not None:
+                return last
+        for key, raw in quotes.items():
+            if _sym_match(key, sym):
+                last = _finite_last(raw)
+                if last is not None:
+                    return last
+    for blob in (snap.get("quotes"),):
+        if not isinstance(blob, list):
+            continue
+        for row in blob:
+            if not isinstance(row, dict) or not _sym_match(row.get("symbol"), sym):
+                continue
+            last = _finite_last(row.get("last") if row.get("last") is not None else row.get("mid"))
+            if last is not None:
+                return last
+    return None
+
+
+def _existing_last(snap: dict, sym: str) -> Any:
+    """Copy a last that already exists on the snap. Never invent one."""
+    row = _session_row(snap, sym)
+    if isinstance(row, dict):
+        last = _finite_last(row.get("last"))
+        if last is not None:
+            return last
+    hit = _scan_hit_row(snap, sym)
+    if isinstance(hit, dict):
+        last = _finite_last(hit.get("last"))
+        if last is not None:
+            return last
+    return _quote_on_snap(snap, sym)
+
+
+def _news_headlines_for(snap: dict, sym: str) -> tuple[str, list[dict]]:
+    items = snap.get("news_items")
+    if not isinstance(items, list):
+        return "", []
+    out: list[dict] = []
+    asof = ""
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        tagged = str(it.get("symbol") or it.get("ticker") or "").strip().upper()
+        headline = str(it.get("headline") or it.get("title") or it.get("text") or "")
+        if tagged == sym or (
+            not tagged and headline.upper().startswith(sym)
+            and (len(headline) == len(sym) or not headline[len(sym) : len(sym) + 1].isalnum())
+        ):
+            out.append(dict(it))
+            if not asof:
+                asof = str(it.get("asof") or it.get("news_asof") or it.get("ts") or "")
+    return asof, out
+
+
+def _candles_this_look(snap: dict, sym: str) -> bool:
+    if _session_row(snap, sym) is not None:
+        return True
+    bag = snap.get("_research_bag")
+    if not isinstance(bag, dict):
+        return False
+    for fact in bag.get("facts") or []:
+        if not isinstance(fact, dict):
+            continue
+        if str(fact.get("source") or "") != "candles":
+            continue
+        text = str(fact.get("text") or "")
+        if text.upper().startswith(sym) and (
+            len(text) == len(sym) or not text[len(sym) : len(sym) + 1].isalnum()
+        ):
+            return True
+        for part in text.split("|"):
+            bit = part.strip()
+            if bit.upper().startswith(sym) and (
+                len(bit) == len(sym) or not bit[len(sym) : len(sym) + 1].isalnum()
+            ):
+                return True
+    return False
+
+
+def _news_this_look(snap: dict, sym: str) -> bool:
+    _asof, headlines = _news_headlines_for(snap, sym)
+    return bool(headlines)
+
+
+def _web_this_look(snap: dict) -> bool:
+    """True for a fetched page or a search_public hit (text / cited urls)."""
+    page = snap.get("research_web")
+    if not isinstance(page, dict) or str(page.get("error") or "").strip():
+        return False
+    if str(page.get("text") or "").strip():
+        return True
+    if str(page.get("url") or "").strip() and str(page.get("title") or "").strip():
+        return True
+    results = page.get("results")
+    if isinstance(results, list):
+        for row in results:
+            if isinstance(row, dict) and str(row.get("url") or "").strip():
+                return True
+    return False
+
+
+def _scan_priced_this_look(snap: dict, sym: str) -> bool:
+    hit = _scan_hit_row(snap, sym)
+    if hit is None:
+        return False
+    if _finite_last(hit.get("last")) is not None:
+        return True
+    return _quote_on_snap(snap, sym) is not None
+
+
+def this_look_has_research(snap: dict | None, symbol: str) -> bool:
+    """True when this look already has news, web, candles, or a priced scan hit."""
+    if not isinstance(snap, dict):
+        return False
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return False
+    return bool(
+        _news_this_look(snap, sym)
+        or _web_this_look(snap)
+        or _candles_this_look(snap, sym)
+        or _scan_priced_this_look(snap, sym)
+    )
+
+
+def ensure_this_look_dossier(snap: dict | None, symbol: str) -> dict | None:
+    """Upsert a real dossier from this-look research. None if research is thin.
+
+    Copies price / headlines / web already on the snap. Does not invent a last,
+    earnings date, or headline. Earnings unknown is allowed.
+    """
+    if not isinstance(snap, dict):
+        return None
+    sym = str(symbol or "").strip().upper()
+    if not sym or not this_look_has_research(snap, sym):
+        return None
+
+    news_asof, headlines = _news_headlines_for(snap, sym)
+    web_asof = ""
+    web_val: Any = "unavailable"
+    if _web_this_look(snap):
+        page = snap.get("research_web") if isinstance(snap.get("research_web"), dict) else {}
+        web_asof = str(page.get("asof") or page.get("web_asof") or "")
+        web_val = page.get("text") or page.get("title") or "ok"
+
+    session = _session_row(snap, sym) or {}
+    hit = _scan_hit_row(snap, sym)
+    scan_rows = [hit] if isinstance(hit, dict) else []
+    gap_bits = _scan_gap(scan_rows, sym)
+
+    bag = snap.get("_research_bag") if isinstance(snap.get("_research_bag"), dict) else {}
+    calendar = bag.get("calendar") if isinstance(bag.get("calendar"), dict) else {}
+    # Also accept a top-level calendar bag if present.
+    if not calendar and isinstance(snap.get("calendar"), dict):
+        calendar = snap["calendar"]
+    cal_bits = _calendar_fields(calendar, sym)
+
+    spend_src = bag.get("spend") if isinstance(bag.get("spend"), dict) else snap.get("session_spend")
+    if not isinstance(spend_src, dict):
+        spend_src = None
+    spend_bits = _spend_fields(spend_src)
+
+    last = _existing_last(snap, sym)
+    price_asof = ""
+    bar_date = session.get("date") or session.get("bar_date")
+    vs_spy = session.get("vs_spy")
+    if isinstance(hit, dict) and not price_asof:
+        price_asof = str(hit.get("asof") or hit.get("scan_asof") or "")
+
+    dossier = {
+        "price_asof": price_asof,
+        "bar_date": bar_date,
+        "vs_spy": vs_spy,
+        "last": last,
+        "scan_asof": gap_bits.get("scan_asof", ""),
+        "gap": gap_bits.get("gap", "unavailable"),
+        "vs_open": gap_bits.get("vs_open", "unavailable")
+        if gap_bits.get("vs_open") is not None
+        else session.get("vs_open", "unavailable"),
+        "calendar_asof": cal_bits.get("calendar_asof", ""),
+        "earnings": cal_bits.get("earnings", "unknown"),
+        "earnings_in": cal_bits.get("earnings_in"),
+        "ex_div": cal_bits.get("ex_div"),
+        "news_asof": news_asof,
+        "headlines": headlines,
+        "web_asof": web_asof,
+        "web": web_val,
+        "odds_asof": "",
+        "odds": "unavailable",
+        "spend_asof": spend_bits.get("spend_asof", ""),
+        "session_usd": spend_bits.get("session_usd", "unavailable"),
+    }
+    if dossier["gap"] is None:
+        dossier["gap"] = "unavailable"
+    if dossier["earnings"] in (None, ""):
+        dossier["earnings"] = "unknown"
+    if dossier["vs_open"] is None:
+        dossier["vs_open"] = "unavailable"
+
+    store = snap.get("dossiers")
+    if not isinstance(store, dict):
+        store = {}
+        snap["dossiers"] = store
+    store[sym] = dossier
+    return dossier

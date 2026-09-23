@@ -34,6 +34,137 @@ logger = logging.getLogger(__name__)
 
 _LIVE_ENGINES: weakref.WeakSet = weakref.WeakSet()
 
+# Fresh prior good snap: still call the model under book_unreliable (wake book_stale).
+_BOOK_STALE_LOOK_S = 60.0
+
+
+def skip_model_look(
+    card_open: bool,
+    same_print: bool,
+    book_unreliable: bool = False,
+    prior_snap_age_s: float | None = None,
+) -> bool:
+    """True = do not call grok_turn this look.
+
+    Unchanged print skips only when the session work card is closed.
+    book_unreliable skips unless a previous good snap is under 60s old.
+    """
+    if book_unreliable:
+        try:
+            age = (
+                float(prior_snap_age_s)
+                if prior_snap_age_s is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            age = None
+        if age is not None and age < _BOOK_STALE_LOOK_S:
+            return False
+        return True
+    if card_open:
+        return False
+    return bool(same_print)
+
+
+def _snap_book_unreliable(snap: dict[str, Any] | None) -> bool:
+    blob = snap if isinstance(snap, dict) else {}
+    if blob.get("book_unreliable") is True:
+        return True
+    pulse = blob.get("reality_pulse")
+    if isinstance(pulse, dict) and pulse.get("book_unreliable") is True:
+        return True
+    gates = blob.get("gates")
+    if isinstance(gates, dict) and gates.get("book_unreliable") is True:
+        return True
+    return False
+
+
+def look_print_fingerprint(snap: dict[str, Any] | None) -> tuple[Any, ...]:
+    """last / stop / cash / session — unchanged-print key for the look loop."""
+    from abcxauto.world_state import STOP_DIST_TICK
+
+    s = snap if isinstance(snap, dict) else {}
+    hours = s.get("market_hours") if isinstance(s.get("market_hours"), dict) else {}
+    block = hours.get("session")
+    if isinstance(block, dict):
+        sess = str(block.get("status") or "").strip().lower()
+    else:
+        sess = str(block or s.get("session") or "").strip().lower()
+    acct = s.get("account") if isinstance(s.get("account"), dict) else {}
+    cash_i: int | None = None
+    for key in (
+        "TotalCashValue",
+        "total_cash",
+        "CashBalance",
+        "cash",
+        "AvailableFunds",
+    ):
+        raw = acct.get(key)
+        if raw is None:
+            continue
+        try:
+            cash_i = int(round(float(raw)))
+            break
+        except (TypeError, ValueError):
+            continue
+    pos = [p for p in (s.get("positions") or []) if isinstance(p, dict)]
+    orders = list(s.get("open_orders") or [])
+    try:
+        from abcxauto.world_state import attach_covering_last_stops
+
+        lots = attach_covering_last_stops(pos, orders)
+    except Exception:
+        lots = pos
+    tick = float(STOP_DIST_TICK) if STOP_DIST_TICK else 0.01
+    lot_keys: list[tuple[Any, ...]] = []
+    for p in lots:
+        ident = str(
+            p.get("conId") or p.get("con_id") or p.get("symbol") or ""
+        ).strip()
+        if not ident:
+            continue
+        last = None
+        stop = None
+        for lk in ("last", "mkt", "market_price", "marketPrice"):
+            if p.get(lk) is None:
+                continue
+            try:
+                last = float(p[lk])
+                break
+            except (TypeError, ValueError):
+                continue
+        for sk in ("stop", "stop_price", "aux_price", "auxPrice", "last_stop"):
+            if p.get(sk) is None:
+                continue
+            try:
+                stop = float(p[sk])
+                break
+            except (TypeError, ValueError):
+                continue
+        qty = None
+        for qk in ("quantity", "position", "qty"):
+            if p.get(qk) is None:
+                continue
+            try:
+                qty = float(p[qk])
+                break
+            except (TypeError, ValueError):
+                continue
+        last_r = (
+            None
+            if last is None
+            else round(round(last / tick) * tick, 4)
+        )
+        stop_r = (
+            None
+            if stop is None
+            else round(round(stop / tick) * tick, 4)
+        )
+        qty_r = None if qty is None else round(qty, 6)
+        lot_keys.append((ident, last_r, stop_r, qty_r))
+    lot_keys.sort()
+    return (sess, cash_i, tuple(lot_keys))
+
 
 def reset_pro_engines_for_tests(*, join_s: float = 3.0) -> None:
     """Join leftover stay-up workers. Tests only.
@@ -327,6 +458,9 @@ class ProEngine:
         self._scan_only_streak = 0
         self._work_streak = 0
         self._last_look_researched = False
+        self._last_good_snap_mono: float | None = None
+        self._last_look_print: tuple[Any, ...] | None = None
+        self._wake_book_stale = False
         # Armed once per IBKR connect: first flat orphan sweep is skipped.
         self._flat_start_orphan_gate = False
         self._brain_key: tuple = ()
@@ -1273,6 +1407,69 @@ class ProEngine:
             snap=blob,
         )
 
+    def _persist_no_ticket_card(
+        self, payload: dict[str, Any], *, session: str
+    ) -> None:
+        """Finished look, no send: keep the session work card open.
+
+        Spoken no-ticket / stand-down with undeployed cash or a flat book
+        must not leave card_is_open false (unchanged-print would skip).
+        Does not rule_out. Does not clear cash_undeployed.
+        """
+        from abcxauto import session_work as sw_mod
+        from abcxauto.world_state import book_is_flat, leftover_dominates
+
+        positions = list(payload.get("positions") or [])
+        orders = list(payload.get("open_orders") or [])
+        ws = (
+            payload.get("world_state")
+            if isinstance(payload.get("world_state"), dict)
+            else {}
+        )
+        try:
+            flat = bool(ws.get("flat")) or book_is_flat(positions, orders)
+        except Exception:
+            flat = bool(ws.get("flat")) or (not positions)
+        bag = (
+            ws.get("portfolio_risk")
+            if isinstance(ws.get("portfolio_risk"), dict)
+            else ws
+        )
+        leftover = False
+        try:
+            leftover = leftover_dominates(bag)
+        except Exception:
+            leftover = False
+        try:
+            card = sw_mod.load()
+        except Exception:
+            logger.debug("session_work load for no-ticket failed", exc_info=True)
+            return
+        already = bool(card.get("cash_undeployed"))
+        if not (flat or leftover or already):
+            return
+        card["cash_undeployed"] = True
+        if not str(card.get("idle_since") or "").strip():
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            card["idle_since"] = datetime.now(ZoneInfo("America/New_York")).isoformat()
+        if session:
+            card["session"] = str(session)
+        card = sw_mod.note_no_ticket(card)
+        try:
+            idle = float(
+                sw_mod.idle_h(idle_since=str(card.get("idle_since") or "") or None)
+            )
+            if idle == idle:
+                card["idle_h"] = idle
+        except Exception:
+            logger.debug("session_work idle_h refresh failed", exc_info=True)
+        try:
+            sw_mod.save(card)
+        except Exception:
+            logger.debug("session_work no-ticket save failed", exc_info=True)
+
     def _rearm_after_think(
         self, out: dict | None, *, session: str, g: Any = None
     ) -> float:
@@ -1363,6 +1560,21 @@ class ProEngine:
             self._mill_gave_up = False
             self._mill_wake = False
             self._kill_entry_in_flight = False
+            # Spoken no-ticket / stand-down: open the session work card so
+            # an unchanged flat print does not skip the next model look.
+            # Skip zero-token empties (junk rationale), duplicate-lead
+            # (_ended), and unpaid tickets (not finished above).
+            if (
+                sends == 0
+                and not ended
+                and not _look_text_is_junk(rationale)
+            ):
+                try:
+                    self._persist_no_ticket_card(payload, session=session)
+                except Exception:
+                    logger.debug(
+                        "session_work no-ticket persist failed", exc_info=True
+                    )
         if parked and not stay:
             self._fail_streak = 0
             self._cold_next = True
@@ -1406,6 +1618,7 @@ class ProEngine:
                 except Exception:
                     pass
         elif stay:
+            # A hold / stand-down is a finished look. Sit for a real event.
             self._resume_think = False
             self._cold_next = False
             self._mill_wake = False
@@ -1798,6 +2011,9 @@ class ProEngine:
             day = None
         if not isinstance(day, dict):
             day = {}
+        if getattr(self, "_wake_book_stale", False):
+            day["book_stale"] = True
+            self._wake_book_stale = False
         try:
             from abcxauto.desk_mode import is_rth_session
 
@@ -2264,6 +2480,56 @@ class ProEngine:
                     except Exception:
                         logger.debug("kill-look skip failed", exc_info=True)
                         skip = ""
+                # Continuity: session work + book_unreliable / prior good snap.
+                from abcxauto.thin_rth_kill_look import REASON_BOOK_UNRELIABLE
+
+                sw_mod = None
+                try:
+                    from abcxauto import session_work as sw_mod
+                except ImportError:
+                    sw_mod = None
+                book_unrel = _snap_book_unreliable(s) or (
+                    skip == REASON_BOOK_UNRELIABLE
+                )
+                if not book_unrel:
+                    self._last_good_snap_mono = time.monotonic()
+                prior_age: float | None = None
+                mono = getattr(self, "_last_good_snap_mono", None)
+                if mono is not None:
+                    prior_age = max(0.0, time.monotonic() - float(mono))
+                card_open = True  # missing session_work → never unchanged-skip
+                same_print = False
+                if sw_mod is not None:
+                    try:
+                        card = sw_mod.load()
+                        card_open = bool(sw_mod.card_is_open(card))
+                        fp = look_print_fingerprint(s)
+                        prev = getattr(self, "_last_look_print", None)
+                        same_print = prev is not None and fp == prev
+                    except Exception:
+                        logger.debug("session_work look gate failed", exc_info=True)
+                        card_open = True
+                        same_print = False
+                if skip == REASON_BOOK_UNRELIABLE:
+                    # Gate the existing book_unreliable skip site.
+                    if not skip_model_look(
+                        card_open, same_print, True, prior_age
+                    ):
+                        skip = ""
+                        self._wake_book_stale = True
+                elif not skip:
+                    if book_unrel and not skip_model_look(
+                        card_open, same_print, True, prior_age
+                    ):
+                        # Proceeding on a briefly stale book — wake bit only.
+                        self._wake_book_stale = True
+                    elif sw_mod is not None and skip_model_look(
+                        card_open, same_print, False, prior_age
+                    ):
+                        logger.info("look unchanged")
+                        self._note("SKIP", "look unchanged")
+                        self.state.skip_reason = "look unchanged"
+                        continue
                 # Start/bounce one-shot is spent after the first look gate.
                 self._force_first_look = False
                 if skip:
@@ -2339,6 +2605,10 @@ class ProEngine:
                     if gen != self._gen or self.stop.is_set():
                         continue
                     out = await self._host_think(n, g, s, resume=resume)
+                    try:
+                        self._last_look_print = look_print_fingerprint(s)
+                    except Exception:
+                        logger.debug("look print fingerprint failed", exc_info=True)
                     try:
                         from abcxauto.park_clock import book_fingerprint
 

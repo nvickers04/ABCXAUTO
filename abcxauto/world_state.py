@@ -1512,7 +1512,31 @@ def day_facts(world: Any, scorecard: dict[str, Any] | None = None) -> dict[str, 
             facts["allocation"] = alloc
     except Exception:
         pass
+    facts["div_positions"] = _compact_div_positions(getattr(world, "positions", None))
     return facts
+
+
+def _compact_div_positions(positions: Any) -> list[dict[str, Any]]:
+    """Lots the diversification page can weigh. Cash rows dropped."""
+    out: list[dict[str, Any]] = []
+    for pos in positions or []:
+        if not isinstance(pos, dict):
+            continue
+        sym = str(pos.get("symbol") or "").strip()
+        if not sym:
+            continue
+        sec = str(pos.get("secType") or pos.get("sec_type") or "STK")
+        if sec.upper() in ("CASH", "BAL", "MONEY"):
+            continue
+        qty = pos.get("quantity")
+        if qty is None:
+            qty = pos.get("position")
+        row: dict[str, Any] = {"symbol": sym, "secType": sec, "quantity": qty}
+        for key in ("marketValue", "market_value", "right", "underlying", "underSymbol"):
+            if pos.get(key) not in (None, ""):
+                row[key] = pos.get(key)
+        out.append(row)
+    return out
 
 
 def _session_cap_day(world: Any) -> dict[str, Any]:
@@ -1878,19 +1902,19 @@ def _allocation_rank_line(day: dict[str, Any]) -> str:
     sorts after any lot that has one. Not a buy list and not a send.
     """
     alloc = day.get("allocation") if isinstance(day.get("allocation"), dict) else {}
-    ranked: list[tuple[bool, float, float, dict[str, Any]]] = []
-    for lot in alloc.get("lots") or []:
+    ranked: list[tuple[bool, float, float, int, dict[str, Any]]] = []
+    for i, lot in enumerate(alloc.get("lots") or []):
         if not isinstance(lot, dict) or not str(lot.get("symbol") or "").strip():
             continue
         eff = _real_float(lot.get("eff"))
         cap = _real_float(lot.get("pct_nl")) or 0.0
-        ranked.append((eff is None, eff if eff is not None else 0.0, -cap, lot))
+        ranked.append((eff is None, eff if eff is not None else 0.0, -cap, i, lot))
     ranked.sort()
     bits: list[str] = []
     nl = _real_float(day.get("nl"))
     if nl is None:
         nl = _real_float(alloc.get("nl"))
-    for _missing, _eff, _cap, lot in ranked:
+    for _missing, _eff, _cap, _i, lot in ranked:
         sym = str(lot.get("symbol") or "").strip()
         part = sym
         if lot.get("pct_nl") is not None:
@@ -2603,12 +2627,366 @@ def format_wake(
             body = f"{body} {note_bit}".strip()
     except Exception:
         logger.debug("memory wake bit failed", exc_info=True)
+    # pace_line / work_line lead the desk (facts only — no sell/rotate/should/must).
+    head: list[str] = []
+    pace_line = day.get("pace_line") if isinstance(day, dict) else None
+    if isinstance(pace_line, str) and pace_line.strip():
+        pl = pace_line.strip()
+        head.append(pl if pl.endswith(".") else f"{pl}.")
+    work_line = day.get("work_line") if isinstance(day, dict) else None
+    if isinstance(work_line, str) and work_line.strip():
+        wl = work_line.strip()
+        head.append(wl if wl.endswith(".") else f"{wl}.")
     lead = worst_wake_fact(unprotected=unprotected, day=day, session=session)
     if lead:
         if not lead.endswith("."):
             lead = lead + "."
-        return f"{lead}\n{body}"
+        head.append(lead)
+    if isinstance(day, dict) and day.get("book_stale") is True:
+        body = f"{body} book_stale".strip()
+    pages = _directional_pages(day if isinstance(day, dict) else {})
+    if pages:
+        body = f"{body}\n{pages}".strip() if body else pages
+    if head:
+        return "\n".join(head) + (f"\n{body}" if body else "")
     return body
+
+
+def _directional_pages(day: dict[str, Any]) -> str:
+    """Diversification, size, and order-type facts. Inputs filled, answers blank."""
+    if not isinstance(day.get("allocation"), dict):
+        return ""
+    alloc = day["allocation"]
+    lots = [r for r in (alloc.get("lots") or []) if isinstance(r, dict)]
+    nl = _real_float(alloc.get("nl"))
+    if nl is None:
+        nl = _real_float(day.get("nl"))
+    cash = _real_float(alloc.get("leftover_usd"))
+    raw_pos = day.get("div_positions")
+    has_mv = False
+    if isinstance(raw_pos, list):
+        for pos in raw_pos:
+            if not isinstance(pos, dict):
+                continue
+            if _real_float(pos.get("marketValue") or pos.get("market_value")):
+                has_mv = True
+                break
+    if has_mv:
+        positions = [p for p in raw_pos if isinstance(p, dict)]
+    else:
+        positions = []
+        for lot in lots:
+            sym = str(lot.get("symbol") or "").strip()
+            if not sym:
+                continue
+            qty = lot.get("qty")
+            last = _real_float(lot.get("last"))
+            row: dict[str, Any] = {
+                "symbol": sym,
+                "secType": str(lot.get("secType") or lot.get("sec_type") or "STK"),
+                "quantity": qty if qty is not None else 0,
+            }
+            mv = _real_float(lot.get("marketValue"))
+            if mv is None and last is not None and qty is not None:
+                try:
+                    mv = abs(float(qty)) * last
+                except (TypeError, ValueError):
+                    mv = None
+            if mv is not None:
+                row["marketValue"] = mv
+            positions.append(row)
+    blocks: list[str] = []
+    try:
+        from abcxauto.div_fact import diversification_facts, format_diversification
+
+        betas = day.get("betas") if isinstance(day.get("betas"), dict) else None
+        heat = day.get("heat_groups") if isinstance(day.get("heat_groups"), list) else None
+        facts = diversification_facts(
+            positions,
+            net_liq=nl,
+            total_cash=cash,
+            betas=betas,
+            heat_groups=heat,
+        )
+        board = day.get("board_line")
+        div = format_diversification(
+            facts, board_line=board if isinstance(board, str) else None
+        )
+        if div.strip():
+            blocks.append(div.strip())
+    except Exception:
+        logger.debug("diversification page failed", exc_info=True)
+    price = stop = target = entry = None
+    if lots:
+        price = _real_float(lots[0].get("last"))
+        stop = _real_float(lots[0].get("stop"))
+        target = _real_float(lots[0].get("target"))
+        entry = _real_float(lots[0].get("avg"))
+        if entry is None:
+            entry = price
+    path = None
+    try:
+        from abcxauto.memory import get_journal
+        from abcxauto.path_math import path_from_journal
+
+        raw = path_from_journal(
+            get_journal(),
+            equity=nl,
+            risk_pct=day.get("max_risk_per_trade_pct"),
+        )
+        if isinstance(raw, dict):
+            path = raw
+    except Exception:
+        path = None
+    try:
+        from abcxauto.size_fact import format_size_page
+
+        size = format_size_page(
+            nl=nl,
+            price=price,
+            entry=entry,
+            stop=stop,
+            atr=_real_float(day.get("atr")),
+            sigma_annual=_real_float(day.get("sigma_annual")),
+            max_loss_per_contract=_real_float(day.get("max_loss_per_contract")),
+            max_risk_per_trade_pct=day.get("max_risk_per_trade_pct"),
+            path=path if isinstance(path, dict) else None,
+        )
+        if size.strip():
+            blocks.append(size.strip())
+    except Exception:
+        logger.debug("size page failed", exc_info=True)
+    try:
+        from abcxauto.order_type_fact import format_order_type_page
+
+        cash_only = day.get("cash_only")
+        order = format_order_type_page(
+            nl=nl,
+            cash_only=True if cash_only is None else bool(cash_only),
+            price=price,
+            entry=entry,
+            stop=stop,
+            target=target,
+            atr=_real_float(day.get("atr")),
+            debit=day.get("debit"),
+            credit=day.get("credit"),
+            width=day.get("width"),
+            wing=day.get("wing"),
+            strike=day.get("strike"),
+            put_strike=day.get("put_strike"),
+            call_strike=day.get("call_strike"),
+            net_debit=day.get("net_debit"),
+            bid=day.get("bid"),
+            ask=day.get("ask"),
+            delta=day.get("delta"),
+            theta=day.get("theta"),
+            vega=day.get("vega"),
+            iv=day.get("iv"),
+            rv=day.get("rv"),
+            front_iv=day.get("front_iv"),
+            back_iv=day.get("back_iv"),
+            stock_bid=day.get("stock_bid"),
+            stock_ask=day.get("stock_ask"),
+        )
+        if order.strip():
+            blocks.append(order.strip())
+    except Exception:
+        logger.debug("order type page failed", exc_info=True)
+    return "\n".join(blocks)
+
+
+def _quote_px(row: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        px = _real_float(row.get(key))
+        if px is not None and px > 0:
+            return px
+    return None
+
+
+def _nested_quote(row: dict[str, Any]) -> dict[str, Any]:
+    for key in ("ibkr", "mda"):
+        inner = row.get(key)
+        if isinstance(inner, dict):
+            return inner
+    return row
+
+
+def _held_stop_and_avg(
+    world: Any, symbol: str
+) -> tuple[float | None, float | None]:
+    su = str(symbol or "").strip().upper()
+    if not su:
+        return None, None
+    positions = list(getattr(world, "positions", None) or [])
+    orders = list(getattr(world, "open_orders", None) or [])
+    stop = avg = None
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        if str(pos.get("symbol") or "").strip().upper() != su:
+            continue
+        if stop is None:
+            try:
+                stop = _covering_last_stop_px(pos, orders)
+            except Exception:
+                stop = None
+        if avg is None:
+            try:
+                avg = position_avg_facts(pos).get("avg")
+            except Exception:
+                avg = _real_float(pos.get("avgCost") or pos.get("avg"))
+        if stop is not None and avg is not None:
+            break
+    return _real_float(stop), _real_float(avg)
+
+
+def attach_tool_math(payload: Any, world: Any) -> None:
+    """Recompute size and payoff on a quote the model just received."""
+    if not isinstance(payload, dict) or world is None:
+        return
+    rows = payload.get("quotes")
+    targets = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else [payload]
+    try:
+        nl = _real_float(getattr(world, "net_liquidation", None))
+    except Exception:
+        nl = None
+    try:
+        cash_only = bool(getattr(get_config(), "cash_only", True))
+        risk = getattr(get_config(), "max_risk_per_trade_pct", None)
+    except Exception:
+        cash_only = True
+        risk = None
+    for row in targets:
+        _attach_one_tool_math(row, world, nl=nl, cash_only=cash_only, risk=risk)
+
+
+def _attach_one_tool_math(
+    row: dict[str, Any],
+    world: Any,
+    *,
+    nl: float | None,
+    cash_only: bool,
+    risk: Any,
+) -> None:
+    live = _nested_quote(row)
+    price = _quote_px(row, "last", "mid", "mark") or _quote_px(live, "last", "mid", "mark")
+    bid = _quote_px(row, "bid") or _quote_px(live, "bid")
+    ask = _quote_px(row, "ask") or _quote_px(live, "ask")
+    if price is None and bid is not None and ask is not None:
+        price = (bid + ask) / 2.0
+    sym = str(row.get("symbol") or live.get("symbol") or "").strip().upper()
+    stop, avg = _held_stop_and_avg(world, sym)
+    und_px = None
+    quotes = getattr(world, "ibkr_live_quotes", None)
+    if isinstance(quotes, dict) and sym:
+        q = quotes.get(sym)
+        if isinstance(q, dict):
+            und_px = _quote_px(q, "last", "mid")
+        else:
+            und_px = _real_float(q)
+    strike = _real_float(row.get("strike"))
+    if strike is None:
+        strike = _real_float(live.get("strike"))
+    # Finite positive strike => option quote; otherwise stock.
+    is_option = strike is not None and strike > 0
+    entry = avg if avg is not None else (und_px if is_option else price)
+    stock_px = und_px if is_option else price
+    try:
+        from abcxauto.size_fact import format_size_page
+
+        row["size_page"] = format_size_page(
+            nl=nl,
+            price=stock_px,
+            entry=entry,
+            stop=stop,
+            max_risk_per_trade_pct=risk,
+        ).strip()
+    except Exception:
+        logger.debug("tool size page failed", exc_info=True)
+    try:
+        from abcxauto.order_type_fact import format_order_type_page
+
+        if is_option:
+            mid = None
+            if bid is not None and ask is not None:
+                mid = (bid + ask) / 2.0
+            debit = mid if mid is not None else price
+            delta = _real_float(row.get("delta"))
+            if delta is None:
+                delta = _real_float(live.get("delta"))
+            theta = _real_float(row.get("theta"))
+            if theta is None:
+                theta = _real_float(live.get("theta"))
+            vega = _real_float(row.get("vega"))
+            if vega is None:
+                vega = _real_float(live.get("vega"))
+            iv = _real_float(row.get("iv"))
+            if iv is None:
+                iv = _real_float(live.get("iv"))
+            # Distinct stock keys only — never invent from the option bid/ask.
+            stock_bid = _quote_px(row, "stock_bid")
+            stock_ask = _quote_px(row, "stock_ask")
+            row["order_type"] = format_order_type_page(
+                nl=nl,
+                cash_only=cash_only,
+                price=stock_px,
+                entry=entry,
+                stop=stop,
+                debit=debit,
+                strike=strike,
+                bid=bid,
+                ask=ask,
+                delta=delta,
+                theta=theta,
+                vega=vega,
+                iv=iv,
+                stock_bid=stock_bid,
+                stock_ask=stock_ask,
+            ).strip()
+        else:
+            # Stock quote: bid/ask feed stock_bid/stock_ask only.
+            row["order_type"] = format_order_type_page(
+                nl=nl,
+                cash_only=cash_only,
+                price=stock_px,
+                entry=entry,
+                stop=stop,
+                stock_bid=bid,
+                stock_ask=ask,
+            ).strip()
+    except Exception:
+        logger.debug("tool order page failed", exc_info=True)
+
+
+def attach_book_math(payload: Any, world: Any) -> None:
+    """Same three pages the wake paints, on the book tool."""
+    if not isinstance(payload, dict):
+        return
+    alloc = payload.get("allocation")
+    if not isinstance(alloc, dict):
+        return
+    day: dict[str, Any] = {"allocation": alloc}
+    if world is not None:
+        day["div_positions"] = _compact_div_positions(getattr(world, "positions", None))
+        day["nl"] = getattr(world, "net_liquidation", None)
+    try:
+        day["cash_only"] = bool(getattr(get_config(), "cash_only", True))
+        day["max_risk_per_trade_pct"] = getattr(
+            get_config(), "max_risk_per_trade_pct", None
+        )
+    except Exception:
+        day["cash_only"] = True
+    pages = _directional_pages(day)
+    if not pages:
+        return
+    # Order catalog stays on the wake and on option_quote. The book tool
+    # is an 8k clip; the two short pages fit beside the lots.
+    div, _, rest = pages.partition("\nsize:\n")
+    if div.strip():
+        payload["diversification"] = div.strip()
+    if rest:
+        size, _, _order = rest.partition("\nq=floor(NL * f / loss_per_unit)")
+        payload["size_page"] = ("size:\n" + size).strip()
 
 
 def _session_phase(session_status: str, current_et: str | None = None) -> str:

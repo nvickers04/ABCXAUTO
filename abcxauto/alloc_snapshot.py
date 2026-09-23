@@ -11,6 +11,13 @@ def _sym(raw: Any) -> str:
     return str(raw or "").strip().upper()
 
 
+def _pos_px(raw: Any) -> float | None:
+    v = _finite(raw)
+    if v is None or v <= 0:
+        return None
+    return v
+
+
 def _finite(raw: Any) -> float | None:
     try:
         v = float(raw)
@@ -270,18 +277,25 @@ async def build_allocation_snapshot(
     names: dict[str, dict[str, Any]] = {}
     for sym in symbols:
         quote = quotes.get(sym) if quotes_read else None
-        last = bid = None
+        last = bid = ask = mid = iv = None
+        delta = theta = vega = None
         if quotes_read and isinstance(quote, dict):
-            last = _finite(quote.get("last"))
-            bid = _finite(quote.get("bid"))
-            if last is not None and last <= 0:
-                last = None
-            if bid is not None and bid <= 0:
-                bid = None
+            last = _pos_px(quote.get("last"))
+            bid = _pos_px(quote.get("bid"))
+            ask = _pos_px(quote.get("ask"))
+            mid = _pos_px(quote.get("mid"))
+            if mid is None and bid is not None and ask is not None:
+                mid = (bid + ask) / 2.0
+            if last is None:
+                last = mid
+            iv = _pos_px(quote.get("iv"))
+            delta = _finite(quote.get("delta"))
+            theta = _finite(quote.get("theta"))
+            vega = _finite(quote.get("vega"))
         completed = list(bars_by.get(sym) or [])
         last_completed = completed[-1]["date"] if completed else ""
         aligned = bool(bar_date and last_completed and last_completed == bar_date)
-        names[sym] = {
+        panel: dict[str, Any] = {
             "last": last,
             "bid": bid,
             "stop": stops.get(sym),
@@ -289,6 +303,19 @@ async def build_allocation_snapshot(
             "bars": completed,
             "aligned": aligned,
         }
+        if ask is not None:
+            panel["ask"] = ask
+        if mid is not None:
+            panel["mid"] = mid
+        if iv is not None:
+            panel["iv"] = iv
+        if delta is not None:
+            panel["delta"] = delta
+        if theta is not None:
+            panel["theta"] = theta
+        if vega is not None:
+            panel["vega"] = vega
+        names[sym] = panel
 
     return {
         "ok": bool(ok),

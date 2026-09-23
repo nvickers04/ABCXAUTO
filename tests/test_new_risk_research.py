@@ -26,13 +26,12 @@ def _ok_dossier(**extra) -> dict:
     return row
 
 
-def test_quote_or_scan_last_only_is_research_thin():
-    snap = {
-        "ibkr_live_quotes": {"AAPL": 178.5},
-        "scan_hits": {"rows": [{"symbol": "AAPL", "last": 178.5}]},
-    }
+def test_quote_only_is_research_thin():
+    """A quote alone is not this-look research — no dossier upsert."""
+    snap = {"ibkr_live_quotes": {"AAPL": 178.5}}
     _thin_note(new_risk_research_error("AAPL", snap, strat="market_bracket"))
     _thin_note(new_risk_research_error("AAPL", snap, strat="bracket"))
+    assert "dossiers" not in snap or "AAPL" not in (snap.get("dossiers") or {})
 
 
 def test_empty_snap_is_research_thin():
@@ -46,7 +45,21 @@ def _bar_row(**extra) -> dict:
     return row
 
 
-def test_web_fact_alone_is_research_thin():
+def test_web_search_text_alone_upserts_dossier():
+    """search_public stores text and cites, not a page url+title."""
+    snap = {
+        "research_web": {
+            "query": "Microsoft MSFT Stifel upgrade",
+            "where": "web",
+            "text": "Stifel upgraded MSFT to Buy.",
+            "results": [{"url": "https://example.com/msft", "source": "web"}],
+        },
+    }
+    assert new_risk_research_error("MSFT", snap, strat="bracket") == ""
+    assert isinstance((snap.get("dossiers") or {}).get("MSFT"), dict)
+
+
+def test_web_fact_alone_upserts_dossier():
     snap = {
         "research_web": {
             "url": "https://example.com/ir",
@@ -54,18 +67,26 @@ def test_web_fact_alone_is_research_thin():
             "text": "announces merger",
         },
     }
-    _thin_note(new_risk_research_error("AAPL", snap, strat="bracket"))
+    assert new_risk_research_error("AAPL", snap, strat="bracket") == ""
+    assert isinstance((snap.get("dossiers") or {}).get("AAPL"), dict)
+    assert (snap["dossiers"]["AAPL"].get("earnings") or "unknown") in (
+        "unknown",
+        "unavailable",
+    )
 
 
-def test_session_range_plus_news_is_research_thin():
+def test_session_range_plus_news_upserts_dossier():
     snap = {
         "session_range": {"AAPL": _bar_row()},
         "news_items": [{"symbol": "AAPL", "headline": "AAPL prints after hours"}],
     }
-    _thin_note(new_risk_research_error("AAPL", snap, strat="market_bracket"))
+    assert new_risk_research_error("AAPL", snap, strat="market_bracket") == ""
+    d = snap["dossiers"]["AAPL"]
+    assert d["last"] == 178.5
+    assert d["headlines"]
 
 
-def test_session_range_plus_research_web_is_research_thin():
+def test_session_range_plus_research_web_upserts_dossier():
     snap = {
         "session_range": {"AAPL": _bar_row()},
         "research_web": {
@@ -74,23 +95,40 @@ def test_session_range_plus_research_web_is_research_thin():
             "text": "announces merger",
         },
     }
-    _thin_note(new_risk_research_error("AAPL", snap, strat="bracket"))
+    assert new_risk_research_error("AAPL", snap, strat="bracket") == ""
+    assert snap["dossiers"]["AAPL"]["last"] == 178.5
 
 
-def test_session_range_only_is_research_thin():
+def test_session_range_only_upserts_dossier():
     snap = {"session_range": {"AAPL": _bar_row()}}
-    _thin_note(new_risk_research_error("AAPL", snap, strat="market_bracket"))
+    assert new_risk_research_error("AAPL", snap, strat="market_bracket") == ""
+    assert snap["dossiers"]["AAPL"]["last"] == 178.5
 
 
-def test_naked_last_plus_news_is_research_thin():
+def test_naked_last_plus_news_upserts_dossier():
     snap = {
         "session_range": {"AAPL": {"last": 178.5}},
         "news_items": [{"symbol": "AAPL", "headline": "AAPL prints after hours"}],
     }
+    assert new_risk_research_error("AAPL", snap, strat="market_bracket") == ""
+    assert snap["dossiers"]["AAPL"]["last"] == 178.5
+
+
+def test_scan_hit_with_last_upserts_dossier():
+    snap = {
+        "ibkr_live_quotes": {"AAPL": 178.5},
+        "scan_hits": {"rows": [{"symbol": "AAPL", "last": 178.5}]},
+    }
+    assert new_risk_research_error("AAPL", snap, strat="market_bracket") == ""
+    assert snap["dossiers"]["AAPL"]["last"] == 178.5
+
+
+def test_scan_hit_without_price_stays_thin():
+    snap = {"scan_hits": {"rows": [{"symbol": "AAPL", "open_gap_pct": 2.1}]}}
     _thin_note(new_risk_research_error("AAPL", snap, strat="market_bracket"))
 
 
-def test_scan_stashed_session_range_stays_thin_after_compact():
+def test_scan_stashed_session_range_upserts_after_compact():
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
@@ -118,22 +156,60 @@ def test_scan_stashed_session_range_stays_thin_after_compact():
         "session_range": compacted,
         "news_items": [{"symbol": "AAPL", "headline": "AAPL prints after hours"}],
     }
-    _thin_note(new_risk_research_error("AAPL", snap, strat="market_bracket"))
+    assert new_risk_research_error("AAPL", snap, strat="market_bracket") == ""
+    assert "AAPL" in snap["dossiers"]
 
 
-def test_option_strat_session_range_plus_option_facts_is_research_thin():
+def test_option_strat_session_range_upserts_dossier():
     snap = {
         "session_range": {"SPY": _bar_row(open=500.0, high=501.0, low=499.0, last=500.12)},
         "option_facts": [{"symbol": "SPY", "right": "P", "strike": 500.0}],
     }
-    _thin_note(new_risk_research_error("SPY", snap, strat="vertical_spread"))
+    assert new_risk_research_error("SPY", snap, strat="vertical_spread") == ""
+    assert snap["dossiers"]["SPY"]["last"] == 500.12
 
 
-def test_dossier_earnings_unknown_is_research_thin():
+def test_dossier_earnings_unknown_allows():
     snap = {"dossiers": {"AAPL": _ok_dossier(earnings="unknown", earnings_in=None)}}
+    assert new_risk_research_error("AAPL", snap, strat="market_bracket") == ""
+
+
+def test_dossier_earnings_unavailable_allows():
+    snap = {
+        "dossiers": {"AAPL": _ok_dossier(earnings="unavailable", earnings_in=None)}
+    }
+    assert new_risk_research_error("AAPL", snap, strat="market_bracket") == ""
+
+
+def test_dossier_earnings_in_one_is_research_thin():
+    snap = {
+        "dossiers": {
+            "AAPL": _ok_dossier(earnings="2026-09-24", earnings_in=1)
+        }
+    }
     msg = new_risk_research_error("AAPL", snap, strat="market_bracket")
     _thin_note(msg)
-    assert "earnings_unknown" in msg
+    assert "earnings_window" in msg
+
+
+def test_this_look_upsert_still_refuses_earnings_window():
+    snap = {
+        "session_range": {"AAPL": _bar_row()},
+        "news_items": [{"symbol": "AAPL", "headline": "AAPL prints after hours"}],
+        "_research_bag": {
+            "calendar": {
+                "AAPL": {
+                    "earnings": "2026-09-24",
+                    "earnings_in": 1,
+                    "calendar_asof": "c",
+                }
+            }
+        },
+    }
+    msg = new_risk_research_error("AAPL", snap, strat="market_bracket")
+    _thin_note(msg)
+    assert "earnings_window" in msg
+    assert "AAPL" in snap["dossiers"]
 
 
 def test_dossier_earnings_in_30_clears():
@@ -182,12 +258,12 @@ def _world(**kwargs) -> WorldState:
 
 
 def _look_quote_snap(symbol: str = "AAPL", last: float = 178.5) -> dict:
+    """Quote-only look — no this-look research, so research_thin still fires."""
     snap = {
         "account": {"netliquidation": 37000.0},
         "positions": [],
         "open_orders": [],
         "ibkr_live_quotes": {symbol: last},
-        "scan_hits": {"rows": [{"symbol": symbol, "last": last}]},
     }
     begin_look(snap)
     record_look_tool(
@@ -331,7 +407,16 @@ def test_send_preview_appends_research_thin_note():
     assert any("research_thin" in str(r) for r in (out.get("would_refuse") or []))
 
 
-def _color_snap(symbol: str = "AAPL", last: float = 178.5) -> dict:
+def _dossier_snap(symbol: str = "AAPL", last: float = 178.5) -> dict:
+    snap = _look_quote_snap(symbol=symbol, last=last)
+    snap["dossiers"] = {
+        symbol: _ok_dossier(last=last, earnings="2026-10-22", earnings_in=30)
+    }
+    return snap
+
+
+def _researched_snap(symbol: str = "AAPL", last: float = 178.5) -> dict:
+    """This-look candles + news — gate upserts a dossier (earnings unknown)."""
     snap = _look_quote_snap(symbol=symbol, last=last)
     snap["session_range"] = {
         symbol: {
@@ -345,14 +430,6 @@ def _color_snap(symbol: str = "AAPL", last: float = 178.5) -> dict:
     snap["news_items"] = [
         {"symbol": symbol, "headline": f"{symbol} prints after hours"}
     ]
-    return snap
-
-
-def _dossier_snap(symbol: str = "AAPL", last: float = 178.5) -> dict:
-    snap = _look_quote_snap(symbol=symbol, last=last)
-    snap["dossiers"] = {
-        symbol: _ok_dossier(last=last, earnings="2026-10-22", earnings_in=30)
-    }
     return snap
 
 
@@ -376,8 +453,27 @@ async def test_execute_ticket_allows_when_dossier_clears(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_ticket_allows_when_this_look_research_upserts(monkeypatch):
+    """Mid-look candles+news upsert a dossier; research_thin does not fire."""
+    from abcxauto.agent_loop import execute_ticket
+
+    sent = _stub_siblings(monkeypatch)
+    snap = _researched_snap()
+    result = await execute_ticket(
+        _new_risk_ticket(),
+        MagicMock(),
+        _world(session_status="premarket"),
+        snap,
+    )
+    assert "AAPL" in (snap.get("dossiers") or {})
+    assert result.get("reason_code") != REASON_RESEARCH_THIN
+    assert "research_thin" not in str(result.get("note") or "")
+    del sent
+
+
+@pytest.mark.asyncio
 async def test_execute_ticket_research_thin_without_structure_outside_rth(monkeypatch):
-    """Scan/quote last alone is still research_thin outside RTH."""
+    """Quote alone is still research_thin outside RTH."""
     from abcxauto.agent_loop import execute_ticket
 
     sent = _stub_siblings(monkeypatch)

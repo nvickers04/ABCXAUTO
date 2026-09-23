@@ -136,6 +136,7 @@ def chat_create_kwargs(
     messages: Any = None,
     tools: Any | None = None,
     previous_response_id: str | None = None,
+    refresh_system: bool = False,
 ) -> dict[str, Any]:
     """Core chat.create kwargs plus operator ``model_params``.
 
@@ -145,6 +146,8 @@ def chat_create_kwargs(
 
     When ``previous_response_id`` is set, omit ``messages`` so the server
     continues the stored thread and the caller only appends the new wake.
+    Pass ``refresh_system=True`` with ``messages`` to attach the current
+    system prompt once onto that same thread (prompt-hash change).
     """
     kw: dict[str, Any] = {
         "model": g.model,
@@ -160,6 +163,8 @@ def chat_create_kwargs(
     prev = str(previous_response_id or "").strip()
     if prev:
         kw["previous_response_id"] = prev
+        if refresh_system and messages is not None:
+            kw["messages"] = messages
     elif messages is not None:
         kw["messages"] = messages
     if tools is not None:

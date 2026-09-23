@@ -40,7 +40,7 @@ from abcxauto.thin_rth_kill_look import (
     MODE_OPEN,
     MODE_RESEARCH,
     PCS_CARD,
-    REASON_ALLOWLIST,
+    REASON_STRUCTURE,
     REASON_BOOK_UNRELIABLE,
     REASON_NAMELESS,
     REASON_F10,
@@ -241,7 +241,8 @@ def test_open_send_ok_after_multiple_looks_f10_still_hard(monkeypatch):
     assert blocked["reason_code"] == REASON_F10
 
 
-def test_manage_replaces_second_entry(monkeypatch):
+def test_manage_allows_second_named_entry(monkeypatch):
+    """Open pcs-skew is MANAGE for look-skip; a second legal named ticket still goes."""
     _kill_on(monkeypatch)
     reset_session_caps()
     lot = _pcs_lot()
@@ -268,15 +269,16 @@ def test_manage_replaces_second_entry(monkeypatch):
         "params": dict(PCS_OPEN),
         "card": PCS_CARD,
     }
-    blocked = kill_look_send_block(
-        new_risk,
-        session="regular",
-        positions=[lot],
-        open_lots=["pcs-skew SPY vert"],
-        f10=_allow_f10(),
+    assert (
+        kill_look_send_block(
+            new_risk,
+            session="regular",
+            positions=[lot],
+            open_lots=["pcs-skew SPY vert"],
+            f10=_allow_f10(),
+        )
+        is None
     )
-    assert blocked is not None
-    assert blocked["reason_code"] == REASON_ALLOWLIST
     close = {
         "strategy": "vertical_spread",
         "params": {**PCS_OPEN, "closing_position": True},
@@ -349,16 +351,41 @@ def test_open_stk_lot_is_manage_like_pcs(monkeypatch):
     )
     assert blocked is not None
     assert blocked["reason_code"] == REASON_F10
-    # Even under preferred F10 allow, MANAGE blocks new named risk.
-    blocked_open = kill_look_send_block(
-        new_risk,
-        session="regular",
-        positions=[lot],
-        open_lots=[label],
-        f10=_allow_f10(),
+    # Even under preferred F10 allow, open AVGO does not refuse a second name.
+    other_name = {
+        "strategy": "vertical_spread",
+        "params": {
+            "symbol": "MSFT",
+            "expiration": "20260918",
+            "long_strike": 400.0,
+            "short_strike": 405.0,
+            "right": "P",
+            "quantity": 1,
+            "limit_price": 0.85,
+            "card": "msft-bp",
+        },
+        "card": "msft-bp",
+    }
+    assert (
+        kill_look_send_block(
+            other_name,
+            session="regular",
+            positions=[lot],
+            open_lots=[label],
+            f10=_allow_f10(),
+        )
+        is None
     )
-    assert blocked_open is not None
-    assert blocked_open["reason_code"] == REASON_ALLOWLIST
+    assert (
+        kill_look_send_block(
+            new_risk,
+            session="regular",
+            positions=[lot],
+            open_lots=[label],
+            f10=_allow_f10(),
+        )
+        is None
+    )
     close = {
         "strategy": "market_bracket",
         "params": {
@@ -438,7 +465,7 @@ def test_named_card_and_defined_risk_send_gates(monkeypatch):
     assert ok is True
     ok, why = pcs_send_ok("market_bracket", {"symbol": "SPY", "card": "x"}, "x", mode=MODE_OPEN)
     assert ok is False
-    assert why == REASON_ALLOWLIST
+    assert why == REASON_STRUCTURE
     ok, why = pcs_send_ok(
         "vertical_spread",
         {**PCS_OPEN, "closing_position": True},
@@ -447,8 +474,13 @@ def test_named_card_and_defined_risk_send_gates(monkeypatch):
     )
     assert ok is True
     ok, why = pcs_send_ok("vertical_spread", PCS_OPEN, PCS_CARD, mode=MODE_MANAGE)
-    assert ok is False
-    assert why == REASON_ALLOWLIST
+    assert ok is True
+    assert why == PCS_CARD
+    ok_abort, why_abort = pcs_send_ok(
+        "vertical_spread", PCS_OPEN, PCS_CARD, mode=MODE_ABORT, abort_fuse="none"
+    )
+    assert ok_abort is False
+    assert why_abort == REASON_PORT
 
 
 @pytest.mark.asyncio
@@ -849,7 +881,7 @@ async def test_execute_ticket_kill_look_blocks_non_pcs(monkeypatch):
         {"positions": []},
     )
     assert result.get("status") == "blocked"
-    assert result.get("reason_code") == REASON_ALLOWLIST
+    assert result.get("reason_code") == REASON_STRUCTURE
 
 
 @pytest.mark.asyncio
@@ -870,7 +902,7 @@ async def test_execute_ticket_no_entry_budget_f10_lie(monkeypatch):
         "card": PCS_CARD,
     }
     out = await execute_ticket(ticket, object(), world, {"positions": []})
-    assert out.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST, REASON_PORT}
+    assert out.get("reason_code") not in {REASON_F10, REASON_STRUCTURE, REASON_PORT}
     close = await execute_ticket(
         {
             "strategy": "vertical_spread",
@@ -881,7 +913,7 @@ async def test_execute_ticket_no_entry_budget_f10_lie(monkeypatch):
         world,
         {"positions": []},
     )
-    assert close.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST}
+    assert close.get("reason_code") not in {REASON_F10, REASON_STRUCTURE}
 
 
 def test_pro_engine_skip_reason_no_entry_budget(monkeypatch):
@@ -1169,7 +1201,7 @@ async def test_execute_ticket_f10_blocks_new_risk_allows_close(monkeypatch):
         world,
         {"positions": []},
     )
-    assert close.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST}
+    assert close.get("reason_code") not in {REASON_F10, REASON_STRUCTURE}
 
 def test_f10_unreadable_fail_closes_loop(monkeypatch):
     _kill_on(monkeypatch)
@@ -1289,7 +1321,7 @@ async def test_execute_ticket_unreadable_latches_exit_ok(monkeypatch):
         world,
         {"positions": []},
     )
-    assert close.get("reason_code") not in {REASON_F10, REASON_ALLOWLIST, REASON_MODEL_COST}
+    assert close.get("reason_code") not in {REASON_F10, REASON_STRUCTURE, REASON_MODEL_COST}
 
 
 def test_hygiene_port_not_live_7496():
@@ -1316,24 +1348,24 @@ def test_named_card_allowlist_and_no_credit_floor(monkeypatch):
     empty = {k: v for k, v in PCS_OPEN.items() if k != "card"}
     ok, why = pcs_send_ok("vertical_spread", empty, None, mode=MODE_OPEN)
     assert ok is False
-    assert why in {REASON_NAMELESS, REASON_ALLOWLIST}
+    assert why in {REASON_NAMELESS, REASON_STRUCTURE}
     ok, why = pcs_send_ok(
         "vertical_spread", {**PCS_OPEN, "card": ""}, "", mode=MODE_OPEN
     )
     assert ok is False
-    assert why in {REASON_NAMELESS, REASON_ALLOWLIST}
+    assert why in {REASON_NAMELESS, REASON_STRUCTURE}
     ok, why = pcs_send_ok(
         "vertical_spread", {**PCS_OPEN, "card": "   "}, "   ", mode=MODE_OPEN
     )
     assert ok is False
-    assert why in {REASON_NAMELESS, REASON_ALLOWLIST}
+    assert why in {REASON_NAMELESS, REASON_STRUCTURE}
     blocked_empty = kill_look_send_block(
         {"strategy": "vertical_spread", "params": empty},
         session="regular",
         f10=f10,
     )
     assert blocked_empty is not None
-    assert blocked_empty["reason_code"] in {REASON_NAMELESS, REASON_ALLOWLIST}
+    assert blocked_empty["reason_code"] in {REASON_NAMELESS, REASON_STRUCTURE}
 
     ok, why = pcs_send_ok(
         "vertical_spread", NAMED_VERT, "spy-bp-750-745", mode=MODE_OPEN
@@ -1358,7 +1390,7 @@ def test_named_card_allowlist_and_no_credit_floor(monkeypatch):
         "vertical_spread", incomplete, "spy-bp-750-745", mode=MODE_OPEN
     )
     assert ok is False
-    assert why == REASON_ALLOWLIST
+    assert why == REASON_STRUCTURE
     missing_strikes = kill_look_send_block(
         {
             "strategy": "vertical_spread",
@@ -1369,7 +1401,7 @@ def test_named_card_allowlist_and_no_credit_floor(monkeypatch):
         f10=f10,
     )
     assert missing_strikes is not None
-    assert missing_strikes["reason_code"] == REASON_ALLOWLIST
+    assert missing_strikes["reason_code"] == REASON_STRUCTURE
 
     assert F10_HARD_USD == 15.0
     assert get_config().ibkr_port != 7496
@@ -1421,7 +1453,7 @@ def test_named_card_allowlist_and_no_credit_floor(monkeypatch):
         mode=MODE_OPEN,
     )
     assert ok is False
-    assert why == REASON_ALLOWLIST
+    assert why == REASON_STRUCTURE
 
     from abcxauto import thin_rth_kill_look as kl
 

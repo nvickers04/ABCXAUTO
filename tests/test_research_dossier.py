@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from abcxauto.research_dossier import assemble_dossiers, dossier_blocks_new_risk
+from abcxauto.research_dossier import (
+    assemble_dossiers,
+    dossier_blocks_new_risk,
+    ensure_this_look_dossier,
+    this_look_has_research,
+)
 
 
 def _empty_sides() -> dict:
@@ -71,24 +76,35 @@ def test_missing_gap_is_unavailable_not_zero():
     assert dossiers["MSFT"]["gap"] != 0
 
 
-def test_earnings_unknown_blocks_new_risk():
+def test_earnings_unknown_allows_new_risk():
     blocked, reason = dossier_blocks_new_risk(
         {
             "last": 10,
             "earnings": "unknown",
-            "earnings_in": 30,
+            "earnings_in": None,
             "gap": "unavailable",
         }
     )
-    assert blocked is True
-    assert reason == "earnings_unknown"
+    assert blocked is False
+    assert reason == ""
+
+    blocked_u, reason_u = dossier_blocks_new_risk(
+        {
+            "last": 10,
+            "earnings": "unavailable",
+            "earnings_in": None,
+            "gap": "unavailable",
+        }
+    )
+    assert blocked_u is False
+    assert reason_u == ""
 
     snap = {"ok": True, "names": {"XYZ": {"last": 10, "asof": "t"}}}
     dossiers = assemble_dossiers(snap, **_empty_sides())
     assert dossiers["XYZ"]["earnings"] == "unknown"
     blocked2, reason2 = dossier_blocks_new_risk(dossiers["XYZ"])
-    assert blocked2 is True
-    assert reason2 == "earnings_unknown"
+    assert blocked2 is False
+    assert reason2 == ""
 
 
 def test_earnings_in_one_blocks_window():
@@ -134,3 +150,33 @@ def test_complete_dossier_earnings_30_sessions_allows():
 def test_none_or_empty_dossier_is_no_dossier():
     assert dossier_blocks_new_risk(None) == (True, "no_dossier")
     assert dossier_blocks_new_risk({}) == (True, "no_dossier")
+
+
+def test_ensure_this_look_dossier_from_news():
+    snap = {
+        "news_items": [{"symbol": "MSFT", "headline": "MSFT Stifel upgrade"}],
+        "ibkr_live_quotes": {"MSFT": 420.5},
+    }
+    assert this_look_has_research(snap, "MSFT") is True
+    d = ensure_this_look_dossier(snap, "MSFT")
+    assert d is not None
+    assert snap["dossiers"]["MSFT"] is d
+    assert d["last"] == 420.5
+    assert d["earnings"] == "unknown"
+    assert d["earnings_in"] is None
+    assert d["headlines"]
+    assert dossier_blocks_new_risk(d) == (False, "")
+
+
+def test_ensure_this_look_dossier_refuses_without_research():
+    snap = {"ibkr_live_quotes": {"MSFT": 420.5}}
+    assert this_look_has_research(snap, "MSFT") is False
+    assert ensure_this_look_dossier(snap, "MSFT") is None
+    assert "dossiers" not in snap
+
+
+def test_ensure_does_not_invent_last():
+    snap = {"news_items": [{"symbol": "MSFT", "headline": "MSFT color only"}]}
+    d = ensure_this_look_dossier(snap, "MSFT")
+    assert d is not None
+    assert d["last"] is None

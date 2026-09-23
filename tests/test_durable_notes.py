@@ -482,6 +482,10 @@ async def test_research_brief_tool_is_fetch_only_not_geometry(tmp_path, monkeypa
     data = json.loads(raw)
     assert data.get("send_geometry") is False
     assert data.get("use", "").startswith("color")
+    this_look = data.get("this_look") or {}
+    assert "symbols" not in this_look
+    prior = data.get("prior_session") or {}
+    assert "symbols" not in prior
     snap: dict = {}
     begin_look(snap)
     record_look_tool(snap, "research_brief", data)

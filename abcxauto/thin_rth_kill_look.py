@@ -38,7 +38,7 @@ REASON_F10 = "NO_SEND:f10"
 REASON_DD = "NO_SEND:dd_fuse"
 REASON_QTY0 = "NO_SEND:qty0_streak"
 REASON_MODEL_COST = "NO_SEND:model_cost_cap"
-REASON_ALLOWLIST = "kill_look_allowlist"
+REASON_STRUCTURE = "kill_look_structure"
 REASON_NAMELESS = "kill_look_nameless"
 REASON_RESEARCH_WEEK = "kill_look_research_week"
 REASON_RESEARCH_PROMPT = "kill_look_research_prompt"
@@ -317,6 +317,12 @@ _KILL_LOOK_PREFERRED = (
     "market_bracket",
     "oca",
 )
+# Not new risk. Must stay on the send enum or a cancel is emitted as a bracket.
+_KILL_LOOK_MANAGE = (
+    "cancel_order",
+    "modify_stop",
+    "modify_target",
+)
 
 
 def _kill_look_sendable_strategies() -> list[str]:
@@ -336,6 +342,15 @@ def _kill_look_sendable_strategies() -> list[str]:
             continue
         if name in OPTION_STRATEGIES or name in _KILL_LOOK_STOCK_ENTRIES:
             out.append(name)
+    for name in _KILL_LOOK_MANAGE:
+        if name in NOT_TICKETS:
+            continue
+        if name not in ORDER_EXAMPLES:
+            continue
+        entry = STRATEGIES.get(name)
+        if not entry or not entry[1]:
+            continue
+        out.append(name)
     return out
 
 
@@ -431,8 +446,9 @@ def pcs_send_ok(
 ) -> tuple[bool, str]:
     """Legal kill-look new risk: named card + ORDER EXAMPLES schema + geometry.
 
-    Closers / non-new-risk skip the allowlist. Nameless freestyle is refused.
-    Credit quality is Grok judgement — no clerk dollar credit floor.
+    Closers / non-new-risk skip structure checks. MANAGE (open STK/pcs) does
+    not refuse a second name. Nameless freestyle is refused. Credit quality
+    is Grok judgement — no clerk dollar credit floor.
     """
     from abcxauto.agent_loop import is_new_risk
 
@@ -442,19 +458,17 @@ def pcs_send_ok(
         dumped.setdefault("card", card)
     if _is_closing(dumped) or not is_new_risk(strat, dumped):
         return True, "closing"
-    if mode == MODE_MANAGE:
-        return False, REASON_ALLOWLIST
     if mode == MODE_ABORT:
         return False, _abort_send_reason(abort_fuse)
     card_norm = normalize_kill_look_card(dumped.get("card"))
     if not card_norm:
         return False, REASON_NAMELESS
     if not _clerk_legal_defined_risk(strat, dumped):
-        return False, REASON_ALLOWLIST
+        return False, REASON_STRUCTURE
     if not _ticket_schema_ok(strat, dumped):
-        return False, REASON_ALLOWLIST
+        return False, REASON_STRUCTURE
     if not _geometry_complete(strat, dumped):
-        return False, REASON_ALLOWLIST
+        return False, REASON_STRUCTURE
     return True, card_norm
 
 

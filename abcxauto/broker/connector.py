@@ -63,6 +63,9 @@ def port_is_closed(exc: BaseException) -> bool:
 # the wall-clock digits were read in the wrong zone.
 _FILL_FUTURE_TOLERANCE_S = 300.0
 
+# ib.fills() re-reads the same session fills on every poll; rewrite stays, warn once.
+_FILL_TS_WARNED: set[str] = set()
+
 
 # IANA name so CDT/CST follow DST. A fixed offset would stay wrong after the
 # fall-back. Noah's TWS display is Chicago (Configure → Display).
@@ -114,6 +117,7 @@ def fill_ts_iso(
     *,
     now: Optional[datetime] = None,
     local_tz: Optional[tzinfo] = None,
+    exec_id: Optional[str] = None,
 ) -> str:
     """Canonical ``...Z`` UTC stamp for one broker execution.
 
@@ -124,6 +128,8 @@ def fill_ts_iso(
     proof the digits were already read in some other zone; reading that zone's
     wall clock back as UTC undoes exactly that shift. ``local_tz`` defaults to
     this machine's zone, which is the one ib_insync guesses with.
+    Future-stamp rewrites always apply; the WARNING logs once per ``exec_id``
+    (or once per mangled iso when ``exec_id`` is missing).
     """
     now_utc = now or datetime.now(timezone.utc)
     dt = _as_datetime(exec_time)
@@ -140,14 +146,18 @@ def fill_ts_iso(
     else:
         dt = dt.astimezone(timezone.utc)
     if (dt - now_utc).total_seconds() > _FILL_FUTURE_TOLERANCE_S:
+        mangled = _iso_z(dt)
         reread = dt.astimezone(local_tz).replace(tzinfo=timezone.utc)
         fixed = reread if reread <= now_utc else now_utc
-        logger.warning(
-            "fill timestamp %s is in the future - reading it as %s; "
-            "check IB.TimezoneTWS against the TWS clock",
-            _iso_z(dt),
-            _iso_z(fixed),
-        )
+        warn_key = str(exec_id).strip() if exec_id is not None and str(exec_id).strip() else mangled
+        if warn_key not in _FILL_TS_WARNED:
+            _FILL_TS_WARNED.add(warn_key)
+            logger.warning(
+                "fill timestamp %s is in the future - reading it as %s; "
+                "check IB.TimezoneTWS against the TWS clock",
+                mangled,
+                _iso_z(fixed),
+            )
         dt = fixed
     return _iso_z(dt)
 
@@ -491,7 +501,10 @@ class IBKRQueriesMixin:
                 contract = fill.contract
                 commission_report = getattr(fill, "commissionReport", None)
 
-                ts = fill_ts_iso(getattr(execution, "time", None))
+                ts = fill_ts_iso(
+                    getattr(execution, "time", None),
+                    exec_id=getattr(execution, "execId", None),
+                )
 
                 commission = None
                 realized_pnl = None
@@ -563,7 +576,10 @@ class IBKRQueriesMixin:
             for fill in fills:
                 contract = fill.contract
                 sec = getattr(contract, "secType", None) or "STK"
-                ts = fill_ts_iso(getattr(fill.execution, "time", None))
+                ts = fill_ts_iso(
+                    getattr(fill.execution, "time", None),
+                    exec_id=getattr(fill.execution, "execId", None),
+                )
                 row = {
                     'symbol': contract.symbol,
                     'side': fill.execution.side,
@@ -1610,7 +1626,10 @@ class IBKRConnector(IBKROrdersMixin, IBKROptionsMixin, IBKRQueriesMixin, IBKRBar
                 'shares': int(execution.shares),
                 'price': float(execution.price),
                 'avg_price': float(execution.avgPrice),
-                'time': fill_ts_iso(getattr(execution, "time", None)),
+                'time': fill_ts_iso(
+                    getattr(execution, "time", None),
+                    exec_id=getattr(execution, "execId", None),
+                ),
                 'order_id': execution.orderId,
                 'exec_id': execution.execId,
                 'commission': commission,

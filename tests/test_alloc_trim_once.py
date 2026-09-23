@@ -146,13 +146,11 @@ async def test_trim_records_sent_and_skips_stale_second_look(monkeypatch) -> Non
         snap=snap1,
         day={},
     )
-    assert len(calls) == 1
-    assert calls[0]["target_conId"] == "313130367"
-    assert calls[0]["params"]["target_conId"] == "313130367"
-    assert snap1["alloc_trim_sent"]["AVGO"] == 67
-    assert brain._ALLOC_TRIM_SENT["AVGO"] == 67
+    assert calls == []
+    assert snap1["trim_tickets"][0]["symbol"] == "AVGO"
+    assert snap1["trim_tickets"][0]["quantity"] == 67
+    assert "alloc_trim_sent" not in snap1
 
-    # Next look: stale book still says 89; must not sell again.
     snap2: dict = {
         "positions": list(positions),
         "open_orders": list(orders),
@@ -164,8 +162,8 @@ async def test_trim_records_sent_and_skips_stale_second_look(monkeypatch) -> Non
         snap=snap2,
         day={},
     )
-    assert len(calls) == 1
-    assert snap2["alloc_trim_sent"]["AVGO"] == 67
+    assert calls == []
+    assert snap2["trim_tickets"][0]["quantity"] == 67
 
 
 @pytest.mark.asyncio
@@ -245,8 +243,9 @@ async def test_trim_records_when_execution_captured_despite_failed_flag(
         snap=snap,
         day={},
     )
-    assert len(calls) == 1
-    assert snap["alloc_trim_sent"]["AVGO"] == 67
+    assert calls == []
+    assert snap["trim_tickets"][0]["quantity"] == 67
+    assert "alloc_trim_sent" not in snap
 
 
 @pytest.mark.asyncio
@@ -350,6 +349,6 @@ async def test_after_send_refresh_skips_when_held_at_sized(monkeypatch) -> None:
         snap=snap,
         day={},
     )
-    assert calls == ["AVGO"]
-    assert snap["alloc_trim_sent"]["AVGO"] == 67
-    assert "MSFT" not in snap["alloc_trim_sent"]
+    assert calls == []
+    assert [t["symbol"] for t in snap["trim_tickets"]] == ["AVGO", "MSFT"]
+    assert "alloc_trim_sent" not in snap

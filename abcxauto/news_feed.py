@@ -27,6 +27,11 @@ _HEADLINE_TTL_S = 15 * 60.0
 # A later look refetches. A stall is a hard miss, not a fake headline.
 NEWS_SYMBOL_S = 2.0
 NEWS_TRIES = 1
+# MDA's first prints for a symbol are often other names. Scan past that
+# prefix, then keep only headlines that name the ticker.
+NEWS_SCAN_N = 24
+# Explicit news tool and the dossier pass. The 2s default stays for scan color.
+NEWS_LOOK_BUDGET_S = 8.0
 
 
 class NewsFetch(list):
@@ -64,6 +69,32 @@ def is_real_headline(item: Any) -> bool:
     if not hl:
         return False
     return not hl.startswith("(unavailable")
+
+
+def headline_mentions_symbol(headline: str, symbol: str) -> bool:
+    """True when the print text names the ticker (case insensitive).
+
+    No company-name map — ticker substring is enough. Off-topic MDA tags
+    (e.g. Palantir under AVGO) are not news for that symbol.
+    """
+    sym = str(symbol or "").strip()
+    if not sym:
+        return False
+    return sym.casefold() in str(headline or "").casefold()
+
+
+def _on_topic_for(symbol: str, items: list[dict] | None) -> list[dict]:
+    """Keep real prints that mention ``symbol``. All off-topic → empty."""
+    su = str(symbol or "").upper().strip()
+    out: list[dict] = []
+    for it in items or []:
+        if not isinstance(it, dict) or not is_real_headline(it):
+            continue
+        hl = str(it.get("headline") or "").strip()
+        if not headline_mentions_symbol(hl, su):
+            continue
+        out.append(it)
+    return out
 
 
 # Comparable news page. Outlet is publisher; source is the feed (mda), not Yahoo.
@@ -159,11 +190,13 @@ def remember_headlines(items: list[dict] | None) -> None:
         sym = str(it.get("symbol") or "").upper().strip()
         if not sym:
             continue
+        hl = str(it.get("headline") or "").strip()
+        if not headline_mentions_symbol(hl, sym):
+            continue
         bucket = _HEADLINES.setdefault(sym, {"ts": now, "items": []})
         bucket["ts"] = now
         rows = list(bucket.get("items") or [])
         seen = {str(x.get("headline") or "").strip() for x in rows}
-        hl = str(it.get("headline") or "").strip()
         if hl and hl not in seen:
             rows.append(it)
         bucket["items"] = rows[:8]
@@ -189,8 +222,12 @@ def remembered_headlines(symbols: list[str] | None = None) -> list[dict]:
         if want is not None and sym not in want:
             continue
         for it in bucket.get("items") or []:
-            if is_real_headline(it):
-                out.append(it)
+            if not is_real_headline(it):
+                continue
+            hl = str(it.get("headline") or "").strip()
+            if not headline_mentions_symbol(hl, sym):
+                continue
+            out.append(it)
     for sym in dead:
         _HEADLINES.pop(sym, None)
     cache_age = now - float(_CACHE.get("ts") or 0.0)
@@ -200,6 +237,9 @@ def remembered_headlines(symbols: list[str] | None = None) -> list[dict]:
                 continue
             su = str(it.get("symbol") or "").upper().strip()
             if want is not None and su not in want:
+                continue
+            hl = str(it.get("headline") or "").strip()
+            if su and not headline_mentions_symbol(hl, su):
                 continue
             out.append(it)
     return _dedupe_headlines(out)
@@ -240,11 +280,17 @@ def coalesce_news(
         su = str(it.get("symbol") or "").upper().strip()
         if want is not None and su.casefold() not in want:
             continue
+        hl = str(it.get("headline") or "").strip()
+        if su and not headline_mentions_symbol(hl, su):
+            continue
         real.append(it)
         if su:
             have.add(su)
     for it in remembered_headlines(symbols):
         su = str(it.get("symbol") or "").upper().strip()
+        hl = str(it.get("headline") or "").strip()
+        if su and not headline_mentions_symbol(hl, su):
+            continue
         if su and su not in have:
             real.append(it)
             have.add(su)
@@ -341,6 +387,7 @@ async def _fetch_symbol_news(
     *,
     per_symbol: int,
     deadline: float,
+    budget_s: float,
 ) -> tuple[list[dict], str | None]:
     """One symbol against the shared batch deadline. Miss is not empty."""
     try:
@@ -354,36 +401,51 @@ async def _fetch_symbol_news(
     reason: str | None = None
     tries = max(1, int(NEWS_TRIES))
     loop = asyncio.get_running_loop()
+    # Log the shared batch budget in force — not the NEWS_SYMBOL_S default.
+    log_budget = float(budget_s)
     for _attempt in range(tries):
         remaining = float(deadline) - loop.time()
         if remaining <= 0:
             reason = "timed out"
             logger.warning(
-                "news %s timed out after %.0fs", sym, float(NEWS_SYMBOL_S)
+                "news %s timed out after %.0fs", sym, log_budget
             )
             break
         try:
+            keep = max(1, int(per_symbol or 1))
             landed = await _call_stock_news(
-                client, sym, per_symbol=per_symbol, timeout=remaining
+                client,
+                sym,
+                per_symbol=max(keep, NEWS_SCAN_N),
+                timeout=remaining,
             )
-            remember_headlines(landed)
-            if landed:
-                return landed, None
-            cached = remembered_headlines([sym])
-            return (cached, None) if cached else ([], None)
+            on_topic = _on_topic_for(sym, landed)[:keep]
+            remember_headlines(on_topic)
+            if on_topic:
+                return on_topic, None
+            cached = _on_topic_for(sym, remembered_headlines([sym]))
+            if cached:
+                return cached[:keep], None
+            # MDA tagged prints that never name this ticker — miss, not a story.
+            if any(
+                isinstance(it, dict) and is_real_headline(it)
+                for it in (landed or [])
+            ):
+                return [], "unavailable"
+            return [], None
         except (asyncio.TimeoutError, TimeoutError):
             reason = "timed out"
             logger.warning(
-                "news %s timed out after %.0fs", sym, float(NEWS_SYMBOL_S)
+                "news %s timed out after %.0fs", sym, log_budget
             )
             break
         except Exception:
             reason = "error"
             logger.exception("news fetch failed for %s", sym)
             break
-    cached = remembered_headlines([sym])
+    cached = _on_topic_for(sym, remembered_headlines([sym]))
     if cached:
-        return cached, None
+        return cached[: max(1, int(per_symbol or 1))], None
     return [], reason
 
 
@@ -391,12 +453,15 @@ async def fetch_symbols_news(
     symbols: list[str] | None,
     *,
     per_symbol: int = 4,
+    budget_s: float | None = None,
 ) -> list[dict]:
     """Headlines for an explicit tape. Public list is real prints only.
 
-    One shared ~2s deadline for the whole batch. Whatever finished lands;
-    the rest are timed_out — not a fresh 2s wait per leftover name.
+    One shared deadline for the whole batch (default NEWS_SYMBOL_S; pass
+    budget_s=8 for a longer dossier pass). Whatever finished lands; the rest
+    are timed_out — not a fresh wait per leftover name.
     A total miss stays a hard miss (news_hard_miss), not a fake empty ok.
+    Off-topic headlines (ticker not in text) are dropped, not kept as news.
     """
     global _LAST_FETCH_MISS, _LAST_TIMED_OUT
     _LAST_FETCH_MISS = None
@@ -414,14 +479,19 @@ async def fetch_symbols_news(
         return NewsFetch([])
 
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + float(NEWS_SYMBOL_S)
+    budget = float(NEWS_SYMBOL_S if budget_s is None else budget_s)
+    deadline = loop.time() + budget
     items: list[dict] = []
     misses: list[dict] = []
     timed_out: list[str] = []
 
     async def _one(sym: str) -> tuple[str, list[dict], str | None]:
         batch, err = await _fetch_symbol_news(
-            client, sym, per_symbol=per_symbol, deadline=deadline
+            client,
+            sym,
+            per_symbol=per_symbol,
+            deadline=deadline,
+            budget_s=budget,
         )
         return sym, batch, err
 
@@ -429,6 +499,57 @@ async def fetch_symbols_news(
         asyncio.create_task(_one(s), name=f"news:{s}"): s for s in out
     }
     pending: set[asyncio.Task] = set(tasks)
+
+    def _cached_on_topic(sym: str) -> list[dict]:
+        return _on_topic_for(sym, remembered_headlines([sym]))
+
+    def _take(sym: str, batch: list[dict], err: str | None) -> None:
+        """Keep whatever finished. A miss is that name only — never the batch."""
+        if err:
+            cached = _cached_on_topic(sym)
+            if cached:
+                items.extend(cached)
+            else:
+                # Deadline/transport go on timed_out; off-topic is unavailable.
+                if err in ("timed out", "error"):
+                    timed_out.append(sym)
+                misses.append(_miss(sym, err))
+            return
+        on_topic = _on_topic_for(sym, batch)
+        if on_topic:
+            items.extend(on_topic)
+            return
+        cached = _cached_on_topic(sym)
+        if cached:
+            items.extend(cached)
+        # Completed empty stays empty — not a fake headline, not timed_out.
+
+    def _harvest(task: asyncio.Task) -> None:
+        sym = tasks[task]
+        if task.cancelled():
+            timed_out.append(sym)
+            cached = _cached_on_topic(sym)
+            if cached:
+                items.extend(cached)
+            else:
+                misses.append(_miss(sym, "timed out"))
+                logger.warning(
+                    "news %s timed out after %.0fs", sym, budget
+                )
+            return
+        try:
+            sym, batch, err = task.result()
+        except Exception:
+            logger.exception("news task failed for %s", sym)
+            timed_out.append(sym)
+            cached = _cached_on_topic(sym)
+            if cached:
+                items.extend(cached)
+            else:
+                misses.append(_miss(sym, "error"))
+            return
+        _take(sym, batch, err)
+
     try:
         while pending:
             remaining = deadline - loop.time()
@@ -437,68 +558,66 @@ async def fetch_symbols_news(
             done, pending = await asyncio.wait(
                 pending,
                 timeout=remaining,
-                return_when=asyncio.ALL_COMPLETED,
+                return_when=asyncio.FIRST_COMPLETED,
             )
+            if not done:
+                # Shared budget spent; do not wait a fresh budget for leftovers.
+                break
             for task in done:
-                sym, batch, err = task.result()
-                if err:
-                    cached = remembered_headlines([sym])
-                    if cached:
-                        items.extend(cached)
-                    else:
-                        timed_out.append(sym)
-                        misses.append(_miss(sym, err))
-                else:
-                    items.extend(batch)
-        # Budget gone: do not start a new 2s wait for leftovers.
+                _harvest(task)
+        # Budget gone: cancel leftovers. Already-landed names stay in items.
         for task in list(pending):
             sym = tasks[task]
-            if task.done() and not task.cancelled():
-                try:
-                    sym, batch, err = task.result()
-                except Exception:
-                    timed_out.append(sym)
-                    misses.append(_miss(sym, "timed out"))
-                    logger.warning(
-                        "news %s timed out after %.0fs",
-                        sym,
-                        float(NEWS_SYMBOL_S),
-                    )
-                    continue
-                if err:
-                    cached = remembered_headlines([sym])
-                    if cached:
-                        items.extend(cached)
-                    else:
-                        timed_out.append(sym)
-                        misses.append(_miss(sym, err))
-                else:
-                    items.extend(batch)
+            if task.done():
+                _harvest(task)
                 continue
             task.cancel()
             timed_out.append(sym)
-            cached = remembered_headlines([sym])
+            cached = _cached_on_topic(sym)
             if cached:
                 items.extend(cached)
             else:
                 misses.append(_miss(sym, "timed out"))
                 logger.warning(
-                    "news %s timed out after %.0fs", sym, float(NEWS_SYMBOL_S)
+                    "news %s timed out after %.0fs", sym, budget
                 )
         if pending:
             await asyncio.wait(pending, timeout=0.05)
     except Exception:
         logger.exception("fetch_symbols_news failed")
         for task in pending:
-            task.cancel()
-        cached = remembered_headlines(out)
-        combined = list(cached) if cached else [_miss(s, "error") for s in out]
-        _LAST_FETCH_MISS = news_hard_miss(combined)
-        _LAST_TIMED_OUT = list(out)
-        return NewsFetch(coalesce_news(combined, out), timed_out=list(out))
+            if not task.done():
+                task.cancel()
+        # Keep whatever already landed; only unfinished names become misses.
+        have = {
+            str(it.get("symbol") or "").upper().strip()
+            for it in items
+            if isinstance(it, dict)
+        }
+        for sym in out:
+            if sym in have or sym in timed_out:
+                continue
+            cached = _cached_on_topic(sym)
+            if cached:
+                items.extend(cached)
+            else:
+                timed_out.append(sym)
+                misses.append(_miss(sym, "error"))
 
     remember_headlines(items)
-    combined = _dedupe_headlines(items) + misses
+    # Ask order for landed prints; misses stay out of the public list via coalesce.
+    by_sym: dict[str, list[dict]] = {}
+    for it in _dedupe_headlines(items):
+        su = str(it.get("symbol") or "").upper().strip()
+        if not su:
+            continue
+        by_sym.setdefault(su, []).append(it)
+    ordered_items: list[dict] = []
+    for sym in out:
+        ordered_items.extend(by_sym.pop(sym, []))
+    for leftover in by_sym.values():
+        ordered_items.extend(leftover)
+    combined = ordered_items + misses
     # Dedupe timed_out while preserving ask order.
     seen_to: set[str] = set()
     ordered_to: list[str] = []
@@ -519,6 +638,8 @@ async def fetch_agent_news(
 ) -> list[dict]:
     """Fetch / cache headlines for open-book underlyings.
 
+    Uses NEWS_LOOK_BUDGET_S (not the short fetch_symbols_news default) so the
+    desktop rail cannot starve under NEWS_SYMBOL_S.
     A timeout or transport miss is not cached and is not a headline item.
     Empty headlines from a completed fetch stay empty.
     """
@@ -536,7 +657,11 @@ async def fetch_agent_news(
     if not symbols:
         return NewsFetch([])
 
-    unique = await fetch_symbols_news(symbols, per_symbol=per_symbol)
+    # Rail shares the dossier budget so flat-book scan names are not
+    # starved under the 2s fetch_symbols_news default.
+    unique = await fetch_symbols_news(
+        symbols, per_symbol=per_symbol, budget_s=NEWS_LOOK_BUDGET_S
+    )
     timed_out = list(getattr(unique, "timed_out", None) or _LAST_TIMED_OUT)
     remember_headlines(unique)
     unique = coalesce_news(unique, symbols)

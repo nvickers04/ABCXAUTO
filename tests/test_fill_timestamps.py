@@ -11,6 +11,7 @@ because they stamp ``datetime.now(timezone.utc)`` and never touch local time.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -19,7 +20,13 @@ import pytest
 
 from threading import Lock
 
-from abcxauto.broker.connector import IBKRConnector, fill_ts_iso, new_ib, tws_timezone
+from abcxauto.broker.connector import (
+    IBKRConnector,
+    _FILL_TS_WARNED,
+    fill_ts_iso,
+    new_ib,
+    tws_timezone,
+)
 from abcxauto.memory.journal import TradeJournal, _et_calendar_date
 
 # What this desk's clock reads in summer (US Central, DST).
@@ -96,6 +103,24 @@ def test_a_stamp_already_in_the_past_is_left_alone():
         local_tz=CDT,
     )
     assert ts == "2026-08-20T15:42:06.000Z"
+
+
+def test_future_stamp_warns_once_per_exec_id(caplog):
+    """Same mangled fill polled twice: rewrite every time, WARNING once."""
+    _FILL_TS_WARNED.clear()
+    true_utc = datetime(2026, 8, 20, 15, 42, 6, tzinfo=timezone.utc)
+    mangled = ib_insync_stamp(true_utc, CDT)
+    now = datetime(2026, 8, 20, 15, 42, 20, tzinfo=timezone.utc)
+    with caplog.at_level(logging.WARNING, logger="abcxauto.broker.connector"):
+        ts1 = fill_ts_iso(mangled, now=now, local_tz=CDT, exec_id="avgo-spam")
+        ts2 = fill_ts_iso(mangled, now=now, local_tz=CDT, exec_id="avgo-spam")
+    assert ts1 == ts2 == "2026-08-20T15:42:06.000Z"
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "fill timestamp" in r.getMessage()
+    ]
+    assert len(warnings) == 1
 
 
 def test_a_broker_clock_a_little_ahead_is_not_rewritten():

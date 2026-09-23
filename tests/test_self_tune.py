@@ -709,18 +709,24 @@ def test_paper_start_gates_off_stays_off(tmp_path, monkeypatch):
     clear_risk_settings(path=path)
     load_risk_settings(path)
     get_config.cache_clear()
-    update_risk_config(risk_gates_enabled=False, persist=True, _skip_clamp=True)
+    update_risk_config(
+        risk_gates_enabled=False,
+        cash_only=False,
+        persist=True,
+        _skip_clamp=True,
+    )
     assert get_config().risk_gates_enabled is False
+    assert '"cash_only": false' in path.read_text(encoding="utf-8")
     ensure_immutable_floor(persist=True)
     assert get_config().risk_gates_enabled is False
     assert get_config().defined_risk_only is True
-    assert get_config().cash_only is True
     clear_runtime_overrides()
     load_risk_settings(path)
     get_config.cache_clear()
     assert get_config().risk_gates_enabled is False
     persisted = path.read_text(encoding="utf-8")
     assert '"risk_gates_enabled": false' in persisted
+    assert '"cash_only": false' in persisted
 
 
 def test_live_start_gates_off_repaired_on(tmp_path, monkeypatch):

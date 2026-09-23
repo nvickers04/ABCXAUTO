@@ -68,7 +68,7 @@ def test_ledger_hard_spend_blocks_new_risk(monkeypatch):
 
 
 def test_ledger_unknown_spend_fail_closed_not_zero(monkeypatch):
-    """{usd:None, unknown:True, hard:True} is unreadable — not a $0 session."""
+    """All-unknown / unreadable session_spend → None cost, refuse new risk."""
     _kill_on(monkeypatch)
     monkeypatch.setattr(
         "abcxauto.look_ledger.session_spend",
@@ -96,3 +96,28 @@ def test_ledger_unknown_spend_fail_closed_not_zero(monkeypatch):
     blocked = kill_look_send_block(act, session="regular", f10=gate)
     assert blocked is not None
     assert blocked["reason_code"] == REASON_MODEL_COST
+
+
+def test_ledger_finite_after_unknown_skip_allows_cost(monkeypatch):
+    """Finite session_spend (unknown rows already skipped) is readable — not None."""
+    _kill_on(monkeypatch)
+    monkeypatch.setattr(
+        "abcxauto.look_ledger.session_spend",
+        lambda day, *, path=None: {
+            "usd": 0.42,
+            "unknown": False,
+            "preferred": False,
+            "hard": False,
+        },
+    )
+    cost = session_model_cost_usd()
+    assert cost == 0.42
+    gate = f10_gate(cost, est_this_look=EST_THIS_LOOK_USD, window_cost=0.0)
+    assert gate["allow_new_risk"] is True
+    assert gate["reason_code"] != REASON_MODEL_COST
+    act = {
+        "strategy": "vertical_spread",
+        "params": dict(PCS_OPEN),
+        "card": PCS_CARD,
+    }
+    assert kill_look_send_block(act, session="regular", f10=gate) is None

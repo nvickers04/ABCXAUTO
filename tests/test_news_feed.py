@@ -6,6 +6,7 @@ import time
 import pytest
 
 from abcxauto.news_feed import (
+    NEWS_LOOK_BUDGET_S,
     NEWS_SYMBOL_S,
     NEWS_TRIES,
     _CACHE,
@@ -14,6 +15,7 @@ from abcxauto.news_feed import (
     fetch_agent_news,
     fetch_symbols_news,
     format_news_for_prompt,
+    headline_mentions_symbol,
     news_hard_miss,
     news_need_symbols,
     news_timed_out,
@@ -211,7 +213,8 @@ async def test_timeout_is_not_empty_success(monkeypatch):
         return [{"symbol": "NKE", "headline": "should not land"}]
 
     client = _MDA(hang)
-    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    # Rail uses NEWS_LOOK_BUDGET_S, not the 2s fetch_symbols_news default.
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_LOOK_BUDGET_S", 0.05)
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["NKE"])
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_agent_news([{"symbol": "NKE"}])
@@ -237,7 +240,7 @@ async def test_timeout_does_not_retry_into_the_stall(monkeypatch):
         return [{"symbol": symbol, "headline": f"{symbol} printed"}]
 
     client = _MDA(once_then_ok)
-    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_LOOK_BUDGET_S", 0.05)
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["AG"])
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     items = await fetch_agent_news([{"symbol": "AG"}])
@@ -261,7 +264,7 @@ async def test_timeout_does_not_cache_so_next_look_refetches(monkeypatch):
         return []
 
     client = _MDA(hang)
-    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.05)
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_LOOK_BUDGET_S", 0.05)
     monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["BE"])
     monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
     first = await fetch_agent_news([{"symbol": "BE"}])
@@ -334,6 +337,32 @@ async def test_shared_batch_deadline_not_per_symbol(monkeypatch):
     assert elapsed < 0.2 * len(names)
     assert set(getattr(items, "timed_out", []) or news_timed_out()) == set(names)
     assert seen_timeouts  # at least the first slot was entered under the batch budget
+
+
+@pytest.mark.asyncio
+async def test_partial_batch_keeps_fast_symbols(monkeypatch):
+    """Three symbols, shared deadline: two instant hits, one stall — keep the two."""
+
+    async def mixed(symbol, _countback, _timeout=None):
+        su = str(symbol).upper()
+        if su in {"AMD", "SPY"}:
+            return [{"symbol": su, "headline": f"{su} printed"}]
+        await asyncio.sleep(30)
+        return [{"symbol": su, "headline": "should not land"}]
+
+    client = _MDA(mixed)
+    monkeypatch.setattr("abcxauto.news_feed.NEWS_SYMBOL_S", 0.1)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["AMD", "NVDA", "SPY"])
+    assert [it.get("headline") for it in items] == ["AMD printed", "SPY printed"]
+    assert news_hard_miss(items) is None
+    assert list(getattr(items, "timed_out", []) or news_timed_out()) == ["NVDA"]
+    assert not any(it.get("error") for it in items)
+    assert not any(
+        "(unavailable" in str(it.get("headline") or "") for it in items
+    )
+    # Miss is not cached as an empty success for a later look.
+    assert not _CACHE["items"]
 
 
 @pytest.mark.asyncio
@@ -525,3 +554,174 @@ async def test_remembered_nvda_fills_timeout_fetch(monkeypatch):
     assert not any(
         "(unavailable" in str(it.get("headline") or "") for it in items
     )
+
+
+def test_headline_mentions_symbol_is_case_insensitive():
+    assert headline_mentions_symbol("avgo beats estimates", "AVGO")
+    assert headline_mentions_symbol("AVGO Beats", "avgo")
+    assert not headline_mentions_symbol(
+        "Could Palantir Be the Next Stock Added to the Dow", "AVGO"
+    )
+
+
+@pytest.mark.asyncio
+async def test_off_topic_headline_dropped_matching_kept(monkeypatch):
+    """MDA may tag Palantir under AVGO — that is not AVGO news."""
+
+    async def mixed(_symbol, _countback, _timeout=None):
+        return [
+            {
+                "symbol": "AVGO",
+                "headline": "Could Palantir Be the Next Stock Added to the Dow",
+            },
+            {
+                "symbol": "AVGO",
+                "headline": "AVGO guidance lifts Broadcom peers",
+            },
+        ]
+
+    client = _MDA(mixed)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["AVGO"])
+    assert [it.get("headline") for it in items] == [
+        "AVGO guidance lifts Broadcom peers"
+    ]
+    assert not any("Palantir" in str(it.get("headline") or "") for it in items)
+    assert news_hard_miss(items) is None
+
+
+@pytest.mark.asyncio
+async def test_on_topic_headline_past_the_prefix_is_kept(monkeypatch):
+    """MDA leads with other names. The AVGO print further down still counts."""
+
+    async def prefix(_symbol, countback=4, _timeout=None):
+        assert int(countback) >= 6
+        rows = [
+            {
+                "symbol": "AVGO",
+                "headline": "Could Palantir Be the Next Stock Added to the Dow",
+            }
+            for _ in range(5)
+        ]
+        rows.append(
+            {
+                "symbol": "AVGO",
+                "headline": "Broadcom (AVGO) buybacks and AI chip deals",
+            }
+        )
+        return rows
+
+    client = _MDA(prefix)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["AVGO"], per_symbol=4)
+    assert [it.get("headline") for it in items] == [
+        "Broadcom (AVGO) buybacks and AI chip deals"
+    ]
+    assert news_hard_miss(items) is None
+
+
+@pytest.mark.asyncio
+async def test_all_off_topic_is_unavailable_not_a_fake_story(monkeypatch):
+    async def palantir(_symbol, _countback, _timeout=None):
+        return [
+            {
+                "symbol": "AVGO",
+                "headline": "Could Palantir Be the Next Stock Added to the Dow",
+            }
+        ]
+
+    client = _MDA(palantir)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_symbols_news(["AVGO"])
+    assert items == []
+    assert not any("Palantir" in str(it.get("headline") or "") for it in items)
+    assert news_hard_miss(items) == "unavailable"
+    text = format_news_for_prompt(
+        [{"symbol": "AVGO", "headline": "(unavailable - unavailable)", "error": "unavailable"}]
+    )
+    assert "unavailable" in text
+    assert "Palantir" not in text
+
+
+@pytest.mark.asyncio
+async def test_budget_s_sets_shared_deadline(monkeypatch):
+    """budget_s=8 is the whole-batch deadline; assert via timeout, not a real wait."""
+    seen: list[float] = []
+
+    async def quick(symbol, _countback, timeout=None):
+        if timeout is not None:
+            seen.append(float(timeout))
+        # Fake sleep — do not burn the 8s budget.
+        await asyncio.sleep(0.01)
+        su = str(symbol).upper()
+        return [{"symbol": su, "headline": f"{su} printed"}]
+
+    client = _MDA(quick)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    t0 = time.monotonic()
+    items = await fetch_symbols_news(["AVGO", "NVDA"], budget_s=8)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0
+    assert [it.get("headline") for it in items] == ["AVGO printed", "NVDA printed"]
+    assert seen
+    assert seen[0] == pytest.approx(8.0, abs=0.25)
+    assert all(t <= 8.0 + 0.05 for t in seen)
+
+
+@pytest.mark.asyncio
+async def test_budget_s_default_stays_short(monkeypatch):
+    seen: list[float] = []
+
+    async def quick(symbol, _countback, timeout=None):
+        if timeout is not None:
+            seen.append(float(timeout))
+        await asyncio.sleep(0.01)
+        su = str(symbol).upper()
+        return [{"symbol": su, "headline": f"{su} printed"}]
+
+    client = _MDA(quick)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    await fetch_symbols_news(["AMD"])
+    assert seen
+    assert seen[0] == pytest.approx(float(NEWS_SYMBOL_S), abs=0.25)
+
+
+@pytest.mark.asyncio
+async def test_fetch_agent_news_uses_look_budget_not_symbol_default(monkeypatch):
+    """Desktop rail must not starve under NEWS_SYMBOL_S (2s) when book is flat."""
+    seen: list[float] = []
+
+    async def quick(symbol, _countback, timeout=None):
+        if timeout is not None:
+            seen.append(float(timeout))
+        await asyncio.sleep(0.01)
+        su = str(symbol).upper()
+        return [{"symbol": su, "headline": f"{su} printed"}]
+
+    client = _MDA(quick)
+    monkeypatch.setattr("abcxauto.news_feed._universe", lambda _p: ["AVGO"])
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    items = await fetch_agent_news([{"symbol": "AVGO"}])
+    assert [it.get("headline") for it in items] == ["AVGO printed"]
+    assert seen
+    assert seen[0] == pytest.approx(float(NEWS_LOOK_BUDGET_S), abs=0.25)
+    assert float(NEWS_LOOK_BUDGET_S) > float(NEWS_SYMBOL_S)
+
+
+@pytest.mark.asyncio
+async def test_timeout_log_uses_budget_in_force(monkeypatch, caplog):
+    """Log the shared budget (8s look / explicit), not NEWS_SYMBOL_S (2s)."""
+    import logging
+
+    async def hang(_symbol, _countback, _timeout=None):
+        await asyncio.sleep(30)
+        return []
+
+    client = _MDA(hang)
+    monkeypatch.setattr("abcxauto.news_feed._get_client", lambda: client)
+    with caplog.at_level(logging.WARNING, logger="abcxauto.news_feed"):
+        await fetch_symbols_news(["NKE"], budget_s=8.0)
+    msgs = [r.getMessage() for r in caplog.records if "timed out after" in r.getMessage()]
+    assert msgs
+    assert any("timed out after 8s" in m for m in msgs)
+    assert not any("timed out after 2s" in m for m in msgs)

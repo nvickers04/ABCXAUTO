@@ -119,8 +119,11 @@ def test_format_order_examples():
     assert "vertical_spread:" in text
     assert "calendar_spread:" in text
     assert "diagonal_spread:" in text
-    assert "Clerk will not invent the close price" in text
-    assert "Clerk will not invent omitted stop/target/qty" in text
+    assert "Code will not invent the close price" in text
+    assert "Code will not invent omitted stop/target/qty" in text
+    assert "buy_option right=P is a long put" in text
+    assert "buy_option put:" in text
+    assert '"right":"P"' in text.split("buy_option put:")[1].split("\n", 1)[0]
     assert "Clerk fills missing" not in text
     assert "price_hint" not in text
     assert "ratio_spread:" not in text

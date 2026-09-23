@@ -65,7 +65,10 @@ WEB_TIMEOUT_S = 8.0
 WEB_MAX_BYTES = 200_000
 WEB_TEXT_CAP = 2_000
 WEB_SEARCH_CAP = 5
-WEB_SEARCH_TIMEOUT_S = 12.0
+WEB_SEARCH_TIMEOUT_S = 30.0
+# Color search. The book model (grok-4.7, xhigh) does not finish a web
+# tool turn inside a short wait.
+WEB_SEARCH_MODEL = "grok-4-1-fast-non-reasoning"
 THIS_LOOK_NEED = (
     "this look has no gathered color — scan|news|candles|web|odds|recall"
 )
@@ -808,12 +811,13 @@ def this_look_research(
 def _inline_dossier_blocks_new_risk(
     dossier: dict[str, Any] | None,
 ) -> tuple[bool, str]:
-    """Same gate as research_dossier.dossier_blocks_new_risk when that module is absent."""
+    """Same gate as research_dossier.dossier_blocks_new_risk when that module is absent.
+
+    Unknown / unavailable / missing earnings do not refuse. Only a known
+    ``earnings_in`` inside 2 sessions refuses.
+    """
     if not isinstance(dossier, dict) or not dossier:
         return True, "no_dossier"
-    earnings = str(dossier.get("earnings") or "").strip().lower()
-    if earnings in ("", "unknown"):
-        return True, "earnings_unknown"
     earnings_in = dossier.get("earnings_in")
     if isinstance(earnings_in, int) and not isinstance(earnings_in, bool) and earnings_in <= 2:
         return True, "earnings_window"
@@ -843,7 +847,9 @@ def new_risk_research_error(
 ) -> str:
     """Empty = may go. Non-empty = this look has no usable dossier for the ticket name.
 
-    Scan / web / news alone never clear. Exits skip this in the caller.
+    Missing dossiers are filled from this-look research (news / web / candles /
+    priced scan hit) before the earnings gate runs. No research still refuses.
+    Exits skip this in the caller.
     """
     del strat
     blob = snap if isinstance(snap, dict) else {}
@@ -852,7 +858,14 @@ def new_risk_research_error(
         return ""
     dossier = _dossier_for_symbol(blob, name)
     if dossier is None:
-        return _RESEARCH_THIN_NOTE
+        try:
+            from abcxauto.research_dossier import ensure_this_look_dossier
+        except ImportError:
+            ensure_this_look_dossier = None  # type: ignore[assignment]
+        if ensure_this_look_dossier is not None:
+            dossier = ensure_this_look_dossier(blob, name)
+        if dossier is None:
+            return _RESEARCH_THIN_NOTE
     try:
         from abcxauto.research_dossier import dossier_blocks_new_risk
     except ImportError:
@@ -1130,7 +1143,7 @@ def research_brief_look_payload(
     world: Any = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """What research_brief() returns. This-look color plus a prior-session stub."""
+    """This-look color plus a prior-session stub (wake-safe; may keep symbols)."""
     row = brief if isinstance(brief, dict) else {}
     missing = not bool(row)
     stale = True if missing else research_brief_stale(row, now=now)
@@ -1154,6 +1167,32 @@ def research_brief_look_payload(
     }
     if _this_look_empty(this_look):
         out["need"] = THIS_LOOK_NEED
+    return out
+
+
+def research_brief_tool_payload(
+    brief: dict[str, Any] | None,
+    *,
+    snap: dict[str, Any] | None = None,
+    world: Any = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Tool result for research_brief: color only, never a symbol allowlist."""
+    out = dict(
+        research_brief_look_payload(brief, snap=snap, world=world, now=now)
+    )
+    out["use"] = "color, never a live trigger"
+    out["send_geometry"] = False
+    this_look = out.get("this_look")
+    if isinstance(this_look, dict):
+        trimmed = dict(this_look)
+        trimmed.pop("symbols", None)
+        out["this_look"] = trimmed
+    prior = out.get("prior_session")
+    if isinstance(prior, dict) and "symbols" in prior:
+        trimmed_prior = dict(prior)
+        trimmed_prior.pop("symbols", None)
+        out["prior_session"] = trimmed_prior
     return out
 
 
@@ -1999,19 +2038,10 @@ async def _xai_search_sample(query: str, tools: list[Any]) -> Any:
     cfg = get_config()
     if not getattr(cfg, "xai_api_key", ""):
         raise RuntimeError("XAI_API_KEY is not set")
-    model = str(getattr(cfg, "model", "") or "grok-4.7")
-    # Search is color only — never ride an xhigh brain id.
-    try:
-        from abcxauto.thin_rth_kill_look import rth_model_no_xhigh
-
-        model = rth_model_no_xhigh(model, enabled=True) or model
-    except Exception:
-        if "xhigh" in model.lower():
-            model = "grok-4.7"
     client = AsyncClient(api_key=cfg.xai_api_key, timeout=WEB_SEARCH_TIMEOUT_S)
     try:
         chat = client.chat.create(
-            model=model,
+            model=WEB_SEARCH_MODEL,
             messages=[
                 xai_user(
                     "Quote the matching posts and pages. "
@@ -2021,7 +2051,8 @@ async def _xai_search_sample(query: str, tools: list[Any]) -> Any:
             ],
             max_tokens=600,
             tools=list(tools or []),
-            max_turns=3,
+            max_turns=2,
+            reasoning_effort="none",
             include=["inline_citations"],
         )
         return await asyncio.wait_for(chat.sample(), timeout=WEB_SEARCH_TIMEOUT_S)
@@ -2065,7 +2096,8 @@ async def search_public(
         return _web_payload(error="web search unavailable", query=q, where=which)
     try:
         resp = await _xai_search_sample(q, tools)
-    except Exception:
+    except Exception as exc:
+        logger.warning("web search failed: %s", type(exc).__name__)
         return _web_payload(error="web search unavailable", query=q, where=which)
     text = str(getattr(resp, "content", "") or "").strip()
     results = _cite_rows(resp)

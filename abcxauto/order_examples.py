@@ -360,6 +360,31 @@ def ticket_strategy_names() -> list[str]:
     )
 
 
+def order_type_lines() -> str:
+    """Ticket names the send tool accepts. Shapes, not a tactic menu."""
+    return "\n".join(_ORDER_TYPE_BITS)
+
+
+_ORDER_TYPE_BITS = (
+    "Order types are the strategy name on send.",
+    "buy_option right=P is a long put. buy_option right=C is a long call.",
+    "vertical_spread right=P is a put vertical. vertical_spread right=C is a call vertical.",
+    "bracket direction is LONG or SHORT. cancel_order is order_id only.",
+)
+
+
+def _order_type_lines_for(allowed: frozenset[str] | set[str]) -> str:
+    """Drop type lines whose strategy is outside this allowlist."""
+    names = {"buy_option", "vertical_spread", "bracket", "cancel_order"}
+    kept: list[str] = []
+    for bit in _ORDER_TYPE_BITS:
+        mentioned = [n for n in names if n in bit]
+        if mentioned and not any(n in allowed for n in mentioned):
+            continue
+        kept.append(bit)
+    return "\n".join(kept)
+
+
 def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -> str:
     """Compact prompt section: how to send each Act-allowlisted order type.
 
@@ -377,7 +402,8 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         allowed = _allowed
     lines = [
         "ORDER EXAMPLES (send tool — strategy + params)",
-        "Stock entries: symbol+direction. Clerk will not invent omitted stop/target/qty. "
+        _order_type_lines_for(allowed),
+        "Stock entries: symbol+direction. Code will not invent omitted stop/target/qty. "
         "Bare opens become a bracket; exits stay exits. "
         "New risk requires card= naming a play (scorecard label, not a catalog).",
         "Use direction LONG|SHORT for bracket/market_bracket/oca/trailing.",
@@ -386,7 +412,7 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
         "Option multi-leg / CSP: match param shapes below. "
         "Close a live combo with that SAME strategy + closing_position=true + "
         "your limit_price (one BAG). Never close_option / oca / trailing a combo leg. "
-        "Clerk will not invent the close price — omit limit only if order_type=MKT. "
+        "Code will not invent the close price — omit limit only if order_type=MKT. "
         "Algo/auction exits (vwap/twap/iceberg/adaptive/MOC/MOO/...) are sendable "
         "on protect/manage/new-entry; closing_position required. "
         "defined_risk_only still rejects unlimited/naked shapes; cash-only still "
@@ -405,6 +431,13 @@ def format_order_examples(*, allowed: frozenset[str] | set[str] | None = None) -
             continue
         params = ORDER_EXAMPLES[name]
         lines.append(f"{name}: {json.dumps(params, separators=(',', ':'))}")
+        if name == "buy_option":
+            put = dict(params)
+            put["right"] = "P"
+            put["strike"] = 490.0
+            lines.append(
+                "buy_option put: " + json.dumps(put, separators=(",", ":"))
+            )
         if name in COMBO_BAG_CLOSE:
             close = combo_close_example(name)
             lines.append(

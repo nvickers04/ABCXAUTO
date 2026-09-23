@@ -31,7 +31,7 @@ from abcxauto.send_preview import (
 from abcxauto.thin_rth_kill_look import (
     F10_HARD_USD,
     MODE_OPEN,
-    REASON_ALLOWLIST,
+    REASON_STRUCTURE,
     pcs_send_ok,
 )
 from abcxauto.world_state import WorldState
@@ -194,7 +194,7 @@ def test_allowlist_refuses_incomplete_geom_and_undefined_stk(monkeypatch):
         mode=MODE_OPEN,
     )
     assert ok is False
-    assert why == REASON_ALLOWLIST
+    assert why == REASON_STRUCTURE
     ok2, why2 = pcs_send_ok(
         "market_bracket",
         {"symbol": "SPY", "card": "x"},
@@ -202,7 +202,7 @@ def test_allowlist_refuses_incomplete_geom_and_undefined_stk(monkeypatch):
         mode=MODE_OPEN,
     )
     assert ok2 is False
-    assert why2 == REASON_ALLOWLIST
+    assert why2 == REASON_STRUCTURE
     reasons = collect_would_refuse(
         {
             "strategy": "ratio_spread",
@@ -220,7 +220,7 @@ def test_allowlist_refuses_incomplete_geom_and_undefined_stk(monkeypatch):
             "_desk_session": "regular",
         }
     )
-    assert any(REASON_ALLOWLIST in str(r) for r in reasons)
+    assert any(REASON_STRUCTURE in str(r) for r in reasons)
 
 
 def test_module_has_no_ibkr_import():

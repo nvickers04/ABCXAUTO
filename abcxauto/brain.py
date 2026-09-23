@@ -54,6 +54,8 @@ STREAM_IDLE_LIMIT = 6
 STREAM_LOOP_UNIT = 12
 STREAM_LOOP_COPIES = 6
 STREAM_LOOP_SENTENCE_COPIES = 3
+# Last stream_round usage (for zero-token empty retry). Cleared each call.
+_LAST_STREAM_USAGE: dict[str, int] = {}
 
 
 def brain_system_prompt() -> str:
@@ -1387,50 +1389,66 @@ async def stream_round(
         logger.exception("model usage journal failed")
     try:
         from abcxauto.look_ledger import append_call
+        from abcxauto.scorecard import estimate_cost_usd
 
         from abcxauto.config import get_config
 
         inn = int(used.get("input_tokens") or 0)
         out = int(used.get("output_tokens") or 0)
-        model_id = str(getattr(get_config(), "model", "") or "")
-        sess = ""
-        try:
-            from abcxauto.marketdata.market_hours import get_session_info
-
-            sess = str((get_session_info() or {}).get("session") or "")
-        except Exception:
+        # Zero-token empty samples must not land a ledger row (retry path).
+        if inn > 0 or out > 0:
+            model_id = str(getattr(get_config(), "model", "") or "")
             sess = ""
-        usd: Any = "unknown"
-        for blob in (used, getattr(last_resp, "usage", None), last_resp):
-            if not isinstance(blob, dict):
-                continue
-            raw = blob.get("cost_usd")
-            if raw is None:
-                raw = blob.get("usd")
-            if raw is None:
-                raw = blob.get("total_cost")
-            if raw is None:
-                continue
             try:
-                val = float(raw)
-            except (TypeError, ValueError):
-                continue
-            if val == val and val not in (float("inf"), float("-inf")) and val >= 0:
-                usd = val
-                break
-        asof = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-        append_call(
-            asof=asof,
-            model=model_id,
-            input_tokens=inn,
-            output_tokens=out,
-            usd=usd,
-            session=sess,
-        )
+                from abcxauto.marketdata.market_hours import get_session_info
+
+                sess = str((get_session_info() or {}).get("session") or "")
+            except Exception:
+                sess = ""
+            usd: Any = None
+            for blob in (used, getattr(last_resp, "usage", None), last_resp):
+                if not isinstance(blob, dict):
+                    continue
+                raw = blob.get("cost_usd")
+                if raw is None:
+                    raw = blob.get("usd")
+                if raw is None:
+                    raw = blob.get("total_cost")
+                if raw is None:
+                    continue
+                try:
+                    val = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if val == val and val not in (float("inf"), float("-inf")) and val >= 0:
+                    usd = val
+                    break
+            if usd is None:
+                cached = int(used.get("cached_tokens") or 0)
+                usd = estimate_cost_usd(inn, out, cached_tokens=cached)
+            asof = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            append_call(
+                asof=asof,
+                model=model_id,
+                input_tokens=inn,
+                output_tokens=out,
+                usd=usd,
+                session=sess,
+            )
     except ImportError:
         pass
     except Exception:
         logger.debug("look_ledger append_call failed", exc_info=True)
+    global _LAST_STREAM_USAGE
+    try:
+        _LAST_STREAM_USAGE = {
+            "input_tokens": int(used.get("input_tokens") or 0),
+            "output_tokens": int(used.get("output_tokens") or 0),
+            "cached_tokens": int(used.get("cached_tokens") or 0),
+            "reasoning_tokens": int(used.get("reasoning_tokens") or 0),
+        }
+    except Exception:
+        _LAST_STREAM_USAGE = {}
     return o, last_resp, reason
 
 
@@ -1561,14 +1579,25 @@ def _new_chat(g: GrokClient, *, session: str = "") -> Any:
         except Exception:
             logger.debug("session knobs apply failed", exc_info=True)
     prev = ""
+    refresh_system = False
     try:
-        from abcxauto.chat_cursor import load_previous_response_id
+        from abcxauto.chat_cursor import load_previous_response_id, prompt_needs_refresh
 
         prev = load_previous_response_id()
+        refresh_system = bool(prev) and prompt_needs_refresh()
     except Exception:
         logger.debug("chat_cursor load failed", exc_info=True)
         prev = ""
-    if prev:
+        refresh_system = False
+    if prev and refresh_system:
+        create_kw = chat_create_kwargs(
+            g,
+            messages=[system(brain_system_prompt())],
+            tools=agent_tools(session=session),
+            previous_response_id=prev,
+            refresh_system=True,
+        )
+    elif prev:
         create_kw = chat_create_kwargs(
             g,
             tools=agent_tools(session=session),
@@ -1916,6 +1945,8 @@ def _working_limit_sell_qty(
 
 # Process-lifetime: one alloc excess sell per symbol. Survives look snaps.
 _ALLOC_TRIM_SENT: dict[str, int] = {}
+# Snap key: trim fills queued until g.chat can take a developer line.
+_TRIM_FILL_NOTES_KEY = "_alloc_trim_chat_notes"
 
 
 def _alloc_trim_sent_bag(snap: dict[str, Any]) -> dict[str, int]:
@@ -1947,6 +1978,297 @@ def _record_alloc_trim_sent(snap: dict[str, Any], symbol: str, qty: int) -> None
     bag[sym] = int(qty)
     _ALLOC_TRIM_SENT[sym] = int(qty)
     snap["alloc_trim_sent"] = bag
+
+
+def _queue_trim_fill_note(snap: dict[str, Any], symbol: str, qty: int) -> None:
+    """Remember a trim fill so the live chat can hear it before the next sample."""
+    if not isinstance(snap, dict):
+        return
+    sym = str(symbol or "").strip().upper()
+    try:
+        n = int(qty)
+    except (TypeError, ValueError):
+        return
+    if not sym or n <= 0:
+        return
+    bag = snap.get(_TRIM_FILL_NOTES_KEY)
+    if not isinstance(bag, list):
+        bag = []
+        snap[_TRIM_FILL_NOTES_KEY] = bag
+    bag.append({"symbol": sym, "qty": n})
+
+
+def _append_trim_fill_to_chat(chat: Any, symbol: str, qty: int) -> None:
+    """Short developer fact on the same chat — fill qty + symbol, no new chat."""
+    if chat is None:
+        return
+    sym = str(symbol or "").strip().upper()
+    try:
+        n = int(qty)
+    except (TypeError, ValueError):
+        return
+    if not sym or n <= 0:
+        return
+    line = f"alloc trim fill qty={n} symbol={sym}"
+    try:
+        chat.append(developer(line))
+    except Exception:
+        logger.debug("trim fill chat append failed", exc_info=True)
+        return
+    think_emit("tool", f"\n[{line}]\n")
+
+
+def _flush_trim_fill_notes(g: Any, snap: dict[str, Any] | None) -> None:
+    """Push queued trim fills onto g.chat before the model samples again."""
+    if not isinstance(snap, dict):
+        return
+    notes = snap.pop(_TRIM_FILL_NOTES_KEY, None)
+    if not isinstance(notes, list) or not notes:
+        return
+    chat = getattr(g, "chat", None) if g is not None else None
+    if chat is None:
+        # Keep the notes if the chat is not up yet (should not happen mid-look).
+        snap[_TRIM_FILL_NOTES_KEY] = notes
+        return
+    for note in notes:
+        if not isinstance(note, dict):
+            continue
+        _append_trim_fill_to_chat(chat, note.get("symbol"), note.get("qty"))
+
+
+def _daily_pnl_from_world(world: Any, day: dict[str, Any] | None) -> float | None:
+    """IBKR daily PnL from day bag or world. None when unknown."""
+    if isinstance(day, dict):
+        for key in ("ibkr_daily_pnl", "daily_pnl"):
+            raw = day.get(key)
+            if raw is None:
+                continue
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if val == val and val not in (float("inf"), float("-inf")):
+                return val
+    if world is not None:
+        for key in ("ibkr_daily_pnl", "daily_pnl"):
+            raw = getattr(world, key, None)
+            if raw is None:
+                continue
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if val == val and val not in (float("inf"), float("-inf")):
+                return val
+    return None
+
+
+def _board_rows_from_snapshot(
+    snap: dict[str, Any],
+    *,
+    positions: list[Any],
+    ruled_out: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Rows for research_board.build_board from allocation / dossiers / sized."""
+    ruled = {str(x).strip().upper() for x in (ruled_out or set()) if str(x or "").strip()}
+    held_syms: set[str] = set()
+    for pos in positions or []:
+        if not isinstance(pos, dict):
+            continue
+        sym = str(pos.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        sec = str(pos.get("secType") or pos.get("sec_type") or "STK").upper()
+        if sec.startswith("STK"):
+            held_syms.add(sym)
+
+    allocation = (
+        snap.get("allocation_snapshot")
+        if isinstance(snap.get("allocation_snapshot"), dict)
+        else {}
+    )
+    names = (
+        allocation.get("names")
+        if isinstance(allocation.get("names"), dict)
+        else {}
+    )
+    sized = snap.get("sized") if isinstance(snap.get("sized"), dict) else {}
+    dossiers = snap.get("dossiers") if isinstance(snap.get("dossiers"), dict) else {}
+    news_items = list(snap.get("news_items") or [])
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _add(sym: str, panel: dict[str, Any] | None = None) -> None:
+        key = str(sym or "").strip().upper()
+        if not key or key == "SPY" or key in ruled or key in seen:
+            return
+        seen.add(key)
+        panel = panel if isinstance(panel, dict) else {}
+        dos = dossiers.get(key) if isinstance(dossiers.get(key), dict) else {}
+        size_panel = sized.get(key) if isinstance(sized.get(key), dict) else {}
+        headlines = dos.get("headlines") if isinstance(dos.get("headlines"), list) else []
+        if not headlines and news_items:
+            headlines = [
+                h
+                for h in news_items
+                if isinstance(h, (str, dict))
+            ]
+        stop = panel.get("stop")
+        if stop is None:
+            stop = panel.get("stop_dist")
+        row: dict[str, Any] = {
+            "symbol": key,
+            "last": panel.get("last") if panel.get("last") is not None else dos.get("last"),
+            "bid": panel.get("bid"),
+            "ask": panel.get("ask"),
+            "vs_spy": panel.get("vs_spy")
+            if panel.get("vs_spy") is not None
+            else dos.get("vs_spy"),
+            "earnings_in": dos.get("earnings_in"),
+            "headlines": headlines,
+            "web": dos.get("web"),
+            "odds": dos.get("odds"),
+            "chain": dos.get("chain"),
+            "stop_dist": stop,
+            "sized": size_panel.get("sized")
+            if size_panel.get("sized") is not None
+            else dos.get("sized"),
+        }
+        if key in held_syms:
+            row["held"] = True
+        rows.append(row)
+
+    for sym, panel in names.items():
+        _add(str(sym), panel if isinstance(panel, dict) else None)
+    for pos in positions or []:
+        if isinstance(pos, dict):
+            _add(str(pos.get("symbol") or ""))
+    for raw in _look_scan_symbols(snap):
+        _add(str(raw))
+    return rows
+
+
+def _apply_board_and_work_lines(
+    *,
+    snap: dict[str, Any],
+    world: Any,
+    day: dict[str, Any],
+    positions: list[Any],
+) -> None:
+    """Build research board + work/pace wake lines when siblings import."""
+    try:
+        from abcxauto.research_board import board_line, build_board
+        from abcxauto.session_work import (
+            continuing_line,
+            idle_h,
+            load,
+            pace_usd_per_h,
+        )
+    except ImportError:
+        return
+    try:
+        card = load()
+        ruled = {
+            str(x).strip().upper()
+            for x in (card.get("ruled_out") or [])
+            if str(x or "").strip()
+        }
+        rows_in = _board_rows_from_snapshot(snap, positions=positions, ruled_out=ruled)
+        board = build_board(rows_in)
+        snap["research_board"] = board
+        line = board_line(board)
+        if line:
+            snap["board_line"] = line
+            day["board_line"] = line
+
+        daily = _daily_pnl_from_world(world, day)
+        session = str(
+            getattr(world, "session_status", None)
+            or day.get("session")
+            or card.get("session")
+            or ""
+        )
+        if daily is not None:
+            try:
+                pace = float(pace_usd_per_h(daily, session))
+            except Exception:
+                pace = None
+            if pace is not None and pace == pace:
+                card["pace_usd_per_h"] = pace
+                try:
+                    idle = float(
+                        idle_h(idle_since=str(card.get("idle_since") or "") or None)
+                    )
+                except Exception:
+                    idle = float(card.get("idle_h") or 0) or 0.0
+                card["idle_h"] = idle
+                if abs(pace - round(pace)) < 1e-9:
+                    pace_s = f"${int(round(pace))}"
+                else:
+                    pace_s = f"${pace:.2f}"
+                if abs(idle - round(idle)) < 1e-9:
+                    idle_s = str(int(round(idle)))
+                else:
+                    idle_s = f"{idle:.2f}".rstrip("0").rstrip(".")
+                day["pace_line"] = f"pace={pace_s}/h idle_h={idle_s}"
+
+        # Refresh cash/held on the card for the continuing line from live book.
+        try:
+            cash = None
+            acct = snap.get("account") if isinstance(snap.get("account"), dict) else {}
+            for key in ("cash", "TotalCashValue", "totalcashvalue"):
+                raw = acct.get(key) if acct else None
+                if raw is None and isinstance(snap.get("allocation_snapshot"), dict):
+                    raw = snap["allocation_snapshot"].get("cash")
+                if raw is None:
+                    continue
+                try:
+                    cash = float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if cash == cash:
+                    break
+                cash = None
+            if cash is not None:
+                card["cash"] = cash
+            held_rows: list[dict[str, Any]] = []
+            for pos in positions or []:
+                if not isinstance(pos, dict):
+                    continue
+                sym = str(pos.get("symbol") or "").strip().upper()
+                if not sym:
+                    continue
+                sec = str(pos.get("secType") or pos.get("sec_type") or "STK").upper()
+                if not sec.startswith("STK"):
+                    continue
+                try:
+                    qty = float(
+                        pos.get("quantity")
+                        if pos.get("quantity") is not None
+                        else (
+                            pos.get("position")
+                            if pos.get("position") is not None
+                            else pos.get("qty") or 0
+                        )
+                    )
+                except (TypeError, ValueError):
+                    qty = 0.0
+                if qty:
+                    held_rows.append({"symbol": sym, "qty": qty})
+            if held_rows:
+                card["held"] = held_rows
+            if session:
+                card["session"] = session
+        except Exception:
+            logger.debug("session work card refresh failed", exc_info=True)
+
+        work = continuing_line(card)
+        if work:
+            day["work_line"] = work
+            snap["work_line"] = work
+    except Exception:
+        logger.debug("board/work wake lines failed", exc_info=True)
 
 
 def _sell_exec_count(connector: Any, symbol: str) -> int:
@@ -1997,17 +2319,172 @@ def _stk_held_qty(positions: list[Any], symbol: str) -> int:
     return abs(total)
 
 
+def _stash_quote_inputs(day: dict[str, Any], allocation: dict[str, Any]) -> None:
+    """Copy the held name's live quote onto the day. SPY is not a position."""
+    names = allocation.get("names") if isinstance(allocation.get("names"), dict) else {}
+    alloc = day.get("allocation") if isinstance(day.get("allocation"), dict) else {}
+    lots = [r for r in (alloc.get("lots") or []) if isinstance(r, dict)]
+    sym = str(lots[0].get("symbol") or "").strip().upper() if lots else ""
+    panel = names.get(sym) if isinstance(names.get(sym), dict) else None
+    if panel is None:
+        for key, row in names.items():
+            if not isinstance(row, dict):
+                continue
+            try:
+                qty = float(row.get("qty") or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            if abs(qty) < 1e-9 or str(key).upper() == "SPY":
+                continue
+            panel = row
+            sym = str(key).upper()
+            break
+    if not isinstance(panel, dict):
+        return
+    # Stock panel only — bid/ask/iv/greeks on day are reserved for the option quote.
+    for src, dst in (("bid", "stock_bid"), ("ask", "stock_ask"), ("iv", "stock_iv")):
+        val = panel.get(src)
+        if val not in (None, ""):
+            day[dst] = val
+    last = panel.get("last")
+    if lots and sym and str(lots[0].get("symbol") or "").strip().upper() == sym:
+        try:
+            px = float(last)
+        except (TypeError, ValueError):
+            px = 0.0
+        if px > 0 and lots[0].get("last") in (None, "", 0, 0.0):
+            lots[0]["last"] = px
+
+
+def _option_quote_spec(pos: dict[str, Any]) -> dict[str, Any] | None:
+    sec = str(pos.get("secType") or pos.get("sec_type") or "").upper()
+    right = str(pos.get("right") or "").upper()[:1]
+    if sec not in ("OPT", "FOP") and right not in ("C", "P"):
+        return None
+    if right not in ("C", "P"):
+        return None
+    sym = str(pos.get("underlying") or pos.get("symbol") or "").strip().upper()
+    exp = str(
+        pos.get("expiration")
+        or pos.get("lastTradeDateOrContractMonth")
+        or pos.get("expiry")
+        or ""
+    ).strip()
+    exp = exp.replace("-", "")[:8]
+    try:
+        strike = float(pos.get("strike"))
+    except (TypeError, ValueError):
+        return None
+    if not sym or len(exp) != 8 or strike <= 0:
+        return None
+    return {"symbol": sym, "expiration": exp, "strike": strike, "right": right}
+
+
+async def _stash_option_quotes(
+    connector: Any,
+    positions: list[Any],
+    day: dict[str, Any],
+) -> None:
+    """One live quote per held option. A single contract fills debit and greeks."""
+    fn = getattr(connector, "get_live_option_quote", None)
+    if not callable(fn):
+        return
+    specs: list[dict[str, Any]] = []
+    for pos in positions or []:
+        if not isinstance(pos, dict):
+            continue
+        spec = _option_quote_spec(pos)
+        if spec is not None:
+            specs.append(spec)
+        if len(specs) >= 4:
+            break
+    if len(specs) != 1:
+        return
+    spec = specs[0]
+    try:
+        row = await fn(
+            spec["symbol"], spec["expiration"], spec["strike"], spec["right"]
+        )
+    except Exception:
+        logger.debug("held option quote failed", exc_info=True)
+        return
+    if not isinstance(row, dict) or row.get("error"):
+        return
+    live = row.get("ibkr") if isinstance(row.get("ibkr"), dict) else row
+    bid = live.get("bid")
+    ask = live.get("ask")
+    last = live.get("last")
+    if last in (None, "") and live.get("mid") not in (None, ""):
+        last = live.get("mid")
+    try:
+        bid_f = float(bid) if bid not in (None, "") else None
+        ask_f = float(ask) if ask not in (None, "") else None
+    except (TypeError, ValueError):
+        bid_f = ask_f = None
+    # Option quote only — never overwrite day["stock_bid"] / day["stock_ask"].
+    if bid_f is not None and bid_f > 0:
+        day["bid"] = bid_f
+    if ask_f is not None and ask_f > 0:
+        day["ask"] = ask_f
+    mid = None
+    if bid_f is not None and ask_f is not None and bid_f > 0 and ask_f > 0:
+        mid = (bid_f + ask_f) / 2.0
+    try:
+        last_f = float(last) if last not in (None, "") else None
+    except (TypeError, ValueError):
+        last_f = None
+    debit = mid if mid is not None else (last_f if last_f is not None and last_f > 0 else None)
+    if debit is not None:
+        day["debit"] = debit
+    day["strike"] = spec["strike"]
+    for key in ("delta", "theta", "vega", "iv"):
+        val = live.get(key)
+        if val not in (None, ""):
+            day[key] = val
+
+
+def _stash_div_inputs(
+    day: dict[str, Any],
+    returns_by: dict[str, list[float]],
+    groups: Any,
+) -> None:
+    """Beta and heat from bars already on this look. No new download."""
+    try:
+        from abcxauto.div_fact import beta_from_returns
+    except Exception:
+        return
+    spy = list(returns_by.get("SPY") or [])
+    betas: dict[str, float] = {}
+    for sym, rets in returns_by.items():
+        su = str(sym or "").strip().upper()
+        if not su or su == "SPY":
+            continue
+        try:
+            b = beta_from_returns(list(rets or []), spy)
+        except Exception:
+            b = None
+        if b is not None:
+            betas[su] = float(b)
+    if betas:
+        day["betas"] = betas
+    if isinstance(groups, list) and groups:
+        day["heat_groups"] = groups
+
+
 async def apply_pre_model_look_systems(
     *,
     connector: Any,
     world: Any,
     snap: dict[str, Any],
     day: dict[str, Any] | None,
+    chat: Any = None,
 ) -> None:
     """Allocation → size/trim → dossiers after world/snap, before model research.
 
     Missing sibling modules are ImportError-guarded so a partial tree does not
     crash the desk. Does not call note_brief_turn or set brief_loop_halted.
+    ``chat`` is the live stay-up chat when the caller has one — trim fills
+    append there before the model samples.
     """
     if not isinstance(snap, dict):
         return
@@ -2023,20 +2500,27 @@ async def apply_pre_model_look_systems(
     try:
         from abcxauto.alloc_snapshot import build_allocation_snapshot
 
+        # Bars for names already held, plus SPY inside the snapshot.
+        # A scan list is not a daily-bar download on this path.
         allocation = await build_allocation_snapshot(
             connector,
             positions=positions,
             orders=orders,
             account=account,
-            scan_symbols=scan_symbols,
+            scan_symbols=[],
             today=today,
         )
         if isinstance(allocation, dict):
             snap["allocation_snapshot"] = allocation
+            _stash_quote_inputs(day_bag, allocation)
     except ImportError:
         logger.debug("alloc_snapshot not installed")
     except Exception:
         logger.debug("build_allocation_snapshot failed", exc_info=True)
+    try:
+        await _stash_option_quotes(connector, positions, day_bag)
+    except Exception:
+        logger.debug("held option quotes failed", exc_info=True)
 
     sized: dict[str, Any] | None = None
     ranked: list[dict[str, Any]] = []
@@ -2074,6 +2558,7 @@ async def apply_pre_model_look_systems(
             snap["alloc_rank"] = ranked
             groups = heat_groups(returns_by)
             sized = sized_book(allocation, scores, groups)
+            _stash_div_inputs(day_bag, returns_by, groups)
             snap["sized"] = sized
         except ImportError:
             logger.debug("alloc_rank/alloc_size not installed")
@@ -2102,111 +2587,7 @@ async def apply_pre_model_look_systems(
                     bids[str(sym)] = bid
             tickets = trim_tickets(sized, bids=bids)
             snap["trim_tickets"] = list(tickets or [])
-            try:
-                from abcxauto.agent_loop import execute_ticket
-
-                sent_bag = _alloc_trim_sent_bag(snap)
-                refresh_positions = False
-                for ticket in tickets or []:
-                    if not isinstance(ticket, dict):
-                        continue
-                    sym = str(ticket.get("symbol") or "").strip().upper()
-                    try:
-                        excess = int(ticket.get("quantity") or 0)
-                    except (TypeError, ValueError):
-                        excess = 0
-                    try:
-                        trim_px = float(ticket.get("limit_price") or 0)
-                    except (TypeError, ValueError):
-                        trim_px = 0.0
-                    if not sym or excess <= 0:
-                        continue
-                    if sym in sent_bag:
-                        logger.info(
-                            "alloc trim skip %s — already sent qty=%s this process",
-                            sym,
-                            sent_bag.get(sym),
-                        )
-                        continue
-                    if _working_limit_sell_qty(
-                        orders, sym, at_or_below=trim_px
-                    ) >= excess:
-                        logger.info(
-                            "alloc trim skip %s excess=%s — limit sell already at the bid",
-                            sym,
-                            excess,
-                        )
-                        continue
-                    panel = sized.get(sym) if isinstance(sized.get(sym), dict) else {}
-                    try:
-                        sized_qty = int(panel.get("sized") or 0)
-                    except (TypeError, ValueError):
-                        sized_qty = 0
-                    if refresh_positions and connector is not None:
-                        get_pos = getattr(connector, "get_positions", None)
-                        if callable(get_pos):
-                            try:
-                                live = await get_pos()
-                            except Exception:
-                                live = None
-                                logger.debug(
-                                    "alloc trim position refresh failed",
-                                    exc_info=True,
-                                )
-                            if isinstance(live, list):
-                                positions = live
-                                snap["positions"] = list(live)
-                        refresh_positions = False
-                    held = _stk_held_qty(positions, sym)
-                    if held <= sized_qty:
-                        logger.info(
-                            "alloc trim skip %s — held=%s already at/under sized=%s",
-                            sym,
-                            held,
-                            sized_qty,
-                        )
-                        continue
-                    con_id = _stk_con_id(positions, sym)
-                    if not con_id:
-                        logger.info("alloc trim skip %s — no position conId", sym)
-                        continue
-                    logger.info(
-                        "alloc trim %s qty=%s limit=%s conId=%s",
-                        sym,
-                        excess,
-                        trim_px,
-                        con_id,
-                    )
-                    act = {
-                        "action": "limit_order",
-                        "strategy": "limit_order",
-                        "target_conId": con_id,
-                        "params": {
-                            "symbol": sym,
-                            "action": "SELL",
-                            "quantity": ticket.get("quantity"),
-                            "limit_price": ticket.get("limit_price"),
-                            "closing_position": True,
-                            "conId": con_id,
-                            "target_conId": con_id,
-                        },
-                        "rationale": str(ticket.get("reason") or "alloc_excess"),
-                    }
-                    exec_before = _sell_exec_count(connector, sym)
-                    result = await execute_ticket(act, connector, world, snap)
-                    executed = _send_succeeded(
-                        result if isinstance(result, dict) else None
-                    )
-                    if not executed and _sell_exec_count(connector, sym) > exec_before:
-                        executed = True
-                    if executed:
-                        _record_alloc_trim_sent(snap, sym, excess)
-                        sent_bag = snap["alloc_trim_sent"]
-                        refresh_positions = True
-            except ImportError:
-                logger.debug(
-                    "execute_ticket not importable; trim_tickets left on snap"
-                )
+            # Measured excess stays on the snap. send is the only broker path.
         except ImportError:
             logger.debug("alloc_trim not installed")
         except Exception:
@@ -2231,19 +2612,163 @@ async def apply_pre_model_look_systems(
                 if isinstance(snap.get("_research_bag"), dict)
                 else {}
             )
+            # Held + scan names for calendar/news/web/odds. Cap 8, skip SPY.
+            research_syms: list[str] = []
+            seen_rs: set[str] = set()
+
+            def _add_research_sym(raw: Any) -> None:
+                sym = str(raw or "").strip().upper()
+                if (
+                    not sym
+                    or sym == "SPY"
+                    or sym in seen_rs
+                    or len(research_syms) >= 8
+                ):
+                    return
+                seen_rs.add(sym)
+                research_syms.append(sym)
+
+            for pos in positions:
+                if isinstance(pos, dict):
+                    _add_research_sym(pos.get("symbol"))
+            for raw in scan_symbols:
+                _add_research_sym(raw)
+
+            calendar: dict[str, Any] = {}
+            if isinstance(bag.get("calendar"), dict):
+                calendar = dict(bag["calendar"])
+            try:
+                from abcxauto.research_calendar import fetch_calendar
+
+                async def _one_cal(sym: str) -> tuple[str, dict[str, Any] | None]:
+                    try:
+                        row = await fetch_calendar(connector, sym, today=today)
+                        return sym, row if isinstance(row, dict) else None
+                    except Exception:
+                        logger.debug(
+                            "fetch_calendar failed for %s", sym, exc_info=True
+                        )
+                        return sym, None
+
+                if research_syms:
+                    for sym, row in await asyncio.gather(
+                        *[_one_cal(s) for s in research_syms]
+                    ):
+                        if isinstance(row, dict):
+                            calendar[sym] = row
+            except ImportError:
+                logger.debug("research_calendar not installed")
+            except Exception:
+                logger.debug("dossier calendar batch failed", exc_info=True)
+
+            news: dict[str, Any] = {"items": list(snap.get("news_items") or [])}
+            if isinstance(bag.get("news"), dict):
+                news = dict(bag["news"])
+            try:
+                items: list[Any] | None = None
+                try:
+                    from abcxauto.news_feed import (
+                        NEWS_LOOK_BUDGET_S,
+                        fetch_symbols_news,
+                    )
+
+                    items = list(
+                        await fetch_symbols_news(
+                            research_syms, budget_s=NEWS_LOOK_BUDGET_S
+                        )
+                        or []
+                    )
+                except ImportError:
+                    try:
+                        from abcxauto.brain_tools import _mda_news
+
+                        items = list(await _mda_news(research_syms) or [])
+                    except ImportError:
+                        items = None
+                if items is None:
+                    news = {
+                        "news": "unavailable",
+                        "headlines": [],
+                        "items": [],
+                    }
+                else:
+                    news = {"items": items}
+                    if items:
+                        snap["news_items"] = list(items)
+            except Exception:
+                logger.debug("dossier news batch failed", exc_info=True)
+                news = {
+                    "news": "unavailable",
+                    "error": "news unavailable",
+                    "headlines": [],
+                    "items": [],
+                }
+
             research_web = (
                 snap.get("research_web")
                 if isinstance(snap.get("research_web"), dict)
                 else {}
             )
-            calendar = bag.get("calendar") if isinstance(bag.get("calendar"), dict) else {}
-            odds = bag.get("odds") if isinstance(bag.get("odds"), dict) else {}
-            web = research_web or (
-                bag.get("web") if isinstance(bag.get("web"), dict) else {}
+            web: dict[str, Any] = (
+                dict(research_web)
+                if research_web
+                else (
+                    dict(bag["web"])
+                    if isinstance(bag.get("web"), dict)
+                    else {}
+                )
             )
-            news: dict[str, Any] = {"items": list(snap.get("news_items") or [])}
-            if isinstance(bag.get("news"), dict):
-                news = bag["news"]
+            try:
+                from abcxauto.desk_mode import search_public
+
+                q = " ".join(research_syms[:4]).strip()
+                if q:
+                    page = await search_public(q, where="web")
+                    if isinstance(page, dict):
+                        asof = str(page.get("as_of") or page.get("asof") or "")
+                        if page.get("error"):
+                            web = {"web": "unavailable", "web_asof": asof}
+                        else:
+                            web = {
+                                "web": page.get("text")
+                                or page.get("results")
+                                or "ok",
+                                "web_asof": asof,
+                            }
+                            snap["research_web"] = dict(page)
+            except ImportError:
+                logger.debug("search_public not importable")
+            except Exception:
+                logger.debug("dossier web search failed", exc_info=True)
+                if not web:
+                    web = {"web": "unavailable", "web_asof": ""}
+
+            odds: dict[str, Any] = (
+                dict(bag["odds"]) if isinstance(bag.get("odds"), dict) else {}
+            )
+            try:
+                from abcxauto.prediction_odds import fetch_odds
+
+                if research_syms:
+                    payload = await fetch_odds(symbols=research_syms)
+                    if isinstance(payload, dict):
+                        asof = str(
+                            payload.get("as_of") or payload.get("asof") or ""
+                        )
+                        odds = {
+                            "odds": payload.get("events")
+                            if payload.get("events") is not None
+                            else payload,
+                            "odds_asof": asof,
+                        }
+                        snap["odds"] = dict(payload)
+            except ImportError:
+                logger.debug("fetch_odds not importable")
+            except Exception:
+                logger.debug("dossier odds failed", exc_info=True)
+                if not odds:
+                    odds = {"odds": "unavailable", "odds_asof": ""}
+
             dossiers = assemble_dossiers(
                 allocation,
                 scan_rows=scan_rows,
@@ -2279,6 +2804,17 @@ async def apply_pre_model_look_systems(
             if usd is not None and usd == usd:
                 snap["session_spend_usd"] = usd
                 day_bag["session_spend_usd"] = usd
+
+    # Research board + work/pace wake lines (siblings optional).
+    try:
+        _apply_board_and_work_lines(
+            snap=snap,
+            world=world,
+            day=day_bag,
+            positions=positions,
+        )
+    except Exception:
+        logger.debug("board/work lines skipped", exc_info=True)
 
 
 async def _inject_live_poke(
@@ -2628,6 +3164,9 @@ def _book_payload(
         high_line = to_high_line(bag.get("session_range"))
         if high_line:
             out["to_high_line"] = high_line
+        from abcxauto.world_state import attach_book_math
+
+        attach_book_math(out, world)
     except Exception:
         logger.debug("book allocation facts failed", exc_info=True)
     marks = facts.get("marks")
@@ -2697,6 +3236,21 @@ def _bill_research_brief_round(
     except Exception:
         logger.debug("research brief bill failed", exc_info=True)
     return False
+
+
+
+def look_may_sit(
+    tool_trace: list[Any] | None,
+    *,
+    sends: int = 0,
+    text: str = "",
+) -> bool:
+    """A spoken round may sit. Hold / no-ticket is a finished look.
+
+    Kept for callers/tests. grok_turn no longer continues on a hold.
+    """
+    _ = (tool_trace, sends, text)
+    return True
 
 
 async def grok_turn(
@@ -3356,6 +3910,11 @@ async def _grok_turn_impl(
                 turn.ended = True
                 _finish_look_chat(g, turn, session=session)
                 return turn
+    # Trim fills from apply_pre_model_look_systems land on this chat first.
+    try:
+        _flush_trim_fill_notes(g, snap)
+    except Exception:
+        logger.debug("trim fill flush failed", exc_info=True)
     billed_before = _model_usage_calls()
     ran_out = True
     abort_tries = 0
@@ -3402,6 +3961,46 @@ async def _grok_turn_impl(
             turn.stream_error = str(exc)
             ran_out = False
             break
+        # Zero-token empty sample on a cold look: retry once on the same
+        # chat. Do not append the void response, do not journal append_call
+        # (already skipped), do not write session work for this attempt.
+        # After tools/say, leave the existing empty-after-work recover path.
+        usage = dict(_LAST_STREAM_USAGE)
+        inn = int(usage.get("input_tokens") or 0)
+        out = int(usage.get("output_tokens") or 0)
+        pending_calls = (
+            list(getattr(response, "tool_calls", None) or [])
+            if response is not None
+            else []
+        )
+        cold_look = (
+            not turn.tool_trace
+            and not turn.sends
+            and _look_text_is_junk(turn.text)
+        )
+        if (
+            cold_look
+            and inn <= 0
+            and out <= 0
+            and stop == "empty"
+            and not (text or "").strip()
+            and not pending_calls
+        ):
+            if empty_tries < 1:
+                empty_tries += 1
+                logger.warning(
+                    "zero-token empty sample — retry once same chat"
+                )
+                think_emit("tool", "\n[empty sample retry]\n")
+                continue
+            # Second empty: fall through with no invented hold sentence.
+            logger.warning(
+                "zero-token empty sample twice — no hold sentence"
+            )
+            turn.last_strat = ""
+            if str((turn.last_act or {}).get("strategy") or "").lower() == "hold":
+                turn.last_act = {}
+                turn.last_result = {}
         # Keep every spoken chunk, including a later empty / interrupt /
         # repeat-text stop. Junk is the whole look, not the last assistant turn.
         if text:

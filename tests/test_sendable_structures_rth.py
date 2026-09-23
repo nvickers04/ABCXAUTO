@@ -12,7 +12,7 @@ from abcxauto.order_examples import NOT_TICKETS, ORDER_EXAMPLES
 from abcxauto.proposals import OrderProposal, STRATEGIES, validate_proposal
 from abcxauto.risk_gates import check_defined_risk_only, reset_risk_gate
 from abcxauto.thin_rth_kill_look import (
-    REASON_ALLOWLIST,
+    REASON_STRUCTURE,
     pcs_send_ok,
     send_strategy_names,
 )
@@ -47,6 +47,9 @@ EXPECTED_RTH_KILL_LOOK = [
     "bracket",
     "market_bracket",
     "oca",
+    "cancel_order",
+    "modify_stop",
+    "modify_target",
 ]
 
 LEFT_OUT_UNLIMITED = ("ratio_spread", "jade_lizard")
@@ -343,4 +346,4 @@ def test_pcs_send_ok_accepts_named_bracket_and_condor(monkeypatch):
         mode=MODE_OPEN,
     )
     assert ok3 is False
-    assert why3 == REASON_ALLOWLIST
+    assert why3 == REASON_STRUCTURE
